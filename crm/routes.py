@@ -806,6 +806,26 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     @crm_route('/tickets/<int:ticket_id>', methods=('DELETE',))
     def crm_ticket_delete(ticket_id, ctx):
+        """Удалить обращение вместе с перепиской и историей.
+
+        Удаление НАСТОЯЩЕЕ, а не флаг «скрыто». Раздел выкатили 17.08.2026, и
+        первые три дня в нём копились прогоны на выдуманных ИИН и номерах —
+        такие записи не «архивные», их не должно быть ни в списке, ни в поиске
+        по ИИН, ни в разбивке по тематикам. Скрытая строка всё это продолжала бы
+        засорять, а фильтр «кроме скрытых» пришлось бы дописать в каждый запрос
+        раздела.
+
+        Что переживает удаление и почему это правильно:
+        * сообщения и события уезжают каскадом (ON DELETE CASCADE в схеме) —
+          переписка без обращения смысла не имеет;
+        * нить в самой Telegram-группе ОСТАЁТСЯ. Стирать чужую переписку в
+          рабочем чате мы не вправе, и бот там не всегда админ; в интерфейсе об
+          этом сказано прямо, чтобы удаление не выглядело обещанием, которого
+          никто не давал.
+
+        Единственный след — эта запись в логе: crm_ticket_events уезжает вместе
+        с обращением, и «кто убрал обращение №14» больше спросить негде.
+        """
         with db._get_cursor() as cursor:
             ticket = queries.get_ticket(cursor, ticket_id, ctx['user_id'])
             if not ticket:
@@ -813,7 +833,12 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             if not access.can_delete_ticket(ctx, ticket):
                 return jsonify({"error": "Удалять обращения может только администратор"}), 403
             cursor.execute('DELETE FROM crm_tickets WHERE id = %s', (ticket_id,))
-        return jsonify({"status": "deleted"})
+        logging.info(
+            'crm: обращение №%s удалено (%s, автор %s, тема %r) — %s [id %s]',
+            ticket_id, ticket.get('status'), ticket.get('created_by_name') or '—',
+            ticket.get('subject'), ctx.get('name') or '—', ctx.get('user_id'),
+        )
+        return jsonify({"status": "deleted", "id": ticket_id})
 
     @crm_route('/meta')
     def crm_meta(ctx):

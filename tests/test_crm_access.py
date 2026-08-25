@@ -218,6 +218,41 @@ class ActionsTest(unittest.TestCase):
         self.assertTrue(access.can_delete_ticket(
             ctx(role='super_admin', user_id=1), ticket(created_by=10)))
 
+    def test_queue_manager_is_not_a_deleter(self):
+        """Настраивать очереди СВ и главе отдела дали, удалять обращения — нет.
+
+        Права разъехались осознанно: ошибочная привязка чата чинится второй
+        привязкой, а удалённое обращение не возвращается. Проверяем именно эту
+        пару, потому что «может настраивать раздел» так и тянет прочитать как
+        «может в разделе всё».
+        """
+        for me in (ctx(role='sv', user_id=10),
+                   ctx(role='admin', user_id=10, headed=(1,))):
+            self.assertTrue(access.can_manage_queues(me), me['role'])
+            self.assertFalse(access.can_delete_ticket(me, ticket(created_by=11)), me['role'])
+
+    def test_unknown_role_deletes_nothing(self):
+        """Незнакомая роль сводится к оператору — закрыто, а не открыто."""
+        me = ctx(role='директор по чему-нибудь', user_id=10)
+        self.assertFalse(access.can_delete_ticket(me, ticket(created_by=10)))
+
+    def test_closed_ticket_is_still_deletable_by_the_admin(self):
+        """Прогоны раздела как раз закрыты; запрет на закрытые — правило ОТВЕТА.
+
+        Скопировать его в удаление (соблазн: рядом, в одном файле, похоже
+        выглядит) значило бы сделать мусор невыносимым — «Отменено» удалить
+        нельзя, а вернуть в работу, чтобы удалить, никто не догадается.
+        """
+        admin = ctx(role='super_admin', user_id=1)
+        for status in ('resolved', 'cancelled'):
+            self.assertTrue(access.can_delete_ticket(
+                admin, ticket(created_by=10, status=status)), status)
+
+    def test_capabilities_carry_the_admin_flag_for_the_frontend(self):
+        """Лента рисует режим отбора по этому признаку, а не по названию роли."""
+        self.assertTrue(access.capabilities(ctx(role='super_admin', user_id=1))['is_global_admin'])
+        self.assertFalse(access.capabilities(ctx(role='sv', user_id=10))['is_global_admin'])
+
 
 class VisibilitySqlMatchesPythonTest(unittest.TestCase):
     """Обе формы правила обязаны говорить об одном и том же."""
@@ -494,6 +529,82 @@ class FrontendContractTest(unittest.TestCase):
         trainer_block = re.search(r'TRAINER_ALLOWED_VIEWS = Object\.freeze\(\[(.*?)\]\)', app, re.S)
         self.assertIsNotNone(trainer_block)
         self.assertNotIn("'crm_tickets'", trainer_block.group(1))
+
+    def test_delete_button_asks_the_server_who_may_delete(self):
+        """Кнопка удаления в карточке стоит за правом, пришедшим с сервера.
+
+        Право живёт в crm/access.py, и второй его слепок во фронте («роль
+        super_admin») разошёлся бы с первым молча: кнопка есть, сервер отвечает
+        403 — и человек считает, что раздел сломан.
+        """
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        card = view.split('const TicketCard = ({')[1].split('\nconst ')[0]
+        self.assertIn('permissions.can_delete', card)
+        # Своего слепка правила во фронте нет — ни роли, ни списка id.
+        self.assertNotIn('super_admin', card)
+        # Ровно один путь удаления, и он тот же, что у сервера (DELETE по id).
+        self.assertIn('axios.delete(`${apiBaseUrl}/api/crm/tickets/${ticketId}`', card)
+        # В файле есть второй axios.delete — удаление ОЧЕРЕДИ. Перепутать их
+        # копипастой стоило бы очереди вместе со всеми её обращениями.
+        self.assertNotIn('/api/crm/queues/', card)
+        # Никакой своей ручки «удалить пачкой» раздел не выдумывает: пачка —
+        # это те же одиночные запросы, и права проверяются по каждому.
+        self.assertNotIn('/tickets/bulk', view)
+
+    def test_delete_is_confirmed_and_says_what_stays_in_telegram(self):
+        """Удаление необратимо, а нить в рабочей группе остаётся жить."""
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        warning = re.search(r'const DeleteWarning = \(\{.*?\}\) => \((.*?)\n\);', view, re.S)
+        self.assertIsNotNone(warning, 'из раздела пропало предупреждение об удалении')
+        self.assertIn('Вернуть нельзя', warning.group(1))
+        self.assertIn('Telegram', warning.group(1))
+        # Оба вопроса (одно обращение и пачка) объясняют одно и то же одним
+        # текстом: два разных объяснения читаются как два разных действия.
+        self.assertEqual(view.count('<DeleteWarning'), 2)
+        # И согласуется с числом: «переписка по нему» над списком из трёх строк
+        # описывает не то, что произойдёт.
+        self.assertIn('many={picked.size > 1}', view)
+
+    def test_select_mode_belongs_to_the_global_admin_only(self):
+        """Режим отбора к удалению открыт по тому же признаку, что и само право."""
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        self.assertIn("const canDelete = !!capabilities?.is_global_admin;", view)
+        self.assertIn('canDelete && !!tickets.length', view)
+
+    def test_list_row_stays_a_single_button(self):
+        """Кнопка внутри кнопки — невалидная разметка, и браузеры её ломают.
+
+        Отметка к удалению поэтому меняет СМЫСЛ нажатия на строку, а не
+        добавляет вторую кнопку внутрь первой. Проверяем счётом, а не глазами:
+        соблазн «добавить сюда ещё одну кнопочку» возвращается в каждой правке
+        ленты.
+        """
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        start = view.index('const TicketRow = memo(')
+        row = view[start:view.index('/* ─── Сообщение в переписке', start)]
+        self.assertEqual(row.count('<button'), 1, 'в строке ленты завелась вторая кнопка')
+
+    def test_feed_column_may_shrink_on_the_phone(self):
+        """Запрет на сжатие держит ленте её 360 px — но только в РЯДУ.
+
+        На телефоне колонки встают друг под другом, и там тот же `shrink-0`
+        значил «не становись ниже своего содержимого»: лента вырастала до
+        высоты всех строк, вылезала за карточку с overflow-hidden и обрезалась,
+        а внутренняя прокрутка не включалась никогда (scrollHeight равнялся
+        clientHeight). Всё за первым экраном — строки, подвал, кнопка удаления
+        отобранных — было недостижимо: 874 px содержимого в 521 px карточки.
+        """
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        column = re.search(r'className=\{`flex w-full min-h-0[^`]*`\}', view)
+        self.assertIsNotNone(column, 'пропала колонка ленты')
+        self.assertIn('lg:shrink-0', column.group(0))
+        self.assertNotIn(' shrink-0', column.group(0))
+
+    def test_counters_are_recomputed_after_a_delete(self):
+        """Иначе в сайдбаре остаётся бейдж, за которым уже ничего нет."""
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        self.assertIn('const refreshCounters =', view)
+        self.assertIn('refreshCounters();', view)
 
     def test_section_does_not_open_its_own_realtime_channel(self):
         """Второй поток на пользователя занял бы ещё нить waitress — их считаные."""

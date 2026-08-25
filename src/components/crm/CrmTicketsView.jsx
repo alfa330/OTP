@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, CheckCircle2, ChevronRight,
+    AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, Check, CheckCircle2, ChevronRight,
     CornerDownRight, CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
     XCircle,
@@ -20,7 +20,7 @@ import {
     shortAuthorName,
 } from './threadView';
 import {
-    isOverdue, markTicketSeen, mergeTicketsById, previewAuthor, previewText,
+    isOverdue, markTicketSeen, mergeTicketsById, pluralTickets, previewAuthor, previewText,
     queueMonogram, queueTile, rowBadges, unreadLabel,
 } from './ticketList';
 import { fitHeight, measureShell } from './layout';
@@ -40,6 +40,13 @@ import { fitHeight, measureShell } from './layout';
  * доставки, горящий срок. «Новое» и «Решено» остаются нейтральными — иначе
  * список из тридцати обращений превращается в светофор, по которому ничего
  * не читается. */
+
+/* Красная кнопка подтверждения — тот же iOS-примитив, перекрашенный. Своего
+ * экспорта в ui/ios для неё нет, и заводить его ради двух мест значило бы
+ * править общий модуль всех разделов; так же поступает «Вики» (WikiGuests.jsx).
+ * Красное здесь только на кнопке подтверждения в модалке: сама «Удалить» в
+ * подвале карточки серая, и краснеет лишь под курсором. */
+const iosBtnDanger = `${iosBtnPrimary} !bg-rose-600 hover:!bg-rose-700`;
 
 // Статусы. tone: null = нейтральный (в списке ничем не красится).
 const STATUS_META = {
@@ -143,7 +150,17 @@ const LoadingBlock = () => (
  * массовый сбой и высокий приоритет. Штатное «Отправлено» бейджем не рисуется —
  * иначе сорок строк снова превращаются в светофор.
  */
-const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
+/* Строка ленты. В обычном виде открывает обращение; в режиме отбора (он есть
+ * только у администратора) — отмечает его к удалению.
+ *
+ * Кнопка остаётся ОДНОЙ на всю строку, а не «кнопка + чекбокс внутри»: кнопка
+ * внутри кнопки — невалидная разметка, и браузер разбирает её как попало.
+ * Поэтому в режиме отбора у той же кнопки меняется смысл нажатия, а кружок
+ * слева — просто картинка состояния. Заодно мишень остаётся во всю строку:
+ * отметить сорок обращений, целясь в кружок 18×18, — это про другое терпение. */
+const TicketRow = memo(function TicketRow({
+    ticket, active, onSelect, selectable = false, selected = false, onToggle,
+}) {
     const unread = ticket.unread;
     const count = unreadLabel(ticket.unread_count);
     const last = ticket.last_message;
@@ -156,9 +173,10 @@ const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
     return (
         <button
             type="button"
-            onClick={() => onSelect(ticket.id)}
+            onClick={() => (selectable ? onToggle?.(ticket.id) : onSelect(ticket.id))}
+            aria-pressed={selectable ? selected : undefined}
             className={`relative flex w-full gap-3 px-3 py-2.5 text-left transition-colors ${
-                active
+                active || (selectable && selected)
                     ? 'bg-blue-50'
                     : unread ? 'bg-blue-50/40 hover:bg-blue-50/70' : 'hover:bg-slate-50'
             }`}
@@ -168,6 +186,18 @@ const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
             <span className={`absolute inset-y-1 left-0 w-[3px] rounded-r-full transition-colors ${
                 active ? 'bg-blue-500' : 'bg-transparent'
             }`} />
+
+            {/* Кружок отметки — только в режиме отбора. Место под него не
+                держим: в обычной ленте это сорок пустых кружков подряд. */}
+            {selectable && (
+                <span className={`mt-[11px] grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full border transition-colors ${
+                    selected
+                        ? 'border-blue-600 bg-blue-600 text-white'
+                        : 'border-slate-300 bg-white text-transparent'
+                }`}>
+                    <Check size={11} strokeWidth={3} />
+                </span>
+            )}
 
             {/* Плитка очереди: куда ушло обращение. Цвет по id очереди —
                 постоянный, поэтому «Посылки» узнаются до чтения подписи. */}
@@ -623,8 +653,13 @@ const writeAsidePreference = (value) => {
 // один пузырь: если внизу видно последнее сообщение, лента доедет сама.
 const NEAR_BOTTOM = 120;
 
+/* «Обращения больше нет» — состояние, а не отказ, поэтому и рисуется серым, а
+ * не красным (см. разбор ошибки в load). Одна строка на оба места: текст и
+ * условие его цвета разъехались бы первой же правкой формулировки. */
+const TICKET_GONE = 'Обращение удалено или больше вам не видно';
+
 const TicketCard = ({
-    ticketId, apiBaseUrl, headers, showToast, onChanged, onSeen, onBack, pulse,
+    ticketId, apiBaseUrl, headers, showToast, onChanged, onSeen, onBack, onDeleted, pulse,
 }) => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -643,6 +678,11 @@ const TicketCard = ({
     const [asideOpen, setAsideOpen] = useState(readAsidePreference);
     // Человек ушёл читать историю переписки вверх — вниз его не тащим.
     const [atBottom, setAtBottom] = useState(true);
+    // Вопрос перед удалением. Не window.confirm: сказать нужно две вещи, и
+    // вторую («в Telegram-группе сообщения останутся») в системном окошке никто
+    // не читает — оно выглядит как формальность.
+    const [confirmDelete, setConfirmDelete] = useState(false);
+    const [deleting, setDeleting] = useState(false);
     const fileRef = useRef(null);
     const threadRef = useRef(null);
 
@@ -659,7 +699,14 @@ const TicketCard = ({
                перезапрос увёз бы читаемое обращение из-под курсора вниз. */
             if (response.data?.item && !response.data.item.unread) onSeen?.(Number(ticketId));
         } catch (err) {
-            setError(errorText(err, 'Не удалось открыть обращение'));
+            /* 404 — это не отказ раздела, а «обращения больше нет»: его удалил
+               администратор, а ссылка на него осталась — в колоколе, в открытой
+               вкладке коллеги, в переходе из Telegram. Показывать здесь ответ
+               сервера «Обращение не найдено» красным значило бы объявить
+               поломкой обычный порядок вещей. */
+            setError(err?.response?.status === 404
+                ? TICKET_GONE
+                : errorText(err, 'Не удалось открыть обращение'));
         } finally {
             setLoading(false);
         }
@@ -816,6 +863,27 @@ const TicketCard = ({
         }
     };
 
+    /* Удалить обращение. Право приезжает с сервера (permissions.can_delete), а
+       не выводится из роли: правило живёт в crm/access.py, и второй его слепок
+       во фронте разошёлся бы с первым молча — кнопка есть, сервер отвечает 403.
+
+       Ленту после удаления перезапрашивает раздел, а не карточка: строка ушла
+       не только из карточки, но и из списка, и из счётчиков шапки. */
+    const removeTicket = async () => {
+        setDeleting(true);
+        try {
+            await axios.delete(`${apiBaseUrl}/api/crm/tickets/${ticketId}`,
+                { headers: headers() });
+            setConfirmDelete(false);
+            showToast?.(`Обращение №${ticketId} удалено`, 'success');
+            onDeleted?.(ticketId);
+        } catch (err) {
+            showToast?.(errorText(err, 'Не удалось удалить обращение'), 'error');
+        } finally {
+            setDeleting(false);
+        }
+    };
+
     const resend = async () => {
         try {
             await axios.post(`${apiBaseUrl}/api/crm/tickets/${ticketId}/resend`, {},
@@ -830,9 +898,12 @@ const TicketCard = ({
 
     if (loading) return <LoadingBlock />;
     if (error) {
+        const gone = error === TICKET_GONE;
         return (
-            <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-rose-500">
-                <AlertCircle size={15} /> {error}
+            <div className={`flex items-center justify-center gap-2 py-16 text-[13px] ${
+                gone ? 'text-slate-400' : 'text-rose-500'
+            }`}>
+                {gone ? <Inbox size={15} /> : <AlertCircle size={15} />} {error}
             </div>
         );
     }
@@ -1138,13 +1209,13 @@ const TicketCard = ({
                     </div>
                 )}
 
-                {permissions.can_change_status && (
+                {(permissions.can_change_status || permissions.can_delete) && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
                         <button type="button" onClick={toggleEvents} className={iosBtnGhost}>
                             {eventsLoading ? <Loader2 size={13} className="animate-spin" /> : <History size={13} />}
                             История
                         </button>
-                        {!closed && (
+                        {permissions.can_change_status && !closed && (
                             <>
                                 <button type="button" onClick={() => changeStatus('resolved')}
                                         className={iosBtnSecondary}>
@@ -1156,10 +1227,21 @@ const TicketCard = ({
                                 </button>
                             </>
                         )}
-                        {closed && (
+                        {permissions.can_change_status && closed && (
                             <button type="button" onClick={() => changeStatus('open')}
                                     className={iosBtnSecondary}>
                                 <RefreshCw size={14} /> Вернуть в работу
+                            </button>
+                        )}
+                        {/* Удаление стоит поодаль от рабочих кнопок (ml-auto) и
+                            выкрашивается только под курсором: «Вопрос решён» и
+                            «Удалить» — это разные по последствиям действия, и
+                            стоять они рядом плечом к плечу не должны. */}
+                        {permissions.can_delete && (
+                            <button type="button" onClick={() => setConfirmDelete(true)}
+                                    title="Удалить обращение вместе с перепиской"
+                                    className="ml-auto inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium text-slate-400 transition-all hover:bg-rose-50 hover:text-rose-600 active:scale-[0.98]">
+                                <Trash2 size={13} /> Удалить
                             </button>
                         )}
                     </div>
@@ -1182,9 +1264,56 @@ const TicketCard = ({
                     </div>
                 )}
             </div>
+
+            <IosModal
+                open={confirmDelete}
+                onClose={() => setConfirmDelete(false)}
+                title={`Удалить обращение №${ticketId}?`}
+                subtitle={ticket.subject}
+                maxWidth="max-w-md"
+                footer={(
+                    <>
+                        <button type="button" onClick={() => setConfirmDelete(false)}
+                                className={iosBtnSecondary}>
+                            Отмена
+                        </button>
+                        <button type="button" onClick={removeTicket} disabled={deleting}
+                                className={iosBtnDanger}>
+                            {deleting
+                                ? <Loader2 size={14} className="animate-spin" />
+                                : <Trash2 size={14} />}
+                            Удалить
+                        </button>
+                    </>
+                )}
+            >
+                <DeleteWarning />
+            </IosModal>
         </div>
     );
 };
+
+/* Что именно случится при удалении. Отдельным блоком, потому что спрашивается
+ * в двух местах — в карточке про одно обращение и в ленте про отобранные, — а
+ * два разных объяснения одного действия человек прочитает как два действия.
+ *
+ * many меняет ровно два слова. Не мелочь: «Обращение и вся переписка по нему»
+ * над списком из трёх строк читается как «удалится одно», то есть подтверждение
+ * описывает не то, что произойдёт. */
+const DeleteWarning = ({ many = false }) => (
+    <div className="space-y-2 text-[13px] leading-relaxed text-slate-600">
+        <p>
+            {many
+                ? 'Обращения и вся переписка по ним исчезнут'
+                : 'Обращение и вся переписка по нему исчезнут'} из раздела: ни в
+            списке, ни в поиске по ИИН, ни в истории их больше не будет.
+            Вернуть нельзя.
+        </p>
+        <p className="text-slate-500">Сообщения, которые бот уже отправил в
+           Telegram-группу, в ней останутся — чужую переписку в рабочем чате мы
+           не стираем.</p>
+    </div>
+);
 
 /* ─── Куда уходят темы тематики ───────────────────────────────────────────── */
 
@@ -1536,6 +1665,19 @@ export default function CrmTicketsView({
     const [selectedId, setSelectedId] = useState(null);
     const [composerOpen, setComposerOpen] = useState(false);
 
+    /* Режим отбора: лента вместо «открыть обращение» отмечает его к удалению.
+       Отдельным режимом, а не действием у каждой строки, по двум причинам.
+       Первая — цена в обычной работе: «три точки» у сорока строк это сорок
+       мишеней на правом краю, из которых операторам не нужна ни одна (удалять
+       может только администратор). Вторая — сама задача: чистят не по одному, а
+       пачкой (после выката в разделе осталось полтора десятка прогонов на
+       выдуманных ИИН), и открывать ради каждого карточку с перепиской — это
+       пятнадцать лишних запросов и пятнадцать подтверждений. */
+    const [selectMode, setSelectMode] = useState(false);
+    const [picked, setPicked] = useState(() => new Set());
+    const [confirmBulk, setConfirmBulk] = useState(false);
+    const [bulkBusy, setBulkBusy] = useState(false);
+
     const [stateFilter, setStateFilter] = useState('active');
     const [queueFilter, setQueueFilter] = useState('');
     const [mine, setMine] = useState(true);
@@ -1699,6 +1841,7 @@ export default function CrmTicketsView({
     }, [focusRequest?.requestId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const canManage = !!capabilities?.can_manage_queues;
+    const canDelete = !!capabilities?.is_global_admin;
     const readyScenarios = useMemo(
         () => scenarioCatalog.filter((item) => item.is_ready),
         [scenarioCatalog],
@@ -1707,6 +1850,93 @@ export default function CrmTicketsView({
     const refreshAfterChange = useCallback(() => {
         loadTickets(0, true);
     }, [loadTickets]);
+
+    /* Пересчитать числа шапки. Тот же /ping, что при входе, но без разбора
+       «схема развернулась»: к моменту удаления раздел давно открыт.
+       Нужен именно после удаления: counters.unread ведёт бейдж раздела в
+       сайдбаре, и без пересчёта в меню осталась бы цифра, за которой уже
+       ничего нет. На фильтры и на буквы в поиске этот запрос не ходит — там он
+       был бы проходом по таблице ни за чем. */
+    const refreshCounters = useCallback(async () => {
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/crm/ping`,
+                { headers: headers() });
+            setCounters(response.data.counters || {});
+        } catch (err) { /* числа в шапке — не повод показывать отказ */ }
+    }, [apiBaseUrl, headers]);
+
+    const exitSelect = useCallback(() => {
+        setSelectMode(false);
+        setPicked(new Set());
+    }, []);
+
+    /* Отметить/снять строку. setState функцией: отметок бывает пятнадцать, и
+       замыкание на прежний Set потеряло бы половину из них. */
+    const togglePicked = useCallback((ticketId) => {
+        setPicked((prev) => {
+            const next = new Set(prev);
+            if (next.has(ticketId)) next.delete(ticketId); else next.add(ticketId);
+            return next;
+        });
+    }, []);
+
+    /* Отобранные — в том порядке, в котором они лежат в ленте: этот же список
+       показывается в вопросе перед удалением, и «что я отметил» человек должен
+       читать там же, где отмечал. Отметки строк, уехавших из ленты после
+       смены фильтра, здесь отсеиваются сами. */
+    const pickedTickets = useMemo(
+        () => tickets.filter((item) => picked.has(item.id)),
+        [tickets, picked],
+    );
+
+    /* Удаление отобранных. Запросы ИДУТ ПО ОДНОМУ, а не Promise.all: у сервера
+       считаное число рабочих нитей (waitress), и пятнадцать параллельных
+       удалений заняли бы их все — раздел встал бы у всех остальных.
+       Пятнадцать запросов подряд — это пара секунд, и на это время кнопка
+       заблокирована.
+
+       Отказ по одному обращению не отменяет остальные: у 403 и 404 разные
+       причины (чужой периметр, кто-то удалил раньше), и бросать на первом же
+       значило бы оставить работу недоделанной без объяснения. */
+    const deletePicked = async () => {
+        const ids = pickedTickets.map((item) => item.id);
+        if (!ids.length) return;
+        setBulkBusy(true);
+        const removed = [];
+        let lastError = null;
+        for (const id of ids) {
+            try {
+                await axios.delete(`${apiBaseUrl}/api/crm/tickets/${id}`,
+                    { headers: headers() });
+                removed.push(id);
+            } catch (err) {
+                lastError = err;
+            }
+        }
+        setBulkBusy(false);
+        setConfirmBulk(false);
+        exitSelect();
+        if (selectedId && removed.includes(selectedId)) setSelectedId(null);
+        if (removed.length) {
+            showToast?.(
+                `Удалено ${removed.length} ${pluralTickets(removed.length)}`
+                + (ids.length > removed.length ? `, не удалось — ${ids.length - removed.length}` : ''),
+                ids.length > removed.length ? 'error' : 'success',
+            );
+        } else {
+            showToast?.(errorText(lastError, 'Не удалось удалить'), 'error');
+        }
+        loadTickets(0);
+        refreshCounters();
+    };
+
+    /* Обращение удалили из карточки: она закрывается, а лента и числа шапки
+       перечитываются — строки и её непрочитанного больше нет. */
+    const handleDeleted = useCallback(() => {
+        setSelectedId(null);
+        loadTickets(0, true);
+        refreshCounters();
+    }, [loadTickets, refreshCounters]);
 
     /* Настройка очередей и каталог тем перезагружаются ВМЕСТЕ: адрес темы
        живёт в каталоге (/scenarios), а список очередей — в /queues, и любая
@@ -1755,7 +1985,26 @@ export default function CrmTicketsView({
                             ))}
                         </div>
                     )}
-                    {tab === 'tickets' && (
+                    {/* Отбор к удалению — только у администратора и только на
+                        вкладке обращений. Пока он идёт, «Новое обращение» с
+                        экрана убрано: заводить обращение посреди чистки никто
+                        не собирается, а две главные кнопки рядом заставляют
+                        выбирать между несравнимыми действиями. */}
+                    {tab === 'tickets' && canDelete && !!tickets.length && (
+                        selectMode ? (
+                            <button type="button" onClick={exitSelect} className={iosBtnSecondary}>
+                                Готово
+                            </button>
+                        ) : (
+                            <button type="button"
+                                    onClick={() => { setSelectMode(true); setSelectedId(null); }}
+                                    title="Отобрать обращения и удалить"
+                                    className={iosBtnGhost}>
+                                <ListChecks size={14} /> Выбрать
+                            </button>
+                        )
+                    )}
+                    {tab === 'tickets' && !selectMode && (
                         <button type="button" onClick={() => setComposerOpen(true)}
                                 disabled={!readyScenarios.length}
                                 title={readyScenarios.length ? undefined
@@ -1873,7 +2122,23 @@ export default function CrmTicketsView({
                                 переписку, внутренняя прокрутка не включается
                                 никогда и едет вся страница — ровно то, от чего
                                 карточке и задана высота. */}
-                            <div className={`flex w-full min-h-0 shrink-0 flex-col border-slate-200/70 lg:w-[360px] lg:border-r ${
+                            {/* shrink-0 только с lg. На широком экране колонки
+                                стоят в РЯД, и запрет на сжатие держит ленте её
+                                360 px. На телефоне направление меняется на
+                                колонку — и тот же запрет означал «не становись
+                                ниже своего содержимого»: лента вырастала до
+                                высоты всех строк (874 px на одиннадцати),
+                                вылезала за карточку с overflow-hidden и
+                                обрезалась. Внутренняя прокрутка при этом не
+                                включалась никогда — scrollHeight равнялся
+                                clientHeight, — а страница не ехала, потому что
+                                лишнее не выходило за пределы карточки, а
+                                исчезало в ней. Всё, что не влезло в первый
+                                экран (строки, подвал «Показано N», кнопка
+                                удаления отобранных), было недостижимо.
+                                Теперь колонка занимает высоту карточки, а
+                                прокручивается лента внутри — как на широком. */}
+                            <div className={`flex w-full min-h-0 flex-col border-slate-200/70 lg:w-[360px] lg:shrink-0 lg:border-r ${
                                 selectedId ? 'hidden lg:flex' : 'flex'
                             }`}>
                                 <div className="crm-scroll min-h-0 flex-1 overflow-y-auto">
@@ -1902,7 +2167,10 @@ export default function CrmTicketsView({
                                         {tickets.map((ticket) => (
                                             <TicketRow key={ticket.id} ticket={ticket}
                                                        active={ticket.id === selectedId}
-                                                       onSelect={setSelectedId} />
+                                                       onSelect={setSelectedId}
+                                                       selectable={selectMode}
+                                                       selected={picked.has(ticket.id)}
+                                                       onToggle={togglePicked} />
                                         ))}
                                     </div>
                                     {hasMore && (
@@ -1913,11 +2181,32 @@ export default function CrmTicketsView({
                                         </button>
                                     )}
                                 </div>
-                                {!!tickets.length && (
+                                {/* Подвал ленты. В режиме отбора на месте
+                                    «Показано N» стоит сама работа: сколько
+                                    отмечено и кнопка удаления. Двух подвалов
+                                    друг под другом лента не выдержит — она и так
+                                    самая узкая колонка раздела. */}
+                                {!!tickets.length && (selectMode ? (
+                                    <div className="flex shrink-0 items-center gap-2 border-t border-slate-100 px-3.5 py-2">
+                                        <span className="text-[11.5px] tabular-nums text-slate-500">
+                                            {picked.size
+                                                ? `Отмечено ${picked.size}`
+                                                : 'Отметьте обращения'}
+                                        </span>
+                                        <button type="button" onClick={() => setConfirmBulk(true)}
+                                                disabled={!picked.size || bulkBusy}
+                                                className="ml-auto inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-1.5 text-[12.5px] font-semibold text-white transition-all hover:bg-rose-700 active:scale-[0.98] disabled:opacity-40">
+                                            {bulkBusy
+                                                ? <Loader2 size={13} className="animate-spin" />
+                                                : <Trash2 size={13} />}
+                                            Удалить
+                                        </button>
+                                    </div>
+                                ) : (
                                     <div className="shrink-0 border-t border-slate-100 px-3.5 py-2 text-[11px] tabular-nums text-slate-400">
                                         Показано {tickets.length}{hasMore ? ' — есть ещё' : ''}
                                     </div>
-                                )}
+                                ))}
                             </div>
 
                             {/* Карточка (про min-h-0 — см. выше) */}
@@ -1933,15 +2222,28 @@ export default function CrmTicketsView({
                                             onChanged={refreshAfterChange}
                                             onSeen={handleSeen}
                                             onBack={() => setSelectedId(null)}
+                                            onDeleted={handleDeleted}
                                             pulse={realtimePulse}
                                         />
                                     </div>
                                 ) : (
                                     <div className="flex w-full items-center justify-center">
-                                        <EmptyBlock icon={ChevronRight}
-                                                    hint="Слева — обращения в работе. Выберите любое, чтобы увидеть переписку с группой.">
-                                            Выберите обращение
-                                        </EmptyBlock>
+                                        {/* В режиме отбора нажатие по строке
+                                            переписку НЕ открывает, и обещать её
+                                            здесь значило бы объяснять человеку
+                                            не то, что произойдёт от его
+                                            следующего действия. */}
+                                        {selectMode ? (
+                                            <EmptyBlock icon={ListChecks}
+                                                        hint="Отмеченные удалятся вместе с перепиской. «Готово» — выйти из отбора, ничего не удаляя.">
+                                                Отметьте обращения слева
+                                            </EmptyBlock>
+                                        ) : (
+                                            <EmptyBlock icon={ChevronRight}
+                                                        hint="Слева — обращения в работе. Выберите любое, чтобы увидеть переписку с группой.">
+                                                Выберите обращение
+                                            </EmptyBlock>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -1949,6 +2251,50 @@ export default function CrmTicketsView({
                     </div>
                 </>
             )}
+
+            {/* Вопрос перед удалением пачки. Список отобранного здесь не для
+                красоты: отметок пятнадцать, они набирались минуту, и «что
+                именно сейчас исчезнет» человек обязан увидеть одним взглядом —
+                иначе подтверждение подтверждает не то, что он думает. */}
+            <IosModal
+                open={confirmBulk}
+                onClose={() => { if (!bulkBusy) setConfirmBulk(false); }}
+                title={`Удалить ${picked.size} ${pluralTickets(picked.size)}?`}
+                maxWidth="max-w-md"
+                footer={(
+                    <>
+                        <button type="button" onClick={() => setConfirmBulk(false)}
+                                disabled={bulkBusy} className={iosBtnSecondary}>
+                            Отмена
+                        </button>
+                        <button type="button" onClick={deletePicked} disabled={bulkBusy}
+                                className={iosBtnDanger}>
+                            {bulkBusy
+                                ? <Loader2 size={14} className="animate-spin" />
+                                : <Trash2 size={14} />}
+                            Удалить
+                        </button>
+                    </>
+                )}
+            >
+                <div className="space-y-3">
+                    <DeleteWarning many={picked.size > 1} />
+                    <div className="max-h-[220px] overflow-y-auto rounded-xl bg-white p-2 ring-1 ring-slate-200/70">
+                        {pickedTickets.map((item) => (
+                            <div key={item.id}
+                                 className="flex items-baseline gap-2 px-1 py-1 text-[12px] text-slate-600">
+                                <span className="shrink-0 tabular-nums text-slate-400">
+                                    №{item.id}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate">{item.subject}</span>
+                                <span className="shrink-0 text-[11px] text-slate-400">
+                                    {item.created_by_name || '—'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </IosModal>
 
             <TicketWizard
                 open={composerOpen}

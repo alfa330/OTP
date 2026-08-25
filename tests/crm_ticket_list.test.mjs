@@ -5,6 +5,7 @@ import {
   isOverdue,
   markTicketSeen,
   mergeTicketsById,
+  pluralTickets,
   previewAuthor,
   previewText,
   queueMonogram,
@@ -176,4 +177,23 @@ test('нейтральный статус и обычный приоритет �
 test('массовый сбой показывается, когда есть место', () => {
   const ticket = { status: 'answered', delivery_status: 'sent', flags: ['mass_outage'], unread: true };
   assert.deepEqual(labels(ticket, meta(TONE, NORMAL)), ['Массовый сбой']);
+});
+
+/* Склонение в вопросе перед удалением. Экран, после которого ничего не
+ * вернуть, не имеет права спрашивать «Удалить 13 обращение?». */
+test('обращения склоняются по числу', () => {
+  assert.equal(pluralTickets(1), 'обращение');
+  assert.equal(pluralTickets(2), 'обращения');
+  assert.equal(pluralTickets(4), 'обращения');
+  assert.equal(pluralTickets(5), 'обращений');
+  assert.equal(pluralTickets(0), 'обращений');
+});
+
+test('подростковый десяток не путается с единицами', () => {
+  // Ловушка: 11 % 10 === 1, но «11 обращение» — не по-русски.
+  for (const n of [11, 12, 13, 14, 111, 112]) {
+    assert.equal(pluralTickets(n), 'обращений', String(n));
+  }
+  assert.equal(pluralTickets(21), 'обращение');
+  assert.equal(pluralTickets(22), 'обращения');
 });
