@@ -1,22 +1,21 @@
 # -*- coding: utf-8 -*-
 """Эндпоинты гостевого доступа: выдать, продлить, отозвать, посмотреть.
 
-Читающая сторона гостевого доступа жила в вике с самого начала и работала
+Читающая сторона гостевого доступа жила в вики с самого начала и работала
 (wiki/guests.py, шапка). Здесь появляется дверь, через которую доступ ВЫДАЮТ, —
 и три границы, за которые она не пускает.
 
-ПРАВО. Гейт стоит в теле обработчиков, а не параметром capability= на роуте, и
-это не небрежность: право выдавать гостевой доступ — не способность, а правило
-на конкретной ветке (wiki_section_access_rules.can_grant_guest), и «есть ли оно
-вообще» отвечает не словарь способностей, а запрос по дереву. Параметр
-capability= принимает имя из CAPABILITY_COLUMNS и такого права выразить не может.
+ПРАВО. Гейт стоит в теле обработчиков, а не параметром capability= на роуте:
+право выдавать гостевой доступ — не способность, а ДОЛЖНОСТЬ по лестнице
+access.GUEST_GRANT_CEILING (супервайзер и выше), а параметр capability=
+принимает имя из CAPABILITY_COLUMNS и такого права выразить не может.
 
 ОБЪЕКТ. Раздел или статья обязаны лежать в ветке отдела выдающего. Проверяется
 на КАЖДОЙ двери отдельно, включая продление и отзыв: право могло исчезнуть между
 выдачей и отзывом, и «раз выдал — значит вправе трогать» здесь неверно.
 
-ПОЛУЧАТЕЛЬ. Уровень должности строго ниже своего (access.may_grant_guest_to).
-Отдел получателя не проверяется вовсе — решение владельца, см. шапку guests.py.
+ПОЛУЧАТЕЛЬ. Свой подчинённый: и по чину (потолок должности), и по отделу.
+«Если СВ из СЗоВ, то он и видит операторов из СЗоВ» — решение владельца.
 
 Списки для формы (кому, что) считаются ТЕМИ ЖЕ правилами, что и проверки на
 записи. Иначе форма предложит то, что сервер отвергнет, — молчаливый отказ с
@@ -36,27 +35,52 @@ from .routes_structure import _int_or_none
 from .schema import MAX_GUEST_DAYS
 
 
+# Права нет вовсе — по должности. Отдельный текст от «нечего открывать»: беды
+# разные, и чинятся они разным. Прежняя формулировка отсылала к тумблеру в
+# «Структуре»; тумблера больше нет — право даёт должность (решение владельца
+# 25.08.2026).
+_NO_RIGHT = 'Гостевой доступ выдают супервайзер и выше'
+
+# Право есть, а открывать нечего: в ветке отдела нет ни одного раздела, который
+# человек видит сам.
+_NOTHING_TO_SHARE = ('В вашей ветке отдела нет разделов, которые вы могли бы '
+                     'открыть гостю')
+
+
 def _body():
     return request.get_json(silent=True) or {}
 
 
 def register(bp, wiki_route, db, log_ip):
 
-    def _unbounded(ctx):
-        """Снимаются ли с человека обе границы выдачи — отдел и лестница.
+    def _is_wiki_admin(ctx):
+        """Мастер-ключ раздела: роль вики с can_manage_access, а не должность.
 
-        Тот же мастер-ключ, что и всюду в разделе: супер-админ и роль вики с
-        can_manage_access. Правило повторено из routes_structure._grant_departments
-        намеренно — там оно замыкание внутри register(), импортировать его
-        нельзя, а разъезжаться правилам про одно и то же не дают тесты.
+        Проверка «роль вики И способность» осталась и после того, как должность
+        'admin' перестала раздавать мастер-ключ: у роли вики он по-прежнему есть.
         """
-        if wiki_access.normalize_role(ctx['otp_role']) == 'super_admin':
-            return True
         return bool(ctx['wiki_roles']) and bool(ctx['capabilities'].get('can_manage_access'))
 
+    def _ceiling(ctx):
+        """До какого уровня должности человек выдаёт. None — не выдаёт вовсе.
+
+        По этому же признаку в интерфейсе появляется сам раздел «Гостевой
+        доступ»: вопрос «вижу ли я раздел» и «кому вправе выдать» — один вопрос
+        (access.GUEST_GRANT_CEILING).
+        """
+        return wiki_access.guest_grant_ceiling(
+            ctx['otp_role'], is_wiki_admin=_is_wiki_admin(ctx))
+
     def _departments(ctx):
-        """Отделы, чьи ветки человек вправе открывать гостю. None — без границы."""
-        if _unbounded(ctx):
+        """Свои отделы: и чьи ветки открываем, и чьих людей зовём. None — все.
+
+        Границы нет у супер-админа и администратора вики — им сказано «может
+        всем». Правило то же, что у выдачи правил разделов
+        (routes_structure._grant_departments); повторено намеренно — там оно
+        замыкание внутри register(), импортировать его нельзя, а разъезжаться
+        правилам про одно и то же не дают тесты.
+        """
+        if wiki_access.normalize_role(ctx['otp_role']) == 'super_admin' or _is_wiki_admin(ctx):
             return None
         own = set(ctx.get('headed_department_ids') or [])
         if ctx.get('department_id'):
@@ -66,8 +90,7 @@ def register(bp, wiki_route, db, log_ip):
     def _shareable(cursor, ctx):
         """Разделы, которые человек вправе открыть гостю. None — любые."""
         return wiki_guests.shareable_section_ids(
-            cursor, ctx['subjects'], ctx['user_id'],
-            unbounded=_unbounded(ctx), departments=_departments(ctx))
+            cursor, ctx, ctx['subjects'], departments=_departments(ctx))
 
     def _may_share_section(shareable, section_id):
         return shareable is None or section_id in shareable
@@ -86,6 +109,7 @@ def register(bp, wiki_route, db, log_ip):
         заполненной форме — то есть отказом уже после того, как человек всё
         заполнил и нажал «Выдать».
         """
+        ceiling = _ceiling(ctx)
         shareable = _shareable(cursor, ctx)
         today = wiki_guests.now_almaty().date()
         space_id = _int_or_none(request.args.get('space_id'))
@@ -98,7 +122,9 @@ def register(bp, wiki_route, db, log_ip):
         if len(query) < 2:
             query = ''
 
-        may_grant = shareable is None or bool(shareable)
+        # Право выдавать — по должности; наличие разделов в своей ветке решает
+        # уже другой вопрос («есть ли что открыть») и объясняется отдельно.
+        may_grant = ceiling is not None and (shareable is None or bool(shareable))
         return jsonify({
             "items": wiki_guests.list_grants(
                 cursor, actor_id=ctx['user_id'], section_ids=shareable or (),
@@ -107,6 +133,9 @@ def register(bp, wiki_route, db, log_ip):
             # Право выдавать. Без него вкладка показывает историю своих выдач и
             # прячет кнопку — не пустой экран без объяснения.
             "can_grant": may_grant,
+            # Ради честного пустого экрана: «права нет вовсе» и «право есть, а
+            # разделов в моей ветке нет» — разные беды с разными подсказками.
+            "may_grant_by_role": ceiling is not None,
             "max_days": MAX_GUEST_DAYS,
             # Календарные рамки считает СЕРВЕР, и форма берёт их только отсюда.
             # У браузера западнее Алматы «сегодня» на сутки раньше нашего, и
@@ -130,11 +159,11 @@ def register(bp, wiki_route, db, log_ip):
         переключателем, и второй запрос при щелчке по переключателю выглядел бы
         как подвисание на пустом списке.
         """
+        if _ceiling(ctx) is None:
+            return _forbidden(_NO_RIGHT)
         shareable = _shareable(cursor, ctx)
         if shareable is not None and not shareable:
-            return _forbidden('Вам не выдано право открывать разделы гостям. '
-                              'Его включают в «Структуре» — тумблер «Гостевой '
-                              'доступ» в правиле раздела')
+            return _forbidden(_NOTHING_TO_SHARE, 'WIKI_GUEST_NOTHING_TO_SHARE')
 
         space_id = _int_or_none(request.args.get('space_id'))
         query = (request.args.get('q') or '').strip()[:120]
@@ -152,14 +181,17 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_guests_people(cursor, ctx):
         """Сотрудники, которым текущий человек вправе выдать гостевой доступ.
 
-        Список НЕ ограничен отделом — это и есть «любому сотруднику из icore».
-        Ограничен он лестницей: строго ниже себя по оргструктуре.
+        Свои подчинённые: и по чину, и по отделу. Список считается теми же
+        правилами, что и проверка на записи, — форма не может предложить того,
+        кого сервер потом отвергнет.
         """
+        ceiling = _ceiling(ctx)
+        if ceiling is None:
+            return _forbidden(_NO_RIGHT)
         query = (request.args.get('q') or '').strip()[:120]
         return jsonify({"items": wiki_guests.guest_candidates(
-            cursor, actor_id=ctx['user_id'],
-            actor_level=wiki_access.role_level_of(ctx['otp_role']),
-            unbounded=_unbounded(ctx), query=query)})
+            cursor, actor_id=ctx['user_id'], ceiling=ceiling,
+            departments=_departments(ctx), query=query)})
 
     # ── Выдача ───────────────────────────────────────────────────────────
     @wiki_route('/guests', methods=('POST',))
@@ -172,11 +204,11 @@ def register(bp, wiki_route, db, log_ip):
         последнее.
         """
         data = _body()
+        if _ceiling(ctx) is None:
+            return _forbidden(_NO_RIGHT)
         shareable = _shareable(cursor, ctx)
         if shareable is not None and not shareable:
-            return _forbidden('Вам не выдано право открывать разделы гостям. '
-                              'Его включают в «Структуре» — тумблер «Гостевой '
-                              'доступ» в правиле раздела')
+            return _forbidden(_NOTHING_TO_SHARE, 'WIKI_GUEST_NOTHING_TO_SHARE')
 
         section_id = _int_or_none(data.get('section_id'))
         article_id = _int_or_none(data.get('article_id'))
@@ -192,15 +224,13 @@ def register(bp, wiki_route, db, log_ip):
             if structure.section_exists(cursor, section_id) is None:
                 return jsonify({"error": "Раздел не найден"}), 404
             if not _may_share_section(shareable, section_id):
-                return _forbidden('Этот раздел не в вашей ветке отдела — '
-                                  'или на нём нет права выдавать гостевой доступ',
+                return _forbidden('Этот раздел не в вашей ветке отдела',
                                   'WIKI_GUEST_SECTION_SCOPE')
         else:
             sections = wiki_guests.article_section_ids(cursor, article_id)
             if shareable is not None and not (sections & shareable):
-                return _forbidden('Эта статья не в вашей ветке отдела — '
-                                  'или на её разделе нет права выдавать '
-                                  'гостевой доступ', 'WIKI_GUEST_SECTION_SCOPE')
+                return _forbidden('Эта статья не в вашей ветке отдела',
+                                  'WIKI_GUEST_SECTION_SCOPE')
 
         # ПОЛУЧАТЕЛЬ.
         target_id = _int_or_none(data.get('user_id'))
@@ -208,7 +238,7 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": "Выберите сотрудника"}), 400
         cursor.execute(
             """
-            SELECT u.role, u.name, u.status,
+            SELECT u.role, u.name, u.status, u.department_id,
                    EXISTS (SELECT 1 FROM departments d
                             WHERE d.head_user_id = u.id AND d.is_active)
               FROM users u WHERE u.id = %s
@@ -217,15 +247,21 @@ def register(bp, wiki_route, db, log_ip):
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Сотрудник не найден"}), 404
-        target_role, target_name, target_status, target_heads = row
+        target_role, target_name, target_status, target_department, target_heads = row
         if target_status != 'working':
             return jsonify({"error": "Сотрудник не числится работающим"}), 400
         if target_id == ctx['user_id']:
             return _forbidden('Себе гостевой доступ не выдают')
         if not wiki_access.may_grant_guest_to(ctx['otp_role'], target_role,
-                                             unbounded=_unbounded(ctx)):
-            return _forbidden('Гостевой доступ выдают тем, кто ниже по '
-                              'оргструктуре', 'WIKI_GUEST_LADDER')
+                                             is_wiki_admin=_is_wiki_admin(ctx)):
+            return _forbidden('Этот сотрудник выше вас по оргструктуре — '
+                              'гостевой доступ выдают своим подчинённым',
+                              'WIKI_GUEST_LADDER')
+        if not wiki_access.may_grant_guest_in_department(
+                target_department, _departments(ctx)):
+            return _forbidden('Этот сотрудник из другого отдела — гостевой '
+                              'доступ выдают своим подчинённым',
+                              'WIKI_GUEST_DEPARTMENT')
 
         # СРОК.
         try:
@@ -256,7 +292,7 @@ def register(bp, wiki_route, db, log_ip):
                      'user_name': target_name},
             ip_address=log_ip())
 
-        # Оператору вика открывается только после QR-подтверждения сессии
+        # Оператору вики открывается только после QR-подтверждения сессии
         # (access.requires_sensitive_qr), и подтверждать его нужно КАЖДУЮ
         # сессию заново. Выдача этого гейта не снимает — он про рабочее место,
         # а не про права, — но выдающий обязан узнать об этом здесь, а не от

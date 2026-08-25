@@ -11,7 +11,6 @@ from flask import jsonify, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
-from . import guests as wiki_guests
 from . import queries, structure
 from . import schema as wiki_schema
 from .schema import CAPABILITY_TITLES, SUBJECT_TYPES
@@ -257,27 +256,6 @@ def register(bp, wiki_route, db, log_ip):
                 ctx['otp_role'], structure.section_role_levels(cursor).get(section_id)):
             return _SECTION_ABOVE_GRANTOR
         return None
-
-    def _may_grant_guest_here(cursor, ctx, section_id):
-        """Вправе ли человек ПОСТАВИТЬ на этом разделе тумблер «Гостевой доступ».
-
-        Та же граница, что и у прав в правиле: выписать можно только то, что
-        умеешь сам (WIKI_GRANT_BEYOND_SELF ниже). Без неё дыра открывается в два
-        нажатия: супервайзер выписывает правило на СВОЙ ЖЕ отдел без порога —
-        такое правило проходит потолок, потому что весит как оператор, — ставит
-        в нём тумблер и получает право выдавать гостевой доступ и себе, и всем
-        своим операторам разом.
-
-        Мастер-ключ (супер-админ, роль вики с can_manage_access) тумблер ставит
-        везде: у него _grant_departments отдаёт None, как и во всех остальных
-        границах раздела.
-        """
-        departments = _grant_departments(ctx)
-        if departments is None:
-            return True
-        return section_id in wiki_guests.shareable_section_ids(
-            cursor, ctx['subjects'], ctx['user_id'],
-            unbounded=False, departments=departments)
 
     # ── Дерево структуры ─────────────────────────────────────────────────
     @wiki_route('/structure')
@@ -816,13 +794,6 @@ def register(bp, wiki_route, db, log_ip):
                 # отказом с обратной стороны стола.
                 "grantable": [key for key in PERMISSION_FIELDS
                               if ctx['role_capabilities'].get(key)],
-                # Четвёртое измерение выдачи, появившееся вместе с гостевым
-                # доступом: вправе ли человек передать ПРАВО РАЗДАВАТЬ. В
-                # grantable его нет намеренно — там права на содержимое, а это
-                # право на людей (schema.GUEST_GRANT_COLUMN). Без раздела
-                # вопрос не задан: тумблер живёт на конкретной ветке.
-                "may_grant_guest": bool(
-                    section_id and _may_grant_guest_here(cursor, ctx, section_id)),
             })
 
         data = _body()
@@ -922,58 +893,12 @@ def register(bp, wiki_route, db, log_ip):
                 "required": beyond,
             }), 403
 
-        # Тумблер «Гостевой доступ» — право РАЗДАВАТЬ, и передать его вправе
-        # только тот, у кого оно уже есть на этом разделе. Проверка отдельная от
-        # WIKI_GRANT_BEYOND_SELF выше по той же причине, по какой колонка не
-        # входит в PERMISSION_FIELDS: то право на содержимое и сверяется со
-        # способностями должности, это — на людей и живёт на ветке.
-        # Трёхзначное поле: не прислали — не трогаем. Правило пересохраняют
-        # из двух форм, и та, что про тумблер не знает, гасила бы его молча.
-        can_grant_guest = (bool(data['can_grant_guest'])
-                           if 'can_grant_guest' in data else None)
-
-        if can_grant_guest:
-            # ТОЛЬКО ПОИМЁННОЕ ПРАВИЛО. Лестница GRANT_CEILING смотрит на
-            # должность адресата единственный раз — у subject_type='user'
-            # (target_role выше). У правила на отдел, группу или направление
-            # адресат — множество, и его «вес» считается по min_role_level,
-            # который для правила без порога равен уровню оператора
-            # (UNBOUNDED_RULE_LEVEL). То есть супервайзер выписал бы на свой же
-            # отдел правило с порогом 10, оно прошло бы потолок — и право
-            # выдавать гостевой доступ досталось бы тренерам, другим
-            # супервайзерам и главе отдела, которым сам он выдать не вправе
-            # ничего. Верхней границы у правила в модели нет, добавлять её ради
-            # одного тумблера значит менять смысл всех правил сразу.
-            #
-            # Ограничение не косметическое и по смыслу: владелец сказал «у
-            # ЧЕЛОВЕКА имеется право предоставлять гостевой доступ». Право
-            # раздавать — именное.
-            if subject_type != 'user':
-                return jsonify({
-                    "error": "Право выдавать гостевой доступ выписывают "
-                             "конкретному сотруднику, а не отделу, группе или "
-                             "должности",
-                    "code": "WIKI_GUEST_GRANT_SUBJECT",
-                }), 400
-            if not _may_grant_guest_here(cursor, ctx, section_id):
-                return jsonify({
-                    "error": "Право выдавать гостевой доступ передаёт тот, у кого "
-                             "оно есть на этом разделе",
-                    "code": "WIKI_GUEST_GRANT_BEYOND_SELF",
-                }), 403
-            # Раздавать раздел, которого сам не видишь, нельзя. То же правило,
-            # что и у прав выше («право без чтения бессмысленно»), и та же
-            # проверка стоит на читающей стороне — _GRANTABLE_SECTIONS_SQL
-            # требует can_read.
-            permissions['can_read'] = True
-
         rule_id = structure.upsert_section_rule(
             cursor, section_id=section_id, subject_type=subject_type,
             subject_id=subject_id, subject_role=subject_role,
             permissions=permissions,
             grant_subsections=bool(data.get('grant_subsections', True)),
             min_role_level=min_role_level,
-            can_grant_guest=can_grant_guest,
             created_by=ctx['user_id'],
         )
         queries.log_action(cursor, actor_id=ctx['user_id'], action='rule.upsert',
@@ -981,9 +906,7 @@ def register(bp, wiki_route, db, log_ip):
                            target_user_id=subject_id if subject_type == 'user' else None,
                            details={'rule_id': rule_id, 'subject_type': subject_type,
                                     'subject_id': subject_id, 'subject_role': subject_role,
-                                    'min_role_level': min_role_level,
-                                    'can_grant_guest': bool(can_grant_guest),
-                                    **permissions},
+                                    'min_role_level': min_role_level, **permissions},
                            ip_address=log_ip())
         return jsonify({"id": rule_id}), 201
 

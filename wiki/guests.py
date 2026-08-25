@@ -9,20 +9,26 @@
 закрывает ровно эту дыру и ничего не меняет в том, как доступ ЧИТАЕТСЯ.
 
 ── Три границы выдачи (решения владельца 25.08.2026) ────────────────────────
-1. ПРАВО. «В структуре, кто видит раздел, добавить переключатель гостевой
-   доступ» — право адресное и живёт в правиле раздела
-   (wiki_section_access_rules.can_grant_guest), а не в должности. Кому правило
-   выписано — тот и раздаёт, на той ветке, где выписано.
-2. ОБЪЕКТ. «Гостевой доступ можно предоставить только внутри своего отдела» —
-   отделом ограничен ОБЪЕКТ: раздел или статья обязаны лежать в ветке отдела
-   выдающего (structure.section_branch_department ∈ _grant_departments).
-3. ПОЛУЧАТЕЛЬ. «Любому сотруднику из icore… тем, кто стоит ниже себя по
-   оргструктуре» — отдел получателя не проверяется вовсе, проверяется уровень
-   должности, строго ниже своего (access.may_grant_guest_to).
+1. ПРАВО — ДОЛЖНОСТЬ, по лестнице access.GUEST_GRANT_CEILING:
+       Коммерческий директор → всем,
+       Руководитель          → супервайзерам и операторам,
+       Супервайзер           → операторам,
+       тренер и оператор     → не выдают вовсе.
+   По этому же признаку в интерфейсе появляется сам раздел «Гостевой доступ»:
+   он виден супервайзеру и выше. Вопрос «вижу ли раздел» и «кому вправе выдать»
+   здесь один и тот же, и отвечать на него двумя способами нельзя.
+2. ОБЪЕКТ. Раздел или статья обязаны лежать в ветке отдела выдающего
+   (structure.branch_department_map ∈ свои отделы) и быть видны ему самому.
+3. ПОЛУЧАТЕЛЬ — СВОЙ ПОДЧИНЁННЫЙ, и по чину, и по отделу: «если СВ из СЗоВ, то
+   он и видит операторов из СЗоВ». У директора и администратора вики границы
+   отдела нет — им сказано «может всем».
 
-Границы независимы, и ни одна не выводится из другой. Право без объекта открыло
-бы чужую ветку тому, кому тумблер поставили щедро; объект без права позволил бы
-раздавать всякому, кто просто числится в отделе.
+Границы независимы, и ни одна не выводится из другой: должность отвечает «кому
+по чину», отдел — «чьим людям», периметр — «что я вообще вижу».
+
+Прежний механизм права — тумблер в правиле раздела — снят тем же решением: он
+давал право адресно, в обход должности, и рядом с лестницей стал вторым
+источником истины об одном и том же.
 
 ── Срок ─────────────────────────────────────────────────────────────────────
 Считается КОНЦОМ ДНЯ по Алматы, а не «моментом плюс N часов». Человек читает
@@ -32,7 +38,7 @@
 (schema.MAX_GUEST_DAYS) считается в днях, а не в часах: иначе «14 дней» и «дата
 через 14 дней» означали бы разное.
 
-Время наивное и по Алматы — как во всей вике: колонки TIMESTAMP без зоны, а
+Время наивное и по Алматы — как во всей вики: колонки TIMESTAMP без зоны, а
 «сейчас» в SQL пишется как (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty').
 Считать срок в питоне, а сравнивать в SQL — единственный способ разойтись,
 поэтому здесь наивное «сейчас» берётся ровно из той же зоны.
@@ -41,9 +47,9 @@
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from . import queries
 from . import structure as wiki_structure
 from .access import ROLE_LEVELS
-from .queries import SUBJECT_MATCH as _SUBJECT_MATCH, subject_params
 from .schema import MAX_GUEST_DAYS
 
 ALMATY = ZoneInfo('Asia/Almaty')
@@ -146,103 +152,42 @@ def grant_status(row, now):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Где человек вправе выдавать гостевой доступ
+# Что человек вправе открыть гостю
 # ─────────────────────────────────────────────────────────────────────────────
-#
-# Тот же рекурсивный обход, что и у чтения (queries._AUTO_SECTIONS_SQL):
-# правило, помеченное «на подразделы», раздаёт право и вглубь. Иначе тумблер
-# вёл бы себя не так, как соседний с ним grant_subsections, — на одной форме, в
-# одной строке.
-_GRANTABLE_SECTIONS_SQL = """
-WITH RECURSIVE rule_hits AS (
-    SELECT r.section_id, bool_or(r.grant_subsections) AS deep
-      FROM wiki_section_access_rules r
-      JOIN wiki_sections s ON s.id = r.section_id AND s.status = 'active'
-     WHERE r.can_grant_guest
-       -- И ЧИТАТЬ. Раздавать раздел, которого сам не видишь, нельзя: тот же
-       -- принцип, что и у прав в правиле («право без чтения бессмысленно»,
-       -- routes_structure), и та же проверка стоит на пишущей стороне.
-       AND r.can_read
-       AND (
-""" + _SUBJECT_MATCH + """
-       )
-     GROUP BY r.section_id
-),
-subtree AS (
-    SELECT section_id AS id FROM rule_hits WHERE deep
-    UNION
-    SELECT child.id
-      FROM wiki_sections child
-      JOIN subtree parent ON child.parent_section_id = parent.id
-     WHERE child.status = 'active'
-)
-SELECT id FROM subtree
-UNION
-SELECT section_id FROM rule_hits
-"""
 
+def shareable_section_ids(cursor, ctx, subjects, *, departments=None,
+                          branch_map=None):
+    """Разделы, которые человек вправе открыть гостю. None — любые.
 
-def grantable_section_ids(cursor, subjects, user_id):
-    """Разделы, на которые человеку выписано право выдавать гостевой доступ.
+    Пересечение двух условий: раздел ВИДЕН самому раздающему и лежит в ветке
+    ЕГО отдела. Первое очевидно — открывать гостю то, чего не видишь сам,
+    нельзя; второе и есть «только внутри своего отдела».
 
-    Только правилами: мастер-ключ сюда не подмешивается намеренно. Кто вправе
-    выдавать ВЕЗДЕ (супер-админ, роль вики с can_manage_access), спрашивает не
-    список, а признак unbounded, — иначе на каждый его запрос считалось бы
-    дерево целиком ради ответа «да».
+    departments=None снимает границу (коммерческий директор, администратор
+    вики): возвращаем None, чтобы вызывающий не тащил в память список разделов
+    ради ответа «любой».
+
+    Периметр берётся с мастер-ключом, и это не дыра: замыкание «видеть всё»
+    внутри allowed_section_ids срабатывает только у супер-админа и
+    администратора доступов, а у них departments и так None — до пересечения
+    дело не доходит. Рядовому руководителю тот же вызов отдаёт его ЛИЧНЫЙ
+    периметр.
     """
-    cursor.execute(_GRANTABLE_SECTIONS_SQL, subject_params(subjects, user_id))
-    return {row[0] for row in cursor.fetchall()}
-
-
-# Есть ли право выдавать ХОТЬ ГДЕ. Отдельным запросом, а не длиной списка из
-# grantable_section_ids: признак спрашивает /ping на каждом заходе в раздел, и
-# ради ответа «да/нет» разворачивать всё дерево подразделов незачем.
-_MAY_GRANT_ANYWHERE_SQL = """
-SELECT EXISTS (
-    SELECT 1
-      FROM wiki_section_access_rules r
-      JOIN wiki_sections s ON s.id = r.section_id AND s.status = 'active'
-     WHERE r.can_grant_guest
-       AND r.can_read
-       AND (
-""" + _SUBJECT_MATCH + """
-       )
-)
-"""
-
-
-def may_grant_guest_anywhere(cursor, subjects, user_id):
-    """Выписано ли человеку право выдавать гостевой доступ хотя бы на одном разделе."""
-    cursor.execute(_MAY_GRANT_ANYWHERE_SQL, subject_params(subjects, user_id))
-    return bool(cursor.fetchone()[0])
-
-
-def shareable_section_ids(cursor, subjects, user_id, *, unbounded=False,
-                          departments=None, branch_map=None):
-    """Разделы, которые человек вправе открыть гостю.
-
-    Пересечение двух независимых границ (см. шапку модуля): ПРАВО — правило с
-    can_grant_guest, ОБЪЕКТ — ветка своего отдела. Пересечение, а не «или»:
-    право на чужой ветке не делает её своей, а своя ветка без права не делает
-    раздающим.
-
-    unbounded — супер-админ и роль вики с can_manage_access: обе границы для них
-    сняты, как и всюду в разделе. Возвращаем None — «все активные разделы»,
-    чтобы вызывающий не тащил в память список ради ответа «любой».
-    """
-    if unbounded:
-        return None
-    allowed = grantable_section_ids(cursor, subjects, user_id)
     if departments is None:
-        return allowed
-    branches = branch_map if branch_map is not None else wiki_structure.branch_department_map(cursor)
+        return None
+    allowed = queries.allowed_section_ids(cursor, ctx, subjects)
+    branches = (branch_map if branch_map is not None
+                else wiki_structure.branch_department_map(cursor))
     inside = {int(value) for value in departments}
     return {sid for sid in allowed if branches.get(sid) in inside}
 
 
-# Получатели гостевого доступа: любой РАБОТАЮЩИЙ сотрудник компании, чей уровень
-# должности строго ниже уровня выдающего (access.may_grant_guest_to). Отдел не
-# при чём — отделом ограничен объект, а не человек.
+# Получатели — СВОИ ПОДЧИНЁННЫЕ. Решение владельца 25.08.2026 дословно: «должны
+# быть видны только свои подчинённые, например если СВ из СЗоВ, то он и видит
+# операторов из СЗоВ». Два измерения, и оба обязательны:
+#   потолок должности — access.GUEST_GRANT_CEILING (директор всем, руководитель
+#                       супервайзерам и операторам, супервайзер операторам);
+#   отдел             — свой; у директора и администратора вики границы нет.
 #
 # Фильтр по status = 'working', а не по is_active: в боевой базе is_active снят
 # почти у всех, и по нему список оказался бы почти пустым (см.
@@ -257,32 +202,32 @@ SELECT u.id, u.name, u.role, d.name
   LEFT JOIN departments d ON d.id = u.department_id
  WHERE u.status = 'working'
    AND u.id <> %(actor)s
-   AND (%(all)s
-        OR COALESCE((%(levels)s::jsonb ->> lower(coalesce(u.role, '')))::int, 0)
-           BETWEEN 1 AND %(ceiling)s)
+   AND COALESCE((%(levels)s::jsonb ->> lower(coalesce(u.role, '')))::int, 0)
+       BETWEEN 1 AND %(ceiling)s
+   AND (%(depts)s::int[] IS NULL OR u.department_id = ANY(%(depts)s::int[]))
    AND (%(query)s = '' OR u.name ILIKE %(like)s)
  ORDER BY u.name
  LIMIT %(limit)s
 """
 
 
-def guest_candidates(cursor, *, actor_id, actor_level, unbounded=False,
+def guest_candidates(cursor, *, actor_id, ceiling, departments=None,
                      query='', limit=MAX_PAGE):
     """Кому этот человек вправе выдать гостевой доступ.
 
-    Список считается тем же правилом, что и проверка на записи, поэтому форма
-    физически не может предложить того, кого сервер потом отвергнет. Шкала
-    должностей уезжает в SQL из ROLE_LEVELS, а не переписывается в запросе:
-    вторая копия шкалы однажды разойдётся с первой.
+    Список считается теми же двумя правилами, что и проверка на записи, поэтому
+    форма физически не может предложить того, кого сервер потом отвергнет.
+    Шкала должностей уезжает в SQL из ROLE_LEVELS, а не переписывается в
+    запросе: вторая копия шкалы однажды разойдётся с первой.
     """
     import json
 
     text = (query or '').strip()
     cursor.execute(_CANDIDATES_SQL, {
         'actor': actor_id,
-        'all': bool(unbounded),
         'levels': json.dumps(ROLE_LEVELS),
-        'ceiling': max(0, int(actor_level) - 1),
+        'ceiling': int(ceiling),
+        'depts': list(departments) if departments is not None else None,
         'query': text,
         'like': '%%%s%%' % text,
         'limit': max(1, min(int(limit), MAX_PAGE)),

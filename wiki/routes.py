@@ -132,7 +132,7 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         # потеряли бы доступ к настройке самого тумблера.
                         # ГОСТЯ тумблер не касается тоже (решение владельца
                         # 25.08.2026): выдать доступ можно любому сотруднику
-                        # компании, а вика выдана не каждому отделу. Иначе
+                        # компании, а вики выдана не каждому отделу. Иначе
                         # выдача сотруднику такого отдела молча оборачивалась бы
                         # 403 на каждом запросе — доступ есть, войти нельзя.
                         # Внутрь он попадает именно как гость: периметр ему
@@ -249,9 +249,10 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # шапке и вкладку, на которой подпись почему-то не появляется.
             #
             # can_grant_guest — «вправе ли я выдавать», по нему рисуется половина
-            # «Гостевой доступ». Способностью это право не выражается: оно
-            # адресное и живёт в правиле раздела, поэтому и считается запросом,
-            # а не читается из ctx['capabilities'].
+            # «Гостевой доступ»: она видна супервайзеру и выше. Способностью это
+            # право не выражается — оно живёт в ДОЛЖНОСТИ, отдельной лестницей
+            # (access.GUEST_GRANT_CEILING), потому что «кому по чину» и «что
+            # человек делает с содержимым» — разные вопросы.
             #
             # Оба вызова под try: они читают колонки, добавленные миграцией
             # 25.08.2026, а init_wiki_schema идёт одним савпоинтом — чужая
@@ -263,12 +264,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             try:
                 payload['guest_access'] = wiki_guests.my_active_grants(
                     cursor, ctx['user_id'])
-                payload['can_grant_guest'] = (
-                    wiki_access.normalize_role(ctx['otp_role']) == 'super_admin'
-                    or (bool(ctx['wiki_roles'])
-                        and bool(ctx['capabilities'].get('can_manage_access')))
-                    or wiki_guests.may_grant_guest_anywhere(
-                        cursor, ctx['subjects'], ctx['user_id']))
+                payload['can_grant_guest'] = wiki_access.guest_grant_ceiling(
+                    ctx['otp_role'],
+                    is_wiki_admin=bool(ctx['wiki_roles'])
+                    and bool(ctx['capabilities'].get('can_manage_access')),
+                ) is not None
             except Exception:  # noqa: BLE001 — см. комментарий выше
                 import logging
                 logging.exception('wiki: гостевой доступ недоступен в /ping')

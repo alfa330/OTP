@@ -5,18 +5,15 @@
 них — это место, где механика ломается МОЛЧА, и обычным тестом такое не ловится:
 поломка выглядит как рабочая система, просто с другими правами.
 
-1. can_grant_guest НЕ ПРАВО НА СОДЕРЖИМОЕ. Шесть прав из PERMISSION_COLUMNS
-   превращаются в способности (access.capabilities_from_grants), а любая
-   способность сверх чтения открывает справочники «Парки» и «Офисы»
-   (access.has_write_capability). Добавь кто-нибудь седьмой элемент в кортеж —
-   и тумблер «пусть выдаёт гостевой доступ» молча раздаст правку телефонов
-   парков. На это ссылаются три докстринга (wiki/schema.py, wiki/structure.py,
-   wiki/guests.py), и до этого файла единственной защитой был комментарий.
+1. ЛЕСТНИЦА ВЫДАЧИ. Владелец 25.08.2026 перечислил роли поимённо: директор
+   выдаёт всем, руководитель — супервайзерам и операторам, супервайзер —
+   операторам, тренер и оператор не выдают вовсе. Таблица, а не арифметика «на
+   ступень ниже»: у супервайзера ступенька перепрыгивает тренера. Формула,
+   которая «почти совпадает», разошлась бы с решением молча.
 
-2. ЛЕСТНИЦА «НИЖЕ СЕБЯ». Решение владельца 25.08.2026, и оно НЕ совпадает с
-   GRANT_CEILING: та таблица перепрыгивает тренера у супервайзера, а тут сказано
-   «ниже себя» без исключений. Совпади две лестницы случайно в одной точке —
-   кто-нибудь заменит одну другой, и правило разойдётся с решением беззвучно.
+2. СВОИ ПОДЧИНЁННЫЕ. Второе измерение того же права — отдел: «если СВ из СЗоВ,
+   то он и видит операторов из СЗоВ». Потолок отвечает «кому по чину», отдел —
+   «чьим людям», и одно из другого не выводится.
 
 3. ДВА РАЗДВОЕНИЯ, оба сознательные и оба обязаны сходиться:
    * гостевая CTE описана дважды — в периметре чтения (queries) и отдельным
@@ -38,127 +35,138 @@ from pathlib import Path
 from wiki import guests, queries, structure
 from wiki.access import (
     ROLE_LEVELS,
-    capabilities_from_grants,
-    has_write_capability,
+    guest_grant_ceiling,
+    may_grant_guest_in_department,
     may_grant_guest_to,
     role_level_of,
 )
-from wiki.schema import (
-    CAPABILITY_COLUMNS,
-    GUEST_GRANT_COLUMN,
-    MAX_GUEST_DAYS,
-    PERMISSION_COLUMNS,
-)
+from wiki.schema import MAX_GUEST_DAYS
 
 # «Сейчас» для арифметики срока. Фиксированное, а не now(): тест про календарь,
 # который проходит только до полуночи, — это не тест.
 NOW = datetime(2026, 8, 25, 14, 37, 12)
 
 
-class GuestGrantColumnIsolationTest(unittest.TestCase):
-    """Страж №1: право выдавать не должно стать правом на содержимое."""
-
-    def test_column_name_is_the_one_the_guards_watch(self):
-        """Имя проверяем первым: иначе стражи ниже сторожат несуществующее.
-
-        Приём из tests/test_wiki_directory_space.py — константу переименуют, а
-        assertNotIn по новому имени продолжит проходить, ничего не проверяя.
-        """
-        self.assertEqual('can_grant_guest', GUEST_GRANT_COLUMN)
-
-    def test_not_a_permission(self):
-        self.assertNotIn(GUEST_GRANT_COLUMN, PERMISSION_COLUMNS)
-
-    def test_not_a_capability(self):
-        self.assertNotIn(GUEST_GRANT_COLUMN, CAPABILITY_COLUMNS)
-
-    def test_does_not_become_a_write_capability(self):
-        """Главное следствие: тумблер не открывает справочники «Парки»/«Офисы».
-
-        Гейт этих справочников — has_write_capability, «есть ли хоть одна
-        способность сверх чтения». Способности поднимаются из ПРАВИЛ, которые
-        человеку выписали (capabilities_from_grants), и попади сюда тумблер —
-        правка телефонов парков досталась бы каждому, кому разрешили звать
-        гостей.
-        """
-        caps = capabilities_from_grants({GUEST_GRANT_COLUMN: True})
-        self.assertFalse(has_write_capability(caps))
-        self.assertFalse(any(caps.values()))
-
-    def test_permission_columns_stay_six(self):
-        """Ровно шесть прав. Седьмое обязано сначала сломать этот тест."""
-        self.assertEqual(
-            ('can_read', 'can_create', 'can_edit',
-             'can_delete', 'can_publish', 'can_approve'),
-            PERMISSION_COLUMNS)
-
-
 class GuestLadderTest(unittest.TestCase):
-    """Страж №2: «ниже себя по оргструктуре» — строго ниже."""
+    """Страж №1: лестница выдачи — ровно та, что назвал владелец."""
 
-    def test_supervisor_grants_below_including_trainer(self):
-        """СВ выдаёт и тренеру — здесь лестница РАСХОДИТСЯ с GRANT_CEILING.
+    def test_director_grants_to_everyone(self):
+        """«Коммерческий директор может всем» — включая других директоров.
 
-        В GRANT_CEILING у супервайзера потолок 10, и тренер (20) пропущен
-        намеренно: так владелец сформулировал ПРО ПРАВИЛА разделов. Про гостевой
-        доступ сказано иначе — «ниже себя», без исключений. Тест закрепляет
-        именно расхождение: подмени кто-нибудь одну лестницу другой, разница
-        исчезнет молча.
+        Наверху лестницы правило «никто не выдаёт своему уровню» лишено смысла:
+        над директором никого нет, эскалировать некуда.
         """
-        self.assertTrue(may_grant_guest_to('sv', 'trainer'))
-        self.assertTrue(may_grant_guest_to('sv', 'operator'))
-        self.assertTrue(may_grant_guest_to('sv', 'trainee'))
-
-    def test_nobody_grants_to_their_own_level(self):
-        """Своему уровню — нет. Гостевой доступ не заменяет правило раздела."""
-        for role in ('sv', 'admin', 'trainer', 'super_admin'):
-            with self.subTest(role=role):
-                self.assertFalse(may_grant_guest_to(role, role))
-
-    def test_nobody_grants_upwards(self):
-        self.assertFalse(may_grant_guest_to('operator', 'sv'))
-        self.assertFalse(may_grant_guest_to('trainer', 'admin'))
-        self.assertFalse(may_grant_guest_to('sv', 'admin'))
-
-    def test_operator_grants_to_nobody(self):
-        """Ниже оператора никого нет — и стажёр ему не «ниже», а вровень."""
         for target in ROLE_LEVELS:
             with self.subTest(target=target):
-                self.assertFalse(may_grant_guest_to('operator', target))
+                self.assertTrue(may_grant_guest_to('super_admin', target))
+
+    def test_head_grants_to_supervisors_and_operators(self):
+        """«Руководитель — супервайзерам и операторам», но не другим руководителям."""
+        self.assertTrue(may_grant_guest_to('admin', 'sv'))
+        self.assertTrue(may_grant_guest_to('admin', 'operator'))
+        self.assertTrue(may_grant_guest_to('admin', 'trainee'))
+        self.assertFalse(may_grant_guest_to('admin', 'admin'))
+        self.assertFalse(may_grant_guest_to('admin', 'super_admin'))
+
+    def test_supervisor_grants_to_operators_only(self):
+        """«Супервайзеры могут выдавать доступы операторам» — и только им.
+
+        Тренер (20) под потолок супервайзера (10) НЕ проходит, и это не описка:
+        та же ступенька перепрыгнута в GRANT_CEILING у правил разделов.
+        """
+        self.assertTrue(may_grant_guest_to('sv', 'operator'))
+        self.assertTrue(may_grant_guest_to('sv', 'trainee'))
+        self.assertFalse(may_grant_guest_to('sv', 'trainer'))
+        self.assertFalse(may_grant_guest_to('sv', 'sv'))
+        self.assertFalse(may_grant_guest_to('sv', 'admin'))
+
+    def test_trainer_and_operator_do_not_grant_at_all(self):
+        """Ниже супервайзера права нет вовсе — и раздела они не видят."""
+        for role in ('trainer', 'operator', 'trainee'):
+            with self.subTest(role=role):
+                self.assertIsNone(guest_grant_ceiling(role))
+                for target in ROLE_LEVELS:
+                    self.assertFalse(may_grant_guest_to(role, target))
+
+    def test_ceiling_answers_both_questions_at_once(self):
+        """Один и тот же признак: «вижу ли раздел» и «кому вправе выдать».
+
+        Раздел «Гостевой доступ» виден супервайзеру и выше — это ровно те, у
+        кого потолок не None. Считать видимость вторым способом значило бы
+        завести второй источник истины об одном и том же.
+        """
+        visible = {role for role in ROLE_LEVELS
+                   if guest_grant_ceiling(role) is not None}
+        self.assertEqual({'super_admin', 'admin', 'sv'}, visible)
 
     def test_unknown_target_role_is_refused(self):
-        """Опечатка в должности — отказ, а не «ноль меньше любого уровня».
+        """Опечатка в должности — отказ, а не «ноль меньше любого потолка».
 
         role_level_of отдаёт незнакомой роли ноль, и без явной проверки условие
-        «уровень цели меньше моего» пропустило бы кого угодно.
+        «уровень цели не выше потолка» пропустило бы кого угодно.
         """
         self.assertEqual(0, role_level_of('нет такой должности'))
-        self.assertFalse(may_grant_guest_to('admin', 'нет такой должности'))
-        self.assertFalse(may_grant_guest_to('admin', ''))
-        self.assertFalse(may_grant_guest_to('admin', None))
+        for value in ('нет такой должности', '', None):
+            with self.subTest(value=value):
+                self.assertFalse(may_grant_guest_to('admin', value))
 
     def test_unknown_actor_role_grants_to_nobody(self):
+        self.assertIsNone(guest_grant_ceiling('нет такой должности'))
         self.assertFalse(may_grant_guest_to('нет такой должности', 'operator'))
 
-    def test_master_key_has_no_ladder(self):
-        """unbounded снимает лестницу целиком — как и границу отдела.
+    def test_wiki_admin_role_lifts_the_ceiling(self):
+        """Роль вики «Администратор» поднимает потолок независимо от должности.
 
-        Носитель роли вики «Администратор» бывает оператором по должности, и
-        лестница закрыла бы ему выдачу вовсе, хотя роль назначают ровно за тем,
-        чтобы человек раздавал доступ.
+        Её назначают руками ровно затем, чтобы человек раздавал доступ, а
+        должность у него бывает любая — по лестнице оператор не выдал бы никому.
         """
-        self.assertTrue(may_grant_guest_to('operator', 'super_admin', unbounded=True))
+        self.assertIsNone(guest_grant_ceiling('operator'))
+        self.assertEqual(ROLE_LEVELS['super_admin'],
+                         guest_grant_ceiling('operator', is_wiki_admin=True))
+        self.assertTrue(may_grant_guest_to('operator', 'admin', is_wiki_admin=True))
 
-    def test_supervisor_alias_is_normalized(self):
-        """'supervisor' — историческое написание 'sv', и уровень у него нулевой.
+    def test_supervisor_alias_matches_sv(self):
+        """'supervisor' — историческое написание 'sv', и выдаёт он так же.
 
-        В ROLE_LEVELS его нет (см. шапку wiki/access.py), поэтому носитель такой
-        роли по лестнице не выдаёт никому. Это не описка теста, а фиксация
-        существующего края: у правил разделов алиас разворачивается отдельной
-        веткой (expand_otp_roles), здесь такой ветки нет.
+        В ROLE_LEVELS его нет (см. шапку wiki/access.py), поэтому в таблице он
+        прописан отдельной строкой — иначе носители этой роли не выдавали бы
+        вовсе, хотя это те же супервайзеры.
         """
         self.assertNotIn('supervisor', ROLE_LEVELS)
-        self.assertFalse(may_grant_guest_to('supervisor', 'operator'))
+        self.assertEqual(guest_grant_ceiling('sv'), guest_grant_ceiling('supervisor'))
+        self.assertTrue(may_grant_guest_to('supervisor', 'operator'))
+        self.assertFalse(may_grant_guest_to('supervisor', 'trainer'))
+
+
+class GuestDepartmentTest(unittest.TestCase):
+    """Страж №2: свои подчинённые — не только по чину, но и по отделу."""
+
+    def test_own_department_passes(self):
+        self.assertTrue(may_grant_guest_in_department(1, [1, 367]))
+
+    def test_foreign_department_is_refused(self):
+        """«СВ из СЗоВ видит операторов из СЗоВ» — и только их."""
+        self.assertFalse(may_grant_guest_in_department(367, [1]))
+
+    def test_no_department_is_refused(self):
+        """Отдела нет — «неизвестно чей», а не «ничей». То же, что в may_grant_to_subject."""
+        for value in (None, '', 'нет'):
+            with self.subTest(value=value):
+                self.assertFalse(may_grant_guest_in_department(value, [1]))
+
+    def test_director_has_no_department_border(self):
+        """None означает «без границы»: директору сказано «может всем»."""
+        self.assertTrue(may_grant_guest_in_department(367, None))
+        self.assertTrue(may_grant_guest_in_department(None, None))
+
+    def test_department_and_ladder_are_independent(self):
+        """Два измерения, и одно не выводится из другого.
+
+        Свой отдел не поднимает потолок должности, а высокий потолок не открывает
+        чужой отдел: обе проверки стоят на выдаче по очереди.
+        """
+        self.assertTrue(may_grant_guest_in_department(1, [1]))
+        self.assertFalse(may_grant_guest_to('sv', 'sv'))
 
 
 class GuestExpiryTest(unittest.TestCase):
@@ -326,14 +334,20 @@ class GuestSqlAgreementTest(unittest.TestCase):
         cte = _normalize(queries._GUEST_SECTIONS_CTE)
         self.assertIn('g.user_id = %(user_id)s', cte)
 
-    def test_grant_right_requires_read(self):
-        """Раздавать раздел, которого сам не видишь, нельзя."""
-        text = _normalize(guests._GRANTABLE_SECTIONS_SQL)
-        self.assertIn('r.can_grant_guest', text)
-        self.assertIn('r.can_read', text)
-        text = _normalize(guests._MAY_GRANT_ANYWHERE_SQL)
-        self.assertIn('r.can_grant_guest', text)
-        self.assertIn('r.can_read', text)
+    def test_candidates_ask_both_questions(self):
+        """Справочник получателей сужен И потолком, И отделом.
+
+        Забудь одно из двух — и форма предложит того, кого сервер отвергнет:
+        молчаливый отказ с обратной стороны стола, от которого этот раздел
+        лечили дважды.
+        """
+        text = _normalize(guests._CANDIDATES_SQL)
+        self.assertIn('BETWEEN 1 AND %(ceiling)s', text)
+        self.assertIn('u.department_id = ANY(%(depts)s::int[])', text)
+        # Уволенных и уволившихся в списке быть не должно.
+        self.assertIn("u.status = 'working'", text)
+        # И себя самого тоже.
+        self.assertIn('u.id <> %(actor)s', text)
 
     def test_shareable_articles_offer_only_what_a_guest_can_open(self):
         """Форма не предлагает черновик и строгий режим.

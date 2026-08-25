@@ -290,12 +290,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     // Какие права этот раздающий вправе поставить. Приезжает вместе с потолком
     // и границей отдела — тремя измерениями выдачи (routes_structure).
     const [grantable, setGrantable] = useState(null);
-    /* Четвёртое измерение выдачи: вправе ли этот человек передать ПРАВО
-       РАЗДАВАТЬ гостевой доступ на этом разделе. В grantable его нет намеренно —
-       там права на содержимое, а это право на людей, и живёт оно в отдельной
-       колонке (wiki/schema.py: GUEST_GRANT_COLUMN). Считает сервер: право
-       адресное, и вывести его из способностей нельзя. */
-    const [mayGrantGuest, setMayGrantGuest] = useState(false);
     const [people, setPeople] = useState([]);
     const [catalog, setCatalog] = useState({});
     const [loading, setLoading] = useState(true);
@@ -325,7 +319,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                 setCeiling(r.data?.grant_ceiling ?? null);
                 setGrantDepartments(r.data?.grant_departments ?? null);
                 setGrantable(r.data?.grantable ?? null);
-                setMayGrantGuest(!!r.data?.may_grant_guest);
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
             .finally(() => setLoading(false));
@@ -439,13 +432,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
             ...draft.permissions,
             grant_subsections: draft.grant_subsections,
-            /* Поле уходит ТОЛЬКО из этой формы и только когда тумблер вообще
-               показан. Матрица должностей его не шлёт вовсе, и это важно:
-               сервер отличает «прислали false» от «не прислали» и во втором
-               случае колонку не трогает. Пошли мы отсюда false «за компанию» —
-               и любое пересохранение правила гасило бы выданное право молча. */
-            ...(mayGrantGuest && draft.subject_type === 'user'
-                ? { can_grant_guest: !!draft.can_grant_guest } : {}),
         }, { headers })
             .then(() => { toast('Правило сохранено', 'success'); setDraft(null); loadRules(); reload?.(); })
             .catch((e) => toast(errText(e, 'Не удалось сохранить правило'), 'error'))
@@ -637,9 +623,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                                 {rule.grant_subsections && (
                                                     <IosBadge tone="slate">+ подразделы</IosBadge>
                                                 )}
-                                                {rule.can_grant_guest && (
-                                                    <IosBadge tone="blue">гостевой доступ</IosBadge>
-                                                )}
                                             </div>
                                         </div>
                                         {/* Правило можно было только снести и завести
@@ -657,7 +640,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                                 subject_role: rule.subject_role || 'operator',
                                                 min_role_level: rule.min_role_level ?? '',
                                                 grant_subsections: !!rule.grant_subsections,
-                                                can_grant_guest: !!rule.can_grant_guest,
                                                 permissions: permissionsOf(rule),
                                             })}
                                             className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
@@ -683,7 +665,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 onClick={() => setDraft({
                                     subject_type: 'user', subject_id: '', subject_role: 'operator',
                                     min_role_level: '', grant_subsections: false,
-                                    can_grant_guest: false,
                                     permissions: { ...NO_PERMISSIONS, can_read: true },
                                 })}
                             >
@@ -857,49 +838,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                             />
                         </div>
 
-                        {/* Право РАЗДАВАТЬ, а не читать, — поэтому тумблер стоит
-                            здесь, рядом с «подразделами», а не в ряду галочек
-                            выше: те галочки про содержимое, эта про людей.
-
-                            Показан только на правиле для КОНКРЕТНОГО человека:
-                            у правила на отдел, группу или должность адресат —
-                            множество, и лестница «кому по чину» проверяет его
-                            лишь по нижнему порогу. Правилом на свой же отдел
-                            супервайзер раздал бы право выдачи и тренерам, и
-                            другим супервайзерам, и главе отдела. Сервер такое
-                            правило отвергает (WIKI_GUEST_GRANT_SUBJECT), и
-                            форма не предлагает того, что будет отвергнуто.
-
-                            И только тому, у кого право уже есть на этом
-                            разделе: иначе его можно было бы поднять себе
-                            (may_grant_guest в ответе сервера). */}
-                        {mayGrantGuest && draft.subject_type === 'user' && (
-                            <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
-                                <div className="min-w-0">
-                                    <div className="text-[13.5px] font-medium text-slate-900">
-                                        Гостевой доступ
-                                    </div>
-                                    <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                                        Разрешить этому человеку временно открывать раздел
-                                        сотрудникам ниже себя — на срок до двух недель, из
-                                        половины «Гостевой доступ».
-                                    </p>
-                                </div>
-                                <IosToggle
-                                    checked={!!draft.can_grant_guest}
-                                    onChange={(v) => setDraft({
-                                        ...draft,
-                                        can_grant_guest: v,
-                                        // Раздавать раздел, которого сам не видишь,
-                                        // нельзя — сервер всё равно доставит чтение,
-                                        // и галочка обязана это показать сразу.
-                                        permissions: v
-                                            ? { ...draft.permissions, can_read: true }
-                                            : draft.permissions,
-                                    })}
-                                />
-                            </div>
-                        )}
                     </div>
                 )}
             </IosModal>
