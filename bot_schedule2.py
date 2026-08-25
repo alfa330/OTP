@@ -10736,8 +10736,10 @@ def get_admin_users():
                         u.department_id,
                         grp.group_id,
                         grp.group_name,
-                        -- «Город» дописан в конец, чтобы не сдвигать индексы выше
-                        u.city
+                        -- «Город» и «Должность» дописаны в конец, чтобы не
+                        -- сдвигать индексы выше
+                        u.city,
+                        u.job_title
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -10834,7 +10836,8 @@ def get_admin_users():
                         "department_id": row[48],
                         "group_id": row[49],
                         "group_name": row[50] or "",
-                        "city": row[51] or ""
+                        "city": row[51] or "",
+                        "job_title": row[52] or ""
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
@@ -10963,6 +10966,7 @@ def admin_update_user():
             'close_contact_2_phone',
             'card_number',
             'city',
+            'job_title',
             'taxipro_id'
         ]:
             value = str(value).strip() if value is not None else ''
@@ -12720,9 +12724,11 @@ def get_sv_list():
                         direction_id,
                         supervisor_id,
                         department_id,
-                        -- «Город» дописан в конец: индекс department_id (39) уже
-                        -- используется фильтром возглавляемых отделов ниже
-                        city
+                        -- «Город» и «Должность» дописаны в конец: индекс
+                        -- department_id (39) уже используется фильтром
+                        -- возглавляемых отделов ниже
+                        city,
+                        job_title
                     FROM users
                     WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                     ORDER BY name
@@ -12776,7 +12782,8 @@ def get_sv_list():
                         "direction_id": sv[37],
                         "supervisor_id": sv[38],
                         "department_id": sv[39],
-                        "city": sv[40] or ""
+                        "city": sv[40] or "",
+                        "job_title": sv[41] or ""
                     })
             else:
                 # Супервайзер видит только супервайзеров СВОЕГО отдела
@@ -16197,6 +16204,33 @@ def add_user():
         except ValueError:
             return jsonify({"error": "Invalid hire_date format. Use YYYY-MM-DD"}), 400
 
+        # Отдел: только глобальный админ/супер-админ выбирает любой отдел.
+        # СВ и глава отдела (даже с админ-ролью) создают строго в своём отделе —
+        # выбор клиента игнорируем, иначе оператор может уйти в чужой отдел/СЗоВ
+        # и пропасть из скоупа главы (см. get_admin_users).
+        requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)
+        department_id = None
+        if _is_global_admin_requester(requester_role, requester_id):
+            department_raw = data.get('department_id')
+            if department_raw not in [None, '']:
+                try:
+                    department_id = int(department_raw)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Invalid department_id"}), 400
+                if not db.get_department_by_id(department_id):
+                    return jsonify({"error": "Department not found"}), 400
+        else:
+            # СВ / глава отдела — отдел создающего (выбор клиента игнорируем)
+            department_id = requester_dept_id
+
+        # Отдел нужен ЗДЕСЬ, до разбора направления: у бэк-офиса (Бухгалтерия,
+        # HR) направлений и групп нет вовсе, и обязательный direction_id не давал
+        # завести сотрудника — форма поле уже не показывает, а сервер его всё
+        # ещё требовал. Ниже отдел могут ещё уточнить по выбранной группе; на
+        # бэк-офис это не влияет — групп у него нет.
+        # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
+        line_fields_hidden = _department_hides_operator_line_fields(department_id)
+
         # Группа оператора: определяет и членство, и супервайзера (СВ группы).
         # supervisor_id как прямой параметр — legacy-фолбэк для старых клиентов.
         target_group = None
@@ -16220,15 +16254,18 @@ def add_user():
                     supervisor_id = int(supervisor_raw)
                 except (TypeError, ValueError):
                     return jsonify({"error": "Invalid supervisor_id"}), 400
-            if role == 'operator' and not data.get('direction_id'):
+            if role == 'operator' and not line_fields_hidden and not data.get('direction_id'):
                 return jsonify({"error": "Missing required field: direction_id"}), 400
             if role == 'operator' and not data.get('rate'):
                 return jsonify({"error": "Missing required field: rate"}), 400
             if role == 'operator':
-                try:
-                    direction_id = int(data['direction_id'])
-                except (TypeError, ValueError):
-                    return jsonify({"error": "Invalid direction_id"}), 400
+                if line_fields_hidden:
+                    direction_id = None
+                else:
+                    try:
+                        direction_id = int(data['direction_id'])
+                    except (TypeError, ValueError):
+                        return jsonify({"error": "Invalid direction_id"}), 400
                 try:
                     rate = float(data['rate'])
                 except (TypeError, ValueError):
@@ -16262,7 +16299,7 @@ def add_user():
                 supervisor_id = requester_id
             # Направление берём выбранное в модалке (оно ограничено отделом СВ);
             # если не выбрано — наследуем направление самого СВ.
-            if role == 'operator' and not direction_id:
+            if role == 'operator' and not direction_id and not line_fields_hidden:
                 requester_direction_name = str(requester[4] or '').strip()
                 if requester_direction_name:
                     requester_direction_id = next(
@@ -16321,6 +16358,7 @@ def add_user():
         close_contact_2_phone = str(data.get('close_contact_2_phone') or '').strip() or None
         card_number = str(data.get('card_number') or '').strip() or None
         city = str(data.get('city') or '').strip() or None
+        job_title = str(data.get('job_title') or '').strip() or None
         taxipro_id = str(data.get('taxipro_id') or '').strip() or None
 
         if phone and not _is_valid_kz_phone(phone):
@@ -16448,25 +16486,6 @@ def add_user():
         if role != 'operator':
             sip_number = None
 
-        # Отдел: только глобальный админ/супер-админ выбирает любой отдел.
-        # СВ и глава отдела (даже с админ-ролью) создают строго в своём отделе —
-        # выбор клиента игнорируем, иначе оператор может уйти в чужой отдел/СЗоВ
-        # и пропасть из скоупа главы (см. get_admin_users).
-        requester_dept_id = requester_headed_dept if requester_headed_dept is not None else db.get_user_department_id(requester_id)
-        department_id = None
-        if _is_global_admin_requester(requester_role, requester_id):
-            department_raw = data.get('department_id')
-            if department_raw not in [None, '']:
-                try:
-                    department_id = int(department_raw)
-                except (TypeError, ValueError):
-                    return jsonify({"error": "Invalid department_id"}), 400
-                if not db.get_department_by_id(department_id):
-                    return jsonify({"error": "Department not found"}), 400
-        else:
-            # СВ / глава отдела — отдел создающего (выбор клиента игнорируем)
-            department_id = requester_dept_id
-
         # Группа: строго из отдела, в котором создаётся сотрудник. Если админ не
         # выбрал отдел явно — сотрудник уходит в отдел группы. СВ берём из группы
         # (переданный supervisor_id игнорируем — источник истины членство в группе).
@@ -16539,6 +16558,7 @@ def add_user():
             close_contact_2_phone=close_contact_2_phone,
             card_number=card_number,
             city=city,
+            job_title=job_title,
             internship_in_company=internship_in_company,
             front_office_training=front_office_training,
             front_office_training_date=front_office_training_date,
@@ -23087,6 +23107,26 @@ def call_distribution_settings_endpoint():
 # users.sip_number — у СЗоВ, ОП и ТЭЗ. Зеркало на фронте —
 # SIP_SETTINGS_DEPARTMENT_CODES в src/App.jsx.
 SIP_SETTINGS_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})
+
+
+# Отделы без операторских полей: ни направлений, ни групп, ни SIP-номера.
+# Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
+OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})
+
+
+def _department_hides_operator_line_fields(department_id):
+    """Отдел без направлений, групп и телефонии (бэк-офис).
+
+    Отдел не задан — считаем, что поля нужны: неизвестный отдел не повод
+    снимать проверку, которая держит данные операторов на линии.
+    """
+    if department_id is None:
+        return False
+    try:
+        department = db.get_department_by_id(int(department_id)) or {}
+    except Exception:
+        return False
+    return str(department.get('code') or '').strip().lower() in OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES
 
 
 def _is_sip_settings_department_head(requester_id):

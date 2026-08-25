@@ -38,7 +38,7 @@ import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
+import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -37263,6 +37263,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             sortField: 'hire_date',
                             render: (employee) => formatEmployeeTableDate(employee?.hire_date)
                         },
+                        ...(departmentUsesEmployeeJobTitle(user) ? [
+                        {
+                            key: 'job_title',
+                            label: 'Должность',
+                            render: (employee) => employee?.job_title || '-'
+                        }
+                        ] : []),
                         ...(departmentUsesEmployeeCity(user) ? [
                         {
                             key: 'city',
@@ -40761,6 +40768,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             company_name: normalizeTextForApi(editedUser.company_name),
                             employment_type: normalizeEmploymentTypeForApi(editedUser.employment_type),
                             city: normalizeTextForApi(editedUser.city),
+                            job_title: normalizeTextForApi(editedUser.job_title),
                             internship_in_company: normalizeBoolForApi(editedUser.internship_in_company),
                             front_office_training: normalizeBoolForApi(editedUser.front_office_training),
                             front_office_training_date: normalizeBoolForApi(editedUser.front_office_training)
@@ -41196,6 +41204,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'city',
                             value: nextCity
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextJobTitle = normalizeTextForApi(editedUser?.job_title);
+                    const prevJobTitle = normalizeTextForApi(userToEdit?.job_title);
+                    if (nextJobTitle !== prevJobTitle) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'job_title',
+                            value: nextJobTitle
                         }, {
                             headers: { 'X-User-Id': user.id }
                         });

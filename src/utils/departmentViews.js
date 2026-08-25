@@ -177,6 +177,20 @@ export const departmentCodeUsesEmployeeCity = (code) => {
 
 export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCity(departmentCodeOf(user));
 
+// Отделы, у сотрудников которых в карточке есть «Должность». У бэк-офиса
+// человека определяет именно она: направления и группы, которыми
+// различают людей на линии, там не заведены вовсе (см.
+// OPERATOR_FIELDS_HIDDEN_DEPARTMENTS — те же коды с другой стороны).
+// В базе колонка называется job_title: position — ключевое слово Postgres.
+const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr']);
+
+export const departmentCodeUsesEmployeeJobTitle = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && EMPLOYEE_JOB_TITLE_DEPARTMENTS.has(normalized));
+};
+
+export const departmentUsesEmployeeJobTitle = (user) => departmentCodeUsesEmployeeJobTitle(departmentCodeOf(user));
+
 // Отделы, у сотрудников которых не спрашиваем «Был во фронт офисе на обучении»:
 // сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна, а
 // бухгалтерия и HR на линию не выходят вовсе — обучать их работе в офисе

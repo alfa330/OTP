@@ -27,6 +27,7 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = ROOT / "database.py"
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 APP_PATH = ROOT / "src" / "App.jsx"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
@@ -340,6 +341,208 @@ class SipSettingsGateRuntimeTests(unittest.TestCase):
         can = self._gate({30: {1499, 367}, 31: {1499, 1500}}, {})
         self.assertTrue(can(30, 'admin'))
         self.assertFalse(can(31, 'admin'))
+
+
+class EmployeeJobTitleFieldTests(unittest.TestCase):
+    """«Должность» для бэк-офиса — устроена как «Город» у фронт-офисов:
+    обычная колонка users + дубль в user_hr_profiles, показ по коду отдела
+    СОТРУДНИКА.
+
+    Колонка называется job_title, а не position: position — ключевое слово
+    Postgres, а SQL здесь местами собирается строкой (в update_user —
+    f"SELECT role, {field} FROM users").
+    """
+
+    def test_schema_adds_the_column_to_both_tables(self):
+        source = _read(DATABASE_PATH)
+        self.assertIn("job_title VARCHAR(255),", source)          # CREATE TABLE users
+        self.assertIn("job_title VARCHAR(255)\n", source)         # CREATE user_hr_profiles
+        self.assertEqual(
+            2, source.count("ADD COLUMN IF NOT EXISTS job_title VARCHAR(255);"),
+            "ALTER нужен и для users, и для user_hr_profiles",
+        )
+        # position закрыт намеренно — проверяем, что его не завезли обратно.
+        self.assertNotIn("ADD COLUMN IF NOT EXISTS position ", source)
+
+    def test_field_is_writable_through_both_paths(self):
+        source = _read(DATABASE_PATH)
+        # Точечное обновление поля кладёт его в кадровую карточку, а не только
+        # в users: иначе users и user_hr_profiles разъедутся.
+        self.assertIn("'card_number', 'city', 'job_title'", source)
+        # Массовое создание.
+        self.assertIn("        job_title=None,", source)
+
+        bot = _read(BOT_PATH)
+        self.assertIn(
+            "        job_title = str(data.get('job_title') or '').strip() or None",
+            bot,
+        )
+        self.assertIn("            job_title=job_title,", bot)
+
+    def test_lists_append_the_column_at_the_end(self):
+        # Оба списка читаются по ИНДЕКСАМ, поэтому колонку дописывают в конец;
+        # вставка в середину молча сдвинула бы все поля ниже.
+        bot = _read(BOT_PATH)
+        self.assertIn('"city": row[51] or "",\n                        "job_title": row[52] or ""', bot)
+        self.assertIn('"city": sv[40] or "",\n                        "job_title": sv[41] or ""', bot)
+
+    def test_frontend_helper_and_card(self):
+        views = _read(DEPARTMENT_VIEWS_PATH)
+        self.assertIn(
+            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr']);",
+            views,
+        )
+        self.assertIn("export const departmentCodeUsesEmployeeJobTitle = (code) => {", views)
+
+        modal = _read(MODAL_PATH)
+        self.assertIn(
+            "const showEmployeeJobTitle = departmentCodeUsesEmployeeJobTitle(effectiveDeptCode);",
+            modal,
+        )
+        # Поле в обоих режимах модалки.
+        self.assertEqual(2, modal.count(">Должность</label>"))
+        self.assertEqual(2, modal.count("job_title: e.target.value"))
+
+    def test_frontend_sends_and_diffs_the_field(self):
+        app = _read(APP_PATH)
+        self.assertIn("job_title: normalizeTextForApi(editedUser.job_title),", app)
+        self.assertIn("field: 'job_title',", app)
+        self.assertIn("label: 'Должность',", app)
+
+    def test_name_field_is_labelled_fio(self):
+        # Поле одно (editedUser.name) и хранит ФИО целиком — подпись обязана
+        # совпадать в обоих режимах, иначе карточка только что заведённого
+        # сотрудника называет его иначе, чем форма создания.
+        modal = _read(MODAL_PATH)
+        self.assertNotIn(">Имя</label>", modal)
+        self.assertIn('setModalError("ФИО обязательно.");', modal)
+
+
+class CreateUserSqlBalanceTests(unittest.TestCase):
+    """В create_user запросы собраны руками: колонки, плейсхолдеры и кортеж
+    параметров живут в трёх разных местах. Забытый параметр — не синтаксис, а
+    сдвиг значений по колонкам, и находят его уже в данных."""
+
+    def test_placeholders_match_parameters(self):
+        source = _read(DATABASE_PATH)
+        module = source_cache.parse(source)
+        create_user = next(
+            node for node in ast.walk(module)
+            if isinstance(node, ast.FunctionDef) and node.name == "create_user"
+        )
+
+        checked = 0
+        for call in ast.walk(create_user):
+            if not (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "execute"
+                    and len(call.args) == 2):
+                continue
+            sql_node, params_node = call.args
+            if not (isinstance(sql_node, ast.Constant) and isinstance(sql_node.value, str)):
+                continue
+            if not isinstance(params_node, ast.Tuple):
+                continue
+            sql = sql_node.value
+            if "INSERT INTO" not in sql and "UPDATE " not in sql:
+                continue
+            checked += 1
+            self.assertEqual(
+                sql.count("%s"), len(params_node.elts),
+                f"строка {call.lineno}: плейсхолдеров и параметров разное число",
+            )
+
+        # Страховка от «тест ничего не проверил»: запросов в create_user много.
+        self.assertGreaterEqual(checked, 6)
+
+    def test_users_insert_lists_job_title_next_to_city(self):
+        # Порядок — единственное, чего счётчик выше не ловит.
+        source = _read(DATABASE_PATH)
+        self.assertIn("card_number, city, job_title, internship_in_company", source)
+        self.assertIn(
+            "                    card_number,\n"
+            "                    city,\n"
+            "                    job_title,\n",
+            source,
+        )
+        self.assertEqual(
+            2, source.count("card_number, city, job_title, internship_in_company_value"),
+            "обе UPDATE-ветки create_user (по имени и по telegram_id)",
+        )
+
+
+class BackOfficeUserCreationBackendTests(unittest.TestCase):
+    """Сервер тоже не должен требовать направление у бэк-офиса.
+
+    Скрыть поле на фронте мало: ручка создания сотрудника проверяет
+    direction_id сама и отвечала «Missing required field: direction_id».
+    """
+
+    def test_department_is_resolved_before_the_direction_check(self):
+        # Суть бага была в ПОРЯДКЕ: отдел разбирался ниже проверки направления,
+        # поэтому проверка не могла знать, что направлений у отдела нет.
+        source = _read(BOT_PATH)
+        endpoint = _function_source(BOT_PATH, "add_user")
+
+        resolved_at = endpoint.index("line_fields_hidden = _department_hides_operator_line_fields(department_id)")
+        checked_at = endpoint.index('"error": "Missing required field: direction_id"')
+        self.assertLess(
+            resolved_at, checked_at,
+            "отдел обязан разбираться ДО проверки направления",
+        )
+        # Отдел разбирается один раз: второй копии этого блока быть не должно.
+        self.assertEqual(1, endpoint.count("department_id = requester_dept_id"))
+        self.assertEqual(1, source.count("line_fields_hidden = _department_hides_operator_line_fields"))
+
+    def test_direction_is_optional_only_for_back_office(self):
+        endpoint = _function_source(BOT_PATH, "add_user")
+        self.assertIn(
+            "if role == 'operator' and not line_fields_hidden and not data.get('direction_id'):",
+            endpoint,
+        )
+        self.assertIn("                if line_fields_hidden:\n                    direction_id = None", endpoint)
+        # Фолбэк «СВ наследует своё направление» бэк-офису тоже не нужен.
+        self.assertIn(
+            "if role == 'operator' and not direction_id and not line_fields_hidden:",
+            endpoint,
+        )
+
+    def test_helper_matches_the_frontend_set(self):
+        source = _read(BOT_PATH)
+        self.assertIn(
+            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})",
+            source,
+        )
+        views = _read(DEPARTMENT_VIEWS_PATH)
+        self.assertIn(
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr']);",
+            views,
+        )
+
+    def test_helper_runtime(self):
+        departments = {
+            1: {'code': 'szov'}, 367: {'code': 'op'}, 560: {'code': 'tez'},
+            909: {'code': 'front_office'}, 1499: {'code': 'hr'}, 1500: {'code': 'accounting'},
+        }
+
+        class _Db:
+            def get_department_by_id(self, department_id):
+                return departments.get(department_id)
+
+        namespace = {'db': _Db()}
+        exec("OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})", namespace)
+        exec(_function_source(BOT_PATH, "_department_hides_operator_line_fields"), namespace)
+        hides = namespace["_department_hides_operator_line_fields"]
+
+        self.assertTrue(hides(1499), 'HR')
+        self.assertTrue(hides(1500), 'Бухгалтерия')
+        self.assertTrue(hides('1500'), 'id строкой из JSON')
+        for department_id in (1, 367, 560, 909):
+            self.assertFalse(hides(department_id), departments[department_id]['code'])
+        # Отдел неизвестен — проверку не снимаем: это операторы на линии.
+        self.assertFalse(hides(None))
+        self.assertFalse(hides(999999))
+        self.assertFalse(hides('не число'))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import {
     departmentCodeHidesFrontOfficeTraining,
     departmentCodeHidesOperatorFields,
     departmentCodeUsesEmployeeCity,
+    departmentCodeUsesEmployeeJobTitle,
     departmentHidesOperatorFields,
     departmentRestrictsViews,
     departmentUsesSimpleEmployeeAccounting,
@@ -118,6 +119,9 @@ for (const code of BACK_OFFICE_CODES) {
         assert.equal(departmentCodeHidesFrontOfficeTraining(code), true);
         // «Город» — только у фронт-офисов: бэк-офис сидит в головном офисе.
         assert.equal(departmentCodeUsesEmployeeCity(code), false);
+        // Зато есть «Должность»: ею в бэк-офисе и различают людей — направления
+        // и группы, которыми различают на линии, там не заведены вовсе.
+        assert.equal(departmentCodeUsesEmployeeJobTitle(code), true);
     });
 
     test(`${code}: админ без своего отдела и супер-админ не ограничиваются`, () => {
@@ -152,5 +156,6 @@ test('бэк-офис не задел остальные отделы', () => {
     // «у всех, кроме ОП».
     for (const code of ['szov', 'op', 'tez', 'front_office']) {
         assert.equal(departmentCodeHidesOperatorFields(code), false, code);
+        assert.equal(departmentCodeUsesEmployeeJobTitle(code), false, code);
     }
 });

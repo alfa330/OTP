@@ -688,8 +688,12 @@ class SupervisorGroupChangeTests(unittest.TestCase):
             "{(isAdminLikeRequester || isScopedDepartmentHeadRequester) && isOperatorDraft(editedUser) && (",
             edit_block,
         )
-        # направление в карточке — не для обычного СВ
-        self.assertIn("{isOperatorDraft(editedUser) && !isPureSupervisorRequester && (", edit_block)
+        # направление в карточке — не для обычного СВ (и не для бэк-офиса,
+        # где направлений нет вовсе: showOperatorLineFields)
+        self.assertIn(
+            "{isOperatorDraft(editedUser) && !isPureSupervisorRequester && showOperatorLineFields && (",
+            edit_block,
+        )
         # СВ не может оставить оператора без группы
         self.assertIn("{(!isPureSupervisorRequester || !editedUser?.group_id) && (", edit_block)
         # раздела «Группы» у СВ нет — не отправляем его туда

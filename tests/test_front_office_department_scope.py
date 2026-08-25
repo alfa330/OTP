@@ -148,7 +148,8 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
 
         self.assertIn(
             "import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining,"
-            " departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting,"
+            " departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
+            " departmentUsesSimpleEmployeeAccounting,"
             " firstAllowedView } from './utils/departmentViews';",
             source,
         )
@@ -233,7 +234,8 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
 
         self.assertIn(
             "import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
-            " departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';",
+            " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle }"
+            " from '../../utils/departmentViews';",
             modal,
         )
         self.assertIn("const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);", modal)

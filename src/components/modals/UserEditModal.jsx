@@ -1,7 +1,7 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';
+import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import CustomSelect from '../ui/CustomSelect';
 
@@ -299,6 +299,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         .find((d) => Number(d?.id) === Number(effectiveDeptId))?.code
         ?? (isDeptScoped && Number(effectiveDeptId) === Number(requesterScopeDeptId) ? requesterScopeDeptCode : null);
     const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);
+    // «Должность» — у бэк-офиса взамен направления и группы: там людей
+    // различают именно ею. Свободный ввод, а не справочник: перечня
+    // должностей в системе нет и заводить его владелец не просил.
+    const showEmployeeJobTitle = departmentCodeUsesEmployeeJobTitle(effectiveDeptCode);
     const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);
     // Группа, направление и SIP-номер — поля человека НА ЛИНИИ. У бэк-офиса
     // (Бухгалтерия, HR) ни групп, ни направлений, ни телефонии нет: выпадашки
@@ -438,6 +442,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         company_name: base.company_name ?? "",
         employment_type: base.employment_type ?? "",
         city: base.city ?? "",
+        job_title: base.job_title ?? "",
         internship_in_company: !!base.internship_in_company,
         front_office_training: !!base.front_office_training,
         front_office_training_date: base.front_office_training_date ?? "",
@@ -480,6 +485,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             ? String(defaults.employment_type || '').trim().toLowerCase()
             : "";
         defaults.city = String(defaults.city ?? '').trim();
+        defaults.job_title = String(defaults.job_title ?? '').trim();
         defaults.internship_in_company = !!defaults.internship_in_company;
         defaults.front_office_training = !!defaults.front_office_training;
         defaults.front_office_training_date = defaults.front_office_training
@@ -707,6 +713,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         company_name: "",
         employment_type: "",
         city: "",
+        job_title: "",
         internship_in_company: false,
         front_office_training: false,
         front_office_training_date: "",
@@ -739,7 +746,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
         // Простая локальная валидация
         if (!editedUser || !editedUser.name || editedUser.name.trim().length === 0) {
-        setModalError("Имя обязательно.");
+        setModalError("ФИО обязательно.");
         return;
         }
 
@@ -870,6 +877,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 ? String(editedUser?.employment_type || '').trim().toLowerCase()
                 : '',
             city: String(editedUser?.city || '').trim(),
+            job_title: String(editedUser?.job_title || '').trim(),
             internship_in_company: !!editedUser?.internship_in_company,
             front_office_training: !!editedUser?.front_office_training,
             front_office_training_date: !!editedUser?.front_office_training
@@ -1112,7 +1120,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <>
                     {renderAvatarEditor()}
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
                         <input
                         ref={nameRef}
                         type="text"
@@ -1365,6 +1373,20 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                     />
                     </div>
+
+                    {showEmployeeJobTitle && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Должность</label>
+                        <input
+                        type="text"
+                        value={editedUser?.job_title || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
+                        placeholder="Например, бухгалтер по расчётам"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+                    )}
 
                     {showEmployeeCity && (
                     <div>
@@ -1771,7 +1793,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <>
                         {renderAvatarEditor()}
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Имя</label>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
                             <input
                             ref={nameRef}
                             type="text"
@@ -2043,6 +2065,20 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             )}
                             </div>
                         </div>
+
+                        {showEmployeeJobTitle && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Должность</label>
+                            <input
+                            type="text"
+                            value={editedUser?.job_title || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
+                            placeholder="Например, бухгалтер по расчётам"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+                        )}
 
                         {showEmployeeCity && (
                         <div>
