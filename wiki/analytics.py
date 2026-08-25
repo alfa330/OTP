@@ -94,7 +94,15 @@ SELECT (SELECT count(*) FROM reads)                       AS reads,
          WHERE v.article_id = ANY(%(visible)s)
 """ + _period('v.viewed_at') + """)                       AS opens,
        (SELECT count(*) FROM wiki_articles a
-         WHERE a.id = ANY(%(visible)s) AND a.status = 'published') AS published
+         WHERE a.id = ANY(%(visible)s) AND a.status = 'published') AS published,
+       -- Сколько ОПУБЛИКОВАННОГО читали. Нужно ради разности: список
+       -- нетронутого режется потолком строк, и без этого числа плитка
+       -- показывала бы длину куска («не открывали 20») вместо правды.
+       -- Считается разностью, а не вторым NOT EXISTS: одно определение
+       -- «читали за период» на весь блок — второе разошлось бы с первым.
+       (SELECT count(DISTINCT r.article_id)
+          FROM reads r JOIN wiki_articles a ON a.id = r.article_id
+         WHERE a.status = 'published')                    AS published_read
 """
 
 _DAYS_SQL = _READS_CTE + """
@@ -163,13 +171,16 @@ def reading(cursor, visible_ids, *, since=None, until=None, limit=10):
               'limit': limit}
 
     cursor.execute(_TOTALS_SQL, params)
-    reads, readers, articles_read, opens, published = cursor.fetchone()
+    reads, readers, articles_read, opens, published, published_read = cursor.fetchone()
     totals = {
         'reads': reads or 0,
         'opens': opens or 0,
         'readers': readers or 0,
         'articles_read': articles_read or 0,
         'published': published or 0,
+        # Опубликованное, к чему за период никто не прикоснулся, — ЦЕЛИКОМ,
+        # а не «сколько влезло в список ниже».
+        'unread': max(0, (published or 0) - (published_read or 0)),
         # Охват — доля опубликованного, которую за период открыл хоть кто-то.
         # Знаменатель именно опубликованное: черновики в охват не входят,
         # иначе показатель падал бы от того, что кто-то начал писать статью.
@@ -199,7 +210,7 @@ def reading(cursor, visible_ids, *, since=None, until=None, limit=10):
 
 def _empty_reading_totals():
     return {'reads': 0, 'opens': 0, 'readers': 0, 'articles_read': 0,
-            'published': 0, 'coverage': None}
+            'published': 0, 'unread': 0, 'coverage': None}
 
 
 # ── Ознакомления ─────────────────────────────────────────────────────────────

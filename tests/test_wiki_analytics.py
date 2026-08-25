@@ -81,10 +81,10 @@ def make_context(otp_role='operator', department_id=None, wiki_role=True, **caps
 
 
 # Сколько значений отдаёт fetchone на каждый запрос отчёта, в порядке вызова:
-# итоги чтения (5), итоги ознакомлений (6), итоги поиска (4), дата начала
+# итоги чтения (6), итоги ознакомлений (6), итоги поиска (4), дата начала
 # журнала (1), итоги помощника (5). Считать их «как получится» нельзя —
 # распаковка кортежа не той длины падает, и падает она уже внутри роута.
-REPORT_FETCHONE = [(0,) * 5, (0,) * 6, (0,) * 4, (None,), (0,) * 5]
+REPORT_FETCHONE = [(0,) * 6, (0,) * 6, (0,) * 4, (None,), (0,) * 5]
 
 
 def build_client(test, context, *, fetchone=None, fetchall=()):
@@ -196,8 +196,10 @@ class DepartmentBoundaryTest(unittest.TestCase):
             make_context(otp_role='sv', department_id=7, can_publish=True))
         self.assertEqual(depts, [7])
         self.assertTrue(payload['scoped'])
-        self.assertTrue(any('только по вашим отделам' in n for n in payload['notes']),
-                        'человеку не сказали, что список сужен')
+        # Оговорка приходит ключом, а не строкой в общем списке: фронт ставит
+        # её к поимённому списку, а не подвалом страницы.
+        self.assertIn('только по вашим отделам', payload['notes'].get('scoped', ''),
+                      'человеку не сказали, что список сужен')
 
     def test_department_head_sees_headed_departments(self):
         context = make_context(otp_role='admin', department_id=7, can_edit=True)
@@ -210,6 +212,8 @@ class DepartmentBoundaryTest(unittest.TestCase):
             make_context(otp_role='super_admin', department_id=7, wiki_role=False))
         self.assertIsNone(depts)
         self.assertFalse(payload['scoped'])
+        self.assertNotIn('scoped', payload['notes'],
+                         'без границы оговорки о сужении быть не должно')
 
     def test_access_manager_has_no_boundary_either(self):
         _payload, depts = self._depts(
@@ -334,21 +338,46 @@ class ReadDeduplicationTest(unittest.TestCase):
     def tearDown(self):
         prod_db.rollback()
 
-    def _totals(self, rows):
+    def _totals(self, rows, articles=None):
         stubs = _VIEWS_STUB.format(
             rows=', '.join(rows),
             people="(5, 1, 'working'), (6, 1, 'fired')",
-            articles="(1, 'a', 'Статья', 'published', '2026-08-01'::timestamp)")
+            articles=articles
+            or "(1, 'a', 'Статья', 'published', '2026-08-01'::timestamp)")
         sql = _stub(wiki_analytics._TOTALS_SQL, stubs)
         with self.conn.cursor() as cursor:
             cursor.execute(sql, {'visible': [1], 'since': None, 'until': None})
             return cursor.fetchone()
 
+    def test_untouched_published_counts_whole(self):
+        """Нетронутое считается ЦЕЛИКОМ, а не по длине урезанного списка.
+
+        Плитка «Статей без чтений» брала длину списка, а список режется
+        потолком строк: при полусотне нетронутых статей она показывала бы
+        ровно столько, сколько влезло в таблицу.
+        """
+        rows = ["(1, 5, '2026-08-10 10:00:05'::timestamp, 1)"]
+        articles = ("(1, 'a', 'Читали', 'published', '2026-08-01'::timestamp), "
+                    "(2, 'b', 'Не читали', 'published', '2026-08-01'::timestamp), "
+                    "(3, 'c', 'Черновик', 'draft', '2026-08-01'::timestamp)")
+        with self.conn.cursor() as cursor:
+            cursor.execute(_stub(wiki_analytics._TOTALS_SQL, _VIEWS_STUB.format(
+                rows=', '.join(rows), people="(5, 1, 'working')",
+                articles=articles)),
+                {'visible': [1, 2, 3], 'since': None, 'until': None})
+            row = cursor.fetchone()
+        published, published_read = row[4], row[5]
+        self.assertEqual(published, 2, 'черновик не опубликован')
+        self.assertEqual(published_read, 1)
+        # Ровно эту разность роут кладёт в totals['unread'].
+        self.assertEqual(published - published_read, 1,
+                         'нетронутая опубликованная статья ровно одна')
+
     def test_three_opens_in_one_minute_are_one_read(self):
         rows = ["(1, 5, '2026-08-10 10:00:05'::timestamp, 1)",
                 "(1, 5, '2026-08-10 10:00:31'::timestamp, 1)",
                 "(1, 5, '2026-08-10 10:00:59'::timestamp, 1)"]
-        reads, readers, articles_read, opens, published = self._totals(rows)
+        reads, readers, articles_read, opens, published, _read_pub = self._totals(rows)
         self.assertEqual(opens, 3, 'сырые открытия считаются как есть')
         self.assertEqual(reads, 1, 'обновление страницы — не второе прочтение')
         self.assertEqual(readers, 1)
@@ -358,13 +387,13 @@ class ReadDeduplicationTest(unittest.TestCase):
     def test_next_minute_is_a_second_read(self):
         rows = ["(1, 5, '2026-08-10 10:00:05'::timestamp, 1)",
                 "(1, 5, '2026-08-10 10:01:05'::timestamp, 1)"]
-        reads, _readers, _articles, opens, _published = self._totals(rows)
+        reads, _readers, _articles, opens, _published, _read_pub = self._totals(rows)
         self.assertEqual((opens, reads), (2, 2))
 
     def test_different_people_are_different_reads(self):
         rows = ["(1, 5, '2026-08-10 10:00:05'::timestamp, 1)",
                 "(1, 6, '2026-08-10 10:00:07'::timestamp, 1)"]
-        reads, readers, _articles, _opens, _published = self._totals(rows)
+        reads, readers, _articles, _opens, _published, _read_pub = self._totals(rows)
         self.assertEqual((reads, readers), (2, 2))
 
     def test_period_cuts_by_almaty_day_inclusive(self):

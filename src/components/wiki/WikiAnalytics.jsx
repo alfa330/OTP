@@ -9,7 +9,7 @@ import {
     Tooltip, XAxis, YAxis,
 } from 'recharts';
 
-import { iosCard, iosGroupLabel, iosBtnGhost, IosBadge } from '../ui/ios';
+import { iosCard, iosBtnGhost, IosBadge, IosHint, IosSegmented } from '../ui/ios';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import { Bar, Metric, Table, Td, Th } from './reportKit';
 import useStableCallback from './useStableCallback';
@@ -18,8 +18,10 @@ import useStableCallback from './useStableCallback';
  *
  * Три блока и жёсткий порядок, потому что вопросов ровно три: пользуются ли
  * викой (ЧТЕНИЕ), выполнено ли обязательное (ОЗНАКОМЛЕНИЯ) и чего в ней не
- * хватает (СПРОС БЕЗ ОТВЕТА). Первые два отвечают на «работает ли», третий —
+ * хватает (ЧЕГО НЕ ХВАТАЕТ). Первые два отвечают на «работает ли», третий —
  * на «что делать дальше», и третий читают, только поверив первым двум.
+ * Вопрос блока написан подзаголовком: заголовок «Чтение и охват» называет
+ * тему, но не говорит, зачем сюда смотреть.
  *
  * ЧЕГО ЗДЕСЬ НЕТ СОЗНАТЕЛЬНО. Ни «среднего числа находок», ни «медианы
  * подтверждения», ни «токенов помощника», ни топа цитируемых статей. Всё это
@@ -27,42 +29,86 @@ import useStableCallback from './useStableCallback';
  * половина таблиц — «просто цифры», перестают открывать целиком, и вместе с
  * цифрами теряются те пять разрезов, ради которых он и сделан.
  *
- * ДВЕ ВЕЩИ, КОТОРЫЕ ОБЯЗАНЫ БЫТЬ НАПИСАНЫ НА ЭКРАНЕ.
+ * ГДЕ ЖИВУТ ОБЪЯСНЕНИЯ. Оговорка стоит у того числа, которое объясняет, а не
+ * подвалом «как это посчитано» внизу страницы: подвал был набором верных
+ * предложений, до которых не доскроллили. Правило простое — что нужно всем и
+ * всегда (период на ознакомления не действует; список сужен по отделу),
+ * написано открытым текстом; что нужно один раз (определение прочтения,
+ * почему числа расходятся со счётчиком под статьёй), спрятано под «i» рядом
+ * с показателем. Текст оговорок по-прежнему приходит с сервера — он про то,
+ * как устроены данные, и меняется вместе с запросами.
  *
- * 1. Период действует не на всё: ознакомления показаны на сейчас, потому что
- *    просрочка не бывает «за прошлый месяц». Молча игнорировать выбранный
- *    фильтр нельзя — это читается как поломка.
- * 2. Цифры здесь и под статьёй разные: под статьёй пожизненный счётчик
- *    открытий, здесь — прочтения за период. Оговорки приходят с сервера и
- *    лежат в подвале экрана.
+ * ЧТО ЗДЕСЬ НАЗЫВАЕТСЯ СВОИМИ ИМЕНАМИ. Внутренних слов на экране нет:
+ * «периметр», «контент-долг» и «свёртка префиксов» понятны тому, кто писал
+ * запросы, и никому больше. Причины «без ответа» подписаны действием, которое
+ * из них следует, — легенда под таблицей показывает только те, что реально
+ * встретились в выборке.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-/* Почему спрос остался без ответа. Четыре причины, и лечатся они РАЗНЫМ:
-   первая — написать статью, вторая — выдать доступ, остальные две про
-   качество ответа помощника. Ради этого различия блок и существует. */
+/* Почему спрос остался без ответа. Пять причин, и лечатся они РАЗНЫМ: первая —
+   написать статью, вторая и третья — выдать доступ, остальные про качество
+   ответа помощника. Ради этого различия блок и существует, поэтому подпись
+   называет не механику («пустой периметр», «числа не подтвердились»), а то,
+   что видно снаружи, а расшифровка идёт легендой под таблицей. */
 const REASON = {
-    missing: { label: 'Нет статьи', tone: 'amber' },
-    rights: { label: 'У других находится', tone: 'blue' },
-    empty_perimeter: { label: 'Пустой периметр', tone: 'slate' },
-    unverified: { label: 'Числа не подтвердились', tone: 'slate' },
-    refused: { label: 'Модель отказала', tone: 'slate' },
+    missing: {
+        label: 'Нет статьи', tone: 'amber',
+        help: 'по теме не нашлось текста ни поиском, ни помощником — это и есть дыра в базе знаний',
+    },
+    rights: {
+        label: 'Не выдан доступ', tone: 'blue',
+        help: 'статья есть — тому же запросу она нашлась у других; спрашивавшему её не выдали',
+    },
+    empty_perimeter: {
+        label: 'Доступа нет ни к чему', tone: 'blue',
+        help: 'человеку не выдан ни один раздел, поэтому поиск пуст на любой запрос',
+    },
+    unverified: {
+        label: 'Ответ придержан', tone: 'slate',
+        help: 'помощник нашёл текст, но не смог подтвердить числа фрагментами и промолчал — статью стоит уточнить',
+    },
+    refused: {
+        label: 'Помощник отказал', tone: 'slate',
+        help: 'модель не стала отвечать своими словами по найденному тексту',
+    },
 };
 
 const CHANNEL = { search: 'Поиск', assistant: 'Помощник' };
 
-/* Пресеты периода. «Весь период» стоит последним и назван честно: на нём график
-   переключается на недели, потому что история тянется назад настолько,
-   насколько тянется самый старый просмотр. */
+/* Пресеты периода стоят ОТДЕЛЬНЫМ сегментным контролом, а не только в подвале
+   календаря. Причина не в удобстве: на отчётном экране первый вопрос к любому
+   числу — «за какой это период», и ответ обязан читаться, не открывая
+   поповер. Календарь рядом остаётся для произвольного отрезка и показывает
+   выбранные даты; когда он не совпадает ни с одним пресетом, в сегментах не
+   подсвечено ничего — и это честно.
+
+   «Всё время» названо честно: на нём график переключается на недели, потому
+   что история тянется назад настолько, насколько тянется самый старый
+   просмотр. */
 const back = (days) => isoDate(new Date(Date.now() - days * 86400000));
 
 const PRESETS = [
-    { label: '7 дней', range: () => ({ from: back(6), to: isoDate(new Date()) }) },
-    { label: '30 дней', range: () => ({ from: back(29), to: isoDate(new Date()) }) },
-    { label: '90 дней', range: () => ({ from: back(89), to: isoDate(new Date()) }) },
-    { label: 'Весь период', range: () => ({ from: '', to: '' }) },
+    { value: 'd7', label: '7 дней', days: 7 },
+    { value: 'd30', label: '30 дней', days: 30 },
+    { value: 'd90', label: '90 дней', days: 90 },
+    { value: 'all', label: 'Всё время', days: null },
 ];
+
+const presetRange = (value) => {
+    const preset = PRESETS.find((p) => p.value === value);
+    if (!preset || !preset.days) return { from: '', to: '' };
+    return { from: back(preset.days - 1), to: isoDate(new Date()) };
+};
+
+/** Какой пресет отвечает выбранному отрезку. Пустая строка — произвольный. */
+const presetOf = ({ from, to }) => {
+    if (!from && !to) return 'all';
+    if (to !== isoDate(new Date())) return '';
+    const hit = PRESETS.find((p) => p.days && back(p.days - 1) === from);
+    return hit ? hit.value : '';
+};
 
 const ACK_STATUS = {
     not_open: 'не открывал',
@@ -97,13 +143,23 @@ const ago = (iso) => {
     return Math.max(0, Math.round((Date.now() - value.getTime()) / 86400000));
 };
 
-const Group = ({ title, subtitle, icon: Icon, children }) => (
+/* Блок отчёта: заголовок, вопрос, на который он отвечает, и чип периода.
+ *
+ * Чип нужен именно здесь, а не только наверху: блоки живут в РАЗНОМ времени —
+ * чтение за выбранный отрезок, ознакомления на сейчас. Пока это стояло серой
+ * припиской у заголовка, разница читалась как «фильтр не сработал». */
+const Group = ({ title, subtitle, scope, icon: Icon, children }) => (
     <section className="space-y-3">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-1">
-            <h2 className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
-                {Icon && <Icon size={15} className="text-indigo-600" />}{title}
-            </h2>
-            {subtitle && <span className="text-[12px] text-slate-400">{subtitle}</span>}
+        <div className="px-1">
+            <div className="flex flex-wrap items-center gap-2">
+                <h2 className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
+                    {Icon && <Icon size={15} className="text-indigo-600" />}{title}
+                </h2>
+                {scope && <IosBadge tone="slate">{scope}</IosBadge>}
+            </div>
+            {subtitle && (
+                <p className="mt-1 text-[12.5px] leading-snug text-slate-500">{subtitle}</p>
+            )}
         </div>
         {children}
     </section>
@@ -126,6 +182,44 @@ const ArticleLink = ({ row, onOpen }) => (onOpen ? (
         {row.title}
     </button>
 ) : <span>{row.title}</span>);
+
+/* Расшифровка причин под таблицей.
+ *
+ * Показываются ТОЛЬКО те причины, что встретились в выборке: полная легенда из
+ * пяти строк под таблицей из двух — это пять строк текста, которые никто не
+ * читает, и ровно тот шум, из-за которого перестают читать и остальное.
+ *
+ * Легенда нужна вообще: колонка «Почему без ответа» состоит из бейджей, и без
+ * расшифровки «Ответ придержан» не подсказывает никакого действия. А действия
+ * у причин разные — написать статью, выдать доступ, уточнить числа в статье.
+ */
+const ReasonLegend = ({ items }) => {
+    const shown = useMemo(() => {
+        const seen = new Set((items || []).map((row) => row.reason));
+        return Object.keys(REASON).filter((key) => seen.has(key));
+    }, [items]);
+
+    if (!shown.length) return null;
+    return (
+        <div className="space-y-1.5">
+            {shown.map((key) => (
+                <div key={key} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    {/* Серому бейджу нужна обводка ИМЕННО здесь: в таблице он
+                        лежит на белой строке и виден, а под таблицей — на сером
+                        фоне раздела, где сливается с ним и перестаёт читаться
+                        как тот же бейдж, что в колонке. */}
+                    <IosBadge
+                        tone={REASON[key].tone}
+                        className={REASON[key].tone === 'slate' ? 'ring-1 ring-slate-200' : ''}
+                    >
+                        {REASON[key].label}
+                    </IosBadge>
+                    <span>— {REASON[key].help}</span>
+                </div>
+            ))}
+        </div>
+    );
+};
 
 /* Ряд для графика.
  *
@@ -204,15 +298,33 @@ const DaysChart = ({ days, since = null, until = null }) => {
         return (
             <div className={`${iosCard} flex flex-col items-center justify-center gap-1 px-6 py-10 text-center`}>
                 <div className="text-[13px] text-slate-500">Недостаточно данных для графика</div>
-                <div className="text-[12px] text-slate-400">
+                <div className="text-[12px] text-slate-500">
                     Появится, когда в периоде наберётся хотя бы два дня с чтениями.
                 </div>
             </div>
         );
     }
 
+    /* Легенда обязательна: рядов два и они разной природы — столбики считают
+       события, линия людей. Без подписи цвета читаются как «что-то и что-то», а
+       узнать их можно было только наведением на конкретный столбик. */
     return (
         <div className={`${iosCard} p-3`}>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1">
+                <div className="text-[12.5px] font-semibold text-slate-700">
+                    {grain === 'week' ? 'Прочтения по неделям' : 'Прочтения по дням'}
+                </div>
+                <div className="flex items-center gap-3 text-[11.5px] text-slate-500">
+                    <span className="flex items-center gap-1.5">
+                        <span className="h-2.5 w-2.5 rounded-[3px] bg-[#c7d2fe]" />
+                        прочтений
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                        <span className="h-[3px] w-3.5 rounded-full bg-[#4f46e5]" />
+                        {grain === 'week' ? 'читателей в день, максимум' : 'читателей'}
+                    </span>
+                </div>
+            </div>
             <div
                 className="h-64"
                 role="img"
@@ -258,9 +370,12 @@ const DaysChart = ({ days, since = null, until = null }) => {
                 </ResponsiveContainer>
             </div>
             {grain === 'week' && (
-                <div className="px-1 pt-2 text-[11.5px] text-slate-400">
+                <div className="px-1 pt-2 text-[11.5px] leading-relaxed text-slate-500">
                     Период длиннее двух месяцев, поэтому график собран по неделям —
                     по дням он превратился бы в частокол из трёхсот столбиков.
+                    Линия при этом показывает не сумму читателей за неделю, а
+                    самый людный день в ней: один и тот же человек, заходивший
+                    трижды, иначе посчитался бы за троих.
                 </div>
             )}
             {/* Те же числа построчно — для скринридера: график для него картинка. */}
@@ -354,54 +469,80 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
     const at = ack?.totals || {};
     const ds = demand?.search || {};
     const da = demand?.assistant || {};
+    const notes = data?.notes || {};
 
     return (
         <div className="space-y-6">
 
-            {/* Панель периода. Подписей «с»/«по» нет: чип сам называет период. */}
+            {/* Панель периода: пресеты сегментами, календарь — для произвольного
+                отрезка. Отдельной кнопки «Весь период» рядом нет: она делала
+                ровно то же, что сегмент «Всё время», а два элемента с одним
+                действием читаются как два разных. */}
             <section className={`${iosCard} flex flex-wrap items-center gap-3 px-4 py-3`}>
+                <IosSegmented
+                    value={presetOf(range)}
+                    options={PRESETS}
+                    onChange={(value) => setRange(presetRange(value))}
+                    ariaLabel="Период отчёта"
+                />
                 <IosDateRangePicker
                     from={range.from} to={range.to} max={isoDate(new Date())}
                     onChange={setRange}
-                    presets={PRESETS}
+                    presets={[{ label: 'Сегодня',
+                                range: () => ({ from: isoDate(new Date()),
+                                                to: isoDate(new Date()) }) }]}
                 />
-                {(range.from || range.to) && (
-                    <button
-                        type="button"
-                        className={iosBtnGhost}
-                        onClick={() => setRange({ from: '', to: '' })}
-                    >
-                        Весь период
-                    </button>
-                )}
                 {loading && (
-                    <span className="flex items-center gap-1.5 text-[12px] text-slate-400">
+                    <span className="flex items-center gap-1.5 text-[12px] text-slate-500">
                         <Loader2 size={13} className="animate-spin" /> считаем…
                     </span>
                 )}
             </section>
 
+            {/* Ни одной видимой статьи — говорим об этом ДО нулей, а не после.
+                Экран из нулей без объяснения читается как «викой не пользуются»,
+                хотя причина в том, что смотрящему не выдан ни один раздел. */}
+            {notes.empty && (
+                <div className={`${iosCard} flex items-start gap-3 px-4 py-3`}>
+                    <EyeOff size={16} className="mt-0.5 shrink-0 text-amber-500" />
+                    <div className="text-[12.5px] leading-relaxed text-slate-600">
+                        {notes.empty}
+                    </div>
+                </div>
+            )}
+
             {/* ── Блок 1. Чтение и охват ─────────────────────────────────── */}
-            <Group title="Чтение и охват" icon={TrendingUp} subtitle="за выбранный период">
+            <Group
+                title="Чтение и охват" icon={TrendingUp} scope="за выбранный период"
+                subtitle="Пользуются ли викой: сколько читают, кто читает и что лежит нетронутым."
+            >
                 <Tiles>
                     <Metric
                         label="Прочтений" value={num(t.reads)}
-                        hint={`${num(t.opens)} открытий с повторами`}
+                        hint={`из ${num(t.opens)} открытий: повторы за минуту свёрнуты`}
+                        help={notes.read}
                     />
-                    <Metric label="Читателей" value={num(t.readers)} />
+                    <Metric
+                        label="Читателей" value={num(t.readers)}
+                        hint="человек открыли хотя бы одну статью"
+                    />
                     <Metric
                         label="Охват статей"
                         value={t.coverage === null || t.coverage === undefined
                             ? '—' : `${t.coverage}%`}
                         hint={`${num(t.articles_read)} из ${num(t.published)} опубликованных`}
+                        help="Доля опубликованных статей, которые за период открыл хотя бы один человек. Черновики в знаменатель не входят: показатель не должен падать от того, что кто-то начал писать новую статью."
                         tone={t.coverage === null || t.coverage === undefined ? null
                             : t.coverage >= 60 ? 'good' : t.coverage >= 30 ? 'warn' : 'bad'}
                     />
+                    {/* Число берётся из итогов, а НЕ из длины списка ниже:
+                        список режется потолком строк, и плитка показывала бы
+                        «не открывали 20» при пятидесяти семи нетронутых. */}
                     <Metric
-                        label="Не открывали"
-                        value={num(reading?.unread?.length)}
-                        hint="опубликованных статей за период"
-                        tone={reading?.unread?.length ? 'warn' : 'good'}
+                        label="Статей без чтений"
+                        value={num(t.unread)}
+                        hint="опубликованных — за период не открыли ни разу"
+                        tone={t.unread ? 'warn' : 'good'}
                     />
                 </Tiles>
 
@@ -411,16 +552,20 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                     until={data?.period?.until}
                 />
 
+                {/* Колонка называется «Доля отдела», а знаменатель написан
+                    рядом с процентом: «Из штата» с одной лишь полосой не
+                    говорило, от какого числа доля считается, и 30 % у отдела
+                    из шести человек читались как 30 % у отдела из ста. */}
                 <Table
                     title="Кто читает: по отделам" icon={Users}
                     count={reading?.departments?.length}
                     empty="За период никто не читал."
-                    hint="«Из штата» — сколько человек отдела заходили хотя бы раз. Уволенные в знаменатель не входят, отпуск и больничный — входят."
+                    help="«Доля отдела» — сколько человек из штата отдела заходили в вику хотя бы раз за период. Уволенные и уволившиеся в знаменатель не входят, отпуск, больничный и Б/С — входят: человек в отпуске остаётся сотрудником, которому вика адресована. Отдел берётся тот, в котором человек был на момент чтения."
                     head={(
                         <tr>
                             <Th>Отдел</Th>
                             <Th right>Читателей</Th>
-                            <Th right>Из штата</Th>
+                            <Th right>Доля отдела</Th>
                             <Th right>Прочтений</Th>
                             <Th right>Статей</Th>
                         </tr>
@@ -432,8 +577,13 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Td right>{num(row.readers)}</Td>
                             <Td right>
                                 {row.headcount
-                                    ? <Bar done={row.readers} total={row.headcount} />
-                                    : <span className="text-slate-400">—</span>}
+                                    ? (
+                                        <Bar
+                                            done={row.readers} total={row.headcount}
+                                            caption={`из ${num(row.headcount)}`}
+                                        />
+                                    )
+                                    : <span className="text-slate-500">—</span>}
                             </Td>
                             <Td right>{num(row.reads)}</Td>
                             <Td right>{num(row.articles_read)}</Td>
@@ -442,9 +592,10 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                 </Table>
 
                 <Table
-                    title="Что читают" icon={BookOpen}
+                    title="Что читают чаще всего" icon={BookOpen}
                     count={reading?.top?.length}
                     empty="За период не открыли ни одной статьи."
+                    help="Самые читаемые за период статьи из тех, что видны вам. Черновики сюда тоже попадают — их открывают редакторы, и такая строка помечена."
                     head={(
                         <tr>
                             <Th>Статья</Th>
@@ -470,10 +621,11 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                 </Table>
 
                 <Table
-                    title="Контент-долг: не открывали за период" icon={EyeOff}
+                    title="Не открывали ни разу за период" icon={EyeOff}
                     count={reading?.unread?.length}
+                    total={t.unread}
                     empty="За период открывали каждую опубликованную статью."
-                    hint="Только опубликованные: черновик без просмотров — это норма, а не находка."
+                    help="Только опубликованные статьи: черновик без просмотров — это норма, а не находка. Первыми идут те, которых не открывали никогда, дальше — по давности последнего чтения. Дата последнего чтения берётся за всё время, а не за период: «читали в марте» и «не читали никогда» — разные диагнозы."
                     head={(
                         <tr>
                             <Th>Статья</Th>
@@ -499,8 +651,9 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
 
             {/* ── Блок 2. Ознакомления ───────────────────────────────────── */}
             <Group
-                title="Ознакомления" icon={ShieldAlert}
-                subtitle="на сейчас — период на этот блок не действует"
+                title="Ознакомления" icon={ShieldAlert} scope="на сейчас"
+                subtitle={['Выполнено ли обязательное: кто не подтвердил назначенные статьи.',
+                           notes.ack_now].filter(Boolean).join(' ')}
             >
                 {/* Назначений нет вовсе — блок складывается в одну строку.
                     Пять пустых плиток и две пустые таблицы рядом с живыми
@@ -518,10 +671,11 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Metric
                                 label="Просрочено" value={num(at.overdue)}
                                 tone={at.overdue > 0 ? 'bad' : 'good'}
-                                hint="срок вышел, не подтвердили"
+                                hint="срок вышел, подписи нет"
                             />
                             <Metric
                                 label="Не открывали" value={num(at.not_open)}
+                                hint="назначено, но статью не открывали"
                                 tone={at.not_open > 0 ? 'warn' : null}
                             />
                             <Metric
@@ -530,15 +684,15 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             />
                             <Metric
                                 label="Людей" value={num(at.people)}
-                                hint={`по ${num(at.articles)} статьям`}
+                                hint={`кому назначено — по ${num(at.articles)} статьям`}
                             />
                         </Tiles>
 
                         <Table
-                            title="По отделам" icon={Users}
+                            title="Ознакомления по отделам" icon={Users}
                             count={ack?.departments?.length}
                             empty="Назначений нет."
-                            hint="Отдел — из снимка на момент назначения: перешедший человек не уносит просрочку в новый отдел."
+                            help="Отдел берётся из снимка на момент назначения, а не из нынешней карточки: перешедший человек не уносит просрочку в новый отдел — назначали ему тогда, когда он был здесь. Отменённые и перевыпущенные назначения не считаются."
                             head={(
                                 <tr>
                                     <Th>Отдел</Th>
@@ -562,9 +716,24 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             ))}
                         </Table>
 
+                        {/* Список сужен по отделу — и это видно рядом с ним,
+                            а не только оговоркой внизу страницы: у супервайзера
+                            и у директора числа здесь РАЗНЫЕ, и без пометки
+                            расхождение читается как поломка данных. Потолок
+                            строк подписан там же («· 20 из 57»), но только
+                            когда сужения нет: иначе обрез по правам и обрез по
+                            потолку слились бы в одно число. */}
                         <Table
                             title="Просрочено поимённо" icon={ShieldAlert}
                             count={ack?.overdue?.length}
+                            total={data?.scoped ? null : at.overdue}
+                            badge={data?.scoped ? (
+                                <span className="flex items-center gap-1.5">
+                                    <IosBadge tone="blue">только ваши отделы</IosBadge>
+                                    <IosHint text={notes.scoped} align="right"
+                                             label="Почему список сужен" />
+                                </span>
+                            ) : null}
                             empty="Просроченных ознакомлений нет."
                             head={(
                                 <tr>
@@ -602,13 +771,20 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
 
             {/* ── Блок 3. Спрос, на который вика не отвечает ─────────────── */}
             <Group
-                title="Спрос без ответа" icon={Search}
-                subtitle="что искали и о чём спрашивали впустую"
+                title="Чего не хватает в базе" icon={Search} scope="за выбранный период"
+                subtitle="Что искали и о чём спрашивали помощника, но ответа не нашли, — темы для новых статей."
             >
                 <Tiles>
                     <Metric
                         label="Запросов в поиске" value={num(ds.total)}
-                        hint={ds.steps ? `${num(ds.steps)} обращений до склейки` : null}
+                        hint={ds.steps && ds.steps !== ds.total
+                            ? `набрано ${num(ds.steps)} раз` : null}
+                        help={[
+                            'Запросы к поиску по вике за период. Поле ищет по мере набора, поэтому одна фраза приезжает пятью запросами-огрызками: «дог», «догов», «договор» — это один запрос, а не три, и здесь они склеены.',
+                            ds.logging_since
+                                ? `Журнал поиска ведётся с ${day(ds.logging_since)} — за более ранние дни запросов не сохранилось.`
+                                : 'Журнал поиска пуст: запросы начали записываться только что.',
+                        ].join(' ')}
                     />
                     <Metric
                         label="Ничего не нашли" value={num(ds.empty)}
@@ -619,32 +795,30 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                     />
                     <Metric
                         label="Вопросов помощнику" value={num(da.total)}
-                        hint={da.people ? `${num(da.people)} человек` : null}
+                        hint={da.people ? `спрашивали ${num(da.people)} человек` : null}
                     />
                     <Metric
                         label="Помощник не нашёл" value={num(da.no_answer)}
                         tone={da.total && da.no_answer / da.total >= 0.25 ? 'warn' : null}
-                        hint={da.clarify ? `${num(da.clarify)} раз переспросил` : null}
+                        hint={da.clarify ? `и ${num(da.clarify)} раз переспросил` : null}
+                        helpAlign="right"
+                        help="Ответы, в которых помощник прямо сказал, что ответа в вике нет. «Переспросил» — это когда он попросил уточнить вопрос: такие обращения в дыры базы знаний не записываются."
                     />
                 </Tiles>
 
                 <Table
-                    title="Чего не хватает" count={demand?.items?.length}
+                    title="Темы без ответа" count={demand?.items?.length}
                     empty={ds.logging_since
                         ? 'За период всё, что искали и спрашивали, находилось.'
                         : 'Журнал поиска пуст — запросы начали записываться только что.'}
-                    hint={[
-                        '«Нет статьи» — это и есть дыра в базе знаний: текста по теме не нашлось ни поиском, ни помощником.',
-                        '«У других находится» — статья есть, но спрашивавшему её не выдали: лечится доступом, а не текстом.',
-                        ds.logging_since ? `Журнал поиска ведётся с ${day(ds.logging_since)}; запросы, набранные подряд одним человеком, склеиваются в один.` : null,
-                        'Кто именно спрашивал, здесь не показано намеренно: список отвечает на «какой статьи не хватает», а не на «кто не знал».',
-                    ].filter(Boolean).join(' ')}
+                    help="Кто именно спрашивал, здесь не показано намеренно: список отвечает на вопрос «какой статьи не хватает», а не «кто не знал». Одинаковые запросы разных людей склеены в одну строку, поэтому «Спрашивали» больше, чем «Людей»."
+                    hint={<ReasonLegend items={demand?.items} />}
                     head={(
                         <tr>
                             <Th>Запрос или вопрос</Th>
                             <Th>Откуда</Th>
                             <Th>Почему без ответа</Th>
-                            <Th right>Раз</Th>
+                            <Th right>Спрашивали</Th>
                             <Th right>Людей</Th>
                             <Th right>Последний раз</Th>
                         </tr>
@@ -665,21 +839,6 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                     })}
                 </Table>
             </Group>
-
-            {/* Оговорки приходят с сервера: они про то, как устроены данные, и
-                меняются вместе с запросами, а не с вёрсткой. */}
-            {(data?.notes || []).length > 0 && (
-                <section className="space-y-1 px-1">
-                    <div className={iosGroupLabel}>Как это посчитано</div>
-                    <ul className="space-y-1">
-                        {data.notes.map((note) => (
-                            <li key={note} className="flex gap-2 text-[11.5px] leading-relaxed text-slate-400">
-                                <span className="select-none">·</span><span>{note}</span>
-                            </li>
-                        ))}
-                    </ul>
-                </section>
-            )}
         </div>
     );
 }
