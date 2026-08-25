@@ -209,11 +209,18 @@ class GuestExpiryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             guests.resolve_expiry(NOW, until='2026-08-24')
 
-    def test_zero_and_negative_days_are_refused(self):
-        for days in (0, -1):
-            with self.subTest(days=days):
-                with self.assertRaises(ValueError):
-                    guests.resolve_expiry(NOW, days=days)
+    def test_today_is_a_valid_preset(self):
+        """Ноль дней — «сегодня», и это законный срок.
+
+        Он здесь ради часа: «сегодня до 18:00» — то, зачем гостевой доступ чаще
+        всего и зовут. Без нуля ближайший пресет — завтрашний день.
+        """
+        self.assertEqual(datetime(2026, 8, 25, 23, 59, 59),
+                         guests.resolve_expiry(NOW, days=0))
+
+    def test_negative_days_are_refused(self):
+        with self.assertRaises(ValueError):
+            guests.resolve_expiry(NOW, days=-1)
 
     def test_both_doors_at_once_is_refused(self):
         """Умолчание пришлось бы выбрать, а тихий выбор — это чужой срок."""
@@ -233,6 +240,59 @@ class GuestExpiryTest(unittest.TestCase):
                 message = str(ctx.exception)
                 self.assertTrue(message and message[0].isupper(), message)
                 self.assertNotIn('literal', message)
+
+
+class GuestHourTest(unittest.TestCase):
+    """Час: «до 18:00» вместо «до конца дня» (решение владельца 25.08.2026)."""
+
+    def test_named_hour_replaces_the_end_of_day(self):
+        self.assertEqual(datetime(2026, 8, 25, 18, 0),
+                         guests.resolve_expiry(NOW, days=0, at_time='18:00'))
+        self.assertEqual(datetime(2026, 8, 26, 9, 0),
+                         guests.resolve_expiry(NOW, days=1, at_time='09:00'))
+        self.assertEqual(datetime(2026, 9, 1, 18, 30),
+                         guests.resolve_expiry(NOW, until='2026-09-01', at_time='18:30'))
+
+    def test_no_hour_still_means_the_end_of_day(self):
+        """Час необязателен, и без него ничего не меняется."""
+        for value in (None, '', '   '):
+            with self.subTest(value=value):
+                self.assertEqual(guests.resolve_expiry(NOW, days=3),
+                                 guests.resolve_expiry(NOW, days=3, at_time=value))
+
+    def test_hour_in_the_past_is_refused(self):
+        """«До 09:00», набранное в 14:37, — выдача, истёкшая в момент создания.
+
+        Строка в списке есть, доступа нет: тот самый молчаливый отказ, от
+        которого этот раздел лечили шесть раз.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            guests.resolve_expiry(NOW, days=0, at_time='09:00')
+        self.assertIn('прошло', str(ctx.exception))
+
+    def test_same_hour_tomorrow_is_fine(self):
+        """Тот же час, но завтра, — уже будущее и потому законен."""
+        self.assertEqual(datetime(2026, 8, 26, 9, 0),
+                         guests.resolve_expiry(NOW, days=1, at_time='09:00'))
+
+    def test_broken_hour_is_refused_with_a_human_message(self):
+        for value in ('25:00', '18:70', 'вечером', '18-00'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    guests.resolve_expiry(NOW, days=1, at_time=value)
+                self.assertIn('ЧЧ:ММ', str(ctx.exception))
+
+    def test_hour_does_not_lift_the_day_cap(self):
+        """Час уточняет ДЕНЬ, а не обходит потолок в четырнадцать дней."""
+        with self.assertRaises(ValueError):
+            guests.resolve_expiry(NOW, days=MAX_GUEST_DAYS + 1, at_time='18:00')
+        with self.assertRaises(ValueError):
+            guests.resolve_expiry(NOW, until='2026-09-09', at_time='18:00')
+
+    def test_seconds_are_zero(self):
+        """«До 18:00» — ровно 18:00. Лишние секунды в списке читаются как
+        чужая точность, которой человек не задавал."""
+        self.assertEqual(0, guests.resolve_expiry(NOW, days=0, at_time='18:00').second)
 
 
 class GuestStatusTest(unittest.TestCase):

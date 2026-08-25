@@ -18,8 +18,13 @@
  * дни, и форма предлагала бы дату, которую сервер тут же отвергнет.
  */
 
-/** Предустановки срока. Дни, а не даты: потолок на сервере тоже в днях. */
-export const GUEST_PRESETS = [1, 3, 7, 14];
+/* Предустановки срока. Дни, а не даты: потолок на сервере тоже в днях.
+ *
+ * Ноль — «сегодня», и он здесь ради часа: «сегодня до 18:00» — то, зачем
+ * гостевой доступ чаще всего и зовут (показать раздел на время созвона).
+ * Без нуля ближайший пресет — завтрашний день, и однодневную выдачу пришлось
+ * бы набирать датой. */
+export const GUEST_PRESETS = [0, 1, 3, 7, 14];
 
 /** Предустановки, которые проходят под потолок сервера (max_days из ответа). */
 export const presetsWithin = (maxDays) => GUEST_PRESETS.filter(
@@ -34,7 +39,21 @@ export const plural = (n, one, few, many) => {
     return many;
 };
 
-export const presetLabel = (days) => `${days} ${plural(days, 'день', 'дня', 'дней')}`;
+export const presetLabel = (days) => (
+    days === 0 ? 'сегодня' : `${days} ${plural(days, 'день', 'дня', 'дней')}`);
+
+/* Конец дня — умолчание срока, и в подписи его показывать НЕ надо: «до
+   05.09.2026, 23:59» это тот же «до 5 сентября», только с шумом. А вот
+   названный час показывать надо всегда — он и есть то, что человек выбрал. */
+export const END_OF_DAY = '23:59:59';
+
+export const isEndOfDay = (iso) => String(iso || '').slice(11, 19) === END_OF_DAY;
+
+/** «2026-09-05T18:00:00» → «18:00». Строкой, без разбора в Date — см. шапку. */
+export const fmtTime = (iso) => {
+    const match = /T(\d{2}):(\d{2})/.exec(String(iso || ''));
+    return match ? `${match[1]}:${match[2]}` : '';
+};
 
 /** «2026-09-05T23:59:59» → «05.09.2026». Строкой, без разбора в Date — см. шапку. */
 export const fmtDate = (iso) => {
@@ -47,18 +66,32 @@ export const fmtDate = (iso) => {
 /** Дата без времени — для сравнения и для пикера. */
 export const dateOnly = (iso) => String(iso || '').slice(0, 10);
 
+/* Срок так, как его прочтёт человек: «05.09.2026», а с названным часом —
+   «05.09.2026, 18:00». Одна функция на список, баннер и статью: три разных
+   формата одного и того же срока читались бы как три разных срока. */
+export const fmtDeadline = (iso) => {
+    const date = fmtDate(iso);
+    if (!date) return '';
+    return isEndOfDay(iso) ? date : `${date}, ${fmtTime(iso)}`;
+};
+
 /* Сколько осталось — словами.
  *
  * Ноль дней — это «сегодня последний», а не «истёк»: срок живёт до конца дня
  * (wiki/guests.py: resolve_expiry). Отрицательное — уже прошёл. Числа при этом
  * НЕ считаются здесь: их присылает сервер, у которого календарь алматинский. */
-export const daysLeftLabel = (daysLeft) => {
+export const daysLeftLabel = (daysLeft, iso = null) => {
     if (daysLeft === null || daysLeft === undefined) return '';
     if (daysLeft < 0) {
         const gone = Math.abs(daysLeft);
         return `истёк ${gone} ${plural(gone, 'день', 'дня', 'дней')} назад`;
     }
-    if (daysLeft === 0) return 'сегодня последний день';
+    if (daysLeft === 0) {
+        // Назван час — говорим час, а не «сегодня последний день»: у выдачи до
+        // 18:00 «последний день» звучит как «до полуночи», и человек рассчитает
+        // время неверно.
+        return iso && !isEndOfDay(iso) ? `сегодня до ${fmtTime(iso)}` : 'сегодня последний день';
+    }
     if (daysLeft === 1) return 'остался 1 день';
     return `осталось ${daysLeft} ${plural(daysLeft, 'день', 'дня', 'дней')}`;
 };
@@ -125,8 +158,8 @@ export const bannerText = (grants) => {
     // списка, а баннер молча начнёт показывать самый дальний.
     const soonest = items.reduce((best, item) => (
         !best || String(item.expires_at) < String(best.expires_at) ? item : best), null);
-    const until = `до ${fmtDate(soonest.expires_at)}`;
-    const left = daysLeftLabel(soonest.days_left);
+    const until = `до ${fmtDeadline(soonest.expires_at)}`;
+    const left = daysLeftLabel(soonest.days_left, soonest.expires_at);
     if (items.length === 1) {
         return {
             title: `Гостевой доступ: ${targetLabel(soonest)}`,

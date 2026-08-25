@@ -6,10 +6,11 @@ import {
     Loader2, Maximize2, Minimize2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
-// fmtDate под своим именем: в файле уже есть свой — «5 сентября 2026» для
-// подписей статьи, а гостевому сроку нужен короткий цифровой формат, и
-// разбирать наивную дату через new Date() ему нельзя (см. guestAccess.js).
-import { daysLeftLabel, fmtDate as fmtGuestDate } from './guestAccess';
+// fmtDeadline под своим именем: в файле уже есть свой fmtDate — «5 сентября
+// 2026» для подписей статьи, а гостевому сроку нужен короткий цифровой формат
+// с часом, и разбирать наивную дату через new Date() ему нельзя (см.
+// guestAccess.js).
+import { daysLeftLabel, fmtDeadline as fmtGuestDeadline } from './guestAccess';
 import { typeBadge } from './articleTypes';
 import { findTrainer } from './trainers/registry';
 import { scrollToElement } from './scrollContainer';
@@ -734,7 +735,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             открывалась, а сегодня отвечает «не найдена». */}
                         {article.guest_access && (
                             <IosBadge tone="amber">
-                                Гостевой доступ до {fmtGuestDate(article.guest_access.expires_at)}
+                                Гостевой доступ до {fmtGuestDeadline(article.guest_access.expires_at)}
                             </IosBadge>
                         )}
                         {article.tags?.map((tag) => (
@@ -863,7 +864,8 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 <p className="px-1 text-[11.5px] text-slate-400">
                     Доступ: {article.why}
                     {article.guest_access && (
-                        <>{' — '}{daysLeftLabel(article.guest_access.days_left)}</>
+                        <>{' — '}{daysLeftLabel(article.guest_access.days_left,
+                                                article.guest_access.expires_at)}</>
                     )}
                 </p>
             )}

@@ -143,6 +143,11 @@ def register(bp, wiki_route, db, log_ip):
             # resolve_expiry тут же отвергнет со словами «уже прошла» — отказ на
             # значении, которое сам же интерфейс и показал как допустимое.
             "today": today.isoformat(),
+            # Час «сейчас» — для пикера времени: на СЕГОДНЯШНЕМ дне прошедшие
+            # часы выбирать незачем, сервер их всё равно отвергнет («это время
+            # уже прошло»). Считает опять же сервер: у браузера западнее Алматы
+            # свой час, и граница разъехалась бы.
+            "now_time": wiki_guests.now_almaty().strftime('%H:%M'),
             "max_until": (today + timedelta(days=MAX_GUEST_DAYS)).isoformat(),
             "grant_departments": _departments(ctx),
             # Сколько разделов человек вправе открыть. Число, а не список:
@@ -267,7 +272,8 @@ def register(bp, wiki_route, db, log_ip):
         try:
             expires_at = wiki_guests.resolve_expiry(
                 wiki_guests.now_almaty(),
-                days=data.get('days'), until=data.get('until'))
+                days=data.get('days'), until=data.get('until'),
+                at_time=data.get('at_time'))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -353,7 +359,8 @@ def register(bp, wiki_route, db, log_ip):
         try:
             expires_at = wiki_guests.resolve_expiry(
                 wiki_guests.now_almaty(),
-                days=data.get('days'), until=data.get('until'))
+                days=data.get('days'), until=data.get('until'),
+                at_time=data.get('at_time'))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 

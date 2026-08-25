@@ -11,10 +11,11 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
+import IosTimePicker from '../ui/TimePicker';
 import SectionTreeSelect from './SectionTreeSelect';
 import useStableCallback from './useStableCallback';
 import {
-    STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, fmtDate,
+    STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, fmtDeadline,
     plural, presetLabel, presetsWithin, targetLabel, urgency,
 } from './guestAccess';
 
@@ -80,7 +81,14 @@ const Empty = ({ icon: Icon, title, hint }) => (
  * и какой из них уедет на сервер, видно только из кода (сервер такое и не
  * принимает: resolve_expiry отвергает оба поля сразу).
  */
-const TermPicker = ({ meta, days, until, onDays, onUntil }) => (
+const TermPicker = ({ meta, days, until, atTime, onDays, onUntil, onTime }) => {
+    /* Час ограничиваем снизу только на СЕГОДНЯШНЕМ дне: прошедшие часы сервер
+       всё равно отвергнет («это время уже прошло»), и предлагать их — обещать
+       отказ. «Сегодня» — это либо пресет «сегодня» (0 дней), либо дата, равная
+       сегодняшней; на любом другом дне доступен весь сутки. */
+    const today = meta?.today;
+    const isToday = until ? until === today : days === 0;
+    return (
     <div className="space-y-2.5">
         <div className={iosGroupLabel}>На сколько</div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -115,14 +123,39 @@ const TermPicker = ({ meta, days, until, onDays, onUntil }) => (
                 />
             </div>
         </div>
+
+        {/* Час — УТОЧНЕНИЕ выбранного дня, а не отдельный вид срока, поэтому он
+            стоит строкой ниже и по умолчанию пуст. Пустой = до конца дня: это
+            и есть обычная выдача, и заставлять называть 23:59 незачем. */}
+        <div className={`${iosCard} flex flex-wrap items-center gap-3 p-3`}>
+            <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-medium text-slate-900">До какого часа</div>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
+                    Не указан — доступ живёт до конца дня. «Сегодня до 18:00» — это
+                    пресет «сегодня» и час здесь.
+                </p>
+            </div>
+            <IosTimePicker
+                value={atTime}
+                onChange={onTime}
+                min={isToday ? meta?.now_time : undefined}
+                allowEmpty
+                step={30}
+                placeholder="до конца дня"
+                ariaLabel="Час, до которого действует гостевой доступ"
+                className="w-full sm:w-32"
+            />
+        </div>
+
         <p className="text-[11.5px] leading-relaxed text-slate-500">
-            Доступ действует до конца выбранного дня. Дольше
-            {' '}{meta?.max_days || 14} {plural(meta?.max_days || 14, 'дня', 'дней', 'дней')}
-            {' '}выдать нельзя: бессрочный «гостевой» доступ перестаёт быть гостевым
-            и подменяет собой правило раздела.
+            Дольше {meta?.max_days || 14}
+            {' '}{plural(meta?.max_days || 14, 'дня', 'дней', 'дней')} выдать нельзя:
+            бессрочный «гостевой» доступ перестаёт быть гостевым и подменяет собой
+            правило раздела.
         </p>
     </div>
-);
+    );
+};
 
 /* Одна строка списка. Три вопроса подряд, в том же порядке, в каком их задают:
    кому открыто, что открыто, до какого срока — и только потом кто выдал. */
@@ -159,13 +192,12 @@ const GrantRow = ({ item, onExtend, onRevoke, busy }) => {
 
             <div className="min-w-[9.5rem] shrink-0 text-right">
                 <div className="text-[12.5px] font-medium tabular-nums text-slate-900">
-                    до {fmtDate(item.expires_at)}
+                    до {fmtDeadline(item.expires_at)}
                 </div>
                 <div className={`mt-0.5 text-[11px] ${tone}`}>
-                    {active ? daysLeftLabel(item.days_left)
-                            : item.status === 'revoked'
-                                ? `отозвал ${item.revoked_by_name || '—'}`
-                                : daysLeftLabel(item.days_left)}
+                    {item.status === 'revoked'
+                        ? `отозвал ${item.revoked_by_name || '—'}`
+                        : daysLeftLabel(item.days_left, item.expires_at)}
                 </div>
                 <div className="mt-0.5 text-[10.5px] text-slate-400">
                     выдал {item.granted_by_name || '—'}
@@ -262,8 +294,9 @@ export default function WikiGuests({ base, headers, space = null, showToast = nu
                     <div className="text-[14px] font-semibold text-slate-900">Гостевой доступ</div>
                     <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
                         Временный доступ к разделу или статье вашего отдела — своим
-                        подчинённым и на срок до
-                        {' '}{meta?.max_days || 14} {plural(meta?.max_days || 14, 'дня', 'дней', 'дней')}.
+                        подчинённым: на срок до
+                        {' '}{meta?.max_days || 14} {plural(meta?.max_days || 14, 'дня', 'дней', 'дней')}
+                        {' '}или до названного часа, хоть до 18:00 сегодня.
                     </p>
                 </div>
                 {meta?.can_grant && (
@@ -334,7 +367,7 @@ export default function WikiGuests({ base, headers, space = null, showToast = nu
                                                    : `${STATUS_FILTERS.find((f) => f.key === status)?.label} — пусто`}
                         hint={status === 'active'
                             ? (meta?.can_grant
-                                ? 'Нажмите «Выдать доступ», выберите сотрудника и раздел — он увидит его у себя в вики до конца выбранного дня.'
+                                ? 'Нажмите «Выдать доступ», выберите сотрудника и раздел — он увидит его у себя в вики до конца срока.'
                                 : 'Здесь появятся выдачи по разделам вашей ветки отдела — и ваши собственные.')
                             : 'История выдач не удаляется: отозванная и истёкшая строка остаются здесь.'}
                     />
@@ -422,6 +455,7 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
     const [deep, setDeep] = useState(true);
     const [days, setDays] = useState(7);
     const [until, setUntil] = useState('');
+    const [atTime, setAtTime] = useState('');
     const [reason, setReason] = useState('');
     const [busy, setBusy] = useState(false);
 
@@ -466,14 +500,16 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
             section_id: kind === 'section' ? sectionId : null,
             article_id: kind === 'article' ? Number(articleId) : null,
             include_subsections: kind === 'section' ? deep : false,
-            // Ровно одно поле срока: сервер отвергает оба сразу, и это
-            // правильно — умолчание пришлось бы выбрать за человека.
+            // Ровно одно поле ДНЯ: сервер отвергает оба сразу, и это правильно —
+            // умолчание пришлось бы выбрать за человека. Час к дню не относится
+            // как альтернатива, он его уточняет, и едет отдельным полем.
             ...(until ? { until } : { days }),
+            ...(atTime ? { at_time: atTime } : {}),
             reason: reason.trim() || null,
         }, { headers })
             .then((r) => {
                 const label = r.data?.created ? 'Гостевой доступ выдан' : 'Срок доступа продлён';
-                toast?.(`${label} — до ${fmtDate(r.data?.expires_at)}`, 'success');
+                toast?.(`${label} — до ${fmtDeadline(r.data?.expires_at)}`, 'success');
                 /* Оператору вики открывается только после QR-подтверждения
                    сессии, и подтверждать его нужно каждый раз заново. Выдача
                    этого не отменяет, и узнать про это выдающий обязан здесь, а
@@ -494,7 +530,7 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
             open
             onClose={onClose}
             title="Выдать гостевой доступ"
-            subtitle="Сотрудник увидит выбранное у себя в вики до конца выбранного дня"
+            subtitle="Сотрудник увидит выбранное у себя в вики до конца срока"
             maxWidth="max-w-xl"
             footer={(
                 <>
@@ -591,8 +627,8 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
                     </div>
                 )}
 
-                <TermPicker meta={meta} days={days} until={until}
-                            onDays={setDays} onUntil={setUntil} />
+                <TermPicker meta={meta} days={days} until={until} atTime={atTime}
+                            onDays={setDays} onUntil={setUntil} onTime={setAtTime} />
 
                 <div className="space-y-2">
                     <div className={iosGroupLabel}>Зачем (необязательно)</div>
@@ -623,13 +659,17 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
 const ExtendModal = ({ base, headers, meta, item, onClose, onDone, toast }) => {
     const [days, setDays] = useState(7);
     const [until, setUntil] = useState('');
+    const [atTime, setAtTime] = useState('');
     const [busy, setBusy] = useState(false);
 
     const submit = () => {
         setBusy(true);
-        axios.patch(`${base}/guests/${item.id}`, until ? { until } : { days }, { headers })
+        axios.patch(`${base}/guests/${item.id}`, {
+            ...(until ? { until } : { days }),
+            ...(atTime ? { at_time: atTime } : {}),
+        }, { headers })
             .then((r) => {
-                toast?.(`Срок продлён до ${fmtDate(r.data?.expires_at)}`, 'success');
+                toast?.(`Срок продлён до ${fmtDeadline(r.data?.expires_at)}`, 'success');
                 onDone();
             })
             .catch((e) => toast?.(errText(e, 'Не удалось продлить доступ'), 'error'))
@@ -658,14 +698,14 @@ const ExtendModal = ({ base, headers, meta, item, onClose, onDone, toast }) => {
         >
             <div className="space-y-4">
                 <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[12px] leading-relaxed text-slate-600">
-                    Сейчас доступ действует до {fmtDate(item.expires_at)}
+                    Сейчас доступ действует до {fmtDeadline(item.expires_at)}
                     {item.days_left !== null && item.days_left !== undefined
-                        ? ` — ${daysLeftLabel(item.days_left)}` : ''}.
+                        ? ` — ${daysLeftLabel(item.days_left, item.expires_at)}` : ''}.
                     {' '}Новый срок считается от сегодняшнего дня, а не прибавляется
                     к прежнему.
                 </div>
-                <TermPicker meta={meta} days={days} until={until}
-                            onDays={setDays} onUntil={setUntil} />
+                <TermPicker meta={meta} days={days} until={until} atTime={atTime}
+                            onDays={setDays} onUntil={setUntil} onTime={setAtTime} />
             </div>
         </IosModal>
     );

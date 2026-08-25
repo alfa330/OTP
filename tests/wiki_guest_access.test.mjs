@@ -9,6 +9,9 @@ import {
     clampDate,
     daysLeftLabel,
     fmtDate,
+    fmtDeadline,
+    fmtTime,
+    isEndOfDay,
     plural,
     presetLabel,
     presetsWithin,
@@ -84,8 +87,41 @@ test('предустановки не выходят за потолок сер�
     // Потолок приезжает из ответа (max_days), а не зашит во фронт: разойдись
     // они, форма предложила бы срок, который сервер отклонит.
     assert.deepEqual(presetsWithin(14), GUEST_PRESETS);
-    assert.deepEqual(presetsWithin(7), [1, 3, 7]);
-    assert.deepEqual(presetsWithin(1), [1]);
+    assert.deepEqual(presetsWithin(7), [0, 1, 3, 7]);
+    assert.deepEqual(presetsWithin(1), [0, 1]);
+});
+
+test('«сегодня» — тоже срок, и он нужен ради часа', () => {
+    // Без нуля ближайший пресет — завтрашний день, и «сегодня до 18:00»
+    // пришлось бы набирать датой. Ноль под любым потолком проходит.
+    assert.equal(GUEST_PRESETS[0], 0);
+    assert.equal(presetLabel(0), 'сегодня');
+    assert.ok(presetsWithin(1).includes(0));
+});
+
+test('срок с часом читается вместе с часом, без часа — без него', () => {
+    // Конец дня — умолчание, и «до 05.09.2026, 23:59» это тот же «до 5
+    // сентября», только с шумом. А названный час и есть то, что человек выбрал.
+    assert.equal(fmtDeadline('2026-09-05T23:59:59'), '05.09.2026');
+    assert.equal(fmtDeadline('2026-08-25T18:00:00'), '25.08.2026, 18:00');
+    assert.equal(fmtDeadline(''), '');
+});
+
+test('час режется строкой — и здесь тоже без Date', () => {
+    assert.equal(fmtTime('2026-08-25T18:00:00'), '18:00');
+    assert.equal(fmtTime('2026-08-25T09:05:00'), '09:05');
+    assert.equal(fmtTime('2026-08-25'), '');
+    assert.equal(isEndOfDay('2026-08-25T23:59:59'), true);
+    assert.equal(isEndOfDay('2026-08-25T18:00:00'), false);
+});
+
+test('последний день с часом называет час, а не «до полуночи»', () => {
+    // «Сегодня последний день» у выдачи до 18:00 звучит как «до полуночи», и
+    // человек рассчитает время неверно — придёт читать в 19:00.
+    assert.equal(daysLeftLabel(0, '2026-08-25T18:00:00'), 'сегодня до 18:00');
+    assert.equal(daysLeftLabel(0, '2026-08-25T23:59:59'), 'сегодня последний день');
+    // Дальше первого дня час уже не важен: там счёт идёт днями.
+    assert.equal(daysLeftLabel(3, '2026-08-28T18:00:00'), 'осталось 3 дня');
 });
 
 test('дата подтягивается к границе — пресеты панели про min/max не знают', () => {
@@ -116,6 +152,16 @@ test('баннер одной выдачи называет, что именно
     }]);
     assert.equal(banner.title, 'Гостевой доступ: Регламент СЗоВ и подразделы');
     assert.equal(banner.detail, 'до 05.09.2026 · осталось 3 дня');
+});
+
+test('баннер выдачи на пару часов называет час', () => {
+    // Ради этого случая час и появился: «показать раздел на время созвона».
+    const banner = bannerText([{
+        kind: 'section', title: 'Регламент СЗоВ',
+        expires_at: '2026-08-25T18:00:00', days_left: 0,
+    }]);
+    assert.equal(banner.detail, 'до 25.08.2026, 18:00 · сегодня до 18:00');
+    assert.equal(banner.urgency, 'soon');
 });
 
 test('баннер нескольких выдач берёт БЛИЖАЙШИЙ срок, а не первый в ответе', () => {
