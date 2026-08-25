@@ -625,6 +625,61 @@ def branch_department_map(cursor):
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
+# Уровень должности, с которого раздел читают, — «высота» раздела на лестнице.
+#
+# Считается по МИНИМАЛЬНОМУ порогу правил НА ЧТЕНИЕ: раздел, открытый одним лишь
+# правилом с min_role_level = 40, читают с уровня руководителя, и раздавать в
+# нём доступ супервайзер не вправе (access.may_manage_section_level — там же
+# написано, почему высота меряется именно так и почему правила без порога в счёт
+# не идут).
+#
+# ПОДРАЗДЕЛ БЕЗ СВОИХ ПОРОГОВ НАСЛЕДУЕТ ВЫСОТУ БЛИЖАЙШЕГО ПРЕДКА, у которого она
+# есть. Иначе дыра открывается одним движением директора: заведи он подраздел
+# внутри «Руководителя группы» — своих правил у подраздела ещё нет, высоты нет,
+# и супервайзер настраивает его как свой. Собственный порог всегда сильнее
+# наследства: в дереве вики «Супервайзер» лежит ВНУТРИ «Руководителя группы», и
+# без этого правила супервайзер потерял бы собственный раздел.
+#
+# Обход вверх — тот же приём и тот же ограничитель глубины, что в
+# branch_department_map: идём вверх, пока высота не найдена.
+_SECTION_ROLE_LEVELS_SQL = """
+WITH RECURSIVE own AS (
+    SELECT r.section_id AS id, MIN(r.min_role_level) AS level
+      FROM wiki_section_access_rules r
+     WHERE r.can_read AND r.min_role_level IS NOT NULL
+     GROUP BY r.section_id
+),
+up AS (
+    SELECT s.id AS root, s.parent_section_id, own.level, 0 AS depth
+      FROM wiki_sections s
+      LEFT JOIN own ON own.id = s.id
+     WHERE s.status = 'active'
+    UNION ALL
+    SELECT up.root, p.parent_section_id, own.level, up.depth + 1
+      FROM up
+      JOIN wiki_sections p ON p.id = up.parent_section_id
+      LEFT JOIN own ON own.id = p.id
+     WHERE up.level IS NULL AND up.depth < 50
+)
+SELECT root, level FROM up WHERE level IS NOT NULL
+"""
+
+
+def section_role_levels(cursor):
+    """Высота КАЖДОГО активного раздела на лестнице должностей: {section_id: level}.
+
+    Разом, а не по разделу: карту спрашивает и список разделов (вкладка
+    «Структура» считает по ней кнопку «Кому открыт раздел» для каждой строки), и
+    проверка на записи — поштучный обход дерева стоил бы запрос на строку.
+
+    Раздела без высоты в ключах НЕТ, а не лежит со значением None: «уровня нет»
+    и «уровень неизвестен» здесь одно и то же — раздел закрыт только границей
+    отдела, как было до 25.08.2026.
+    """
+    cursor.execute(_SECTION_ROLE_LEVELS_SQL)
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
 def grantable_people(cursor, *, max_role_level, department_ids=None):
     """Сотрудники, которым этот человек вправе выдать доступ.
 

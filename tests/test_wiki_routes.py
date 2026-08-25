@@ -477,13 +477,22 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
     это отсутствие зернистости.
     """
 
-    def _stub_section(self, department_id=1):
-        """Раздел существует и лежит в ветке указанного отдела."""
+    def _stub_section(self, department_id=1, role_level=None):
+        """Раздел существует, лежит в ветке отдела и стоит на такой-то ступени.
+
+        role_level=None — у раздела нет ни одного правила с порогом должности,
+        то есть высоты на лестнице он не имеет: так выглядит ветка отдела и
+        витрина верхнего уровня, и закрыты они только границей отдела.
+        """
         self.addCleanup(setattr, structure, 'section_exists', structure.section_exists)
         structure.section_exists = lambda cursor, sid: 1
         self.addCleanup(setattr, structure, 'section_branch_department',
                         structure.section_branch_department)
         structure.section_branch_department = lambda cursor, sid: department_id
+        self.addCleanup(setattr, structure, 'section_role_levels',
+                        structure.section_role_levels)
+        structure.section_role_levels = lambda cursor: (
+            {} if role_level is None else {1: role_level})
 
     def test_operator_and_trainer_cannot_grant(self):
         for role in ('operator', 'trainer'):
@@ -697,6 +706,97 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
             'can_read': True})
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(denied.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+
+    # ── Высота раздела: «свой и ниже, но никак не выше» ─────────────────
+    #
+    # Жалоба владельца 25.08.2026: супервайзер раздавал чтение В РАЗДЕЛЕ
+    # РУКОВОДИТЕЛЯ. Двух прежних границ на это не хватало: раздел руководителя
+    # лежит в ветке того же отдела (дерево вики повторяет оргструктуру), а
+    # правило без порога весит как оператор и проходит потолок насквозь.
+
+    def test_supervisor_cannot_touch_the_head_section(self):
+        """Раздел уровня 40 супервайзеру не открыть НИКАКИМ правилом.
+
+        Проверяются оба пути — и самое широкое правило (на отдел, без порога:
+        именно оно и пробивало обе прежние границы), и точечное, на человека.
+        """
+        self._stub_section(department_id=1, role_level=40)
+        client, cursor = self.build(make_context('sv', department_id=1))
+
+        wide = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'can_read': True})
+        self.assertEqual(wide.status_code, 403)
+        self.assertEqual(wide.get_json().get('code'), 'WIKI_SECTION_ABOVE_GRANTOR')
+
+        cursor.fetchone.return_value = ('operator', 1)   # роль и отдел адресата
+        personal = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'user', 'subject_id': 77,
+            'can_read': True})
+        self.assertEqual(personal.status_code, 403)
+        self.assertEqual(personal.get_json().get('code'), 'WIKI_SECTION_ABOVE_GRANTOR')
+
+    def test_supervisor_does_not_even_see_the_head_section_rules(self):
+        """Список правил закрыт тем же гейтом: подсматривать чужую ветку незачем."""
+        self._stub_section(department_id=1, role_level=40)
+        client, _ = self.build(make_context('sv', department_id=1))
+        r = client.get('/api/wiki/access/section-rules?section_id=1')
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_SECTION_ABOVE_GRANTOR')
+
+    def test_supervisor_cannot_strip_a_rule_from_the_head_section(self):
+        """Снятие правила — такое же вмешательство, как выдача, и та же граница.
+
+        Без неё запрет разворачивался наизнанку: выдать доступ в разделе
+        руководителя супервайзер бы не смог, а отобрать выданный — вполне.
+        """
+        self._stub_section(department_id=1, role_level=40)
+        client, cursor = self.build(make_context('sv', department_id=1))
+        # Строка правила: section_id, min_role_level, субъект, права.
+        cursor.fetchone.return_value = (1, 40, 'department', 1, None,
+                                        True, False, False, False, False, False)
+        r = client.delete('/api/wiki/access/section-rules/5')
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_SECTION_ABOVE_GRANTOR')
+
+    def test_supervisor_keeps_his_own_section_and_the_one_below(self):
+        """«Свой и ниже» — не «строго ниже»: свой раздел он настраивает сам."""
+        self._capture_upsert()
+        for level in (30, 20, None):
+            self._stub_section(department_id=1, role_level=level)
+            client, _ = self.build(make_context('sv', department_id=1))
+            r = client.post('/api/wiki/access/section-rules', json={
+                'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+                'can_read': True})
+            self.assertEqual(r.status_code, 201, 'ступень %s' % level)
+
+    def test_head_reaches_his_own_section_but_not_the_director_one(self):
+        """Та же ситуация с руководителем группы — на ступень выше."""
+        self._capture_upsert()
+        self._stub_section(department_id=1, role_level=40)
+        client, _ = self.build(make_context('admin', department_id=1, headed=(1,)))
+        own = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'min_role_level': 40, 'can_read': True})
+        self.assertEqual(own.status_code, 201)
+
+        self._stub_section(department_id=1, role_level=50)
+        client, _ = self.build(make_context('admin', department_id=1, headed=(1,)))
+        above = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'can_read': True})
+        self.assertEqual(above.status_code, 403)
+        self.assertEqual(above.get_json().get('code'), 'WIKI_SECTION_ABOVE_GRANTOR')
+
+    def test_director_stands_above_every_section(self):
+        """У мастер-ключа сняты все три границы — иначе чинить нечем и некому."""
+        self._capture_upsert()
+        self._stub_section(department_id=1, role_level=50)
+        client, _ = self.build(make_context('super_admin', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'min_role_level': 50, 'can_read': True})
+        self.assertEqual(r.status_code, 201)
 
     def test_director_still_writes_company_wide_rules(self):
         """У директора границы нет — правило на должность остаётся его инструментом."""

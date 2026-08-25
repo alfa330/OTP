@@ -448,6 +448,55 @@ class GrantCeilingTest(unittest.TestCase):
                                               target_role='super_admin'))
 
 
+class SectionHeightTest(unittest.TestCase):
+    """Высота раздела: «свой и ниже, но никак не выше» (владелец, 25.08.2026).
+
+    Потолок GRANT_CEILING отвечает «КОМУ по чину», отдел ветки — «ЧЬИМ людям»,
+    а эта граница — «ГДЕ». Без неё супервайзер открывал раздел руководителя
+    своего же отдела: ветка та самая, а правило без порога весит как оператор и
+    проходит потолок насквозь.
+
+    Дерево вики повторяет оргструктуру, поэтому «выше» — это буквально ступень
+    выше: «Руководитель группы» (40) над «Супервайзером» (30) над «Оператором».
+    """
+
+    def test_supervisor_stops_before_the_head_section(self):
+        self.assertFalse(access.may_manage_section_level('sv', 40))
+        self.assertFalse(access.may_manage_section_level('sv', 50))
+
+    def test_supervisor_keeps_his_own_and_everything_below(self):
+        """Сравнение нестрогое: свой раздел настраивает он сам, а не «вышестоящий».
+
+        Строгое отрезало бы супервайзера от собственного раздела — то есть
+        чинило бы жалобу, ломая ровно то, ради чего право и выдано.
+        """
+        self.assertTrue(access.may_manage_section_level('sv', 30))
+        self.assertTrue(access.may_manage_section_level('sv', 20))
+        self.assertTrue(access.may_manage_section_level('sv', 10))
+
+    def test_head_reaches_his_level_but_not_the_director_one(self):
+        self.assertTrue(access.may_manage_section_level('admin', 40))
+        self.assertFalse(access.may_manage_section_level('admin', 50))
+
+    def test_section_without_a_threshold_is_closed_by_the_department_only(self):
+        """Ветка отдела и витрина верхнего уровня высоты не имеют.
+
+        Иначе супервайзер лишился бы вкладки «Структура» целиком: правил на
+        чтение ему может быть не выписано вовсе, а свою ветку он настраивает.
+        """
+        self.assertTrue(access.may_manage_section_level('sv', None))
+        self.assertTrue(access.may_manage_section_level('admin', None))
+
+    def test_master_key_stands_above_everything(self):
+        """У супер-админа и роли вики сняты все три границы — иначе чинить нечем."""
+        self.assertTrue(access.may_manage_section_level('super_admin', 50))
+        self.assertTrue(access.may_manage_section_level('sv', 50, unbounded=True))
+
+    def test_unknown_role_gets_nothing(self):
+        """Незнакомая должность — уровень 0, и ни одна ступень ей не по силам."""
+        self.assertFalse(access.may_manage_section_level('оператор-стажёр', 10))
+
+
 class GrantSubjectScopeTest(unittest.TestCase):
     """Граница отдела для АДРЕСАТА правила (решение владельца 21.08.2026).
 

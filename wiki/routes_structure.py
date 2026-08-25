@@ -132,6 +132,17 @@ PERMISSION_FIELDS = ('can_read', 'can_create', 'can_edit',
 # Отказ по границе отдела — своими словами на каждый субъект. Общее «адресат из
 # другого отдела» на роли звучало бы неправдой: у роли отдела нет вовсе, и
 # человек искал бы, какой именно отдел не тот.
+# Отказы про САМ РАЗДЕЛ (у адресата свои — _SUBJECT_SCOPE_ERRORS ниже). Тексты
+# разные потому, что и починка разная: чужой отдел человек не исправит никак, а
+# «раздел выше вашей должности» объясняет, к кому идти.
+_NOT_A_GRANTOR = ("Доступ раздают супервайзер и выше", "WIKI_FORBIDDEN")
+_FOREIGN_DEPARTMENT = ("Раздел относится к другому отделу", "WIKI_DEPARTMENT_SCOPE")
+_SECTION_ABOVE_GRANTOR = (
+    "Этот раздел стоит выше вашей должности — доступ в нём раздаёт вышестоящий "
+    "руководитель",
+    "WIKI_SECTION_ABOVE_GRANTOR",
+)
+
 _SUBJECT_SCOPE_ERRORS = {
     'user': 'Этот сотрудник из другого отдела',
     'group': 'Эта группа из другого отдела',
@@ -210,20 +221,42 @@ def register(bp, wiki_route, db, log_ip):
             own.add(ctx['department_id'])
         return sorted(own)
 
-    def _may_grant_on_section(cursor, ctx, section_id):
-        """Вправе ли человек трогать правила ИМЕННО ЭТОГО раздела.
+    def _section_grant_refusal(cursor, ctx, section_id):
+        """Почему человек не вправе трогать правила ИМЕННО ЭТОГО раздела.
 
-        Две проверки: потолок должности (есть ли право вообще) и граница отдела
-        (та ли это ветка). Раздел вне любой ветки отдела остаётся за директором:
-        «свой отдел» для него не определён, и пускать туда руководителя нельзя.
+        None — вправе. Иначе (текст, код) для ответа: отказы разные, и путать их
+        нельзя. «Раздел относится к другому отделу», сказанное про раздел своего
+        же отдела, отправило бы человека искать несуществующую ошибку в ветке.
+
+        Три проверки:
+
+          1. потолок должности — есть ли право раздавать вообще (GRANT_CEILING);
+          2. граница отдела — та ли это ветка (свой отдел, а не соседний);
+          3. ВЫСОТА РАЗДЕЛА — не выше ли он самого раздающего.
+
+        Третья появилась 25.08.2026 по требованию владельца: дерево вики
+        повторяет оргструктуру, поэтому раздел руководителя лежит в ТОМ ЖЕ
+        отделе, что и раздел супервайзера, — граница отдела его пропускала, а
+        потолок про раздел не знает вовсе (он отвечает «кому по чину», а не
+        «где»). Супервайзер открывал руководительский раздел своим операторам
+        одним правилом без порога. Как меряется высота — access.py, шапка
+        may_manage_section_level.
+
+        Раздел вне любой ветки отдела остаётся за директором: «свой отдел» для
+        него не определён, и пускать туда руководителя нельзя.
         """
         if _grant_ceiling(ctx) is None:
-            return False
+            return _NOT_A_GRANTOR
         departments = _grant_departments(ctx)
         if departments is None:
-            return True
+            return None
         branch = structure.section_branch_department(cursor, section_id)
-        return branch is not None and branch in departments
+        if branch is None or branch not in departments:
+            return _FOREIGN_DEPARTMENT
+        if not wiki_access.may_manage_section_level(
+                ctx['otp_role'], structure.section_role_levels(cursor).get(section_id)):
+            return _SECTION_ABOVE_GRANTOR
+        return None
 
     def _may_grant_guest_here(cursor, ctx, section_id):
         """Вправе ли человек ПОСТАВИТЬ на этом разделе тумблер «Гостевой доступ».
@@ -283,6 +316,11 @@ def register(bp, wiki_route, db, log_ip):
         # рекурсивным запросом на каждый раздел.
         ceiling = _grant_ceiling(ctx)
         grant_departments = _grant_departments(ctx)
+        # Высота разделов на лестнице должностей — одной картой на весь ответ, а
+        # не запросом на строку: третья граница выдачи (см. _section_grant_refusal).
+        # Раздающему без границы отдела она не нужна вовсе — у мастер-ключа сняты
+        # все три, и считать дерево ради ответа «да» незачем.
+        role_levels = {} if grant_departments is None else structure.section_role_levels(cursor)
         by_id = {s['id']: s for s in sections}
         branch_of = {}
 
@@ -311,13 +349,15 @@ def register(bp, wiki_route, db, log_ip):
         visible = []
         for section in sections:
             # Может ли текущий человек раздавать доступ ИМЕННО ТУТ: решает
-            # сервер, а не фронт. Иначе граница отдела считалась бы дважды и
-            # однажды разошлась бы — а расходится она всегда в сторону «показали
-            # кнопку, а API ответил 403».
+            # сервер, а не фронт. Иначе границы (потолок, отдел ветки и высота
+            # самого раздела) считались бы дважды и однажды разошлись бы — а
+            # расходится это всегда в сторону «показали кнопку, а API ответил 403».
             can_grant_here = bool(
                 ceiling is not None
                 and (grant_departments is None
-                     or branch_department(section['id']) in grant_departments)
+                     or (branch_department(section['id']) in grant_departments
+                         and wiki_access.may_manage_section_level(
+                             ctx['otp_role'], role_levels.get(section['id']))))
             )
             # Раздел, которым человек УПРАВЛЯЕТ, остаётся в ответе, даже если он
             # его не читает. Иначе супервайзер не увидел бы во вкладке
@@ -338,9 +378,9 @@ def register(bp, wiki_route, db, log_ip):
             section['accessible'] = section['id'] in allowed
             section['readable_count'] = readable_counts.get(section['id'], 0)
             # Может ли текущий человек раздавать доступ ИМЕННО ТУТ: решает
-            # сервер, а не фронт. Иначе граница отдела считалась бы дважды и
-            # однажды разошлась бы — а расходится она всегда в сторону «показали
-            # кнопку, а API ответил 403».
+            # сервер, а не фронт. Иначе границы (потолок, отдел ветки и высота
+            # самого раздела) считались бы дважды и однажды разошлись бы — а
+            # расходится это всегда в сторону «показали кнопку, а API ответил 403».
             section['can_grant_access'] = can_grant_here
             section['public_department_ids'] = public_departments.get(section['id'], [])
             visible.append(section)
@@ -756,9 +796,9 @@ def register(bp, wiki_route, db, log_ip):
         section_id = _int_or_none(
             request.args.get('section_id') if request.method == 'GET'
             else _body().get('section_id'))
-        if section_id and not _may_grant_on_section(cursor, ctx, section_id):
-            return jsonify({"error": "Раздел относится к другому отделу",
-                            "code": "WIKI_DEPARTMENT_SCOPE"}), 403
+        refusal = _section_grant_refusal(cursor, ctx, section_id) if section_id else None
+        if refusal:
+            return jsonify({"error": refusal[0], "code": refusal[1]}), 403
 
         if request.method == 'GET':
             return jsonify({
@@ -829,7 +869,7 @@ def register(bp, wiki_route, db, log_ip):
                 cursor, subject_type, subject_id)
 
         # ── Граница отдела для адресата ──────────────────────────────
-        # Раздел уже проверен выше (_may_grant_on_section), но раздел — это
+        # Раздел уже проверен выше (_section_grant_refusal), но раздел — это
         # «где», а не «кому». Без этой проверки супервайзер на СВОЁМ разделе
         # выписывал правило чужому отделу, чужой группе или роли по всей
         # компании: потолок такое пропускает, потому что порог у них пуст и
@@ -971,9 +1011,9 @@ def register(bp, wiki_route, db, log_ip):
         removed = {'rule_id': rule_id, 'subject_type': row[2], 'subject_id': row[3],
                    'subject_role': row[4], 'min_role_level': row[1]}
         removed.update(dict(zip(PERMISSION_FIELDS, row[5:])))
-        if not _may_grant_on_section(cursor, ctx, row[0]):
-            return jsonify({"error": "Раздел относится к другому отделу",
-                            "code": "WIKI_DEPARTMENT_SCOPE"}), 403
+        refusal = _section_grant_refusal(cursor, ctx, row[0])
+        if refusal:
+            return jsonify({"error": refusal[0], "code": refusal[1]}), 403
         if not wiki_access.may_grant_with_ceiling(ceiling, row[1]):
             return jsonify({"error": "Это правило снимает только вышестоящий руководитель",
                             "code": "WIKI_GRANT_CEILING"}), 403
