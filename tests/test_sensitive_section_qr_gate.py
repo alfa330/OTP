@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""QR-подтверждение сессии на входе в «Обращения» и «Вики».
+"""QR-подтверждение сессии на входе в «Обращения», «Вики» и «Посылки».
 
 Раздел «Мои оценки» давно открывает записи и переписки только после того, как
 админ или супервайзер подтвердил QR-код оператора: доступ живёт до конца ЭТОЙ
-сессии. Тем же ключом закрыты теперь два раздела целиком (решение владельца
-19.08.2026) — «Обращения» (переписка по живым водителям) и «Вики» (база знаний
-компании).
+сессии. Тем же ключом закрыты теперь три раздела целиком — «Обращения»
+(переписка по живым водителям) и «Вики» (база знаний компании) с 19.08.2026 по
+решению владельца, «Посылки» (ФИО и телефоны водителей в реестре) с 25.08.2026
+по постановке задачи #240.
 
 Проверяется именно HTTP-гейт, а не намерение: спрятанный пункт меню доступом не
 является, оба раздела открываются прямым адресом. Отдельно фиксируются две
@@ -40,6 +41,10 @@ from crm import access as crm_access  # noqa: E402
 from crm import queries as crm_queries  # noqa: E402
 from crm import schema as crm_schema  # noqa: E402
 from crm.routes import build_crm_blueprint  # noqa: E402
+from parcels import access as parcels_access  # noqa: E402
+from parcels import queries as parcels_queries  # noqa: E402
+from parcels import schema as parcels_schema  # noqa: E402
+from parcels.routes import build_parcels_blueprint  # noqa: E402
 from wiki import access as wiki_access  # noqa: E402
 from wiki import queries as wiki_queries  # noqa: E402
 from wiki.routes import build_wiki_blueprint  # noqa: E402
@@ -58,6 +63,20 @@ def crm_ctx(role='operator', user_id=10, department_code='szov', headed=()):
         'headed_department_ids': list(headed),
         'headed_department_codes': ['szov'] if headed else [],
         'group_ids': [],
+    }
+
+
+def parcels_ctx(role='operator', user_id=10, department_code='front_office', headed=()):
+    """Портрет сотрудника раздела «Посылки». По умолчанию — менеджер фронт-офиса."""
+    return {
+        'user_id': user_id,
+        'name': 'Тест',
+        'role': role,
+        'department_id': 909,
+        'department_code': department_code,
+        'city': 'Тараз',
+        'headed_department_ids': list(headed),
+        'headed_department_codes': [department_code] if headed else [],
     }
 
 
@@ -120,6 +139,27 @@ class CrmGateHarness(_Harness):
         gate = _GateRecorder(granted)
         app = Flask(__name__)
         app.register_blueprint(build_crm_blueprint(
+            db=db,
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (context['user_id'], None, None),
+            sensitive_access_granted=gate,
+        ))
+        app.config['TESTING'] = True
+        return app.test_client(), gate
+
+
+class ParcelsGateHarness(_Harness):
+    def build(self, context, granted=False):
+        _cursor, db = self._cursor_and_db()
+        self._patch(parcels_queries, 'load_access_context', lambda _c, _uid: dict(context))
+        # Схема «не развёрнута»: /ping тогда не считает счётчики по моку и
+        # отвечает валидным JSON. Здесь важен код ответа, а не сводка.
+        self._patch(parcels_schema, 'schema_is_ready', lambda _c: False)
+
+        gate = _GateRecorder(granted)
+        app = Flask(__name__)
+        app.register_blueprint(build_parcels_blueprint(
             db=db,
             require_api_key=lambda f: f,
             build_cors_preflight_response=lambda: ('', 204),
@@ -242,8 +282,92 @@ class WikiQrGateTest(WikiGateHarness, unittest.TestCase):
         self.assertEqual(gate.calls, [])
 
 
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
+    def test_operator_without_confirmation_is_stopped_everywhere(self):
+        """Закрыт весь раздел, а не только запись: СЗоВ приходит сюда читать."""
+        client, _gate = self.build(parcels_ctx())
+        for method, url in (('get', '/api/parcels/ping'),
+                            ('get', '/api/parcels'),
+                            ('get', '/api/parcels/offices'),
+                            ('get', '/api/parcels/filters'),
+                            ('get', '/api/parcels/1'),
+                            ('post', '/api/parcels'),
+                            ('post', '/api/parcels/driver-lookup'),
+                            ('post', '/api/parcels/1/status'),
+                            ('patch', '/api/parcels/1')):
+            response = getattr(client, method)(url, json={})
+            self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
+            self.assertEqual(response.get_json().get('code'), QR_CODE, url)
+
+    def test_szov_operator_is_asked_for_qr_too(self):
+        """Требование постановки: QR у ОБОИХ отделов, а не только у пишущего."""
+        client, _gate = self.build(parcels_ctx(department_code='szov'))
+        response = client.get('/api/parcels')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), QR_CODE)
+
+    def test_operator_with_confirmation_passes(self):
+        client, gate = self.build(parcels_ctx(), granted=True)
+        self.assertEqual(client.get('/api/parcels/ping').status_code, 200)
+        self.assertEqual([call['user_id'] for call in gate.calls], [10])
+
+    def test_supervisor_and_admin_are_not_asked_for_qr(self):
+        for context in (parcels_ctx(role='sv', department_code='szov'),
+                        parcels_ctx(role='admin', department_code='op'),
+                        parcels_ctx(role='super_admin', department_code='op'),
+                        parcels_ctx(role='operator', headed=[909])):
+            with self.subTest(role=context['role'], headed=context['headed_department_ids']):
+                client, gate = self.build(context, granted=False)
+                self.assertEqual(client.get('/api/parcels/ping').status_code, 200)
+                self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
+
+    def test_closed_section_answers_before_the_qr_gate(self):
+        """Тренеру и чужому отделу — «раздел не открыт», а не «покажите QR».
+
+        Иначе человеку предлагают подтвердить доступ к тому, чего ему не
+        выдавали, — тупик, из которого он не выйдет.
+        """
+        for context in (parcels_ctx(role='trainer'),
+                        parcels_ctx(role='operator', department_code='op')):
+            with self.subTest(role=context['role'], dept=context['department_code']):
+                client, gate = self.build(context, granted=False)
+                response = client.get('/api/parcels/ping')
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.get_json().get('code'), 'PARCELS_SECTION_CLOSED')
+                self.assertEqual(gate.calls, [])
+
+    def test_reader_passes_the_qr_gate_but_not_the_write_gate(self):
+        """Порядок гейтов: сначала QR, потом «только чтение».
+
+        Оператор СЗоВ с подтверждённой сессией обязан получить именно
+        PARCELS_READ_ONLY: «покажите QR» на подтверждённой сессии читалось бы как
+        сбой подтверждения.
+        """
+        client, _gate = self.build(parcels_ctx(department_code='szov'), granted=True)
+        for method, url in (('post', '/api/parcels'),
+                            ('post', '/api/parcels/driver-lookup'),
+                            ('post', '/api/parcels/1/status'),
+                            ('patch', '/api/parcels/1'),
+                            ('delete', '/api/parcels/1')):
+            response = getattr(client, method)(url, json={})
+            self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
+            self.assertEqual(response.get_json().get('code'), 'PARCELS_READ_ONLY', url)
+
+    def test_reader_still_reads(self):
+        client, _gate = self.build(parcels_ctx(department_code='szov'), granted=True)
+        self.assertEqual(client.get('/api/parcels/ping').status_code, 200)
+
+    def test_preflight_is_never_gated(self):
+        """OPTIONS обязан отвечать без ключа: иначе браузер не пустит и сам отказ."""
+        client, gate = self.build(parcels_ctx(), granted=False)
+        self.assertEqual(client.options('/api/parcels').status_code, 204)
+        self.assertEqual(client.options('/api/parcels/1').status_code, 204)
+        self.assertEqual(gate.calls, [])
+
+
 class GatePolicyTest(unittest.TestCase):
-    """Правило «кому нужен QR» — одинаковое в обоих разделах."""
+    """Правило «кому нужен QR» — одинаковое во всех трёх разделах."""
 
     def test_crm_policy(self):
         self.assertTrue(crm_access.requires_sensitive_qr(crm_ctx()))
@@ -262,10 +386,22 @@ class GatePolicyTest(unittest.TestCase):
         self.assertFalse(wiki_access.requires_sensitive_qr('superadmin'))
         self.assertFalse(wiki_access.requires_sensitive_qr('operator', is_department_head=True))
 
+    def test_parcels_policy(self):
+        self.assertTrue(parcels_access.requires_sensitive_qr(parcels_ctx()))
+        self.assertTrue(parcels_access.requires_sensitive_qr(
+            parcels_ctx(department_code='szov')))
+        self.assertFalse(parcels_access.requires_sensitive_qr(parcels_ctx(role='sv')))
+        self.assertFalse(parcels_access.requires_sensitive_qr(
+            parcels_ctx(role='admin', department_code='op')))
+        # Глава отдела — даже с базовой ролью оператора.
+        self.assertFalse(parcels_access.requires_sensitive_qr(parcels_ctx(headed=[909])))
+
     def test_capabilities_tell_the_front_about_the_gate(self):
         """Фронт рисует замок по одному источнику правды, а не по роли."""
         self.assertTrue(crm_access.capabilities(crm_ctx())['requires_qr'])
         self.assertFalse(crm_access.capabilities(crm_ctx(role='sv'))['requires_qr'])
+        self.assertTrue(parcels_access.capabilities(parcels_ctx())['requires_qr'])
+        self.assertFalse(parcels_access.capabilities(parcels_ctx(role='sv'))['requires_qr'])
 
 
 def _approval_perimeter():

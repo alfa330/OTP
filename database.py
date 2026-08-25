@@ -5643,6 +5643,7 @@ class Database:
             self._init_front_office_calls_schema_tx(cursor)
             self._init_wiki_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
+            self._init_parcels_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
@@ -6362,6 +6363,36 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT crm_schema")
+
+    def _init_parcels_schema_tx(self, cursor):
+        """Схема раздела «Посылки» (таблицы parcels/parcel_events).
+
+        DDL живёт в пакете parcels/schema.py по той же причине, что у вики и
+        обращений; импорт локальный — на уровне модуля он создал бы цикл.
+
+        Стоит ПОСЛЕ _init_wiki_schema_tx намеренно: `parcels.office_id` — внешний
+        ключ на `wiki_offices`, и на чистой базе в обратном порядке разворот
+        раздела упал бы на несуществующей таблице.
+
+        SAVEPOINT — потому что весь _init_db идёт одной транзакцией: падение
+        здесь не должно ронять инициализацию всей базы. При отказе раздел честно
+        сообщает о себе через /api/parcels/ping (schema_ready=false), а остальное
+        приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT parcels_schema")
+        try:
+            from parcels.schema import init_parcels_schema
+            init_parcels_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT parcels_schema")
+            logging.exception(
+                "Схема раздела «Посылки» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT parcels_schema")
 
     def _init_trainer_schema_tx(self, cursor):
         """Схема раздела «Тренажёр» (таблицы trainer_*).

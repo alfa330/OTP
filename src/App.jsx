@@ -161,6 +161,7 @@ const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupCh
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
+const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
 const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
@@ -310,6 +311,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     szov_wallboard: 'SZoV wallboard',
     fleet_edm: 'EDM provider',
     operators: 'Operators',
+    parcels: 'Unclaimed parcels',
     profile: 'Profile',
     qr_access: 'QR access',
     recruiting: 'Recruiting',
@@ -1561,10 +1563,42 @@ const canAccessCrmSectionForUser = (userLike) => {
         === CRM_SECTION_DEPARTMENT_CODE;
 };
 
-// Разделы «Обращения» и «Вики» оператор открывает только после того, как админ
-// или супервайзер подтвердил его QR-код — тем же ключом, что открывает записи в
-// «Моих оценках». Правило повторяет серверное (crm/access.py, wiki/access.py):
-// экран с замком — удобство, а доступом является ответ сервера.
+/* «Посылки» — реестр невостребованных посылок фронт-офисов (задача #240).
+
+   Два отдела с разными правами на одни и те же записи: фронт-офисы заводят и
+   ведут карточки, СЗоВ ищет и читает. Роль внутри отдела на вход не влияет —
+   посылку принимает тот, кто сидит в офисе, а ищет тот, кому позвонил водитель.
+   Исключение то же, что у «Обращений»: тренер сюда не ходит.
+
+   Здесь решается только «показывать ли пункт меню»; обязательную границу и
+   разницу «читает / правит» держит parcels/access.py. */
+const PARCELS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
+
+const isParcelsSectionDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).some(
+        (code) => PARCELS_SECTION_DEPARTMENT_CODES.includes(code),
+    )
+);
+
+const canAccessParcelsSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'trainer') return false;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: реестр посылок
+    // главам чужих отделов не нужен (главы СЗоВ и фронт-офисов проходят ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isParcelsSectionDepartmentHead(userLike)) return true;
+    return PARCELS_SECTION_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+    );
+};
+
+// Разделы «Обращения», «Вики» и «Посылки» оператор открывает только после того,
+// как админ или супервайзер подтвердил его QR-код — тем же ключом, что открывает
+// записи в «Моих оценках». Правило повторяет серверное (crm/access.py,
+// wiki/access.py, parcels/access.py): экран с замком — удобство, а доступом
+// является ответ сервера.
 const sensitiveSectionQrRequiredFor = (userLike) => (
     normalizeRole(userLike?.role) === 'operator' && !isDepartmentHead(userLike)
 );
@@ -35754,6 +35788,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
+            const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             // Виджет табло живёт здесь, а не в разделе: закрывается только своим крестиком.
             // Какое направление табло открыто виджетом: null | 'osnova' | 'chat'. Окно поверх
@@ -43647,12 +43682,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Обращения» — свой предикат, не allowlist отдела: раздел общий,
                 // но на время выката открыт СЗоВ, админам и пилотному оператору.
                 if (view === 'crm_tickets' && canAccessCrmSection) return;
+                // «Посылки» — тоже свой предикат: раздел общий для двух отделов
+                // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
+                // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
+                if (view === 'parcels' && canAccessParcelsSection) return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessSipSettings, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessSipSettings, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -43711,10 +43750,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                // «Обращения» и «Вики» закрыты тем же ключом. Статус спрашиваем
-                // до отрисовки раздела: иначе замок мигнёт тому, кто доступ уже
-                // подтвердил, а сам раздел успеет получить 403.
-                if (view === 'crm_tickets' || view === 'wiki') {
+                // «Обращения», «Вики» и «Посылки» закрыты тем же ключом. Статус
+                // спрашиваем до отрисовки раздела: иначе замок мигнёт тому, кто
+                // доступ уже подтвердил, а сам раздел успеет получить 403.
+                if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept]);
@@ -44894,6 +44933,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
+                                    {/* «Посылки» — реестр невостребованных посылок фронт-офисов.
+                                        Раздел общий для двух отделов (фронт-офисы пишут, СЗоВ
+                                        читает), поэтому пункт объявлен ОДИН раз здесь, в общей
+                                        части меню, а не по ролевым ветвям — как «Вики» и
+                                        «Обращения». Кто что может внутри, считает бэкенд. */}
+                                    {canAccessParcelsSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'parcels')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'parcels' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-box"></FaIcon>
+                                            <span className="sidebar-text">Посылки</span>
+                                        </button>
+                                    </li>
+                                    )}
+
                                     {/* «Тренажёр» — голосовой разговор с ИИ и разбор после него.
                                         Раздел тестовый: тратит платные квоты и раздаёт браузеру
                                         ключи к внешним сервисам, поэтому только супер-админ.
@@ -45106,6 +45163,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fourYouUnreadCount,
                 crmUnreadCount,
                 canAccessCrmSection,
+                canAccessParcelsSection,
                 bellReadSource,
                 mobileIncomingNonce,
                 selectedSvId,
@@ -45439,6 +45497,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     realtimePulse={crmRealtimePulse}
                                     onUnreadChange={setCrmUnreadCount}
                                     focusRequest={crmFocusRequest}
+                                />
+                            </Suspense>
+                        ))}
+                        {view === "parcels" && canAccessParcelsSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Посылки"
+                                description="В реестре ФИО и телефоны живых водителей. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка реестра…</div>}>
+                                <ParcelsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
                                 />
                             </Suspense>
                         ))}

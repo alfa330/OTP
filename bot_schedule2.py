@@ -52434,6 +52434,25 @@ except Exception:
     logging.exception("Раздел «Обращения»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Посылки» (реестр невостребованных посылок фронт-офисов) ──────────
+# Тот же приём, что у вики и обращений. Ключ sensitive-access тот же самый:
+# в карточке ФИО и телефон живого водителя, и оба отдела — фронт-офисы и СЗоВ —
+# открывают раздел только после QR-подтверждения сессии (ТЗ задачи #240).
+try:
+    from parcels.routes import build_parcels_blueprint  # noqa: E402
+
+    app.register_blueprint(build_parcels_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+    ))
+    logging.info("Раздел «Посылки»: Blueprint подключён на /api/parcels")
+except Exception:
+    logging.exception("Раздел «Посылки»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Ограничитель Перезвона» (агент на машине оператора) ──────────────
 # GCS-клиент передаётся аргументом: раздел раздаёт exe агента подписанной
 # ссылкой, а не через наш инстанс — после выпуска версии обновляются все машины
