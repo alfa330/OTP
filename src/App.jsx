@@ -162,6 +162,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
+const TouchesView = lazyWithRetry(() => import('./components/cdr/TouchesView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
 const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
@@ -312,6 +313,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     fleet_edm: 'EDM provider',
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
+    touches: 'Sales touches',
     profile: 'Profile',
     qr_access: 'QR access',
     recruiting: 'Recruiting',
@@ -1592,6 +1594,40 @@ const canAccessParcelsSectionForUser = (userLike) => {
     return PARCELS_SECTION_DEPARTMENT_CODES.includes(
         normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
     );
+};
+
+/* «Касания» — звонки отдела продаж из CDR АТС. Круг у́же, чем у «Посылок»: АТС
+   обслуживает только продажи (проверено — из 98 внутренних номеров 55 совпали с
+   ОП-номерами базы, а «СЗоВ-номера» станция держит за сотрудниками ОП), поэтому
+   раздел видят глобальные админы, глава отдела продаж и супервайзеры ОП.
+
+   Оператору не показываем: выгрузка — это телефоны клиентов за период целиком,
+   инструмент разбора работы отдела, а не личный кабинет. Тренеру — по той же
+   причине, по которой ему закрыты «Обращения» и «Посылки».
+
+   Здесь решается только «показывать ли пункт меню»; обязательную границу держит
+   cdr/access.py. */
+const TOUCHES_SECTION_DEPARTMENT_CODE = 'op';
+
+const isTouchesSectionDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).includes(TOUCHES_SECTION_DEPARTMENT_CODE)
+);
+
+const canAccessTouchesSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'trainer') return false;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: звонки продаж
+    // главам чужих отделов не нужны (глава ОП проходит проверкой ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isTouchesSectionDepartmentHead(userLike)) return true;
+    // СВ отдела продаж. Сверяем и код отдела, и id: у части профилей приходит
+    // только одно из двух, и проверка по одному полю молча теряла бы человека.
+    if (!isSupervisorRole(role)) return false;
+    if (isOpSalesSupervisorForAiQa(userLike)) return true;
+    return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+        === TOUCHES_SECTION_DEPARTMENT_CODE;
 };
 
 // Разделы «Обращения», «Вики» и «Посылки» оператор открывает только после того,
@@ -35789,6 +35825,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
+            // «Касания»: глобальные админы, глава отдела продаж и СВ ОП.
+            const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             // Виджет табло живёт здесь, а не в разделе: закрывается только своим крестиком.
             // Какое направление табло открыто виджетом: null | 'osnova' | 'chat'. Окно поверх
@@ -38594,7 +38632,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'group_late_bot' || canAccessGroupLateBotSection) &&
                     (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection) &&
-                    (requestedViewFromUrl !== 'fleet_edm' || canAccessFleetEdm);
+                    (requestedViewFromUrl !== 'fleet_edm' || canAccessFleetEdm) &&
+                    (requestedViewFromUrl !== 'touches' || canAccessTouchesSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
                     return;
@@ -38604,7 +38643,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessTouchesSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -43686,12 +43725,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
                 // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
                 if (view === 'parcels' && canAccessParcelsSection) return;
+                // «Касания» — свой предикат, не allowlist отдела: раздел про
+                // отдел продаж, но открыт и админам, которые в ОП не состоят.
+                if (view === 'touches' && canAccessTouchesSection) return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessSipSettings, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessTouchesSection, canAccessSipSettings, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -44951,6 +44993,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
+                                    {/* «Касания» — звонки отдела продаж из CDR АТС.
+                                        Пункт объявлен ОДИН раз здесь, в общей части
+                                        меню, как «Вики», «Обращения» и «Посылки»:
+                                        аудитория разнородная (глобальные админы, глава
+                                        ОП, СВ ОП), и по ролевым ветвям его легко забыть
+                                        в одной — так уже было с «Ботом опозданий».
+                                        Кто что может внутри, считает бэкенд. */}
+                                    {canAccessTouchesSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'touches')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'touches' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-phone-volume"></FaIcon>
+                                            <span className="sidebar-text">Касания</span>
+                                        </button>
+                                    </li>
+                                    )}
+
                                     {/* «Тренажёр» — голосовой разговор с ИИ и разбор после него.
                                         Раздел тестовый: тратит платные квоты и раздаёт браузеру
                                         ключи к внешним сервисам, поэтому только супер-админ.
@@ -45164,6 +45226,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 crmUnreadCount,
                 canAccessCrmSection,
                 canAccessParcelsSection,
+                canAccessTouchesSection,
                 bellReadSource,
                 mobileIncomingNonce,
                 selectedSvId,
@@ -45516,6 +45579,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
+                        {view === "touches" && canAccessTouchesSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <TouchesView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
                         {view === "szov_wallboard" && canAccessSzovWallboardSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
                                 <SzovWallboardView

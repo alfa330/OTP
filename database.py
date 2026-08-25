@@ -5649,6 +5649,7 @@ class Database:
             self._init_icore_phone_schema_tx(cursor)
             self._init_trainings_schema_tx(cursor)
             self._init_trainer_schema_tx(cursor)
+            self._init_cdr_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -6461,6 +6462,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT fleet_edm_schema")
+
+    def _init_cdr_schema_tx(self, cursor):
+        """Схема раздела «Касания» (cdr_touches, cdr_sync_days, cdr_operators,
+        cdr_agent_state).
+
+        Под SAVEPOINT по той же причине, что и соседи: весь _init_db идёт одной
+        транзакцией, и упавший раздел не имеет права уронить старт приложения.
+        При отказе роуты раздела отвечают понятным 503 (schema_is_ready), а не
+        падают пятисоткой из-под первого SELECT.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT cdr_schema")
+        try:
+            from cdr.schema import init_cdr_schema
+            init_cdr_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT cdr_schema")
+            logging.exception(
+                "Схема раздела «Касания» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT cdr_schema")
 
     def _init_trainings_schema_tx(self, cursor):
         """Схема раздела «Тренинги»: справочник корпоративных тем (training_topics)

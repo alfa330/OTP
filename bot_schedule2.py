@@ -52499,6 +52499,27 @@ except Exception:
     logging.exception("Раздел «Провайдер ЭДО»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Касания»: звонки отдела продаж из CDR АТС FreePBX ────────────────
+# Своего пула у раздела нет намеренно: портал к станции не ходит. Станция стоит
+# в корпоративной сети (наружу её выводили 25.08.2026 и в тот же день закрыли —
+# сервис лёг), поэтому данные приносит мост оттуда: cdr_bridge/, ручки
+# /api/cdr/agent/* под токеном CDR_AGENT_TOKEN. Здесь остаётся только чтение
+# своей базы и сборка книги.
+try:
+    from cdr.routes import build_cdr_blueprint  # noqa: E402
+
+    app.register_blueprint(build_cdr_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+    ))
+    logging.info("Раздел «Касания»: Blueprint подключён на /api/cdr")
+except Exception:
+    logging.exception("Раздел «Касания»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Тренинги»: справочник корпоративных тем ──────────────────────────
 # Только НОВАЯ поверхность раздела. Сами записи о проведённых тренингах
 # остаются на плоских /api/trainings ниже: они вплетены в расчёт оплачиваемых
