@@ -27,6 +27,11 @@ import { iosCard, iosGroupLabel, IosHint, IosPager } from '../ui/ios';
  *
  *  `hint`  — короткая оговорка, видна всегда (расшифровка знаменателя).
  *  `help`  — определение показателя, спрятано под «i».
+ *
+ *  «Аналитика» пользуется только `help`: решение владельца 25.08.2026 — на
+ *  экране остаются числа и названия, объяснения уходят под «i». `hint` жив
+ *  ради статистики тренажёров, где подпись — это единица измерения
+ *  («медиана», «в среднем»), а не пояснение.
  */
 export const Metric = ({ label, value, hint = null, help = null,
                          helpAlign = 'left', tone = null }) => (
@@ -67,11 +72,12 @@ export const Td = ({ children, right = false, muted = false }) => (
  *  подписываются прямо в заголовке («· 20 из 57»): таблица режется потолком
  *  строк, и без этого обрез читается как «просрочек ровно двадцать».
  *  `badge` — состояние выборки (например, сужение по отделу) справа.
- *  `help`  — длинное пояснение под «i»; `hint` — короткая строка под таблицей.
+ *  `help`  — пояснение под «i». Видимой подписи под таблицей у набора нет
+ *  намеренно: пояснение нужно один раз, а место занимало бы всегда.
  *  `footer` — управление под таблицей; туда PagedTable кладёт пейджер.
  */
 export const Table = ({ title, icon: Icon, count, total = null, empty, head,
-                        children, hint = null, help = null, badge = null,
+                        children, help = null, badge = null,
                         footer = null }) => (
     <section className="space-y-1.5">
         <div className="flex items-center gap-1.5 pr-1">
@@ -97,7 +103,6 @@ export const Table = ({ title, icon: Icon, count, total = null, empty, head,
             )}
         </div>
         {footer}
-        {hint && <div className="px-1 text-[11.5px] leading-relaxed text-slate-500">{hint}</div>}
     </section>
 );
 
