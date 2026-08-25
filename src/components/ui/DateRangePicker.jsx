@@ -187,8 +187,17 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
 }
 
 /* Чип с диапазоном и календарь под ним. Выбор применяется сразу: второй клик по
- * дню (или пресет) отдаёт диапазон разделу и закрывает поповер. */
-export function IosDateRangePicker({ from, to, max, min, onChange, presets = null }) {
+ * дню (или пресет) отдаёт диапазон разделу и закрывает поповер.
+ *
+ * `triggerClassName` ЗАМЕНЯЕТ класс кнопки целиком — так же, как у одиночного
+ * IosDatePicker (второй смысл того же имени в двух соседних примитивах был бы
+ * ловушкой). Значит и состояния (наведение, фокус) берёт на себя вызывающий.
+ * Нужен он там, где чип стоит в РЯДУ С ПОЛЯМИ формы: в фильтрах «Посылок»
+ * поле-чип по своей ширине выбивалось из строки трёх селекторов. Кнопка внутри
+ * — иконка, подпись и шеврон, поэтому своему классу обычно нужен
+ * `[&>span]:flex-1`, иначе подпись не растягивается и шеврон уезжает к тексту. */
+export function IosDateRangePicker({ from, to, max, min, onChange, presets = null,
+                                    triggerClassName = '' }) {
     const [open, setOpen] = useState(false);
     const ref = useRef(null);
 
@@ -202,9 +211,10 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
     return (
         <div ref={ref} className="relative">
             <button type="button" onClick={() => setOpen((o) => !o)}
-                    className={`flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-medium transition ${
-                        open ? 'bg-white text-slate-900 ring-2 ring-blue-500/70'
-                             : 'bg-slate-100 text-slate-700 hover:bg-slate-200/80'}`}>
+                    className={triggerClassName
+                        || `flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-medium transition ${
+                            open ? 'bg-white text-slate-900 ring-2 ring-blue-500/70'
+                                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200/80'}`}>
                 <Calendar size={14} className="text-slate-400" />
                 <span>{rangeLabel(from, to)}</span>
                 <ChevronUp size={13} className={`text-slate-400 transition-transform ${open ? '' : 'rotate-180'}`} />

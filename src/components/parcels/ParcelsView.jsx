@@ -61,6 +61,19 @@ const shiftDays = (days) => {
     return isoDate(value);
 };
 
+/* Вид чипа диапазона — ОДИН В ОДИН с ios-вариантом CustomSelect (белое поле,
+   ring-1, px-3 py-2, 12.5px, тот же мягкий контур). Иначе «Дата приёма» стоит в
+   ряду трёх селекторов кнопкой по своей ширине и выбивается из строки.
+   `[&>span]:flex-1` нужен, потому что triggerClassName заменяет класс кнопки
+   целиком: без него подпись не растягивается и шеврон уезжает к тексту.
+   Состояния свои — открытому поповеру кнопка остаётся в фокусе, поэтому кольцо
+   на `focus`, как у эталона в OfficeDayModal. */
+const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 '
+    + 'text-left text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:bg-slate-50 '
+    + 'active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
+    + '[&>span]:flex-1 [&>span]:text-left [&>span]:truncate';
+
 const DATE_PRESETS = [
     { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
     { label: 'Неделя', range: () => ({ from: shiftDays(6), to: isoDate(new Date()) }) },
@@ -507,8 +520,11 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             полей. Раскрытый системный календарь рисует браузер: своя
                             шапка, свои кнопки, чужая деталь рядом с rounded-2xl.
                             Здесь тот же примитив, что в аналитике вики и в чатах. */}
-                        <div className="space-y-1.5">
-                            <span className={`block ${iosGroupLabel}`}>Дата приёма</span>
+                        {/* Обёртка и подпись — как у трёх соседей: у них подпись
+                            строчный <span> внутри <label>, и `block` здесь поднимал
+                            «ДАТА ПРИЁМА» на пару пикселей выше остальных. */}
+                        <label className="block space-y-1.5">
+                            <span className={iosGroupLabel}>Дата приёма</span>
                             <IosDateRangePicker
                                 from={filters.date_from || ''}
                                 to={filters.date_to || ''}
@@ -517,8 +533,9 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                     ...prev, date_from: from || '', date_to: to || '',
                                 }))}
                                 presets={DATE_PRESETS}
+                                triggerClassName={DATE_TRIGGER}
                             />
-                        </div>
+                        </label>
                     </div>
                 </div>
             )}

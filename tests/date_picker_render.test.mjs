@@ -49,10 +49,12 @@ async function loadCalendar() {
   const file = join(dir, 'DateRangePicker.mjs');
   writeFileSync(file, patched, 'utf8');
   const mod = await import(`file://${file.replace(/\\/g, '/')}`);
-  return mod.IosDateRangeCalendar;
+  return mod;
 }
 
-const IosDateRangeCalendar = await loadCalendar();
+const picker = await loadCalendar();
+const IosDateRangeCalendar = picker.IosDateRangeCalendar;
+const IosDateRangePicker = picker.IosDateRangePicker;
 
 const render = (props) => renderToStaticMarkup(
   React.createElement(IosDateRangeCalendar, { onChange: () => {}, ...props }),
@@ -103,4 +105,36 @@ test('диапазонный режим не задет: пресеты и по�
 test('диапазон по-прежнему подсвечивает полосу между краями', () => {
   const html = render({ from: '2026-08-01', to: '2026-08-10' });
   assert.ok(html.includes('bg-blue-500/10'), 'полоса выбранного периода должна рисоваться');
+});
+
+/* ── Класс кнопки-триггера у обёртки ──────────────────────────────────────
+ *
+ * `triggerClassName` появился, когда чип диапазона понадобился В РЯДУ С ПОЛЯМИ
+ * формы (фильтры «Посылок»): своей шириной он выбивался из строки селекторов.
+ * Договор такой же, как у одиночного IosDatePicker — класс ЗАМЕНЯЕТСЯ целиком,
+ * и вызывающий берёт на себя все состояния. Разойдись эти два примитива в
+ * смысле одного и того же имени — это была бы ловушка, поэтому договор под
+ * тестом, а не только в комментарии.
+ */
+const renderPicker = (props) => renderToStaticMarkup(
+  React.createElement(IosDateRangePicker, { from: '', to: '', onChange: () => {}, ...props }),
+);
+
+test('без triggerClassName обёртка остаётся прежним чипом', () => {
+  const html = renderPicker({});
+  assert.ok(html.includes('bg-slate-100'), 'у чипа по умолчанию серая подложка');
+  assert.ok(html.includes('Весь период'), 'пустой диапазон подписан «Весь период»');
+});
+
+test('triggerClassName заменяет класс кнопки целиком, а не дописывается к нему', () => {
+  const html = renderPicker({ triggerClassName: 'мой-класс-поля' });
+  assert.ok(html.includes('мой-класс-поля'));
+  assert.ok(!html.includes('bg-slate-100'),
+    'класс по умолчанию не должен оставаться — иначе поле сохранит вид чипа');
+});
+
+test('подпись диапазона не зависит от класса триггера', () => {
+  const html = renderPicker({ from: '2026-08-19', to: '2026-08-25', triggerClassName: 'мой-класс-поля' });
+  assert.ok(html.includes('19 авг'), html.slice(0, 200));
+  assert.ok(html.includes('25 авг 2026'));
 });
