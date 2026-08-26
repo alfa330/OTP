@@ -48848,7 +48848,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           <>
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
                                             <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                                              <FaIcon className="fas fa-id-badge text-indigo-600 text-lg"></FaIcon>
+                                              <FaIcon className="fas fa-id-card text-indigo-600 text-lg"></FaIcon>
                                             </div>
                                             <div className="min-w-0">
                                               <p className="text-xs uppercase tracking-wide text-gray-500">Должность</p>
