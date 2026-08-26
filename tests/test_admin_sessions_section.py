@@ -26,6 +26,8 @@ import logging
 import textwrap
 import typing
 import unittest
+import uuid
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -837,6 +839,345 @@ class SensitiveAccessAuditTests(unittest.TestCase):
             'sid', 7, False, actor_id=7, actor_role='operator')
         self.assertEqual(recorded[1][1][2], 'revoked')
         self.assertIn('ELSE NULL', recorded[0][0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Выдача доступа из карточки, без сканирования QR
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# QR показывает сам оператор со своего экрана, и когда показать его нечем
+# (разряженный телефон, удалёнка), доступ упирался в устройство, а не в решение.
+# Кнопка у сессии снимает это, но ровно тем же путём: та же запись, тот же
+# журнал, то же уведомление. Здесь сторожится главное — что вход через раздел
+# «Сессии» НЕ шире периметра выдачи по QR: гвард раздела пускает по уровню роли
+# и на возглавляемые отделы не смотрит вовсе.
+
+# users: id, telegram_id, name, role, direction, hire_date, supervisor_id, login
+def _user(uid, role, name='Кто-то', supervisor_id=None):
+    return (uid, None, name, role, None, None, supervisor_id, f'u{uid}')
+
+
+LIVE_SESSION = {
+    'session_id': '3dbab764-1234-4b3c-9aaa-0011223344ff',
+    'user_id': 448,
+    'revoked_at': None,
+    'expires_at': datetime(2099, 1, 1),
+    'sensitive_data_unlocked': False,
+}
+
+
+class _GrantDB(_RouteDB):
+    """База для выдачи доступа: люди, одна сессия и запись о переключении."""
+
+    def __init__(self, session=None, users=None, headed=None, departments=None, updated=True):
+        super().__init__()
+        self.session = dict(session) if session is not None else dict(LIVE_SESSION)
+        self.users = dict(users or {})
+        self.headed = dict(headed or {})
+        self.departments = dict(departments or {})
+        self.updated = updated
+        self.granted = None
+
+    def get_user(self, id):  # noqa: A002 — сигнатура монолита
+        return self.users.get(int(id))
+
+    def get_user_session(self, session_id, user_id=None):
+        if not self.session or self.session['session_id'] != session_id:
+            return None
+        if user_id is not None and self.session['user_id'] != user_id:
+            return None
+        return dict(self.session)
+
+    def get_headed_departments_for_user(self, user_id):
+        return [{'id': dept} for dept in self.headed.get(int(user_id), [])]
+
+    def get_user_department_id(self, user_id):
+        return self.departments.get(int(user_id))
+
+    def set_session_sensitive_access(self, **kwargs):
+        self.granted = kwargs
+        return self.updated
+
+
+_GRANT_HELPERS = (
+    'grant_admin_session_sensitive_access',
+    '_admin_sessions_guard',
+    '_sensitive_access_grant_capability',
+    '_sensitive_access_approval_error',
+    '_normalize_user_role',
+)
+
+
+def _grant_route(fake_db, actor_id=1, method='POST'):
+    """Ручку и периметр берём НАСТОЯЩИЕ: подменяется только всё внешнее.
+
+    Возвращает (route, notifications) — уведомления складываются списком вместо
+    похода в Telegram, поток тоже подставной: настоящий ушёл бы в сеть.
+    """
+    notifications = []
+
+    class _FakeThreading:
+        @staticmethod
+        def Thread(target=None, args=(), kwargs=None, daemon=None):
+            class _Started:
+                @staticmethod
+                def start():
+                    notifications.append((args, dict(kwargs or {})))
+            return _Started
+
+    namespace = {
+        'db': fake_db,
+        'g': SimpleNamespace(user_id=actor_id),
+        'request': SimpleNamespace(method=method,
+                                   headers={'User-Agent': 'Chrome'},
+                                   get_json=lambda silent=False: {},
+                                   args={}),
+        'jsonify': lambda payload: payload,
+        'logging': logging,
+        'uuid': uuid,
+        'datetime': datetime,
+        'threading': _FakeThreading,
+        '_is_admin_role': lambda role: role in ('admin', 'super_admin'),
+        '_client_ip': lambda: '10.0.0.9',
+        '_build_cors_preflight_response': lambda: ({}, 200),
+        '_notify_super_admin_sensitive_access_approved': lambda *a, **kw: None,
+    }
+    module = source_cache.parse(BOT_PATH.read_text(encoding='utf-8-sig'))
+    nodes = []
+    for target in _GRANT_HELPERS:
+        node = copy.deepcopy(next(n for n in module.body
+                                  if isinstance(n, ast.FunctionDef) and n.name == target))
+        node.decorator_list = []
+        nodes.append(node)
+    scope = dict(namespace)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+                 str(BOT_PATH), 'exec'), scope)
+    return scope['grant_admin_session_sensitive_access'], notifications
+
+
+class GrantAccessRouteTests(unittest.TestCase):
+    SESSION_ID = LIVE_SESSION['session_id']
+
+    def _db(self, **kwargs):
+        users = kwargs.pop('users', None) or {
+            1: _user(1, 'super_admin', 'Супер админ'),
+            448: _user(448, 'operator', 'Дуанаева Айша', supervisor_id=77),
+        }
+        return _GrantDB(users=users, **kwargs)
+
+    def test_grant_writes_the_actor_and_wakes_the_notification(self):
+        fake_db = self._db()
+        route, notifications = _grant_route(fake_db)
+        result = route(session_id=self.SESSION_ID)
+
+        self.assertEqual(_status(result), 200)
+        self.assertTrue(result[0]['changed'])
+        self.assertEqual(fake_db.granted['session_id'], self.SESSION_ID)
+        self.assertEqual(fake_db.granted['user_id'], 448)
+        self.assertTrue(fake_db.granted['unlocked'])
+        self.assertEqual(fake_db.granted['actor_id'], 1, 'выдал тот, кто нажал')
+        self.assertEqual(fake_db.granted['actor_role'], 'super_admin')
+        self.assertEqual(fake_db.granted['ip_address'], '10.0.0.9')
+        self.assertEqual(len(notifications), 1, 'супер-админ обязан узнать о выдаче')
+
+    def test_notification_says_the_grant_was_manual(self):
+        """Ручную выдачу отличаем от QR: оператор её не инициировал."""
+        route, notifications = _grant_route(self._db())
+        route(session_id=self.SESSION_ID)
+        self.assertEqual(notifications[0][1].get('source'), 'manual')
+
+    def test_section_guard_still_closes_the_route(self):
+        fake_db = self._db(users={
+            7: _user(7, 'operator', 'Оператор'),
+            448: _user(448, 'operator', 'Дуанаева Айша'),
+        })
+        route, notifications = _grant_route(fake_db, actor_id=7)
+        self.assertEqual(_status(route(session_id=self.SESSION_ID)), 403)
+        self.assertIsNone(fake_db.granted)
+        self.assertEqual(notifications, [])
+
+    def test_department_head_cannot_reach_another_department(self):
+        """Главное, ради чего тест и написан.
+
+        Гвард раздела смотрит только на уровень роли, поэтому глава Бухгалтерии
+        с базовой ролью admin открывает карточку любого сотрудника портала. Право
+        на выдачу считает периметр — тот же, что у подтверждения по QR.
+        """
+        fake_db = self._db(
+            users={
+                2: _user(2, 'admin', 'Глава Бухгалтерии'),
+                448: _user(448, 'operator', 'Оператор СЗоВ', supervisor_id=77),
+            },
+            headed={2: [5]},
+            departments={2: 5, 448: 9},
+        )
+        route, notifications = _grant_route(fake_db, actor_id=2)
+        result = route(session_id=self.SESSION_ID)
+        self.assertEqual(_status(result), 403)
+        self.assertIn('своего отдела', result[0]['error'])
+        self.assertIsNone(fake_db.granted)
+        self.assertEqual(notifications, [])
+
+    def test_department_head_opens_his_own_people(self):
+        fake_db = self._db(
+            users={
+                2: _user(2, 'admin', 'Глава СЗоВ'),
+                448: _user(448, 'operator', 'Оператор СЗоВ', supervisor_id=77),
+            },
+            headed={2: [9]},
+            departments={2: 9, 448: 9},
+        )
+        route, _ = _grant_route(fake_db, actor_id=2)
+        self.assertEqual(_status(route(session_id=self.SESSION_ID)), 200)
+        self.assertEqual(fake_db.granted['user_id'], 448)
+
+    def test_people_without_the_qr_gate_are_refused(self):
+        """Супервайзеру, стажёру и админу гейт не мешает — «выдавать» им нечего.
+
+        Условие то же, что у выдачи по QR (approve_sensitive_access отбивает
+        не-оператора) и у /api/sensitive-access/status: роль «оператор», и всё.
+        """
+        for role in ('sv', 'trainee', 'admin', 'trainer'):
+            fake_db = self._db(users={
+                1: _user(1, 'super_admin'),
+                448: _user(448, role, 'Не оператор'),
+            })
+            route, notifications = _grant_route(fake_db)
+            result = route(session_id=self.SESSION_ID)
+            self.assertEqual(_status(result), 400, role)
+            self.assertIn('QR-ограничения', result[0]['error'])
+            self.assertIsNone(fake_db.granted, role)
+            self.assertEqual(notifications, [], role)
+
+    def test_operator_heading_a_department_is_still_opened(self):
+        """Оператору-главе отдела кнопка нужна ровно так же, как остальным.
+
+        Вики, «Обращения» и «Посылки» его действительно не держат — назначение
+        главой заменяет роль. Но «Мои оценки» держат наравне со всеми (телефоны
+        маскируются, записи и переписки закрыты), его собственный экран просит
+        QR, и подтверждение по QR ему открывают без вопросов. Вычти мы главу из
+        правила — кнопки не было бы ровно у того, кому доступ и так выдают.
+        """
+        fake_db = self._db(headed={448: [5]}, departments={448: 9})
+        route, _ = _grant_route(fake_db)
+        self.assertEqual(_status(route(session_id=self.SESSION_ID)), 200)
+        self.assertEqual(fake_db.granted['user_id'], 448)
+
+    def test_revoked_and_expired_sessions_are_not_opened(self):
+        """Открыть протухшую сессию значит соврать: читающий гейт всё равно откажет."""
+        for patch in ({'revoked_at': datetime(2026, 8, 1)},
+                      {'expires_at': datetime(2000, 1, 1)}):
+            session = dict(LIVE_SESSION)
+            session.update(patch)
+            fake_db = self._db(session=session)
+            route, notifications = _grant_route(fake_db)
+            self.assertEqual(_status(route(session_id=self.SESSION_ID)), 410, patch)
+            self.assertIsNone(fake_db.granted, patch)
+            self.assertEqual(notifications, [], patch)
+
+    def test_already_open_access_is_not_journalled_twice(self):
+        """Журнал читают как историю решений, а не нажатий."""
+        session = dict(LIVE_SESSION, sensitive_data_unlocked=True)
+        fake_db = self._db(session=session)
+        route, notifications = _grant_route(fake_db)
+        result = route(session_id=self.SESSION_ID)
+        self.assertEqual(_status(result), 200)
+        self.assertFalse(result[0]['changed'])
+        self.assertIsNone(fake_db.granted)
+        self.assertEqual(notifications, [])
+
+    def test_lost_race_with_revocation_is_not_reported_as_success(self):
+        fake_db = self._db(updated=False)
+        route, notifications = _grant_route(fake_db)
+        self.assertEqual(_status(route(session_id=self.SESSION_ID)), 409)
+        self.assertEqual(notifications, [], 'уведомлять не о чем — доступ не открылся')
+
+    def test_garbage_session_id_is_a_refusal_not_a_crash(self):
+        """session_id — колонка UUID: мусор роняет драйвер и даёт 500 вместо отказа."""
+        fake_db = self._db()
+        route, _ = _grant_route(fake_db)
+        for bad in ('', 'abc', "1' OR '1'='1", None):
+            self.assertEqual(_status(route(session_id=bad)), 400, bad)
+        self.assertIsNone(fake_db.granted)
+
+    def test_unknown_session_is_404(self):
+        fake_db = self._db()
+        route, _ = _grant_route(fake_db)
+        self.assertEqual(
+            _status(route(session_id='00000000-0000-4000-8000-000000000000')), 404)
+        self.assertIsNone(fake_db.granted)
+
+    def test_preflight_does_not_need_a_session(self):
+        fake_db = self._db()
+        route, _ = _grant_route(fake_db, method='OPTIONS')
+        self.assertEqual(_status(route(session_id='что угодно')), 200)
+        self.assertIsNone(fake_db.granted)
+
+
+class GrantAccessCardFlagsTests(unittest.TestCase):
+    """Право на кнопку считает сервер: на клиенте его не из чего посчитать."""
+
+    def test_card_carries_both_flags(self):
+        source = BOT_PATH.read_text(encoding='utf-8-sig')
+        card = source[source.index('def get_admin_session_user('):]
+        card = card[:card.index('def _revoke_sessions_of_users')]
+        self.assertIn('"sensitive_access_required"', card)
+        self.assertIn('"can_grant_sensitive_access"', card)
+        self.assertIn('_sensitive_access_grant_capability(', card)
+
+    def test_list_route_stays_free_of_them(self):
+        """В списке кнопки нет, а флаги стоили бы запроса на КАЖДУЮ строку."""
+        source = BOT_PATH.read_text(encoding='utf-8-sig')
+        listing = source[source.index('def list_admin_sessions('):
+                         source.index('def get_admin_session_user(')]
+        self.assertNotIn('_sensitive_access_grant_capability', listing)
+
+
+class GrantAccessButtonTests(unittest.TestCase):
+    """Интерфейсные решения кнопки. Их ломают молча, поэтому сторожим текстом."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.modal = (ROOT / 'src' / 'components' / 'sessions' / 'SessionUserModal.jsx').read_text(
+            encoding='utf-8')
+        cls.app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+
+    def test_button_is_gated_by_the_server_flag_and_by_the_state(self):
+        self.assertIn('canGrantAccess && !accessOpen', self.modal,
+                      'кнопка обязана исчезать там, где доступ уже открыт')
+        self.assertIn('detail?.user?.sensitive_access_required', self.modal)
+        self.assertIn('detail?.user?.can_grant_sensitive_access', self.modal,
+                      'право берётся с сервера, а не выводится из роли на клиенте')
+
+    def test_the_button_exists_once(self):
+        self.assertEqual(self.modal.count("'Открыть доступ'"), 1)
+
+    def test_closing_access_is_deliberately_absent(self):
+        """Закрыть доступ у админа сегодня нечем — и это решение, а не пропуск.
+
+        Доступ гаснет вместе с сессией, а «Прервать» стоит тут же. Появится
+        кнопка «Закрыть доступ» — правится и этот тест, и ручка.
+        """
+        self.assertNotIn('Закрыть доступ', self.modal)
+
+    def test_client_calls_exactly_the_route_the_server_serves(self):
+        self.assertIn('/sensitive-access`', self.app)
+        self.assertIn("/api/admin/sessions/${encodeURIComponent(session.session_id)}/sensitive-access",
+                      self.app)
+        self.assertIn("@app.route('/api/admin/sessions/<session_id>/sensitive-access'",
+                      BOT_PATH.read_text(encoding='utf-8-sig'))
+
+    def test_grant_asks_before_it_opens(self):
+        """Сессий в карточке бывает десяток — промах мышью открыл бы не ту."""
+        handler = self.app[self.app.index('const handleGrantAdminSessionAccess'):]
+        handler = handler[:handler.index('}, [user?.id, refreshAdminSessions]);')]
+        self.assertIn('window.confirm', handler)
+
+    def test_showtoast_is_not_a_dependency(self):
+        """Нестабильный showToast в зависимостях перезапускает загрузку данных."""
+        handler = self.app[self.app.index('const handleGrantAdminSessionAccess'):]
+        handler = handler[:handler.index('}, [user?.id, refreshAdminSessions]);')]
+        self.assertNotIn('showToast]', handler)
 
 
 if __name__ == '__main__':

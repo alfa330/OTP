@@ -67,14 +67,29 @@ const grantedByText = (name, role) => (
     name ? `${name} · ${roleLabel(role)}` : 'неизвестно — доступ выдан до того, как завели журнал'
 );
 
-const SessionCard = ({ session, formatDate, onRevoke, isRevoking, disabled }) => {
+const SessionCard = ({
+    session,
+    formatDate,
+    onRevoke,
+    isRevoking,
+    onGrantAccess,
+    isGranting,
+    canGrantAccess,
+    disabled
+}) => {
     const [uaOpen, setUaOpen] = React.useState(false);
     const device = React.useMemo(() => parseUserAgent(session.user_agent), [session.user_agent]);
     const accessOpen = Boolean(session.sensitive_data_unlocked);
 
     return (
         <div className={`${iosCard} overflow-hidden`}>
-            <div className="flex items-start justify-between gap-3 px-3.5 py-3">
+            {/* flex-wrap, а не одна строка: на телефоне модалка раскрывается во
+                весь экран, и две пилюли рядом со строкой «Планшет · Android 14 ·
+                Chrome» ужимали её вдвое (199 → 79 px на ширине 320), а карточка
+                режет вылезшее своим overflow-hidden. Не помещаются — кнопки
+                уезжают на свою строку, ml-auto держит их справа. С одной кнопкой
+                (доступ уже открыт) перенос не нужен и не случается. */}
+            <div className="flex flex-wrap items-start justify-between gap-3 px-3.5 py-3">
                 <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-1.5">
                         <span className="text-[13px] font-semibold text-slate-800">
@@ -93,14 +108,30 @@ const SessionCard = ({ session, formatDate, onRevoke, isRevoking, disabled }) =>
                         {dash(session.ip_address)} · {session.session_id?.slice(0, 8)}…
                     </div>
                 </div>
-                <button
-                    type="button"
-                    onClick={() => onRevoke(session)}
-                    disabled={disabled || isRevoking}
-                    className="shrink-0 rounded-lg bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-600 ring-1 ring-red-100 transition hover:bg-red-600 hover:text-white active:scale-[0.98] disabled:opacity-40"
-                >
-                    {isRevoking ? 'Прерывание…' : 'Прервать'}
-                </button>
+                <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
+                    {/* Выдать доступ можно только там, где его ещё нет: когда он
+                        открыт, об этом говорит янтарная полоса ниже, и второй
+                        ответ на тот же вопрос — шум. Право приходит с сервера
+                        одним флагом, потому что на клиенте его не посчитать. */}
+                    {canGrantAccess && !accessOpen && (
+                        <button
+                            type="button"
+                            onClick={() => onGrantAccess(session)}
+                            disabled={disabled || isGranting || isRevoking}
+                            className="rounded-lg bg-blue-50 px-2.5 py-1.5 text-[12px] font-medium text-blue-600 ring-1 ring-blue-100 transition hover:bg-blue-600 hover:text-white active:scale-[0.98] disabled:opacity-40"
+                        >
+                            {isGranting ? 'Открываем…' : 'Открыть доступ'}
+                        </button>
+                    )}
+                    <button
+                        type="button"
+                        onClick={() => onRevoke(session)}
+                        disabled={disabled || isRevoking || isGranting}
+                        className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-600 ring-1 ring-red-100 transition hover:bg-red-600 hover:text-white active:scale-[0.98] disabled:opacity-40"
+                    >
+                        {isRevoking ? 'Прерывание…' : 'Прервать'}
+                    </button>
+                </div>
             </div>
 
             <div className="grid grid-cols-3 gap-px border-t border-slate-100 bg-slate-100 text-center">
@@ -162,7 +193,9 @@ const SessionUserModal = ({
     formatDate,
     onRevokeSession,
     onRevokeAll,
-    revokingSessionId
+    revokingSessionId,
+    onGrantAccess,
+    grantingSessionId
 }) => {
     const user = detail?.user || person || null;
     const sessions = detail?.sessions || [];
@@ -181,6 +214,14 @@ const SessionUserModal = ({
     const openSessions = React.useMemo(
         () => sessions.filter((s) => s.sensitive_data_unlocked),
         [sessions]
+    );
+    // Право на выдачу считает сервер и присылает готовым флагом: у карточки нет
+    // ни возглавляемых отделов сотрудника, ни отделов смотрящего, а без них ни
+    // «есть ли QR-ограничение», ни «мой ли это периметр» не посчитать. Пока
+    // карточка не загрузилась, кнопки нет: обещать действие по строке списка
+    // нельзя — сервер откажет молча.
+    const canGrantAccess = Boolean(
+        detail?.user?.sensitive_access_required && detail?.user?.can_grant_sensitive_access
     );
     // Пока карточка не загрузилась, число берём из строки списка; как только
     // пришли настоящие сессии — только из них. Иначе кнопка предлагала
@@ -371,6 +412,9 @@ const SessionUserModal = ({
                                         formatDate={formatDate}
                                         onRevoke={onRevokeSession}
                                         isRevoking={revokingSessionId === session.session_id}
+                                        onGrantAccess={onGrantAccess}
+                                        isGranting={grantingSessionId === session.session_id}
+                                        canGrantAccess={canGrantAccess}
                                         disabled={busy}
                                     />
                                 ))}

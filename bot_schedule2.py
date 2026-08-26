@@ -3028,7 +3028,8 @@ def _build_sensitive_access_approved_message_html(
     claims,
     operator_session,
     approval_context,
-    operator_supervisor_name
+    operator_supervisor_name,
+    source='qr'
 ):
     """Короткое уведомление о выдаче QR-доступа.
 
@@ -3072,7 +3073,10 @@ def _build_sensitive_access_approved_message_html(
         "",
         f"<b>Кому:</b> {person(operator_name, operator_role_label, operator_login)}",
         f"<b>Супервайзер:</b> {_escape_telegram_html(operator_supervisor_name or '—', 120)}",
-        f"<b>Открыл:</b> {person(approver_name, approver_role_label)}",
+        # Выдачу из раздела «Сессии» помечаем: оператор её не инициировал и мог
+        # о ней не знать — для супер-админа это и есть главное отличие от QR.
+        f"<b>Открыл:</b> {person(approver_name, approver_role_label)}"
+        f"{' · вручную, без QR' if source == 'manual' else ''}",
         f"<b>Когда:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
         "",
         f"<b>Сессия:</b> <code>{_escape_telegram_html(session_id[:8] or '—', 40)}</code> · "
@@ -3091,7 +3095,8 @@ def _notify_super_admin_sensitive_access_approved(
     claims,
     operator_session,
     approval_context,
-    operator_supervisor_name
+    operator_supervisor_name,
+    source='qr'
 ):
     try:
         super_admin_chat_ids = _resolve_super_admin_chat_ids()
@@ -3105,7 +3110,8 @@ def _notify_super_admin_sensitive_access_approved(
             claims=claims,
             operator_session=operator_session,
             approval_context=approval_context,
-            operator_supervisor_name=operator_supervisor_name
+            operator_supervisor_name=operator_supervisor_name,
+            source=source
         )
 
         for chat_id in super_admin_chat_ids:
@@ -8963,6 +8969,49 @@ def _admin_sessions_guard():
     return None, None
 
 
+def _sensitive_access_grant_capability(*, requester_id, requester_role, target_id,
+                                       target_role, target_supervisor_id):
+    """Вправе ли этот админ открыть чувствительные данные ЭТОМУ сотруднику.
+
+    Возвращает (required, allowed, error), где error — (текст, код) для ручки.
+
+    Слоёв два, и второй обязателен. `_admin_sessions_guard` пускает в раздел по
+    уровню роли и на возглавляемые отделы не смотрит вовсе: глава Бухгалтерии с
+    базовой ролью admin открывает карточку любого сотрудника портала. Право на
+    КОНКРЕТНОГО человека считает только `_sensitive_access_approval_error` — тот
+    же периметр, что у подтверждения по QR. Своей копии правила здесь нет
+    намеренно: разъехавшись, копии дали бы разный ответ на один вопрос, и раздел
+    «Сессии» стал бы обходом периметра, а не вторым входом в него.
+
+    required — есть ли у сотрудника само QR-ограничение. Условие ровно то же, что
+    у выдачи по QR (approve_sensitive_access) и у /api/sensitive-access/status:
+    роль «оператор», и всё. Возглавляемые отделы здесь НЕ вычитаются, хотя вики,
+    «Обращения» и «Посылки» главу отдела не держат: «Мои оценки» держат его
+    наравне со всеми — телефоны маскируются, записи и переписки не открываются
+    без подтверждения, — и его собственный экран просит QR. Вычти мы главу, кнопки
+    не было бы ровно у того, кому по QR доступ открывают без вопросов.
+    """
+    required = _normalize_user_role(target_role) == 'operator'
+    if not required:
+        return False, False, ("У сотрудника нет QR-ограничения — открывать нечего", 400)
+
+    if int(requester_id) == int(target_id):
+        # Сегодня недостижимо: цель обязана быть оператором, а оператора в раздел
+        # не пускает гвард. Запрет всё равно явный — ручка принимает id снаружи.
+        return True, False, ("Открыть доступ самому себе нельзя", 403)
+
+    requester_headed = [d['id'] for d in (db.get_headed_departments_for_user(requester_id) or [])]
+    error = _sensitive_access_approval_error(
+        approver_role=requester_role,
+        approver_id=requester_id,
+        approver_department_id=db.get_user_department_id(requester_id),
+        approver_headed_department_ids=requester_headed,
+        operator_department_id=db.get_user_department_id(target_id),
+        operator_supervisor_id=target_supervisor_id,
+    )
+    return True, error is None, error
+
+
 def _serialize_admin_session(item, current_session_id=None):
     """Одна сессия внутри карточки человека."""
     return {
@@ -9132,6 +9181,21 @@ def get_admin_session_user(user_id):
 
         user = detail["user"]
         current_session_id = _current_session_id_from_access_token()
+
+        # Кнопку «Открыть доступ» гейтит сервер, а не роль на клиенте: в карточке
+        # нет возглавляемых отделов ни у кого из двоих, а без них ни «есть ли у
+        # человека QR-ограничение», ни «мой ли это периметр» не посчитать. Кнопка,
+        # которую сервер потом отбивает, — молчаливый отказ, а их у портала уже
+        # было шесть.
+        requester = db.get_user(id=getattr(g, 'user_id', None))
+        grant_required, grant_allowed, _grant_error = _sensitive_access_grant_capability(
+            requester_id=getattr(g, 'user_id', None),
+            requester_role=requester[3] if requester else None,
+            target_id=user["user_id"],
+            target_role=user["user_role"],
+            target_supervisor_id=user["supervisor_id"],
+        )
+
         return jsonify({
             "status": "success",
             "user": {
@@ -9148,7 +9212,9 @@ def get_admin_session_user(user_id):
                 "user_status": user["user_status"],
                 "has_telegram": user["has_telegram"],
                 "active_sessions": user["active_sessions"],
-                "total_sessions": user["total_sessions"]
+                "total_sessions": user["total_sessions"],
+                "sensitive_access_required": bool(grant_required),
+                "can_grant_sensitive_access": bool(grant_allowed)
             },
             "sessions": [
                 _serialize_admin_session(item, current_session_id)
@@ -9268,6 +9334,135 @@ def revoke_admin_session(session_id):
         return response, 200
     except Exception as e:
         logging.error(f"revoke_admin_session error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/sessions/<session_id>/sensitive-access', methods=['POST', 'OPTIONS'])
+@require_api_key
+def grant_admin_session_sensitive_access(session_id):
+    """Открыть чувствительные данные в КОНКРЕТНОЙ сессии, минуя сканирование QR.
+
+    Зачем: QR показывает сам оператор со своего экрана, и когда показать его
+    нечем — телефон разряжен, человек на удалёнке, экран не грузится — доступ
+    упирался в устройство, а не в решение. Раздел «Сессии» и так показывает все
+    его живые сессии поимённо, и решение принимается здесь же.
+
+    Выдача идёт ровно тем же путём, что и по QR: та же запись в сессию, та же
+    строка в журнале `session_access_events`, то же уведомление супер-админу.
+    Иначе появился бы способ открыть чувствительные данные мимо аудита — а
+    именно ради аудита журнал и уведомление и заводились.
+
+    Периметр тоже общий с QR (`_sensitive_access_grant_capability`): гвард
+    раздела шире правила выдачи, и глава одного отдела видит карточки всего
+    портала.
+    """
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        error, status = _admin_sessions_guard()
+        if error:
+            return jsonify(error), status
+
+        approver_id = getattr(g, 'user_id', None)
+        approver = db.get_user(id=approver_id)
+
+        # session_id — колонка UUID. Не-UUID строка роняет запрос на уровне
+        # драйвера, и опечатка в адресе возвращается человеку как «Internal
+        # server error» вместо внятного отказа.
+        try:
+            session_id = str(uuid.UUID(str(session_id)))
+        except (TypeError, ValueError, AttributeError):
+            return jsonify({"error": "Invalid session id"}), 400
+
+        session = db.get_user_session(session_id=session_id)
+        if not session:
+            return jsonify({"error": "Сессия не найдена"}), 404
+        if session["revoked_at"] is not None:
+            return jsonify({"error": "Сессия прервана — открывать нечего"}), 410
+        # Срок жизни проверяем здесь: UPDATE его не смотрит и на протухшей сессии
+        # отчитается об успехе, а читающий гейт (SENSITIVE_ACCESS_SQL) всё равно
+        # откажет. Админ увидел бы «открыто», оператор — «закрыто».
+        if session["expires_at"] is not None and session["expires_at"] <= datetime.utcnow():
+            return jsonify({"error": "Срок сессии истёк — открывать нечего"}), 410
+
+        # Кому открываем — берём из САМОЙ сессии. Приди владелец из тела запроса,
+        # периметр считался бы по одному человеку, а доступ открывался другому.
+        target_id = session["user_id"]
+        target = db.get_user(id=target_id)
+        if not target:
+            return jsonify({"error": "Сотрудник не найден"}), 404
+
+        _required, allowed, capability_error = _sensitive_access_grant_capability(
+            requester_id=approver_id,
+            requester_role=approver[3] if approver else None,
+            target_id=target_id,
+            target_role=target[3],
+            target_supervisor_id=target[6] if len(target) > 6 else None,
+        )
+        if not allowed:
+            message, code = capability_error
+            return jsonify({"error": message}), code
+
+        # Доступ уже открыт — второй строки «выдал» в журнале быть не должно:
+        # журнал читают как историю решений, а не нажатий.
+        if session["sensitive_data_unlocked"]:
+            return jsonify({
+                "status": "success",
+                "session_id": session_id,
+                "user_id": target_id,
+                "granted": True,
+                "changed": False
+            }), 200
+
+        updated = db.set_session_sensitive_access(
+            session_id=session_id,
+            user_id=target_id,
+            unlocked=True,
+            actor_id=approver_id,
+            actor_role=approver[3] if approver else None,
+            ip_address=_client_ip(),
+            user_agent=request.headers.get('User-Agent')
+        )
+        # Ответ UPDATE — единственная правда: между проверками выше и записью
+        # сессию могли прервать, и «открыто» оказалось бы враньём.
+        if not updated:
+            return jsonify({"error": "Не удалось открыть доступ: сессия изменилась"}), 409
+
+        operator_session = db.get_user_session(session_id=session_id, user_id=target_id)
+        target_supervisor_id = target[6] if len(target) > 6 else None
+        operator_supervisor_name = None
+        if target_supervisor_id:
+            supervisor = db.get_user(id=target_supervisor_id)
+            if supervisor:
+                operator_supervisor_name = supervisor[2]
+
+        # Всё из request и g вычислено ДО потока: он уходит из контекста Flask, и
+        # обращение к ним оттуда бросает RuntimeError.
+        approval_context = {
+            "request_ip": _client_ip(),
+            "request_user_agent": request.headers.get('User-Agent'),
+            "request_origin": request.headers.get('Origin')
+        }
+
+        threading.Thread(
+            target=_notify_super_admin_sensitive_access_approved,
+            args=(approver, target, {"session_id": session_id}, operator_session,
+                  approval_context, operator_supervisor_name),
+            kwargs={"source": "manual"},
+            daemon=True
+        ).start()
+
+        return jsonify({
+            "status": "success",
+            "session_id": session_id,
+            "user_id": target_id,
+            "user_name": target[2],
+            "granted": True,
+            "changed": True
+        }), 200
+    except Exception as e:
+        logging.error(f"grant_admin_session_sensitive_access error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

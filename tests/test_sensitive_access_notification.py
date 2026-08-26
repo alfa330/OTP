@@ -142,6 +142,28 @@ class SensitiveAccessNotificationTests(unittest.TestCase):
         self.assertIn('Открыт доступ к чувствительным данным', text)
         self.assertNotIn(', —', text, 'роль неизвестна — не дописываем пустую')
 
+    def test_manual_grant_is_marked(self):
+        """Выдача из раздела «Сессии» идёт без QR — оператор её не инициировал.
+
+        Для супер-админа это и есть главное отличие: по QR человек сам показал
+        код, здесь решение приняли за него. Без пометки два разных события
+        выглядели бы в мессенджере одинаково.
+        """
+        text = self.plain(source='manual')
+        self.assertIn('вручную, без QR', text)
+        self.assertLessEqual(len(text.split('\n')), 10, 'сообщение снова разрослось')
+        self.assertLess(len(self.message(source='manual')), 600)
+
+    def test_qr_grant_stays_exactly_as_it_was(self):
+        # Строку «Когда» вычитаем: она берётся из datetime.now() с секундами, и
+        # два вызова на границе секунды дали бы разный текст — красный прогон
+        # раз в сто тысяч, который потом ищут неделю.
+        def without_time(text):
+            return [line for line in text.split('\n') if not line.startswith('<b>Когда:')]
+
+        self.assertNotIn('вручную', self.plain())
+        self.assertEqual(without_time(self.message()), without_time(self.message(source='qr')))
+
     def test_html_is_escaped(self):
         text = self.message(operator=(448, None, '<b>Взлом</b>', 'operator',
                                       None, None, None, 'hack'))
