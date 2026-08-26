@@ -147,10 +147,12 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         self.assertIn(
-            "import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining,"
-            " departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
-            " departmentUsesSimpleEmployeeAccounting,"
-            " firstAllowedView } from './utils/departmentViews';",
+            "import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole,"
+            " departmentEmployeeRole, departmentHidesColleagueSchedules,"
+            " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
+            " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
+            " departmentUsesSimpleEmployeeAccounting, firstAllowedView,"
+            " isBackOfficeEmployeeRole } from './utils/departmentViews';",
             source,
         )
         self.assertIn(

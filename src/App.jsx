@@ -38,7 +38,7 @@ import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -296,6 +296,14 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
 // (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
 // уже открыт всем, и молча отбирать его на клиенте нельзя.
 const wikiEnabledFor = (user) => user?.wiki_enabled !== false;
+
+// Рядовой сотрудник — это оператор, стажёр ИЛИ сотрудник бэк-офиса со своей
+// ролью. Список нужен всюду, где раньше стояло `role === 'operator'` в
+// смысле «человек без подчинённых»: в ветках меню, в фильтре списка
+// сотрудников и в гейте QR. Роли бэк-офиса заведены отдельно именно чтобы
+// отличать их ТАМ, где речь о линии, — здесь речь не о ней.
+const RANK_AND_FILE_ROLES = Object.freeze(['operator', 'trainee', ...BACK_OFFICE_EMPLOYEE_ROLES]);
+const isRankAndFileRole = (role) => RANK_AND_FILE_ROLES.includes(normalizeRole(role));
 
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
@@ -1649,7 +1657,12 @@ const canAccessTouchesSectionForUser = (userLike) => {
 // wiki/access.py, parcels/access.py): экран с замком — удобство, а доступом
 // является ответ сервера.
 const sensitiveSectionQrRequiredFor = (userLike) => (
-    normalizeRole(userLike?.role) === 'operator' && !isDepartmentHead(userLike)
+    // Бэк-офис здесь наравне с операторами: их роль отделена от 'operator' ради
+    // разделов и полей карточки, а не ради этого гейта — переименование
+    // должности не повод молча снять подтверждение. Зеркало QR_GATED_ROLES в
+    // wiki/access.py (стажёра там намеренно нет).
+    (normalizeRole(userLike?.role) === 'operator' || isBackOfficeEmployeeRole(userLike?.role))
+    && !isDepartmentHead(userLike)
 );
 
 const canManageSzovBroadcastForUser = (userLike) => {
@@ -35920,6 +35933,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             const wikiSectionEnabled = wikiEnabledFor(user);
+            // Профиль сотрудника бэк-офиса: ни оценок, ни часов, ни направления,
+            // ни супервайзера, ни ставки у него нет — показывать пустые плитки и
+            // кнопки в разделы, которых ему не выдали, незачем. Остаётся кадровое:
+            // должность, отдел, дата найма, стаж.
+            const profileHidesOperatorBlocks = departmentHidesOperatorFields(user);
             // Просмотр переписки оценённого чата Chat2Desk из «Мои оценки»
             // (оценки чатов ЧМ живут в журнале оценок: calls.c2d_snapshot_id).
             const [myEvalChatView, setMyEvalChatView] = useState(null); // {snapshotId, quotes, title}
@@ -37424,7 +37442,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return generalColumns;
             };
 
-            const employeeSectionColumns = buildEmployeeSectionColumns('operator');
+            // Вариант 'staff' уже умеет то, что нужно бэк-офису: без «Супервайзера»,
+            // «Направления», «Ставки», «SIP» и «Вод. прав». Отдел берём у СМОТРЯЩЕГО
+            // — раздел показывает его собственных сотрудников (так же устроены
+            // колонки «Город» и «Должность»).
+            const employeeSectionColumns = buildEmployeeSectionColumns(
+                departmentHidesOperatorFields(user) ? 'staff' : 'operator'
+            );
 
             const activeEmployeeTableSection = EMPLOYEE_TABLE_SECTIONS.find((tab) => tab.key === employeeTableSection) || EMPLOYEE_TABLE_SECTIONS[0];
 
@@ -39077,11 +39101,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             }, [getNextBirthdayMeta, isEmployeeVisibleByStatusTab]);
 
+            // Сотрудники раздела «Учёт сотрудников». Роли бэк-офиса обязаны быть
+            // здесь: иначе глава Бухгалтерии/HR открывает раздел и видит пустой
+            // список — люди в базе есть, а фильтр их не пропускает.
             const operatorUsers = useMemo(() => (
                 (Array.isArray(users) ? users : []).filter((employee) =>
-                    ['operator', 'trainee'].includes(normalizeRole(employee?.role))
+                    isRankAndFileRole(employee?.role)
                 )
             ), [users]);
+
+            /* Роль рядового сотрудника определяет отдел, в который его заводят.
+               Трогаем только 'operator' и роли бэк-офиса: стажёр — отдельная
+               история (его так и заводят стажёром), а тренера, СВ и админа отдел
+               не переопределяет вовсе. */
+            const resolveEmployeeRoleForDepartment = useCallback((draft) => {
+                const draftRole = String(draft?.role || '').trim().toLowerCase() || 'operator';
+                if (draftRole !== 'operator' && !isBackOfficeEmployeeRole(draftRole)) return draftRole;
+                const deptCode = (departments || [])
+                    .find((d) => Number(d?.id) === Number(draft?.department_id))?.code;
+                const deptRole = departmentCodeEmployeeRole(deptCode);
+                if (deptRole) return deptRole;
+                // Отдел без своей роли (или ещё не выбран): бэк-офисную роль в нём
+                // оставлять нельзя — она бы сняла ограничения. Возвращаем оператора.
+                return isBackOfficeEmployeeRole(draftRole) ? 'operator' : draftRole;
+            }, [departments]);
 
             const upcomingManageUsersBirthdays = useMemo(() => (
                 buildUpcomingBirthdays(operatorUsers, (employee) => employee?.direction || 'Без направления', 14)
@@ -40353,9 +40396,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
                             const nextUsers = Array.isArray(data.users) ? data.users : [];
+                            // Второй фильтр по ролям, РАНЬШЕ operatorUsers: он режет
+                            // ответ сразу на загрузке, поэтому роли бэк-офиса обязаны
+                            // быть и здесь — иначе список сотрудников у главы
+                            // Бухгалтерии/HR пуст, хотя люди в базе есть.
                             const manageOperatorRoles = isDepartmentManager
-                                ? new Set(['operator', 'trainee', 'sv', 'supervisor'])
-                                : new Set(['operator']);
+                                ? new Set(['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES])
+                                : new Set(['operator', ...BACK_OFFICE_EMPLOYEE_ROLES]);
                             setAdminUsers(nextUsers);
                             setUsers(nextUsers.filter((u) => manageOperatorRoles.has(normalizeRole(u?.role))));
                             setSystemAdmins(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'admin'));
@@ -40792,7 +40839,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         // payload минимальный — дополни по API сервера
                         const payload = {
                             name: editedUser.name || "",
-                            role: editedUser.role || "operator",
+                            role: resolveEmployeeRoleForDepartment(editedUser),
                             // Группа определяет и членство, и супервайзера (СВ группы);
                             // supervisor_id остаётся как legacy-фолбэк без группы.
                             group_id: isCreatedTrainer ? null : (editedUser.group_id ? Number(editedUser.group_id) : null),
@@ -44939,7 +44986,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
-                                    {(currentUserRole === 'operator' || currentUserRole === 'trainee') && !isScopedDepartmentHead && (
+                                    {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {departmentAllowsView(user, 'profile') && (
@@ -46479,15 +46526,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
                                         <button
                                         onClick={() => {
+                                            // Отдел бэк-офиса заводит сотрудника СВОЕЙ ролью, а не
+                                            // оператором. Отдел берём тот же, что уйдёт на сервер:
+                                            // у главы это его собственный, у админа — выбранный
+                                            // фильтром (не выбран — роль по умолчанию, отдел
+                                            // доопределит сервер).
+                                            const createDeptId = manageUsersDeptFilter || "";
+                                            const createDeptCode = createDeptId
+                                                ? (departments || []).find((d) => Number(d?.id) === Number(createDeptId))?.code
+                                                : (isScopedDepartmentHead
+                                                    ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
+                                                    : (user?.department_code ?? user?.departmentCode ?? null));
                                             setUserToEdit({
                                             name: "",
                                             rate: 1.0,
                                             direction_id: "",
-                                            department_id: manageUsersDeptFilter || "",
+                                            department_id: createDeptId,
                                             hire_date: "",
                                             supervisor_id: "",
                                             status: "working",
-                                            role: "operator",
+                                            role: departmentCodeEmployeeRole(createDeptCode) || "operator",
                                             });
                                             setShowUserEditModal(true);
                                         }}
@@ -48482,7 +48540,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                             </>
                         )}
-                        {(currentUserRole === 'operator' || currentUserRole === 'trainee') && !isScopedDepartmentHead && (
+                        {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                             <>
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
@@ -48507,12 +48565,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       </span>
                                     </h2>
 
+                                    {!profileHidesOperatorBlocks && (
                                     <RateSelfChangeCard
                                       user={user}
                                       currentRate={profileData?.rate ?? user?.rate}
                                       showToast={showToast}
                                       onChanged={(r) => setProfileData((prev) => (prev ? { ...prev, rate: r } : prev))}
                                     />
+                                    )}
 
                                     {isLoading ? (
                                       <ProfilePageSkeleton />
@@ -48535,21 +48595,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           </div>
                                           <div className="text-center sm:text-left">
                                             <h3 className="text-xl sm:text-2xl font-bold text-gray-900">{profileData.name || '-'}</h3>
-                                            <div className="flex flex-wrap justify-center sm:justify-start gap-2 mt-2">
-                                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                                                <FaIcon className="fas fa-user-tag"></FaIcon> {profileData.role || 'Оператор'}
-                                              </span>
-                                              {profileData.direction && (
+                                            {/* Плашки роли под именем нет намеренно (решение владельца
+                                                26.08.2026): она печатала СЫРОЕ значение из базы —
+                                                «operator», «sv» — латиницей и с фолбэком «Оператор»,
+                                                который у любой другой должности был просто неверен.
+                                                Человек и так знает, кто он; направление остаётся —
+                                                оно рабочее и у бэк-офиса его нет. */}
+                                            {profileData.direction && (
+                                              <div className="flex flex-wrap justify-center sm:justify-start gap-2 mt-2">
                                                 <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
                                                   <FaIcon className="fas fa-compass"></FaIcon> {profileData.direction}
                                                 </span>
-                                              )}
-                                            </div>
+                                              </div>
+                                            )}
                                           </div>
                                         </div>
 
                                         {/* Stats cards - evaluation & hours summary */}
-                                        {(() => {
+                                        {!profileHidesOperatorBlocks && (() => {
                                           const evals = operatorData?.evaluations ?? [];
                                           const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
                                           // «Тестирование знаний» входит в средний балл, но прослушанным
@@ -48681,7 +48744,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                           </div>
                                   
+                                          {/* Должность и отдел — вместо супервайзера и ставки:
+                                              у бэк-офиса человека определяют именно они. */}
+                                          {profileHidesOperatorBlocks && (
+                                          <>
+                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
+                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                                              <FaIcon className="fas fa-id-badge text-indigo-600 text-lg"></FaIcon>
+                                            </div>
+                                            <div className="min-w-0">
+                                              <p className="text-xs uppercase tracking-wide text-gray-500">Должность</p>
+                                              <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.job_title || '-'}</p>
+                                            </div>
+                                          </div>
+                                          <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
+                                            <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                                              <FaIcon className="fas fa-layer-group text-blue-600 text-lg"></FaIcon>
+                                            </div>
+                                            <div className="min-w-0">
+                                              <p className="text-xs uppercase tracking-wide text-gray-500">Отдел</p>
+                                              <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.department_name || '-'}</p>
+                                            </div>
+                                          </div>
+                                          </>
+                                          )}
+
                                           {/* Supervisor */}
+                                          {!profileHidesOperatorBlocks && (
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
                                             <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
                                               <FaIcon className="fas fa-user-tie text-indigo-600 text-lg"></FaIcon>
@@ -48691,8 +48780,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                               <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.supervisor_name || '-'}</p>
                                             </div>
                                           </div>
+                                          )}
 
                                           {/* Rate */}
+                                          {!profileHidesOperatorBlocks && (
                                           <div
                                             className={`bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3 ${isFirstOfMonthAlmaty() ? 'cursor-pointer ring-2 ring-blue-400 ring-offset-1' : ''}`}
                                             onClick={() => { if (isFirstOfMonthAlmaty()) window.dispatchEvent(new CustomEvent('open-self-rate-modal')); }}
@@ -48716,6 +48807,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                               </p>
                                             </div>
                                           </div>
+                                          )}
 
                                           {/* Experience */}
                                           <div className="bg-gray-50 p-4 rounded-xl shadow-sm hover:shadow-md transition flex items-center gap-3">
@@ -48741,7 +48833,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           </div>
                                         </div>
 
-                                        {/* Quick actions */}
+                                        {/* Quick actions. У бэк-офиса обе кнопки вели бы в разделы,
+                                            которых ему не выдали: гард видимости вернул бы его обратно
+                                            в профиль, и кнопка выглядела бы сломанной. */}
+                                        {!profileHidesOperatorBlocks && (
                                         <div className="pt-4 border-t border-gray-200">
                                           <p className="text-xs uppercase tracking-wide text-gray-500 mb-3">Быстрые действия</p>
                                           <div className="flex flex-wrap gap-2">
@@ -48761,6 +48856,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                           </div>
                                         </div>
+                                        )}
                                       </div>
                                     ) : (
                                       <p className="text-center text-gray-600 flex items-center justify-center">

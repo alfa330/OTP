@@ -29,6 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
 DATABASE_PATH = ROOT / "database.py"
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
+ROLES_PATH = ROOT / "src" / "utils" / "roles.js"
+WIKI_ACCESS_PATH = ROOT / "wiki" / "access.py"
 APP_PATH = ROOT / "src" / "App.jsx"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
 NODE_TEST = ROOT / "tests" / "back_office_department_views.test.mjs"
@@ -237,9 +239,11 @@ class BackOfficeQrAccessTests(unittest.TestCase):
 
     def test_operator_needs_qr_confirmation_for_sensitive_sections(self):
         app = _read(APP_PATH)
+        # Роли бэк-офиса здесь наравне с оператором: до появления собственной
+        # должности эти люди БЫЛИ операторами, и подтверждение им требовалось.
         self.assertIn(
-            "const sensitiveSectionQrRequiredFor = (userLike) => (\n"
-            "    normalizeRole(userLike?.role) === 'operator' && !isDepartmentHead(userLike)\n"
+            "    (normalizeRole(userLike?.role) === 'operator' || isBackOfficeEmployeeRole(userLike?.role))\n"
+            "    && !isDepartmentHead(userLike)\n"
             ");",
             app,
         )
@@ -543,6 +547,158 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
         self.assertFalse(hides(None))
         self.assertFalse(hides(999999))
         self.assertFalse(hides('не число'))
+
+
+class BackOfficeEmployeeRoleTests(unittest.TestCase):
+    """Рядовой сотрудник бэк-офиса заводится не оператором.
+
+    'operator' в этой системе означает человека НА ЛИНИИ — с направлением,
+    группой, часами и оценками. Бухгалтеру и кадровику эта роль давала бы
+    разделы и поля, которых у них нет.
+    """
+
+    ROLES = ('hr_manager', 'accounting_manager')
+
+    def test_role_is_known_everywhere_at_operator_level(self):
+        # Шкала ролей продублирована в четырёх местах. Пропуск в любом из них
+        # НЕ падает — он молча роняет уровень до нуля, а нулевой уровень в вике
+        # не проходит ни одного min_role_level: раздел просто окажется пустым.
+        for path in (BOT_PATH, DATABASE_PATH, ROLES_PATH, WIKI_ACCESS_PATH):
+            source = _read(path)
+            for role in self.ROLES:
+                self.assertRegex(
+                    source, rf"'?{role}'?:\s*10\b",
+                    f"{path.name}: {role} должен быть на уровне оператора",
+                )
+
+    def test_db_check_and_column_width(self):
+        source = _read(DATABASE_PATH)
+        # CHECK пересобирается целиком — ALTER ... ADD CONSTRAINT не «дополняет».
+        self.assertIn("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;", source)
+        self.assertIn("'operator', 'trainee', 'hr_manager', 'accounting_manager'", source)
+        # 'accounting_manager' — 18 символов; в прежний VARCHAR(20) влезало впритык.
+        self.assertEqual(18, len('accounting_manager'))
+        self.assertIn("ALTER TABLE users ALTER COLUMN role TYPE VARCHAR(32);", source)
+        self.assertIn("role VARCHAR(32) NOT NULL CHECK(role IN (", source)
+
+    def test_backend_lets_the_head_create_the_role(self):
+        endpoint = _function_source(BOT_PATH, "add_user")
+        self.assertIn("'hr_manager', 'accounting_manager'):", endpoint)
+        # Прежняя формулировка пускала главу только к операторам и стажёрам —
+        # то есть ни к кому из тех, кто у него есть.
+        self.assertNotIn(
+            "and role not in ('operator', 'trainee'):\n"
+            '            return jsonify({"error": "Scoped managers can create only operators or trainees"}), 403',
+            endpoint,
+        )
+        self.assertIn("role not in BACK_OFFICE_EMPLOYEE_ROLES", endpoint)
+
+    def test_role_is_bound_to_its_department(self):
+        # Роль вне своего отдела — дыра в правах, а не опечатка: в чужом отделе
+        # её нет в DEPARTMENT_VIEW_ALLOWLIST, а роль вне конфига ограничений не
+        # получает вовсе.
+        endpoint = _function_source(BOT_PATH, "add_user")
+        guard = "if role in BACK_OFFICE_EMPLOYEE_ROLES and _back_office_employee_role(department_id) != role:"
+        self.assertIn(guard, endpoint)
+        # Отдел обязан быть разобран ДО проверки.
+        self.assertLess(endpoint.index("department_id = requester_dept_id"), endpoint.index(guard))
+
+    def test_employee_lists_include_the_new_roles(self):
+        # Без этого глава открывает «Учёт сотрудников» и видит пустой список:
+        # люди в базе есть, а оба фильтра — серверный и клиентский — их режут.
+        bot = _read(BOT_PATH)
+        self.assertIn(
+            "visible_roles = ['operator', 'trainee', 'trainer', *sorted(BACK_OFFICE_EMPLOYEE_ROLES)]",
+            bot,
+        )
+        app = _read(APP_PATH)
+        self.assertIn(
+            "const RANK_AND_FILE_ROLES = Object.freeze(['operator', 'trainee', ...BACK_OFFICE_EMPLOYEE_ROLES]);",
+            app,
+        )
+        self.assertIn("isRankAndFileRole(employee?.role)", app)
+        # Ветки меню и рендера рядового сотрудника — обе.
+        self.assertEqual(2, app.count("{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && ("))
+        self.assertNotIn("(currentUserRole === 'operator' || currentUserRole === 'trainee') && !isScopedDepartmentHead", app)
+
+    def test_qr_gate_survives_the_rename(self):
+        # До появления своей роли эти люди были операторами и подтверждение QR
+        # для «Вики» им требовалось. Переименование должности не повод снять его.
+        wiki = _read(WIKI_ACCESS_PATH)
+        self.assertIn(
+            "QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager'})",
+            wiki,
+        )
+        self.assertIn("return normalize_role(otp_role) in QR_GATED_ROLES", wiki)
+        app = _read(APP_PATH)
+        self.assertIn("|| isBackOfficeEmployeeRole(userLike?.role))", app)
+
+    def test_helper_runtime(self):
+        departments = {
+            1: {'code': 'szov'}, 909: {'code': 'front_office'},
+            1499: {'code': 'hr'}, 1500: {'code': 'accounting'},
+        }
+
+        class _Db:
+            def get_department_by_id(self, department_id):
+                return departments.get(department_id)
+
+        namespace = {'db': _Db()}
+        exec("BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE = "
+             "{'accounting': 'accounting_manager', 'hr': 'hr_manager'}", namespace)
+        exec(_function_source(BOT_PATH, "_back_office_employee_role"), namespace)
+        role_of = namespace["_back_office_employee_role"]
+
+        self.assertEqual('hr_manager', role_of(1499))
+        self.assertEqual('accounting_manager', role_of(1500))
+        self.assertEqual('accounting_manager', role_of('1500'))   # id строкой из JSON
+        for department_id in (1, 909, None, 999999, 'не число'):
+            self.assertIsNone(role_of(department_id), repr(department_id))
+
+
+class ProfileSectionTests(unittest.TestCase):
+    """«Профиль»: без плашки роли у всех, без операторского — у бэк-офиса."""
+
+    def test_role_badge_is_gone_for_everyone(self):
+        # Плашка печатала СЫРОЕ значение из базы («operator», «sv») латиницей,
+        # с фолбэком «Оператор», который у любой другой должности просто неверен.
+        app = _read(APP_PATH)
+        self.assertNotIn("{profileData.role || 'Оператор'}", app)
+        self.assertNotIn('fas fa-user-tag"></FaIcon> {profileData.role', app)
+
+    def test_operator_blocks_are_gated(self):
+        app = _read(APP_PATH)
+        self.assertIn(
+            "const profileHidesOperatorBlocks = departmentHidesOperatorFields(user);",
+            app,
+        )
+        # Плитки оценок/часов, смена ставки, карточки СВ и ставки, быстрые
+        # действия — всё, что ведёт в разделы, которых у бэк-офиса нет.
+        self.assertIn("{!profileHidesOperatorBlocks && (() => {", app)
+        self.assertIn("{!profileHidesOperatorBlocks && (\n                                    <RateSelfChangeCard", app)
+        self.assertGreaterEqual(app.count("!profileHidesOperatorBlocks"), 5)
+        # Взамен — должность и отдел.
+        self.assertIn("{profileHidesOperatorBlocks && (", app)
+        self.assertIn("{profileData.job_title || '-'}", app)
+        self.assertIn("{profileData.department_name || '-'}", app)
+
+    def test_backend_sends_job_title_and_department(self):
+        endpoint = _function_source(BOT_PATH, "get_user_profile")
+        self.assertIn("profile_data.update(db.get_user_hr_card(user[0]))", endpoint)
+        card = _function_source(DATABASE_PATH, "get_user_hr_card") if False else _read(DATABASE_PATH)
+        self.assertIn("def get_user_hr_card(self, user_id):", card)
+        self.assertIn('return {"job_title": row[0], "department_name": row[1]}', card)
+
+    def test_columns_use_the_staff_variant_for_back_office(self):
+        # «Супервайзер», «Направление», «Ставка», «SIP» и «Вод. права» —
+        # операторские колонки; вариант 'staff' их уже не рисует.
+        app = _read(APP_PATH)
+        self.assertIn(
+            "const employeeSectionColumns = buildEmployeeSectionColumns(\n"
+            "                departmentHidesOperatorFields(user) ? 'staff' : 'operator'\n"
+            "            );",
+            app,
+        )
 
 
 if __name__ == "__main__":

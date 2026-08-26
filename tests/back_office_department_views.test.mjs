@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    BACK_OFFICE_EMPLOYEE_ROLES,
     DEPARTMENT_VIEW_ALLOWLIST,
     departmentAllowsView,
+    departmentCodeEmployeeRole,
     departmentCodeHidesFrontOfficeTraining,
     departmentCodeHidesOperatorFields,
     departmentCodeUsesEmployeeCity,
@@ -28,6 +30,8 @@ const head = (code) => ({
 });
 const supervisor = (code) => ({ id: 2, role: 'sv', department_code: code });
 const employee = (code, role = 'operator') => ({ id: 3, role, department_code: code });
+// Собственная роль отдела: с ней сотрудника и заводят.
+const ownRole = (code) => departmentCodeEmployeeRole(code);
 
 for (const code of BACK_OFFICE_CODES) {
     test(`${code}: у главы учёт сотрудников, задачи и QR доступ`, () => {
@@ -59,7 +63,10 @@ for (const code of BACK_OFFICE_CODES) {
     });
 
     test(`${code}: у рядового сотрудника только профиль`, () => {
-        for (const role of ['operator', 'trainee']) {
+        // Собственная роль отдела — рядом с operator/trainee: людей, заведённых
+        // до её появления, никто не переписывал, и ограничение обязано
+        // действовать на всех троих одинаково.
+        for (const role of ['operator', 'trainee', ownRole(code)]) {
             const user = employee(code, role);
             assert.equal(departmentRestrictsViews(user), true);
             assert.equal(departmentAllowsView(user, 'profile'), true);
@@ -138,6 +145,43 @@ for (const code of BACK_OFFICE_CODES) {
         assert.equal(departmentRestrictsViews({ id: 6, role: 'trainer', department_code: code }), false);
     });
 }
+
+for (const code of BACK_OFFICE_CODES) {
+    test(`${code}: своя роль сотрудника и её граница`, () => {
+        const role = ownRole(code);
+        assert.ok(role, 'у отдела бэк-офиса обязана быть своя роль');
+        assert.equal(BACK_OFFICE_EMPLOYEE_ROLES.includes(role), true);
+        // Роль читается в нижнем регистре и с пробелами по краям — она приходит
+        // из базы и из черновика модалки.
+        assert.equal(departmentCodeEmployeeRole(code.toUpperCase()), role);
+        assert.equal(departmentCodeEmployeeRole(` ${code} `), role);
+
+        // Ключ роли ОБЯЗАН быть в конфиге отдела: роли, которой в нём нет,
+        // ограничения не касаются вовсе — человек увидел бы всё меню.
+        assert.equal(role in DEPARTMENT_VIEW_ALLOWLIST[code], true);
+        assert.equal(departmentRestrictsViews(employee(code, role)), true);
+        assert.equal(firstAllowedView(employee(code, role), []), 'profile');
+    });
+}
+
+test('роль бэк-офиса не даёт прав в чужом отделе', () => {
+    // Здесь она в конфиг не вписана, поэтому ограничений НЕ получает — и это
+    // ровно та причина, по которой сервер не даёт завести её вне своего отдела
+    // (_back_office_employee_role в add_user). Тест фиксирует связку: пока это
+    // так, серверная проверка обязана стоять.
+    for (const code of ['szov', 'op', 'tez', 'front_office']) {
+        assert.equal(departmentCodeEmployeeRole(code), null, code);
+        for (const role of BACK_OFFICE_EMPLOYEE_ROLES) {
+            assert.equal(departmentRestrictsViews(employee(code, role)), false, `${code}/${role}`);
+        }
+    }
+});
+
+test('роли отделов не пересекаются', () => {
+    const roles = BACK_OFFICE_CODES.map(ownRole);
+    assert.equal(new Set(roles).size, roles.length, 'у каждого отдела своя роль');
+    assert.deepEqual([...BACK_OFFICE_EMPLOYEE_ROLES].sort(), [...roles].sort());
+});
 
 test('бэк-офис не задел остальные отделы', () => {
     assert.deepEqual(

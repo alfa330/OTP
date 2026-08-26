@@ -32,11 +32,25 @@ from .schema import CAPABILITY_COLUMNS, PERMISSION_COLUMNS
 ROLE_LEVELS = {
     'operator': 10,
     'trainee': 10,
+    # Бэк-офис (Бухгалтерия, HR). Десятка обязательна: на ней
+    # expand_otp_roles подводит их под уже написанные правила на
+    # 'operator', а role_level_of перестаёт возвращать 0 — иначе вика у
+    # них была бы пустой, не пройдя ни одного min_role_level.
+    'hr_manager': 10,
+    'accounting_manager': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
     'super_admin': 50,
 }
+
+# Должности, которым вход в чувствительные разделы открывает подтверждение QR.
+# Явный список, а не «все, кроме начальства»: неизвестная роль не должна
+# получать доступ молча, но и запирать по ошибке нового admin'а перечисление не
+# даст. Стажёра здесь намеренно нет — до появления бэк-офиса гейт стоял ровно
+# на 'operator', и расширять его заодно значило бы менять чужое правило.
+QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager'})
+
 
 def role_level_of(role):
     """Уровень должности по шкале ROLE_LEVELS. Незнакомая роль — 0.
@@ -90,7 +104,11 @@ def requires_sensitive_qr(otp_role, *, is_department_head=False):
     """
     if is_department_head:
         return False
-    return normalize_role(otp_role) == 'operator'
+    # Бэк-офис здесь наравне с операторами. Их роль отделена от
+    # 'operator' ради разделов и полей карточки, а не ради этого гейта:
+    # переименование должности не повод молча снять подтверждение,
+    # которое до него действовало.
+    return normalize_role(otp_role) in QR_GATED_ROLES
 
 
 # ─────────────────────────────────────────────────────────────────────────────

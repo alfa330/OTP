@@ -224,9 +224,16 @@ ROLE_ALIASES = {
     'super admin': 'super_admin'
 }
 
+# hr_manager / accounting_manager — рядовые сотрудники бэк-офиса (Бухгалтерия,
+# HR). Уровень тот же, что у оператора: они не на линии, но и не начальство.
+# Уровень читает не только _has_min_role: wiki/access.py::expand_otp_roles
+# раздаёт человеку все роли не выше его уровня, поэтому на десятке новые роли
+# подпадают под уже написанные правила вики на 'operator'.
 ROLE_HIERARCHY = {
     'operator': 10,
     'trainee': 10,
+    'hr_manager': 10,
+    'accounting_manager': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
@@ -1293,7 +1300,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
                     name VARCHAR(255) NOT NULL,
-                    role VARCHAR(20) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee')),
+                    role VARCHAR(32) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee', 'hr_manager', 'accounting_manager')),
                     hire_date DATE,
                     login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
@@ -1375,6 +1382,34 @@ class Database:
             cursor.execute("""
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS city VARCHAR(255);
+            """)
+            # Роли рядовых сотрудников бэк-офиса. CHECK на users.role
+            # пересобираем целиком: ALTER ... ADD CONSTRAINT не умеет
+            # «дополнить», а DROP IF EXISTS + ADD идемпотентен и повторный
+            # старт переживает. Колонку заодно расширяем: 'accounting_manager'
+            # — 18 символов, в прежние VARCHAR(20) влезало впритык.
+            # Расширение колонки — под условием, в отличие от соседних ALTER'ов:
+            # у ALTER COLUMN ... TYPE нет формы IF NEEDED, а безусловный вызов
+            # на каждом старте берёт ACCESS EXCLUSIVE и перестраивает индексы по
+            # колонке. Сам CHECK пересоздаём как есть — на 355 строках проверка
+            # стоит доли миллисекунды, и это тот же приём, что у CHECK'а
+            # employment_type ниже.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                         WHERE table_name = 'users' AND column_name = 'role'
+                           AND character_maximum_length < 32
+                    ) THEN
+                        ALTER TABLE users ALTER COLUMN role TYPE VARCHAR(32);
+                    END IF;
+                END $$;
+                ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+                ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
+                    'super_admin', 'admin', 'sv', 'supervisor', 'trainer',
+                    'operator', 'trainee', 'hr_manager', 'accounting_manager'
+                ));
             """)
             # Должность сотрудника: у бэк-офиса (Бухгалтерия, HR) человека
             # определяет не направление и не группа, а должность — в карточке
@@ -15069,6 +15104,27 @@ class Database:
             """, (user_id,))
             r = cursor.fetchone()
             return (r[0], r[1]) if r else (None, None)
+
+    def get_user_hr_card(self, user_id):
+        """Должность и название отдела сотрудника — для карточки «Профиль».
+
+        Отдельным запросом, а не колонками в get_user: тот возвращает КОРТЕЖ и
+        читается по индексам в десятках мест, и любое расширение там — риск
+        ради двух полей одного экрана.
+        """
+        if not user_id:
+            return {"job_title": None, "department_name": None}
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.job_title, d.name
+                  FROM users u
+                  LEFT JOIN departments d ON d.id = u.department_id
+                 WHERE u.id = %s
+            """, (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return {"job_title": None, "department_name": None}
+            return {"job_title": row[0], "department_name": row[1]}
 
     def department_wiki_enabled(self, department_id):
         """Выдан ли отделу раздел «Вики». Без отдела — выдан.

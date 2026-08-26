@@ -59,8 +59,10 @@ class EventsTrainerAccessTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         branch_start = source.index("{(isDepartmentManager || isPlainTrainer) && (")
+        # Ветка рядового сотрудника теперь опознаётся предикатом: к оператору
+        # и стажёру добавились роли бэк-офиса (isRankAndFileRole).
         branch_end = source.index(
-            "{(currentUserRole === 'operator' || currentUserRole === 'trainee')",
+            "{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (",
             branch_start,
         )
         trainer_branch = source[branch_start:branch_end]

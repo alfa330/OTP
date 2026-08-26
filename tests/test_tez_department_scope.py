@@ -91,7 +91,12 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         self.assertIn("const manageOperatorRoles = isDepartmentManager", source)
-        self.assertIn("new Set(['operator', 'trainee', 'sv', 'supervisor'])", source)
+        # Множество выросло вместе с бэк-офисом: тот же фильтр режет и его
+        # сотрудников, см. test_back_office_department_scope.
+        self.assertIn(
+            "new Set(['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES])",
+            source,
+        )
         self.assertIn("manageOperatorRoles.has(normalizeRole(u?.role))", source)
         self.assertIn("const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;", source)
         self.assertIn("const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users', 'manage_trainers'].includes(view);", source)
@@ -101,7 +106,9 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("setView('manage_users')", source)
         self.assertNotIn("manageOperatorsRoleView", source)
         self.assertIn("const operatorUsers = useMemo(() => (", source)
-        self.assertIn("['operator', 'trainee'].includes(normalizeRole(employee?.role))", source)
+        # Литеральный список заменён предикатом: к оператору и стажёру
+        # добавились роли бэк-офиса (см. test_back_office_department_scope).
+        self.assertIn("isRankAndFileRole(employee?.role)", source)
         self.assertIn("buildUpcomingBirthdays(operatorUsers", source)
         self.assertIn("const filteredUsers = operatorUsers.filter", source)
         self.assertIn("const allUsers = (Array.isArray(operatorUsers) ? operatorUsers : [])", source)

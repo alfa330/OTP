@@ -124,14 +124,18 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
         sv: FRONT_OFFICE_MANAGER_VIEWS,
     },
     accounting: {
+        // 'operator'/'trainee' оставлены для тех, кого успели завести до
+        // появления собственной роли: без ключа ограничение снимается целиком.
         operator: BACK_OFFICE_EMPLOYEE_VIEWS,
         trainee: BACK_OFFICE_EMPLOYEE_VIEWS,
+        accounting_manager: BACK_OFFICE_EMPLOYEE_VIEWS,
         head: BACK_OFFICE_HEAD_VIEWS,
         sv: BACK_OFFICE_MANAGER_VIEWS,
     },
     hr: {
         operator: BACK_OFFICE_EMPLOYEE_VIEWS,
         trainee: BACK_OFFICE_EMPLOYEE_VIEWS,
+        hr_manager: BACK_OFFICE_EMPLOYEE_VIEWS,
         head: BACK_OFFICE_HEAD_VIEWS,
         sv: BACK_OFFICE_MANAGER_VIEWS,
     },
@@ -225,6 +229,29 @@ export const departmentCodeHidesOperatorFields = (code) => {
 };
 
 export const departmentHidesOperatorFields = (user) => departmentCodeHidesOperatorFields(departmentCodeOf(user));
+
+// Роль, с которой заводится рядовой сотрудник отдела. 'operator' в этой
+// системе означает человека НА ЛИНИИ — с направлением, группой, часами и
+// оценками; бухгалтеру и кадровику она давала бы разделы и поля, которых у
+// них нет. Отдела нет в карте => роль по умолчанию, её решает вызывающий.
+// Зеркало — BACK_OFFICE_EMPLOYEE_ROLES в bot_schedule2.py и CHECK на
+// users.role в database.py.
+const BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT = {
+    accounting: 'accounting_manager',
+    hr: 'hr_manager',
+};
+
+export const BACK_OFFICE_EMPLOYEE_ROLES = Object.freeze(
+    Object.values(BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT),
+);
+
+export const departmentCodeEmployeeRole = (code) =>
+    BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT[normalizeDepartmentCodeValue(code)] || null;
+
+export const departmentEmployeeRole = (user) => departmentCodeEmployeeRole(departmentCodeOf(user));
+
+export const isBackOfficeEmployeeRole = (role) =>
+    BACK_OFFICE_EMPLOYEE_ROLES.includes(String(role ?? '').trim().toLowerCase());
 
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {

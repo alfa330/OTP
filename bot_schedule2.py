@@ -1590,9 +1590,16 @@ def _normalize_user_role(role) -> str:
     return role_norm
 
 
+# hr_manager / accounting_manager — рядовые сотрудники бэк-офиса (Бухгалтерия,
+# HR). Уровень тот же, что у оператора: они не на линии, но и не начальство.
+# Уровень читает не только _has_min_role: wiki/access.py::expand_otp_roles
+# раздаёт человеку все роли не выше его уровня, поэтому на десятке новые роли
+# подпадают под уже написанные правила вики на 'operator'.
 ROLE_HIERARCHY = {
     'operator': 10,
     'trainee': 10,
+    'hr_manager': 10,
+    'accounting_manager': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
@@ -2533,7 +2540,9 @@ SENSITIVE_ACCESS_ROLE_LABELS = {
     'sv': 'Супервайзер',
     'operator': 'Оператор',
     'trainee': 'Стажер',
-    'trainer': 'Тренер'
+    'trainer': 'Тренер',
+    'hr_manager': 'HR-менеджер',
+    'accounting_manager': 'Менеджер бухгалтерии'
 }
 try:
     SENSITIVE_ACCESS_NOTIFICATION_TZ = ZoneInfo('Asia/Almaty')
@@ -9536,6 +9545,13 @@ def get_user_profile():
             "avatar_url": _build_avatar_signed_url(user[15], user[16]),
             "avatar_updated_at": user[19].isoformat() if len(user) > 19 and user[19] else None
         }
+        # Должность и отдел — карточка бэк-офиса показывает их вместо
+        # супервайзера и ставки. Мягко: сбой запроса не должен ронять профиль.
+        try:
+            profile_data.update(db.get_user_hr_card(user[0]))
+        except Exception:
+            profile_data.setdefault("job_title", None)
+            profile_data.setdefault("department_name", None)
 
         logging.info(f"Profile data fetched successfully for user_id: {user_id}")
         return jsonify({"status": "success", "profile": profile_data}), 200
@@ -10715,7 +10731,7 @@ def get_admin_users():
         if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer') or headed_dept_ids):
             return jsonify({"error": "Forbidden"}), 403
 
-        visible_roles = ['operator', 'trainee', 'trainer']
+        visible_roles = ['operator', 'trainee', 'trainer', *sorted(BACK_OFFICE_EMPLOYEE_ROLES)]
         if headed_dept_ids:
             visible_roles.extend(['sv', 'supervisor'])
         if requester_role == 'super_admin':
@@ -16222,14 +16238,18 @@ def add_user():
             return jsonify({"error": "Name cannot be empty"}), 400
 
         role = _normalize_user_role(data.get('role') or 'operator')
-        if role not in ('operator', 'trainee', 'trainer', 'sv', 'admin'):
-            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, sv, admin"}), 400
+        if role not in ('operator', 'trainee', 'trainer', 'sv', 'admin',
+                        'hr_manager', 'accounting_manager'):
+            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, sv, admin, hr_manager, accounting_manager"}), 400
         if role == 'admin' and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can create admins"}), 403
         if role == 'sv' and not _is_admin_role(requester_role):
             return jsonify({"error": "Only admins can create supervisors"}), 403
-        if (requester_role == 'sv' or requester_headed_dept is not None) and not _is_admin_role(requester_role) and role not in ('operator', 'trainee'):
-            return jsonify({"error": "Scoped managers can create only operators or trainees"}), 403
+        # Глава бэк-офиса заводит своих сотрудников их же ролью — без этого
+        # он не может завести никого, кроме оператора, которых у него нет.
+        if (requester_role == 'sv' or requester_headed_dept is not None) and not _is_admin_role(requester_role) \
+                and role not in ('operator', 'trainee') and role not in BACK_OFFICE_EMPLOYEE_ROLES:
+            return jsonify({"error": "Scoped managers can create only operators, trainees or back-office employees"}), 403
 
         supervisor_id = None
         direction_id = None
@@ -16268,6 +16288,13 @@ def add_user():
         # бэк-офис это не влияет — групп у него нет.
         # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
         line_fields_hidden = _department_hides_operator_line_fields(department_id)
+
+        # Роль бэк-офиса действительна только в СВОЁМ отделе. Иначе это дыра
+        # в правах, а не опечатка: такой роли нет в конфиге чужого отдела
+        # (DEPARTMENT_VIEW_ALLOWLIST), а роль вне конфига ограничений не
+        # получает — человек увидел бы всё меню.
+        if role in BACK_OFFICE_EMPLOYEE_ROLES and _back_office_employee_role(department_id) != role:
+            return jsonify({"error": "Эта должность заводится только в своём отделе"}), 400
 
         # Группа оператора: определяет и членство, и супервайзера (СВ группы).
         # supervisor_id как прямой параметр — legacy-фолбэк для старых клиентов.
@@ -23150,6 +23177,28 @@ SIP_SETTINGS_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})
 # Отделы без операторских полей: ни направлений, ни групп, ни SIP-номера.
 # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
 OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})
+
+# Рядовой сотрудник бэк-офиса заводится не оператором: 'operator' в этой
+# системе означает человека на линии — с направлением, группой, часами и
+# оценками. Зеркалит BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT в
+# src/utils/departmentViews.js.
+BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE = {
+    'accounting': 'accounting_manager',
+    'hr': 'hr_manager',
+}
+BACK_OFFICE_EMPLOYEE_ROLES = frozenset(BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.values())
+
+
+def _back_office_employee_role(department_id):
+    """Роль рядового сотрудника этого отдела; None — у отдела своей нет."""
+    if department_id is None:
+        return None
+    try:
+        department = db.get_department_by_id(int(department_id)) or {}
+    except Exception:
+        return None
+    code = str(department.get('code') or '').strip().lower()
+    return BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.get(code)
 
 
 def _department_hides_operator_line_fields(department_id):
