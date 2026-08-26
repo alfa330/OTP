@@ -13,7 +13,8 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { daysLeftLabel, fmtDeadline as fmtGuestDeadline } from './guestAccess';
 import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 import { findTrainer } from './trainers/registry';
-import { scrollToElement } from './scrollContainer';
+import { getScrollContainer, scrollToElement } from './scrollContainer';
+import { backLabel } from './articleTrail';
 import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
@@ -210,7 +211,12 @@ const markNeedles = (nodes, rawNeedles, limit = 60) => {
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                       highlightTerm = null, classifierPrefill = null,
                                       onEdit = null, onArchived = null,
-                                      onOpenArticle = null }) {
+                                      onOpenArticle = null,
+                                      /* Предыдущая статья цепочки и позиция, на
+                                         которой в ней оборвали чтение, — обе
+                                         приходят из витрины (articleTrail.js).
+                                         Пусто — в статью пришли из списка. */
+                                      backTo = null, restoreScroll = 0 }) {
     const isClassifier = slug === CLASSIFIER_SLUG;
     const [article, setArticle] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -293,6 +299,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         navigator.clipboard.writeText(link).then(ok).catch(fallback);
     };
 
+    /* Уход по сети статей. Наверх идёт не только цель, но и ЗАГОЛОВОК текущей
+       статьи: витрина держит цепочку по слагам и подписать кнопку возврата
+       «Назад: «Тарифы»» без этого не может — заголовок знает только тот, кто
+       статью загрузил. Отсутствие обработчика остаётся ОТСУТСТВИЕМ, а не
+       пустой функцией: блок связей на нём отдаёт клик браузеру (строка там —
+       настоящая <a href>), и заглушка отняла бы у ссылки эту способность. */
+    const openLinked = onOpenArticle
+        ? (target) => onOpenArticle(target, { title: article?.title || null })
+        : null;
+
     /* Ссылка на другую статью внутри текста ведёт на тот же портал
        (?view=wiki&article=<slug>). Открываем её здесь же: полная перезагрузка
        приложения ради соседней статьи — это секунды ожидания и повторная
@@ -318,13 +334,13 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             return;
         }
 
-        if (!onOpenArticle) return;
+        if (!openLinked) return;
         const anchor = event.target?.closest?.('a[href]');
         if (!anchor || anchor.target === '_blank') return;
         const target = readArticleSlugFromHref(anchor.getAttribute('href'));
         if (!target || target === slug) return;
         event.preventDefault();
-        onOpenArticle(target);
+        openLinked(target);
     };
 
     const archive = () => {
@@ -455,6 +471,25 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         setToc(entries);
         setActiveId(entries[0]?.id || '');
     }, [safeHtml, bodyReady]);
+
+    /* Прокрутка при смене статьи.
+     *
+     * Вперёд по сети статей — всегда в начало: открывают соседнюю статью из
+     * блока связей, а он стоит в самом подвале, то есть в момент нажатия
+     * человек прокручен вниз. Назад — туда, где чтение оборвали: возврат в
+     * «Тарифы» на первый экран означал бы искать абзац со ссылкой заново.
+     *
+     * Ставим ПОСЛЕ того, как тело оказалось в DOM (bodyReady): пока на экране
+     * карточка «Открываем статью…», страница ростом с вьюпорт, и любая позиция
+     * тут же обрезалась бы в ноль. Подсветка найденного слова прокручивает
+     * своим таймером позже и намеренно перебивает эту позицию: пришли из
+     * поиска — значит нужно совпадение, а не начало текста.
+     */
+    useEffect(() => {
+        if (!bodyReady) return;
+        const container = getScrollContainer(bodyRef.current);
+        if (container) container.scrollTo({ top: Math.max(0, restoreScroll || 0), behavior: 'auto' });
+    }, [bodyReady, slug, restoreScroll]);
 
     // Подсветка активного пункта оглавления. IntersectionObserver вместо
     // обработчика прокрутки: он не будит React на каждый кадр.
@@ -600,8 +635,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 <p className="mx-auto mt-1 max-w-sm text-[13px] leading-relaxed text-slate-500">
                     Возможно, статья удалена или у вас нет к ней доступа.
                 </p>
-                <button type="button" className={`${iosBtnSecondary} mt-4`} onClick={onBack}>
-                    <ArrowLeft size={14} /> К списку
+                <button type="button" className={`${iosBtnSecondary} mt-4`} onClick={onBack}
+                        title={backTo?.title ? `Вернуться к статье «${backTo.title}»` : undefined}>
+                    <ArrowLeft size={14} /> {backLabel(backTo)}
                 </button>
             </div>
         );
@@ -623,8 +659,13 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             style={immersive ? { left: 'var(--app-sidebar-offset, 0px)' } : undefined}
         >
             <div className="flex flex-wrap items-center justify-between gap-2">
-                <button type="button" className={iosBtnSecondary} onClick={onBack}>
-                    <ArrowLeft size={14} /> К списку
+                {/* Куда ведёт возврат, зависит от того, как человек сюда попал:
+                    из списка — в список, по ссылке из другой статьи — в неё.
+                    Подпись обязана это называть, иначе кнопка обещает одно, а
+                    делает другое (см. articleTrail.js). */}
+                <button type="button" className={iosBtnSecondary} onClick={onBack}
+                        title={backTo?.title ? `Вернуться к статье «${backTo.title}»` : undefined}>
+                    <ArrowLeft size={14} /> {backLabel(backTo)}
                 </button>
                 {/* Правка открывается ОТСЮДА, и до сих пор её здесь не было:
                     единственным входом в редактор была кнопка «Новая статья»,
@@ -859,7 +900,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                 title="Связанные материалы"
                                 hint="Статьи, на которые ссылается этот текст."
                                 rows={related}
-                                onOpen={onOpenArticle}
+                                onOpen={openLinked}
                             />
                         )}
                         {backlinks.length > 0 && (
@@ -868,7 +909,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                 title="Сюда ссылаются"
                                 hint="Статьи, в тексте которых есть ссылка на эту."
                                 rows={backlinks}
-                                onOpen={onOpenArticle}
+                                onOpen={openLinked}
                             />
                         )}
                     </footer>

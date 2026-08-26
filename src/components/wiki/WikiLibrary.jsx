@@ -11,6 +11,8 @@ import { markedWord } from './WikiSearch';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
+import { openTrail, popTrail, pushTrail, trailBack, trailTop } from './articleTrail';
+import { portalScrollTop, scrollPortalTo } from './scrollContainer';
 import { fetchArticleIndex } from './articleIndex';
 import { absoluteFileUrl } from './fileUrls';
 import { selectableSections } from './sectionPicker';
@@ -116,12 +118,20 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const askAssistant = useStableCallback(onAskAssistant);
     const canAskAssistant = !!onAskAssistant;
 
-    const [openSlug, setOpenSlug] = useState(initialSlug || null);
+    /* Открытая статья — ВЕРШИНА цепочки переходов, а не отдельное значение:
+       из статьи уходят по ссылке в текст соседней, и возврат обязан вести туда,
+       откуда пришли (см. articleTrail.js). Подсветка найденного слова и
+       заготовка классификатора живут в записи цепочки, а не рядом с ней: они
+       принадлежат КОНКРЕТНОЙ статье, и при возврате должны вернуться вместе
+       с ней. */
+    const [trail, setTrail] = useState(() => openTrail(initialSlug || null));
+    const openEntry = trailTop(trail);
+    const openSlug = openEntry?.slug || null;
+    const openHighlight = openEntry?.highlight || null;
+    const openPrefill = openEntry?.prefill || null;
+    const backEntry = trailBack(trail);
     // Открытый парк — такая же страница витрины, как статья (см. WikiPark).
     const [openParkSlug, setOpenParkSlug] = useState(null);
-    const [openHighlight, setOpenHighlight] = useState(null);
-    // Префилл для статьи-классификатора: пришли из поиска с готовой машиной.
-    const [openPrefill, setOpenPrefill] = useState(null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
     // Документ, который надо применить к статье СРАЗУ после её открытия. Живёт
     // здесь, а не в редакторе: путь начинается в проверке дублей на другой
@@ -161,8 +171,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        признак того, что переход уже отработал. */
     useEffect(() => {
         if (!initialSlug) return;
-        setOpenHighlight(null);
-        setOpenSlug(initialSlug);
+        /* Парк гасим ЯВНО: его страница стоит в рендере раньше статьи, и без
+           этого ссылка из чата или клик в колоколе, пришедшие поверх открытого
+           парка, меняли бы адресную строку, не меняя экрана. */
+        setOpenParkSlug(null);
+        setTrail(openTrail(initialSlug));
         consumeInitialSlug();
     }, [initialSlug, consumeInitialSlug]);
 
@@ -170,9 +183,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        вдобавок несёт слово для подсветки в тексте статьи. */
     useEffect(() => {
         if (!searchTarget?.slug) return;
-        setOpenHighlight(searchTarget.highlight || null);
-        setOpenPrefill(searchTarget.prefill || null);
-        setOpenSlug(searchTarget.slug);
+        setOpenParkSlug(null);
+        setTrail(openTrail(searchTarget.slug, {
+            highlight: searchTarget.highlight || null,
+            prefill: searchTarget.prefill || null,
+        }));
         consumeSearchTarget();
     }, [searchTarget, consumeSearchTarget]);
 
@@ -228,9 +243,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         // к полям ввода, и промахнуться по нему слишком легко.
         if (editing && !window.confirm(
             'Уйти на главную вики? Несохранённые правки статьи пропадут.')) return;
-        setOpenSlug(null);
-        setOpenHighlight(null);
-        setOpenPrefill(null);
+        setTrail([]);
         setOpenParkSlug(null);
         setEditing(null);
         setQuery('');
@@ -238,12 +251,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     }, [homeTick]);
 
     /* Обычное открытие из списка — без подсветки: она осмысленна только когда
-       известно, по какому слову статью нашли. */
+       известно, по какому слову статью нашли. Цепочка при этом начинается
+       заново: список — не шаг по сети статей, и возврат из него ведёт в список. */
     const openArticle = useCallback((slug) => {
-        setOpenHighlight(null);
-        setOpenPrefill(null);
         setOpenParkSlug(null);
-        setOpenSlug(slug);
+        setTrail(openTrail(slug));
     }, []);
 
     /* Открытие ИЗ ВЫДАЧИ — с подсветкой, как из поисковой модалки. Раньше это
@@ -251,10 +263,37 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        показывали сниппет с найденным словом, а статья открывалась на первом
        экране, где этого слова нет. */
     const openHit = useCallback((article) => {
-        setOpenHighlight(markedWord(article.snippet, query.trim()));
-        setOpenPrefill(null);
-        setOpenSlug(article.slug);
+        setOpenParkSlug(null);
+        setTrail(openTrail(article.slug, {
+            highlight: markedWord(article.snippet, query.trim()),
+        }));
     }, [query]);
+
+    /* Шаг ВПЕРЁД по сети статей: ссылка в тексте, «Связанные материалы»,
+       «Сюда ссылаются». Отличается от openArticle ровно тем, ради чего всё и
+       затевалось, — предыдущая статья остаётся в цепочке, и возврат ведёт в
+       неё. Заголовок и позицию прокрутки забираем в момент ухода: витрина
+       заголовка открытой статьи не знает (его знает только сама статья), а
+       прокрутка через мгновение схлопнется под карточку «Открываем статью…». */
+    const openLinkedArticle = useCallback((slug, from = null) => {
+        const leaving = { title: from?.title || null, scrollTop: portalScrollTop() };
+        setTrail((prev) => pushTrail(prev, slug, leaving));
+    }, []);
+
+    /* Возврат на шаг назад: в предыдущую статью цепочки, а когда её нет — в
+       список. */
+    const closeArticle = useCallback(() => setTrail(popTrail), []);
+
+    /* Список после статьи показываем СВЕРХУ. Открытие статьи прокрутку сбивает
+       само (высота страницы схлопывается под карточку загрузки, и браузер
+       обрезает scrollTop), а возврат рисуется одним коммитом из готового
+       состояния — и человек попадал в витрину на той прокрутке, докуда дочитал
+       статью, то есть в её самый низ. Прокрутку ВНУТРИ статьи восстанавливает
+       сама статья: списку для этого нечего ждать, а ей — есть (тело приходит
+       с сервера). */
+    useEffect(() => {
+        if (!openSlug) scrollPortalTo(0);
+    }, [openSlug]);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
@@ -418,7 +457,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                         // Числа каталога меняются той же правкой: опубликовали
                         // черновик — «Черновиков» обязано уменьшиться сразу.
                         refreshCatalog();
-                        if (slug) setOpenSlug(slug);
+                        if (slug) setTrail(openTrail(slug));
                     }}
                 />
             </Suspense>
@@ -452,19 +491,27 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 highlightTerm={openHighlight}
                 classifierPrefill={openPrefill}
                 showToast={showToast}
-                onBack={() => { setOpenSlug(null); setOpenHighlight(null); setOpenPrefill(null); }}
+                /* Куда уведёт возврат, знает цепочка: в предыдущую статью, а
+                   когда её нет — в список. Подпись кнопки берётся отсюда же,
+                   чтобы обещание на кнопке и её действие не могли разойтись. */
+                backTo={backEntry}
+                restoreScroll={openEntry?.scrollTop || 0}
+                onBack={closeArticle}
                 /* Ссылка на другую статью внутри текста открывает её здесь же
-                   (см. articleLink.js), без перезагрузки портала. */
-                onOpenArticle={openArticle}
+                   (см. articleLink.js), без перезагрузки портала, и ШАГОМ
+                   ВПЕРЁД по цепочке — статья, из которой ушли, остаётся на
+                   расстоянии одной кнопки. */
+                onOpenArticle={openLinkedArticle}
                 /* Статья приходит с сервера целиком (content, разделы, флаги),
                    поэтому редактору не нужен второй запрос — открываем прямо
                    на том объекте, который человек сейчас читает. */
                 onEdit={(article) => setEditing(article)}
                 onArchived={() => {
-                    // Возвращаемся к списку: открытая статья только что ушла из
-                    // него, и оставлять её на экране значит показывать то, чего
-                    // в витрине уже нет.
-                    setOpenSlug(null);
+                    // Уходим с закрытой статьи: она только что ушла из витрины,
+                    // и оставлять её на экране значит показывать то, чего в
+                    // вике уже нет. Шаг назад по цепочке, а не сразу в список:
+                    // разбирают архив обычно подряд, по сети связей.
+                    setTrail(popTrail);
                     load();
                     loadIndex();
                     loadHome();
