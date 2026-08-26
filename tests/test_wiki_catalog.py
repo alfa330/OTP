@@ -682,6 +682,50 @@ class CatalogScreenSourceTest(unittest.TestCase):
         self.assertRegex(self.code, r'\{!catalogLost && busy &&')
         self.assertIn('Список не загрузился', self.src)
 
+    def test_the_list_is_shown_in_pages(self):
+        """Строки режутся страницами общим пейджером, а не своим.
+
+        Своя вёрстка пейджера рядом с IosPager разошлась бы с ним на первой же
+        правке отступа — ровно та причина, по которой его когда-то и вынесли из
+        карточки сессий в общий модуль.
+        """
+        self.assertIn('IosPager', self.code)
+        self.assertRegex(self.code, r'const ROWS_PER_PAGE = \d+;')
+        self.assertRegex(self.code, r'pageView\.rows\.map\(')
+
+    def test_the_pager_stands_above_the_list(self):
+        """Пейджер стоит выше списка, а не под ним.
+
+        Под списком до него пришлось бы прокручивать всю страницу — ровно та
+        работа, ради избавления от которой страницы и заводят. То же решение и
+        по той же причине принято в карточке сессий.
+        """
+        pager = self.code.index('IosPager\n')
+        rows = self.code.index('pageView.rows.map(')
+        self.assertLess(pager, rows, 'пейджер оказался ниже списка')
+
+    def test_paging_does_not_break_the_filter(self):
+        """Фильтр отбирает по всему списку, а страница режет уже отобранное.
+
+        Спроси страницу у сервера — и «Ничего не найдено» означало бы «нет на
+        этой странице». Порядок здесь и есть гарантия: сначала shown (фильтр),
+        потом окно страницы над ним.
+        """
+        self.assertRegex(self.code, r'pageWindow\(shown, page\)')
+        # Страница сбрасывается на первую, когда меняется то, над чем она стоит.
+        self.assertRegex(self.code, r'useEffect\(\(\) => \{ setPage\(1\); \}, \[filter\]\)')
+        self.assertRegex(self.code, r'if \(!quiet\) \{[^}]*setPage\(1\);')
+
+    def test_a_quiet_refresh_keeps_the_page_the_person_is_reading(self):
+        """Тихое обновление НЕ отбрасывает на первую страницу.
+
+        Человек читает седьмую страницу и архивирует с неё строку. Сбрось мы
+        страницу — список прыгнул бы в начало на каждое действие над строкой.
+        """
+        loader = re.search(r'const loadArticles = .*?\n    \}, \[', self.code, re.S)
+        self.assertIsNotNone(loader)
+        self.assertEqual(len(re.findall(r'setPage\(1\)', loader.group(0))), 1)
+
     def test_the_full_list_is_asked_within_one_space(self):
         """Запрос списка уходит с space_id.
 

@@ -4,7 +4,7 @@ import {
     Archive, ChevronRight, Eye, FileText, Folder, FolderOpen, Layers, Loader2,
     PenLine, Pencil, Search, User, X,
 } from 'lucide-react';
-import { iosCard, IosBadge, IosMenu } from '../ui/ios';
+import { iosCard, IosBadge, IosMenu, IosPager } from '../ui/ios';
 import { fetchArticleIndex } from './articleIndex';
 import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 
@@ -38,6 +38,16 @@ import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
  * черновиков на бою 235: одним запросом список молча обрезался бы, и «Черновики
  * 235» открывались бы двумя сотнями. Страницы добирает fetchArticleIndex — тот
  * же, что собирает оглавление на главной, и по той же причине.
+ *
+ * ПОКАЗЫВАЕТСЯ СПИСОК ТОЖЕ СТРАНИЦАМИ — но это ДРУГИЕ страницы. Забрать всё и
+ * вывалить на экран двести с лишним строк — прокрутка на пятнадцать экранов, в
+ * которой ничего не находится. Поэтому строки режутся пейджером по десятку.
+ *
+ * Режутся на КЛИЕНТЕ, и это не лень. Фильтр под шапкой ищет по всему списку, а
+ * не по видимой странице: спроси мы у сервера одну страницу — и «Ничего не
+ * найдено» означало бы всего лишь «нет на этой странице». По той же причине
+ * честны и числа: «Найдено 60 из 235» знает обе величины, потому что обе
+ * лежат здесь. Цена — два запроса вместо одного, и она уже заплачена выше.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -73,6 +83,41 @@ const NOOP = () => {};
    строка: выборка ходит тем же загрузчиком, что и раздел, и её имя попадает в
    ключ гонки — по пустому значению два запроса было бы не различить. */
 const ALL_ID = 'all';
+
+/* Сколько строк списка видно за раз.
+ *
+ * Десять — столько же, сколько в карточке сессий, и по той же причине: пейджер
+ * стоит НАД списком, поэтому страница обязана умещаться примерно в экран. Будь
+ * она вдвое длиннее, к переключателю пришлось бы возвращаться прокруткой вверх —
+ * ровно та работа, ради избавления от которой страницы и заводят.
+ *
+ * Глубина при этом уходит не в номера страниц, а в фильтр: список отсортирован
+ * по свежести, и «найти конкретную статью» — это набрать слово, а не долистать
+ * до двадцатой страницы. */
+const ROWS_PER_PAGE = 10;
+
+/* Окно страницы: какие строки показать и с какой они по счёту.
+ *
+ * Вынесено из тела экрана ради теста: арифметика «с какой по какую» ошибается
+ * на единицу молча, а ошибку видно только на границе — на последней странице
+ * или на списке ровно в страницу длиной.
+ *
+ * Страница за концом списка прижимается к последней существующей. Это не
+ * перестраховка: статью убирают в архив прямо с последней страницы, список
+ * становится короче, и без этого человек остался бы смотреть на пустоту с
+ * рабочим пейджером. */
+export const pageWindow = (rows, page, perPage = ROWS_PER_PAGE) => {
+    const total = rows ? rows.length : 0;
+    const pageCount = Math.max(1, Math.ceil(total / perPage));
+    const safePage = Math.min(Math.max(Math.trunc(page) || 1, 1), pageCount);
+    const from = (safePage - 1) * perPage;
+    return {
+        pageCount,
+        safePage,
+        from,
+        rows: rows ? rows.slice(from, from + perPage) : rows,
+    };
+};
 
 /* Подпись «где лежит статья» для списка «все статьи»: строки там пришли из
    разных веток, и без неё неоткуда узнать, куда идти за соседними.
@@ -359,6 +404,7 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     const [busy, setBusy] = useState(true);
     const [acting, setActing] = useState(null);       // id статьи, над которой работаем
     const [filter, setFilter] = useState('');         // поиск внутри показанного списка
+    const [page, setPage] = useState(1);              // страница показанного списка
     const [query, setQuery] = useState('');           // поиск по дереву
     const setOpenSections = onOpenSectionsChange;
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
@@ -559,7 +605,12 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
            а спиннер над ним не погас бы вовсе. Себя же тихое обновление
            проверяет тем же ключом: сменилась выборка, пока летел ответ, —
            значит он опоздал и в список не идёт. */
-        if (!quiet) { wantedRef.current = wanted; setBusy(true); setItems(null); }
+        /* Страницу сбрасываем вместе со списком: седьмая страница «Черновиков»
+           к только что открытому «Архиву» отношения не имеет, а пейджер стоит
+           выше списка — уехавшую страницу заметили бы не сразу. Тихое
+           обновление страницу НЕ трогает: человек читает её прямо сейчас, и
+           отбрасывать его в начало из-за архивации одной строки незачем. */
+        if (!quiet) { wantedRef.current = wanted; setBusy(true); setItems(null); setPage(1); }
         const mine = () => wantedRef.current === wanted;
 
         const total = knownCount(id);
@@ -738,6 +789,10 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [bucket, spaceId, hasCatalog]);
 
+    /* Набрали или стёрли слово в фильтре — снова с первой страницы: третья
+       страница прежнего списка к отфильтрованному отношения не имеет. */
+    useEffect(() => { setPage(1); }, [filter]);
+
     /* Фильтр внутри раздела — по названию и описанию, на клиенте: список уже
        целиком здесь, ходить за подстрокой на сервер незачем. */
     const shown = useMemo(() => {
@@ -746,6 +801,16 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
         return items.filter(
             (a) => `${a.title} ${a.summary || ''}`.toLowerCase().includes(term));
     }, [items, filter]);
+
+    /* Показанные строки — окно страницы над отфильтрованным списком. */
+    const pageView = pageWindow(shown, page);
+    /* Список стал короче, чем был на этой странице (статью убрали в архив
+       прямо с неё) — pageWindow уже отдал последнюю существующую, осталось
+       довести до неё само состояние, иначе номер в пейджере разошёлся бы
+       с показанными строками. */
+    useEffect(() => {
+        if (page !== pageView.safePage) setPage(pageView.safePage);
+    }, [page, pageView.safePage]);
 
     if (loading && !catalog) {
         return (
@@ -773,13 +838,14 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     const viewingAll = !selected;
     const filtering = filter.trim().length > 0;
 
-    /* Число в шапке правой колонки. С включённым фильтром — «7 из 235», а не
-       «235»: показано семь строк, и цифра, называющая другое, читается как
-       потерянные статьи. Название корзины в списке «все статьи» не повторяем —
-       оно уже стоит заголовком колонки. */
+    /* Число в шапке правой колонки — про ВЕСЬ список, а пейджер под ним — про
+       показанную страницу. Поэтому с включённым фильтром здесь «Найдено 60 из
+       235», а не «60 из 235»: рядом стоит «1–10 из 60» того же вида, и без
+       слова два разных «из» читались бы как одно и то же число. Название
+       корзины в списке «все статьи» не повторяем — оно уже стоит заголовком. */
     let countLabel = '';
     if (items) {
-        if (filtering) countLabel = `${shown.length} из ${items.length}`;
+        if (filtering) countLabel = `Найдено ${shown.length} из ${items.length}`;
         else {
             const n = `${items.length} ${articleWord(items.length)}`;
             countLabel = viewingAll ? n : `${active.label}: ${n}`;
@@ -999,6 +1065,26 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                 )}
                             </div>
                         )}
+
+                        {/* Пейджер НАД списком, а не под ним. Под ним до него
+                            пришлось бы прокручивать всю страницу — ровно та
+                            работа, ради избавления от которой страницы и
+                            заводят. Сверху он к тому же оставляет начало новой
+                            страницы прямо под собой. Тот же приём и по той же
+                            причине — в карточке сессий. */}
+                        {!busy && shown && shown.length > ROWS_PER_PAGE && (
+                            <div className="mt-2 border-t border-slate-200/70 pt-2">
+                                <IosPager
+                                    page={pageView.safePage}
+                                    pageCount={pageView.pageCount}
+                                    total={shown.length}
+                                    from={pageView.from + 1}
+                                    to={pageView.from + pageView.rows.length}
+                                    onPage={setPage}
+                                    unit="статьи"
+                                />
+                            </div>
+                        )}
                     </div>
 
                     {catalogLost && (
@@ -1035,7 +1121,7 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
 
                     {!busy && shown && shown.length > 0 && (
                         <div className="divide-y divide-slate-100">
-                            {shown.map((article) => (
+                            {pageView.rows.map((article) => (
                                 <ArticleRow
                                     key={article.id}
                                     article={article}

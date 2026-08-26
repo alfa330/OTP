@@ -52,7 +52,7 @@ async function loadModule() {
 
 const mod = await loadModule();
 const WikiCatalog = mod.default;
-const { articleWhere } = mod;
+const { articleWhere, pageWindow } = mod;
 
 const SPACE = { id: 1, name: 'Таксопарки' };
 
@@ -142,6 +142,60 @@ test('каталог не ответил — колонка говорит об 
 test('каталог ещё едет — это по-прежнему ожидание, а не ошибка', () => {
   const html = render({ catalog: null, loading: true });
   assert.doesNotMatch(html, /Список не загрузился/);
+});
+
+// ── Окно страницы ───────────────────────────────────────────────────────────
+//
+// Арифметика «с какой строки по какую» ошибается на единицу молча, и видно это
+// только на границах: последняя страница, список ровно в страницу длиной,
+// список, укоротившийся под ногами.
+
+const rows = (n) => Array.from({ length: n }, (_, i) => i + 1);
+
+test('первая страница — первые десять строк', () => {
+  const w = pageWindow(rows(212), 1, 10);
+  assert.deepEqual(w.rows, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(w.pageCount, 22);
+  assert.equal(w.from, 0);          // «1–10 из 212» в пейджере
+});
+
+test('последняя страница — остаток, а не десять', () => {
+  const w = pageWindow(rows(212), 22, 10);
+  assert.deepEqual(w.rows, [211, 212]);
+  assert.equal(w.from, 210);        // «211–212 из 212»
+});
+
+test('список ровно в страницу — одна страница, пейджера нет', () => {
+  const w = pageWindow(rows(10), 1, 10);
+  assert.equal(w.pageCount, 1);
+  assert.equal(w.rows.length, 10);
+});
+
+test('страница за концом прижимается к последней существующей', () => {
+  // Так бывает по-настоящему: статью убрали в архив с последней страницы, и
+  // список стал короче. Без прижатия человек смотрел бы на пустоту с рабочим
+  // пейджером.
+  const w = pageWindow(rows(11), 5, 10);
+  assert.equal(w.safePage, 2);
+  assert.deepEqual(w.rows, [11]);
+});
+
+test('пустой список — одна страница и ноль строк, а не деление на ноль', () => {
+  const w = pageWindow([], 3, 10);
+  assert.equal(w.pageCount, 1);
+  assert.equal(w.safePage, 1);
+  assert.deepEqual(w.rows, []);
+});
+
+test('список ещё не пришёл — окно отдаёт null, а не пустой массив', () => {
+  // null и [] на этом экране значат разное: «ещё ждём» против «здесь пусто».
+  assert.equal(pageWindow(null, 1, 10).rows, null);
+});
+
+test('мусорный номер страницы не роняет окно', () => {
+  assert.equal(pageWindow(rows(30), 0, 10).safePage, 1);
+  assert.equal(pageWindow(rows(30), -4, 10).safePage, 1);
+  assert.equal(pageWindow(rows(30), NaN, 10).safePage, 1);
 });
 
 // ── Подпись «где лежит статья» ──────────────────────────────────────────────
