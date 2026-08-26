@@ -48237,7 +48237,10 @@ class Database:
                     }
 
                 test_status = self.survey_test_status(starts_at, ends_at, now=now) if is_test else None
-                draft_answers = row[30] if len(row) > 30 and isinstance(row[30], list) else []
+                draft_answers = self.survey_draft_answers_for_questions(
+                    row[30] if len(row) > 30 else None,
+                    questions_source
+                )
 
                 my_response = None
                 if response_id is not None:
@@ -48332,6 +48335,51 @@ class Database:
                 })
 
             return result
+
+    def survey_draft_answers_for_questions(self, draft_answers, questions):
+        """
+        Черновик начатой попытки без вариантов, которых в вопросе уже нет.
+
+        Автор может править опрос, пока его проходят: тогда сохранённый выбор
+        ссылается на исчезнувшую формулировку. Такой выбор — не ответ, и отдавать
+        его оператору нельзя: вопрос выглядел бы отвеченным (галочка в бейдже,
+        полный прогресс), а отправка упиралась бы в отказ по варианту, которого
+        на экране уже нет. Пустой вопрос честнее — его видно и можно ответить.
+        """
+        if not isinstance(draft_answers, list):
+            return []
+
+        options_by_question = {}
+        for question in questions or []:
+            try:
+                question_id = int(question.get('id'))
+            except (TypeError, ValueError):
+                continue
+            options_by_question[question_id] = {str(item) for item in (question.get('options') or [])}
+
+        cleaned = []
+        seen_question_ids = set()
+        for raw_answer in draft_answers:
+            if not isinstance(raw_answer, dict):
+                continue
+            try:
+                question_id = int(raw_answer.get('question_id'))
+            except (TypeError, ValueError):
+                continue
+            if question_id in seen_question_ids or question_id not in options_by_question:
+                continue
+            seen_question_ids.add(question_id)
+            allowed_options = options_by_question[question_id]
+            selected = []
+            for item in (raw_answer.get('selected_options') or []):
+                text = str(item or '').strip()
+                if text and text in allowed_options and text not in selected:
+                    selected.append(text)
+            if not selected:
+                continue
+            cleaned.append({'question_id': question_id, 'selected_options': selected})
+
+        return cleaned
 
     def submit_survey_response(self, survey_id, operator_id, answers, auto_submitted=False):
         survey_id = int(survey_id)
@@ -48432,6 +48480,9 @@ class Database:
             correct_options = row[6] if len(row) > 6 and isinstance(row[6], list) else []
             questions_by_id[int(row[0])] = {
                 'id': int(row[0]),
+                # Номер вопроса — тот же, что видит оператор в форме: вопросы
+                # идут по position, id, и бейдж рисует порядковый номер.
+                'number': len(questions_by_id) + 1,
                 'text': row[1],
                 'type': row[2],
                 'required': bool(row[3]),
@@ -48505,7 +48556,16 @@ class Database:
             allowed_options = set(question.get('options') or [])
             invalid_selected = [item for item in selected_unique if item not in allowed_options]
             if invalid_selected and not question.get('allow_other'):
-                raise ValueError(f"SURVEY_INVALID_OPTION_{question['id']}")
+                # Варианта в вопросе больше нет: автор переписал формулировку,
+                # пока оператор проходил опрос. Живому оператору называем номер
+                # вопроса — иначе он упирается в «недопустимый вариант» и не
+                # может понять, где именно. Автоотправку по окончании окна это
+                # ронять не должно: иначе попытка пропала бы целиком, поэтому
+                # исчезнувший выбор просто не засчитывается.
+                if not auto_submitted:
+                    raise ValueError(f"SURVEY_OPTION_CHANGED_{question['number']}")
+                selected_unique = [item for item in selected_unique if item in allowed_options]
+                invalid_selected = []
 
             valid_selected = [item for item in selected_unique if item in allowed_options]
             if qtype == 'single' and len(valid_selected) > 1:

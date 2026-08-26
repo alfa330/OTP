@@ -18246,6 +18246,18 @@ _SURVEY_ERROR_PREFIX_MESSAGES = (
     ('SURVEY_TOO_MANY_OPTIONS_', "Выбрано больше вариантов, чем допускает вопрос", 400),
     ('SURVEY_OTHER_TEXT_TOO_LONG_', "Ответ «Другое» не должен быть длиннее 500 символов", 400),
 )
+# Автор поправил вопрос, пока опрос проходили: в коде едет НОМЕР вопроса, и его
+# надо назвать оператору — «недопустимый вариант» не подсказывает, где искать.
+# Статус 409 не случаен: фронт по нему перечитывает опрос, а сервер уже отдаёт
+# черновик без исчезнувшего варианта — вопрос станет пустым сам.
+_SURVEY_ERROR_NUMBERED_PREFIX_MESSAGES = (
+    (
+        'SURVEY_OPTION_CHANGED_',
+        "Вопрос №{number} изменили, пока вы проходили опрос. Ответьте на него заново",
+        "Один из вопросов изменили, пока вы проходили опрос. Ответьте на него заново",
+        409,
+    ),
+)
 
 
 def _survey_error_response(code):
@@ -18253,6 +18265,13 @@ def _survey_error_response(code):
     if code in _SURVEY_ERROR_MESSAGES:
         message, status = _SURVEY_ERROR_MESSAGES[code]
         return jsonify({"error": message}), status
+    for prefix, message, fallback_message, status in _SURVEY_ERROR_NUMBERED_PREFIX_MESSAGES:
+        if not code.startswith(prefix):
+            continue
+        suffix = code[len(prefix):].strip()
+        if suffix.isdigit():
+            return jsonify({"error": message.format(number=int(suffix))}), status
+        return jsonify({"error": fallback_message}), status
     for prefix, message, status in _SURVEY_ERROR_PREFIX_MESSAGES:
         if code.startswith(prefix):
             return jsonify({"error": message}), status

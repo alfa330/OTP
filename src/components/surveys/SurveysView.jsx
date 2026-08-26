@@ -1284,8 +1284,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         });
         const initial = {};
         (selectedSurvey.questions || []).forEach((question) => {
+            // Вариант, которого в вопросе уже нет (автор переписал формулировку
+            // во время прохождения), в ответ не берём: иначе вопрос выглядит
+            // отвеченным, а отправка упирается в исчезнувший вариант.
+            const questionOptions = new Set((question.options || []).map((item) => String(item || '')));
+            const draftOptions = (draftByQuestion.get(Number(question.id)) || [])
+                .filter((item) => questionOptions.has(item));
             initial[question.id] = {
-                selected_options: draftByQuestion.get(Number(question.id)) || [],
+                selected_options: draftOptions,
                 answer_text: '',
                 rating_value: ''
             };
@@ -2005,8 +2011,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             await reloadSurveys();
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось отправить ответы', 'error');
-            // Время могло истечь ровно во время отправки — тогда результат
-            // закроет автоотправка, а список надо обновить.
+            // 409 — опрос изменился под нами: истекло время (результат закроет
+            // автоотправка) или автор переписал вопрос. В обоих случаях спасает
+            // только свежая версия опроса, поэтому перечитываем список.
             if (error?.response?.status === 409) await reloadSurveys();
         } finally {
             setIsSubmitting(false);
