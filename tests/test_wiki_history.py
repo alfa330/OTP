@@ -274,6 +274,94 @@ class BlocksTest(unittest.TestCase):
                          ['Пишите <p> в поле'])
 
 
+    def test_cell_wrapped_in_paragraph_does_not_split_the_row(self):
+        """Дефект прода: редактор кладёт в ячейку абзац.
+
+        `<td><p>iTaxi</p></td>` — так у 20 статей, в том числе у «Всех акций».
+        «</p>» давал перевод строки раньше, чем «</td>» успевал поставить
+        разделитель, и запись на одиннадцать граф уезжала в сравнение
+        одиннадцатью строками по значению в каждой: «Все города», «01.08.2026»,
+        «Да», «5» — без подписей и без намёка, что это одна строка таблицы.
+        """
+        blocks = history.html_to_blocks(
+            '<table><tbody><tr><td><p>iTaxi</p></td><td><p>Все города</p></td>'
+            '<td><p>01.08.2026</p></td></tr></tbody></table>')
+        self.assertEqual(blocks, ['iTaxi | Все города | 01.08.2026'])
+
+    def test_table_row_carries_cells_and_column_names(self):
+        lines = history.html_to_lines(
+            '<table><thead><tr><th>№</th><th>Парк</th><th>Актуальность</th></tr></thead>'
+            '<tbody><tr><td><p>4</p></td><td><p>iTaxi</p></td><td><p>Активная</p></td></tr>'
+            '</tbody></table>')
+        self.assertEqual([line['head'] for line in lines], [True, False])
+        self.assertEqual(lines[1]['cells'], ['4', 'iTaxi', 'Активная'])
+        # Имена граф берутся из шапки, а не выдумываются экраном.
+        self.assertEqual(lines[1]['columns'], ['№', 'Парк', 'Актуальность'])
+        # Шапка сама себе имена не раздаёт.
+        self.assertIsNone(lines[0]['columns'])
+
+    def test_table_without_head_has_cells_but_no_column_names(self):
+        lines = history.html_to_lines('<table><tr><td>Тариф</td><td>500</td></tr></table>')
+        self.assertEqual(lines[0]['cells'], ['Тариф', '500'])
+        self.assertIsNone(lines[0]['columns'])
+
+    def test_empty_table_row_is_skipped(self):
+        self.assertEqual(history.html_to_blocks(
+            '<p>А</p><table><tr><td></td><td><p></p></td></tr></table>'), ['А'])
+
+
+class TableDiffTest(unittest.TestCase):
+    """Правка внутри записи таблицы разбирается по графам."""
+
+    HEAD = ('<table><thead><tr><th>№</th><th>Парк</th><th>Город</th>'
+            '<th>Актуальность</th></tr></thead><tbody>')
+
+    def row(self, number, park, city, live):
+        return ('<tr><td><p>%s</p></td><td><p>%s</p></td><td><p>%s</p></td>'
+                '<td><p>%s</p></td></tr>' % (number, park, city, live))
+
+    def table(self, *rows):
+        return self.HEAD + ''.join(rows) + '</tbody></table>'
+
+    def test_one_changed_cell_is_named_by_its_column(self):
+        before = self.table(self.row(4, 'iTaxi', 'Все города', 'Активная'))
+        after = self.table(self.row(4, 'iTaxi', 'Все города', 'Завершена'))
+        rows = history.diff_blocks(before, after)['rows']
+        change = [r for r in rows if r['op'] == 'change']
+        self.assertEqual(len(change), 1)
+        # Правка одной графы — это ОДНА строка вывода, а не одиннадцать.
+        self.assertEqual([c['name'] for c in change[0]['cells'] if c['changed']],
+                         ['Актуальность'])
+        cell = [c for c in change[0]['cells'] if c['changed']][0]
+        self.assertEqual((cell['before'], cell['after']), ('Активная', 'Завершена'))
+        # Нетронутые графы приезжают тоже — экран решает сам, показывать ли их.
+        self.assertEqual(len(change[0]['cells']), 4)
+
+    def test_added_row_keeps_its_cells(self):
+        before = self.table(self.row(4, 'iTaxi', 'Все города', 'Активная'))
+        after = self.table(self.row(4, 'iTaxi', 'Все города', 'Активная'),
+                           self.row(5, 'Аманат', 'Астана', 'Активная'))
+        rows = history.diff_blocks(before, after)['rows']
+        ins = [r for r in rows if r['op'] == 'ins']
+        self.assertEqual(len(ins), 1)
+        self.assertEqual(ins[0]['cells'], ['5', 'Аманат', 'Астана', 'Активная'])
+        self.assertEqual(ins[0]['columns'][1], 'Парк')
+
+    def test_different_cell_count_falls_back_to_text(self):
+        """Объединённые ячейки (colspan есть у 30 статей прода).
+
+        Назвать графу номером, когда их разное количество, — соврать: подписи
+        разъедутся. Такая пара сравнивается как обычный текст.
+        """
+        before = ('<table><tr><td>А</td><td>Б</td><td>В</td></tr></table>')
+        after = ('<table><tr><td colspan="2">А Б</td><td>Г</td></tr></table>')
+        rows = history.diff_blocks(before, after)['rows']
+        change = [r for r in rows if r['op'] == 'change']
+        self.assertEqual(len(change), 1)
+        self.assertNotIn('cells', change[0])
+        self.assertIn('before_parts', change[0])
+
+
 class DiffTest(unittest.TestCase):
 
     def test_word_level_marks_inside_a_changed_line(self):

@@ -161,3 +161,79 @@ test('строки сравнения рисуются каждая по-сво�
   assert.match(change, /bg-emerald-200/);
   assert.doesNotMatch(change, /line-through/);
 });
+
+/* Запись таблицы. Тело ячейки редактор заворачивает в абзац, и сравнение
+   разваливало строку на одиннадцать безымянных значений подряд — сервер это
+   починил (wiki/history.py), а экран обязан показать пришедшие графы. */
+
+const TABLE_COLUMNS = ['№', 'Парк', 'Город', 'Актуальность'];
+
+test('правка в таблице показывает только изменившуюся графу и её имя', () => {
+  const html = render(React.createElement(DiffLine, {
+    row: {
+      op: 'change',
+      before: '4 | iTaxi | Все города | Активная',
+      after: '4 | iTaxi | Все города | Завершена',
+      columns: TABLE_COLUMNS,
+      head: false,
+      cells: [
+        { name: '№', before: '4', after: '4', changed: false },
+        { name: 'Парк', before: 'iTaxi', after: 'iTaxi', changed: false },
+        { name: 'Город', before: 'Все города', after: 'Все города', changed: false },
+        { name: 'Актуальность', before: 'Активная', after: 'Завершена', changed: true,
+          before_parts: [{ op: 'cut', text: 'Активная' }],
+          after_parts: [{ op: 'add', text: 'Завершена' }] },
+      ],
+    },
+  }));
+  assert.match(html, /Строка таблицы/);
+  // Запись опознаётся по первым непустым графам, а не по одному номеру.
+  assert.match(html, /4 · iTaxi/);
+  assert.match(html, /Актуальность/);
+  assert.match(html, /Активная/);
+  assert.match(html, /Завершена/);
+  // Нетронутые графы не показываем: их бывает одиннадцать из двенадцати.
+  assert.doesNotMatch(html, /Все города/);
+});
+
+test('добавленная строка таблицы подписывает каждое значение своей графой', () => {
+  const html = render(React.createElement(DiffLine, {
+    row: {
+      op: 'ins',
+      text: '5 | Аманат | Астана | Активная',
+      cells: ['5', 'Аманат', 'Астана', 'Активная'],
+      columns: TABLE_COLUMNS,
+      head: false,
+    },
+  }));
+  assert.match(html, /Строка таблицы добавлена/);
+  for (const column of TABLE_COLUMNS) assert.match(html, new RegExp(column));
+  for (const value of ['Аманат', 'Астана', 'Активная']) assert.match(html, new RegExp(value));
+  assert.match(html, /emerald/);
+});
+
+test('таблица без шапки: значения показаны, имена не выдуманы', () => {
+  const html = render(React.createElement(DiffLine, {
+    row: { op: 'del', text: 'Тариф | 500', cells: ['Тариф', '500'], columns: null, head: false },
+  }));
+  assert.match(html, /Строка таблицы убрана/);
+  assert.match(html, /Графа 1/);
+  assert.match(html, /rose/);
+});
+
+test('шапку таблицы называют шапкой, а не строкой', () => {
+  const html = render(React.createElement(DiffLine, {
+    row: { op: 'ins', text: '№ | Парк', cells: ['№', 'Парк'], columns: null, head: true },
+  }));
+  assert.match(html, /Шапка таблицы добавлена/);
+});
+
+test('соседняя строка таблицы остаётся одной строкой контекста', () => {
+  // Контекст нужен как точка опоры, а не как вторая копия таблицы.
+  const html = render(React.createElement(DiffLine, {
+    row: { op: 'same', text: '5 | Аманат | Астана', cells: ['5', 'Аманат', 'Астана'],
+           columns: TABLE_COLUMNS, head: false },
+  }));
+  assert.match(html, /5 · Аманат · Астана/);
+  assert.doesNotMatch(html, /Строка таблицы/);
+});

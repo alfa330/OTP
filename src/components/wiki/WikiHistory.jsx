@@ -70,9 +70,132 @@ const Marked = ({ sign, tone, children }) => (
     </div>
 );
 
+/* ЗАПИСЬ ТАБЛИЦЫ. Раньше сервер отдавал её строкой «значение | значение | …», а
+   до того и вовсе разваливал по ячейкам: правка одной графы в таблице акций
+   показывалась одиннадцатью строками подряд, где десять — прежние значения без
+   подписей. Читать это было нечем.
+
+   Теперь запись рисуется парами «графа — значение»: имена граф берутся из шапки
+   таблицы (wiki/history.py), а не выдумываются здесь. Пары, а не колонки: граф
+   бывает двенадцать, а ширины у сравнения — половина модалки, и настоящая
+   таблица в неё влезает только нечитаемой. */
+const CellPairs = ({ cells, tone = null }) => (
+    <dl className="grid gap-x-5 gap-y-1.5 sm:grid-cols-2">
+        {cells.map((cell, index) => (
+            <div key={index} className="min-w-0">
+                <dt className="truncate text-[11px] uppercase tracking-wide text-slate-400">
+                    {cell.name || `Графа ${index + 1}`}
+                </dt>
+                <dd className={`break-words text-[13.5px] leading-snug ${
+                    tone === 'del' ? 'text-slate-600' : 'text-slate-800'}`}
+                >
+                    {cell.value || <span className="text-slate-300">—</span>}
+                </dd>
+            </div>
+        ))}
+    </dl>
+);
+
+/* Чем запись таблицы называется в ленте. Первая графа у таблиц вики — номер
+   («№»), и одним им запись не опознать, поэтому берём номер и следующее за ним
+   непустое значение: «4 · iTaxi» уже отвечает на вопрос «какая это строка». */
+const rowTitle = (values) => values.filter(Boolean).slice(0, 2).join(' · ');
+
+const TableCard = ({ tone, sign, title, children }) => (
+    <div className={`my-1 overflow-hidden rounded-xl border-l-2 px-3 py-2 ${
+        tone === 'del' ? 'border-rose-300 bg-rose-50/70'
+            : tone === 'ins' ? 'border-emerald-400 bg-emerald-50/70'
+                : 'border-slate-200 bg-slate-50'}`}
+    >
+        <div className="mb-1.5 flex items-center gap-2">
+            <span
+                aria-hidden
+                className={`w-3 shrink-0 select-none text-center text-[13px] font-semibold ${
+                    tone === 'del' ? 'text-rose-400'
+                        : tone === 'ins' ? 'text-emerald-500' : 'text-slate-300'}`}
+            >
+                {sign}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-slate-500">
+                {title}
+            </span>
+        </div>
+        <div className="pl-[22px]">{children}</div>
+    </div>
+);
+
+/** Правка внутри записи таблицы: только те графы, что изменились. */
+const TableChange = ({ row }) => {
+    const changed = row.cells.filter((cell) => cell.changed);
+    return (
+        <TableCard
+            tone={null}
+            sign="±"
+            title={`${row.head ? 'Шапка таблицы' : 'Строка таблицы'} · ${
+                rowTitle(row.cells.map((cell) => cell.before || cell.after))}`}
+        >
+            {/* Неизменившиеся графы не показываем вовсе: их бывает одиннадцать
+                из двенадцати, и правка тонет среди них. */}
+            <div className="space-y-1.5">
+                {changed.map((cell, index) => (
+                    <div key={index} className="min-w-0">
+                        <div className="truncate text-[11px] uppercase tracking-wide text-slate-400">
+                            {cell.name || 'Графа'}
+                        </div>
+                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[13.5px] leading-snug">
+                            <span className="break-words rounded bg-rose-100/80 px-1 text-slate-600">
+                                {cell.before_parts
+                                    ? <Parts parts={cell.before_parts} tone="del" />
+                                    : (cell.before || '—')}
+                            </span>
+                            <ArrowRight size={12} className="shrink-0 text-slate-400" />
+                            <span className="break-words rounded bg-emerald-100/80 px-1 text-slate-800">
+                                {cell.after_parts
+                                    ? <Parts parts={cell.after_parts} tone="ins" />
+                                    : (cell.after || '—')}
+                            </span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </TableCard>
+    );
+};
+
+/** Запись таблицы целиком: добавленная, убранная или показанная для контекста. */
+const TableRowLine = ({ row }) => {
+    const cells = row.cells.map((value, index) => ({
+        name: row.head ? null : (row.columns || [])[index] || null,
+        value,
+    }));
+    if (row.op === 'same') {
+        // Контекст читается одной строкой: подробности прежней записи здесь не
+        // нужны, нужна только точка опоры «правка вот в этом месте».
+        return (
+            <div className="flex gap-2.5 px-3 py-1.5">
+                <span aria-hidden className="w-3 shrink-0" />
+                <span className="min-w-0 flex-1 truncate text-[13px] leading-relaxed text-slate-400">
+                    {row.cells.filter(Boolean).join(' · ')}
+                </span>
+            </div>
+        );
+    }
+    const tone = row.op === 'del' ? 'del' : 'ins';
+    return (
+        <TableCard
+            tone={tone}
+            sign={row.op === 'del' ? '−' : '+'}
+            title={`${row.head ? 'Шапка таблицы' : 'Строка таблицы'}${
+                row.op === 'del' ? ' убрана' : ' добавлена'} · ${rowTitle(row.cells)}`}
+        >
+            <CellPairs cells={cells} tone={tone} />
+        </TableCard>
+    );
+};
+
 /* Экспортируется ради теста: рендер модалки через react-dom/server эффектов не
-   выполняет, то есть данные в неё не попадают, и строки сравнения иначе не
-   проверить ничем. */
+ * выполняет, то есть данные в неё не попадают, и строки сравнения иначе не
+ * проверить ничем. */
 export const DiffLine = ({ row }) => {
     if (row.op === 'gap') {
         return (
@@ -85,6 +208,9 @@ export const DiffLine = ({ row }) => {
             </div>
         );
     }
+    // Запись таблицы рисуется по ячейкам, а не полосой текста с палками.
+    if (row.cells && row.op === 'change') return <TableChange row={row} />;
+    if (row.cells) return <TableRowLine row={row} />;
     if (row.op === 'same') {
         return (
             <div className="flex gap-2.5 px-3 py-1.5">
@@ -199,27 +325,35 @@ export const HistoryRow = ({ item, active, onSelect, restoredFrom = null }) => {
     );
 };
 
-/** Одна сторона сравнения: «что было» и «что стало». */
+/* Одна сторона сравнения — ОДНОЙ строкой.
+ *
+ * Было две карточки в ряд, каждая в три этажа: подпись «БЫЛО», имя, время. На
+ * узком экране ряд не помещался и правая карточка обрезалась по краю — шапка
+ * сравнения читалась наполовину. Три этажа ради двух слов и так были дороги:
+ * вопрос «что с чем сравниваем» стоит одной строки, а не блока в четверть
+ * высоты экрана.
+ *
+ * Обрезаться теперь нечему: имя усечётся многоточием, а весь ряд переносится. */
 const CompareSide = ({ label, tone, entry }) => (
-    <div className={`min-w-0 flex-1 rounded-2xl bg-white px-3.5 py-2.5 ring-1 ${
-        tone === 'del' ? 'ring-rose-200' : 'ring-emerald-200'}`}
-    >
-        <div className="flex items-center justify-between gap-2">
-            <span className={`text-[11px] font-semibold uppercase tracking-wide ${
-                tone === 'del' ? 'text-rose-500' : 'text-emerald-600'}`}
-            >
-                {label}
-            </span>
-            {/* Какая из двух сторон — нынешний текст статьи. Без пометки «Было
-                Иванов, стало Иванов» не отвечает на вопрос, куда смотреть: обе
-                стороны выглядят одинаково прошлыми. */}
-            {entry?.is_current && <IosBadge tone="green">Текущая</IosBadge>}
-        </div>
-        <div className="mt-0.5 truncate text-[13.5px] font-semibold text-slate-900">
+    <span className="flex min-w-0 items-baseline gap-1.5">
+        <span className={`shrink-0 text-[11px] uppercase tracking-wide ${
+            tone === 'del' ? 'text-rose-500' : 'text-emerald-600'}`}
+        >
+            {label}
+        </span>
+        <span className="truncate text-[13px] font-semibold text-slate-900">
             {entry?.editor_name || 'Неизвестно'}
-        </div>
-        <div className="text-[12px] tabular-nums text-slate-500">{fmtStamp(entry?.created_at)}</div>
-    </div>
+        </span>
+        <span className="shrink-0 text-[12px] tabular-nums text-slate-500">
+            {fmtStamp(entry?.created_at)}
+        </span>
+        {/* Какая из двух сторон — нынешний текст статьи. Без пометки «Было
+            Иванов, стало Иванов» не отвечает на вопрос, куда смотреть: обе
+            стороны выглядят одинаково прошлыми. */}
+        {entry?.is_current && (
+            <span className="shrink-0 text-[11px] font-medium text-emerald-600">текущая</span>
+        )}
+    </span>
 );
 
 export default function WikiHistory({ base, headers, article, open, onClose,
@@ -449,25 +583,27 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                                 className={`space-y-3${
                                     article?.copy_protected ? ' wiki-no-copy' : ''}`}
                             >
-                                {canPrev && canCurrent && (
-                                    <div className="flex justify-end">
-                                        <IosSegmented
-                                            value={mode}
-                                            onChange={setAgainst}
-                                            ariaLabel="С чем сравнивать"
-                                            options={[
-                                                { value: 'prev', label: 'С предыдущей' },
-                                                { value: 'current', label: 'С текущей' },
-                                            ]}
-                                        />
-                                    </div>
-                                )}
-
+                                {/* Шапка сравнения и переключатель — в одном
+                                    ряду: это один вопрос («что с чем сравниваем»),
+                                    и порознь они занимали два этажа. */}
                                 {pair.from && pair.to ? (
-                                    <div className="flex items-center gap-2">
-                                        <CompareSide label="Было" tone="del" entry={pair.from} />
-                                        <ArrowRight size={16} className="shrink-0 text-slate-400" />
-                                        <CompareSide label="Стало" tone="ins" entry={pair.to} />
+                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl bg-white px-3.5 py-2 ring-1 ring-slate-200/70">
+                                        <CompareSide label="было" tone="del" entry={pair.from} />
+                                        <ArrowRight size={14} className="shrink-0 text-slate-300" />
+                                        <CompareSide label="стало" tone="ins" entry={pair.to} />
+                                        {canPrev && canCurrent && (
+                                            <div className="ml-auto">
+                                                <IosSegmented
+                                                    value={mode}
+                                                    onChange={setAgainst}
+                                                    ariaLabel="С чем сравнивать"
+                                                    options={[
+                                                        { value: 'prev', label: 'С предыдущей' },
+                                                        { value: 'current', label: 'С текущей' },
+                                                    ]}
+                                                />
+                                            </div>
+                                        )}
                                     </div>
                                 ) : (
                                     <div className="rounded-2xl bg-white px-3.5 py-3 text-[13px] text-slate-500 ring-1 ring-slate-200/70">

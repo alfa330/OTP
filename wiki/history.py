@@ -59,6 +59,18 @@ _IMAGE = re.compile(r'<img\b[^>]*>', re.I)
 # таблицу по ячейкам, правка одного числа показалась бы как «строка исчезла и
 # появилась другая» одиннадцать раз подряд (у «Всех акций» столько колонок).
 _CELL_END = re.compile(r'</(td|th)\s*>', re.I)
+# Строка таблицы разбирается ЦЕЛИКОМ и по ячейкам сразу: тело ячейки редактор
+# заворачивает в абзац (`<td><p>…</p></td>` — так у 20 статей прода), а «</p>»
+# ниже даёт перевод строки. Из-за этого строка на одиннадцать колонок ехала в
+# сравнение одиннадцатью отдельными строками — по значению в каждой, без
+# намёка на то, что это одна запись таблицы.
+_TABLE = re.compile(r'<table\b.*?</table\s*>', re.I | re.S)
+_ROW = re.compile(r'<tr\b[^>]*>(.*?)</tr\s*>', re.I | re.S)
+_CELL = re.compile(r'<(td|th)\b[^>]*>(.*?)</\1\s*>', re.I | re.S)
+# Метка строки таблицы в потоке текста: её надо пронести сквозь снятие тегов и
+# раскрытие сущностей, поэтому она из символов, которых в тексте не бывает.
+_MARK = '\x00{}\x00'
+_MARK_RE = re.compile(r'\x00(\d+)\x00')
 _BLOCK_END = re.compile(
     r'</(p|div|li|h[1-6]|tr|table|thead|tbody|ul|ol|blockquote|pre|figure|'
     r'figcaption|details|summary|section|article)\s*>|<br\s*/?>', re.I)
@@ -76,12 +88,61 @@ MAX_BLOCKS = 8000
 MAX_ROWS = 800
 
 
-def html_to_blocks(html):
-    """Тело статьи → список строк для сравнения.
+def _plain(fragment):
+    """Кусок HTML → одна строка текста. Внутренние абзацы и <br> — пробелы."""
+    text = _BLOCK_END.sub(' ', fragment or '')
+    text = _TAG.sub('', text)
+    # Сущности раскрываем ПОСЛЕ снятия тегов: сделай мы наоборот, записанный в
+    # тексте «&lt;p&gt;» превратился бы в настоящий тег и был бы съеден.
+    text = unescape(text).replace('\n', ' ')
+    return _SPACES.sub(' ', text).strip()
 
-    Строка здесь — абзац, пункт списка, заголовок или строка таблицы. Именно на
-    таких кусках сравнение читается: посимвольное дало бы «переставлены два
-    слова» в виде сплошной каши, а сравнение целых статей — «всё изменилось».
+
+def _table_rows(table_html, sink):
+    """Разбирает одну таблицу в строки-записи и возвращает текст с метками.
+
+    Шапка таблицы (строка целиком из `<th>`) запоминается и раздаётся остальным
+    строкам как ИМЕНА КОЛОНОК. Без них сравнение говорит «было „Активная“, стало
+    „Завершена“» — про какую графу речь, человек угадывает по соседям; с ними
+    строка читается сразу: «Актуальность: Активная → Завершена».
+    """
+    columns = None
+
+    def take(match):
+        cells = [(tag.lower(), _plain(body))
+                 for tag, body in _CELL.findall(match.group(1))]
+        # Пустая строка таблицы («| | |») смысла не несёт, а в сравнении стоила
+        # бы места наравне с настоящим абзацем.
+        if not cells or not any(value for _, value in cells):
+            return '\n'
+        values = [value for _, value in cells]
+        head = all(tag == 'th' for tag, _ in cells)
+        nonlocal columns
+        if head and columns is None:
+            columns = values
+        sink.append({
+            'text': ' | '.join(values),
+            'cells': values,
+            # Шапке имена колонок не нужны: она сама ими и является.
+            'columns': None if head else columns,
+            'head': head,
+        })
+        return '\n' + _MARK.format(len(sink) - 1) + '\n'
+
+    return _ROW.sub(take, table_html)
+
+
+def html_to_lines(html):
+    """Тело статьи → список строк для сравнения, со структурой строк таблиц.
+
+    Строка здесь — абзац, пункт списка, заголовок или ЗАПИСЬ ТАБЛИЦЫ. У записи
+    таблицы, кроме текста, есть разбивка по ячейкам и имена колонок: экран рисует
+    её таблицей, а не полосой текста с палками-разделителями.
+
+    Вложенные таблицы разбираются как одна: `<tr>` берётся нежадно, и строка
+    внешней таблицы обрывается на первом `</tr>` внутренней. В проде таких нет
+    (проверено 26.08.2026 по всем 159 статьям с таблицами), а редактор их и не
+    даёт создать.
     """
     if not html:
         return []
@@ -90,25 +151,34 @@ def html_to_blocks(html):
     # в сравнении не значит ничего: её адрес меняется при каждой перезаливке.
     text = _BASE64_SRC.sub('', text)
     text = _IMAGE.sub('\n[изображение]\n', text)
+    rows = []
+    text = _TABLE.sub(lambda m: _table_rows(m.group(0), rows), text)
+    # Ячейки, до которых разбор таблиц не дошёл (обрывок разметки без <table>),
+    # склеиваем по-старому: палка лучше, чем потерянная граница ячеек.
     text = _CELL_END.sub(' | ', text)
     text = _BLOCK_END.sub('\n', text)
     text = _TAG.sub('', text)
-    # Сущности раскрываем ПОСЛЕ снятия тегов: сделай мы наоборот, записанный в
-    # тексте «&lt;p&gt;» превратился бы в настоящий тег и был бы съеден.
     text = unescape(text)
-    blocks = []
+    lines = []
     for raw in text.split('\n'):
-        # Хвостовая палка остаётся от последней ячейки строки таблицы: «</td>»
-        # даёт разделитель, а разделять после неё уже нечего.
-        line = _SPACES.sub(' ', raw).strip().strip('|').strip()
-        # Пустая строка таблицы («| | |») смысла не несёт, а в сравнении стоила
-        # бы места наравне с настоящим абзацем.
-        if not line or not line.strip('| '):
-            continue
-        blocks.append(line)
-        if len(blocks) >= MAX_BLOCKS:
+        mark = _MARK_RE.fullmatch(raw.strip())
+        if mark:
+            lines.append(rows[int(mark.group(1))])
+        else:
+            # Хвостовая палка остаётся от последней ячейки: «</td>» даёт
+            # разделитель, а разделять после неё уже нечего.
+            line = _SPACES.sub(' ', raw).strip().strip('|').strip()
+            if not line or not line.strip('| '):
+                continue
+            lines.append({'text': line, 'cells': None, 'columns': None, 'head': False})
+        if len(lines) >= MAX_BLOCKS:
             break
-    return blocks
+    return lines
+
+
+def html_to_blocks(html):
+    """Те же строки, только текстом. Оставлено ради сравнения и тестов."""
+    return [line['text'] for line in html_to_lines(html)]
 
 
 def _tokens(line):
@@ -145,6 +215,45 @@ def _pairable(before, after):
     return difflib.SequenceMatcher(None, before, after).ratio() >= _PAIR_RATIO
 
 
+def _plain_row(op, line):
+    """Строка вывода как есть: текстом, а у записи таблицы — ещё и ячейками."""
+    row = {'op': op, 'text': line['text']}
+    if line['cells']:
+        row['cells'] = line['cells']
+        row['columns'] = line['columns']
+        row['head'] = line['head']
+    return row
+
+
+def _column_name(columns, index):
+    if columns and index < len(columns):
+        return columns[index] or None
+    return None
+
+
+def _table_change(left, right):
+    """Правка записи таблицы: что изменилось в КАЖДОЙ графе.
+
+    Возвращает None, когда ячейки не сходятся по числу (colspan, объединённые
+    строки — таких статей в проде 30). Тогда запись сравнивается как обычный
+    текст: показать «графа 7» там, где граф на самом деле разное количество,
+    хуже, чем не называть их вовсе.
+    """
+    if not left['cells'] or not right['cells']:
+        return None
+    if len(left['cells']) != len(right['cells']):
+        return None
+    columns = right['columns'] or left['columns']
+    cells = []
+    for index, (was, now) in enumerate(zip(left['cells'], right['cells'])):
+        cell = {'name': _column_name(columns, index),
+                'before': was, 'after': now, 'changed': was != now}
+        if cell['changed'] and was and now:
+            cell['before_parts'], cell['after_parts'] = _inline_parts(was, now)
+        cells.append(cell)
+    return cells
+
+
 def diff_blocks(before_html, after_html, context=3, max_rows=MAX_ROWS):
     """Построчное сравнение двух тел статьи.
 
@@ -155,10 +264,17 @@ def diff_blocks(before_html, after_html, context=3, max_rows=MAX_ROWS):
     Неизменённые куски сворачиваются, оставляя `context` строк вокруг правки:
     статья на восемьсот абзацев, где поправили один, иначе выдаёт восемьсот
     строк «без изменений», среди которых правку надо искать.
+
+    Запись таблицы остаётся ОДНОЙ строкой вывода и несёт свои ячейки: у правки
+    внутри такой записи в `cells` лежит разбор по графам, и экран показывает
+    только изменившиеся — «Актуальность: Активная → Завершена» вместо одиннадцати
+    значений подряд, из которых десять те же самые.
     """
-    before = html_to_blocks(before_html)
-    after = html_to_blocks(after_html)
-    matcher = difflib.SequenceMatcher(None, before, after, autojunk=False)
+    before = html_to_lines(before_html)
+    after = html_to_lines(after_html)
+    before_text = [line['text'] for line in before]
+    after_text = [line['text'] for line in after]
+    matcher = difflib.SequenceMatcher(None, before_text, after_text, autojunk=False)
     opcodes = matcher.get_opcodes()
 
     rows, added, removed, truncated = [], 0, 0, False
@@ -179,13 +295,13 @@ def diff_blocks(before_html, after_html, context=3, max_rows=MAX_ROWS):
             head = 0 if index == 0 else min(context, len(lines))
             tail = 0 if index == len(opcodes) - 1 else min(context, len(lines) - head)
             for line in lines[:head]:
-                put({'op': 'same', 'text': line})
+                put(_plain_row('same', line))
             skipped = len(lines) - head - tail
             if skipped > 0:
                 put({'op': 'gap', 'skipped': skipped})
             if tail:
                 for line in lines[len(lines) - tail:]:
-                    put({'op': 'same', 'text': line})
+                    put(_plain_row('same', line))
             continue
 
         removed += i2 - i1
@@ -193,28 +309,35 @@ def diff_blocks(before_html, after_html, context=3, max_rows=MAX_ROWS):
 
         if tag == 'delete':
             for line in before[i1:i2]:
-                put({'op': 'del', 'text': line})
+                put(_plain_row('del', line))
             continue
         if tag == 'insert':
             for line in after[j1:j2]:
-                put({'op': 'ins', 'text': line})
+                put(_plain_row('ins', line))
             continue
 
         # replace: строки сопоставляем по порядку, пока они похожи.
         paired = min(i2 - i1, j2 - j1)
         for shift in range(paired):
             left, right = before[i1 + shift], after[j1 + shift]
-            if _pairable(left, right):
-                before_parts, after_parts = _inline_parts(left, right)
-                put({'op': 'change', 'before': left, 'after': right,
-                     'before_parts': before_parts, 'after_parts': after_parts})
+            if _pairable(left['text'], right['text']):
+                cells = _table_change(left, right)
+                row = {'op': 'change', 'before': left['text'], 'after': right['text']}
+                if cells:
+                    row['cells'] = cells
+                    row['columns'] = right['columns'] or left['columns']
+                    row['head'] = right['head']
+                else:
+                    row['before_parts'], row['after_parts'] = _inline_parts(
+                        left['text'], right['text'])
+                put(row)
             else:
-                put({'op': 'del', 'text': left})
-                put({'op': 'ins', 'text': right})
+                put(_plain_row('del', left))
+                put(_plain_row('ins', right))
         for line in before[i1 + paired:i2]:
-            put({'op': 'del', 'text': line})
+            put(_plain_row('del', line))
         for line in after[j1 + paired:j2]:
-            put({'op': 'ins', 'text': line})
+            put(_plain_row('ins', line))
 
     return {'rows': rows, 'added': added, 'removed': removed,
             'truncated': truncated,
