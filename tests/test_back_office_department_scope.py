@@ -769,5 +769,94 @@ class EmployeeSectionWordingTests(unittest.TestCase):
         self.assertIn("Ставка: не менять", bulk)
 
 
+class RankAndFileGatesTests(unittest.TestCase):
+    """Гейты, написанные литералом 'operator' там, где имелся в виду «рядовой
+    сотрудник». Пока роль была одна, литерал и смысл совпадали — с появлением
+    hr_manager разошлись, и сломались сразу три экрана.
+    """
+
+    def test_profile_data_is_fetched_for_every_rank_and_file_role(self):
+        # Эффект гейтился списком ['operator','trainee'] — для hr_manager он
+        # выходил сразу, profileData оставался null, и раздел показывал
+        # «Нету информации о профиле».
+        app = _read(APP_PATH)
+        self.assertIn(
+            "                if (!user || !user.id || !isRankAndFileRole(currentUserRole) "
+            "|| isScopedDepartmentHead) return;\n"
+            "\n"
+            "                if (view === 'profile') {\n"
+            "                    fetchProfileData();",
+            app,
+        )
+        # Часы/оценки/тренинги — только тем, у кого эти плитки в профиле есть.
+        self.assertIn("                    if (!profileHidesOperatorBlocks) {\n"
+                      "                        fetchHoursData();", app)
+        self.assertIn("profileHidesOperatorBlocks]);", app)
+
+    def test_salary_calculator_is_not_offered_to_rank_and_file(self):
+        # Пункт стоял под ЗАПРЕЩАЮЩИМ списком: любая роль, которую забыли
+        # перечислить, проваливалась внутрь и получала калькулятор.
+        app = _read(APP_PATH)
+        self.assertNotIn(
+            "currentUserRole !== 'sv' && currentUserRole !== 'operator' "
+            "&& currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (",
+            app,
+        )
+        self.assertIn(
+            "{!isAdminLikeRole && !isScopedDepartmentHead && !isRankAndFileRole(currentUserRole) "
+            "&& currentUserRole !== 'sv' && currentUserRole !== 'trainer' && (",
+            app,
+        )
+
+    def test_qr_button_works_for_everyone_the_lock_is_shown_to(self):
+        # Замок рисовался, а кнопка в нём выходила на литерале 'operator' —
+        # то есть молча не делала ничего.
+        app = _read(APP_PATH)
+        self.assertIn(
+            "            const requestSensitiveQrAccess = async () => {",
+            app,
+        )
+        self.assertIn("if (!user || !sensitiveSectionQrRequiredFor(user)) return;", app)
+        self.assertNotIn("if (!user || user.role !== 'operator') return;", app)
+
+
+class SensitiveQrRolesSingleSourceTests(unittest.TestCase):
+    """Список ролей под QR — ОДИН на сервер и раздел «Вики».
+
+    Копия здесь была бы четвёртой и разошлась бы молча: bot_schedule2 ответил бы
+    «подтверждение не требуется», а wiki/access.py всё равно отказал бы — раздел
+    просто не открывался бы, ничего не объясняя.
+    """
+
+    def test_backend_imports_the_list_instead_of_copying(self):
+        source = _read(BOT_PATH)
+        self.assertIn(
+            "from wiki.access import QR_GATED_ROLES as SENSITIVE_QR_GATED_ROLES",
+            source,
+        )
+        # Собственного литерального множества тех же ролей быть не должно.
+        self.assertNotIn("SENSITIVE_QR_GATED_ROLES = frozenset", source)
+
+    def test_all_three_endpoints_use_it(self):
+        for name in ("request_sensitive_access_qr", "get_sensitive_access_status",
+                     "approve_sensitive_access"):
+            endpoint = _function_source(BOT_PATH, name)
+            self.assertIn("SENSITIVE_QR_GATED_ROLES", endpoint, name)
+            self.assertNotIn("== 'operator'", endpoint, name)
+            self.assertNotIn("!= 'operator'", endpoint, name)
+
+    def test_list_is_importable_on_its_own(self):
+        # wiki.access не должен тянуть за собой ни Flask, ни пул к базе:
+        # bot_schedule2 импортирует его на старте.
+        import importlib
+        import sys as _sys
+        module = importlib.import_module("wiki.access")
+        self.assertEqual(
+            {"operator", "hr_manager", "accounting_manager"},
+            set(module.QR_GATED_ROLES),
+        )
+        self.assertNotIn("bot_schedule2", _sys.modules)
+
+
 if __name__ == "__main__":
     unittest.main()

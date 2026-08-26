@@ -2534,6 +2534,14 @@ TASK_RECURRENCE_LABELS = {
     'weekly': 'Еженедельно',
     'monthly': 'Ежемесячно'
 }
+# Должности, которым вход в чувствительные разделы открывает подтверждение
+# QR. Берём НЕ копией, а из wiki/access.py: там этот же список решает,
+# пускать ли человека в «Вики», и разойтись они не должны — сервер сказал бы
+# «подтверждение не требуется», а раздел всё равно ответил бы отказом.
+# Импорт безопасен: wiki.access тянет только wiki.schema и о bot_schedule2
+# не знает (цикл даёт wiki.routes, он импортируется в конце файла).
+from wiki.access import QR_GATED_ROLES as SENSITIVE_QR_GATED_ROLES  # noqa: E402
+
 SENSITIVE_ACCESS_ROLE_LABELS = {
     'super_admin': 'Супер админ',
     'admin': 'Админ',
@@ -9478,8 +9486,8 @@ def request_sensitive_access_qr():
             return jsonify({"error": "Unauthorized"}), 401
 
         requester = db.get_user(id=requester_id)
-        if not requester or requester[3] != 'operator':
-            return jsonify({"error": "Forbidden: only operator can generate QR access token"}), 403
+        if not requester or _normalize_user_role(requester[3]) not in SENSITIVE_QR_GATED_ROLES:
+            return jsonify({"error": "Forbidden: this role does not need QR access"}), 403
 
         session_id = _current_session_id_from_access_token()
         if not session_id:
@@ -9522,7 +9530,7 @@ def get_sensitive_access_status():
 
         role = _normalize_user_role(requester[3])
         session_id = _current_session_id_from_access_token()
-        required = role == 'operator'
+        required = role in SENSITIVE_QR_GATED_ROLES
         if required:
             granted = bool(_is_sensitive_access_unlocked(requester_id, session_id))
         else:
@@ -9614,8 +9622,8 @@ def approve_sensitive_access():
         claims = _decode_sensitive_qr_token(token)
         operator_id = claims["user_id"]
         operator = db.get_user(id=operator_id)
-        if not operator or operator[3] != 'operator':
-            return jsonify({"error": "QR token does not belong to operator session"}), 400
+        if not operator or _normalize_user_role(operator[3]) not in SENSITIVE_QR_GATED_ROLES:
+            return jsonify({"error": "QR token does not belong to a session that needs confirmation"}), 400
 
         session = db.get_user_session(session_id=claims["session_id"], user_id=operator_id)
         if not session or session["revoked_at"] is not None:

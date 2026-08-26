@@ -43682,7 +43682,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [clearSensitiveQrPolling, stopQrScanner]);
 
             const requestSensitiveQrAccess = async () => {
-                if (!user || user.role !== 'operator') return;
+                // Просит QR ровно тот, кому он нужен. Раньше здесь стоял литерал
+                // 'operator': замок сотруднику бэк-офиса показывался, а кнопка в
+                // нём молча не делала ничего.
+                if (!user || !sensitiveSectionQrRequiredFor(user)) return;
 
                 setSensitiveQrError('');
                 setSensitiveQrUrl('');
@@ -43967,13 +43970,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role, selectedMonth, selectedReportMonth]);
 
             useEffect(() => {
-                if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead) return;
+                if (!user || !user.id || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead) return;
 
                 if (view === 'profile') {
                     fetchProfileData();
-                    fetchHoursData();
-                    fetchOperatorData();
-                    fetchTrainings();
+                    // Часы, оценки и тренинги нужны плиткам, которых в профиле
+                    // бэк-офиса нет: это запросы за данными, которых у него не
+                    // бывает, — пустой ответ в лучшем случае и 403 в худшем.
+                    if (!profileHidesOperatorBlocks) {
+                        fetchHoursData();
+                        fetchOperatorData();
+                        fetchTrainings();
+                    }
                     return;
                 }
 
@@ -44005,7 +44013,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels') {
                     fetchSensitiveAccessStatus();
                 }
-            }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept]);
+            }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
 
             useEffect(() => {
                 if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead) return;
@@ -45128,7 +45136,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </>
                                     )}
-                                    {!isAdminLikeRole && !isScopedDepartmentHead && currentUserRole !== 'sv' && currentUserRole !== 'operator' && currentUserRole !== 'trainer' && currentUserRole !== 'trainee' && (
+                                    {/* Запрещающий список: сюда проваливается любая роль, которую
+                                        забыли перечислить, — так «Калькулятор зарплаты» и открылся
+                                        сотрудникам бэк-офиса. Рядовых отсекаем предикатом, он растёт
+                                        вместе с ролями сам. */}
+                                    {!isAdminLikeRole && !isScopedDepartmentHead && !isRankAndFileRole(currentUserRole) && currentUserRole !== 'sv' && currentUserRole !== 'trainer' && (
                                         <>
                                             {renderSidebarDividerInner()}
                                             <li>

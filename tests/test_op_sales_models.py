@@ -161,7 +161,9 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
         # Флаги отдела обязаны быть в зависимостях: иначе эффект не перезапустится,
         # когда список отделов доедет и isOpSalaryDept станет true.
         deps = effect[:effect.index("useEffect(", 1)] if "useEffect(" in effect[1:] else effect[:3000]
-        self.assertIn("view, isOpSalaryDept, isTezSalaryDept]", deps)
+        # Без закрывающей скобки: в конец массива дописывают и другие
+        # зависимости (profileHidesOperatorBlocks). Важно, что флаги ЕСТЬ.
+        self.assertIn("view, isOpSalaryDept, isTezSalaryDept", deps)
 
     def test_unknown_model_does_not_fall_back_to_the_stub(self):
         # Пока часы не загрузились, модель неизвестна — подменять раздел заглушкой
