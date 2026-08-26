@@ -19,6 +19,14 @@
 4. СТАТЬЯ БЕЗ РАЗДЕЛА ДОСТУПНА. Наследие импорта (см.
    test_wiki_orphans_and_favorites): такая статья не попадает ни на одну плитку
    раздела, и без отдельной плитки «Без раздела» была бы недостижима.
+
+5. ЭКРАН ОТКРЫВАЕТСЯ СПИСКОМ. С 26.08.2026 правая колонка не пустует: пока
+   раздел не выбран, там лежит вся корзина целиком. Решения этого экрана живут
+   в WikiCatalog.jsx, и сторожит их Python — читая исходник текстом. Причина
+   та же, что и у пунктов выше: список за счётчиком обязан быть полным и
+   ровно из той вики, по которой счётчик посчитан, а обе эти границы задаются
+   параметрами запроса во фронте. Отрисовку экрана проверяет
+   tests/wiki_catalog_all.test.mjs — там компонент настоящий.
 """
 
 import re
@@ -563,6 +571,127 @@ class ListPermissionsTest(unittest.TestCase):
         many = wiki_articles.permissions_for_articles(
             cursor, self.ctx(), [article], self.subjects, {3}, self.section_rules())
         self.assertEqual(dict(one), dict(many[1]))
+
+
+class CatalogScreenSourceTest(unittest.TestCase):
+    """Решения вкладки «Статьи», которые видно только в исходнике фронта.
+
+    Тест читает WikiCatalog.jsx текстом. Это не придирка к стилю: каждая
+    проверка здесь — про ЛОЖЬ НА ЭКРАНЕ, которую сборка пропускает молча.
+
+    Читаем исходник ДВАЖДЫ — целиком и без комментариев. Целиком нужен там, где
+    проверяется видимая человеку строка; без комментариев — там, где проверяется
+    сам код, иначе объяснение «раньше здесь стоял потолок в 200 записей» роняло
+    бы тест, описывая ровно то, чего в коде уже нет.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / 'src' / 'components' / 'wiki' / 'WikiCatalog.jsx').read_text(
+            encoding='utf-8')
+        without_blocks = re.sub(r'/\*.*?\*/', '', cls.src, flags=re.S)
+        cls.code = '\n'.join(
+            line for line in without_blocks.splitlines()
+            if not line.lstrip().startswith('//'))
+
+    def _buckets_block(self):
+        block = re.search(r'const BUCKETS = \[(.*?)\n\];', self.code, re.S)
+        self.assertIsNotNone(block, 'не нашли список корзин во фронте')
+        return block.group(1)
+
+    def test_screen_opens_with_the_list_not_with_a_question(self):
+        """Правая колонка больше не встречает просьбой выбрать раздел."""
+        self.assertNotIn('Выберите раздел слева', self.src)
+
+    def test_every_bucket_has_a_name_for_its_whole_contents(self):
+        """У каждой корзины сервера есть подпись «вся корзина» во фронте.
+
+        Строка возврата над деревом называется по текущей корзине. Появись на
+        сервере четвёртая, а подпись к ней нет — кнопка молча обещала бы «Все
+        статьи» и приводила в чужую выборку.
+        """
+        block = self._buckets_block()
+        self.assertEqual(set(re.findall(r"key:\s*'([a-z]+)'", block)),
+                         set(wiki_schema.ARTICLE_BUCKETS))
+        for bucket in wiki_schema.ARTICLE_BUCKETS:
+            described = re.search(
+                r"key:\s*'%s'.*?emptyHere:\s*'[^']*'" % bucket, block, re.S)
+            self.assertIsNotNone(described, 'нет описания корзины %s' % bucket)
+            for field in ('all', 'nothing', 'emptyHere'):
+                self.assertRegex(described.group(0), r"\b%s:\s*'" % field,
+                                 'у корзины %s нет подписи %s' % (bucket, field))
+
+    def test_the_list_is_taken_in_pages(self):
+        """Список забирается страницами, а не одним запросом с потолком.
+
+        Потолок ответа /articles — 200 записей, а черновиков в проде 235.
+        Вернись сюда одиночный запрос с limit в потолок, и «Черновики 235»
+        открывались бы двумя сотнями: счётчик и список за ним разошлись бы
+        молча — ровно тот дефект, ради которого появился articleIndex.js.
+        """
+        self.assertIn('fetchArticleIndex', self.code)
+        self.assertNotRegex(self.code, r'limit:\s*\d')
+
+    def test_page_count_comes_from_the_catalog_not_from_total_visible(self):
+        """Сколько страниц забирать, говорит каталог, а не размер периметра.
+
+        total_visible считается ДО фильтра по корзине (см. articleIndex.js) и
+        завысил бы число страниц: лишние пустые запросы на каждый заход. Точное
+        число этой выборки уже пришло с каталогом — им и пользуемся.
+        """
+        self.assertNotIn('total_visible', self.code)
+        self.assertRegex(self.code, r'totals\?\.\[bucket\]')
+
+    def test_row_action_refreshes_whatever_list_is_on_screen(self):
+        """Действие над строкой обновляет ПОКАЗАННЫЙ список, а не только раздел.
+
+        Пока строки статей жили лишь у выбранного раздела, `if (selected)`
+        перед тихим перезапросом было верным. Основная выборка экрана теперь —
+        вся корзина, и в ней selected === null: с прежним условием
+        заархивированная статья оставалась бы в списке, споря со счётчиком,
+        который reloadCatalog обновляет всегда.
+        """
+        act = re.search(r'const act = .*?\n    \};', self.code, re.S)
+        self.assertIsNotNone(act, 'не нашли обработчик действий над строкой')
+        self.assertNotRegex(act.group(0), r'if \(selected\)\s*loadArticles')
+        self.assertRegex(act.group(0), r'loadArticles\(\s*selected \? selected\.id : ALL_ID')
+
+    def test_quiet_refresh_does_not_claim_the_race_key(self):
+        """Ключ гонки забирает только открытие выборки, не тихое обновление.
+
+        Иначе ответ по разделу, выбранному, пока летел тихий запрос, признаётся
+        чужим: список остаётся прежним, а спиннер над ним не гаснет — экран
+        встаёт намертво до перезагрузки страницы.
+        """
+        loader = re.search(r'const loadArticles = .*?\n    \}, \[', self.code, re.S)
+        self.assertIsNotNone(loader, 'не нашли загрузчик списка')
+        body = loader.group(0)
+        self.assertRegex(body, r'if \(!quiet\) \{ wantedRef\.current = wanted;')
+        # Второго, безусловного присвоения быть не должно.
+        self.assertEqual(len(re.findall(r'wantedRef\.current = wanted', body)), 1)
+
+    def test_a_dead_catalog_does_not_spin_forever(self):
+        """Каталог не ответил — говорим об этом, а не крутим спиннер.
+
+        Загрузчик ждёт каталога (из него берётся число страниц), а busy теперь
+        поднят с первого кадра. Без отдельной ветки правая колонка осталась бы
+        в «Загружаем…» навсегда, и выбраться оттуда можно было бы только
+        случайным нажатием.
+        """
+        self.assertRegex(self.code, r'const catalogLost = !catalog && !loading;')
+        self.assertRegex(self.code, r'\{!catalogLost && busy &&')
+        self.assertIn('Список не загрузился', self.src)
+
+    def test_the_full_list_is_asked_within_one_space(self):
+        """Запрос списка уходит с space_id.
+
+        Выборка «все статьи» — это отсутствие фильтра по разделу, и без
+        space_id она собралась бы по всем викам сразу. На экране живёт одна —
+        та же, по которой каталог посчитал числа рядом со списком.
+        """
+        params = re.search(r'params:\s*\{(?:[^{}]|\{[^{}]*\})*\}', self.code, re.S)
+        self.assertIsNotNone(params, 'не нашли параметры запроса /articles')
+        self.assertIn('space_id', params.group(0))
 
 
 if __name__ == '__main__':
