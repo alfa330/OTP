@@ -6625,6 +6625,38 @@ class Database:
                 total_rows    INTEGER NOT NULL DEFAULT 0,
                 error         TEXT
             );
+
+            -- Журнал изменений счётчиков. Строка пишется только когда счёт
+            -- РЕАЛЬНО поменялся, то есть несколько строк в сутки, а не 69
+            -- на каждый получасовой синк. Нужен потому, что CRM переписывает
+            -- прошлое (см. п. 5 в шапке reg_contest.py): без журнала вопрос
+            -- «почему у меня стало меньше» отвечать нечем — в срезе лежит
+            -- только текущее число, а прошлое нигде не остаётся.
+            -- NULL в *_before = оператор появился в выдаче;
+            -- NULL в *_after  = оператор из выдачи пропал.
+            CREATE TABLE IF NOT EXISTS reg_contest_operator_changes (
+                id            BIGSERIAL PRIMARY KEY,
+                contest_code  VARCHAR(64) NOT NULL,
+                crm_operator_id VARCHAR(64) NOT NULL,
+                operator_name VARCHAR(255),
+                registrations_before INTEGER,
+                registrations_after  INTEGER,
+                successful_before    INTEGER,
+                successful_after     INTEGER,
+                changed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_reg_contest_changes_at
+                ON reg_contest_operator_changes(contest_code, changed_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_reg_contest_changes_operator
+                ON reg_contest_operator_changes(contest_code, crm_operator_id, changed_at DESC);
+        """)
+        # Метка просадки на самом синке: сколько счётчиков ушло вниз в этом
+        # прогоне и у кого — чтобы админ видел это в разделе, а не только в логе.
+        cursor.execute("""
+            ALTER TABLE reg_contest_syncs
+                ADD COLUMN IF NOT EXISTS decreases INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE reg_contest_syncs
+                ADD COLUMN IF NOT EXISTS decrease_note TEXT;
         """)
 
     def get_reg_contest_operator_directory(self):
@@ -6670,8 +6702,61 @@ class Database:
 
         Операторов, пропавших из выдачи CRM, убираем — эндпоинт всегда
         отдаёт полный список, так что пропажа означает «регистраций за период
-        больше не числится»."""
+        больше не числится» (от обрезанного ответа страхует
+        reg_contest.check_snapshot_shrink на стороне синка).
+
+        Попутно ведём журнал: до перезаписи читаем прошлый срез в той же
+        транзакции и складываем в reg_contest_operator_changes каждое реальное
+        изменение счётчиков. Возвращаем сводку прогона — сколько строк, что
+        изменилось и какие счётчики ушли ВНИЗ (CRM переписывает прошлое, см.
+        п. 5 в шапке reg_contest.py; молча проглатывать это нельзя)."""
         with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT crm_operator_id, operator_name, user_name, registrations, successful
+                FROM reg_contest_operators
+                WHERE contest_code = %s
+            """, (contest_code,))
+            previous = {row[0]: {"operator_name": row[1], "user_name": row[2],
+                                 "registrations": row[3], "successful": row[4]}
+                        for row in cursor.fetchall()}
+            fresh = {e["crm_operator_id"] for e in entries}
+            changes = []
+            for entry in entries:
+                was = previous.get(entry["crm_operator_id"])
+                if (was and was["registrations"] == entry["registrations"]
+                        and was["successful"] == entry["successful"]):
+                    continue
+                changes.append({
+                    "crm_operator_id": entry["crm_operator_id"],
+                    "name": (entry.get("user_name") or entry.get("operator_name")
+                             or (was or {}).get("user_name") or (was or {}).get("operator_name")),
+                    "registrations_before": was["registrations"] if was else None,
+                    "registrations_after": entry["registrations"],
+                    "successful_before": was["successful"] if was else None,
+                    "successful_after": entry["successful"],
+                })
+            for key, was in previous.items():
+                if key in fresh:
+                    continue
+                changes.append({
+                    "crm_operator_id": key,
+                    "name": was["user_name"] or was["operator_name"],
+                    "registrations_before": was["registrations"], "registrations_after": None,
+                    "successful_before": was["successful"], "successful_after": None,
+                })
+            if changes:
+                execute_values(cursor, """
+                    INSERT INTO reg_contest_operator_changes (
+                        contest_code, crm_operator_id, operator_name,
+                        registrations_before, registrations_after,
+                        successful_before, successful_after, changed_at)
+                    VALUES %s
+                """, [(contest_code, c["crm_operator_id"], c["name"],
+                       c["registrations_before"], c["registrations_after"],
+                       c["successful_before"], c["successful_after"]) for c in changes],
+                    template="(%s,%s,%s,%s,%s,%s,%s,NOW())")
+            decreases = [c for c in changes if self._reg_contest_change_is_drop(c)]
+            note = self._reg_contest_decrease_note(decreases)
             if entries:
                 args = [(contest_code, e["crm_operator_id"], e["operator_login"],
                          e["operator_name"], e["user_id"], e["user_name"],
@@ -6706,13 +6791,51 @@ class Database:
                 cursor.execute("DELETE FROM reg_contest_operators WHERE contest_code = %s",
                                (contest_code,))
             cursor.execute("""
-                INSERT INTO reg_contest_syncs (contest_code, synced_at, status, total_rows, error)
-                VALUES (%s, NOW(), 'ok', %s, NULL)
+                INSERT INTO reg_contest_syncs (contest_code, synced_at, status, total_rows,
+                                               error, decreases, decrease_note)
+                VALUES (%s, NOW(), 'ok', %s, NULL, %s, %s)
                 ON CONFLICT (contest_code) DO UPDATE SET
                     synced_at = NOW(), status = 'ok',
-                    total_rows = EXCLUDED.total_rows, error = NULL
-            """, (contest_code, len(entries)))
-        return len(entries)
+                    total_rows = EXCLUDED.total_rows, error = NULL,
+                    decreases = EXCLUDED.decreases,
+                    decrease_note = EXCLUDED.decrease_note
+            """, (contest_code, len(entries), len(decreases), note))
+        return {"total": len(entries), "changes": len(changes),
+                "decreases": len(decreases), "decrease_note": note}
+
+    @staticmethod
+    def _reg_contest_change_is_drop(change):
+        """Просадка — это уменьшение счётчика или пропажа строки из выдачи."""
+        for field in ("registrations", "successful"):
+            before, after = change[f"{field}_before"], change[f"{field}_after"]
+            if before is None:
+                continue
+            if after is None or after < before:
+                return True
+        return False
+
+    @staticmethod
+    def _reg_contest_decrease_note(decreases):
+        """Короткая расшифровка просадок для метки на синке и лога."""
+        if not decreases:
+            return None
+        parts = []
+        for change in decreases[:5]:
+            name = change["name"] or change["crm_operator_id"] or "без имени"
+            if change["registrations_after"] is None:
+                parts.append(f"{name}: пропал из выдачи "
+                             f"({change['successful_before']} из "
+                             f"{change['registrations_before']} рег.)")
+                continue
+            moved = [f"{label} {change[f'{field}_before']} → {change[f'{field}_after']}"
+                     for field, label in (("successful", "засчитано"),
+                                          ("registrations", "регистрации"))
+                     if change[f"{field}_before"] is not None
+                     and change[f"{field}_after"] < change[f"{field}_before"]]
+            parts.append(f"{name}: " + ", ".join(moved))
+        if len(decreases) > 5:
+            parts.append(f"и ещё {len(decreases) - 5}")
+        return "; ".join(parts)[:2000]
 
     def mark_reg_contest_sync_error(self, contest_code, error):
         """Фиксируем неудачный синк, не трогая последний удачный срез."""
@@ -6741,14 +6864,40 @@ class Database:
     def get_reg_contest_sync_state(self, contest_code):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT synced_at, status, total_rows, error
+                SELECT synced_at, status, total_rows, error, decreases, decrease_note
                 FROM reg_contest_syncs
                 WHERE contest_code = %s
             """, (contest_code,))
             row = cursor.fetchone()
             if not row:
                 return None
-            return dict(zip(("synced_at", "status", "total_rows", "error"), row))
+            return dict(zip(("synced_at", "status", "total_rows", "error",
+                             "decreases", "decrease_note"), row))
+
+    def get_reg_contest_recent_decreases(self, contest_code, limit=20):
+        """Последние просадки счётчиков из журнала — админский ответ на вопрос
+        «почему у оператора стало меньше». NULL в *_after = строка пропала из
+        выдачи CRM целиком."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT crm_operator_id, operator_name,
+                       registrations_before, registrations_after,
+                       successful_before, successful_after, changed_at
+                FROM reg_contest_operator_changes
+                WHERE contest_code = %s
+                  AND ((registrations_before IS NOT NULL
+                        AND (registrations_after IS NULL
+                             OR registrations_after < registrations_before))
+                    OR (successful_before IS NOT NULL
+                        AND (successful_after IS NULL
+                             OR successful_after < successful_before)))
+                ORDER BY changed_at DESC, id DESC
+                LIMIT %s
+            """, (contest_code, limit))
+            keys = ("crm_operator_id", "operator_name", "registrations_before",
+                    "registrations_after", "successful_before", "successful_after",
+                    "changed_at")
+            return [dict(zip(keys, row)) for row in cursor.fetchall()]
 
     def get_last_amo_lead_sync(self, status=None):
         """Последняя завершённая выгрузка — для отметки о свежести в отбивке.

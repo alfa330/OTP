@@ -136,6 +136,96 @@ class FetchOperatorsTests(unittest.TestCase):
             self._fetch(payload)
         self.assertIn("successful_registrations_count", str(ctx.exception))
 
+    def test_missing_registrations_counter_raises(self):
+        # Второй счётчик обязателен ровно так же: без проверки CRM могла бы
+        # переименовать поле, а мы молча записали бы всем «0 регистраций».
+        payload = {"total_successful": 2, "operators": [
+            {"operator_id": "1", "operator_login": "a@x.kz",
+             "operator_name": "Тестов Тест", "successful_registrations_count": 2}]}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._fetch(payload)
+        self.assertIn("registrations_count", str(ctx.exception))
+
+    def test_duplicate_operator_id_still_raises(self):
+        payload = {"operators": [_crm_op("a@x.kz", "Тестов Тест", 2, 5, operator_id="7"),
+                                 _crm_op("a@x.kz", "Тестов Тест", 3, 9, operator_id="7")]}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._fetch(payload)
+        self.assertIn("дважды", str(ctx.exception))
+
+    def test_anonymous_rows_are_summed_not_fatal(self):
+        # У CRM есть корзина «ничей» — строка без id, логина и ФИО. Приза она
+        # не занимает и сопоставлять её не с кем, поэтому вторая такая строка
+        # не повод ронять синк и морозить рейтинг всем остальным.
+        payload = {"operators": [
+            {"operator_id": None, "operator_login": None, "operator_name": None,
+             "registrations_count": 6, "successful_registrations_count": 3},
+            {"operator_id": None, "operator_login": None, "operator_name": None,
+             "registrations_count": 4, "successful_registrations_count": 1},
+        ]}
+        rows = self._fetch(payload)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["registrations_count"],
+                          rows[0]["successful_registrations_count"]), (10, 4))
+
+    def test_rows_without_id_but_with_login_stay_separate(self):
+        # Без id, но с логином это всё ещё разные люди — складывать нельзя.
+        payload = {"operators": [
+            {"operator_id": None, "operator_login": "a@x.kz", "operator_name": "Первый",
+             "registrations_count": 5, "successful_registrations_count": 2},
+            {"operator_id": None, "operator_login": "b@x.kz", "operator_name": "Второй",
+             "registrations_count": 4, "successful_registrations_count": 1},
+        ]}
+        self.assertEqual(len(self._fetch(payload)), 2)
+
+
+class OperatorKeyTests(unittest.TestCase):
+    def test_operator_id_wins(self):
+        self.assertEqual(reg_contest.operator_key(
+            {"operator_id": " 42 ", "operator_login": "a@x.kz"}), "42")
+
+    def test_falls_back_to_login_then_name(self):
+        self.assertEqual(reg_contest.operator_key(
+            {"operator_id": None, "operator_login": "A@X.kz"}), "login:a@x.kz")
+        self.assertEqual(reg_contest.operator_key(
+            {"operator_id": None, "operator_name": "Тестбаев Нұрасыл"}),
+            "name:тестбаев нурасыл")
+
+    def test_fully_anonymous_row_gets_empty_key(self):
+        self.assertEqual(reg_contest.operator_key({"operator_id": None}), "")
+
+
+class SnapshotShrinkTests(unittest.TestCase):
+    """Обрезанный ответ CRM опаснее пустого: удалённая строка уносит с собой
+    reached_at, а он решает, кому 25 000, а кому 10 000."""
+
+    def _previous(self, count):
+        return [{"crm_operator_id": str(i), "user_name": f"Оператор {i}",
+                 "operator_name": None} for i in range(count)]
+
+    def _entries(self, count):
+        return [{"crm_operator_id": str(i)} for i in range(count)]
+
+    def test_full_response_passes(self):
+        self.assertIsNone(reg_contest.check_snapshot_shrink(self._previous(69), self._entries(69)))
+
+    def test_first_snapshot_passes(self):
+        self.assertIsNone(reg_contest.check_snapshot_shrink([], self._entries(3)))
+
+    def test_single_disappearance_is_allowed(self):
+        # Законный случай: у оператора забрали все регистрации задним числом.
+        self.assertIsNone(reg_contest.check_snapshot_shrink(self._previous(69), self._entries(68)))
+
+    def test_truncated_response_is_refused(self):
+        reason = reg_contest.check_snapshot_shrink(self._previous(69), self._entries(40))
+        self.assertIsNotNone(reason)
+        self.assertIn("29", reason)
+        self.assertIn("Оператор", reason)
+
+    def test_tiny_snapshot_tolerates_one_loss(self):
+        # На трёх операторах 10% — это ноль, но одиночная пропажа законна и там.
+        self.assertIsNone(reg_contest.check_snapshot_shrink(self._previous(3), self._entries(2)))
+
 
 class LeaderboardTests(unittest.TestCase):
     def _directory(self):

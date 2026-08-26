@@ -10373,12 +10373,28 @@ def sync_reg_contest(triggered_by='scheduler'):
                     f"{previous['total_rows']} — рейтинг не затираем")
         directory = db.get_reg_contest_operator_directory()
         entries = reg_contest.resolve_operators(crm_operators, directory)
-        total = db.upsert_reg_contest_operators(contest["code"], entries)
+        # Обрезанный ответ опаснее пустого: пропавшие строки синк удаляет, а
+        # вместе с ними навсегда уходит reached_at — штамп тай-брейка.
+        shrink = reg_contest.check_snapshot_shrink(
+            db.get_reg_contest_operators(contest["code"]), entries)
+        if shrink:
+            raise RuntimeError(shrink)
+        result = db.upsert_reg_contest_operators(contest["code"], entries)
         unmatched = sum(1 for e in entries if e["match_method"] == "none")
         logging.info(
-            "reg_contest sync (%s): %s операторов, %s не сопоставлено, %.1fs",
-            triggered_by, total, unmatched, time.monotonic() - started)
-        return {"status": "success", "rows": total, "unmatched": unmatched}
+            "reg_contest sync (%s): %s операторов, %s не сопоставлено, "
+            "%s изменений, %.1fs",
+            triggered_by, result["total"], unmatched, result["changes"],
+            time.monotonic() - started)
+        if result["decreases"]:
+            # Не авария: CRM переписывает прошлое (см. п. 5 в шапке
+            # reg_contest.py). Но операторы это замечают, поэтому просадка
+            # обязана оставлять след — в логе, в журнале и на самом синке.
+            logging.warning(
+                "reg_contest sync (%s): счётчики просели у %s операторов — %s",
+                triggered_by, result["decreases"], result["decrease_note"])
+        return {"status": "success", "rows": result["total"], "unmatched": unmatched,
+                "changes": result["changes"], "decreases": result["decreases"]}
     except Exception as exc:
         db.mark_reg_contest_sync_error(contest["code"], exc)
         raise
@@ -10409,6 +10425,20 @@ def _reg_contest_public_item(item, avatar_url=None):
         "prize": item.get("prize"),
         "reached_at": _reg_contest_iso(item.get("reached_at")),
         "avatar_url": avatar_url,
+    }
+
+
+def _reg_contest_decrease_item(row):
+    """Строка журнала просадок наружу. after = null означает, что оператор
+    пропал из выдачи CRM целиком, а не обнулился."""
+    return {
+        "crm_operator_id": row.get("crm_operator_id"),
+        "name": row.get("operator_name"),
+        "registrations_before": row.get("registrations_before"),
+        "registrations_after": row.get("registrations_after"),
+        "successful_before": row.get("successful_before"),
+        "successful_after": row.get("successful_after"),
+        "changed_at": _reg_contest_iso(row.get("changed_at")),
     }
 
 
@@ -10460,7 +10490,15 @@ def api_reg_contest_results():
                 "status": (sync_state or {}).get("status"),
                 "total_rows": (sync_state or {}).get("total_rows"),
                 "error": (sync_state or {}).get("error") if is_admin else None,
+                # Просадки — только админам: операторам показывать «у вас
+                # отняли двоих» без объяснения CRM нечестно, а админу это
+                # ответ на вопрос «почему у человека стало меньше».
+                "decreases": (sync_state or {}).get("decreases") if is_admin else None,
+                "decrease_note": (sync_state or {}).get("decrease_note") if is_admin else None,
             },
+            "recent_decreases": [_reg_contest_decrease_item(row)
+                                 for row in db.get_reg_contest_recent_decreases(
+                                     contest["code"])] if is_admin else [],
             "groups": groups,
             "can_sync": is_admin,
             # CRM отдаёт оба счётчика, поэтому под числом засчитанных фронт

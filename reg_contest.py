@@ -39,6 +39,24 @@
      всех: часть операторов заведена у нас с личной почтой, поэтому фолбэк —
      матчинг по ФИО с фолдингом казахских букв (Нұрасыл == Нурасыл) и по
      префиксу (CRM хранит «Фамилия Имя», у нас часто ещё отчество).
+  5. CRM ПЕРЕПИСЫВАЕТ ПРОШЛОЕ, и от этого счётчик у оператора умеет падать.
+     Разбор 26.08.2026 (жалоба «регистрации иногда уменьшаются»): наш синк
+     чист — срез в БД совпал с живым ответом CRM до последней цифры, 347
+     прогонов за неделю без единой ошибки. Падение приносит сама CRM:
+       * оператор Закряева Дана (CRM 376) появился в выдаче только 18.08
+         (строку видно по SERIAL id: первый синк вставил id 1–53, её — 14483),
+         а сегодня CRM числит за ней регистрации с 07.08. До 18.08 те же
+         регистрации лежали у кого-то другого — у него счётчик и просел;
+       * строка-«ничей» с operator_id = null (6 регистраций, 3 засчитано)
+         появилась в выдаче только ~24.08 с регистрациями от 14.08;
+       * у девяти операторов наш штамп reached_at сдвинулся на 2–13 дней
+         позже того дня, когда по сегодняшним данным CRM прирастать было уже
+         нечему, — то есть счётчик менялся не от новых водителей.
+     Сумма по операторам всегда точно равна total_registrations, «ничьей»
+     корзины сверх названных нет, поэтому переезд регистрации к одному
+     оператору — это всегда её пропажа у другого. Отсюда журнал изменений
+     (reg_contest_operator_changes) и метка decreases в reg_contest_syncs:
+     падение счётчика — законное событие, но оно обязано быть видимым.
 
 Прочие особенности живого API: page/per_page игнорируются (список всегда
 полный), trip_deadline раньше registered_to роняет ответ в HTML с кодом 200.
@@ -60,6 +78,13 @@ log = logging.getLogger(__name__)
 HTTP_TIMEOUT = 60
 MAX_RETRIES = 3
 RETRY_PAUSE = 2.0
+
+# Какую долю операторов CRM может «потерять» между двумя синками, чтобы мы
+# всё-таки поверили ответу. Пропавшие строки синк удаляет, а вместе со строкой
+# навсегда уходит reached_at — штамп тай-брейка, по которому в «Линии» делятся
+# 25 000 и 10 000. Одиночная пропажа законна (см. п. 5 в шапке модуля), обвал
+# списка — почти наверняка обрезанный ответ, и терять из-за него штампы нельзя.
+MAX_SNAPSHOT_SHRINK = 0.1
 
 # Единственный активный конкурс. Новый конкурс = новый словарь с новым code:
 # строки в reg_contest_operators разделяются по contest_code.
@@ -170,22 +195,37 @@ class RegContestClient:
             raise RuntimeError(
                 "CRM отдала незнакомый формат: нет списка operators, "
                 f"ключи ответа = {sorted(data)[:10]}")
-        seen = set()
+        merged = {}
+        order = []
         for row in operators:
-            if "successful_registrations_count" not in row:
+            # Оба счётчика обязательны. Раньше проверялся только засчитанный, а
+            # registrations_count добирался через _int_or_zero — то есть стоило
+            # CRM переименовать поле (она уже дважды меняла контракт), и всем
+            # операторам молча записался бы ноль «регистраций всего».
+            for field in ("registrations_count", "successful_registrations_count"):
+                if field not in row:
+                    raise RuntimeError(
+                        f"CRM отдала операторов без {field}, "
+                        f"поля = {sorted(row)[:10]}")
+            key = operator_key(row)
+            if key not in merged:
+                merged[key] = dict(row)
+                order.append(key)
+                continue
+            if key:
+                # Дубль оператора означает, что счётчики разъехались по двум
+                # строкам: какой из них верный — снаружи не решить, а «взять
+                # первый» тихо занизил бы человеку счёт в конкурсе. Падаем.
                 raise RuntimeError(
-                    "CRM отдала операторов без successful_registrations_count, "
-                    f"поля = {sorted(row)[:10]}")
-            # Дубль operator_id означает, что счётчики оператора разъехались по
-            # двум строкам: какой из них верный — снаружи не решить, а «взять
-            # первый» тихо занизил бы человеку счёт в конкурсе. Падаем.
-            operator_id = str(row.get("operator_id") or "")
-            if operator_id in seen:
-                raise RuntimeError(
-                    f"CRM отдала оператора {operator_id} дважды — счётчики "
+                    f"CRM отдала оператора {key} дважды — счётчики "
                     "неоднозначны, срез не обновляем")
-            seen.add(operator_id)
-        return operators
+            # Пустой ключ — это корзина «ничей»: строка без id, логина и ФИО.
+            # Сопоставлять её не с кем и приза она не занимает, поэтому вторая
+            # такая строка не повод ронять синк — складываем их в одну.
+            bucket = merged[key]
+            for field in ("registrations_count", "successful_registrations_count"):
+                bucket[field] = _int_or_zero(bucket.get(field)) + _int_or_zero(row.get(field))
+        return [merged[key] for key in order]
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +245,55 @@ def fold_name(value):
     if not value:
         return ""
     return " ".join(str(value).lower().translate(_KZ_FOLD).split())
+
+
+def operator_key(row):
+    """Чем строка CRM отличается от соседней в нашем срезе.
+
+    Обычно это operator_id. Но CRM отдаёт ещё и безымянную корзину — строку с
+    operator_id = null, куда складывает регистрации, которые ни за кем не
+    числит (проверено 26.08.2026: 6 регистраций, 3 засчитано). Раньше любая
+    строка без id съезжала в один и тот же пустой ключ, и ВТОРАЯ такая строка
+    роняла синк как «дубль оператора» — то есть рейтинг замирал целиком из-за
+    записи, которая никому не принадлежит. Поэтому: нет id — цепляемся за
+    логин, нет логина — за ФИО, и только совсем анонимные строки живут под
+    общим пустым ключом (их fetch_operators складывает в одну).
+    """
+    operator_id = str(row.get("operator_id") or "").strip()
+    if operator_id:
+        return operator_id
+    login = (row.get("operator_login") or "").strip().lower()
+    if login:
+        return f"login:{login}"
+    name = fold_name(row.get("operator_name"))
+    return f"name:{name}" if name else ""
+
+
+def check_snapshot_shrink(previous, entries, limit=MAX_SNAPSHOT_SHRINK):
+    """Не подсунула ли CRM обрезанный список вместо полного.
+
+    Эндпоинт всегда отдаёт полный список операторов, поэтому пропавшую из
+    выдачи строку синк удаляет — вместе с reached_at, восстановить который
+    нечем. Одиночная пропажа законна: CRM переписывает привязки задним числом
+    (п. 5 в шапке модуля), и оператор, у которого забрали все регистрации,
+    честно исчезает. Обвал списка — другое дело: это почти наверняка
+    обрезанный ответ, и платить за него штампами тай-брейка мы не будем.
+
+    previous — прошлый срез (строки get_reg_contest_operators). Возвращает
+    текст причины, если обновлять срез опасно, иначе None.
+    """
+    if not previous:
+        return None
+    fresh = {e["crm_operator_id"] for e in entries}
+    missing = [p for p in previous if p["crm_operator_id"] not in fresh]
+    if len(missing) <= max(1, int(len(previous) * limit)):
+        return None
+    names = ", ".join(sorted(
+        (p.get("user_name") or p.get("operator_name") or p["crm_operator_id"] or "без имени")
+        for p in missing)[:5])
+    return (f"CRM не прислала {len(missing)} операторов из {len(previous)} "
+            f"(порог — {int(limit * 100)}%): похоже на обрезанный ответ, "
+            f"срез не обновляем. Среди пропавших: {names}")
 
 
 def classify_group(direction_name, department_name):
@@ -268,7 +357,7 @@ def resolve_operators(crm_operators, directory):
             group = classify_group(user.get("direction_name"),
                                    user.get("department_name"))
         resolved.append({
-            "crm_operator_id": str(row.get("operator_id") or ""),
+            "crm_operator_id": operator_key(row),
             "operator_login": row.get("operator_login"),
             "operator_name": row.get("operator_name"),
             "user_id": user.get("id") if user else None,
