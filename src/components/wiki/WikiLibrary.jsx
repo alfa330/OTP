@@ -105,7 +105,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed,
                                       features = null, spaceId = null,
-                                      onAskAssistant = null }) {
+                                      onAskAssistant = null,
+                                      /* Вернуть человека на вкладку, с которой он
+                                         открыл статью (каталог, журнал, отчёт). */
+                                      onReturnTo = null }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
        onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
        статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
@@ -116,6 +119,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const consumeEditTarget = useStableCallback(onEditTargetConsumed);
     const refreshCatalog = useStableCallback(reloadCatalog);
     const askAssistant = useStableCallback(onAskAssistant);
+    const returnTo = useStableCallback(onReturnTo);
     const canAskAssistant = !!onAskAssistant;
 
     /* Открытая статья — ВЕРШИНА цепочки переходов, а не отдельное значение:
@@ -130,6 +134,12 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const openHighlight = openEntry?.highlight || null;
     const openPrefill = openEntry?.prefill || null;
     const backEntry = trailBack(trail);
+    /* ДВЕРЬ, через которую вошли в статью: вкладка раздела, где человек был до
+       того (каталог, журнал, аналитика, помощник). Хранится РЯДОМ с цепочкой, а
+       не внутри неё, и это не мелочь: цепочка обрезается по потолку глубины с
+       самого старого конца, то есть корневая запись рано или поздно уходит — и
+       вместе с ней ушла бы дверь. Цепочка про статьи, дверь — про выход. */
+    const [door, setDoor] = useState(null);   // {tab, label} либо null
     // Открытый парк — такая же страница витрины, как статья (см. WikiPark).
     const [openParkSlug, setOpenParkSlug] = useState(null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
@@ -175,6 +185,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
            этого ссылка из чата или клик в колоколе, пришедшие поверх открытого
            парка, меняли бы адресную строку, не меняя экрана. */
         setOpenParkSlug(null);
+        setDoor(null);            // ссылка из чата — вход снаружи, вкладки-источника нет
         setTrail(openTrail(initialSlug));
         consumeInitialSlug();
     }, [initialSlug, consumeInitialSlug]);
@@ -184,6 +195,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     useEffect(() => {
         if (!searchTarget?.slug) return;
         setOpenParkSlug(null);
+        // Единственный путь, у которого дверь есть: статью открыли с другой вкладки.
+        setDoor(searchTarget.from || null);
         setTrail(openTrail(searchTarget.slug, {
             highlight: searchTarget.highlight || null,
             prefill: searchTarget.prefill || null,
@@ -244,6 +257,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         if (editing && !window.confirm(
             'Уйти на главную вики? Несохранённые правки статьи пропадут.')) return;
         setTrail([]);
+        // Заголовок раздела — явная просьба «на главную», дверь ей не перечит.
+        setDoor(null);
         setOpenParkSlug(null);
         setEditing(null);
         setQuery('');
@@ -255,6 +270,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        заново: список — не шаг по сети статей, и возврат из него ведёт в список. */
     const openArticle = useCallback((slug) => {
         setOpenParkSlug(null);
+        setDoor(null);            // открыли из витрины — в витрину и возвращаемся
         setTrail(openTrail(slug));
     }, []);
 
@@ -264,6 +280,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        экране, где этого слова нет. */
     const openHit = useCallback((article) => {
         setOpenParkSlug(null);
+        setDoor(null);
         setTrail(openTrail(article.slug, {
             highlight: markedWord(article.snippet, query.trim()),
         }));
@@ -281,8 +298,24 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     }, []);
 
     /* Возврат на шаг назад: в предыдущую статью цепочки, а когда её нет — в
-       список. */
-    const closeArticle = useCallback(() => setTrail(popTrail), []);
+       дверь, через которую вошли (вкладка-источник), иначе в список витрины.
+     *
+     * Решение принимается ЗДЕСЬ, в теле обработчика, а не внутри апдейтера
+     * setTrail: апдейтер React зовёт в фазе рендера и повторяет его в StrictMode,
+     * так что setTab родителя оттуда — это «Cannot update a component while
+     * rendering a different component» и двойное переключение вкладки.
+     *
+     * Прокрутку в двери сбрасывает РОДИТЕЛЬ. Свой эффект (ниже) здесь не
+     * сработает: витрина размонтируется тем же коммитом, а эффекты
+     * размонтированного не выполняются — каталог открылся бы на той прокрутке,
+     * докуда дочитали статью. */
+    const closeArticle = useCallback(() => {
+        const exit = trail.length <= 1 ? door : null;
+        setTrail(popTrail);
+        if (!exit) return;
+        setDoor(null);
+        returnTo(exit);
+    }, [trail.length, door, returnTo]);
 
     /* Список после статьи показываем СВЕРХУ. Открытие статьи прокрутку сбивает
        само (высота страницы схлопывается под карточку загрузки, и браузер
@@ -457,6 +490,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                         // Числа каталога меняются той же правкой: опубликовали
                         // черновик — «Черновиков» обязано уменьшиться сразу.
                         refreshCatalog();
+                        // Дверь переживает сохранение: человек пришёл из
+                        // каталога, ушёл в правку и вернулся в статью — выход
+                        // у него всё тот же.
                         if (slug) setTrail(openTrail(slug));
                     }}
                 />
@@ -494,7 +530,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 /* Куда уведёт возврат, знает цепочка: в предыдущую статью, а
                    когда её нет — в список. Подпись кнопки берётся отсюда же,
                    чтобы обещание на кнопке и её действие не могли разойтись. */
-                backTo={backEntry}
+                backTo={backEntry || door}
                 restoreScroll={openEntry?.scrollTop || 0}
                 onBack={closeArticle}
                 /* Ссылка на другую статью внутри текста открывает её здесь же
@@ -509,9 +545,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 onArchived={() => {
                     // Уходим с закрытой статьи: она только что ушла из витрины,
                     // и оставлять её на экране значит показывать то, чего в
-                    // вике уже нет. Шаг назад по цепочке, а не сразу в список:
-                    // разбирают архив обычно подряд, по сети связей.
-                    setTrail(popTrail);
+                    // вике уже нет. Выход ТОТ ЖЕ, что у кнопки возврата: два
+                    // выхода с одного экрана не должны вести в разные места —
+                    // архив разбирают из каталога, туда и возвращаемся.
+                    closeArticle();
                     load();
                     loadIndex();
                     loadHome();

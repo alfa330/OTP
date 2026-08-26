@@ -27,7 +27,7 @@ import WikiSpaceModal from './WikiSpaceModal';
 import { effectiveFeatures } from './spaceFeatures';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
-import { getScrollContainer } from './scrollContainer';
+import { getScrollContainer, scrollPortalTo } from './scrollContainer';
 import { CAPABILITY_LABELS } from './sectionGrants';
 import './wiki-theme.css';
 
@@ -62,6 +62,43 @@ const StatTile = ({ icon: Icon, value, label }) => (
         </div>
     </div>
 );
+
+/* ДВЕРЬ ВОЗВРАТА — куда вернуть человека из статьи, открытой не с главной.
+ *
+ * Статью раздел показывает в одном месте — на витрине (второго экрана статьи
+ * быть не должно), поэтому каталог, журнал, аналитика и помощник открывают её
+ * через переключение вкладки. Вкладка-источник при этом размонтируется, и до
+ * сих пор кнопка возврата уводила на главную витрину — то есть в третье место,
+ * где человек не был.
+ *
+ * Подпись обещает ВКЛАДКУ, а не состояние внутри неё: «К помощнику», а не
+ * «К ответу». Половину вкладки «Статьи» восстанавливать не нужно — catalogMode
+ * и catalogBucket живут здесь и переключение на витрину переживают, — но
+ * подписать выход обязана именно она: из «Переноса» вернуться «к списку статей»
+ * значит попасть не туда, что было обещано.
+ */
+const RETURN_LABELS = {
+    catalog: 'К списку статей',
+    assistant: 'К помощнику',
+    analytics: 'К аналитике',
+    audit: 'К журналу',
+    parks: 'К паркам',
+    offices: 'К офисам',
+    overview: 'К обзору',
+};
+
+const RETURN_LABELS_HALF = {
+    structure: 'К структуре',
+    trainers: 'К тренажёрам',
+    guests: 'К гостевому доступу',
+    migration: 'К переносу',
+};
+
+/** Метка вкладки-источника. null — возвращать некуда: человек и так на главной. */
+const returnDoor = (tab, mode = null) => {
+    const label = (tab === 'catalog' && RETURN_LABELS_HALF[mode]) || RETURN_LABELS[tab];
+    return label ? { tab, label } : null;
+};
 
 /* Переключатель половин вкладки «Статьи»: смотреть содержимое или править
    разложение. Сегмент-контрол, а не две кнопки: это выбор ОДНОГО из двух
@@ -238,6 +275,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        («9 черновиков» открывает каталог сразу в черновиках), а вкладка при
        уходе размонтируется и локальное состояние потеряла бы. */
     const [catalogBucket, setCatalogBucket] = useState('published');
+    /* МЕСТО В КАТАЛОГЕ — выбранный раздел и раскрытые ветки дерева. Здесь по той
+       же причине, что корзина: вкладка при уходе в статью размонтируется, и
+       человек, разбирающий раздел по статьям, каждый раз возвращался бы к
+       корню дерева.
+       Раздел храним ИДЕНТИФИКАТОРОМ, а не снимком {id, name, path}: снимок
+       пережил бы переименование раздела и показывал бы в шапке колонки
+       вчерашнее имя. Имя и путь каталог собирает у себя из свежего дерева.
+       null — «все статьи корзины», это полноценная выборка, а не «ничего не
+       выбрано» (см. viewingAll в WikiCatalog). */
+    const [catalogSection, setCatalogSection] = useState(null);
+    const [catalogOpenSections, setCatalogOpenSections] = useState(() => new Set());
+
     /* Что показывает вкладка «Статьи»: каталог или правку структуры. Отдельной
        вкладки «Структура» больше нет — по решению владельца обе половины одной
        работы («что лежит» и «как разложено») собраны под одним пунктом меню и
@@ -496,6 +545,14 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     ], [isEditor, canManageStructure, canGrantAccess, canGrantGuest, canManageAccess,
         features, catalog]);
 
+    /* Смена вики в шапке — смена всего дерева: раздел, выбранный в прежней, в
+       новой не существует, а поднятый выбор пережил бы её молча и повесил бы в
+       шапке колонки имя из чужой вики. */
+    useEffect(() => {
+        setCatalogSection(null);
+        setCatalogOpenSections(new Set());
+    }, [activeSpace?.id]);
+
     /* Сторона, с которой въезжает выбранная половина. Предыдущую держим в ref,
        а не в состоянии: она нужна только для стартового смещения анимации, и
        лишний рендер на её запись был бы чистой платой ни за что. */
@@ -527,6 +584,21 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         Promise.all([loadPing(), loadStructure(), loadCatalog()])
             .then(() => showToast?.('Обновлено', 'success'));
     };
+
+    /* Возврат из статьи на вкладку, с которой её открыли.
+     *
+     * Сверяемся с НАБОРОМ вкладок: он считается из ping и features, и права
+     * могли сузиться, пока человек читал статью, — эффект выше в этом случае
+     * всё равно выкинет на главную, но уже после мигания пустым экраном.
+     *
+     * Прокрутку ставит эта сторона: витрина размонтируется тем же коммитом, и
+     * её собственный сброс прокрутки не выполнится — вкладка открылась бы на
+     * той прокрутке, докуда дочитали статью. */
+    const returnFromArticle = useCallback((exit) => {
+        const known = exit?.tab && tabs.some((t) => t.key === exit.tab && t.show);
+        setTab(known ? exit.tab : 'library');
+        scrollPortalTo(0);
+    }, [tabs]);
 
     /* Заголовок раздела работает как логотип сайта: возвращает на главную вики
        из статьи, из выбранного раздела и с любой вкладки. Прокрутку сбрасываем
@@ -600,15 +672,20 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             base={base}
                             headers={headers}
                             spaceId={activeSpace?.id || null}
+                            /* Поиск открывается с ЛЮБОЙ вкладки, поэтому дверь
+                               возврата — та вкладка, где человек сейчас стоит.
+                               С главной двери нет: возвращаться и так в неё. */
                             onOpenArticle={(slug, highlight) => {
+                                const from = returnDoor(tab, catalogMode);
                                 setTab('library');
-                                setSearchTarget({ slug, highlight });
+                                setSearchTarget({ slug, highlight, from });
                             }}
                             onOpenClassifier={(prefill) => {
                                 // Классификатор — теперь статья этой же вики,
                                 // поэтому никуда из раздела не уходим.
+                                const from = returnDoor(tab, catalogMode);
                                 setTab('library');
-                                setSearchTarget({ slug: CLASSIFIER_SLUG, prefill });
+                                setSearchTarget({ slug: CLASSIFIER_SLUG, prefill, from });
                             }}
                             onAskAssistant={canAskAssistant ? askAssistant : null}
                         />
@@ -837,6 +914,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         onInitialSlugConsumed={onInitialArticleConsumed}
                         searchTarget={searchTarget}
                         onSearchTargetConsumed={() => setSearchTarget(null)}
+                        /* Кнопка возврата в статье, открытой с другой вкладки,
+                           обещает ту вкладку — значит и вернуть обязана туда. */
+                        onReturnTo={returnFromArticle}
                         /* Поиск на витрине — тот же поиск, что в шапке, и выход
                            к помощнику у них обязан быть один и тот же. */
                         onAskAssistant={canAskAssistant ? askAssistant : null}
@@ -865,7 +945,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             onAskRequestConsumed={() => setAssistantAsk(null)}
                             onOpenArticle={(slug, highlight) => {
                                 setTab('library');
-                                setSearchTarget({ slug, highlight });
+                                setSearchTarget({ slug, highlight, from: returnDoor('assistant') });
                             }}
                         />
                     </Suspense>
@@ -929,7 +1009,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                        статьи в разделе быть не должно. */
                                     onOpenArticle={(slug) => {
                                         setTab('library');
-                                        setSearchTarget({ slug });
+                                        setSearchTarget({
+                                            slug, from: returnDoor('catalog', 'migration') });
                                     }}
                                     /* Решение меняет корзину статьи и остаток
                                        очереди — и то и другое живёт в каталоге. */
@@ -943,7 +1024,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                        там же, где все статьи, — на главной. */
                                     onOpenArticle={(slug) => {
                                         setTab('library');
-                                        setSearchTarget({ slug });
+                                        setSearchTarget({
+                                            slug, from: returnDoor('catalog', 'trainers') });
                                     }}
                                     showToast={showToast}
                                 />
@@ -964,12 +1046,19 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                     loading={catalogLoading}
                                     bucket={catalogBucket}
                                     onBucketChange={setCatalogBucket}
+                                    /* Место в каталоге живёт здесь: уход в
+                                       статью размонтирует вкладку. */
+                                    selectedId={catalogSection}
+                                    onSelectedIdChange={setCatalogSection}
+                                    openSections={catalogOpenSections}
+                                    onOpenSectionsChange={setCatalogOpenSections}
                                     /* Статья открывается на главной — там живут
                                        читалка, редактор и оглавление. Второго
                                        экрана статьи в каталоге быть не должно. */
                                     onOpenArticle={(slug) => {
                                         setTab('library');
-                                        setSearchTarget({ slug });
+                                        setSearchTarget({
+                                            slug, from: returnDoor('catalog', 'catalog') });
                                     }}
                                     /* Правка — туда же, где редактор: на
                                        витрину. Второго редактора в каталоге
@@ -1028,7 +1117,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         spaceId={activeSpace?.id || null}
                         onOpenArticle={(slug) => {
                             setTab('library');
-                            setSearchTarget({ slug });
+                            setSearchTarget({ slug, from: returnDoor('analytics') });
                         }}
                     />
                 )}
@@ -1050,7 +1139,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         spaceId={activeSpace?.id}
                         onOpenArticle={(slug) => {
                             setTab('library');
-                            setSearchTarget({ slug });
+                            setSearchTarget({ slug, from: returnDoor('audit') });
                         }}
                     />
                 )}

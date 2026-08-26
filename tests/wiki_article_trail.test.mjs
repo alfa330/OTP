@@ -141,3 +141,76 @@ test('список после статьи показывается сверху
   assert.ok(article.includes('restoreScroll'),
             'возврат в статью обязан ставить человека туда, где он оборвал чтение');
 });
+
+/* ── Дверь: вкладка, с которой открыли статью ─────────────────────────────── */
+
+test('готовая подпись двери старше заголовка статьи', () => {
+  assert.equal(backLabel({ label: 'К журналу' }), 'К журналу');
+  // Дверь и предыдущая статья в одну кнопку не попадают, но правило должно быть
+  // однозначным: пришла подпись — она и рисуется.
+  assert.equal(backLabel({ label: 'К списку статей', title: 'Тарифы' }), 'К списку статей');
+});
+
+test('дверь живёт отдельно от цепочки — иначе её срежет потолок глубины', () => {
+  const src = read('src/components/wiki/WikiLibrary.jsx');
+  assert.ok(src.includes('const [door, setDoor]'),
+            'дверь обязана быть своим состоянием: цепочка обрезается с самого старого конца');
+  // Проверяем на самой цепочке: корень с меткой действительно уходит.
+  let trail = openTrail('s0', { from: { tab: 'catalog' } });
+  for (let i = 1; i < TRAIL_LIMIT + 2; i += 1) trail = pushTrail(trail, `s${i}`);
+  assert.equal(trail[0].from, undefined, 'корень с меткой срезан — значит хранить её там нельзя');
+});
+
+test('выход из статьи один на кнопку и на архивацию', () => {
+  const src = read('src/components/wiki/WikiLibrary.jsx');
+  const archived = /onArchived=\{\(\) => \{[\s\S]*?\n {16}\}\}/.exec(src);
+  assert.ok(archived, 'не нашли обработчик архивации');
+  assert.ok(archived[0].includes('closeArticle()'),
+            'архивация обязана уходить тем же выходом, что кнопка возврата');
+  // Решение о переключении вкладки принимается ВНЕ апдейтера setTrail: внутри
+  // React зовёт его в фазе рендера и повторяет в StrictMode.
+  const close = /const closeArticle = useCallback\([\s\S]*?\}, \[[^\]]*\]\);/.exec(src);
+  assert.ok(close, 'не нашли closeArticle');
+  assert.ok(!/setTrail\(\(prev\)[\s\S]*returnTo/.test(close[0]),
+            'возврат на вкладку нельзя решать внутри апдейтера состояния');
+});
+
+test('каждый вход в статью с другой вкладки несёт дверь', () => {
+  const src = read('src/components/wiki/WikiView.jsx');
+  const opens = src.match(/setSearchTarget\(\{[^}]*\}/g) || [];
+  assert.ok(opens.length >= 7, `ожидали все входы, нашли ${opens.length}`);
+  opens.forEach((call) => {
+    assert.ok(call.includes('from'), `вход без двери: ${call}`);
+  });
+  assert.ok(src.includes('onReturnTo={returnFromArticle}'),
+            'витрина обязана уметь вернуть человека на вкладку-источник');
+  // Права могли сузиться, пока человек читал статью.
+  assert.ok(/tabs\.some\(\(t\) => t\.key === exit\.tab/.test(src),
+            'возврат обязан сверяться с набором доступных вкладок');
+  // Прокрутку сбрасывает родитель: витрина размонтируется тем же коммитом.
+  const back = /const returnFromArticle = useCallback\([\s\S]*?\}, \[[^\]]*\]\);/.exec(src);
+  assert.ok(back && back[0].includes('scrollPortalTo(0)'),
+            'вкладка-источник обязана открыться сверху, а не на прокрутке статьи');
+});
+
+test('место в каталоге переживает уход в статью', () => {
+  const view = read('src/components/wiki/WikiView.jsx');
+  assert.ok(view.includes('const [catalogSection, setCatalogSection]'),
+            'выбранный раздел обязан жить выше вкладки — она размонтируется');
+  assert.ok(view.includes('const [catalogOpenSections, setCatalogOpenSections]'),
+            'без раскрытых веток выбранная строка вернётся невидимой');
+
+  const cat = read('src/components/wiki/WikiCatalog.jsx');
+  assert.ok(!/const \[selected, setSelected\] = useState/.test(cat),
+            'выбор больше не локальное состояние каталога');
+  assert.ok(!/const \[openSections, setOpenSections\] = useState/.test(cat),
+            'раскрытые ветки больше не локальное состояние каталога');
+  // Наверх уезжает идентификатор: снимок {name, path} пережил бы переименование.
+  assert.ok(cat.includes('const selected = useMemo('),
+            'имя и путь раздела обязаны считаться из свежего дерева');
+  // Ветку раскрываем целиком, иначе выбранная строка прячется под свёрнутым предком.
+  const select = /const selectSection = \([\s\S]*?\n {4}\};/.exec(cat);
+  assert.ok(select, 'не нашли выбор раздела');
+  assert.ok(select[0].includes('ancestorsOf(section)'),
+            'раскрывать надо всю ветку до раздела, а не его одного');
+});

@@ -61,6 +61,13 @@ const BUCKET_BY_KEY = new Map(BUCKETS.map((b) => [b.key, b]));
 // Синтетический раздел для статей, не привязанных ни к одной ветке. Та же
 // подпись, что в оглавлении на главной (WikiIndexPanel) — это одно и то же.
 const ORPHANS_ID = 'none';
+/* Подписи псевдораздела. Вынесены из разметки: их читают и строка дерева, и
+   шапка правой колонки, а разъехавшись, они назвали бы одну выборку по-разному. */
+const ORPHANS_ROW = { name: 'Без раздела', path: 'Не привязаны ни к одному разделу' };
+/* Запасные значения места в каталоге. Нужны, чтобы забытый проп ронял не экран,
+   а только память о выборе: каталог остался бы рабочим с закрытым деревом. */
+const NO_BRANCHES = new Set();
+const NOOP = () => {};
 
 /* Выборка «без раздела вовсе» — весь периметр корзины. Не null и не пустая
    строка: выборка ходит тем же загрузчиком, что и раздел, и её имя попадает в
@@ -335,8 +342,16 @@ const Blank = ({ icon: Icon, title, text, children }) => (
 
 export default function WikiCatalog({ base, headers, showToast, catalog, loading,
                                       bucket, onBucketChange, onOpenArticle,
-                                      onEditArticle, reloadCatalog, space = null }) {
-    const [selected, setSelected] = useState(null);   // {id, name, path} либо null
+                                      onEditArticle, reloadCatalog, space = null,
+                                      /* Место в каталоге живёт у родителя: уход
+                                         в статью размонтирует вкладку, и выбор
+                                         раздела не пережил бы возврата (см.
+                                         WikiView). Сюда приходит идентификатор
+                                         (null | 'none' | число), имя и путь
+                                         собираются ниже из свежего дерева. */
+                                      selectedId = null, onSelectedIdChange = NOOP,
+                                      openSections = NO_BRANCHES,
+                                      onOpenSectionsChange = NOOP }) {
     const [items, setItems] = useState(null);         // null = ещё не ответили
     /* Ждём с самого начала: список «все статьи» экран грузит сам, не дожидаясь
        выбора. Начни busy с false — между первым кадром и первым эффектом
@@ -345,7 +360,7 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     const [acting, setActing] = useState(null);       // id статьи, над которой работаем
     const [filter, setFilter] = useState('');         // поиск внутри показанного списка
     const [query, setQuery] = useState('');           // поиск по дереву
-    const [openSections, setOpenSections] = useState(() => new Set());
+    const setOpenSections = onOpenSectionsChange;
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
     const resultRef = useRef(null);
     /* Выборка, ответ по которой ещё ждём: «пространство + раздел + корзина».
@@ -419,6 +434,36 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
         }
         return [space?.name, ...chain].filter(Boolean).join(' › ');
     }, [sections, spaces]);
+
+    /* Цепочка предков раздела — снизу вверх. Тот же обход, что у pathOf, но
+       нужны идентификаторы, а не имена: ими раскрывается ветка дерева. */
+    const ancestorsOf = useCallback((section) => {
+        const byId = new Map(sections.map((s) => [s.id, s]));
+        const chain = [];
+        let parent = section.parent_section_id ? byId.get(section.parent_section_id) : null;
+        let guard = 0;
+        while (parent && guard < 50) {
+            chain.push(parent.id);
+            parent = parent.parent_section_id ? byId.get(parent.parent_section_id) : null;
+            guard += 1;
+        }
+        return chain;
+    }, [sections]);
+
+    /* Выбранная выборка целиком: идентификатор приходит сверху, имя и путь
+       считаются здесь по СВЕЖЕМУ дереву. Раздела с таким идентификатором может
+       уже не быть — его переложили, убрали в архив или сменили вику: тогда
+       честный ответ «вся корзина», а не пустая колонка с чужим именем. */
+    const selected = useMemo(() => {
+        if (selectedId === null || selectedId === undefined) return null;
+        if (selectedId === ORPHANS_ID) return { id: ORPHANS_ID, ...ORPHANS_ROW };
+        const section = sections.find((x) => x.id === selectedId);
+        return section
+            ? { id: section.id, name: section.name, path: pathOf(section) }
+            : null;
+    }, [selectedId, sections, pathOf]);
+
+    const setSelected = onSelectedIdChange;
 
     /* Дерево: пространство → строки {section, depth} в порядке обхода.
        Плоский список со ступенью глубины, а не вложенные массивы: свёрнутую
@@ -629,11 +674,24 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
             () => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
     };
 
-    const selectSection = (section, path) => {
+    const selectSection = (section) => {
         setFilter('');
-        setSelected({ id: section.id, name: section.name, path: path ?? pathOf(section) });
-        // Раскрываем ветку выбранного: он мог быть выбран из свёрнутого родителя.
-        if (section.id !== ORPHANS_ID) setOpenSections((prev) => new Set(prev).add(section.id));
+        setSelected(section.id);
+        /* Раскрываем ВСЮ ветку до выбранного, а не его одного. Строку в дереве
+           видно, только когда открыты все её предки (renderSpace), а выбрать
+           раздел можно и из свёрнутой ветки — при поиске по дереву строки видны
+           через совпадения, а не через openSections. Раньше здесь открывался
+           сам раздел, и обещание комментария расходилось с делом молча; теперь
+           это ещё и условие возврата: выбор переживает уход в статью, а дерево
+           обязано показать, где человек стоит. */
+        if (section.id !== ORPHANS_ID) {
+            setOpenSections((prev) => {
+                const next = new Set(prev);
+                ancestorsOf(section).forEach((id) => next.add(id));
+                next.add(section.id);
+                return next;
+            });
+        }
         loadArticles(section.id);
         revealResult();
     };
@@ -644,7 +702,7 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
        ровно то поведение, которое люди принимают за поломку. */
     const selectAll = () => {
         setFilter('');
-        setSelected(null);
+        setSelected(null);   // null — «вся корзина», полноценная выборка
         loadArticles(ALL_ID);
         revealResult();
     };
@@ -871,15 +929,13 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                             {showOrphans && (
                                 <SpaceGroup title="Вне дерева" closed={false} onToggle={() => {}}>
                                     <SectionRow
-                                        section={{ id: ORPHANS_ID, name: 'Без раздела' }}
+                                        section={{ id: ORPHANS_ID, name: ORPHANS_ROW.name }}
                                         depth={0}
                                         count={orphanCount}
                                         selected={selected?.id === ORPHANS_ID}
                                         open={false}
                                         hasChildren={false}
-                                        onSelect={() => selectSection(
-                                            { id: ORPHANS_ID, name: 'Без раздела' },
-                                            'Не привязаны ни к одному разделу')}
+                                        onSelect={() => selectSection({ id: ORPHANS_ID })}
                                         onToggle={() => {}}
                                     />
                                 </SpaceGroup>
