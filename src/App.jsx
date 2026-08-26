@@ -33678,6 +33678,56 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         };
 
+        // Журнал просадок — только админам. CRM переписывает уже прошедшие дни
+        // (появившийся задним числом оператор забирает регистрации у другого,
+        // отменённая поездка снимает засчитанного), и операторы это замечают.
+        // Раньше ответить им было нечем: в базе лежало только текущее число.
+        const RegContestDecreases = ({ items }) => {
+            const { useState } = React;
+            const [open, setOpen] = useState(false);
+            const line = (item) => {
+                const parts = [];
+                if (item.registrations_after == null) {
+                    parts.push(`пропал из выдачи CRM (было ${item.successful_before} из ${item.registrations_before} рег.)`);
+                } else {
+                    if (item.successful_before != null && item.successful_after < item.successful_before)
+                        parts.push(`засчитано ${item.successful_before} → ${item.successful_after}`);
+                    if (item.registrations_before != null && item.registrations_after < item.registrations_before)
+                        parts.push(`регистрации ${item.registrations_before} → ${item.registrations_after}`);
+                }
+                return parts.join(', ');
+            };
+            return (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 sm:rounded-2xl sm:p-4">
+                    <button type="button" onClick={() => setOpen(!open)}
+                            className="flex w-full items-center gap-2 text-left">
+                        <FaIcon className="fas fa-arrow-trend-down text-amber-600" />
+                        <span className="flex-1 text-[13px] font-semibold text-amber-900 sm:text-sm">
+                            Счётчики снижались: {items.length}
+                        </span>
+                        <FaIcon className={`fas fa-chevron-${open ? 'up' : 'down'} text-[11px] text-amber-600`} />
+                    </button>
+                    {open && (
+                        <div className="mt-3 space-y-1.5">
+                            <p className="text-[11px] leading-snug text-amber-800/80">
+                                CRM пересчитывает уже прошедшие дни: регистрация может переехать
+                                к другому оператору, а засчитанный водитель — перестать считаться.
+                                Наш синк записывает её ответ дословно.
+                            </p>
+                            {items.map((item, idx) => (
+                                <div key={`${item.crm_operator_id}:${item.changed_at}:${idx}`}
+                                     className="flex flex-wrap items-baseline gap-x-2 text-[12px] text-amber-900">
+                                    <span className="font-semibold">{item.name || item.crm_operator_id || 'без имени'}</span>
+                                    <span className="tabular-nums">{line(item)}</span>
+                                    <span className="text-[11px] text-amber-700/70">{regFmtDateTime(item.changed_at)}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         const RegContestPanel = ({ currentUser, isAdmin, addToast }) => {
             const { useState, useEffect } = React;
             const [data, setData] = useState(null);
@@ -33877,6 +33927,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 showRegistrations={showRegistrations} />
                         ))}
                     </div>
+
+                    {isAdmin && (data?.recent_decreases || []).length > 0 && (
+                        <RegContestDecreases items={data.recent_decreases} />
+                    )}
 
                     <RegContestRulesModal open={showRules} onClose={() => setShowRules(false)} contest={contest}
                                           groupLabels={groupLabels} showRegistrations={showRegistrations} />
