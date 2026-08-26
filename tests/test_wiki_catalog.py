@@ -666,7 +666,7 @@ class CatalogScreenSourceTest(unittest.TestCase):
         loader = re.search(r'const loadArticles = .*?\n    \}, \[', self.code, re.S)
         self.assertIsNotNone(loader, 'не нашли загрузчик списка')
         body = loader.group(0)
-        self.assertRegex(body, r'if \(!quiet\) \{ wantedRef\.current = wanted;')
+        self.assertRegex(body, r'if \(!quiet\) \{\s*wantedRef\.current = wanted;')
         # Второго, безусловного присвоения быть не должно.
         self.assertEqual(len(re.findall(r'wantedRef\.current = wanted', body)), 1)
 
@@ -712,19 +712,74 @@ class CatalogScreenSourceTest(unittest.TestCase):
         потом окно страницы над ним.
         """
         self.assertRegex(self.code, r'pageWindow\(shown, page\)')
-        # Страница сбрасывается на первую, когда меняется то, над чем она стоит.
-        self.assertRegex(self.code, r'useEffect\(\(\) => \{ setPage\(1\); \}, \[filter\]\)')
-        self.assertRegex(self.code, r'if \(!quiet\) \{[^}]*setPage\(1\);')
 
-    def test_a_quiet_refresh_keeps_the_page_the_person_is_reading(self):
-        """Тихое обновление НЕ отбрасывает на первую страницу.
+    def test_the_page_resets_only_when_the_selection_actually_changes(self):
+        """Сброс страницы — на СМЕНУ выборки, а не на всякую её загрузку.
 
-        Человек читает седьмую страницу и архивирует с неё строку. Сбрось мы
-        страницу — список прыгнул бы в начало на каждое действие над строкой.
+        Три случая, и все три разные. Сменили корзину или раздел — страница
+        обязана вернуться к первой. Открыли ту же выборку снова (возврат из
+        статьи, повторное нажатие на выбранный раздел) — страница обязана
+        уцелеть, иначе поднимать её к родителю было незачем. Тихое обновление
+        после действия над строкой не трогает её тем более.
         """
         loader = re.search(r'const loadArticles = .*?\n    \}, \[', self.code, re.S)
-        self.assertIsNotNone(loader)
-        self.assertEqual(len(re.findall(r'setPage\(1\)', loader.group(0))), 1)
+        self.assertIsNotNone(loader, 'не нашли загрузчик списка')
+        body = loader.group(0)
+        # Сброс живёт под !quiet и под сравнением выборок — не сам по себе.
+        self.assertRegex(
+            body,
+            r"if \(pagedScopeRef\.current !== null "
+            r"&& pagedScopeRef\.current !== wanted\) setPage\(1\);")
+        self.assertEqual(len(re.findall(r'setPage\(1\)', body)), 1)
+
+    def test_mounting_is_not_mistaken_for_a_change(self):
+        """Первый прогон эффекта по фильтру — монтирование, а не правка.
+
+        Уход в статью размонтирует вкладку, и эффект по фильтру срабатывает при
+        возврате. Без этой проверки он вернул бы человека к первой странице
+        ровно тогда, когда тот возвращается к своей седьмой.
+        """
+        self.assertRegex(self.code, r'const filterSeenRef = useRef\(filter\);')
+        self.assertRegex(self.code, r'if \(filterSeenRef\.current === filter\) return;')
+
+    def test_only_one_place_writes_the_page(self):
+        """За номер страницы не борются два эффекта.
+
+        Соблазн велик: рядом со сбросом просится второй эффект, «прижимающий»
+        состояние к последней существующей странице. В кадре, где фильтр только
+        что сменился, они дерутся за одно число — shown уже новый, page ещё
+        старый, — и побеждает объявленный ниже. Человек, набравший слово с
+        седьмой страницы, попадал бы на ПОСЛЕДНЮЮ страницу находок: шапка
+        честно пишет «Найдено 12 из 235», а пейджер под ней — «11–12 из 12».
+        Проверено вживую в React 18, а не рассуждением.
+
+        Драться не за что, если запомненный номер — пожелание, а показывается
+        ответ pageWindow: и пейджер, и строки берутся из него.
+        """
+        self.assertNotRegex(self.code, r'setPage\(pageView')
+        self.assertNotRegex(self.code, r'setPage\(safePage')
+        # Показывается именно clamp'нутый номер, а не сырое состояние.
+        self.assertRegex(self.code, r'page=\{pageView\.safePage\}')
+        self.assertRegex(self.code, r'pageView\.rows\.map\(')
+        # Ровно два места пишут страницу: смена выборки и смена фильтра.
+        self.assertEqual(len(re.findall(r'setPage\(', self.code)), 2)
+
+    def test_the_page_survives_a_trip_into_an_article(self):
+        """Номер страницы живёт у родителя, как и выбранный раздел.
+
+        Уход в статью размонтирует вкладку. Держи страницу внутри каталога — и
+        человек, разбирающий пятую страницу раздела по статьям, возвращался бы
+        к первой после каждой прочитанной. Раздел ради этого уже подняли к
+        родителю; страница — часть того же места в каталоге.
+        """
+        self.assertNotRegex(self.code, r'useState\(1\)')
+        self.assertRegex(self.code, r'page = 1, onPageChange = NOOP')
+        self.assertRegex(self.code, r'const setPage = onPageChange;')
+        view = (ROOT / 'src' / 'components' / 'wiki' / 'WikiView.jsx').read_text(
+            encoding='utf-8')
+        self.assertRegex(view, r'const \[catalogPage, setCatalogPage\] = useState\(1\);')
+        self.assertRegex(view, r'page=\{catalogPage\}')
+        self.assertRegex(view, r'onPageChange=\{setCatalogPage\}')
 
     def test_the_full_list_is_asked_within_one_space(self):
         """Запрос списка уходит с space_id.

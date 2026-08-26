@@ -396,7 +396,13 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                          собираются ниже из свежего дерева. */
                                       selectedId = null, onSelectedIdChange = NOOP,
                                       openSections = NO_BRANCHES,
-                                      onOpenSectionsChange = NOOP }) {
+                                      onOpenSectionsChange = NOOP,
+                                      /* Страница списка — часть того же места
+                                         в каталоге, что и раздел: живёт у
+                                         родителя, иначе не пережила бы уход в
+                                         статью. Сбрасываем её здесь — там, где
+                                         меняется сама выборка. */
+                                      page = 1, onPageChange = NOOP }) {
     const [items, setItems] = useState(null);         // null = ещё не ответили
     /* Ждём с самого начала: список «все статьи» экран грузит сам, не дожидаясь
        выбора. Начни busy с false — между первым кадром и первым эффектом
@@ -404,8 +410,8 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     const [busy, setBusy] = useState(true);
     const [acting, setActing] = useState(null);       // id статьи, над которой работаем
     const [filter, setFilter] = useState('');         // поиск внутри показанного списка
-    const [page, setPage] = useState(1);              // страница показанного списка
     const [query, setQuery] = useState('');           // поиск по дереву
+    const setPage = onPageChange;
     const setOpenSections = onOpenSectionsChange;
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
     const resultRef = useRef(null);
@@ -421,6 +427,14 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
        Забирает ключ себе только ОТКРЫТИЕ выборки; тихое обновление после
        действия над строкой лишь сверяется с ним — см. loadArticles. */
     const wantedRef = useRef(null);
+
+    /* Выборка, к которой относится запомненная страница. Нужна, чтобы отличить
+       СМЕНУ выборки от повторного открытия той же: страницу помнит родитель, и
+       сбрасывать её при каждом монтировании значило бы начинать список заново
+       после каждой прочитанной статьи — ровно та потеря места, ради которой
+       родителю отдали и выбранный раздел. null — «страница ещё ни к чему не
+       привязана», то есть это первое открытие после монтирования. */
+    const pagedScopeRef = useRef(null);
 
     const spaceId = space?.id || null;
 
@@ -605,12 +619,22 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
            а спиннер над ним не погас бы вовсе. Себя же тихое обновление
            проверяет тем же ключом: сменилась выборка, пока летел ответ, —
            значит он опоздал и в список не идёт. */
-        /* Страницу сбрасываем вместе со списком: седьмая страница «Черновиков»
-           к только что открытому «Архиву» отношения не имеет, а пейджер стоит
-           выше списка — уехавшую страницу заметили бы не сразу. Тихое
-           обновление страницу НЕ трогает: человек читает её прямо сейчас, и
-           отбрасывать его в начало из-за архивации одной строки незачем. */
-        if (!quiet) { wantedRef.current = wanted; setBusy(true); setItems(null); setPage(1); }
+        /* Страницу сбрасываем, только когда открывается ДРУГАЯ выборка:
+           седьмая страница «Черновиков» к «Архиву» отношения не имеет, а
+           пейджер стоит выше списка — уехавшую страницу заметили бы не сразу.
+           Та же выборка (первое открытие после возврата из статьи, повторное
+           нажатие на уже выбранный раздел) страницу сохраняет.
+
+           Тихое обновление не трогает её тем более: человек читает страницу
+           прямо сейчас, и отбрасывать его в начало из-за архивации одной
+           строки незачем. */
+        if (!quiet) {
+            wantedRef.current = wanted;
+            if (pagedScopeRef.current !== null && pagedScopeRef.current !== wanted) setPage(1);
+            pagedScopeRef.current = wanted;
+            setBusy(true);
+            setItems(null);
+        }
         const mine = () => wantedRef.current === wanted;
 
         const total = knownCount(id);
@@ -790,8 +814,15 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     }, [bucket, spaceId, hasCatalog]);
 
     /* Набрали или стёрли слово в фильтре — снова с первой страницы: третья
-       страница прежнего списка к отфильтрованному отношения не имеет. */
-    useEffect(() => { setPage(1); }, [filter]);
+       страница прежнего списка к отфильтрованному отношения не имеет.
+       Первый прогон — монтирование, а не правка: там сбрасывать нечего, и
+       сброс отобрал бы у человека страницу, на которую он возвращается. */
+    const filterSeenRef = useRef(filter);
+    useEffect(() => {
+        if (filterSeenRef.current === filter) return;
+        filterSeenRef.current = filter;
+        setPage(1);
+    }, [filter]);
 
     /* Фильтр внутри раздела — по названию и описанию, на клиенте: список уже
        целиком здесь, ходить за подстрокой на сервер незачем. */
@@ -802,15 +833,23 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
             (a) => `${a.title} ${a.summary || ''}`.toLowerCase().includes(term));
     }, [items, filter]);
 
-    /* Показанные строки — окно страницы над отфильтрованным списком. */
+    /* Показанные строки — окно страницы над отфильтрованным списком.
+     *
+     * ЗАПОМНЕННЫЙ НОМЕР — ЭТО ПОЖЕЛАНИЕ, А ПОКАЗЫВАЕТСЯ ОТВЕТ pageWindow.
+     * Состояние никуда не «прижимаем» вторым эффектом, и это не мелочь стиля.
+     * Такой эффект дрался бы со сбросом по фильтру за одно и то же число:
+     * в кадре, где фильтр только что сменился, shown уже новый, а page ещё
+     * старый — сброс ставит 1, прижатие следом ставит последнюю страницу
+     * НОВОГО списка, посчитанную от СТАРОГО номера, и побеждает тот, кто
+     * объявлен ниже. Человек, набравший слово со седьмой страницы, попадал бы
+     * на последнюю страницу находок вместо первой: шапка честно пишет
+     * «Найдено 12 из 235», а под ней — «11–12 из 12».
+     *
+     * Драться не за что, если хранить пожелание, а показывать clamp: и
+     * пейджер, и строки берутся из pageView, поэтому список, ставший короче
+     * (статью убрали в архив прямо с последней страницы), показывается верно
+     * сам собой. */
     const pageView = pageWindow(shown, page);
-    /* Список стал короче, чем был на этой странице (статью убрали в архив
-       прямо с неё) — pageWindow уже отдал последнюю существующую, осталось
-       довести до неё само состояние, иначе номер в пейджере разошёлся бы
-       с показанными строками. */
-    useEffect(() => {
-        if (page !== pageView.safePage) setPage(pageView.safePage);
-    }, [page, pageView.safePage]);
 
     if (loading && !catalog) {
         return (

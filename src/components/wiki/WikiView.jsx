@@ -286,6 +286,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        выбрано» (см. viewingAll в WikiCatalog). */
     const [catalogSection, setCatalogSection] = useState(null);
     const [catalogOpenSections, setCatalogOpenSections] = useState(() => new Set());
+    /* Страница списка — там же и по той же причине: раздел мы человеку вернули,
+       а пятая страница внутри него без этого начиналась бы заново после каждой
+       прочитанной статьи. Сбрасывает её сам каталог, когда меняется выборка. */
+    const [catalogPage, setCatalogPage] = useState(1);
 
     /* Что показывает вкладка «Статьи»: каталог или правку структуры. Отдельной
        вкладки «Структура» больше нет — по решению владельца обе половины одной
@@ -1052,6 +1056,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                     onSelectedIdChange={setCatalogSection}
                                     openSections={catalogOpenSections}
                                     onOpenSectionsChange={setCatalogOpenSections}
+                                    page={catalogPage}
+                                    onPageChange={setCatalogPage}
                                     /* Статья открывается на главной — там живут
                                        читалка, редактор и оглавление. Второго
                                        экрана статьи в каталоге быть не должно. */
