@@ -505,8 +505,14 @@ def _empty_ack_totals():
 # Дырой в базе знаний является только первый случай. Текст константы
 # импортируется, а не копируется: сравнение с копией молча развалилось бы при
 # первой же правке формулировки.
+#
+# «Не нашли» считается ТОЛЬКО по запросам без фильтров, а общее число запросов —
+# по всем. Запрос, суженный типом документа или создателем, вернул ноль не
+# потому, что статьи нет: она есть, просто не того вида. Смешай мы эти нули —
+# и отчёт ниже, объявленный единственным источником правды о дырах в базе
+# знаний, начал бы требовать писать уже написанное.
 _SEARCH_TOTALS_SQL = """
-SELECT count(*), count(*) FILTER (WHERE l.results_count = 0),
+SELECT count(*), count(*) FILTER (WHERE l.results_count = 0 AND NOT l.filtered),
        count(DISTINCT l.user_id), COALESCE(sum(l.steps), 0)
   FROM wiki_search_log l
  WHERE (%(space)s::int IS NULL OR l.space_id IS NULL OR l.space_id = %(space)s)
@@ -524,6 +530,8 @@ SELECT l.query_norm,
 """ + _period('o.created_at') + """) AS found_by_others
   FROM wiki_search_log l
  WHERE l.results_count = 0
+   -- Суженные фильтром запросы — не дыра в базе знаний (см. _SEARCH_TOTALS_SQL).
+   AND NOT l.filtered
    AND (%(space)s::int IS NULL OR l.space_id IS NULL OR l.space_id = %(space)s)
 """ + _period('l.created_at') + """
  GROUP BY l.query_norm

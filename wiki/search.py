@@ -131,12 +131,11 @@ hit AS (
        AND (%(section)s::int IS NULL
             OR EXISTS (SELECT 1 FROM wiki_article_sections s
                         WHERE s.article_id = a.id AND s.section_id = %(section)s::int))
-       AND (%(article_type)s::text IS NULL OR a.article_type = %(article_type)s::text)
+       AND (%(article_types)s::text[] IS NULL
+            OR a.article_type = ANY(%(article_types)s::text[]))
+       AND (%(authors)s::int[] IS NULL OR a.author_id = ANY(%(authors)s::int[]))
        AND (
-            a.search_vector @@ q.tsq
-            OR (q.tsq_prefix IS NOT NULL AND a.search_vector @@ q.tsq_prefix)
-            OR (q.tsq_loose IS NOT NULL AND a.search_vector @@ q.tsq_loose)
-            {trigram_predicate}
+{match_predicate}
        )
      ORDER BY a.id, tier ASC, score DESC
 ),
@@ -145,11 +144,7 @@ top AS (
 )
 SELECT top.id, top.slug, top.title, top.summary, top.status, top.views,
        top.updated_at, top.rank_fts, top.rank_trgm,
-       ts_headline('russian',
-                   coalesce(top.content_plain, ''),
-                   top.tsq_mark,
-                   'MaxFragments=3, MaxWords=26, MinWords=10, '
-                   'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet,
+       {snippet_expr} AS snippet,
        -- Запасной отрывок для случая «статья по-казахски, запрос по-русски».
        -- Статья находится (векторы и tsvector свёрнуты), а ts_headline
        -- подсвечивает по ОРИГИНАЛУ — и по запросу «Казына» в тексте с «Қазына»
@@ -161,29 +156,17 @@ SELECT top.id, top.slug, top.title, top.summary, top.status, top.views,
        -- отдавала сам свёрнутый текст — и подменяла в превью казахскую букву
        -- русской, то есть показывала статью не такой, какая она есть. Здесь
        -- подменять нечего: наружу уходит ровно то, что в статье.
-       CASE WHEN m.pos IS NULL THEN NULL ELSE
-            substring(a2.content_plain from GREATEST(m.pos - 70, 1)
-                      for m.pos - GREATEST(m.pos - 70, 1))
-            || '<mark>' || substring(a2.content_plain from m.pos for m.len) || '</mark>'
-            || substring(a2.content_plain from m.pos + m.len for 110)
-       END AS snippet_folded,
-       a2.article_type
+       {folded_expr} AS snippet_folded,
+       a2.article_type,
+       -- Автор — и для фильтра «по создателю», и для подписи в строке выдачи:
+       -- выбрав фильтр, человек обязан видеть в результатах, что он сработал.
+       -- Имя берётся LEFT JOIN'ом: у части статей автор снят (ON DELETE SET NULL
+       -- при удалении учётки), и INNER JOIN потерял бы их из выдачи молча.
+       a2.author_id, au.name AS author_name
   FROM top
   JOIN wiki_articles a2 ON a2.id = top.id
-  LEFT JOIN LATERAL (
-      -- Самое раннее вхождение любого варианта запроса, по свёрнутому тексту.
-      SELECT t.pos, t.len
-        FROM (
-            SELECT position(translate(lower(v), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') IN
-                            translate(lower(coalesce(a2.content_plain, '')), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')) AS pos,
-                   length(v) AS len
-              FROM unnest(%(variants)s::text[]) AS v
-             WHERE length(btrim(v)) >= 3
-        ) t
-       WHERE t.pos > 0
-       ORDER BY t.pos
-       LIMIT 1
-  ) m ON TRUE
+  LEFT JOIN users au ON au.id = a2.author_id
+{headline_join}
  ORDER BY top.tier ASC, top.score DESC, top.views DESC
 """
 
@@ -208,8 +191,109 @@ _TIER_TRIGRAM = [
 ]
 _TIER_FALLBACK = 8
 
+# ── Область поиска ───────────────────────────────────────────────────────────
+#
+# MATCH_ALL — как было: совпало где угодно (заголовок, алиасы, описание, тело).
+# MATCH_TITLE — «искать только в названиях статей».
+#
+# Ограничение сделано ВЕСОМ уже посчитанного tsvector, а не отдельным
+# to_tsvector(a.title) на каждую строку: колонка search_vector собрана
+# setweight'ом (schema.py), заголовок в ней помечен весом A, и ts_rank_cd с
+# массивом '{0,0,0,1}' отвечает «совпало ли именно в заголовке» без второй
+# индексации текста.
+#
+# Условие @@ обязано стоять ПЕРВЫМ в каждой скобке и остаться отдельным: только
+# оно берётся GIN-индексом idx_wiki_articles_fts. Один ts_rank_cd без него
+# заставил бы Postgres прочитать все статьи периметра и посчитать ранг у каждой.
+#
+# Алиасы (вес B) в область названий НЕ входят, хотя и собраны из заголовка:
+# search_aliases_for_article кладёт туда ещё описание, теги и синонимы первых
+# двух килобайт ТЕЛА (wiki/text.py) — то есть через вес B в «только названия»
+# просочилось бы ровно то, что человек этим фильтром и отсекает. Опечатки и
+# транслит от этого не страдают: варианты написания запроса подставляются до
+# базы (query_variants), и «хундай» приходит в SQL уже как 'hyundai'.
+MATCH_ALL = 'all'
+MATCH_TITLE = 'title'
+MATCH_SCOPES = (MATCH_ALL, MATCH_TITLE)
+
+_MATCH_PREDICATE = {
+    MATCH_ALL: """            a.search_vector @@ q.tsq
+            OR (q.tsq_prefix IS NOT NULL AND a.search_vector @@ q.tsq_prefix)
+            OR (q.tsq_loose IS NOT NULL AND a.search_vector @@ q.tsq_loose)
+            {trigram_predicate}""",
+    MATCH_TITLE: """            (a.search_vector @@ q.tsq
+                AND ts_rank_cd({w_title}, a.search_vector, q.tsq) > 0)
+            OR (q.tsq_prefix IS NOT NULL AND a.search_vector @@ q.tsq_prefix
+                AND ts_rank_cd({w_title}, a.search_vector, q.tsq_prefix) > 0)
+            OR (q.tsq_loose IS NOT NULL AND a.search_vector @@ q.tsq_loose
+                AND ts_rank_cd({w_title}, a.search_vector, q.tsq_loose) > 0)
+            {trigram_predicate}""",
+}
+
+# Колонки триграммного слоя по областям. В «только названиях» их одна, и это же
+# выражение идёт в rank_trgm — иначе сходство с алиасами тянуло бы вверх статью,
+# у которой в заголовке искомого слова нет.
+_TRIGRAM_COLUMNS = {
+    MATCH_ALL: ('{title}', '{aliases}'),
+    MATCH_TITLE: ('{title}',),
+}
+
+# ── Отрывок с подсветкой ─────────────────────────────────────────────────────
+#
+# В области названий отрывка НЕТ, и это два решения в одном.
+#
+# По смыслу: человек попросил искать только в названиях, а секция «Совпадения в
+# тексте» показывала бы ему совпадение в тексте — то есть ровно то, что он
+# только что отключил. Строка выдачи без отрывка не пустеет: фронт показывает
+# описание статьи (см. split_snippet и WikiSearch.jsx).
+#
+# По цене: ts_headline и LATERAL с position() по content_plain — самая дорогая
+# часть запроса, а тела статей в проде доходят до 900 КБ. В суженной области
+# они считались бы ради результата, который нельзя показывать.
+#
+# NULL::text, а не отсутствие колонок: порядок SELECT жёстко связан с _KEYS
+# (dict(zip(_KEYS, row))), и выкидывать колонки означало бы держать два разных
+# порядка на две области.
+_SNIPPET_EXPR = {
+    MATCH_ALL: """ts_headline('russian',
+                   coalesce(top.content_plain, ''),
+                   top.tsq_mark,
+                   'MaxFragments=3, MaxWords=26, MinWords=10, '
+                   'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"')""",
+    MATCH_TITLE: 'NULL::text',
+}
+
+_FOLDED_EXPR = {
+    MATCH_ALL: """CASE WHEN m.pos IS NULL THEN NULL ELSE
+            substring(a2.content_plain from GREATEST(m.pos - 70, 1)
+                      for m.pos - GREATEST(m.pos - 70, 1))
+            || '<mark>' || substring(a2.content_plain from m.pos for m.len) || '</mark>'
+            || substring(a2.content_plain from m.pos + m.len for 110)
+       END""",
+    MATCH_TITLE: 'NULL::text',
+}
+
+_HEADLINE_JOIN = {
+    MATCH_ALL: """  LEFT JOIN LATERAL (
+      -- Самое раннее вхождение любого варианта запроса, по свёрнутому тексту.
+      SELECT t.pos, t.len
+        FROM (
+            SELECT position(translate(lower(v), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') IN
+                            translate(lower(coalesce(a2.content_plain, '')), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')) AS pos,
+                   length(v) AS len
+              FROM unnest(%(variants)s::text[]) AS v
+             WHERE length(btrim(v)) >= 3
+        ) t
+       WHERE t.pos > 0
+       ORDER BY t.pos
+       LIMIT 1
+  ) m ON TRUE""",
+    MATCH_TITLE: '',
+}
+
 _KEYS = ('id', 'slug', 'title', 'summary', 'status', 'views', 'updated_at',
-         'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded', 'article_type')
+         'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded', 'article_type',
+         'author_id', 'author_name')
 
 # Буквы и цифры, из которых собирается префиксный tsquery. Всё прочее
 # (операторы tsquery, кавычки, дефисы) отбрасывается — слово из букв и цифр
@@ -249,11 +333,39 @@ def prefix_tsquery(variant, joiner=' & '):
     return joiner.join(word + ':*' for word in words[:8])
 
 
-def build_sql(with_trigram=True):
-    """Текст запроса. Без pg_trgm остаётся чистый полнотекстовый поиск."""
+def normalize_scope(value):
+    """Область поиска из запроса: неизвестное значение — как «везде».
+
+    Гасим молча, а не отказом: область — украшение выдачи, и опечатка в адресе
+    не повод оставить человека без результатов. То же правило, что у фильтра
+    типа в routes_articles._article_types.
+    """
+    value = str(value or '').strip().lower()
+    return value if value in MATCH_SCOPES else MATCH_ALL
+
+
+def build_sql(with_trigram=True, scope=MATCH_ALL):
+    """Текст запроса. Без pg_trgm остаётся чистый полнотекстовый поиск.
+
+    scope=MATCH_TITLE сужает поиск до НАЗВАНИЙ статей: и предикат отбора, и
+    ступени, и триграммный слой считаются только по заголовку. Сужать один лишь
+    предикат было бы мало — ступени и score продолжали бы считаться по алиасам
+    и описанию, и внутри отобранной по заголовку выдачи порядок решала бы
+    длина тела статьи.
+    """
+    scope = normalize_scope(scope)
+    title_only = scope == MATCH_TITLE
+
     steps = list(_TIER_FTS)
     if with_trigram:
         steps += _TIER_TRIGRAM
+    if title_only:
+        # Ступени по алиасам, описанию и телу в области названий недостижимы:
+        # такие строки предикат уже не пропустил. Оставь мы их — CASE
+        # присваивал бы ступень 4 статье, попавшей сюда по заголовку, просто
+        # потому что слово нашлось и в алиасах, и порядок выдачи перестал бы
+        # отличать заголовок от совпадения по описанию.
+        steps = [pair for pair in steps if '{title}' in pair[0] or '{w_title}' in pair[0]]
     steps.sort(key=lambda pair: pair[1])
 
     tier_expr = 'CASE\n' + '\n'.join(
@@ -261,9 +373,10 @@ def build_sql(with_trigram=True):
     ) + '\n             ELSE %d\n           END' % _TIER_FALLBACK
 
     if with_trigram:
-        columns = (_TITLE, _ALIASES)
-        similarity_expr = 'GREATEST(%s)' % ', '.join(
-            'word_similarity(q.raw, %s)' % column for column in columns)
+        columns = tuple(_fill(column) for column in _TRIGRAM_COLUMNS[scope])
+        similarity_expr = ('word_similarity(q.raw, %s)' % columns[0] if len(columns) == 1
+                           else 'GREATEST(%s)' % ', '.join(
+                               'word_similarity(q.raw, %s)' % column for column in columns))
         trigram_predicate = '\n            '.join(
             'OR word_similarity(q.raw, %s) >= %s' % (column, _TRIGRAM_THRESHOLD)
             for column in columns)
@@ -277,12 +390,23 @@ def build_sql(with_trigram=True):
         trigram_predicate = ''
         whole_title = ''
 
+    # Подстановка replace'ом, а не format'ом, и по той же причине, что в _fill:
+    # после _fill в тексте стоят весовые массивы ts_rank_cd ('{0,0,0,1}'), и
+    # format сломался бы об их фигурные скобки.
+    match_predicate = _fill(_MATCH_PREDICATE[scope]).replace(
+        '{trigram_predicate}', trigram_predicate)
+
     # Нормализация 32 (rank/(rank+1)) гасит длину документа: без неё длинная
     # статья с частым словом всегда впереди короткой профильной.
+    #
+    # В области названий тот же ранг считается по ВЕСУ A: без весового массива
+    # ts_rank_cd продолжал бы складывать вхождения из тела, и среди статей,
+    # отобранных по заголовку, вперёд выходила бы самая длинная.
+    weights = (_W_TITLE + ', ') if title_only else ''
     score_expr = (
-        'ts_rank_cd(a.search_vector, q.tsq, 32) * 3'
-        ' + COALESCE(ts_rank_cd(a.search_vector, q.tsq_prefix, 32), 0) * 2'
-        ' + COALESCE(ts_rank_cd(a.search_vector, q.tsq_loose, 32), 0) * 0.5'
+        'ts_rank_cd(' + weights + 'a.search_vector, q.tsq, 32) * 3'
+        ' + COALESCE(ts_rank_cd(' + weights + 'a.search_vector, q.tsq_prefix, 32), 0) * 2'
+        ' + COALESCE(ts_rank_cd(' + weights + 'a.search_vector, q.tsq_loose, 32), 0) * 0.5'
         ' + ' + similarity_expr + whole_title
     )
 
@@ -290,7 +414,10 @@ def build_sql(with_trigram=True):
         tier_expr=tier_expr,
         score_expr=score_expr,
         similarity_expr=similarity_expr,
-        trigram_predicate=trigram_predicate,
+        match_predicate=match_predicate,
+        snippet_expr=_SNIPPET_EXPR[scope],
+        folded_expr=_FOLDED_EXPR[scope],
+        headline_join=_HEADLINE_JOIN[scope],
     )
 
 
@@ -335,21 +462,26 @@ def _rows_to_items(cursor):
     return items
 
 
-def _run(cursor, sql, ids, variants, section_id, limit, article_type=None):
+def _run(cursor, sql, ids, variants, section_id, limit,
+         article_types=None, author_ids=None):
     cursor.execute(sql, {
         'ids': ids,
         'variants': variants,
         'prefixes': [prefix_tsquery(v) for v in variants],
         'looses': [prefix_tsquery(v, ' | ') for v in variants],
         'section': section_id,
-        'article_type': article_type or None,
+        # Пустой список — это НЕ «ничего не показывать», а «фильтр не задан»:
+        # приди сюда [] как есть, `= ANY('{}')` не совпал бы ни с одной статьей,
+        # и снятая галочка выглядела бы как «ничего не найдено».
+        'article_types': list(article_types or ()) or None,
+        'authors': list(author_ids or ()) or None,
         'limit': limit,
     })
     return _rows_to_items(cursor)
 
 
-def search(cursor, visible_ids, query, *, section_id=None, article_type=None,
-           limit=20, with_trigram=True):
+def search(cursor, visible_ids, query, *, section_id=None, article_types=None,
+           author_ids=None, scope=MATCH_ALL, limit=20, with_trigram=True):
     """Поиск в границах периметра пользователя.
 
     Запрос прогоняется по всем вариантам написания сразу: исходный,
@@ -363,6 +495,14 @@ def search(cursor, visible_ids, query, *, section_id=None, article_type=None,
     нормализованные заголовок, описание и теги статьи, поэтому слой накрывает
     почти всё, по чему ищут: на боевой базе 13 опечаток из 15 находятся именно
     так (см. комментарий о том, почему отдельного слоя по телу нет).
+
+    Три фильтра выдачи, все необязательные и все сужающие УЖЕ посчитанный
+    периметр, а не заменяющие его:
+      * article_types — типы документа (регламент, инструкция, ...);
+      * author_ids    — создатели статьи (wiki_articles.author_id);
+      * scope         — где искать: MATCH_ALL (везде) или MATCH_TITLE (только
+                        в названиях статей).
+    Пустой список и None значат одно и то же — «фильтр не задан».
     """
     if not visible_ids or not str(query or '').strip():
         return []
@@ -373,8 +513,8 @@ def search(cursor, visible_ids, query, *, section_id=None, article_type=None,
         return []
 
     ids = list(visible_ids)
-    return _run(cursor, build_sql(with_trigram), ids, variants, section_id, limit,
-                article_type=article_type)
+    return _run(cursor, build_sql(with_trigram, scope), ids, variants, section_id, limit,
+                article_types=article_types, author_ids=author_ids)
 
 
 def suggest(cursor, visible_ids, query, *, limit=5, with_trigram=True):
@@ -407,7 +547,7 @@ _COLLAPSE_WINDOW = "interval '30 seconds'"
 _COLLAPSE_SQL = """
 UPDATE wiki_search_log
    SET query = %(query)s, query_norm = %(norm)s, results_count = %(found)s,
-       perimeter_size = %(perimeter)s, steps = steps + 1,
+       perimeter_size = %(perimeter)s, steps = steps + 1, filtered = %(filtered)s,
        created_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
  WHERE id = (
      SELECT id FROM wiki_search_log
@@ -423,18 +563,24 @@ RETURNING id
 
 _INSERT_SQL = """
 INSERT INTO wiki_search_log (user_id, department_id, space_id, query, query_norm,
-                             results_count, perimeter_size)
-VALUES (%(user)s, %(department)s, %(space)s, %(query)s, %(norm)s, %(found)s, %(perimeter)s)
+                             results_count, perimeter_size, filtered)
+VALUES (%(user)s, %(department)s, %(space)s, %(query)s, %(norm)s, %(found)s,
+        %(perimeter)s, %(filtered)s)
 """
 
 
 def log_query(cursor, *, user_id, query, results_count, perimeter_size,
-              department_id=None, space_id=None):
+              department_id=None, space_id=None, filtered=False):
     """Записать поисковый запрос. Возвращает True, если строка легла в журнал.
 
     Вызывающий обязан обернуть вызов савпоинтом: запись идёт в ТОЙ ЖЕ
     транзакции, что и сам поиск, и падение INSERT'а иначе превратило бы рабочую
     выдачу в 500. Журнал — приставка к поиску, а не его часть.
+
+    filtered — «выдача была сужена фильтрами». Пишется рядом с числом находок,
+    потому что без него отчёт «искали и не нашли» перестаёт отвечать на свой
+    вопрос: ноль при отмеченном типе документа означает не «статьи нет», а
+    «статья не того вида», и лечится это не написанием статьи.
     """
     trimmed = str(query or '').strip()[:MAX_QUERY_CHARS]
     if len(trimmed) < 2:
@@ -448,6 +594,7 @@ def log_query(cursor, *, user_id, query, results_count, perimeter_size,
         'norm': wiki_text.fold_kazakh(masked.lower()),
         'found': min(int(results_count or 0), 32767),
         'perimeter': min(int(perimeter_size or 0), 32767),
+        'filtered': bool(filtered),
     }
     # Свернуть можно только у известного человека: у анонимного запроса нет
     # владельца, и «предыдущая строка за 30 секунд» склеила бы разных людей.

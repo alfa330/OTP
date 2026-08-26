@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { FileText, Loader2, Search, Sparkles, X } from 'lucide-react';
+import { FileText, Loader2, Search, Sparkles, User, X } from 'lucide-react';
 import { iosCard, iosGroupLabel, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
 import WikiHome from './WikiHome';
@@ -8,6 +8,8 @@ import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
 import WikiPark from './WikiPark';
 import { markedWord } from './WikiSearch';
+import WikiSearchFilters from './WikiSearchFilters';
+import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
@@ -39,6 +41,11 @@ const WikiEditor = lazy(() => import('./WikiEditor'));
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
+
+/* Сколько статей забираем за раз. Совпадает со значением по умолчанию на
+   сервере, но объявлено здесь: строка «Найдено: N» упирается ровно в это число,
+   и без суффикса «+» на упоре она врала бы. */
+const SEARCH_LIMIT = 20;
 
 /* Сниппет приходит с сервера уже с <mark>. Санитизация здесь не нужна и была
    бы вредна: ts_headline вставляет ровно те теги, что мы задали, а любой текст
@@ -82,6 +89,14 @@ const ArticleCard = ({ article, onOpen }) => {
                             {article.title}
                         </span>
                         {meta && <IosBadge tone={meta.tone}>{meta.label}</IosBadge>}
+                        {/* Создатель — рядом с типом, а не отдельной строкой:
+                            выбрав фильтр по человеку, его же и хочется увидеть
+                            в выдаче, иначе фильтр нечем проверить глазами. */}
+                        {article.author_name && (
+                            <span className="inline-flex items-center gap-1 text-[11.5px] text-slate-400">
+                                <User size={11} /> {article.author_name}
+                            </span>
+                        )}
                     </div>
                     {article.snippet
                         ? <Snippet html={article.snippet} />
@@ -148,6 +163,13 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     // статье, и пережить смену открытого документа он обязан.
     const [pendingUpdateFile, setPendingUpdateFile] = useState(null);
     const [query, setQuery] = useState('');
+    /* Фильтры выдачи: тип документа, создатель и область поиска. Живут рядом с
+       запросом и никуда не деваются, пока человек на витрине — их выбор виден
+       на кнопке и чипами, скрытым состоянием он не становится. */
+    const [filters, setFilters] = useState(EMPTY_FILTERS);
+    const [filtersOpen, setFiltersOpen] = useState(false);
+    const [authors, setAuthors] = useState([]);
+    const [authorsLoading, setAuthorsLoading] = useState(false);
     const [index, setIndex] = useState([]);         // весь периметр — для оглавления
     const [indexLoading, setIndexLoading] = useState(true);
     /* Номер захода за оглавлением: оно собирается из НЕСКОЛЬКИХ ответов, и за
@@ -339,14 +361,28 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         if (term.length < 2) { setFound(null); return; }
 
         setLoading(true);
-        axios.get(`${base}/search`, { headers, params: { q: term, space_id: spaceId } })
+        /* URLSearchParams, а не объект: axios разложил бы массив как
+           `article_type[]=a`, а сервер читает его через getlist — и фильтр
+           молча перестал бы работать (searchFilters.js). */
+        axios.get(`${base}/search`, {
+            headers,
+            /* limit шлём ЯВНО, хотя он совпадает с потолком сервера: цифру
+               «Найдено: N» рисует витрина, и потолок обязан знать тот, кто её
+               рисует, — иначе «Найдено: 20» при сорока подходящих статьях было
+               бы ложью на экране (см. SEARCH_LIMIT). */
+            params: searchParams(term, filters, {
+                space_id: spaceId, limit: SEARCH_LIMIT,
+            }),
+        })
             .then((r) => setFound(r.data?.items || []))
             .catch((e) => {
                 setFound([]);
                 toast(errText(e, 'Поиск не сработал'), 'error');
             })
             .finally(() => setLoading(false));
-    }, [base, headers, query, toast, spaceId]);
+        // filtersKey, а не сам объект: он пересобирается на каждый рендер и в
+        // зависимостях гонял бы поиск по кругу.
+    }, [base, headers, query, toast, spaceId, filtersKey(filters)]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -382,6 +418,22 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
 
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
+
+    /* Создатели для фильтра — по требованию, при первом раскрытии панели: список
+       стоит обхода периметра, а панель раскрывает меньшинство. Отказ гасим
+       молча — без списка фильтр по человеку просто не предлагается, а поиск
+       работает. */
+    const loadAuthors = useCallback(() => {
+        setAuthorsLoading(true);
+        axios.get(`${base}/search/authors`, { headers, params: { space_id: spaceId } })
+            .then((r) => setAuthors(r.data?.items || []))
+            .catch(() => setAuthors([]))
+            .finally(() => setAuthorsLoading(false));
+    }, [base, headers, spaceId]);
+
+    // Сменилось пространство — прежние создатели не при чём: у соседней вики
+    // свой периметр и свои люди, и поиск по ним всегда возвращал бы пусто.
+    useEffect(() => { setAuthors([]); }, [spaceId]);
 
     /* Парки нужны двум местам главной — рельсу и плитке-счётчику. Если в
        пространстве выключено и то, и другое, запрос не делаем вовсе: лишний
@@ -636,6 +688,24 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                         )}
                     </div>
 
+                    {/* Фильтры появляются вместе с выдачей, а не стоят на витрине
+                        «про меня»: пока искать не начали, фильтровать нечего, и
+                        кнопка читалась бы как настройки раздела. То же правило,
+                        что у поиска в шапке. */}
+                    {searching && (
+                        <WikiSearchFilters
+                            className="mx-auto mt-2.5 max-w-[560px] text-left"
+                            size="sm"
+                            value={filters}
+                            onChange={setFilters}
+                            open={filtersOpen}
+                            onOpenChange={setFiltersOpen}
+                            onNeedAuthors={loadAuthors}
+                            authors={authors}
+                            authorsLoading={authorsLoading}
+                        />
+                    )}
+
                 </section>
 
 
@@ -649,7 +719,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 {!busy && searching && (
                     found.length > 0 ? (
                         <div className="space-y-2.5">
-                            <div className={iosGroupLabel}>Найдено: {found.length}</div>
+                            <div className={iosGroupLabel}>
+                                Найдено: {found.length}{found.length >= SEARCH_LIMIT ? '+' : ''}
+                            </div>
                             {found.map((article) => (
                                 <ArticleCard key={article.id} article={article}
                                              onOpen={() => openHit(article)} />

@@ -16,6 +16,10 @@ import CustomSelect from '../ui/CustomSelect';
 import { matchBrand, matchCar } from './carMatch';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
+import WikiSearchFilters, {
+    hasOpenFilterLayer, isInsideSearchFilters,
+} from './WikiSearchFilters';
+import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
 
 /* Поиск по вики — порт search-modal.tsx исходной вики на примитивы портала.
  *
@@ -237,6 +241,10 @@ export function ResultsPane({
     term, rows, articleRows, fragmentRows, selectedIndex, onHover, onPick,
     brandModels, matchedBrand, activeCar, onPickCar,
     loading, failed, onRetry, classifierFailed, listRef, maxHeight,
+    /* Готовая строка фильтров, а не сами фильтры: выдаче незачем знать про их
+       устройство, а дефолт null оставляет старые вызовы (и тест
+       tests/wiki_ask_assistant.test.mjs) рабочими без правки. */
+    filtersSlot = null,
 }) {
     const showEmpty = !loading && !failed && term.length >= 2
         && articleRows.length === 0 && fragmentRows.length === 0
@@ -254,6 +262,11 @@ export function ResultsPane({
 
     return (
         <div className="min-w-0 flex-1">
+            {/* Фильтры — над прокруткой выдачи, а не внутри неё: уехав вместе со
+                списком, кнопка исчезала бы ровно тогда, когда до неё дошла
+                очередь, — на длинной выдаче. */}
+            {filtersSlot}
+
             {term.length < 2 && (
                 <div className="px-3 py-8 text-center text-[13px] text-slate-400">
                     Введите минимум два символа. Понимает опечатки,
@@ -436,6 +449,17 @@ export function ResultsPane({
 export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassifier,
                                      onAskAssistant = null, spaceId = null }) {
     const [query, setQuery] = useState('');
+    /* Фильтры сбрасываются вместе с запросом при закрытии поиска — так же, как
+       это делает сам запрос («начинаем следующий поиск с чистого листа»).
+       Переживи они закрытие — человек вернулся бы через час, набрал слово и не
+       нашёл статью, которая есть: класс дефекта «молчаливый отказ» в вике уже
+       ловили не раз, и заводить его ради экономии четырёх щелчков не стоит.
+       Раскрытие панели держит родитель: от него зависит высота списка выдачи,
+       а состояние, нужное двоим, не может жить у одного. */
+    const [filters, setFilters] = useState(EMPTY_FILTERS);
+    const [filtersOpen, setFiltersOpen] = useState(false);
+    const [authors, setAuthors] = useState([]);
+    const [authorsLoading, setAuthorsLoading] = useState(false);
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(false);
     const [failed, setFailed] = useState(false);
@@ -459,6 +483,9 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const sheetListRef = useRef(null);
     const keyboardRef = useRef(false);
     const requestSeq = useRef(0);
+    // Запрос, с которым уходил прошлый поиск: по нему отличаем набор текста от
+    // щелчка по фильтру (см. дебаунс ниже).
+    const lastTermRef = useRef('');
 
     const reduceMotion = useReducedMotion();
     const motionSet = reduceMotion ? IOS_MODAL_MOTION_REDUCED : IOS_MODAL_MOTION;
@@ -483,6 +510,23 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         return () => { cancelled = true; };
     }, [active, classifier]);
 
+    /* Создатели грузятся по требованию — когда панель фильтров раскрыли впервые.
+       Список стоит обхода периметра, а раскрывает панель меньшинство: запрос на
+       каждый фокус в поле был бы платой ни за что. Отказ гасим молча — без
+       списка фильтр по создателю просто не предлагается, а поиск работает. */
+    const loadAuthors = useCallback(() => {
+        setAuthorsLoading(true);
+        axios.get(`${base}/search/authors`, { headers, params: { space_id: spaceId } })
+            .then((r) => setAuthors(r.data?.items || []))
+            .catch(() => setAuthors([]))
+            .finally(() => setAuthorsLoading(false));
+    }, [base, headers, spaceId]);
+
+    /* Сменилось пространство — прежние создатели больше не при чём: у соседней
+       вики свой периметр и свои люди. Не обнули мы список, фильтр предлагал бы
+       тех, по кому поиск всегда возвращает пусто. */
+    useEffect(() => { setAuthors([]); }, [spaceId]);
+
     // Закрылись — начинаем следующий поиск с чистого листа, как в оригинале.
     useEffect(() => {
         if (active) return;
@@ -491,6 +535,8 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         setSelectedIndex(0);
         setPickedCar(null);
         setFailed(false);
+        setFilters(EMPTY_FILTERS);
+        setFiltersOpen(false);
     }, [active]);
 
     // Статьи — с двух символов, дебаунс 250 мс, гонки отсекаются номером запроса.
@@ -506,6 +552,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         }
         setLoading(true);
         const seq = ++requestSeq.current;
+        /* Дебаунс — про НАБОР текста. Запрос тот же, а эффект перезапустился —
+           значит сработал фильтр, и ждать четверть секунды после щелчка по чипу
+           не за чем: каждый чип иначе залипал бы на 250 мс. */
+        const sameTerm = lastTermRef.current === term;
+        lastTermRef.current = term;
         const timer = setTimeout(() => {
             /* Пространство уходит вместе с запросом, хотя выдачу в шапке оно
                почти не меняет: поле ищет по личному периметру, а он у
@@ -513,7 +564,15 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                половина строк отчёта «что ищут» осталась бы без пространства,
                и «чего не хватает в Тез» было бы не отделить от «чего не
                хватает в Таксопарках». */
-            axios.get(`${base}/search`, { headers, params: { q: term, space_id: spaceId } })
+            /* URLSearchParams, а не объект: axios по умолчанию сериализует
+               массив как `article_type[]=a`, а сервер читает его через
+               request.args.getlist('article_type') — то есть не увидел бы
+               ни одного значения, и фильтр молча перестал бы работать
+               (searchFilters.js). */
+            axios.get(`${base}/search`, {
+                headers,
+                params: searchParams(term, filters, { space_id: spaceId }),
+            })
                 .then((r) => {
                     if (requestSeq.current !== seq) return;
                     setItems(r.data?.items || []);
@@ -529,9 +588,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                     setFailed(true);
                 })
                 .finally(() => { if (requestSeq.current === seq) setLoading(false); });
-        }, 250);
+        }, sameTerm ? 0 : 250);
         return () => { clearTimeout(timer); requestSeq.current += 1; };
-    }, [active, term, base, headers, retryTick, spaceId]);
+        /* filtersKey, а не сам объект фильтров: объект пересобирается на каждый
+           рендер, и в зависимостях он гонял бы запрос по кругу. */
+    }, [active, term, base, headers, retryTick, spaceId, filtersKey(filters)]);
 
     const matchedCar = useMemo(
         () => (classifier ? matchCar(classifier.cars, term) : null),
@@ -597,7 +658,9 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     }, [items, sheetOpen]);
 
     const onKeyDown = useCallback((e) => {
-        if (e.key === 'Escape') { close(); return; }
+        // Escape обслуживает верхний слой: открытая панель фильтров или список
+        // создателей гасят себя сами, и поиск при этом обязан остаться.
+        if (e.key === 'Escape') { if (!hasOpenFilterLayer()) close(); return; }
         if (!rows.length) return;
         if (e.key === 'ArrowDown') {
             e.preventDefault();
@@ -632,9 +695,9 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                 return;
             }
             if (e.key === 'Escape') {
-                // Открытый список CustomSelect («Город») гасит себя сам —
-                // внутренний слой пропускаем вперёд.
-                if (document.querySelector('[role="listbox"]')) return;
+                // Открытый список CustomSelect («Город», «Создатель») и панель
+                // фильтров гасят себя сами — внутренний слой пропускаем вперёд.
+                if (hasOpenFilterLayer()) return;
                 close();
             }
         };
@@ -649,6 +712,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     useEffect(() => {
         if (!focused) return undefined;
         const onDown = (e) => {
+            // Список создателей уходит в портал body, то есть ВНЕ контейнера
+            // поиска. Без этой проверки первый же mousedown по имени считался бы
+            // щелчком мимо: выдача гасла бы до того, как случится click, и
+            // выбор терялся молча. Сама панель фильтров лежит в общем потоке.
+            if (isInsideSearchFilters(e.target)) return;
             if (containerRef.current && !containerRef.current.contains(e.target)) setFocused(false);
         };
         document.addEventListener('mousedown', onDown);
@@ -696,10 +764,32 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const onHover = (index) => { if (!keyboardRef.current) setSelectedIndex(index); };
     const retry = () => setRetryTick((n) => n + 1);
 
+    /* Строка фильтров собирается ОДИН раз и уходит в обе раскладки — выпадашку
+       и мобильный лист. Две копии разметки разъехались бы: у них и так общий
+       ResultsPane ровно по этой причине.
+
+       Показываем её с двух символов, как и саму выдачу: фильтровать нечего,
+       пока сервер не спрошен, а на телефоне пане рисуется всегда — и полоса
+       мигала бы над подсказкой «введите минимум два символа». */
+    const filtersSlot = term.length >= 2 ? (
+        <WikiSearchFilters
+            className="mb-2 border-b border-slate-100 px-1 pb-2"
+            size="sm"
+            value={filters}
+            onChange={setFilters}
+            open={filtersOpen}
+            onOpenChange={setFiltersOpen}
+            onNeedAuthors={loadAuthors}
+            authors={authors}
+            authorsLoading={authorsLoading}
+        />
+    ) : null;
+
     const paneProps = {
         term, rows, articleRows, fragmentRows, selectedIndex,
         onHover, onPick: pickRow, brandModels, matchedBrand, activeCar,
         onPickCar: setPickedCar, loading, failed, onRetry: retry, classifierFailed,
+        filtersSlot,
     };
 
     const carPane = activeCar && classifier ? (
@@ -755,7 +845,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                     onKeyDown={onKeyDown}
                     placeholder="Поиск по вики…"
                     aria-label="Поиск по вики"
-                    aria-expanded={focused && term.length >= 2}
+                    aria-expanded={dropOpen}
                 />
                 {loading && <Loader2 size={14} className="shrink-0 animate-spin text-slate-400" />}
                 {query ? (
@@ -797,7 +887,15 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                             activeCar ? 'w-[900px] gap-3' : 'w-[580px]'
                         }`}
                     >
-                        <ResultsPane {...paneProps} listRef={listRef} maxHeight="60vh" />
+                        {/* Раскрытая панель прибавляется СВЕРХУ, а внешнего
+                            потолка по высоте у выпадашки нет: без сжатия списка
+                            выдача уезжала бы за нижний край экрана на ноутбуке.
+                            Сжимаем список, а не растим блок. */}
+                        <ResultsPane
+                            {...paneProps}
+                            listRef={listRef}
+                            maxHeight={filtersOpen ? '34vh' : '60vh'}
+                        />
                         {carPane && (
                             <motion.div
                                 initial={reduceMotion ? false : { opacity: 0 }}

@@ -51,14 +51,40 @@ def _section_filter():
     return _int_or_none(raw), False
 
 
-def _article_type():
-    """Тип статьи из запроса — только из белого списка.
+# Потолок на выбор в фильтрах. Не защита, а страховка от адреса, собранного
+# руками: сотня id в ANY(...) стоит дороже, чем стоит сам фильтр, а выбрать
+# столько людей в списке нельзя — их там меньше.
+_MAX_FILTER_VALUES = 50
 
-    Неизвестное значение гасим в None, а не в 400: фильтр витрины — украшение
-    выдачи, и опечатка в адресе не повод отказать человеку в списке статей.
+
+def _article_types():
+    """Типы статьи из запроса — только из белого списка, СПИСКОМ.
+
+    getlist, а не get: фильтр в поиске позволяет отметить сразу несколько типов
+    («регламенты и инструкции»), и адрес несёт ?article_type=a&article_type=b.
+    Одиночное значение при этом продолжает работать как раньше — getlist вернёт
+    список из одного элемента.
+
+    Неизвестные значения гасим молча, а не в 400: фильтр — украшение выдачи, и
+    опечатка в адресе не повод отказать человеку в списке статей. Пустой список
+    возвращаем как None — «фильтр не задан», а не «ничего не показывать».
     """
-    value = (request.args.get('article_type') or '').strip()
-    return value if value in wiki_schema.ARTICLE_TYPES else None
+    values = [v.strip() for v in request.args.getlist('article_type')]
+    wanted = [v for v in values if v in wiki_schema.ARTICLE_TYPES]
+    # dict.fromkeys, а не set: порядок значений в адресе сохраняем, иначе
+    # одинаковые запросы давали бы разный текст SQL и разный план в кэше.
+    return list(dict.fromkeys(wanted))[:_MAX_FILTER_VALUES] or None
+
+
+def _author_ids():
+    """Создатели статьи из запроса: ?author_id=12&author_id=34.
+
+    Проверять принадлежность id периметру не нужно и негде: фильтр СУЖАЕТ уже
+    посчитанное множество видимых статей, и чужой id просто не совпадёт ни с
+    одной строкой. Утечь через него нечему.
+    """
+    ids = [_int_or_none(v) for v in request.args.getlist('author_id')]
+    return list(dict.fromkeys(i for i in ids if i))[:_MAX_FILTER_VALUES] or None
 
 
 def register(bp, wiki_route, db, log_ip, gcs):
@@ -100,7 +126,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
             orphans_only=orphans_only,
             status=(request.args.get('status') or None),
             statuses=_bucket(),
-            article_type=_article_type(),
+            article_types=_article_types(),
             query=(request.args.get('q') or None),
             limit=limit, offset=offset,
         )
@@ -217,6 +243,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
         Выдача пересекается с visible_article_ids так же, как список: подсказки
         поиска — это читающий путь, и без фильтра закрытая статья утекла бы
         заголовком и сниппетом.
+
+        Фильтры (тип документа, создатель, область поиска) СУЖАЮТ выдачу и
+        никогда её не расширяют: периметр считается до них и от них не зависит.
+        Поэтому проверять значения фильтров на принадлежность человеку не нужно
+        — чужой автор или тип просто не совпадёт ни с одной видимой статьёй.
         """
         query = (request.args.get('q') or '').strip()
         if len(query) < 2:
@@ -224,10 +255,18 @@ def register(bp, wiki_route, db, log_ip, gcs):
 
         _subjects, _sections, visible = _browse(cursor, ctx)
         limit = min(max(_int_or_none(request.args.get('limit')) or 20, 1), 50)
+        # Область поиска приходит в ?match=, а НЕ в ?scope=: ?scope=all уже
+        # занят переключателем периметра «показать весь портал» (_browse), и
+        # второе значение в том же параметре тихо ломало бы одно из двух.
+        scope = wiki_search.normalize_scope(request.args.get('match'))
+        article_types = _article_types()
+        author_ids = _author_ids()
         items = wiki_search.search(
             cursor, visible, query,
             section_id=_int_or_none(request.args.get('section_id')),
-            article_type=_article_type(),
+            article_types=article_types,
+            author_ids=author_ids,
+            scope=scope,
             limit=limit,
             with_trigram=wiki_schema.trigram_available(cursor),
         )
@@ -251,6 +290,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 perimeter_size=len(visible),
                 department_id=ctx.get('department_id'),
                 space_id=_int_or_none(request.args.get('space_id')),
+                # Ноль находок при заданном фильтре — не дыра в базе знаний, а
+                # «статья не того вида». Отчёт «искали и не нашли» такие строки
+                # пропускает (wiki/analytics.py), и отличить их можно только
+                # здесь — на выходе из поиска фильтров уже не видно.
+                filtered=bool(article_types or author_ids
+                              or scope != wiki_search.MATCH_ALL),
             )
         except Exception:
             cursor.execute('ROLLBACK TO SAVEPOINT wiki_search_log')
@@ -258,6 +303,18 @@ def register(bp, wiki_route, db, log_ip, gcs):
             cursor.execute('RELEASE SAVEPOINT wiki_search_log')
 
         return jsonify({"items": items, "query": query})
+
+    @wiki_route('/search/authors')
+    def wiki_search_authors(cursor, ctx):
+        """Кем написаны статьи периметра — для фильтра «создатель».
+
+        Периметр тот же ВИТРИННЫЙ (_browse), что у самого поиска: список авторов
+        обязан совпадать с тем, чьи статьи человек в этой выдаче встретит.
+        Посчитай мы его по полному периметру или по таблице users — в фильтре
+        появились бы люди, по которым поиск всегда возвращает пусто.
+        """
+        _subjects, _sections, visible = _browse(cursor, ctx)
+        return jsonify({"items": wiki_articles.authors_of(cursor, visible)})
 
     @wiki_route('/suggest')
     def wiki_suggest(cursor, ctx):

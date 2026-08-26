@@ -118,7 +118,7 @@ class KazakhSnippetTest(unittest.TestCase):
     """
 
     def test_query_has_a_folded_fallback(self):
-        self.assertIn('snippet_folded', wiki_search._SEARCH_SQL)
+        self.assertIn('snippet_folded', wiki_search.build_sql(with_trigram=False))
         self.assertIn('snippet_folded', wiki_search._KEYS)
 
     def test_fallback_keeps_the_original_spelling(self):
@@ -129,12 +129,30 @@ class KazakhSnippetTest(unittest.TestCase):
         по свёрнутому (свёртка посимвольная, смещения совпадают), а вырезается
         оригинал.
         """
-        sql = wiki_search._SEARCH_SQL
+        # Собранный запрос, а не шаблон: с появлением области поиска запасной
+        # отрывок стал куском, который в шаблон подставляется, — и проверять
+        # надо то, что реально уходит в базу.
+        sql = wiki_search.build_sql(with_trigram=False)
         self.assertIn('substring(a2.content_plain from m.pos for m.len)', sql)
         self.assertIn('LEFT JOIN LATERAL', sql)
         # Свёртка применяется только к ПОИСКУ позиции, не к выводимому тексту.
         marked = sql[sql.index('CASE WHEN m.pos'):sql.index('END AS snippet_folded')]
         self.assertNotIn('translate(', marked)
+
+    def test_title_scope_asks_for_no_snippet_at_all(self):
+        """В области названий отрывка нет — ни основного, ни запасного.
+
+        Показывать совпадение в ТЕКСТЕ тому, кто попросил искать только в
+        названиях, — ложь на экране; заодно ts_headline и LATERAL с position()
+        по телу статьи (в проде до 900 КБ) — самая дорогая часть запроса, и
+        считать её ради невыводимого результата незачем.
+        """
+        sql = wiki_search.build_sql(with_trigram=False, scope=wiki_search.MATCH_TITLE)
+        self.assertNotIn('ts_headline(', sql)
+        self.assertNotIn('LEFT JOIN LATERAL', sql)
+        # Колонки остаются на своих местах: порядок SELECT жёстко связан с _KEYS.
+        self.assertIn('NULL::text AS snippet,', sql)
+        self.assertIn('NULL::text AS snippet_folded,', sql)
 
     def test_original_snippet_is_preferred(self):
         """Свёрнутый отрывок — только запас: у русских статей превью дословное."""
@@ -248,6 +266,10 @@ WITH wiki_articles AS (
            -- нужна одному тесту из тридцати, и тащить её во все строки-
            -- заготовки значило бы править их все ради значения 'general'.
            {types} AS article_type,
+           -- Автор — тем же приёмом, что и тип: выражением по id, а не
+           -- колонкой в VALUES. Он нужен трём тестам из сорока, и дописывать
+           -- его в каждую строку-заготовку значило бы править их все.
+           {authors} AS author_id,
            setweight(to_tsvector('russian', translate(coalesce(title, ''), 'ёЁ', 'еЕ')),          'A') ||
            setweight(to_tsvector('russian', translate(coalesce(search_aliases, ''), 'ёЁ', 'еЕ')), 'B') ||
            setweight(to_tsvector('russian', translate(coalesce(summary, ''), 'ёЁ', 'еЕ')),        'C') ||
@@ -258,6 +280,13 @@ WITH wiki_articles AS (
 wiki_article_sections AS (
     SELECT article_id::int, section_id::int
       FROM (VALUES {sections}) AS t(article_id, section_id)
+),
+-- users подменяется ТОЖЕ, хотя своих строк тесту почти не нужно: запрос поиска
+-- достаёт имя автора LEFT JOIN'ом, и без подмены он ушёл бы в боевую таблицу
+-- людей — то есть тест перестал бы быть герметичным и потащил бы в вывод
+-- настоящие ФИО.
+users AS (
+    SELECT id::int, name::text FROM (VALUES {users}) AS t(id, name)
 ),
 """
 
@@ -276,13 +305,17 @@ wiki_article_sections AS (
         prod_db.rollback()
 
     def run_search(self, rows, query, *, sections=None, with_trigram=False,
-                   section_id=None, article_type=None, types=None,
-                   ids=(1, 2, 3, 4, 5)):
+                   section_id=None, article_types=None, types=None,
+                   author_ids=None, authors=None, people=None,
+                   scope=wiki_search.MATCH_ALL, ids=(1, 2, 3, 4, 5)):
         """Боевой SQL целиком, только wiki_articles подменена синтетикой.
 
         Параметры собираются ровно как в wiki_search._run, включая слияние всех
         написаний запроса — иначе тест проверял бы не тот запрос, что уходит
         в прод.
+
+        types и authors — раскладки {id статьи: значение}: тип документа и
+        создатель. people — строки подменённой таблицы людей.
         """
         stub = self.STUB.format(
             rows=', '.join(rows),
@@ -291,8 +324,12 @@ wiki_article_sections AS (
             types=("(CASE id %s ELSE 'general' END)::text" % ' '.join(
                 f"WHEN {aid} THEN '{name}'" for aid, name in types.items())
                 if types else "'general'::text"),
+            authors=("(CASE id %s ELSE NULL END)::int" % ' '.join(
+                f'WHEN {aid} THEN {uid}' for aid, uid in authors.items())
+                if authors else 'NULL::int'),
+            users=', '.join(people) if people else '(NULL::int, NULL::text)',
         )
-        sql = (wiki_search.build_sql(with_trigram)
+        sql = (wiki_search.build_sql(with_trigram, scope)
                .replace('WITH q AS (', stub + 'q AS (', 1))
         variants = [v for v in query_variants(query) if len(v) >= 2]
         cur = self.conn.cursor()
@@ -303,7 +340,8 @@ wiki_article_sections AS (
                 'prefixes': [wiki_search.prefix_tsquery(v) for v in variants],
                 'looses': [wiki_search.prefix_tsquery(v, ' | ') for v in variants],
                 'section': section_id,
-                'article_type': article_type,
+                'article_types': list(article_types) if article_types else None,
+                'authors': list(author_ids) if author_ids else None,
                 'limit': 10,
             })
             return wiki_search._rows_to_items(cur)
@@ -444,11 +482,11 @@ class SearchMergeTest(SearchSqlTest):
 
         # Статья 6 — обычная, среди должностных инструкций её быть не должно.
         self.assertEqual(self.run_search(self.ROWS, 'регламент',
-                                         article_type='job_description'), [])
+                                         article_types=['job_description']), [])
 
         # Та же статья, объявленная должностной инструкцией, — находится.
         self.assertEqual(self.ids(self.run_search(
-            self.ROWS, 'регламент', article_type='job_description',
+            self.ROWS, 'регламент', article_types=['job_description'],
             types={6: 'job_description'})), [6])
 
     def test_variants_are_merged_not_short_circuited(self):
@@ -525,6 +563,179 @@ class SearchMergeTest(SearchSqlTest):
     def test_long_query_is_capped(self):
         self.assertEqual(len(('а' * 500)[:wiki_search.MAX_QUERY_CHARS]),
                          wiki_search.MAX_QUERY_CHARS)
+
+
+class SearchFiltersTest(SearchSqlTest):
+    """Фильтры выдачи: создатель, несколько типов сразу, область поиска.
+
+    Наследуется от SearchSqlTest ради общего соединения и run_search — набор
+    статей свой, потому что фильтрам нужны и автор, и совпадение в ТЕЛЕ, ради
+    которого область «только названия» вообще имеет смысл.
+    """
+
+    # Ключ к области поиска — статья 3: слова «аренда» в её заголовке нет, оно
+    # только в теле. Она обязана находиться при поиске везде и исчезать при
+    # поиске по названиям.
+    ROWS = [
+        "(1, 'arenda', 'Аренда транспорта', 'Условия аренды', 'published', 10,"
+        " 'Здесь описаны условия аренды автомобиля', 'arenda transporta')",
+        "(2, 'arenda-reg', 'Регламент аренды', 'Порядок', 'published', 4,"
+        " 'Регламент описывает порядок', 'reglament arendy')",
+        "(3, 'zayavka', 'Заявка на машину', 'Как оформить', 'published', 7,"
+        " 'В заявке указывается срок аренды и город', 'zayavka na mashinu')",
+    ]
+
+    # Кто какую статью создал: 1 и 3 — Айгуль, 2 — Данияр.
+    AUTHORS = {1: 11, 2: 22, 3: 11}
+    PEOPLE = ["(11, 'Айгуль')", "(22, 'Данияр')"]
+
+    def run_search(self, rows=None, query='аренда', **kwargs):
+        # ids по умолчанию оставляем родительские: класс наследует и его
+        # проверки тоже (как SearchMergeTest), а у тех статей другие номера.
+        kwargs.setdefault('authors', self.AUTHORS)
+        kwargs.setdefault('people', self.PEOPLE)
+        return super(SearchFiltersTest, self).run_search(
+            rows if rows is not None else self.ROWS, query, **kwargs)
+
+    def ids(self, found):
+        return sorted(item['id'] for item in found)
+
+    # ── Создатель ────────────────────────────────────────────────────────
+    def test_without_author_filter_everything_is_found(self):
+        self.assertEqual(self.ids(self.run_search()), [1, 2, 3])
+
+    def test_author_filter_narrows_the_result(self):
+        self.assertEqual(self.ids(self.run_search(author_ids=[22])), [2])
+
+    def test_several_authors_are_ored(self):
+        """Два выбранных создателя — это ИЛИ, а не И: статья у неё один."""
+        self.assertEqual(self.ids(self.run_search(author_ids=[11, 22])), [1, 2, 3])
+
+    def test_unknown_author_finds_nothing_but_does_not_break(self):
+        self.assertEqual(self.run_search(author_ids=[999]), [])
+
+    def test_author_name_comes_with_the_result(self):
+        """Имя автора едет в выдаче: без него фильтр не на что проверить глазами."""
+        found = self.run_search(author_ids=[22])
+        self.assertEqual(found[0]['author_id'], 22)
+        self.assertEqual(found[0]['author_name'], 'Данияр')
+
+    def test_article_without_author_still_shows_up(self):
+        """Автора сняли (ON DELETE SET NULL) — статья обязана остаться в выдаче.
+
+        LEFT JOIN, а не INNER: на INNER'е такие статьи пропали бы из поиска
+        молча, и заметили бы это не скоро.
+        """
+        found = self.run_search(authors={}, people=[])
+        self.assertEqual(self.ids(found), [1, 2, 3])
+        self.assertIsNone(found[0]['author_name'])
+
+    # ── Тип документа ────────────────────────────────────────────────────
+    def test_several_types_are_ored(self):
+        """Отмечены регламент и инструкция — в выдаче обе, но не обычная статья."""
+        types = {1: 'instruction', 2: 'regulation'}
+        self.assertEqual(
+            self.ids(self.run_search(types=types,
+                                     article_types=['instruction', 'regulation'])),
+            [1, 2])
+
+    def test_single_type_still_works(self):
+        types = {1: 'instruction', 2: 'regulation'}
+        self.assertEqual(
+            self.ids(self.run_search(types=types, article_types=['regulation'])), [2])
+
+    # ── Область поиска ───────────────────────────────────────────────────
+    def test_title_scope_drops_body_only_match(self):
+        """Статья 3 несёт «аренды» только в теле — по названиям её быть не должно."""
+        everywhere = self.ids(self.run_search())
+        self.assertIn(3, everywhere)
+        self.assertEqual(self.ids(self.run_search(scope=wiki_search.MATCH_TITLE)), [1, 2])
+
+    def test_title_scope_keeps_prefix_typing(self):
+        """Поиск по мере ввода обязан работать и в области названий."""
+        self.assertEqual(
+            self.ids(self.run_search(query='аренд', scope=wiki_search.MATCH_TITLE)),
+            [1, 2])
+
+    def test_title_scope_ignores_summary(self):
+        """Описание — не название. «Оформить» есть только в summary статьи 3."""
+        self.assertEqual(self.run_search(query='оформить',
+                                         scope=wiki_search.MATCH_TITLE), [])
+        self.assertEqual(self.ids(self.run_search(query='оформить')), [3])
+
+    def test_title_scope_ignores_aliases(self):
+        """Алиасы несут описание и начало тела — в область названий им нельзя.
+
+        Проверка именно на слове из ТЕЛА, попавшем в алиасы: без исключения
+        веса B статья находилась бы «в названиях» по тексту статьи.
+        """
+        rows = ["(1, 'x', 'Заголовок без слова', 'Описание', 'published', 1,"
+                " 'Тело статьи', 'бетономешалка betonomeshalka')"]
+        self.assertEqual(
+            self.run_search(rows, query='бетономешалка',
+                            scope=wiki_search.MATCH_TITLE, ids=(1,)), [])
+        self.assertEqual(
+            self.ids(self.run_search(rows, query='бетономешалка', ids=(1,))), [1])
+
+    def test_title_scope_gives_no_text_fragment(self):
+        """Нашли по названию — секции «Совпадения в тексте» быть не должно.
+
+        Слово «аренды» есть и в теле статьи 1, но человек попросил искать только
+        в названиях: подсвеченный кусок текста был бы ответом на другой вопрос.
+        """
+        found = self.run_search(scope=wiki_search.MATCH_TITLE)
+        self.assertTrue(found)
+        for item in found:
+            self.assertEqual(item['snippet'], '')
+            self.assertEqual(item['highlights'], [])
+        # Без фильтра тот же запрос отрывок отдаёт — иначе проверка ничего не
+        # доказывала бы.
+        self.assertTrue(any(item['snippet'] for item in self.run_search()))
+
+    def test_title_scope_survives_trigram_typo(self):
+        """Опечатка в названии ловится и в суженной области."""
+        if not self.has_trigram:
+            self.skipTest('pg_trgm ещё не установлен в этой базе')
+        self.assertIn(2, self.ids(self.run_search(
+            query='реглмент', scope=wiki_search.MATCH_TITLE, with_trigram=True)))
+
+    def test_unknown_scope_falls_back_to_everything(self):
+        """Опечатка в адресе не должна оставлять человека без выдачи."""
+        self.assertEqual(wiki_search.normalize_scope('заголовки'),
+                         wiki_search.MATCH_ALL)
+        self.assertEqual(wiki_search.normalize_scope(None), wiki_search.MATCH_ALL)
+        self.assertEqual(wiki_search.normalize_scope('TITLE'),
+                         wiki_search.MATCH_TITLE)
+
+    # ── Фильтры вместе ───────────────────────────────────────────────────
+    def test_filters_are_anded_between_each_other(self):
+        """Разные фильтры сужают друг друга: создатель И тип И область."""
+        types = {1: 'instruction', 2: 'regulation', 3: 'regulation'}
+        found = self.run_search(types=types, article_types=['regulation'],
+                                author_ids=[11], scope=wiki_search.MATCH_TITLE)
+        # Статья 2 — регламент, но создал её Данияр; статья 3 — регламент Айгуль,
+        # но «аренда» у неё только в теле. Не остаётся ничего.
+        self.assertEqual(found, [])
+
+    def test_empty_filter_lists_mean_no_filter(self):
+        """Снятая последняя галочка — это «фильтр не задан», а не «пусто».
+
+        Проверяется на уровне _run: пустой список обязан уйти в SQL как NULL,
+        иначе `= ANY('{}')` не совпал бы ни с чем.
+        """
+        captured = {}
+
+        class Cursor:
+            def execute(self, _sql, params):
+                captured.update(params)
+
+            def fetchall(self):
+                return []
+
+        wiki_search._run(Cursor(), 'SELECT 1', [1], ['аренда'], None, 10,
+                         article_types=[], author_ids=[])
+        self.assertIsNone(captured['article_types'])
+        self.assertIsNone(captured['authors'])
 
 
 class PrefixTsqueryTest(unittest.TestCase):

@@ -257,7 +257,8 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
    AND (NOT %(orphans)s
         OR NOT EXISTS (SELECT 1 FROM wiki_article_sections s WHERE s.article_id = a.id))
    AND (%(statuses)s::text[] IS NULL OR a.status = ANY(%(statuses)s::text[]))
-   AND (%(article_type)s::text IS NULL OR a.article_type = %(article_type)s::text)
+   AND (%(article_types)s::text[] IS NULL
+        OR a.article_type = ANY(%(article_types)s::text[]))
    AND (%(query)s::text IS NULL
         OR a.title ILIKE '%%' || %(query)s::text || '%%'
         OR a.summary ILIKE '%%' || %(query)s::text || '%%')
@@ -272,12 +273,16 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
 
 def list_articles(cursor, visible_ids, *, section_id=None, status=None,
                   statuses=None, orphans_only=False,
-                  article_type=None, query=None, limit=50, offset=0):
+                  article_types=None, query=None, limit=50, offset=0):
     """Список статей в границах уже посчитанного периметра.
 
     status и statuses — один и тот же фильтр с разной шириной: первый берёт один
     статус (так спрашивает ?status= в адресе), второй — корзину витрины целиком
     (ARTICLE_BUCKETS). Заданы оба — побеждает statuses.
+
+    article_types — СПИСОК типов, а не один: фильтр витрины и фильтр поиска
+    читают один и тот же параметр адреса, и «регламенты и инструкции» одним
+    запросом дешевле двух. Пустой список равен None — «фильтр не задан».
     """
     if not visible_ids:
         return []
@@ -285,7 +290,7 @@ def list_articles(cursor, visible_ids, *, section_id=None, status=None,
     cursor.execute(_LIST_SQL, {
         'ids': list(visible_ids), 'section': section_id, 'statuses': wanted,
         'orphans': bool(orphans_only),
-        'article_type': article_type or None,
+        'article_types': list(article_types) if article_types else None,
         'query': query or None, 'limit': limit, 'offset': offset,
     })
     rows = []
@@ -295,6 +300,55 @@ def list_articles(cursor, visible_ids, *, section_id=None, status=None,
         item['tags'] = list(item['tags'] or [])
         rows.append(item)
     return rows
+
+
+# ── Авторы: кем написаны статьи периметра ────────────────────────────────────
+#
+# Нужен фильтру поиска «по создателю». Считается ПО ПЕРИМЕТРУ, а не по таблице
+# users: список людей — тоже данные, и выкладывать в выпадающий список всех
+# сотрудников портала тому, кому видно три статьи, незачем. Заодно это снимает
+# вопрос о ПДн: в списке ровно те, чьё авторство человек и так видит в выдаче.
+#
+# Автор — a.author_id, то есть КТО СОЗДАЛ статью. Не owner_user_id (владелец,
+# отвечающий за актуальность, — его назначают и меняют) и не updated_by (кто
+# правил последним). Спрашивают обычно именно про создателя.
+_AUTHORS_SQL = """
+SELECT a.author_id, u.name, count(*) AS articles
+  FROM wiki_articles a
+  JOIN users u ON u.id = a.author_id
+ WHERE a.id = ANY(%(ids)s)
+ GROUP BY a.author_id, u.name
+ ORDER BY count(*) DESC, u.name
+ -- Потолок на всякий случай: выпадающий список длиннее двух сотен человек
+ -- списком быть перестаёт. Сортировка по убыванию вклада делает отсечение
+ -- осмысленным — режется хвост из тех, у кого одна статья.
+ LIMIT 200
+"""
+
+
+def authors_of(cursor, visible_ids):
+    """[{id, name, articles}] — создатели статей периметра, по убыванию вклада.
+
+    Статьи без автора (учётку удалили — ON DELETE SET NULL) в список не
+    попадают: строка «— (4)» в фильтре ничего не выбирает и ни о чём не говорит.
+    Из этого следует, что сумма по создателям МЕНЬШЕ числа статей периметра.
+
+    УВОЛЕННЫЕ ОСТАЮТСЯ, и это расхождение с соседями намеренное. Списки для
+    ВЫДАЧИ доступа (structure.grantable_people, guests.guest_candidates) отсекают
+    всех, кроме status='working', — там спрашивают «кому дать право», а право
+    уволенному не нужно. Здесь спрашивают «кто это написал», и регламенты
+    ушедшего сотрудника никуда не делись: отсеки мы его — статьи стали бы
+    ненаходимыми фильтром, а человек решил бы, что их нет.
+
+    Наружу уходят только id и имя. В users лежат телефон, почта и дата
+    рождения — фильтру они не нужны, а раздел читают все.
+    """
+    ids = list(visible_ids or ())
+    if not ids:
+        return []
+    cursor.execute(_AUTHORS_SQL, {'ids': ids})
+    return [{'id': row[0], 'name': row[1], 'articles': row[2]}
+            for row in cursor.fetchall()]
 
 
 # ── Каталог: сколько статей в каждом разделе, по корзинам ────────────────────
