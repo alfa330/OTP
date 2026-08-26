@@ -43652,7 +43652,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             loading: false,
                             checked: true
                         });
-                        if (user.role === 'operator' && data.granted) {
+                        // Тот же предикат, что рисует замок и включает кнопку в
+                        // нём: закрывать окно надо ровно тем, кто через QR и
+                        // проходит. С литералом 'operator' окно сотрудника
+                        // бэк-офиса оставалось висеть после подтверждения, а
+                        // опрос статуса продолжал ходить на сервер.
+                        if (sensitiveSectionQrRequiredFor(user) && data.granted) {
                             clearSensitiveQrPolling();
                             setShowSensitiveQrModal(false);
                             // Оценки перечитываем только в самих «Моих оценках»: тем же

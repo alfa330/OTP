@@ -808,6 +808,30 @@ class RankAndFileGatesTests(unittest.TestCase):
             app,
         )
 
+    def test_qr_modal_closes_when_access_is_granted(self):
+        # После подтверждения окно с QR оставалось висеть, а опрос статуса
+        # продолжал ходить на сервер: закрытие стояло на литерале 'operator'.
+        app = _read(APP_PATH)
+        self.assertIn(
+            "                        if (sensitiveSectionQrRequiredFor(user) && data.granted) {\n"
+            "                            clearSensitiveQrPolling();\n"
+            "                            setShowSensitiveQrModal(false);",
+            app,
+        )
+        self.assertNotIn("if (user.role === 'operator' && data.granted) {", app)
+
+    def test_whole_qr_flow_shares_one_predicate(self):
+        # Замок, кнопка в нём и закрытие окна обязаны спрашивать ОДНО и то же:
+        # разойдясь, они дают экран, который показан, но не работает.
+        app = _read(APP_PATH)
+        self.assertEqual(4, app.count("sensitiveSectionQrRequiredFor"))  # объявление + 3 места
+        for site in (
+            "const sensitiveSectionsLocked = sensitiveSectionQrRequiredFor(user) && !sensitiveAccess.granted;",
+            "if (sensitiveSectionQrRequiredFor(user) && data.granted) {",
+            "if (!user || !sensitiveSectionQrRequiredFor(user)) return;",
+        ):
+            self.assertIn(site, app)
+
     def test_qr_button_works_for_everyone_the_lock_is_shown_to(self):
         # Замок рисовался, а кнопка в нём выходила на литерале 'operator' —
         # то есть молча не делала ничего.
