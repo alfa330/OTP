@@ -701,5 +701,73 @@ class ProfileSectionTests(unittest.TestCase):
         )
 
 
+class EmployeeSectionWordingTests(unittest.TestCase):
+    """В разделе сотрудников бэк-офиса не должно быть слова «операторы».
+
+    Заголовок и кнопку «Добавить» переключал departmentUsesSimpleEmployeeAccounting
+    и раньше, но подпись виджета дней рождения, пустое состояние, плейсхолдер
+    поиска и текст QR-доступа остались операторскими — их и видел владелец.
+    """
+
+    def test_no_hardcoded_operator_wording_in_the_section(self):
+        app = _read(APP_PATH)
+        section = app.split("{(view === 'manage_users' || view === 'employees') && (", 1)[1]
+        section = section.split("{view === 'manage_admins'", 1)[0]
+
+        # Каждое упоминание операторов в разделе обязано быть под предикатом.
+        for phrase in ("'Операторы'", "'Добавить оператора'", "'Операторы не найдены.'"):
+            self.assertIn(phrase, section, phrase)
+            for line in section.splitlines():
+                if phrase in line:
+                    self.assertIn(
+                        "departmentUsesSimpleEmployeeAccounting(user) ?", line,
+                        f"{phrase} без переключателя: {line.strip()[:100]}",
+                    )
+
+    def test_birthdays_widget_caption_and_sublabel(self):
+        app = _read(APP_PATH)
+        # Подпись виджета — та, что владелец увидел как «ОПЕРАТОРЫ».
+        self.assertIn(
+            "                                        departmentUsesSimpleEmployeeAccounting(user) "
+            "? 'Сотрудники' : 'Операторы',",
+            app,
+        )
+        # Подстрочник карточки: направления у бэк-офиса нет, есть должность.
+        self.assertIn("const manageUsersBirthdayLabel = useCallback((employee) => (", app)
+        self.assertIn("? (employee?.job_title || 'Должность не указана')", app)
+        self.assertIn(": (employee?.direction || 'Без направления')", app)
+        self.assertNotIn(
+            "buildUpcomingBirthdays(operatorUsers, (employee) => employee?.direction || 'Без направления', 14)",
+            app,
+        )
+
+    def test_search_covers_job_title(self):
+        # У бэк-офиса нет ни направления, ни супервайзера — без должности поиск
+        # работал бы только по имени, а плейсхолдер обещал бы несуществующее.
+        app = _read(APP_PATH)
+        self.assertIn("String(employee?.job_title || '').toLowerCase().includes(q) ||", app)
+        self.assertIn('? "Поиск по имени или должности..."', app)
+
+    def test_qr_screen_talks_about_employees(self):
+        # Экран отрисован в двух ветках (админ и менеджер) — обе.
+        app = _read(APP_PATH)
+        self.assertNotIn("Отсканируйте QR оператора", app)
+        self.assertEqual(2, app.count("Отсканируйте QR сотрудника или вставьте токен вручную."))
+
+    def test_bulk_panel_drops_group_and_direction(self):
+        # Оба списка у бэк-офиса пустые: групп и направлений в отделе нет.
+        app = _read(APP_PATH)
+        self.assertIn(
+            "<div className={`grid grid-cols-1 gap-3 ${departmentHidesOperatorFields(user) "
+            "? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>",
+            app,
+        )
+        bulk = app.split("Зажмите <span className=\"font-semibold\">Ctrl</span>", 1)[1]
+        bulk = bulk.split("Применить массово", 1)[0]
+        self.assertEqual(2, bulk.count("{!departmentHidesOperatorFields(user) && ("))
+        # Ставка остаётся — она есть у всех.
+        self.assertIn("Ставка: не менять", bulk)
+
+
 if __name__ == "__main__":
     unittest.main()

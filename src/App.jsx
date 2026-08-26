@@ -39144,9 +39144,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return isBackOfficeEmployeeRole(draftRole) ? 'operator' : draftRole;
             }, [departments]);
 
+            // Подстрочник в карточке дня рождения: у операторов это направление,
+            // у бэк-офиса его нет вовсе — там человека определяет должность.
+            const manageUsersBirthdayLabel = useCallback((employee) => (
+                departmentHidesOperatorFields(user)
+                    ? (employee?.job_title || 'Должность не указана')
+                    : (employee?.direction || 'Без направления')
+            ), [user]);
+
             const upcomingManageUsersBirthdays = useMemo(() => (
-                buildUpcomingBirthdays(operatorUsers, (employee) => employee?.direction || 'Без направления', 14)
-            ), [operatorUsers, buildUpcomingBirthdays]);
+                buildUpcomingBirthdays(operatorUsers, manageUsersBirthdayLabel, 14)
+            ), [operatorUsers, buildUpcomingBirthdays, manageUsersBirthdayLabel]);
 
             const isSvRoleForBirthdays = isSupervisorRole(user?.role);
 
@@ -42718,6 +42726,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return (
                     String(employee?.name || '').toLowerCase().includes(q) ||
                     String(directionText || '').toLowerCase().includes(q) ||
+                    // Должность — единственное, чем различаются сотрудники
+                    // бэк-офиса: направления и супервайзера у них нет, и без
+                    // этой строки поиск у них работал бы только по имени.
+                    String(employee?.job_title || '').toLowerCase().includes(q) ||
                     String(employee?.supervisor_name || '').toLowerCase().includes(q)
                 );
             };
@@ -45850,7 +45862,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fa-solid fa-qrcode mr-2 text-blue-600"></FaIcon>QR доступ
                                             </h2>
                                             <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
-                                                Отсканируйте QR оператора или вставьте токен вручную. Подтверждение открывает разделы «Обращения» и «Вики», а также полный номер и аудио в оценках — только в текущей сессии этого человека.
+                                                Отсканируйте QR сотрудника или вставьте токен вручную. Подтверждение открывает разделы «Обращения» и «Вики», а также полный номер и аудио в оценках — только в текущей сессии этого человека.
                                             </p>
                                         </div>
 
@@ -46628,7 +46640,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                     </div>
 
-                                    {renderUpcomingBirthdaysCard(upcomingManageUsersBirthdays, 'Операторы')}
+                                    {renderUpcomingBirthdaysCard(
+                                        upcomingManageUsersBirthdays,
+                                        departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники' : 'Операторы',
+                                    )}
 
                                     {/* Tabs */}
                                     <div className="flex flex-wrap gap-3 mb-6">
@@ -46666,7 +46681,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
 
                                         if (filteredByStatus.length === 0) {
-                                        return <p className="text-center text-gray-600">Операторы не найдены.</p>;
+                                        return <p className="text-center text-gray-600">
+                                            {departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники не найдены.' : 'Операторы не найдены.'}
+                                        </p>;
                                         }
 
                                         // применяем локальный поиск только для этого подраздела
@@ -46690,7 +46707,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="mb-4">
                                             <input
                                                 type="text"
-                                                placeholder="Поиск по имени, направлению или супервайзеру..."
+                                                placeholder={departmentHidesOperatorFields(user)
+                                                    ? "Поиск по имени или должности..."
+                                                    : "Поиск по имени, направлению или супервайзеру..."}
                                                 value={manageUsersSearchQuery}
                                                 onChange={(e) => setManageUsersSearchQuery(e.target.value)}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
@@ -46713,7 +46732,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </button>
                                                         </div>
 
-                                                        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                                        {/* Группа и направление — операторские поля: у бэк-офиса
+                                                            оба списка пустые, и выбирать в них не из чего. Колонок
+                                                            под них тогда тоже не нужно. */}
+                                                        <div className={`grid grid-cols-1 gap-3 ${departmentHidesOperatorFields(user) ? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>
+                                                            {!departmentHidesOperatorFields(user) && (
                                                             <select
                                                                 value={bulkManageUsersChanges.group_id}
                                                                 onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, group_id: e.target.value }))}
@@ -46728,7 +46751,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </option>
                                                                 ))}
                                                             </select>
+                                                            )}
 
+                                                            {!departmentHidesOperatorFields(user) && (
                                                             <select
                                                                 value={bulkManageUsersChanges.direction_id}
                                                                 onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, direction_id: e.target.value }))}
@@ -46741,6 +46766,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     </option>
                                                                 ))}
                                                             </select>
+                                                            )}
 
                                                             <select
                                                                 value={bulkManageUsersChanges.rate}
@@ -47546,7 +47572,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fa-solid fa-qrcode mr-2 text-blue-600"></FaIcon>QR доступ
                                             </h2>
                                             <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
-                                                Отсканируйте QR оператора или вставьте токен вручную. Подтверждение открывает разделы «Обращения» и «Вики», а также полный номер и аудио в оценках — только в текущей сессии этого человека. Вы подтверждаете доступ сотрудникам своего отдела.
+                                                Отсканируйте QR сотрудника или вставьте токен вручную. Подтверждение открывает разделы «Обращения» и «Вики», а также полный номер и аудио в оценках — только в текущей сессии этого человека. Вы подтверждаете доступ сотрудникам своего отдела.
                                             </p>
                                         </div>
 
