@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from group_late import config, messages
+from group_late import config, icore_plan, messages
 from group_late.departments import (
     build_employee_department_lookup,
     count_departments,
@@ -250,13 +250,21 @@ def collect_events(db) -> dict:
         logger.exception("group_late: не удалось обновить справочники Workpace")
 
     employee_lookup = build_employee_department_lookup(employees)
+
+    # Отделы, которые ведут график у себя, судим по нашему плану, а не по
+    # расписанию Workpace: там план оказывался плоским, а дубли карточек давали
+    # неявку человеку, отметившемуся на второй своей карточке.
+    records, icore_diagnostics = icore_plan.apply_to_records(
+        db, records, employees, now_local.date(), employee_lookup=employee_lookup)
+
     routing = db.glb_get_routing()
     mute_snapshot = MuteSnapshot(db.glb_get_mute_rows())
 
     if not routing:
         logger.warning("group_late: нет ни одного чата в рассылке")
         db.glb_finish_poll_run(run_id, ok=True, fetched=len(records))
-        return {"run_id": run_id, "ok": True, "fetched": len(records), "events": []}
+        return {"run_id": run_id, "ok": True, "fetched": len(records), "events": [],
+                "icore_plan": icore_diagnostics}
 
     candidates = find_violations(records, marks, employee_lookup, mute_snapshot, now_local)
 
@@ -289,6 +297,7 @@ def collect_events(db) -> dict:
         "fetched": len(records),
         "events_found": len(plan),
         "events": plan,
+        "icore_plan": icore_diagnostics,
     }
 
 

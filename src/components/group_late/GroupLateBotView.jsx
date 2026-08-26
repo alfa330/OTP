@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bell, BellOff, Building2,
     CalendarClock, CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet, Loader2,
-    LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send, ShieldAlert,
+    Link2, LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send, ShieldAlert,
     Trash2, Users, UserX, X, Zap,
 } from 'lucide-react';
 import {
@@ -33,6 +33,14 @@ const EVENT_TYPES = {
 const eventMeta = (type) => EVENT_TYPES[type] || { label: type || '—', tone: 'slate', icon: Bell };
 
 const MUTE_KIND_LABELS = { all: 'Все уведомления', user: 'Сотрудник', dept: 'Отдел' };
+
+/* Почему карточка Workpace осталась без нашего сотрудника. `excluded` — не промах
+ * автоматики, а решение человека, поэтому и подпись другая. */
+const UNLINKED_REASONS = {
+    no_match: 'не нашли по ФИО',
+    stale_link: 'привязан к тому, кого нет в отделе',
+    excluded: 'отмечен как не наш сотрудник',
+};
 
 const TABS = [
     { key: 'overview', label: 'Обзор', icon: Activity },
@@ -290,7 +298,8 @@ const employeeNumber = (value) => (value
  * составу. Колонка «Город» есть только там, где город заполнен: его ведут
  * отделам, чьи офисы стоят в разных городах (в Workpace это «Регионы»,
  * у нас — «Фронт офисы»). Остальным пустая колонка не нужна. */
-const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle }) => {
+const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle,
+                                 planInfo, onOpenPlanLinks }) => {
     const totals = department.totals || {};
     const columns = EMPLOYEE_COLUMNS.filter((column) => !column.cityOnly || department.has_city);
     const rows = useMemo(
@@ -406,6 +415,35 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle 
                             В Workpace в этом отделе есть ещё {fmtInt(department.foreign_employees)}{' '}
                             {pluralRu(department.foreign_employees, 'человек', 'человека', 'человек')} —
                             их нет в iCore, поэтому в таблицу они не попадают.
+                        </div>
+                    )}
+                    {/* Источник плана показываем только там, где он не Workpace: у
+                        остальных отделов это была бы строка, не несущая новости. */}
+                    {planInfo && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
+                            <span className="text-[11.5px] text-slate-500">
+                                {/* Цвет здесь несёт смысл: пустой график = контроль
+                                    в отделе сейчас не работает, это не фон. */}
+                                {planInfo.with_shifts === 0 ? (
+                                    <span className="font-medium text-amber-600">
+                                        График в iCore не проставлен — опоздания и неявки
+                                        по этому отделу сейчас не проверяются.
+                                    </span>
+                                ) : (
+                                    <>Опоздания и неявки считаются по графику iCore, отметки — из Workpace.</>
+                                )}
+                                {planInfo.without_card > 0 && (
+                                    <> Без карточки Workpace {fmtInt(planInfo.without_card)}{' '}
+                                        {pluralRu(planInfo.without_card, 'человек', 'человека', 'человек')} —
+                                        их контролировать нечем.</>
+                                )}
+                                {planInfo.unlinked > 0 && (
+                                    <> Карточек без сотрудника: {fmtInt(planInfo.unlinked)}.</>
+                                )}
+                            </span>
+                            <button type="button" className={iosBtnSecondary} onClick={onOpenPlanLinks}>
+                                <Link2 size={13} /> Сопоставление
+                            </button>
                         </div>
                     )}
                 </div>
@@ -528,6 +566,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [employeeSort, setEmployeeSort] = useState({ key: 'late_count', dir: 'desc' });
     const [collapsedDepartments, setCollapsedDepartments] = useState(() => new Set());
 
+    const [planLinks, setPlanLinks] = useState(null);
+    const [planLinksError, setPlanLinksError] = useState(null);
+    const [planModalOpen, setPlanModalOpen] = useState(false);
+
     const [reports, setReports] = useState(null);
     const [reportsError, setReportsError] = useState(null);
 
@@ -543,6 +585,26 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const reportPoll = useRef(null);
 
     const scoped = Boolean(departmentScope);
+    /* {отдел Workpace: сколько людей без карточки и карточек без человека} —
+       считаем один раз, а не в каждой карточке отдела. */
+    const planInfoByDepartment = useMemo(() => {
+        if (!planLinks?.departments?.length) return {};
+        const info = {};
+        for (const item of planLinks.departments) {
+            info[item.workpace_name] = { without_card: 0, unlinked: 0, with_shifts: 0 };
+        }
+        for (const person of planLinks.people || []) {
+            const entry = info[person.department_name];
+            if (!entry) continue;
+            if (!(person.cards || []).length) entry.without_card += 1;
+            if (person.shifts_ahead > 0) entry.with_shifts += 1;
+        }
+        for (const card of planLinks.unlinked || []) {
+            const entry = info[card.department_name];
+            if (entry) entry.unlinked += 1;
+        }
+        return info;
+    }, [planLinks]);
     const departmentNames = departments?.items || [];
     const unknownDepartments = useMemo(
         () => (departments?.unknown || []).map((d) => d.name),
@@ -647,6 +709,26 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         });
     }, [base, headers]);
 
+    /* Мост «карточка Workpace → наш сотрудник». Нужен только отделам, которые
+       ведут график у себя; у остальных ответ приходит пустым и раздел молчит. */
+    const loadPlanLinks = useCallback(() => {
+        setPlanLinksError(null);
+        axios.get(`${base}/plan_links`, { headers: headers() })
+            .then((r) => setPlanLinks(r.data))
+            .catch((e) => {
+                setPlanLinks({ departments: [], people: [], unlinked: [] });
+                setPlanLinksError(errText(e, 'Не удалось загрузить сопоставление'));
+            });
+    }, [base, headers]);
+
+    const savePlanLink = useCallback((body) => {
+        setBusy(`plan:${body.workpace_ext_id}`);
+        axios.post(`${base}/plan_links`, body, { headers: headers() })
+            .then(() => loadPlanLinks())
+            .catch((e) => setPlanLinksError(errText(e, 'Не удалось сохранить привязку')))
+            .finally(() => setBusy(''));
+    }, [base, headers, loadPlanLinks]);
+
     const loadReports = useCallback(() => {
         setReportsError(null);
         axios.get(`${base}/reports`, { headers: headers(), params: { limit: 60 } })
@@ -667,6 +749,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         // «Обзора» уже запускает загрузку со своим фильтром, второй запрос лишний.
         if (tab === 'events' && eventsRequest.current.id === 0) loadEvents(eventFilters);
         if (tab === 'employees' && employeesRequest.current.id === 0) loadEmployees(employeeFilters);
+        if (tab === 'employees' && planLinks === null) loadPlanLinks();
         if (tab === 'reports' && reports === null) loadReports();
         if (tab === 'mutes' && mutes === null) loadMutes();
         /* eslint-disable-next-line react-hooks/exhaustive-deps */
@@ -1275,6 +1358,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                         onSort={toggleEmployeeSort}
                                         collapsed={collapsedDepartments.has(department.department_name)}
                                         onToggle={() => toggleDepartmentCard(department.department_name)}
+                                        planInfo={planInfoByDepartment[department.department_name]}
+                                        onOpenPlanLinks={() => setPlanModalOpen(true)}
                                     />
                                 ))}
                             </div>
@@ -2167,6 +2252,137 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             <CalendarClock size={14} className="mt-0.5 shrink-0 text-slate-400" />
                             Отчёт считается в фоне: строка появится в списке со статусом «формируется»
                             и сменится на «готов», когда файл будет собран.
+                        </div>
+                    </div>
+                )}
+            </IosModal>
+
+            <IosModal
+                open={planModalOpen}
+                onClose={() => setPlanModalOpen(false)}
+                title="Сопоставление с Workpace"
+                subtitle="План берём из графика iCore, отметки — из Workpace: без пары человека не с чем сверить"
+                footer={(
+                    <button onClick={() => setPlanModalOpen(false)} className={iosBtnSecondary}>Закрыть</button>
+                )}
+            >
+                {planLinksError && <ErrorBlock>{planLinksError}</ErrorBlock>}
+                {planLinks === null ? <LoadingBlock /> : (
+                    <div className="space-y-4">
+                        {/* Сначала то, что требует решения, — иначе список из двух
+                            десятков нормально сопоставленных людей его прячет. */}
+                        {(planLinks.unlinked || []).length > 0 && (
+                            <div>
+                                <div className={`${iosGroupLabel} mb-1.5`}>
+                                    Карточки Workpace без сотрудника
+                                </div>
+                                <div className="space-y-1.5">
+                                    {planLinks.unlinked.map((card) => (
+                                        <div key={card.ext_id}
+                                             className="rounded-xl bg-slate-50 px-3.5 py-2.5">
+                                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                <span className="text-[13px] font-medium text-slate-800">
+                                                    {card.full_name || card.ext_id}
+                                                </span>
+                                                <span className="text-[11.5px] text-slate-500">
+                                                    {UNLINKED_REASONS[card.reason] || card.reason}
+                                                </span>
+                                            </div>
+                                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                                <div className="min-w-[220px] flex-1">
+                                                    <CustomSelect
+                                                        variant="ios"
+                                                        searchable
+                                                        value=""
+                                                        onChange={(userId) => userId && savePlanLink({
+                                                            workpace_ext_id: card.ext_id,
+                                                            user_id: Number(userId),
+                                                        })}
+                                                        options={[
+                                                            { value: '', label: 'Это сотрудник…' },
+                                                            ...(planLinks.people || []).map((person) => ({
+                                                                value: String(person.user_id),
+                                                                label: person.city
+                                                                    ? `${person.name} · ${person.city}`
+                                                                    : person.name,
+                                                            })),
+                                                        ]}
+                                                        searchPlaceholder="Поиск сотрудника…"
+                                                        ariaLabel="Кому принадлежит карточка"
+                                                    />
+                                                </div>
+                                                {card.reason === 'excluded' ? (
+                                                    <button type="button" className={iosBtnGhost}
+                                                            disabled={busy === `plan:${card.ext_id}`}
+                                                            onClick={() => savePlanLink({
+                                                                workpace_ext_id: card.ext_id, reset: true,
+                                                            })}>
+                                                        Вернуть в поиск
+                                                    </button>
+                                                ) : (
+                                                    <button type="button" className={iosBtnGhost}
+                                                            disabled={busy === `plan:${card.ext_id}`}
+                                                            onClick={() => savePlanLink({
+                                                                workpace_ext_id: card.ext_id, user_id: null,
+                                                            })}>
+                                                        Не наш сотрудник
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        <div>
+                            <div className={`${iosGroupLabel} mb-1.5`}>Наши сотрудники</div>
+                            <div className="divide-y divide-slate-100 overflow-hidden rounded-xl ring-1 ring-slate-200/70">
+                                {(planLinks.people || []).map((person) => (
+                                    <div key={person.user_id}
+                                         className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3.5 py-2.5">
+                                        <span className="min-w-0">
+                                            <span className="text-[13px] font-medium text-slate-800">{person.name}</span>
+                                            {person.city && (
+                                                <span className="ml-1.5 text-[11.5px] text-slate-400">{person.city}</span>
+                                            )}
+                                        </span>
+                                        <span className="flex flex-wrap items-center gap-1.5">
+                                            {person.shifts_ahead === 0 && (
+                                                <IosBadge tone="amber"
+                                                          title={`Смен в графике iCore на ближайшие ${planLinks.schedule_days || 14} дней нет`}>
+                                                    нет смен в графике
+                                                </IosBadge>
+                                            )}
+                                            {(person.cards || []).length === 0 ? (
+                                                <IosBadge tone="red" title="Отметок по человеку взять негде">
+                                                    нет карточки Workpace
+                                                </IosBadge>
+                                            ) : person.cards.map((card) => (
+                                                <button key={card.ext_id} type="button"
+                                                        disabled={busy === `plan:${card.ext_id}`}
+                                                        onClick={() => savePlanLink({
+                                                            workpace_ext_id: card.ext_id, reset: true,
+                                                        })}
+                                                        title={card.source === 'manual'
+                                                            ? 'Привязано вручную — нажмите, чтобы снять'
+                                                            : 'Сопоставлено по ФИО — нажмите, чтобы отвязать'}
+                                                        className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]">
+                                                    {card.source === 'manual' && <Link2 size={10} />}
+                                                    {card.full_name || card.ext_id}
+                                                </button>
+                                            ))}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="flex items-start gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12px] text-slate-500">
+                            <AlertCircle size={14} className="mt-0.5 shrink-0 text-slate-400" />
+                            Человека без карточки Workpace бот не проверяет: отметок по нему нет,
+                            и любая смена выглядела бы как неявка. Смены берутся из «Графиков работы»
+                            — пока график не проставлен, проверять тоже нечего.
                         </div>
                     </div>
                 )}

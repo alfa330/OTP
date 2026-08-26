@@ -23,7 +23,7 @@ from group_late.departments import (
     normalize_text,
     resolve_department_name,
 )
-from group_late import messages
+from group_late import icore_plan, messages
 from group_late.lateness import collect_events, finalize_deliveries
 from group_late.reports import generate_report
 from group_late.workpace import WorkpaceError, workpace_client
@@ -43,6 +43,7 @@ __all__ = [
     "employee_roster",
     "finalize_deliveries",
     "generate_report",
+    "icore_plan",
     "messages",
     "is_configured",
     "normalize_text",

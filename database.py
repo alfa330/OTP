@@ -7109,6 +7109,27 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_glb_employees_dept
                 ON glb_employees(lower(department_name));
+
+            -- Ручная привязка карточки Workpace к нашему сотруднику. Автоматически
+            -- они сшиваются по ФИО (см. _glb_resolve_entry), и в большинстве случаев
+            -- этого хватает; таблица — про остальные: смена фамилии, две карточки на
+            -- одного человека, чужая компания холдинга в том же отделе.
+            -- user_id IS NULL = «это не наш сотрудник, контролировать не нужно»:
+            -- отсутствие строки и явное исключение — разные вещи, иначе исключение
+            -- каждый раз возвращалось бы автоматическим матчингом.
+            CREATE TABLE IF NOT EXISTS glb_employee_links (
+                workpace_ext_id TEXT PRIMARY KEY,
+                user_id         INTEGER NULL REFERENCES users(id) ON DELETE CASCADE,
+                linked_by       INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                linked_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_employee_links_user
+                ON glb_employee_links(user_id) WHERE user_id IS NOT NULL;
+
+            -- План из графика iCore читается по операторам отдела за дату, а исключения
+            -- (отпуск, больничный, Б/С, увольнение) проверяются по периодам статусов.
+            CREATE INDEX IF NOT EXISTS idx_osp_operator_dates
+                ON operator_schedule_status_periods(operator_id, start_date);
         """)
 
     def _stamp_orphan_group_ids_tx(self, cursor, operator_id=None):
@@ -54354,6 +54375,227 @@ class Database:
             cursor.execute("DELETE FROM glb_employees WHERE ext_id <> ALL(%s)",
                            ([item[0] for item in clean],))
         return len(clean)
+
+    # Периоды, на время которых смены оператора не считаются планом: человек в
+    # отпуске, на больничном, за свой счёт или уволен. Тот же набор, что и в
+    # синхронизации статуса пользователя (`temporary_schedule_statuses`).
+    GLB_PLAN_BLOCKING_STATUSES = ('bs', 'sick_leave', 'annual_leave', 'dismissal')
+
+    def glb_cached_employee_roster(self, department_names=None):
+        """Состав Workpace из кэша `glb_employees` в том же виде, что `employee_roster`.
+
+        Раздел на сайте в Workpace не ходит: справочник ему достаётся опросом.
+        Живой список нужен только самому опросу — там он и так уже загружен."""
+        names = [str(name or '').strip() for name in (department_names or [])]
+        names = [name for name in names if name]
+        with self._get_cursor() as cursor:
+            if names:
+                cursor.execute("""
+                    SELECT ext_id, external_id, full_name, department_name
+                    FROM glb_employees
+                    WHERE lower(COALESCE(department_name, '')) = ANY(%s)
+                    ORDER BY full_name
+                """, ([name.lower() for name in names],))
+            else:
+                cursor.execute("""
+                    SELECT ext_id, external_id, full_name, department_name
+                    FROM glb_employees ORDER BY full_name
+                """)
+            return [
+                {'ext_id': row[0], 'external_id': row[1],
+                 'full_name': row[2], 'department_name': row[3]}
+                for row in cursor.fetchall()
+            ]
+
+    def glb_employee_links(self):
+        """{ext_id Workpace: id нашего сотрудника или None} — ручные привязки.
+
+        None означает явное «это не наш сотрудник»: строка есть, значения нет.
+        Поэтому вернуть просто словарь без None нельзя — исключение потерялось бы."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT workpace_ext_id, user_id FROM glb_employee_links")
+            return {row[0]: (int(row[1]) if row[1] is not None else None)
+                    for row in cursor.fetchall()}
+
+    def glb_set_employee_link(self, workpace_ext_id, user_id, linked_by=None):
+        """Привязать карточку Workpace к сотруднику или (user_id=None) исключить её."""
+        ext_id = str(workpace_ext_id or '').strip()
+        if not ext_id:
+            raise ValueError("workpace_ext_id is required")
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO glb_employee_links (workpace_ext_id, user_id, linked_by, linked_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (workpace_ext_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    linked_by = EXCLUDED.linked_by,
+                    linked_at = NOW()
+            """, (ext_id[:128], (int(user_id) if user_id is not None else None),
+                  (int(linked_by) if linked_by is not None else None)))
+        return {'workpace_ext_id': ext_id, 'user_id': user_id}
+
+    def glb_delete_employee_link(self, workpace_ext_id):
+        """Снять ручную привязку — карточка вернётся к автоматическому матчингу по ФИО."""
+        ext_id = str(workpace_ext_id or '').strip()
+        if not ext_id:
+            raise ValueError("workpace_ext_id is required")
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM glb_employee_links WHERE workpace_ext_id = %s", (ext_id,))
+            return {'workpace_ext_id': ext_id, 'deleted': cursor.rowcount > 0}
+
+    def _glb_plan_department_ids(self, cursor, department_codes):
+        """{код отдела: id} — id засеяны миграцией и в разных окружениях разные."""
+        codes = [str(code or '').strip().lower() for code in (department_codes or [])]
+        codes = [code for code in codes if code]
+        if not codes:
+            return {}
+        cursor.execute(
+            "SELECT id, lower(code) FROM departments WHERE lower(code) = ANY(%s)", (codes,))
+        return {row[1]: int(row[0]) for row in cursor.fetchall()}
+
+    def glb_icore_plan_snapshot(self, department_pairs, date_from, date_to, workpace_employees):
+        """План из графика iCore + мост «карточка Workpace → наш сотрудник».
+
+        `department_pairs` — {название отдела Workpace: код нашего отдела}: только
+        те отделы, у которых план берётся у нас. `workpace_employees` — состав из
+        Workpace в виде `employee_roster()`: ext_id, ФИО, отдел.
+
+        Возвращает всё, что нужно сборщику плана, одним походом в базу:
+        `people` — наши сотрудники этих отделов с привязанными карточками Workpace
+        (пустой список карточек = отметок по человеку нам взять негде),
+        `shifts` — смены за период, `unlinked` — карточки Workpace без нашего
+        сотрудника. Матчинг ФИО тот же, что во вкладке «Сотрудники»
+        (`_glb_resolve_entry`): держать два разных правила нельзя, иначе таблица и
+        отбивки разойдутся на одних и тех же людях."""
+        pairs = {}
+        for workpace_name, code in (department_pairs or {}).items():
+            clean_name = str(workpace_name or '').strip()
+            clean_code = str(code or '').strip().lower()
+            if clean_name and clean_code:
+                pairs[clean_name.casefold()] = (clean_name, clean_code)
+        if not pairs:
+            return {'people': [], 'shifts': [], 'unlinked': [], 'departments': {}}
+
+        from_date = self._glb_parse_date(date_from, 'date_from')
+        to_date = self._glb_parse_date(date_to, 'date_to')
+        if not from_date or not to_date:
+            raise ValueError("date_from and date_to are required")
+        if from_date > to_date:
+            raise ValueError("date_from is later than date_to")
+
+        manual_links = self.glb_employee_links()
+
+        with self._get_cursor() as cursor:
+            code_to_id = self._glb_plan_department_ids(cursor, {code for _, code in pairs.values()})
+            department_ids = sorted(set(code_to_id.values()))
+            if not department_ids:
+                return {'people': [], 'shifts': [], 'unlinked': [], 'departments': {}}
+
+            # Состав: действующие операторы отдела. Уволенных и руководителей в план
+            # не берём — у первых смен уже нет, вторые по графику не работают.
+            cursor.execute("""
+                SELECT u.id, btrim(u.name), btrim(COALESCE(u.city, '')), u.department_id
+                FROM users u
+                WHERE u.department_id = ANY(%s)
+                  AND lower(COALESCE(u.role, '')) = 'operator'
+                  AND lower(COALESCE(u.status, '')) <> 'fired'
+                  AND btrim(COALESCE(u.name, '')) <> ''
+                ORDER BY u.name, u.id
+            """, (department_ids,))
+            staff_rows = cursor.fetchall()
+
+            cursor.execute("""
+                SELECT ws.operator_id, ws.shift_date, ws.start_time, ws.end_time
+                FROM work_shifts ws
+                JOIN users u ON u.id = ws.operator_id
+                WHERE u.department_id = ANY(%s)
+                  AND ws.shift_date BETWEEN %s AND %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM operator_schedule_status_periods p
+                      WHERE p.operator_id = ws.operator_id
+                        AND p.status_code = ANY(%s)
+                        AND p.start_date <= ws.shift_date
+                        AND COALESCE(p.end_date, DATE '9999-12-31') >= ws.shift_date
+                  )
+                ORDER BY ws.operator_id, ws.shift_date, ws.start_time
+            """, (department_ids, from_date, to_date,
+                  list(self.GLB_PLAN_BLOCKING_STATUSES)))
+            shift_rows = cursor.fetchall()
+
+        id_to_code = {department_id: code for code, department_id in code_to_id.items()}
+        people = {}
+        buckets = {}
+        for user_id, name, city, department_id in staff_rows:
+            code = id_to_code.get(int(department_id))
+            if not code:
+                continue
+            person = {
+                'user_id': int(user_id), 'name': name, 'city': city or None,
+                'department_code': code, 'workpace_ext_ids': [], 'cards': [],
+                'link_source': None,
+            }
+            people[int(user_id)] = person
+            bucket = buckets.setdefault(code, {'by_key': {}, 'by_short': {}})
+            full_key, short_key = self._glb_name_keys(name)
+            self._glb_index_put(bucket['by_key'], full_key, person)
+            self._glb_index_put(bucket['by_short'], short_key, person)
+
+        unlinked = []
+        for employee in (workpace_employees or []):
+            ext_id = str(employee.get('ext_id') or '').strip()
+            if not ext_id:
+                continue
+            pair = pairs.get(str(employee.get('department_name') or '').strip().casefold())
+            if not pair:
+                continue
+            workpace_name, code = pair
+            full_name = str(employee.get('full_name') or '').strip()
+
+            if ext_id in manual_links:
+                linked_id = manual_links[ext_id]
+                if linked_id is None:
+                    # Явно исключённая карточка. В план она не попадает, но в
+                    # список отдаётся: иначе исключение нельзя было бы снять —
+                    # карточка просто исчезла бы из раздела.
+                    unlinked.append({'ext_id': ext_id, 'full_name': full_name,
+                                     'department_name': workpace_name, 'reason': 'excluded'})
+                    continue
+                person = people.get(linked_id)
+                if person is not None:
+                    person['workpace_ext_ids'].append(ext_id)
+                    person['cards'].append({'ext_id': ext_id, 'full_name': full_name,
+                                            'source': 'manual'})
+                    person['link_source'] = 'manual'
+                    continue
+                # Привязали к тому, кого уже нет в составе отдела: строка осталась,
+                # человека нет — показываем как несопоставленную карточку.
+                unlinked.append({'ext_id': ext_id, 'full_name': full_name,
+                                 'department_name': workpace_name, 'reason': 'stale_link'})
+                continue
+
+            full_key, short_key = self._glb_name_keys(full_name)
+            person = self._glb_resolve_entry(buckets.get(code) or {'by_key': {}, 'by_short': {}},
+                                             full_key, short_key)
+            if person is None:
+                unlinked.append({'ext_id': ext_id, 'full_name': full_name,
+                                 'department_name': workpace_name, 'reason': 'no_match'})
+                continue
+            person['workpace_ext_ids'].append(ext_id)
+            person['cards'].append({'ext_id': ext_id, 'full_name': full_name,
+                                    'source': 'name'})
+            if person['link_source'] != 'manual':
+                person['link_source'] = 'name'
+
+        shifts = [
+            {'user_id': int(row[0]), 'date': row[1], 'start': row[2], 'end': row[3]}
+            for row in shift_rows if int(row[0]) in people
+        ]
+        return {
+            'people': list(people.values()),
+            'shifts': shifts,
+            'unlinked': unlinked,
+            'departments': {code: workpace_name for workpace_name, code in pairs.values()},
+        }
 
     def glb_discover_chat(self, chat_id, title=None, chat_type=None):
         """Бота добавили в группу — запоминаем чат ВЫКЛЮЧЕННЫМ. Рассылку по нему

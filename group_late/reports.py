@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from group_late import config
+from group_late import config, icore_plan
 from group_late.departments import (
     build_employee_department_lookup,
     clean_department_filters as _normalize_department_filters,
@@ -44,6 +44,7 @@ def generate_report(
     end_date_str: Optional[str] = None,
     dept_filter=None,
     stats_out: Optional[dict] = None,
+    db=None,
 ) -> Tuple[Optional[bytes], str, str]:
     """Excel-отчёт по посещаемости за день или период, с фильтром по отделам.
 
@@ -79,7 +80,8 @@ def generate_report(
     department_filter_label = _format_department_filter(dept_filter)
 
     try:
-        employee_lookup = build_employee_department_lookup(workpace_client.get_employees())
+        workpace_employees = workpace_client.get_employees()
+        employee_lookup = build_employee_department_lookup(workpace_employees)
     except Exception as exc:
         logger.error("Failed to fetch employees for department lookup: %s", exc)
         return None, "", f"❌ Ошибка получения списка сотрудников Workpace для определения отделов:\n<code>{exc}</code>"
@@ -140,6 +142,16 @@ def generate_report(
             logger.error("Failed to fetch data for %s: %s", date_iso, exc)
             return None, "", f"❌ Ошибка получения данных от Workpace API за {date_iso}:\n<code>{exc}</code>"
 
+        # Тот же источник плана, что и у отбивок: иначе выгрузка и уведомления
+        # расходились бы на одних и тех же людях.
+        if db is not None:
+            records, _ = icore_plan.apply_to_records(
+                db, records, workpace_employees, current_date.date(),
+                employee_lookup=employee_lookup)
+        # Отметка человека может лежать на другой его карточке Workpace, чем план:
+        # сводим их к одной, иначе он попадёт в отчёт как не пришедший.
+        mark_alias = icore_plan.mark_alias_map(records)
+
         # Group data
         emp_data = {}
 
@@ -170,6 +182,7 @@ def generate_report(
             emp_id = _employee_id(m)
             if not emp_id:
                 continue
+            emp_id = mark_alias.get(str(emp_id), emp_id)
             emp_name = _employee_name(m)
             dept_name = resolve_department_name(m, employee_lookup)
             m = {**m, "departmentName": dept_name}

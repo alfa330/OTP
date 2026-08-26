@@ -7067,6 +7067,97 @@ def api_group_late_bot_employees():
         return jsonify({"error": str(error)}), 500
 
 
+def _group_late_plan_snapshot(scope):
+    """Снимок «план из iCore» для отделов, доступных запрашивающему.
+
+    Состав Workpace берём из кэша `glb_employees`, а не из самого Workpace: раздел
+    на сайте туда не ходит, справочник ему привозит опрос."""
+    pairs = {
+        name: code for name, code in group_late.icore_plan.plan_pairs().items()
+        if not scope or name.casefold() == str(scope).casefold()
+    }
+    if not pairs:
+        return pairs, {'people': [], 'shifts': [], 'unlinked': [], 'departments': {}}
+    today = datetime.now(group_late.TZ).date()
+    snapshot = db.glb_icore_plan_snapshot(
+        pairs, today, today + timedelta(days=13),
+        db.glb_cached_employee_roster(pairs.keys()),
+    )
+    return pairs, snapshot
+
+
+@app.route('/api/group_late_bot/plan_links', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_plan_links():
+    """Мост «карточка Workpace → наш сотрудник» для отделов с планом из iCore.
+
+    Автоматически карточки сшиваются по ФИО; здесь видно результат и правится то,
+    что автоматике не даётся: смена фамилии, две карточки на одного человека,
+    чужая компания холдинга в том же отделе Workpace."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, scope, err = _group_late_bot_guard()
+    if err:
+        return err
+
+    try:
+        pairs, snapshot = _group_late_plan_snapshot(scope)
+        if request.method == 'GET':
+            shifts_by_user = {}
+            for shift in snapshot['shifts']:
+                shifts_by_user[shift['user_id']] = shifts_by_user.get(shift['user_id'], 0) + 1
+            people = [
+                {**{key: person[key] for key in ('user_id', 'name', 'city', 'cards', 'link_source')},
+                 'department_name': snapshot['departments'].get(person['department_code']),
+                 'shifts_ahead': shifts_by_user.get(person['user_id'], 0)}
+                for person in snapshot['people']
+            ]
+            people.sort(key=lambda item: item['name'].lower())
+            return jsonify({
+                'status': 'success',
+                'departments': [{'workpace_name': name, 'department_code': code}
+                                for name, code in sorted(pairs.items())],
+                'people': people,
+                'unlinked': snapshot['unlinked'],
+                'schedule_days': 14,
+            }), 200
+
+        payload = request.get_json(silent=True) or {}
+        ext_id = str(payload.get('workpace_ext_id') or '').strip()
+        if not ext_id:
+            return jsonify({"error": "workpace_ext_id обязателен"}), 400
+
+        # Граница отдела: править можно только карточки своих отделов и привязывать
+        # только к своим сотрудникам. Обе стороны берём из уже собранного снимка —
+        # он и так посчитан по доступным отделам.
+        known_cards = {card['ext_id'] for person in snapshot['people'] for card in person['cards']}
+        known_cards.update(item['ext_id'] for item in snapshot['unlinked'])
+        if ext_id not in known_cards:
+            return _group_late_bot_scope_forbidden('Изменение привязки этой карточки')
+
+        if payload.get('reset'):
+            result = db.glb_delete_employee_link(ext_id)
+        else:
+            # user_id: null — это «не наш сотрудник», осмысленное значение. Поэтому
+            # отсутствие поля и явный null различаем: молча исключить карточку из-за
+            # опечатки в запросе хуже, чем отказать.
+            if 'user_id' not in payload:
+                return jsonify({"error": "нужен user_id (или null, чтобы исключить карточку)"}), 400
+            user_id = payload.get('user_id')
+            if user_id is not None:
+                known_users = {person['user_id'] for person in snapshot['people']}
+                if int(user_id) not in known_users:
+                    return _group_late_bot_scope_forbidden('Привязка к этому сотруднику')
+            result = db.glb_set_employee_link(ext_id, user_id, linked_by=requester_id)
+        result['status'] = 'success'
+        return jsonify(result), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot plan_links failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/group_late_bot/reports', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_reports():
@@ -54732,7 +54823,7 @@ def _group_late_generate_report(report_id, date_from, date_to, department, send_
     try:
         file_bytes, filename, text = group_late.generate_report(
             date_from, date_to if date_to != date_from else None, department or None,
-            stats_out=stats,
+            stats_out=stats, db=db,
         )
     except Exception as error:
         logging.exception("group_late: отчёт %s не собрался", report_id)

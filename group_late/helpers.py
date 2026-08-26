@@ -65,9 +65,18 @@ def employee_id(item: dict) -> Optional[str]:
 
 
 def employee_keys(item: dict) -> set[str]:
+    """Идентификаторы сотрудника, по которым к записи подбираются его отметки.
+
+    `workpaceKeys` — список всех карточек человека в Workpace; его проставляет
+    план из графика iCore. Одному сотруднику там нередко заведено несколько
+    карточек, отметка ложится на любую из них, и по одному идентификатору его
+    приход просто не находится."""
     keys = set()
     for field in ("employeeId", "employeeExternalId", "id", "externalId"):
         value = item.get(field)
+        if value:
+            keys.add(str(value))
+    for value in (item.get("workpaceKeys") or []):
         if value:
             keys.add(str(value))
     return keys

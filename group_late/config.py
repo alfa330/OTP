@@ -34,6 +34,16 @@ RETENTION_POLL_RUNS_DAYS = _env_int("GROUP_LATE_RETENTION_POLL_RUNS_DAYS", 7)
 # Период отчёта ограничен, чтобы одна выгрузка не тянула из Workpace полгода.
 MAX_REPORT_DAYS = _env_int("GROUP_LATE_MAX_REPORT_DAYS", 31)
 
+# Отделы, у которых ПЛАН берётся из графика iCore, а не из расписания Workpace:
+# {название отдела в Workpace: код нашего отдела}. Факт (отметки терминала) в
+# любом случае остаётся за Workpace — своего источника прихода/ухода у нас нет.
+#
+# Отдел обязан быть в паре GROUP_LATE_BOT_DEPARTMENT_SCOPES (bot_schedule2.py):
+# без объявленной пары сотрудника Workpace не с кем сопоставить у себя, и матчить
+# по всей базе нельзя — тёзка из соседнего отдела подставил бы чужого человека.
+# Сверку держит tests/test_group_late_icore_plan.py.
+ICORE_PLAN_DEPARTMENTS = {'Регионы': 'front_office'}
+
 
 def is_configured() -> bool:
     """Без логина и пароля Workpace опрос и отчёты работать не могут."""
