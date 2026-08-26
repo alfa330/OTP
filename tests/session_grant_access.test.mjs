@@ -32,31 +32,30 @@ test('кнопка стоит слева от «Прервать» и обе г�
     assert.equal(guarded.length, 2, 'обе кнопки обязаны гаснуть на время любой из двух операций');
 });
 
-test('видимость кнопки решает сервер, а не роль на клиенте', () => {
-    // В карточке нет возглавляемых отделов ни у смотрящего, ни у сотрудника, а
-    // без них «мой ли это периметр» не посчитать.
-    assert.match(modal, /detail\?\.user\?\.can_grant_sensitive_access/);
-    assert.ok(!/session\.user_role|user\.user_role\s*===\s*'operator'/.test(modal),
-        'роль на клиенте для этого не разбирается');
-});
-
-test('роль сотрудника кнопку не прячет — она уходит в текст подтверждения', () => {
-    // Гейт держит только операторов, но открывать владелец просил всем, у кого
-    // не открыто. Спрячь мы кнопку у супервайзера — вернулось бы ровно то
-    // ограничение, которое сняли.
+test('роль не участвует в видимости кнопки — ни в каком виде', () => {
+    // Это буквально жалоба, с которой раздел переделывали дважды: кнопки не
+    // было у тех, у кого гейт спрашивает QR. Условия соединяет сервер одним
+    // флагом, потому что список гейтованных ролей уже расширяли на бэк-офис, и
+    // любая копия здесь разошлась бы молча.
     const decl = modal.slice(modal.indexOf('const canGrantAccess'));
-    const body = decl.slice(0, decl.indexOf(';') + 1);
-    assert.ok(body.length > 20, 'объявление canGrantAccess изменилось — проверь тест');
-    assert.ok(!body.includes('sensitive_access_required'),
-        'роль снова прячет кнопку');
-    // …но справка обязана дойти до подтверждения, иначе выдача выглядит
-    // решением проблемы, которой нет.
-    assert.match(app, /sensitive_access_required/);
-    assert.match(app, /подтверждение не требуется/);
-    // Ролей в тексте быть не должно: список гейтованных ролей живёт на сервере
-    // (wiki.access.QR_GATED_ROLES), и его расширение на бэк-офис уже один раз
-    // сделало здешнюю формулировку враньём.
-    assert.ok(!/только операторам/.test(app), 'роль снова зашита в текст');
+    const end = decl.indexOf(';');
+    assert.ok(end > 0, 'объявление canGrantAccess изменилось — проверь тест');
+    const body = decl.slice(0, end + 1);
+
+    assert.ok(body.includes('can_grant_sensitive_access'), 'флаг сервера пропал');
+    assert.ok(!/user_role|role|operator|hr_manager|accounting_manager|sensitive_access_required/.test(body),
+        `роль снова участвует в видимости кнопки: ${body}`);
+
+    // Проверяем самого стража подделкой: без этого «зелено» ничего не значит.
+    const tampered = "const canGrantAccess = Boolean(detail?.user?.can_grant_sensitive_access) && detail?.user?.user_role !== 'sv';";
+    assert.ok(/user_role|role|operator/.test(tampered), 'страж не поймал бы возврат роли');
+
+    // Ролей нет и в текстах: их расширение уже делало формулировку враньём.
+    const handler = app.slice(app.indexOf('const handleGrantAdminSessionAccess'));
+    const texts = handler.slice(0, handler.indexOf('await axios.post'));
+    assert.ok(texts.length > 50, 'обработчик изменился — проверь тест');
+    assert.ok(!/оператор|супервайзер|бэк-офис|админ/i.test(texts),
+        `роль зашита в текст подтверждения: ${texts}`);
 });
 
 test('открытой сессии кнопки нет — про неё говорит янтарная полоса', () => {

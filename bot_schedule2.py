@@ -9072,7 +9072,7 @@ def _sensitive_access_grant_capability(*, requester_id, requester_role, target_i
                                        target_role, target_supervisor_id):
     """Вправе ли этот админ открыть чувствительные данные ЭТОМУ сотруднику.
 
-    Возвращает (required, allowed, error), где error — (текст, код) для ручки.
+    Возвращает (allowed, error), где error — (текст, код) для ручки.
 
     Слоёв два, и второй обязателен. `_admin_sessions_guard` пускает в раздел по
     уровню роли и на возглавляемые отделы не смотрит вовсе: глава Бухгалтерии с
@@ -9082,31 +9082,34 @@ def _sensitive_access_grant_capability(*, requester_id, requester_role, target_i
     намеренно: разъехавшись, копии дали бы разный ответ на один вопрос, и раздел
     «Сессии» стал бы обходом периметра, а не вторым входом в него.
 
-    required — держит ли этого человека сам гейт. Это СПРАВКА, а не условие
-    выдачи (решение владельца 26.08.2026: открывать можно всем, у кого не
-    открыто).
+    Второе условие — спрашивает ли гейт подтверждение у ЭТОГО человека.
+    Супервайзеру, тренеру и админу разделы открыты и без QR, и «выдавать» им
+    нечего: флаг для них не читает никто, а запись в журнале «открыт доступ»
+    была бы неправдой о смене прав, которой не было.
 
     Список ролей берётся из SENSITIVE_QR_GATED_ROLES — того же, по которому
     отказывают вики и три ручки /api/sensitive-access/*. Своего литерала здесь
-    быть НЕ должно: копия разошлась бы молча (гейт расширили на бэк-офис —
-    hr_manager и accounting_manager, — и справка «этому и так открыто» стала бы
-    враньём ровно про тех, ради кого его расширяли). Возглавляемые отделы не
-    вычитаются: «Мои оценки» держат главу отдела наравне со всеми, и его
-    собственный экран просит QR.
+    быть НЕ должно: копия разошлась бы молча. Так уже вышло — гейт расширили на
+    бэк-офис (hr_manager и accounting_manager), а копия осталась на 'operator',
+    и кнопки не стало ровно у тех, ради кого гейт и расширяли: для Бухгалтерии
+    и HR вики — единственный чувствительный раздел.
 
-    Кого гейт не держит — супервайзера, тренера, стажёра, админа, — тому выдача
-    прав не добавит: КАЖДЫЙ читатель флага сперва спрашивает роль. Для них это
-    запись в журнал и состояние в карточке, а не смена доступа. Поэтому required
-    и уезжает на клиент отдельным флагом: сказать это нажимающему до нажатия, а
-    не оставить его думать, что проблема решена.
+    Возглавляемые отделы из списка не вычитаются — ровно как в трёх ручках
+    /api/sensitive-access/*, которые главу отдела тоже не вычитают. Вычти мы его
+    здесь, кнопка стала бы СТРОЖЕ выдачи по QR, и это была бы четвёртая копия
+    правила. Оператору-главе она к тому же нужна: «Мои оценки» держат его
+    наравне со всеми (их гейты стоят на роли operator и про главу не знают), а
+    вики и «Обращения» — нет.
     """
-    required = _normalize_user_role(target_role) in SENSITIVE_QR_GATED_ROLES
-
     if int(requester_id) == int(target_id):
-        # Себе — нельзя, даже админу. Выдача чувствительного доступа это решение
-        # о другом человеке; путь «сам себе открыл, сам и посмотрел» не должен
-        # существовать, даже когда флаг для этой роли ничего не открывает.
-        return required, False, ("Открыть доступ самому себе нельзя", 403)
+        # Себе — нельзя, и эта проверка идёт ПЕРВОЙ: «сам себе открыл, сам и
+        # посмотрел» не должно существовать как путь, независимо от того, по
+        # какой ещё причине выдача не полагается.
+        return False, ("Открыть доступ самому себе нельзя", 403)
+
+    if _normalize_user_role(target_role) not in SENSITIVE_QR_GATED_ROLES:
+        return False, (
+            "Этому сотруднику подтверждение не требуется — разделы открыты ему и так", 400)
 
     requester_headed = [d['id'] for d in (db.get_headed_departments_for_user(requester_id) or [])]
     error = _sensitive_access_approval_error(
@@ -9117,7 +9120,7 @@ def _sensitive_access_grant_capability(*, requester_id, requester_role, target_i
         operator_department_id=db.get_user_department_id(target_id),
         operator_supervisor_id=target_supervisor_id,
     )
-    return required, error is None, error
+    return error is None, error
 
 
 def _serialize_admin_session(item, current_session_id=None):
@@ -9290,13 +9293,14 @@ def get_admin_session_user(user_id):
         user = detail["user"]
         current_session_id = _current_session_id_from_access_token()
 
-        # Кнопку «Открыть доступ» гейтит сервер, а не роль на клиенте: в карточке
-        # нет возглавляемых отделов ни у кого из двоих, а без них ни «есть ли у
-        # человека QR-ограничение», ни «мой ли это периметр» не посчитать. Кнопка,
-        # которую сервер потом отбивает, — молчаливый отказ, а их у портала уже
-        # было шесть.
+        # Кнопку «Открыть доступ» гейтит сервер, а не роль на клиенте. Внутри
+        # флага два условия, и ни одно клиент посчитать не может: список ролей, у
+        # которых гейт спрашивает подтверждение, живёт на сервере (копия уже
+        # расходилась), а возглавляемых отделов — ни у сотрудника, ни у
+        # смотрящего — в карточке нет вовсе. Кнопка, которую сервер потом
+        # отбивает, — молчаливый отказ, а их у портала уже было шесть.
         requester = db.get_user(id=getattr(g, 'user_id', None))
-        grant_required, grant_allowed, _grant_error = _sensitive_access_grant_capability(
+        grant_allowed, _grant_error = _sensitive_access_grant_capability(
             requester_id=getattr(g, 'user_id', None),
             requester_role=requester[3] if requester else None,
             target_id=user["user_id"],
@@ -9321,7 +9325,6 @@ def get_admin_session_user(user_id):
                 "has_telegram": user["has_telegram"],
                 "active_sessions": user["active_sessions"],
                 "total_sessions": user["total_sessions"],
-                "sensitive_access_required": bool(grant_required),
                 "can_grant_sensitive_access": bool(grant_allowed)
             },
             "sessions": [
@@ -9464,11 +9467,10 @@ def grant_admin_session_sensitive_access(session_id):
     раздела шире правила выдачи, и глава одного отдела видит карточки всего
     портала.
 
-    Роль ЦЕЛИ ручку не ограничивает (решение владельца 26.08.2026): открыть
-    можно любую сессию, где не открыто. Тому, кого гейт не держит, это доступа
-    не добавит, но остаётся честной записью в журнале — решать, кому это нужно,
-    не дело ручки. `required` уезжает в ответ, чтобы клиент сказал нажавшему,
-    меняет выдача что-нибудь для этого человека или нет.
+    Выдать можно только тому, у кого гейт СПРАШИВАЕТ подтверждение
+    (SENSITIVE_QR_GATED_ROLES: оператор и бэк-офис). У супервайзера, тренера и
+    админа разделы открыты и без QR — «открывать» им нечего, и ручка отвечает
+    400, а кнопки у них нет вовсе.
     """
     try:
         if request.method == 'OPTIONS':
@@ -9507,7 +9509,7 @@ def grant_admin_session_sensitive_access(session_id):
         if not target:
             return jsonify({"error": "Сотрудник не найден"}), 404
 
-        required, allowed, capability_error = _sensitive_access_grant_capability(
+        allowed, capability_error = _sensitive_access_grant_capability(
             requester_id=approver_id,
             requester_role=approver[3] if approver else None,
             target_id=target_id,
@@ -9526,8 +9528,7 @@ def grant_admin_session_sensitive_access(session_id):
                 "session_id": session_id,
                 "user_id": target_id,
                 "granted": True,
-                "changed": False,
-                "sensitive_access_required": bool(required)
+                "changed": False
             }), 200
 
         updated = db.set_session_sensitive_access(
@@ -9574,8 +9575,7 @@ def grant_admin_session_sensitive_access(session_id):
             "user_id": target_id,
             "user_name": target[2],
             "granted": True,
-            "changed": True,
-            "sensitive_access_required": bool(required)
+            "changed": True
         }), 200
     except Exception as e:
         logging.error(f"grant_admin_session_sensitive_access error: {e}", exc_info=True)

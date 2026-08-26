@@ -35314,15 +35314,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // только из ответа сервера, без этого сессия так и выглядела бы закрытой.
         const grantAccessFromDetail = React.useCallback(async (session) => {
             const label = detail?.user?.user_name || detailPerson?.user_name || '';
-            await handleGrantAdminSessionAccess(
-                session, label, Boolean(detail?.user?.sensitive_access_required));
+            await handleGrantAdminSessionAccess(session, label);
             if (!detailUserId || typeof onFetchAdminSessionUser !== 'function') return;
             try {
                 const data = await onFetchAdminSessionUser(detailUserId);
                 if (data) setDetail(data);
             } catch (_) { /* список уже обновлён, карточку просто не трогаем */ }
-        }, [handleGrantAdminSessionAccess, detail?.user?.user_name,
-            detail?.user?.sensitive_access_required, detailPerson?.user_name,
+        }, [handleGrantAdminSessionAccess, detail?.user?.user_name, detailPerson?.user_name,
             detailUserId, onFetchAdminSessionUser]);
 
         const revokeAllForPerson = React.useCallback(async (person, count) => {
@@ -40673,21 +40671,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // все сессии в карточке принадлежат ОДНОМУ человеку, и по имени
             // десять строк неразличимы — промах мышью открыл бы персональные
             // данные водителей не в той из них.
-            const handleGrantAdminSessionAccess = useCallback(async (session, personLabel, gateApplies = true) => {
+            const handleGrantAdminSessionAccess = useCallback(async (session, personLabel) => {
                 if (!session?.session_id) return;
                 const who = personLabel ? `сотруднику «${personLabel}»` : 'сотруднику';
                 const which = `${session.ip_address || 'адрес неизвестен'} · ${String(session.session_id).slice(0, 8)}…`;
-                // Гейт держит операторов и бэк-офис (wiki.access.QR_GATED_ROLES);
-                // супервайзеру, тренеру и админу разделы открыты и так. Выдать им
-                // можно — владелец просил не ограничивать кнопку ролью, — но
-                // нажимающий обязан знать, что прав это не добавит: иначе выдача
-                // выглядит решением проблемы, которой нет, и настоящую причину
-                // («его не пускает не гейт») никто не ищет. Роли здесь не
-                // перечисляем: список живёт на сервере, оттуда и приходит ответ.
-                const note = gateApplies
-                    ? 'Доступ останется открытым до конца этой сессии.'
-                    : 'Учтите: этому сотруднику подтверждение не требуется — разделы открыты ему и так, и доступа это не добавит.';
-                if (!window.confirm(`Открыть доступ к чувствительным данным ${who} в сессии ${which}? ${note}`)) return;
+                if (!window.confirm(`Открыть доступ к чувствительным данным ${who} в сессии ${which}? Доступ останется открытым до конца этой сессии.`)) return;
 
                 setGrantingSessionId(session.session_id);
                 try {
@@ -40698,19 +40686,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     );
                     const data = response.data || {};
                     if (data.status === 'success') {
-                        // Три разных исхода — три разных ответа. Экран замка сам
-                        // статус не перезапрашивает (только при смене раздела или
-                        // пока человек ждёт свой QR), поэтому там, где выдача
-                        // что-то меняет, сразу говорим, что от него требуется. А
-                        // там, где не меняет, не обещаем несуществующего: гейт
-                        // этого сотрудника не держит, и «обновите страницу» он бы
-                        // выполнил впустую.
-                        showToast(
-                            data.changed === false ? 'Доступ уже был открыт'
-                                : data.sensitive_access_required === false
-                                    ? 'Отмечено в журнале — подтверждение этому сотруднику не требуется'
-                                    : 'Доступ открыт — сотруднику нужно обновить страницу',
-                            'success');
+                        // Экран замка сам статус не перезапрашивает — только при
+                        // смене раздела или пока человек ждёт свой QR, — поэтому
+                        // сразу говорим, что от него требуется.
+                        showToast(data.changed === false
+                            ? 'Доступ уже был открыт'
+                            : 'Доступ открыт — сотруднику нужно обновить страницу', 'success');
                         await refreshAdminSessions();
                     } else {
                         showToast(data.error || 'Не удалось открыть доступ', 'error');
