@@ -9082,22 +9082,31 @@ def _sensitive_access_grant_capability(*, requester_id, requester_role, target_i
     намеренно: разъехавшись, копии дали бы разный ответ на один вопрос, и раздел
     «Сессии» стал бы обходом периметра, а не вторым входом в него.
 
-    required — есть ли у сотрудника само QR-ограничение. Условие ровно то же, что
-    у выдачи по QR (approve_sensitive_access) и у /api/sensitive-access/status:
-    роль «оператор», и всё. Возглавляемые отделы здесь НЕ вычитаются, хотя вики,
-    «Обращения» и «Посылки» главу отдела не держат: «Мои оценки» держат его
-    наравне со всеми — телефоны маскируются, записи и переписки не открываются
-    без подтверждения, — и его собственный экран просит QR. Вычти мы главу, кнопки
-    не было бы ровно у того, кому по QR доступ открывают без вопросов.
+    required — держит ли этого человека сам гейт. Это СПРАВКА, а не условие
+    выдачи (решение владельца 26.08.2026: открывать можно всем, у кого не
+    открыто).
+
+    Список ролей берётся из SENSITIVE_QR_GATED_ROLES — того же, по которому
+    отказывают вики и три ручки /api/sensitive-access/*. Своего литерала здесь
+    быть НЕ должно: копия разошлась бы молча (гейт расширили на бэк-офис —
+    hr_manager и accounting_manager, — и справка «этому и так открыто» стала бы
+    враньём ровно про тех, ради кого его расширяли). Возглавляемые отделы не
+    вычитаются: «Мои оценки» держат главу отдела наравне со всеми, и его
+    собственный экран просит QR.
+
+    Кого гейт не держит — супервайзера, тренера, стажёра, админа, — тому выдача
+    прав не добавит: КАЖДЫЙ читатель флага сперва спрашивает роль. Для них это
+    запись в журнал и состояние в карточке, а не смена доступа. Поэтому required
+    и уезжает на клиент отдельным флагом: сказать это нажимающему до нажатия, а
+    не оставить его думать, что проблема решена.
     """
-    required = _normalize_user_role(target_role) == 'operator'
-    if not required:
-        return False, False, ("У сотрудника нет QR-ограничения — открывать нечего", 400)
+    required = _normalize_user_role(target_role) in SENSITIVE_QR_GATED_ROLES
 
     if int(requester_id) == int(target_id):
-        # Сегодня недостижимо: цель обязана быть оператором, а оператора в раздел
-        # не пускает гвард. Запрет всё равно явный — ручка принимает id снаружи.
-        return True, False, ("Открыть доступ самому себе нельзя", 403)
+        # Себе — нельзя, даже админу. Выдача чувствительного доступа это решение
+        # о другом человеке; путь «сам себе открыл, сам и посмотрел» не должен
+        # существовать, даже когда флаг для этой роли ничего не открывает.
+        return required, False, ("Открыть доступ самому себе нельзя", 403)
 
     requester_headed = [d['id'] for d in (db.get_headed_departments_for_user(requester_id) or [])]
     error = _sensitive_access_approval_error(
@@ -9108,7 +9117,7 @@ def _sensitive_access_grant_capability(*, requester_id, requester_role, target_i
         operator_department_id=db.get_user_department_id(target_id),
         operator_supervisor_id=target_supervisor_id,
     )
-    return True, error is None, error
+    return required, error is None, error
 
 
 def _serialize_admin_session(item, current_session_id=None):
@@ -9454,6 +9463,12 @@ def grant_admin_session_sensitive_access(session_id):
     Периметр тоже общий с QR (`_sensitive_access_grant_capability`): гвард
     раздела шире правила выдачи, и глава одного отдела видит карточки всего
     портала.
+
+    Роль ЦЕЛИ ручку не ограничивает (решение владельца 26.08.2026): открыть
+    можно любую сессию, где не открыто. Тому, кого гейт не держит, это доступа
+    не добавит, но остаётся честной записью в журнале — решать, кому это нужно,
+    не дело ручки. `required` уезжает в ответ, чтобы клиент сказал нажавшему,
+    меняет выдача что-нибудь для этого человека или нет.
     """
     try:
         if request.method == 'OPTIONS':
@@ -9492,7 +9507,7 @@ def grant_admin_session_sensitive_access(session_id):
         if not target:
             return jsonify({"error": "Сотрудник не найден"}), 404
 
-        _required, allowed, capability_error = _sensitive_access_grant_capability(
+        required, allowed, capability_error = _sensitive_access_grant_capability(
             requester_id=approver_id,
             requester_role=approver[3] if approver else None,
             target_id=target_id,
@@ -9511,7 +9526,8 @@ def grant_admin_session_sensitive_access(session_id):
                 "session_id": session_id,
                 "user_id": target_id,
                 "granted": True,
-                "changed": False
+                "changed": False,
+                "sensitive_access_required": bool(required)
             }), 200
 
         updated = db.set_session_sensitive_access(
@@ -9558,7 +9574,8 @@ def grant_admin_session_sensitive_access(session_id):
             "user_id": target_id,
             "user_name": target[2],
             "granted": True,
-            "changed": True
+            "changed": True,
+            "sensitive_access_required": bool(required)
         }), 200
     except Exception as e:
         logging.error(f"grant_admin_session_sensitive_access error: {e}", exc_info=True)

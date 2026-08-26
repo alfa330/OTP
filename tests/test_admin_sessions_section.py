@@ -32,6 +32,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tests import prod_db, source_cache
+from wiki.access import QR_GATED_ROLES
 
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / 'database.py'
@@ -938,6 +939,10 @@ def _grant_route(fake_db, actor_id=1, method='POST'):
         'datetime': datetime,
         'threading': _FakeThreading,
         '_is_admin_role': lambda role: role in ('admin', 'super_admin'),
+        # Список гейтованных ролей берём НАСТОЯЩИЙ, из wiki.access: подставь мы
+        # сюда свой, тест перестал бы замечать расхождение — а сторожить надо
+        # именно его.
+        'SENSITIVE_QR_GATED_ROLES': QR_GATED_ROLES,
         '_client_ip': lambda: '10.0.0.9',
         '_build_cors_preflight_response': lambda: ({}, 200),
         '_notify_super_admin_sensitive_access_approved': lambda *a, **kw: None,
@@ -1031,23 +1036,79 @@ class GrantAccessRouteTests(unittest.TestCase):
         self.assertEqual(_status(route(session_id=self.SESSION_ID)), 200)
         self.assertEqual(fake_db.granted['user_id'], 448)
 
-    def test_people_without_the_qr_gate_are_refused(self):
-        """Супервайзеру, стажёру и админу гейт не мешает — «выдавать» им нечего.
+    def test_any_role_can_be_opened(self):
+        """Роль ЦЕЛИ выдачу не ограничивает (решение владельца 26.08.2026).
 
-        Условие то же, что у выдачи по QR (approve_sensitive_access отбивает
-        не-оператора) и у /api/sensitive-access/status: роль «оператор», и всё.
+        Раньше ручка отбивала не-оператора: гейт его не держит, значит и
+        открывать нечего. Владелец попросил обратного — открывать всем, у кого
+        не открыто, — и решение о том, кому это нужно, ручка больше не
+        принимает.
         """
-        for role in ('sv', 'trainee', 'admin', 'trainer'):
+        for role in ('sv', 'trainee', 'admin', 'trainer', 'super_admin',
+                     'hr_manager', 'accounting_manager'):
             fake_db = self._db(users={
                 1: _user(1, 'super_admin'),
                 448: _user(448, role, 'Не оператор'),
             })
             route, notifications = _grant_route(fake_db)
             result = route(session_id=self.SESSION_ID)
-            self.assertEqual(_status(result), 400, role)
-            self.assertIn('QR-ограничения', result[0]['error'])
-            self.assertIsNone(fake_db.granted, role)
-            self.assertEqual(notifications, [], role)
+            self.assertEqual(_status(result), 200, role)
+            self.assertEqual(fake_db.granted['user_id'], 448, role)
+            self.assertEqual(len(notifications), 1, role)
+
+    def test_answer_says_whether_the_gate_holds_this_person(self):
+        """Клиенту нужен честный ответ: не-оператору выдача прав не добавит.
+
+        КАЖДЫЙ читатель флага — вики, «Обращения», «Посылки», записи и
+        переписки «Моих оценок» — сперва спрашивает роль. Не скажи мы этого,
+        выдача выглядела бы решением проблемы, которой нет.
+        """
+        # Гейт держит оператора И бэк-офис: список один на весь портал
+        # (wiki.access.QR_GATED_ROLES), и своей копии у выдачи быть не должно.
+        for role in sorted(QR_GATED_ROLES):
+            fake_db = self._db(users={1: _user(1, 'super_admin'), 448: _user(448, role, role)})
+            route, _ = _grant_route(fake_db)
+            self.assertTrue(
+                route(session_id=self.SESSION_ID)[0]['sensitive_access_required'],
+                f'{role}: гейт его держит, а справка говорит обратное')
+
+        for role in ('sv', 'trainer', 'admin', 'trainee'):
+            fake_db = self._db(users={1: _user(1, 'super_admin'), 448: _user(448, role, role)})
+            route, _ = _grant_route(fake_db)
+            self.assertFalse(
+                route(session_id=self.SESSION_ID)[0]['sensitive_access_required'], role)
+
+    def test_nobody_opens_access_to_himself(self):
+        """Себе — нельзя, даже админу и даже когда флаг ему ничего не открывает.
+
+        Пока целью обязан был быть оператор, ветка была недостижима: оператора
+        в раздел не пускает гвард. Сняли ролевое условие — стала достижимой.
+        """
+        fake_db = self._db(
+            session=dict(LIVE_SESSION, user_id=1),
+            users={1: _user(1, 'admin', 'Сам себе')},
+        )
+        route, notifications = _grant_route(fake_db, actor_id=1)
+        result = route(session_id=self.SESSION_ID)
+        self.assertEqual(_status(result), 403)
+        self.assertIn('самому себе', result[0]['error'])
+        self.assertIsNone(fake_db.granted)
+        self.assertEqual(notifications, [])
+
+    def test_perimeter_holds_for_non_operators_too(self):
+        """Сняли роль — периметр остался: чужой отдел закрыт и для админа."""
+        fake_db = self._db(
+            users={
+                2: _user(2, 'admin', 'Глава Бухгалтерии'),
+                448: _user(448, 'sv', 'Супервайзер чужого отдела'),
+            },
+            headed={2: [5]},
+            departments={2: 5, 448: 9},
+        )
+        route, notifications = _grant_route(fake_db, actor_id=2)
+        self.assertEqual(_status(route(session_id=self.SESSION_ID)), 403)
+        self.assertIsNone(fake_db.granted)
+        self.assertEqual(notifications, [])
 
     def test_operator_heading_a_department_is_still_opened(self):
         """Оператору-главе отдела кнопка нужна ровно так же, как остальным.
@@ -1133,6 +1194,31 @@ class GrantAccessCardFlagsTests(unittest.TestCase):
         self.assertNotIn('_sensitive_access_grant_capability', listing)
 
 
+class GrantAccessGatedRolesTests(unittest.TestCase):
+    """У выдачи НЕТ своего списка гейтованных ролей.
+
+    Копия здесь была бы четвёртой (после вики и трёх ручек
+    /api/sensitive-access/*) и разошлась бы молча: подтверждение сказало бы
+    «этому сотруднику разделы открыты и так», а вики всё равно отказала бы.
+    Ровно это и случилось, когда гейт расширили на бэк-офис.
+    """
+
+    def test_capability_reads_the_shared_list(self):
+        source = BOT_PATH.read_text(encoding='utf-8-sig')
+        module = source_cache.parse(source)
+        for name in ('_sensitive_access_grant_capability',
+                     'grant_admin_session_sensitive_access'):
+            node = next(n for n in module.body
+                        if isinstance(n, ast.FunctionDef) and n.name == name)
+            body = ast.get_source_segment(source, node)
+            self.assertNotIn("== 'operator'", body, name)
+            self.assertNotIn("!= 'operator'", body, name)
+        capability = ast.get_source_segment(source, next(
+            n for n in module.body if isinstance(n, ast.FunctionDef)
+            and n.name == '_sensitive_access_grant_capability'))
+        self.assertIn('SENSITIVE_QR_GATED_ROLES', capability)
+
+
 class GrantAccessButtonTests(unittest.TestCase):
     """Интерфейсные решения кнопки. Их ломают молча, поэтому сторожим текстом."""
 
@@ -1145,9 +1231,21 @@ class GrantAccessButtonTests(unittest.TestCase):
     def test_button_is_gated_by_the_server_flag_and_by_the_state(self):
         self.assertIn('canGrantAccess && !accessOpen', self.modal,
                       'кнопка обязана исчезать там, где доступ уже открыт')
-        self.assertIn('detail?.user?.sensitive_access_required', self.modal)
         self.assertIn('detail?.user?.can_grant_sensitive_access', self.modal,
                       'право берётся с сервера, а не выводится из роли на клиенте')
+
+    def test_role_no_longer_hides_the_button(self):
+        """Видимость кнопки завязана на периметр, а не на «есть ли гейт».
+
+        Держит ли гейт этого человека — уходит в ТЕКСТ подтверждения, иначе
+        супервайзеру кнопки не было бы вовсе, а владелец просил обратного.
+        """
+        card = self.modal[self.modal.index('const canGrantAccess'):]
+        card = card[:card.index(';')]
+        self.assertNotIn('sensitive_access_required', card,
+                         'роль снова начала прятать кнопку')
+        self.assertIn('sensitive_access_required', self.app,
+                      'справка «гейт этого человека не держит» обязана дойти до подтверждения')
 
     def test_the_button_exists_once(self):
         self.assertEqual(self.modal.count("'Открыть доступ'"), 1)
