@@ -30,7 +30,14 @@
    письме супервайзеру. Остальной раздел фильтрует именно так (wiki/ack.py),
    и разъезжаться этим правилам нельзя.
 
-5. ЗАПРОСЫ-ОГРЫЗКИ. Поле поиска ищет по мере набора, поэтому одна фраза
+5. ВЫГРУЗКА — ТА ЖЕ ДВЕРЬ, ЧТО И ЭКРАН. Гейт и граница отдела у /analytics и
+   у /analytics/export обязаны совпадать: файл уносят с собой, и поимённый
+   список чужого отдела в нём хуже, чем на экране. Отличаться выгрузка вправе
+   ровно потолком строк — и проверяется, что экранный `limit` из строки запроса
+   на неё не действует, иначе файл обрезался бы ровно там, где начинается то,
+   ради чего его просили.
+
+6. ЗАПРОСЫ-ОГРЫЗКИ. Поле поиска ищет по мере набора, поэтому одна фраза
    приезжает шестью запросами. Свёртка проверяется на уровне питона: какие
    параметры уходят в запрос и какой запрос выбирается.
 """
@@ -38,6 +45,8 @@
 import sys
 import unittest
 from contextlib import contextmanager
+from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -50,9 +59,16 @@ try:
 except ImportError:  # pragma: no cover
     Flask = None
 
+try:
+    from openpyxl import load_workbook
+except ImportError:  # pragma: no cover
+    load_workbook = None
+
 from tests import prod_db  # noqa: E402
 
 from wiki import analytics as wiki_analytics  # noqa: E402
+from wiki import analytics_report  # noqa: E402
+from wiki import routes_analytics  # noqa: E402
 from wiki import perimeter as wiki_perimeter  # noqa: E402
 from wiki import queries  # noqa: E402
 from wiki import search as wiki_search  # noqa: E402
@@ -640,6 +656,271 @@ class AckOverdueTest(unittest.TestCase):
         self.assertEqual(not_open, 1)
         self.assertEqual(overdue, 1, 'просрочка ровно одна — отменённое не в счёт')
         self.assertEqual((people, articles), (2, 1))
+
+
+# ── Выгрузка ─────────────────────────────────────────────────────────────────
+
+# Порядок fetchone у выгрузки — тот же, что у экрана, плюс один запрос на
+# титульный лист (имя автора и название пространства одной строкой).
+EXPORT_FETCHONE = list(REPORT_FETCHONE) + [('Иванов Иван', 'Тез')]
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+@unittest.skipIf(load_workbook is None, 'openpyxl не установлен')
+class ExportGateTest(unittest.TestCase):
+    """Дверь в файл — та же, что дверь на экран."""
+
+    def test_reader_is_refused(self):
+        """Читателю выгрузка закрыта так же, как вкладка: в книге люди поимённо
+        и она уходит из портала вместе с человеком."""
+        client, _ = build_client(self, make_context(), fetchone=EXPORT_FETCHONE)
+        response = client.get('/api/wiki/analytics/export')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'WIKI_EDITOR_ONLY')
+
+    def test_editor_gets_a_workbook(self):
+        client, _ = build_client(self, make_context(can_edit=True),
+                                 fetchone=EXPORT_FETCHONE)
+        response = client.get('/api/wiki/analytics/export')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, routes_analytics.XLSX_MIME)
+        self.assertIn('attachment', response.headers.get('Content-Disposition', ''))
+        book = load_workbook(BytesIO(response.data))
+        self.assertEqual(book.sheetnames[0], 'Контекст')
+
+    def test_department_boundary_reaches_the_file(self):
+        """Граница отдела у файла своя не бывает: тот же _departments."""
+        client, cursor = build_client(
+            self, make_context(otp_role='sv', department_id=7, can_publish=True),
+            fetchone=EXPORT_FETCHONE)
+        self.assertEqual(client.get('/api/wiki/analytics/export').status_code, 200)
+        with_depts = [p for _sql, p in cursor.calls
+                      if isinstance(p, dict) and 'depts' in p]
+        self.assertTrue(with_depts, 'поимённый список в файле не получил границу')
+        for params in with_depts:
+            self.assertEqual(params['depts'], [7])
+
+    def test_screen_limit_does_not_shrink_the_file(self):
+        """`limit` из строки запроса — потолок ЭКРАНА.
+
+        Он приходит с фронта вместе с остальными параметрами периода, и если бы
+        выгрузка его слушалась, файл обрезался бы сотней строк — ровно там, где
+        начинается то, ради чего его и просили.
+        """
+        client, cursor = build_client(self, make_context(can_edit=True),
+                                      fetchone=EXPORT_FETCHONE)
+        self.assertEqual(
+            client.get('/api/wiki/analytics/export?limit=5').status_code, 200)
+        limits = {p['limit'] for _sql, p in cursor.calls
+                  if isinstance(p, dict) and 'limit' in p}
+        self.assertEqual(limits, {routes_analytics.EXPORT_ROWS})
+
+    def test_period_and_space_reach_the_file(self):
+        """Файл повторяет то, на что человек смотрит: тот же период и та же вики."""
+        client, cursor = build_client(self, make_context(can_edit=True),
+                                      fetchone=EXPORT_FETCHONE)
+        client.get('/api/wiki/analytics/export?since=2026-08-01&until=2026-08-24'
+                   '&space_id=3')
+        dated = [p for _sql, p in cursor.calls
+                 if isinstance(p, dict) and 'since' in p]
+        self.assertTrue(dated)
+        for params in dated:
+            self.assertEqual((params['since'], params['until']),
+                             ('2026-08-01', '2026-08-24'))
+        # Название пространства для титульного листа сервер берёт из базы, а не
+        # из строки запроса: подставлять в файл присланное браузером незачем.
+        titles = [p for _sql, p in cursor.calls
+                  if isinstance(p, dict) and 'space' in p and 'user' in p]
+        self.assertEqual(titles, [{'user': 42, 'space': 3}])
+
+
+@unittest.skipIf(load_workbook is None, 'openpyxl не установлен')
+class ExportWorkbookTest(unittest.TestCase):
+    """Книга: листы, форматы ячеек и оговорки.
+
+    Проверяется не «собралось без ошибки», а то, ради чего файл и берут: дата
+    обязана быть датой (иначе не работает фильтр по периоду), доля — долей
+    (иначе по колонке не считается среднее), а обрез списка — подписанным.
+    """
+
+    SHEETS = ['Контекст', 'Прочтения по дням', 'Кто читает по отделам',
+              'Что читают чаще всего', 'Не открывали ни разу',
+              'Кто пользовался вики', 'Разделы', 'Давно не обновляли',
+              'Ознакомления по отделам', 'Просрочено поимённо',
+              'Темы без ответа']
+
+    def _book(self, report, **kwargs):
+        kwargs.setdefault('generated_at', datetime(2026, 8, 26, 12, 0))
+        stream = analytics_report.build_workbook(report=report, **kwargs)
+        return load_workbook(BytesIO(stream.getvalue()))
+
+    def test_empty_report_still_builds(self):
+        """Пустой периметр не должен ронять выгрузку: у нового редактора он
+        именно такой, и вместо файла он получил бы 500."""
+        book = self._book({})
+        self.assertEqual(book.sheetnames, self.SHEETS)
+
+    def test_rows_land_with_the_right_types(self):
+        book = self._book(FULL_REPORT, space_name='Тез',
+                          requested_by='Иванов Иван',
+                          since='2026-08-01', until='2026-08-26')
+
+        top = book['Что читают чаще всего']
+        self.assertEqual(top['A2'].value, 'Как принять заказ')
+        self.assertEqual(top['B2'].value, 'опубликована')
+        # Дата — датой: по тексту «22.08.2026» фильтр Excel не работает.
+        self.assertIsInstance(top['E2'].value, datetime)
+
+        # Доля — числом от нуля до единицы плюс процентный формат: строка «50%»
+        # не усредняется и не ложится в сводную.
+        depts = book['Кто читает по отделам']
+        self.assertAlmostEqual(depts['D2'].value, 0.5)
+        self.assertEqual(depts['D2'].number_format, '0%')
+
+        unread = book['Не открывали ни разу']
+        self.assertEqual(unread['B2'].value, 'нет', 'статью не открывали никогда')
+        self.assertIsNone(unread['C2'].value)
+        self.assertEqual(unread['B3'].value, 'да')
+        self.assertEqual(unread['D3'].value, 25, 'дней с последнего чтения')
+
+        # Коды превращаются в те же слова, что на экране.
+        self.assertEqual(book['Просрочено поимённо']['F2'].value, 'не открывал')
+        self.assertEqual(book['Темы без ответа']['B2'].value, 'Поиск')
+        self.assertEqual(book['Темы без ответа']['C2'].value, 'Нет статьи')
+
+        sections = book['Разделы']
+        self.assertEqual(sections['F2'].value, 'Пётр · 3, Анна · 1')
+
+    def test_context_carries_period_author_and_notes(self):
+        book = self._book(FULL_REPORT, space_name='Тез',
+                          requested_by='Иванов Иван',
+                          since='2026-08-01', until='2026-08-26')
+        text = '\n'.join(str(cell.value) for row in book['Контекст'].iter_rows()
+                          for cell in row if cell.value is not None)
+        self.assertIn('с 2026-08-01 по 2026-08-26', text)
+        self.assertIn('Иванов Иван', text)
+        self.assertIn('Тез', text)
+        # Оговорки приезжают с сервера теми же словами, что на экране: иначе
+        # файл и вкладка объясняют одно число по-разному.
+        self.assertIn('Прочтение — это человек, статья и минута', text)
+        self.assertIn('только по вашим отделам', text)
+        self.assertIn('только ваши отделы', text, 'охват выгрузки не подписан')
+        # Легенда причин — только те, что встретились в выборке.
+        self.assertIn('«Нет статьи»', text)
+        self.assertNotIn('«Помощник отказал»', text)
+
+    def test_period_without_borders_is_named(self):
+        """Пустые границы — «за всё время», а не пустая строка: через месяц по
+        одному числу уже не сказать, за какие дни оно посчитано."""
+        book = self._book({})
+        values = [cell.value for row in book['Контекст'].iter_rows() for cell in row]
+        self.assertIn('за всё время', values)
+
+    def test_truncated_sheet_is_named(self):
+        """Молчаливый обрез читается как «больше и нет»."""
+        report = {'reading': {'top': [{'title': 'Статья', 'reads': 1}] * 3}}
+        book = self._book(report, row_cap=3)
+        text = '\n'.join(str(cell.value) for row in book['Контекст'].iter_rows()
+                          for cell in row if cell.value is not None)
+        self.assertIn('«Что читают чаще всего» упёрся в потолок', text)
+
+    def test_filename_has_no_slashes(self):
+        self.assertEqual(analytics_report.report_filename(datetime(2026, 8, 26)),
+                         'wiki_analytics_2026-08-26.xlsx')
+
+
+# Один отчёт на все проверки книги: он повторяет форму ответа /analytics, и
+# собирать его заново в каждом тесте значило бы завести пять слегка разных
+# форм ответа вместо одной.
+FULL_REPORT = {
+    'scoped': True,
+    'notes': {
+        'read': 'Прочтение — это человек, статья и минута: обновление страницы…',
+        'ack_now': 'Выбранный период на этот блок не действует.',
+        'scoped': 'Люди показаны поимённо только по вашим отделам.',
+    },
+    'reading': {
+        'totals': {'reads': 47, 'opens': 56, 'readers': 12, 'articles_read': 9,
+                   'published': 20, 'unread': 11, 'coverage': 45.0},
+        'days': [{'day': '2026-08-25', 'reads': 4, 'readers': 2}],
+        'top': [{'id': 1, 'slug': 'order', 'title': 'Как принять заказ',
+                 'status': 'published', 'reads': 12, 'readers': 5,
+                 'updated_at': '2026-08-20T10:00:00'}],
+        'unread': [
+            {'id': 2, 'slug': 'never', 'title': 'Регламент выдачи',
+             'updated_at': '2026-01-10T10:00:00', 'last_at': None},
+            {'id': 3, 'slug': 'old', 'title': 'Памятка по кассе',
+             'updated_at': '2026-02-10T10:00:00', 'last_at': '2026-08-01T12:00:00'},
+        ],
+        'departments': [{'department_id': 1, 'name': 'СЗоВ', 'reads': 30,
+                         'readers': 5, 'articles_read': 7, 'headcount': 10}],
+        'people': [{'user_id': 5, 'name': 'Пётр Петров', 'department': 'СЗоВ',
+                    'reads': 9, 'articles': 4, 'last_at': '2026-08-25T09:30:00'}],
+    },
+    'content': {
+        'sections': [{'id': 1, 'name': 'Регламенты', 'parent': 'СЗоВ',
+                      'articles': 12, 'published': 10,
+                      'last_update': '2026-08-19T10:00:00',
+                      'editors': [{'name': 'Пётр', 'edits': 3},
+                                  {'name': 'Анна', 'edits': 1}]}],
+        'stale': [{'id': 4, 'slug': 'stale', 'title': 'Старый регламент',
+                   'updated_at': '2025-06-01T10:00:00', 'days': 451,
+                   'review_overdue': True, 'editor': 'Анна', 'section': 'Регламенты'}],
+        'stale_total': 1,
+        'stale_days': 180,
+    },
+    'acknowledgements': {
+        'totals': {'total': 8, 'done': 5, 'not_open': 2, 'overdue': 1,
+                   'people': 4, 'articles': 3},
+        'departments': [{'department_id': 1, 'name': 'СЗоВ', 'total': 8,
+                         'done': 4, 'overdue': 1}],
+        'overdue': [{'user_id': 6, 'name': 'Сидоров Сидор', 'department': 'СЗоВ',
+                     'team': 'Группа 1', 'supervisor': 'Иванов Иван',
+                     'article_id': 1, 'slug': 'order', 'title': 'Как принять заказ',
+                     'due_at': '2026-08-10T00:00:00', 'status': 'not_open',
+                     'days': 16}],
+    },
+    'demand': {
+        'search': {'total': 120, 'empty': 14, 'people': 9, 'steps': 340,
+                   'empty_share': 11.7, 'logging_since': '2026-08-01T00:00:00'},
+        'assistant': {'total': 40, 'answered': 30, 'no_answer': 8, 'clarify': 2,
+                      'people': 6},
+        'items': [{'channel': 'search', 'key': 'справка ндс', 'text': 'справка ндс',
+                   'times': 6, 'people': 3, 'last_at': '2026-08-24T15:00:00',
+                   'reason': 'missing'}],
+    },
+}
+
+
+class ExportButtonTest(unittest.TestCase):
+    """Кнопка выгрузки во вкладке. Тест читает WikiAnalytics.jsx текстом.
+
+    Решения здесь интерфейсные, но ломаются они молча: с экранным `limit` файл
+    приедет обрезанным сотней строк и будет выглядеть исправным, а без blob и
+    заголовков вместо книги скачается страница входа.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / 'src' / 'components' / 'wiki'
+                   / 'WikiAnalytics.jsx').read_text(encoding='utf-8')
+
+    def test_button_calls_the_export_route(self):
+        self.assertIn('/analytics/export', self.src)
+        self.assertIn('Выгрузить в Excel', self.src)
+
+    def test_file_is_fetched_with_headers_and_as_blob(self):
+        """Раздел авторизуется заголовком: обычная ссылка их не несёт."""
+        self.assertIn("responseType: 'blob'", self.src)
+        self.assertRegex(self.src, r'analytics/export`,\s*\{\s*\n?\s*headers')
+
+    def test_screen_row_cap_is_dropped(self):
+        """`limit` — потолок экрана; в файле он обрезал бы ровно подробность."""
+        self.assertIn('limit: undefined', self.src)
+
+    def test_period_and_space_go_with_the_file(self):
+        """Выгрузка повторяет то, на что человек смотрит."""
+        self.assertIn('...params', self.src)
 
 
 if __name__ == '__main__':

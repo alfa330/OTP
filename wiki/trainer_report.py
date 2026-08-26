@@ -23,19 +23,14 @@
 
 from datetime import datetime
 from io import BytesIO
-from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
 
-ALMATY = ZoneInfo('Asia/Almaty')
-
-HEADER_FILL = PatternFill('solid', fgColor='1F2937')
-HEADER_FONT = Font(bold=True, color='FFFFFF')
-TITLE_FONT = Font(bold=True, size=13)
-NOTE_FONT = Font(color='6B7280')
-DATE_FMT = 'DD.MM.YYYY HH:MM'
+from .report_kit import (
+    DATE_FMT, TITLE_FONT, fill_table, note, now_almaty, parse, period_words,
+)
+from .report_kit import report_filename as report_kit_filename
 
 STATUS_TITLES = {
     'finished': 'Прошёл',
@@ -99,19 +94,6 @@ ARTICLE_COLUMNS = (
 )
 
 
-def _parse(value):
-    """ISO-строка из слоя запросов → datetime без таймзоны (в базе она уже
-    алматинская). Excel про таймзоны не знает, и подсовывать ему aware-объект
-    значит получить строку вместо даты."""
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return parsed.replace(tzinfo=None)
-
-
 def _human_time(seconds):
     if seconds is None:
         return ''
@@ -123,32 +105,6 @@ def _seconds(duration_ms):
     return None if duration_ms is None else round(duration_ms / 1000)
 
 
-def _header(sheet, columns, row=1):
-    for index, (_key, title, width) in enumerate(columns, start=1):
-        cell = sheet.cell(row=row, column=index, value=title)
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(vertical='center', wrap_text=True)
-        sheet.column_dimensions[get_column_letter(index)].width = width
-    sheet.row_dimensions[row].height = 28
-    # Заморозка и автофильтр — на каждом листе с таблицей: без них выгрузку на
-    # тысячу строк листают вслепую, потеряв шапку на втором экране.
-    sheet.freeze_panes = sheet.cell(row=row + 1, column=1)
-
-
-def _autofilter(sheet, columns, rows):
-    if not rows:
-        return
-    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(columns)), rows + 1)
-
-
-def _put(sheet, row, column, value, *, date=False):
-    cell = sheet.cell(row=row, column=column, value=value)
-    if date and value:
-        cell.number_format = DATE_FMT
-    return cell
-
-
 def build_workbook(*, trainer, totals, runs, people, articles,
                    since=None, until=None, requested_by='', generated_at=None):
     """Возвращает BytesIO с готовой книгой.
@@ -157,14 +113,15 @@ def build_workbook(*, trainer, totals, runs, people, articles,
     приходит из фронта вместе с запросом. Ключ пишем рядом с названием, потому
     что по ключу выгрузку и опознают в переписке.
     """
-    generated_at = generated_at or datetime.now(ALMATY).replace(tzinfo=None)
+    generated_at = generated_at or now_almaty()
 
     workbook = Workbook()
     _fill_context(workbook.active, trainer, totals, since, until,
                   requested_by, generated_at)
-    _fill_runs(workbook.create_sheet('Прохождения'), runs)
-    _fill_people(workbook.create_sheet('По людям'), people)
-    _fill_articles(workbook.create_sheet('По статьям'), articles)
+    fill_table(workbook.create_sheet('Прохождения'), RUN_COLUMNS, runs, _run_values)
+    fill_table(workbook.create_sheet('По людям'), PERSON_COLUMNS, people, _person_values)
+    fill_table(workbook.create_sheet('По статьям'), ARTICLE_COLUMNS, articles,
+               _article_values)
 
     stream = BytesIO()
     workbook.save(stream)
@@ -173,10 +130,8 @@ def build_workbook(*, trainer, totals, runs, people, articles,
 
 
 def report_filename(trainer_key, generated_at=None):
-    generated_at = generated_at or datetime.now(ALMATY)
-    safe = ''.join(ch for ch in str(trainer_key or 'trainer')
-                   if ch.isalnum() or ch in '-_')[:48] or 'trainer'
-    return 'trainer_%s_%s.xlsx' % (safe, generated_at.strftime('%Y-%m-%d'))
+    """Имя файла узнают по ключу сценария, поэтому он в имени и стоит."""
+    return report_kit_filename('trainer_%s' % (trainer_key or 'trainer'), generated_at)
 
 
 # ── Листы ────────────────────────────────────────────────────────────────────
@@ -189,24 +144,11 @@ def _fill_context(sheet, trainer, totals, since, until, requested_by, generated_
     sheet['A1'] = 'Статистика тренажёра'
     sheet['A1'].font = TITLE_FONT
 
-    period = 'за всё время'
-    if since and until:
-        period = 'с %s по %s' % (since, until)
-    elif since:
-        period = 'с %s' % since
-    elif until:
-        period = 'по %s' % until
-
-    def note(text):
-        cell = sheet.cell(row=sheet.max_row + 1, column=1, value=text)
-        cell.font = NOTE_FONT
-        cell.alignment = Alignment(wrap_text=True, vertical='top')
-
     rows = [
         ('Тренажёр', trainer.get('title') or trainer.get('key')),
         ('Ключ сценария', trainer.get('key')),
         ('Приложение', trainer.get('app') or ''),
-        ('Период', period),
+        ('Период', period_words(since, until)),
         ('Выгрузку собрал', requested_by or ''),
         ('Дата выгрузки', generated_at),
         ('', ''),
@@ -218,8 +160,8 @@ def _fill_context(sheet, trainer, totals, since, until, requested_by, generated_
         ('Промахов на прохождение (среднее)', totals.get('avg_errors')),
         ('Подсказок на прохождение (среднее)', totals.get('avg_hints')),
         ('Начинали заново', totals.get('restarts', 0)),
-        ('Первый запуск', _parse(totals.get('first_at'))),
-        ('Последний запуск', _parse(totals.get('last_at'))),
+        ('Первый запуск', parse(totals.get('first_at'))),
+        ('Последний запуск', parse(totals.get('last_at'))),
     ]
     for index, (label, value) in enumerate(rows, start=3):
         sheet.cell(row=index, column=1, value=label).font = Font(bold=bool(label))
@@ -228,75 +170,60 @@ def _fill_context(sheet, trainer, totals, since, until, requested_by, generated_
             cell.number_format = DATE_FMT
 
     sheet.cell(row=sheet.max_row + 2, column=1)
-    note('«Человек садилось» и «человек прошло» считаются по разным людям, а не '
+    note(sheet, '«Человек садилось» и «человек прошло» считаются по разным людям, а не '
          'по попыткам: один и тот же оператор мог пройти тренажёр трижды.')
-    note('Медиана, а не среднее: одна попытка, оставленная открытой на двадцать '
+    note(sheet, 'Медиана, а не среднее: одна попытка, оставленная открытой на двадцать '
          'минут, сдвигает среднее так, что цифра перестаёт что-либо значить.')
-    note('Время и промахи считаются только по завершённым попыткам — у брошенной '
+    note(sheet, 'Время и промахи считаются только по завершённым попыткам — у брошенной '
          'ни то, ни другое не окончательно.')
-    note('Строка со статусом «Не завершил» — попытка, которую человек начал и '
+    note(sheet, 'Строка со статусом «Не завершил» — попытка, которую человек начал и '
          'закрыл, не дойдя до конца. Это не ошибка учёта, а рабочая цифра: по ней '
          'видно, на каком шаге инструкция теряет людей.')
 
 
-def _fill_runs(sheet, runs):
-    _header(sheet, RUN_COLUMNS)
-    for index, run in enumerate(runs, start=2):
-        seconds = _seconds(run.get('duration_ms'))
-        values = {
-            'started_at': _parse(run.get('started_at')),
-            'name': run.get('name'),
-            'department': run.get('department') or '',
-            'group': run.get('group') or '',
-            'role': ROLE_TITLES.get(run.get('role'), run.get('role') or ''),
-            'status': STATUS_TITLES.get(run.get('status'), run.get('status')),
-            'progress': '%d из %d' % (run.get('stages_done') or 0,
-                                      run.get('stages_total') or 0),
-            'errors': run.get('errors') or 0,
-            'hints': run.get('hints') or 0,
-            'restarts': run.get('restarts') or 0,
-            'seconds': seconds,
-            'human_time': _human_time(seconds),
-            'source': SOURCE_TITLES.get(run.get('source'), run.get('source')),
-            'article_title': run.get('article_title') or '',
-            'finished_at': _parse(run.get('finished_at')),
-        }
-        for column, (key, _title, _width) in enumerate(RUN_COLUMNS, start=1):
-            _put(sheet, index, column, values[key], date=key.endswith('_at'))
-    _autofilter(sheet, RUN_COLUMNS, len(runs))
+def _run_values(run):
+    seconds = _seconds(run.get('duration_ms'))
+    return {
+        'started_at': parse(run.get('started_at')),
+        'name': run.get('name'),
+        'department': run.get('department') or '',
+        'group': run.get('group') or '',
+        'role': ROLE_TITLES.get(run.get('role'), run.get('role') or ''),
+        'status': STATUS_TITLES.get(run.get('status'), run.get('status')),
+        'progress': '%d из %d' % (run.get('stages_done') or 0,
+                                  run.get('stages_total') or 0),
+        'errors': run.get('errors') or 0,
+        'hints': run.get('hints') or 0,
+        'restarts': run.get('restarts') or 0,
+        'seconds': seconds,
+        'human_time': _human_time(seconds),
+        'source': SOURCE_TITLES.get(run.get('source'), run.get('source')),
+        'article_title': run.get('article_title') or '',
+        'finished_at': parse(run.get('finished_at')),
+    }
 
 
-def _fill_people(sheet, people):
-    _header(sheet, PERSON_COLUMNS)
-    for index, person in enumerate(people, start=2):
-        values = {
-            'name': person.get('name'),
-            'department': person.get('department') or '',
-            'group': person.get('group') or '',
-            'role': ROLE_TITLES.get(person.get('role'), person.get('role') or ''),
-            'runs': person.get('runs') or 0,
-            'finished': person.get('finished') or 0,
-            'errors': person.get('errors') or 0,
-            'hints': person.get('hints') or 0,
-            'best_seconds': _seconds(person.get('best_ms')),
-            'first_at': _parse(person.get('first_at')),
-            'last_at': _parse(person.get('last_at')),
-        }
-        for column, (key, _title, _width) in enumerate(PERSON_COLUMNS, start=1):
-            _put(sheet, index, column, values[key], date=key.endswith('_at'))
-    _autofilter(sheet, PERSON_COLUMNS, len(people))
+def _person_values(person):
+    return {
+        'name': person.get('name'),
+        'department': person.get('department') or '',
+        'group': person.get('group') or '',
+        'role': ROLE_TITLES.get(person.get('role'), person.get('role') or ''),
+        'runs': person.get('runs') or 0,
+        'finished': person.get('finished') or 0,
+        'errors': person.get('errors') or 0,
+        'hints': person.get('hints') or 0,
+        'best_seconds': _seconds(person.get('best_ms')),
+        'first_at': parse(person.get('first_at')),
+        'last_at': parse(person.get('last_at')),
+    }
 
 
-def _fill_articles(sheet, articles):
-    _header(sheet, ARTICLE_COLUMNS)
-    for index, article in enumerate(articles, start=2):
-        values = {
-            'title': article.get('title'),
-            'runs': article.get('runs') or 0,
-            'finished': article.get('finished') or 0,
-            'people': article.get('people') or 0,
-            'last_at': _parse(article.get('last_at')),
-        }
-        for column, (key, _title, _width) in enumerate(ARTICLE_COLUMNS, start=1):
-            _put(sheet, index, column, values[key], date=key.endswith('_at'))
-    _autofilter(sheet, ARTICLE_COLUMNS, len(articles))
+def _article_values(article):
+    return {
+        'title': article.get('title'),
+        'runs': article.get('runs') or 0,
+        'finished': article.get('finished') or 0,
+        'people': article.get('people') or 0,
+        'last_at': parse(article.get('last_at')),
+    }

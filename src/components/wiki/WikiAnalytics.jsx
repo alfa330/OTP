@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, BookOpen, EyeOff, FolderTree, History, Library, Loader2,
-    RefreshCw, Search, ShieldAlert, ShieldCheck, TrendingUp, Users,
+    AlertCircle, BookOpen, Download, EyeOff, FolderTree, History, Library,
+    Loader2, RefreshCw, Search, ShieldAlert, ShieldCheck, TrendingUp, Users,
 } from 'lucide-react';
 import {
     Bar as RBar, CartesianGrid, ComposedChart, Line, ResponsiveContainer,
     Tooltip, XAxis, YAxis,
 } from 'recharts';
 
-import { iosCard, iosBtnGhost, IosBadge, IosHint, IosSegmented } from '../ui/ios';
+import { iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosHint, IosSegmented } from '../ui/ios';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import { Bar, Metric, PagedTable, Td, Th } from './reportKit';
 import useStableCallback from './useStableCallback';
@@ -388,12 +388,13 @@ const DaysChart = ({ days, since = null, until = null }) => {
 };
 
 export default function WikiAnalytics({ base, headers, showToast, spaceId = null,
-                                        onOpenArticle = null }) {
+                                        spaceName = '', onOpenArticle = null }) {
     const toast = useStableCallback(showToast);
 
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [downloading, setDownloading] = useState(false);
     /* Период одним значением: «с» и «по» — две границы одного отрезка, а не два
        независимых фильтра. Пустые границы = «за всё время».
 
@@ -440,6 +441,46 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
     }, [base, headers, params, toast]);
 
     useEffect(() => { load(); }, [load]);
+
+    /* Выгрузка: тот же отчёт, но целиком и в Excel.
+     *
+     * Зачем она нужна при живом экране. Экран отвечает на вопрос «работает ли
+     * вики» и ради этого режет каждую таблицу пятью строками; из него нельзя
+     * ни отфильтровать просрочку по своей группе, ни свести прочтения по
+     * отделам за квартал, ни отправить список тому, у кого вкладки нет вовсе.
+     * Файл ровно за этим и берут — поэтому в нём нет ни потолка в пять строк,
+     * ни экранной сотни: сервер собирает всё, что нашлось за период.
+     *
+     * Файл забираем axios'ом, а не ссылкой: раздел авторизуется заголовком, а
+     * обычная ссылка заголовков не несёт — вместо книги пришла бы страница
+     * входа. Отдаём его браузеру временной ссылкой на blob.
+     *
+     * Период и пространство уходят те же, что на экране: выгрузка обязана
+     * повторять то, на что человек сейчас смотрит, — иначе её открывают и
+     * видят другие числа. А вот `limit` снимаем: это потолок ЭКРАНА, и с ним
+     * файл обрезался бы ровно там, где начинается то, ради чего его просили. */
+    const download = useCallback(() => {
+        setDownloading(true);
+        return axios.get(`${base}/analytics/export`, {
+            headers, responseType: 'blob', params: { ...params, limit: undefined },
+        })
+            .then((r) => {
+                const url = URL.createObjectURL(new Blob([r.data]));
+                const link = document.createElement('a');
+                link.href = url;
+                /* Имя с пространством: у Тез и Таксопарков отчёты разные, и
+                   две «Аналитика вики.xlsx» в загрузках различаются только
+                   припиской «(1)». */
+                link.download = spaceName
+                    ? `Аналитика вики — ${spaceName}.xlsx` : 'Аналитика вики.xlsx';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+            })
+            .catch((e) => toast(errText(e, 'Не удалось собрать выгрузку'), 'error'))
+            .finally(() => setDownloading(false));
+    }, [base, headers, params, spaceName, toast]);
 
     const reading = data?.reading;
     const ack = data?.acknowledgements;
@@ -528,6 +569,22 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                         <Loader2 size={13} className="animate-spin" /> считаем…
                     </span>
                 )}
+                {/* Кнопка стоит здесь, а не над каждой таблицей: выгружается
+                    весь отчёт за выбранный период, и место ей — рядом с тем,
+                    что этот период задаёт. Девять кнопок «выгрузить» у девяти
+                    таблиц дали бы девять файлов и ту же работу по их сборке
+                    вручную. */}
+                <button
+                    type="button"
+                    className={`${iosBtnSecondary} ml-auto`}
+                    onClick={download}
+                    disabled={downloading}
+                >
+                    {downloading
+                        ? <Loader2 size={15} className="animate-spin" />
+                        : <Download size={15} />}
+                    Выгрузить в Excel
+                </button>
             </section>
 
             {/* Ни одной видимой статьи — говорим об этом ДО нулей, а не после.

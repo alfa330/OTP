@@ -1121,6 +1121,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                            запись о чужой вике всё равно нужна, аналитика
                            отвечает на вопрос про КОНКРЕТНУЮ базу знаний. */
                         spaceId={activeSpace?.id || null}
+                        /* Название — только ради имени файла выгрузки: две
+                           «Аналитика вики.xlsx» в загрузках не различить. */
+                        spaceName={activeSpace?.name || ''}
                         onOpenArticle={(slug) => {
                             setTab('library');
                             setSearchTarget({ slug, from: returnDoor('analytics') });
