@@ -18,6 +18,8 @@ import { backLabel } from './articleTrail';
 import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
+import useCopyGuard from './useCopyGuard';
+import useStableCallback from './useStableCallback';
 import WikiAckPanel from './WikiAckPanel';
 import WikiHistory from './WikiHistory';
 
@@ -384,6 +386,30 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         [article?.content, base],
     );
 
+    /* Статья защищена от копирования (тумблер в редакторе). Признак приходит с
+       сервера полем copy_protected и действует ОДИНАКОВО для всех, кто читает
+       статью, — включая автора и администратора. Исключений тут нет намеренно:
+       «у меня копируется, а у людей нет» — это состояние, в котором автор не
+       может проверить собственный запрет, а поддержка не может воспроизвести
+       жалобу. Кому текст нужен целиком, тот открывает «Править». */
+    const copyProtected = !!article?.copy_protected;
+
+    /* Исключений по типу статьи здесь НЕТ — и это решение, а не упущение.
+       Соблазн вывести из-под запрета статью-справочник был: тела у неё нет,
+       вместо текста рисуется калькулятор с полями ввода. Но тумблер в редакторе
+       показывается у всякой статьи и сохраняется у всякой, и статья, у которой
+       он включён, а на витрине не действует, — это ровно та ложь на экране,
+       ради которой всё остальное здесь и написано: владелец видит «защита
+       стоит», читатель копирует. Поля ввода при этом целы — им выделение
+       возвращает отдельное правило в wiki-theme.css. */
+    const protectText = copyProtected;
+    const protectedRef = useRef(null);
+
+    /* Тост — через стабильную обёртку: showToast приходит новой функцией на
+       каждый рендер App, и в зависимостях эффекта ниже он переподписывал бы
+       слушателей документа на любой чужой рендер (см. useStableCallback.js). */
+    const notify = useStableCallback(showToast);
+
     /* Два блока связей — и ни одной статьи в обоих сразу.
      *
      * Взаимная пара (я ссылаюсь на неё, она на меня) попала бы и в «Связанные
@@ -443,6 +469,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             }
         });
     }, [safeHtml, bodyReady]);
+
+    /* ЗАЩИТА ОТ КОПИРОВАНИЯ (тумблер в редакторе, wiki_articles.copy_protected).
+       Выделение гасит CSS (.wiki-no-copy), буфер обмена — этот хук; почему
+       нужны оба рубежа, написано в useCopyGuard.js.
+
+       Тост обязателен: Ctrl+C, который молча ничего не делает, читается как
+       поломка портала, а не как запрет. */
+    const onCopyBlocked = useCallback(
+        () => notify?.('Копирование из этой статьи запрещено', 'info'), [notify]);
+    useCopyGuard(protectText, protectedRef, onCopyBlocked);
 
     /* Пробел и Enter на кнопке тренажёра. У настоящей button это работает само,
        у div с role=button — нет, и без этого кнопка остаётся недоступной тем,
@@ -760,7 +796,19 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 делает карточку контейнером прокрутки, и position:sticky внутри
                 неё перестаёт работать: оглавление уезжало вместе со страницей.
                 clip обрезает, не создавая контейнера прокрутки. */}
-            <article className={`${iosCard} overflow-clip`}>
+            {/* Запрет копирования накрывает КАРТОЧКУ, а не только тело.
+                Тело — это лишь текст; заголовок, аннотация и оглавление лежат
+                в шапке рядом, и запрет на одном теле обходился бы Ctrl+A:
+                название статьи и полный список её заголовков выделились бы и
+                скопировались как ни в чём не бывало. */}
+            <article
+                ref={protectedRef}
+                className={`${iosCard} overflow-clip${protectText ? ' wiki-no-copy' : ''}`}
+                /* Перетаскивание — тот же вынос наружу, только мышью: кусок
+                   текста и картинку роняют в соседнее окно, и запрета на буфер
+                   обмена это не касается. */
+                onDragStart={protectText ? (event) => event.preventDefault() : undefined}
+            >
                 <header className="border-b border-slate-100 px-5 py-4 sm:px-7 sm:py-6">
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
                         <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
@@ -781,6 +829,13 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             <IosBadge tone="amber">Только по списку</IosBadge>
                         )}
                         {article.strict_mode && <IosBadge tone="red">Строгий режим</IosBadge>}
+                        {/* Читателю надо объяснить, почему текст не выделяется.
+                            Без бейджа неработающее выделение — это «портал
+                            сломался», и человек идёт в поддержку вместо того,
+                            чтобы понять запрет. */}
+                        {protectText && (
+                            <IosBadge tone="slate">Копирование запрещено</IosBadge>
+                        )}
                         {/* Статья открыта ТОЛЬКО гостевым доступом — значит у
                             неё есть дата, после которой она пропадёт. Сервер
                             присылает поле лишь в этом случае: тому, кому статья
@@ -915,6 +970,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     </footer>
                 )}
             </article>
+
+            {/* Что увидит нажавший Ctrl+P. На экране блока нет вовсе, на бумаге
+                нет самой статьи — и стоять он обязан СНАРУЖИ карточки, иначе
+                при печати скрылся бы вместе с ней. Пустой лист человек прочитал
+                бы как сбой печати, а не как запрет. */}
+            {protectText && (
+                <p className="wiki-print-only px-1 text-[13px] text-slate-500">
+                    Статья защищена от копирования и не печатается.
+                </p>
+            )}
 
             {article.why && (
                 <p className="px-1 text-[11.5px] text-slate-400">

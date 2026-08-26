@@ -321,6 +321,12 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             # статьёй»), отрицательная — периметру, где по умолчанию разрешено.
             ai_opt_out=(not data['ai_support']) if 'ai_support' in data
                        else bool(data.get('ai_opt_out')),
+            # «Защита от копирования» ставится ПРИ СОЗДАНИИ, а не только правкой
+            # потом: тумблер стоит в форме новой статьи, и приди он сюда мимо
+            # INSERT'а — статья открылась бы читателям незащищённой до первого
+            # сохранения. Ровно этой ложью про применённое решение когда-то
+            # отличался статус (см. ниже).
+            copy_protected=bool(data.get('copy_protected')),
             # Запасной раздел ищется только в пространствах автора: без этой
             # границы статья без раздела уехала бы в «Общий сотрудник» чужого
             # пространства (см. wiki_edit.default_section_id).
@@ -450,6 +456,19 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                     "code": "WIKI_FORBIDDEN", "required": "can_edit",
                 }), 403
             fields['cross_department'] = bool(data['cross_department'])
+
+        # «Защита от копирования» — тоже решение владельца статьи, и права
+        # править её достаточно: запрет ничего не открывает и не закрывает в
+        # доступе, он лишь мешает унести текст из витрины. Требовать здесь
+        # администратора доступов значило бы, что автор не может защитить
+        # собственный регламент, не сходив к нему.
+        if 'copy_protected' in data:
+            if not permissions.get('can_edit'):
+                return jsonify({
+                    "error": "Нет права править эту статью",
+                    "code": "WIKI_FORBIDDEN", "required": "can_edit",
+                }), 403
+            fields['copy_protected'] = bool(data['copy_protected'])
 
         changed = wiki_edit.update_article(
             cursor, article_id, fields, editor_id=ctx['user_id'],

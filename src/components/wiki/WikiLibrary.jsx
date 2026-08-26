@@ -449,6 +449,19 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 </div>
             )}>
                 <WikiEditor
+                    /* key — не украшение. Редактор держит поля в useState с
+                       начальным значением из article, а ниже есть путь, где
+                       article подменяется у УЖЕ смонтированного редактора:
+                       «Обновить эту статью» документом делает GET и setEditing
+                       (onUpdateExisting). Без key React оставляет тот же
+                       инстанс, и форма показывает состояние ПРЕЖНЕЙ статьи —
+                       чужое название, чужой раздел и, что хуже всего, снятую
+                       защиту от копирования: сохранение молча унесло бы
+                       copy_protected=false на боевой регламент. Ключ меняется
+                       ровно в этом переходе — onSaved закрывает редактор
+                       (setEditing(null)), так что перемонтирования на ровном
+                       месте не будет. */
+                    key={editing.id || 'new'}
                     base={base}
                     headers={headers}
                     showToast={showToast}

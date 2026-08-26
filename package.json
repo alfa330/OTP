@@ -28,6 +28,7 @@
     "test:wiki-home-paging": "node --test tests/wiki_home_recent_paging.test.mjs",
     "test:wiki-article-index": "node --test tests/wiki_article_index.test.mjs",
     "test:wiki-catalog-all": "node --test tests/wiki_catalog_all.test.mjs",
+    "test:wiki-copy-guard": "node --test tests/wiki_copy_guard.test.mjs",
   "test:wiki-section-grants": "node --test tests/wiki_section_grants.test.mjs",
   "test:wiki-section-access": "node --test tests/wiki_section_access_render.test.mjs",
     "test:wiki-ask-assistant": "node --test tests/wiki_ask_assistant.test.mjs",

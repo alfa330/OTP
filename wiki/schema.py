@@ -1558,6 +1558,17 @@ _ORG_STATEMENTS = [
 
     "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
     "cross_department BOOLEAN NOT NULL DEFAULT TRUE;",
+
+    # ЗАЩИТА ОТ КОПИРОВАНИЯ. Тумблер владельца статьи: витрина перестаёт
+    # отдавать текст выделению и буферу обмена.
+    #
+    # По умолчанию FALSE, и иначе быть не может: статей в проде уже написаны
+    # сотни, и миграция, включившая защиту всем, отняла бы у людей возможность
+    # выписать из инструкции номер или адрес — то есть сломала бы работающее
+    # ради того, чего никто не просил. Защита — осознанное решение по
+    # конкретному документу, как и cross_department строкой выше.
+    "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
+    "copy_protected BOOLEAN NOT NULL DEFAULT FALSE;",
     "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
     "source_article_id INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL;",
     "CREATE INDEX IF NOT EXISTS idx_wiki_articles_source "

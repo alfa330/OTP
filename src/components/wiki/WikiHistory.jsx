@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { ArrowRight, Loader2, RotateCcw, Users } from 'lucide-react';
 import {
@@ -6,6 +6,8 @@ import {
 } from '../ui/ios';
 import { STATUS_TONES, statusLabel } from './articleTypes';
 import { CHANGE_LABELS, comparePair, fmtStamp, plural, stateKey } from './historyView';
+import useCopyGuard from './useCopyGuard';
+import useStableCallback from './useStableCallback';
 
 /* История версий статьи: кто менял, что именно изменилось и как вернуть.
  *
@@ -223,6 +225,21 @@ const CompareSide = ({ label, tone, entry }) => (
 export default function WikiHistory({ base, headers, article, open, onClose,
                                       onRestored = null, showToast = null }) {
     const articleId = article?.id;
+    /* ЗАЩИТА ОТ КОПИРОВАНИЯ. История открыта КАЖДОМУ, кто вправе читать статью
+       (кнопка не гейтится правом на правку — см. WikiArticle), а сравнение
+       редакций показывает тот же текст построчно и в выделяемом виде. Оставь мы
+       её как есть, и запрет обходился бы одним нажатием «История»: тумблер
+       обещает, что текст статьи не унести, а не что его не унести из одного
+       конкретного дива. */
+    const compareRef = useRef(null);
+    const notify = useStableCallback(showToast);
+    const onCopyBlocked = useCallback(
+        () => notify?.('Копирование из этой статьи запрещено', 'info'), [notify]);
+    // ТОЛЬКО при открытой модалке. Компонент рендерится всегда (open приходит
+    // пропсом), и подписка «по одному лишь флагу» держала бы на документе второй
+    // слушатель поверх того, что уже сторожит саму статью: на защищённой статье
+    // Ctrl+A давал бы два одинаковых тоста подряд.
+    useCopyGuard(open && !!article?.copy_protected, compareRef, onCopyBlocked);
     const [state, setState] = useState({ loading: true });
     const [selected, setSelected] = useState(null);
     const [against, setAgainst] = useState('prev');
@@ -427,7 +444,11 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                         )}
 
                         {items.length >= 2 && entry && (
-                            <div className="space-y-3">
+                            <div
+                                ref={compareRef}
+                                className={`space-y-3${
+                                    article?.copy_protected ? ' wiki-no-copy' : ''}`}
+                            >
                                 {canPrev && canCurrent && (
                                     <div className="flex justify-end">
                                         <IosSegmented

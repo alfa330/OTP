@@ -21,7 +21,7 @@ import {
     Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
 import {
-    iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
+    iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
@@ -148,6 +148,11 @@ export default function WikiEditor({
     // помощника. Показать её выключенной значило бы соврать про текущее
     // состояние, а сохранить в этом виде — молча выключить то, что включено.
     const [aiSupport, setAiSupport] = useState(!article?.ai_opt_out);
+    /* Защита от копирования. Формулировка ПОЛОЖИТЕЛЬНАЯ и в базе, и здесь:
+       включён тумблер — защита стоит. Инверсии, как у поддержки ИИ, тут не
+       нужно, и заводить её было бы вредно — два имени у одного признака это
+       второе место, где можно ошибиться знаком. */
+    const [copyProtected, setCopyProtected] = useState(!!article?.copy_protected);
 
     /* Название общего раздела — для подсказки под выбором раздела. Слаг тот же,
        что знает сервер (wiki/edit.py: _FALLBACK_SECTION_SLUG); совпадение
@@ -295,6 +300,7 @@ export default function WikiEditor({
             article_type: articleType,
             section_ids: sectionIds.map(Number).filter(Boolean),
             ai_support: aiSupport,
+            copy_protected: copyProtected,
             // Для журнала: сервер запишет действие в это пространство, даже
             // если раздел статье достался запасной.
             space_id: spaceId || undefined,
@@ -323,8 +329,8 @@ export default function WikiEditor({
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
-    }, [editor, title, summary, articleType, sectionIds, aiSupport, isNew, base,
-        headers, article, showToast, onSaved]);
+    }, [editor, title, summary, articleType, sectionIds, aiSupport, copyProtected,
+        isNew, base, headers, article, showToast, onSaved]);
 
     const importDocument = (file) => {
         if (!file) return;
@@ -546,6 +552,31 @@ export default function WikiEditor({
                                 </p>
                             )}
                         </div>
+                    </div>
+
+                    {/* Защита от копирования — свойство ДОКУМЕНТА, поэтому она
+                        здесь, рядом с типом и разделом, а не в правах доступа:
+                        кому статья видна, тумблер не меняет вовсе.
+                        Оговорка под тумблером обязательна. Запрет держится на
+                        браузере читателя, и человек, включивший его в расчёте на
+                        «текст отсюда не унесут», должен узнать про снимок экрана
+                        здесь, а не после утечки. */}
+                    <div className="flex items-start justify-between gap-3 border-t border-slate-100 pt-3">
+                        <div className="min-w-0">
+                            <div className="text-[14px] font-medium text-slate-900">
+                                Защита от копирования
+                            </div>
+                            <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+                                Текст нельзя будет выделить, скопировать и распечатать.
+                                Не спасает от снимка экрана; отрывки статьи по-прежнему
+                                показывают поиск и ИИ-помощник, а весь текст видит тот,
+                                кто откроет её на правку.
+                            </p>
+                        </div>
+                        <IosToggle
+                            checked={copyProtected}
+                            onChange={(value) => { setCopyProtected(value); setDirty(true); }}
+                        />
                     </div>
                 </div>
             </section>

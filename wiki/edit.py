@@ -110,18 +110,21 @@ def _next_version(cursor, article_id):
 
 def create_article(cursor, *, slug, title, summary, content, article_type,
                    section_ids, tags, author_id, visibility_mode='inherit',
-                   strict_mode=False, ai_opt_out=False, space_ids=None):
+                   strict_mode=False, ai_opt_out=False, copy_protected=False,
+                   space_ids=None):
     clean = sanitize_html(content)
     cursor.execute(
         """
         INSERT INTO wiki_articles (slug, title, summary, content, content_plain,
                                    article_type, status, visibility_mode, strict_mode,
-                                   ai_opt_out, author_id, updated_by, owner_user_id)
-        VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s, %s)
+                                   ai_opt_out, copy_protected,
+                                   author_id, updated_by, owner_user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (slug, title, summary, clean, to_plain_text(clean), article_type,
-         visibility_mode, strict_mode, ai_opt_out, author_id, author_id, author_id),
+         visibility_mode, strict_mode, ai_opt_out, copy_protected,
+         author_id, author_id, author_id),
     )
     article_id = cursor.fetchone()[0]
     set_sections(cursor, article_id, section_ids, space_ids)
@@ -137,8 +140,8 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
 
 
 _UPDATABLE = ('title', 'summary', 'article_type', 'status',
-              'visibility_mode', 'strict_mode', 'ai_opt_out', 'owner_user_id',
-              'review_due_at', 'cross_department')
+              'visibility_mode', 'strict_mode', 'ai_opt_out', 'copy_protected',
+              'owner_user_id', 'review_due_at', 'cross_department')
 
 
 def update_article(cursor, article_id, fields, *, editor_id, session_id, comment):
@@ -458,7 +461,7 @@ def fork_article(cursor, source_id, *, section_id, author_id, slug, title):
     """
     cursor.execute(
         """
-        SELECT summary, content, content_plain, article_type, ai_opt_out
+        SELECT summary, content, content_plain, article_type, ai_opt_out, copy_protected
           FROM wiki_articles WHERE id = %s
         """,
         (source_id,),
@@ -466,19 +469,26 @@ def fork_article(cursor, source_id, *, section_id, author_id, slug, title):
     row = cursor.fetchone()
     if not row:
         return None
-    summary, content, content_plain, article_type, ai_opt_out = row
+    summary, content, content_plain, article_type, ai_opt_out, copy_protected = row
 
+    # Защита от копирования переезжает в копию ВМЕСТЕ с текстом — в отличие от
+    # visibility_mode и strict_mode, которые сбрасываются нарочно. Разница в
+    # том, что те два — про доступ к документу, и решает их новый владелец в
+    # своём отделе; защита же — свойство самого текста, и копия — это тот же
+    # текст. Сбрасывай её здесь — и «перенести к себе» стало бы обходным путём
+    # вокруг запрета, доступным каждому, кто вправе завести статью.
     cursor.execute(
         """
         INSERT INTO wiki_articles (slug, title, summary, content, content_plain,
                                    article_type, status, visibility_mode, strict_mode,
-                                   ai_opt_out, author_id, updated_by, owner_user_id,
+                                   ai_opt_out, copy_protected,
+                                   author_id, updated_by, owner_user_id,
                                    source_article_id)
-        VALUES (%s, %s, %s, %s, %s, %s, 'draft', 'inherit', FALSE, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, 'draft', 'inherit', FALSE, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (slug, title, summary, content, content_plain, article_type,
-         ai_opt_out, author_id, author_id, author_id, source_id),
+         ai_opt_out, copy_protected, author_id, author_id, author_id, source_id),
     )
     article_id = cursor.fetchone()[0]
     set_sections(cursor, article_id, [section_id])
