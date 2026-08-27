@@ -683,16 +683,30 @@ class OfficeStatusTest(unittest.TestCase):
 
     KEY = 'office_status'
 
-    def test_asks_only_the_city_and_the_office(self):
+    def test_asks_the_city_the_office_and_the_drivers_words(self):
         """§3.3 перечисляет три поля, и третье — фиксированный вопрос.
 
         Спрашивать его у оператора нечего: ответ всегда один и тот же. Он стоит
         заголовком сообщения в группу — там, где его и читают.
+
+        Зато спрашиваем то, чего в §3.3 нет, — что именно сказал водитель
+        (просьба владельца 27.08.2026): подставленная фраза одинакова у всех
+        обращений, а регион разбирается как раз по подробностям.
         """
         keys = [s['key'] for s in sc.get(self.KEY)['steps']]
-        self.assertEqual(keys, ['office_city', 'office'])
+        self.assertEqual(keys, ['office_city', 'office', 'driver_claim'])
         self.assertEqual(sc.get(self.KEY)['group_title'],
                          'Уточнение — работает офис или нет?')
+
+    def test_the_comment_is_optional(self):
+        """Оператор пишет его во время разговора — держать его на поле, когда
+        добавить нечего, значило бы менять одну помеху на другую."""
+        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'driver_claim')
+        self.assertTrue(step['optional'])
+        answers = full(self.KEY)
+        answers.pop('driver_claim')
+        self.assertEqual(verdict(self.KEY, answers, has_attachment=False)['outcome'],
+                         sc.READY)
 
     def test_open_office_against_the_drivers_word_is_sent(self):
         """§3.2: отправляем только при расхождении таблицы и слов водителя."""
@@ -763,11 +777,28 @@ class OfficeStatusTest(unittest.TestCase):
     def test_message_carries_the_table_and_the_drivers_word(self):
         """В группе должно быть видно и то, и другое: иначе вопрос «работает ли
         офис» при статусе «Открыт» читается как бессмыслица."""
-        body = sc.render_body(self.KEY, full(self.KEY))
+        answers = full(self.KEY)
+        answers.pop('driver_claim')
+        body = sc.render_body(self.KEY, answers)
         self.assertIn('Адрес офиса: Офис Астана · проспект Сарыарка, 31', body)
         self.assertIn('По таблице статусов офисов:', body)
         self.assertIn('Статус на сегодня: Открыт', body)
+        # Не написали — остаётся фраза §3.1, без неё сообщение теряет смысл.
         self.assertIn('Со слов водителя: офис не работает', body)
+
+    def test_the_comment_replaces_the_default_phrase(self):
+        body = sc.render_body(self.KEY, full(
+            self.KEY, driver_claim='Приехал к 10:00, дверь закрыта, на звонки не отвечают'))
+        self.assertIn('Со слов водителя: Приехал к 10:00, дверь закрыта, '
+                      'на звонки не отвечают', body)
+        self.assertNotIn('офис не работает', body)
+
+    def test_the_comment_does_not_stand_twice(self):
+        """Он показывается В ПАРЕ со статусом таблицы. Попав ещё и в общий
+        перечень ответов, он оказался бы отдельно от того самого утверждения,
+        которому противоречит, — и повторился бы в каждом сообщении."""
+        body = sc.render_body(self.KEY, full(self.KEY, driver_claim='дверь закрыта'))
+        self.assertEqual(body.count('дверь закрыта'), 1)
 
     def test_subject_names_the_city(self):
         self.assertIn('Астана', sc.render_subject(self.KEY, full(self.KEY)))
