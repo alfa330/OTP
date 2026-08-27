@@ -50,6 +50,7 @@ import {
   normalizeShiftAuctionOperators,
   shouldHydrateShiftAuctionDraft,
 } from './shiftAuctionParticipants';
+import { collectMyAuctionDayClaims } from './shiftAuctionDayClaims';
 
 // Стабильный ключ недавнего добора: (lot_id | plan_id | source_schedule_shift_id).
 const getPostClaimKey = (claim) => {
@@ -759,6 +760,21 @@ const formatCompactAuctionShiftLabel = (lot) => {
   return `${formatCompactClockValue(lot?.start_time)}-${formatCompactClockValue(lot?.end_time)}`;
 };
 
+// То же, но по фактически взятому диапазону: у частичного добора окно лота шире
+// взятого, и подпись «9-21» рядом с «4 ч» противоречила бы сама себе.
+// Ночная смена сохраняет свою метку — «20*08» узнают по ней, а не по времени.
+const formatAuctionClaimLabel = (lot) => {
+  if (isNightAuctionLot(lot)) return '20*08';
+  const start = normalizeClockValue(getAuctionLotEffectiveStartTime(lot));
+  const end = normalizeClockValue(getAuctionLotEffectiveEndTime(lot));
+  return `${start}-${end}`;
+};
+
+const formatCompactAuctionClaimLabel = (lot) => {
+  if (isNightAuctionLot(lot)) return '20*08';
+  return `${formatCompactClockValue(getAuctionLotEffectiveStartTime(lot))}-${formatCompactClockValue(getAuctionLotEffectiveEndTime(lot))}`;
+};
+
 const AuctionLotCell = ({
   lot,
   canClaim,
@@ -891,8 +907,16 @@ const AuctionLotCell = ({
 
   let tone;
   if (isLotClaimed) {
-    // In post-auction mode all claimed lots become grey — the auction is over
-    tone = 'border-slate-200 bg-slate-100 text-slate-400';
+    // Чужие взятые смены серые — брать их нельзя. Своя остаётся зелёной в любой
+    // фазе, иначе оператор не отличит её от чужой: единственной приметой был бы
+    // title с именем, а на телефоне наведения нет.
+    // Цвет не делим на «добор/не добор»: в предпросмотре опубликованной недели
+    // post_auction_claimed выставляется каждой закрытой смене, и обычные смены
+    // прошлой недели красились бы доборными. Про добор говорят подсказка и
+    // карточка дня.
+    tone = lotClaimedByCurrentUser
+      ? 'border-emerald-600 bg-emerald-600 text-white'
+      : 'border-slate-200 bg-slate-100 text-slate-400';
   } else if (postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted) {
     tone = 'text-orange-900 hover:brightness-95';
   } else if (isAddedLot) {
@@ -923,10 +947,14 @@ const AuctionLotCell = ({
       }
     }
   }
-  // Claimed (fully taken) → full shift range, grey. Available + partly taken → free part.
+  // Claimed (fully taken) → the range actually taken. Available + partly taken → free part.
   // A marker is shown whenever the shift was taken IN PARTS (split / partially taken).
-  const finalDisplayLabel = freeRangeLabel || label;
-  const finalDisplayCompact = freeRangeLabel || compactLabel;
+  // Взятая частью смена подписывается взятым окном, а не исходным: иначе ячейка
+  // обещает часы, которых у оператора нет.
+  const finalDisplayLabel = freeRangeLabel
+    || (isLotClaimed ? formatAuctionClaimLabel(lot) : label);
+  const finalDisplayCompact = freeRangeLabel
+    || (isLotClaimed ? formatCompactAuctionClaimLabel(lot) : compactLabel);
   const finalClassName = `relative flex h-6 w-full min-w-0 items-center justify-center overflow-hidden rounded border px-1 text-[10px] font-semibold tabular-nums sm:h-8 sm:px-2 sm:text-xs ${tone}${detailClickable ? ' cursor-pointer transition hover:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1' : ''}`;
   const finalInner = (
     <>
@@ -946,7 +974,8 @@ const AuctionLotCell = ({
       ) : null}
       {isSelfScheduledLot ? (
         <span
-          className="pointer-events-none absolute left-0.5 top-0.5 text-teal-600"
+          // Белая подложка: на зелёной «своей» смене бирюзовый значок сливался с фоном.
+          className="pointer-events-none absolute left-0.5 top-0.5 rounded-full bg-white text-teal-600 ring-1 ring-white"
           title={`Свой график · ${lot.claimed_by_name || '—'}`}
         >
           <CalendarCheck size={9} strokeWidth={3} />
@@ -1578,7 +1607,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
     ),
     nuances: [
       'Больше нормы плюс 10 часов поставить нельзя — в окне видно, сколько осталось.',
-      'Передумали? Нажмите на день со своей сменой и подтвердите возврат — смена просто исчезнет.',
+      'Передумали? Нажмите на день со своей сменой — в карточке дня у неё есть кнопка «Убрать».',
       'На день с выходным или статусным периодом смену поставить нельзя, как и две смены на один день.'
     ]
   },
@@ -1708,8 +1737,8 @@ const OPERATOR_INSTRUCTION_STEPS = [
   },
   {
     icon: Undo2,
-    title: 'Шаг 4 · Передумали? Верните смену',
-    body: 'В нижней панели дней нажмите на день, где у вас уже стоит смена — появится карточка «Хотите ли вы вернуть эту смену?». После подтверждения смена снова станет доступной остальным операторам.',
+    title: 'Шаг 4 · Посмотрите свои смены и верните лишнюю',
+    body: 'Нажмите на любой день в нижней панели — снизу откроется карточка дня со всеми вашими сменами этого дня: время, часы и пометка «добор», если вы брали только часть смены. Карточка работает и когда аукцион уже закрыт, и на прошлых неделях. Пока аукцион открыт, у каждой смены есть кнопка «Вернуть» — после подтверждения смена снова станет доступной остальным операторам.',
     visual: (
       <div className="space-y-3">
         <div>
@@ -1720,27 +1749,26 @@ const OPERATOR_INSTRUCTION_STEPS = [
             <DayBarCellPreview date="ср, 04" label="Б/С" tone="blocked" />
             <DayBarCellPreview date="чт, 05" label="Смена" tone="off" />
           </div>
-          <div className="mt-1 text-xs text-slate-500">Клик по зелёной ячейке с временем смены → откроется карточка подтверждения.</div>
+          <div className="mt-1 text-xs text-slate-500">Клик по любой ячейке → снизу откроется карточка дня.</div>
         </div>
         <div>
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Карточка подтверждения</div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Карточка дня</div>
           <div className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-sm font-semibold text-slate-950">Хотите ли вы вернуть эту смену?</div>
-            <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-              <div className="text-sm font-semibold text-slate-900">вт, 03 июн</div>
-              <div className="text-xs text-slate-600">10:00 - 19:00 · 9 ч</div>
-            </div>
-            <p className="mt-2 text-[11px] leading-5 text-slate-600">Смена снова станет доступной для других операторов.</p>
-            <div className="mt-3 flex justify-end gap-2">
-              <ButtonPreview variant="outline">Отмена</ButtonPreview>
-              <ButtonPreview variant="danger">Вернуть смену</ButtonPreview>
+            <div className="text-sm font-semibold text-slate-950">вт, 03 июн</div>
+            <div className="text-xs text-slate-500">Ваши смены: 1 · 9 ч</div>
+            <div className="mt-2 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+              <span className="rounded-lg bg-emerald-50 px-2 py-1 text-[12px] font-semibold tabular-nums text-emerald-800">10:00–19:00</span>
+              <span className="flex-1" />
+              <span className="text-[12px] tabular-nums text-slate-400">9 ч</span>
+              <span className="rounded-lg border border-rose-200 px-2 py-1 text-[12px] font-semibold text-rose-600">Вернуть</span>
             </div>
           </div>
         </div>
       </div>
     ),
     nuances: [
-      'Вернуть можно только пока аукцион ещё открыт.',
+      'Смотреть свои смены можно всегда — и пока аукцион идёт, и после закрытия, и на прошлой неделе.',
+      'Кнопка «Вернуть» есть только пока аукцион ещё открыт.',
       'Если кто-то параллельно её уже забрал — система покажет ошибку, ничего страшного не произойдёт.'
     ]
   },
@@ -2036,7 +2064,7 @@ const ADMIN_INSTRUCTION_STEPS = [
     ),
     nuances: [
       'Смена появляется сразу закреплённой за оператором и попадает в итоговые графики, как обычная.',
-      'Вернуть её оператор может тем же нажатием на день — смена удаляется, другим она не достаётся.',
+      'Убрать её оператор может кнопкой «Убрать» в карточке дня — смена удаляется, другим она не достаётся.',
       'Выходные, статусные периоды и правило «одна смена в день» действуют и здесь.'
     ]
   },
@@ -3855,7 +3883,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [connectionState, setConnectionState] = useState('idle');
   const [statusVersion, setStatusVersion] = useState(0);
   const [activeDayDate, setActiveDayDate] = useState('');
-  const [isAdminDayDetailsOpen, setIsAdminDayDetailsOpen] = useState(false);
+  // Карточка дня. Админу — кто взял смены, оператору — его собственные.
+  const [isDayDetailsOpen, setIsDayDetailsOpen] = useState(false);
   const [auctionDayColumnPx, setAuctionDayColumnPx] = useState(64);
   const [availablePeriods, setAvailablePeriods] = useState([]);
   const [claimJournal, setClaimJournal] = useState([]);
@@ -4822,18 +4851,56 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [adminActiveDayClaimLots]
   );
 
+  // Свои смены активного дня — то, что оператор видит в карточке дня.
+  // Целиком взятый лот приходит через claimed_by, а взятая в доборе ЧАСТЬ живёт
+  // только в lot.claim_segments: сам лот при этом остаётся 'available' с пустым
+  // claimed_by, поэтому одного claimed_by мало. Из сегмента собираем
+  // синтетический лот — тогда часы и подпись считают те же помощники, что и для
+  // обычной смены, вместе с перерывами внутри взятого окна.
+  const myActiveDayClaimRows = useMemo(() => {
+    if (canMonitor || !activeDayDate) return [];
+    const rows = collectMyAuctionDayClaims({
+      lots: monitoredLots,
+      date: activeDayDate,
+      userId: user?.id
+    }).map(({ key, claimLot, lot }) => {
+      const range = getAuctionLotEffectiveMinuteRange(claimLot);
+      return {
+        key,
+        lot,
+        start: range ? range[0] : 0,
+        timeLabel: formatAuctionLotEffectiveTimeRangeLabel(claimLot),
+        netMinutes: getAuctionLotNetMinutes(claimLot),
+        partial: isPartialPostAuctionClaim(claimLot),
+        originalLabel: formatAuctionShiftLabel(claimLot)
+      };
+    });
+    return rows.sort((a, b) => a.start - b.start || String(a.key).localeCompare(String(b.key)));
+  }, [activeDayDate, canMonitor, monitoredLots, user?.id]);
+
+  const myActiveDayClaimNetMinutes = useMemo(
+    () => myActiveDayClaimRows.reduce((sum, row) => sum + Number(row.netMinutes || 0), 0),
+    [myActiveDayClaimRows]
+  );
+
+  const activeDayNavigationItem = useMemo(
+    () => dayNavigationItems.find((item) => item.date === activeDayDate) || null,
+    [activeDayDate, dayNavigationItems]
+  );
+
   useEffect(() => {
     if (!dayNavigationItems.length) {
       setActiveDayDate('');
-      setIsAdminDayDetailsOpen(false);
+      setIsDayDetailsOpen(false);
       return;
     }
-    setActiveDayDate((current) => (
-      current && dayNavigationItems.some((item) => item.date === current)
-        ? current
-        : dayNavigationItems[0].date
-    ));
-  }, [dayNavigationItems]);
+    const stillThere = activeDayDate && dayNavigationItems.some((item) => item.date === activeDayDate);
+    if (!stillThere) {
+      // Неделю переключили — открытая карточка уже не про эту дату.
+      setActiveDayDate(dayNavigationItems[0].date);
+      setIsDayDetailsOpen(false);
+    }
+  }, [activeDayDate, dayNavigationItems]);
 
   const runtimeStatus = useMemo(
     () => getAuctionRuntimeStatus(settings, Date.now(), operatorEffectiveStartsAt, operatorEffectiveEndsAt),
@@ -5298,7 +5365,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   const scrollToDay = useCallback((date) => {
     setActiveDayDate(date);
-    if (canMonitor) setIsAdminDayDetailsOpen(true);
+    setIsDayDetailsOpen(true);
     const dateIndex = lotDates.indexOf(date);
     if (dateIndex < 0) return;
 
@@ -5322,7 +5389,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
     scrollNodeToDay(table);
     scrollNodeToDay(bar);
-  }, [canMonitor, lotDates]);
+  }, [lotDates]);
 
   const toggleOperator = useCallback((operatorId) => {
     const id = normalizeOperatorId(operatorId);
@@ -6191,6 +6258,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     ? releaseConfirmOptions
     : (releaseConfirmLot ? [releaseConfirmLot] : []);
   const hasMultipleReleaseOptions = releaseOptions.length > 1;
+  // Возврат из карточки дня — только оператору и только пока аукцион открыт на
+  // активной неделе. В превью прошлой недели и после закрытия кнопки нет.
+  const canReleaseFromDayPanel = !canMonitor && canClaim;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -6597,27 +6667,27 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                 : !canMonitor && item.state === 'locked' ? 'Занято' : statusText;
                               const myShiftCount = Number(item.myClaimed || 0);
                               const myShiftLabel = !canMonitor && item.state === 'shift'
-                                ? (myShiftCount > 1 ? `Смен: ${myShiftCount}` : formatCompactAuctionShiftLabel(item.myClaimedLot))
+                                ? (myShiftCount > 1 ? `Смен: ${myShiftCount}` : formatCompactAuctionClaimLabel(item.myClaimedLot))
                                 : '';
                               const myShiftDuration = !canMonitor && item.state === 'shift'
                                 ? `${formatAuctionHours(item.myClaimedNetMinutes)} ч`
                                 : '';
                               const hoverTone = active ? 'hover:bg-blue-100' : 'hover:bg-slate-50';
-                              const canReleaseHere = !canMonitor && canClaim && item.state === 'shift' && item.myClaimedLots?.length;
                               // A free day of a "свой график" operator is where they put
                               // their own shift — that beats scrolling to the column.
                               const canSelfScheduleHere = Boolean(
                                 canSelfSchedule && item.state !== 'shift' && !item.isBlocked && !item.isDayOff
                               );
-                              const onCellClick = canReleaseHere
-                                ? () => openReleaseConfirm(item.myClaimedLots)
-                                : canSelfScheduleHere
-                                  ? () => openSelfSchedule(item.date)
-                                  : () => scrollToDay(item.date);
-                              const cellTitle = canReleaseHere
-                                ? `${formatDateLabel(item.date)} · ${myShiftCount > 1 ? 'выберите смену для возврата' : 'нажмите, чтобы вернуть смену'}`
-                                : canSelfScheduleHere
-                                  ? `${formatDateLabel(item.date)} · нажмите, чтобы поставить свою смену`
+                              // Клик по дню открывает карточку дня, а не сразу возврат:
+                              // смотреть свои смены нужно и после закрытия аукциона, а
+                              // возврат живёт кнопкой внутри карточки.
+                              const onCellClick = canSelfScheduleHere
+                                ? () => openSelfSchedule(item.date)
+                                : () => scrollToDay(item.date);
+                              const cellTitle = canSelfScheduleHere
+                                ? `${formatDateLabel(item.date)} · нажмите, чтобы поставить свою смену`
+                                : item.state === 'shift'
+                                  ? `${formatDateLabel(item.date)} · нажмите, чтобы посмотреть свои смены`
                                   : item.isBlocked
                                     ? `${formatDateLabel(item.date)} · ${item.blockedLabel}`
                                     : formatDateLabel(item.date);
@@ -6668,20 +6738,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 )}
               </div>
             </main>
-            {canMonitor && isAdminDayDetailsOpen && activeDayDate ? (
+            {isDayDetailsOpen && activeDayDate ? (
               <aside className="fixed inset-x-3 bottom-[66px] z-40 max-h-[58vh] overflow-hidden rounded-2xl bg-white/95 shadow-2xl ring-1 ring-black/5 backdrop-blur-xl xl:inset-x-auto xl:bottom-auto xl:right-3 xl:top-24 xl:w-[360px] xl:max-h-[calc(100vh-7rem)]">
                 <div className="flex items-start justify-between gap-3 border-b border-slate-200/70 px-4 py-3.5">
                   <div className="min-w-0">
                     <div className="truncate text-[15px] font-semibold tracking-tight text-slate-900">
                       {formatDateLabel(activeDayDate)}
                     </div>
-                    <div className="mt-0.5 text-xs text-slate-500">
-                      {adminActiveDayClaimCount ? `Взято смен: ${adminActiveDayClaimCount}` : 'Нет взятых смен'}
-                    </div>
+                    {canMonitor ? (
+                      <div key="day-details-admin-subtitle" className="mt-0.5 text-xs text-slate-500">
+                        <span>{adminActiveDayClaimCount ? `Взято смен: ${adminActiveDayClaimCount}` : 'Нет взятых смен'}</span>
+                      </div>
+                    ) : myActiveDayClaimRows.length ? (
+                      <div key="day-details-my-subtitle" className="mt-0.5 text-xs text-slate-500">
+                        <span>{`Ваши смены: ${myActiveDayClaimRows.length} · ${formatAuctionHours(myActiveDayClaimNetMinutes)} ч`}</span>
+                      </div>
+                    ) : null}
                   </div>
                   <button
                     type="button"
-                    onClick={() => setIsAdminDayDetailsOpen(false)}
+                    onClick={() => setIsDayDetailsOpen(false)}
                     className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
                     title="Закрыть"
                   >
@@ -6689,37 +6765,94 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   </button>
                 </div>
                 <div className="max-h-[calc(58vh-64px)] overflow-y-auto p-3 xl:max-h-[calc(100vh-11rem)]">
-                  {adminActiveDayClaimLots.length ? (
-                    <ul className="space-y-1.5">
-                      {adminActiveDayClaimLots.map((row) => (
-                        <li key={`admin-day-claim-${row.key}`}>
-                          <button
-                            type="button"
-                            onClick={() => row.operatorId ? setDrilldownOperatorId(row.operatorId) : null}
-                            disabled={!row.operatorId}
-                            className="flex w-full items-center gap-3 rounded-xl border border-slate-200/80 bg-white px-3 py-2 text-left shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-default disabled:hover:border-slate-200/80 disabled:hover:bg-white"
-                            title="Открыть взятые смены оператора"
-                          >
-                            <span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[12px] font-semibold tabular-nums text-slate-700">
-                              {row.timeLabel}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[13px] font-medium text-slate-900">{row.operatorName}</span>
-                              {row.partial ? (
-                                <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-orange-700">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                                  добор · часть из {row.originalLabel}
-                                </span>
+                  {/*
+                    У каждой ветки свой key, а голый текст завёрнут в <span>:
+                    встроенный переводчик оборачивает текстовые узлы в <font>, и
+                    без этого removeChild роняет раздел целиком.
+                  */}
+                  {canMonitor ? (
+                    adminActiveDayClaimLots.length ? (
+                      <ul key="admin-day-claims" className="space-y-1.5">
+                        {adminActiveDayClaimLots.map((row) => (
+                          <li key={`admin-day-claim-${row.key}`}>
+                            <button
+                              type="button"
+                              onClick={() => row.operatorId ? setDrilldownOperatorId(row.operatorId) : null}
+                              disabled={!row.operatorId}
+                              className="flex w-full items-center gap-3 rounded-xl border border-slate-200/80 bg-white px-3 py-2 text-left shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-default disabled:hover:border-slate-200/80 disabled:hover:bg-white"
+                              title="Открыть взятые смены оператора"
+                            >
+                              <span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[12px] font-semibold tabular-nums text-slate-700">
+                                {row.timeLabel}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[13px] font-medium text-slate-900">{row.operatorName}</span>
+                                {row.partial ? (
+                                  <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-orange-700">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                                    добор · часть из {row.originalLabel}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(row.netMinutes)} ч</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div key="admin-day-empty" className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-10 text-center text-sm text-slate-500">
+                        <span>В этот день пока никто не взял смены.</span>
+                      </div>
+                    )
+                  ) : myActiveDayClaimRows.length ? (
+                    <ul key="my-day-claims" className="space-y-1.5">
+                      {myActiveDayClaimRows.map((row) => {
+                        const releasable = Boolean(
+                          canReleaseFromDayPanel
+                          && !row.partial
+                          && row.lot
+                          && row.lot.status === 'claimed'
+                          && Number.isFinite(Number(row.lot.id))
+                        );
+                        return (
+                          <li key={`my-day-claim-${row.key}`}>
+                            <div className="flex items-center gap-2.5 rounded-xl border border-slate-200/80 bg-white px-3 py-2 shadow-sm">
+                              <span className="shrink-0 rounded-lg bg-emerald-50 px-2 py-1 text-[12px] font-semibold tabular-nums text-emerald-800">
+                                {row.timeLabel}
+                              </span>
+                              <span className="min-w-0 flex-1">
+                                {row.partial ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-orange-700">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                                    добор · часть из {row.originalLabel}
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(row.netMinutes)} ч</span>
+                              {releasable ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openReleaseConfirm([row.lot])}
+                                  className="shrink-0 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-[12px] font-semibold text-rose-600 transition hover:bg-rose-50 active:scale-95"
+                                  title={row.lot?.self_scheduled ? 'Убрать свою смену' : 'Вернуть смену в аукцион'}
+                                >
+                                  {row.lot?.self_scheduled ? 'Убрать' : 'Вернуть'}
+                                </button>
                               ) : null}
-                            </span>
-                            <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{formatAuctionHours(row.netMinutes)} ч</span>
-                          </button>
-                        </li>
-                      ))}
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                   ) : (
-                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-10 text-center text-sm text-slate-500">
-                      В этот день пока никто не взял смены.
+                    <div key="my-day-empty" className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-10 text-center text-sm text-slate-500">
+                      <span>
+                        {activeDayNavigationItem?.isBlocked
+                          ? `${activeDayNavigationItem.blockedLabel} · смен в этот день нет`
+                          : activeDayNavigationItem?.isDayOff
+                            ? 'Вы отметили этот день выходным'
+                            : 'В этот день у вас нет смен'}
+                      </span>
                     </div>
                   )}
                 </div>
