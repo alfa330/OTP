@@ -36066,7 +36066,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canSupervisorExportOperators = isSupervisorRole(currentUserRole) && !isDepartmentHeadUser;
             const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;
             const canFilterByDepartment = isAdminLikeRole || isPlainTrainer;
-            const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer;
+            // Кнопка «Закрепить» стоит в карточке задачи безусловно, поэтому у того,
+            // кому раздел выдан, флаг обязан быть true: иначе клик кладёт задачу в
+            // state, а виджет не рисуется — кнопка без эффекта и без объяснения.
+            // Условие то же, по которому пункт «Задачи» попадает в меню рядового:
+            // departmentRestrictsViews отсекает операторов линии — у их отделов
+            // (СЗоВ) ограничений нет вовсе, и departmentAllowsView вернул бы им true.
+            const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer
+                || (isRankAndFileRole(currentUserRole) && departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
@@ -45434,6 +45441,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {/* Порядок как в ветке СВ: «Опросы» → «Задачи» → «Конкурсы».
+                                                Кнопка берётся тем же хелпером, что и у остальных ролей, —
+                                                иначе рядовой не увидит бейдж «задача ждёт вашего действия». */}
+                                            {departmentAllowsView(user, 'tasks') && (
+                                            <li>
+                                                {renderTasksSidebarButtonInner()}
+                                            </li>
+                                            )}
                                             {departmentAllowsView(user, 'contests') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
@@ -48978,6 +48993,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                         {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                             <>
+                                {/* Раздел объявлен и здесь, в ветке рядовых: пункт меню и экран
+                                    живут в РАЗНЫХ ветках, и без этой строки «Задачи» открывались
+                                    бы в пустую область — ни ошибки, ни заглушки. Кому раздел
+                                    выдан, решает departmentAllowsView в меню и бэкенд. */}
+                                {( view === "tasks" && (
+                                    <TasksView
+                                        user={user}
+                                        showToast={showToast}
+                                        apiBaseUrl={API_BASE_URL}
+                                        withAccessTokenHeader={withAccessTokenHeader}
+                                        pinnedTaskId={pinnedTask?.id || null}
+                                        onPinTask={handlePinTask}
+                                        onUnpinTask={handleUnpinTask}
+                                        onPinnedTaskSync={handlePinnedTaskSync}
+                                        focusTaskRequest={taskFocusRequest}
+                                        externalRefreshToken={taskRefreshToken}
+                                        onActionNeedsChange={handleTasksActionNeedsChange}
+                                    />
+                                ))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "events" && (

@@ -5,7 +5,10 @@
 
 * «Учёт сотрудников» и «Задачи» — строками в DEPARTMENT_VIEW_ALLOWLIST
   (поведение карты проверяет настоящий Node в
-  tests/back_office_department_views.test.mjs);
+  tests/back_office_department_views.test.mjs). «Задачи» есть у ВСЕХ ролей
+  отдела, но у рядового сотрудника охват личный — задачи, где он постановщик,
+  поручитель или исполнитель, без приёмки за других. Карта разделов и гейт
+  бэкенда обязаны совпадать; зеркало держит TasksSectionForBackOfficeTests;
 * «Вики» — тумблером departments.wiki_enabled вместе с пространством вики;
   allowlist о разделе не знает вовсе.
 
@@ -16,6 +19,7 @@
 полей человека на линии.
 """
 import ast
+import re
 import shutil
 import subprocess
 import textwrap
@@ -73,18 +77,24 @@ class BackOfficeAllowlistSourceTests(unittest.TestCase):
     def test_back_office_allowlist_entries(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
 
-        self.assertIn("const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile'];", source)
+        # 'profile' первым — это раздел по умолчанию (firstAllowedView берёт
+        # allow[0]); переставив элементы, мы молча сменили бы стартовый экран.
+        self.assertIn("const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile', 'tasks'];", source)
         self.assertIn("const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks'];", source)
         self.assertIn(
             "const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];",
             source,
         )
 
-        for code in ("accounting", "hr"):
+        for code, own_role in (("accounting", "accounting_manager"), ("hr", "hr_manager")):
             self.assertIn(f"    {code}: {{", source)
             entry = source.split(f"    {code}: {{", 1)[1].split("},", 1)[0]
             self.assertIn("operator: BACK_OFFICE_EMPLOYEE_VIEWS", entry)
             self.assertIn("trainee: BACK_OFFICE_EMPLOYEE_VIEWS", entry)
+            # Собственная роль отдела — тем же набором, что и остатки на
+            # operator/trainee: набор один, разъехавшись, они дали бы одному
+            # человеку раздел, а его соседу с прежней ролью — нет.
+            self.assertIn(f"{own_role}: BACK_OFFICE_EMPLOYEE_VIEWS", entry)
             self.assertIn("head: BACK_OFFICE_HEAD_VIEWS", entry)
             self.assertIn("sv: BACK_OFFICE_MANAGER_VIEWS", entry)
 
@@ -880,6 +890,180 @@ class SensitiveQrRolesSingleSourceTests(unittest.TestCase):
             set(module.QR_GATED_ROLES),
         )
         self.assertNotIn("bot_schedule2", _sys.modules)
+
+
+class TasksSectionForBackOfficeTests(unittest.TestCase):
+    """«Задачи» у ВСЕХ ролей бэк-офиса, а не только у главы и СВ.
+
+    Раздел гейтится в шести независимых местах, и пять из них отказывают МОЛЧА
+    (пустой список, пустой экран, ноль в колоколе). Поэтому проверяем не сами
+    правки, а инвариант шире их: кому раздел выдала КАРТА отделов, того обязан
+    пускать бэкенд, — иначе пункт меню есть, а за ним пустота.
+    """
+
+    BACK_OFFICE = {"hr": "hr_manager", "accounting": "accounting_manager"}
+
+    @classmethod
+    def _js_views(cls, source, name):
+        """Значение набора разделов из departmentViews.js, со спредами."""
+        line = next(row for row in source.splitlines() if row.startswith(f"const {name} = ["))
+        views = []
+        for spread in re.findall(r"\.\.\.([A-Z_]+)", line):
+            views.extend(cls._js_views(source, spread))
+        views.extend(re.findall(r"'([a-z_]+)'", line))
+        return views
+
+    def _roles_granted_tasks(self):
+        """Роли, которым карта отделов выдала «Задачи», — прямо из исходника."""
+        source = _read(DEPARTMENT_VIEWS_PATH)
+        granted = {}
+        for code in self.BACK_OFFICE:
+            entry = source.split(f"    {code}: {{", 1)[1].split("},", 1)[0]
+            for role, const in re.findall(r"(\w+): ([A-Z_]+)", entry):
+                if "tasks" in self._js_views(source, const):
+                    granted.setdefault(code, []).append(role)
+        return granted
+
+    def test_map_grants_tasks_to_every_role_of_the_department(self):
+        granted = self._roles_granted_tasks()
+        for code, own_role in self.BACK_OFFICE.items():
+            self.assertEqual(
+                {"operator", "trainee", own_role, "head", "sv"},
+                set(granted.get(code, [])),
+                code,
+            )
+
+    def _can_access_tasks(self, departments, user_departments, heads):
+        """Настоящий _can_access_tasks с подставленной базой."""
+
+        class _Db:
+            def get_department_by_id(self, department_id):
+                return departments.get(int(department_id))
+
+            def get_user_department_id(self, user_id):
+                return user_departments.get(int(user_id))
+
+        namespace = {
+            "db": _Db(),
+            "ROLE_HIERARCHY": {
+                "operator": 10, "trainee": 10, "hr_manager": 10, "accounting_manager": 10,
+                "trainer": 20, "sv": 30, "admin": 40, "super_admin": 50,
+            },
+            "_headed_department_id": lambda requester_id: dict(heads).get(requester_id),
+        }
+        exec("BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE = "
+             "{'accounting': 'accounting_manager', 'hr': 'hr_manager'}", namespace)
+        exec("BACK_OFFICE_EMPLOYEE_ROLES = frozenset("
+             "BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.values())", namespace)
+        exec("BACK_OFFICE_TASK_EMPLOYEE_ROLES = "
+             "BACK_OFFICE_EMPLOYEE_ROLES | {'operator', 'trainee'}", namespace)
+        for name in ("_normalize_user_role", "_get_role_level", "_has_min_role",
+                     "_is_admin_role", "_back_office_employee_role",
+                     "_back_office_task_employee_role", "_can_access_tasks"):
+            exec(_function_source(BOT_PATH, name), namespace)
+        return namespace["_can_access_tasks"]
+
+    def test_backend_lets_in_everyone_the_map_did(self):
+        # 1499 — HR, 1500 — Бухгалтерия, 1 — СЗоВ (отдел с линией).
+        departments = {1: {"code": "szov"}, 1499: {"code": "hr"}, 1500: {"code": "accounting"}}
+        can = self._can_access_tasks(departments, {10: 1499, 20: 1500, 30: 1}, heads={})
+        granted = self._roles_granted_tasks()
+
+        for user_id, code in ((10, "hr"), (20, "accounting")):
+            for role in granted[code]:
+                if role == "head":
+                    continue  # глава — не роль, его пускает _headed_department_id
+                self.assertTrue(can(role, user_id), f"{code}/{role}")
+
+    def test_line_operator_does_not_get_tasks_along_the_way(self):
+        # Роль 'operator' у кадровика и у оператора линии — одна и та же строка,
+        # различает их только отдел. Проверка по роли открыла бы раздел всей линии.
+        departments = {1: {"code": "szov"}, 1499: {"code": "hr"}}
+        can = self._can_access_tasks(departments, {30: 1, 40: None}, heads={})
+        self.assertFalse(can("operator", 30))
+        self.assertFalse(can("trainee", 30))
+        self.assertFalse(can("operator", 40))
+        # И обратное: роль бэк-офиса в чужом отделе раздела не получает —
+        # ровно как в add_user, где роль сверяется с отделом.
+        self.assertFalse(can("hr_manager", 30))
+
+    def test_managers_and_department_heads_still_get_in(self):
+        can = self._can_access_tasks({1: {"code": "szov"}}, {50: 1, 60: 1, 70: 1}, heads={50: 1})
+        self.assertTrue(can("admin", 50))   # глава отдела
+        self.assertTrue(can("sv", 60))
+        self.assertTrue(can("trainer", 70))
+
+    def test_bell_asks_the_same_predicate_as_the_route_guard(self):
+        # Разъехавшись, они дают худший из отказов: уведомление в колоколе есть,
+        # а раздел за ним не открывается — и наоборот.
+        guard = _function_source(BOT_PATH, "_task_route_guard")
+        viewer = _function_source(BOT_PATH, "_notifications_viewer_context")
+        self.assertIn("_can_access_tasks(requester_role, requester_id)", guard)
+        self.assertIn("_can_access_tasks(role, requester_id)", viewer)
+        # Своей копии списка ролей у колокола больше нет.
+        self.assertNotIn("role in ('sv', 'trainer')", viewer)
+
+    def test_data_layer_shares_one_list_of_personally_scoped_roles(self):
+        source = _read(DATABASE_PATH)
+        namespace = {}
+        for name in ("BACK_OFFICE_EMPLOYEE_ROLES", "TASK_PERSONAL_SCOPE_ROLES",
+                     "TASK_RECIPIENT_ROLES"):
+            line = next(row for row in source.splitlines() if row.startswith(f"{name} = "))
+            exec(line, namespace)
+
+        self.assertEqual({"hr_manager", "accounting_manager"},
+                         set(namespace["BACK_OFFICE_EMPLOYEE_ROLES"]))
+        # Охват личный: постановщик / поручитель / исполнитель — тот же, что у СВ.
+        self.assertEqual({"sv", "trainer", "hr_manager", "accounting_manager"},
+                         set(namespace["TASK_PERSONAL_SCOPE_ROLES"]))
+        # Рядовой бэк-офиса обязан быть и в ПОЛУЧАТЕЛЯХ: иначе задачу ему не
+        # поручит ни глава отдела, ни админ, и раздел покажет только своё.
+        self.assertEqual(("super_admin", "admin", "sv", "accounting_manager", "hr_manager"),
+                         tuple(namespace["TASK_RECIPIENT_ROLES"]))
+
+        # Три места, где список ролей раньше был переписан заново.
+        self.assertIn("elif role in TASK_PERSONAL_SCOPE_ROLES:", source)
+        self.assertIn("if role_has_min(role, 'admin') or role in TASK_PERSONAL_SCOPE_ROLES:", source)
+        self.assertIn("(u.role IN ({_TASK_RECIPIENT_ROLES_SQL}) {scope_filter})", source)
+
+    def test_personal_scope_has_no_default_department(self):
+        # Отдел задачи — это отдел ПОСТАНОВЩИКА. Подставив рядовому его
+        # собственный отдел, переключатель молча спрятал бы всё, что поручили
+        # извне, — например задачу от админа из другого отдела.
+        guard = _function_source(BOT_PATH, "_task_route_guard")
+        endpoint = _function_source(BOT_PATH, "get_task_departments")
+        self.assertIn("g.task_scope_is_personal = back_office_role is not None", guard)
+        self.assertIn("None if getattr(g, 'task_scope_is_personal', False)", endpoint)
+
+    def test_menu_item_and_screen_live_in_the_same_branch(self):
+        # Пункт меню и экран объявлены в РАЗНЫХ ветках дерева, и забыть вторую
+        # значит выдать раздел, который открывается в пустую область.
+        app = _read(APP_PATH)
+        marker = "{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && ("
+        self.assertEqual(2, app.count(marker))
+        menu_branch = app.split(marker, 1)[1]
+        screen_branch = app.split(marker, 2)[2]
+        self.assertIn("{departmentAllowsView(user, 'tasks') && (", menu_branch)
+        self.assertIn("{renderTasksSidebarButtonInner()}", menu_branch)
+        self.assertIn('{( view === "tasks" && (', screen_branch)
+        self.assertIn("<TasksView", screen_branch)
+
+    def test_section_gate_asks_the_map_not_a_list_of_roles(self):
+        view = _read(ROOT / "src" / "components" / "tasks" / "TasksView.jsx")
+        self.assertIn(
+            "|| (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));",
+            view,
+        )
+        # departmentRestrictsViews обязателен: у отдела без ограничений
+        # departmentAllowsView возвращает true всем подряд.
+        self.assertIn(
+            "import { departmentAllowsView, departmentRestrictsViews } from '../../utils/departmentViews';",
+            view,
+        )
+        # Сырой код роли в выпадашке исполнителей — тот самый шум, который
+        # появляется, как только бэк-офис попадает в получатели.
+        self.assertIn("hr_manager: 'HR',", view)
+        self.assertIn("accounting_manager: 'Бухгалтерия',", view)
 
 
 if __name__ == "__main__":

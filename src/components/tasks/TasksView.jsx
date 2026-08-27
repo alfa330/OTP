@@ -22,6 +22,7 @@ import {
   StickyNote,
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
+import { departmentAllowsView, departmentRestrictsViews } from '../../utils/departmentViews';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import CustomSelect from '../ui/CustomSelect';
@@ -2826,7 +2827,15 @@ const HISTORY_LABELS = {
   reopened:    'Возобновлён',
 };
 
-const ROLE_LABELS = { admin: 'Админ', sv: 'СВ' };
+/* Подпись рядом с именем в списке исполнителей. Фолбэк печатает СЫРОЕ значение
+   из базы, поэтому карту дополняем вместе с каждой ролью, попадающей в
+   получатели: без строк бэк-офиса в выпадашке стояло бы «Иванова (hr_manager)». */
+const ROLE_LABELS = {
+  admin: 'Админ',
+  sv: 'СВ',
+  hr_manager: 'HR',
+  accounting_manager: 'Бухгалтерия',
+};
 const TASKS_PAGE_SIZE = 20;
 
 /** «3ч», «1д 2ч», «90», «2h30m» → минуты. Пусто/мусор → 0. */
@@ -6746,7 +6755,15 @@ const TasksView = ({
   onActionNeedsChange,
 }) => {
   const currentUserRole = normalizeRole(user?.role);
-  const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
+  /* Гейт раздела. Кроме управленческих ролей сюда попадает тот, кому раздел
+     выдала карта отдела, — рядовой сотрудник бэк-офиса. Спрашиваем именно карту,
+     а не список ролей: у оператора HR и у оператора линии роль одна и та же
+     строка, и различает их только отдел. departmentRestrictsViews обязателен —
+     без него departmentAllowsView пропустил бы отделы вообще без ограничений.
+     От этого флага зависит не только рендер, но и ВСЕ загрузки раздела ниже:
+     оставив его узким, получим открытый экран, в который не приехали данные. */
+  const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer'
+    || (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));
   const [tasks,               setTasks]               = useState([]);
   /* Список «моих задач» хотя бы раз загрузился. До этого счётчик уведомлений
      наружу не репортится: на маунте tasks=[] даёт транзиентный ноль, который

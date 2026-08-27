@@ -240,6 +240,31 @@ ROLE_HIERARCHY = {
     'super_admin': 50
 }
 
+# Рядовые сотрудники бэк-офиса (Бухгалтерия, HR). Зеркалит
+# BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT в src/utils/departmentViews.js и
+# одноимённый набор в bot_schedule2.py.
+BACK_OFFICE_EMPLOYEE_ROLES = frozenset({'hr_manager', 'accounting_manager'})
+
+# Роли с ЛИЧНЫМ охватом задач: человек видит только то, где он сам постановщик,
+# поручитель или исполнитель, и не принимает работу за других. Набор один на три
+# места (_task_scope_filters, get_task_recipients, get_task_board_people) — до
+# этого список ролей был переписан в каждом из них отдельно.
+#
+# Зеркалит _can_access_tasks в bot_schedule2.py: тот решает, пускать ли в раздел
+# вообще, этот — что человек в разделе увидит. Разъедься они, раздел откроется и
+# молча покажет ноль задач вместо отказа. Совпадение держит тест.
+TASK_PERSONAL_SCOPE_ROLES = frozenset({'sv', 'trainer'}) | BACK_OFFICE_EMPLOYEE_ROLES
+
+# Кого вообще можно поставить исполнителем задачи. Рядовой бэк-офиса здесь не
+# ради своей доски, а чтобы задачу можно было поручить ЕМУ: без этой строки
+# кадровик не появлялся бы в выпадашке ни у главы отдела, ни у админа, и раздел
+# держал бы у него только то, что он завёл сам.
+TASK_RECIPIENT_ROLES = ('super_admin', 'admin', 'sv', *sorted(BACK_OFFICE_EMPLOYEE_ROLES))
+# Значения — константы модуля, а не пользовательский ввод: подставляются в SQL
+# как литералы, отдельными плейсхолдерами их не сделать (список ролей меняет
+# длину, а параметры этого запроса считаются по позициям).
+_TASK_RECIPIENT_ROLES_SQL = ", ".join(f"'{role}'" for role in TASK_RECIPIENT_ROLES)
+
 CALCULATION_MODEL_OPERATOR = 'operator'
 CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
 # Модели отдела TEZ (направления «Оператор Линия TEZ» и «Оператор ОП TEZ»).
@@ -49457,7 +49482,7 @@ class Database:
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
         with self._get_cursor() as cursor:
-            if role_has_min(role, 'admin') or role in ('sv', 'trainer'):
+            if role_has_min(role, 'admin') or role in TASK_PERSONAL_SCOPE_ROLES:
                 scope_filter = ""
                 params = []
                 if scope_department_id is not None and not role_has_min(role, 'admin'):
@@ -49471,7 +49496,7 @@ class Database:
                     FROM users u
                     WHERE COALESCE(u.status, 'working') <> 'fired'
                       AND (
-                          (u.role IN ('super_admin', 'admin', 'sv') {scope_filter})
+                          (u.role IN ({_TASK_RECIPIENT_ROLES_SQL}) {scope_filter})
                           OR u.id = %s
                       )
                     ORDER BY CASE WHEN u.role IN ('super_admin', 'admin') THEN 0 ELSE 1 END, u.name
@@ -49503,6 +49528,10 @@ class Database:
         conditions = ["COALESCE(u.status, 'working') <> 'fired'"]
         params = []
         if not role_has_min(role, 'admin'):
+            # Рядового бэк-офиса здесь намеренно НЕТ, хотя раздел ему выдан:
+            # список досок читает только админский селектор охвата, остальным
+            # доска предлагает «Мои / На мне / Все» без выбора человека. Отдать
+            # ему список — послать данные, которые никто не покажет.
             if role not in ('sv', 'trainer'):
                 return []
             # Видит только тех, с кем пересекается по задачам. Исполнителем
@@ -51737,7 +51766,7 @@ class Database:
         params = []
         if role_has_min(role, 'admin'):
             pass
-        elif role in ('sv', 'trainer'):
+        elif role in TASK_PERSONAL_SCOPE_ROLES:
             # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
             conditions.append(
                 f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"

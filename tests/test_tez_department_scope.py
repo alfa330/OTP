@@ -122,8 +122,11 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
             source,
         )
         self.assertIn("const canFilterByDepartment = isAdminLikeRole || isPlainTrainer;", source)
+        # Хвост про рядового сотрудника бэк-офиса появился вместе с выдачей ему
+        # раздела «Задачи»; смысл проверки прежний — глава-тренер идёт по
+        # правилам главы, а не «чистого тренера».
         self.assertIn(
-            "const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer;",
+            "const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer\n",
             source,
         )
 
@@ -185,7 +188,11 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         surveys_guard = _function_source(BOT_PATH, "_surveys_route_guard")
         effective_role = _function_source(BOT_PATH, "_effective_scoped_manager_role")
 
-        self.assertIn("headed_dept_id = _headed_department_id(requester_id)", task_guard)
+        # Главу отдела пускает в задачи _can_access_tasks — правило вынесено из
+        # гарда, чтобы колокол спрашивал ровно его же.
+        task_access = _function_source(BOT_PATH, "_can_access_tasks")
+        self.assertIn("_can_access_tasks(requester_role, requester_id)", task_guard)
+        self.assertIn("_headed_department_id(requester_id) is not None", task_access)
         self.assertIn("g.effective_task_role", task_guard)
         self.assertIn("g.task_scope_department_id", task_guard)
         self.assertIn("_is_global_admin_requester(g.effective_task_role, requester_id)", task_guard)

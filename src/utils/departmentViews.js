@@ -73,7 +73,14 @@ const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_acc
 // одного раздела из TRAINER_ALLOWED_VIEWS, и два гарда в App.jsx — тренерский
 // (выкидывает в 'surveys') и отдельский (выкидывает в 'profile') — гоняли бы
 // вид друг другу без остановки.
-const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile'];
+// «Задачи» есть у ВСЕХ ролей бэк-офиса, а не только у главы и СВ: в этих
+// отделах раздел — рабочий инструмент рядового, а не инструмент надзора.
+// Охват у рядового ЛИЧНЫЙ: задачи, где он постановщик, поручитель или
+// исполнитель, — и принимать работу за других он не может. Считает это
+// бэкенд (database.TASK_PERSONAL_SCOPE_ROLES), карта лишь показывает пункт.
+// 'profile' обязан остаться ПЕРВЫМ: firstAllowedView берёт allow[0], и
+// раздел по умолчанию сменился бы вместе с порядком.
+const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile', 'tasks'];
 const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks'];
 const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];
 

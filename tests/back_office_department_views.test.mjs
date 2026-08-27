@@ -62,7 +62,7 @@ for (const code of BACK_OFFICE_CODES) {
         assert.equal(departmentUsesSimpleEmployeeAccounting(user), true);
     });
 
-    test(`${code}: у рядового сотрудника только профиль`, () => {
+    test(`${code}: у рядового сотрудника профиль и задачи`, () => {
         // Собственная роль отдела — рядом с operator/trainee: людей, заведённых
         // до её появления, никто не переписывал, и ограничение обязано
         // действовать на всех троих одинаково.
@@ -70,11 +70,16 @@ for (const code of BACK_OFFICE_CODES) {
             const user = employee(code, role);
             assert.equal(departmentRestrictsViews(user), true);
             assert.equal(departmentAllowsView(user, 'profile'), true);
+            // «Задачи» есть у ВСЕХ ролей отдела, а не только у главы и СВ.
+            // Охват рядового считает бэкенд — здесь только видимость пункта.
+            assert.equal(departmentAllowsView(user, 'tasks'), true, `${role}/tasks`);
+            // Раздел по умолчанию обязан остаться профилем: firstAllowedView
+            // берёт первый элемент набора, и порядок в нём — не косметика.
             assert.equal(firstAllowedView(user, []), 'profile');
 
             for (const denied of [
                 'hours', 'work_schedules', 'salary', 'evaluation', 'surveys',
-                'manage_operators', 'manage_users', 'sv_list', 'qr_access', 'tasks',
+                'manage_operators', 'manage_users', 'sv_list', 'qr_access',
             ]) {
                 assert.equal(departmentAllowsView(user, denied), false, `${role}/${denied}`);
             }

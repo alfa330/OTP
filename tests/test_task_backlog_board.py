@@ -1172,8 +1172,11 @@ class ActionNeedsBadgeTests(unittest.TestCase):
     def test_sidebar_badge_is_wired(self):
         src = _read(APP_JSX_PATH)
         self.assertIn("const renderTasksSidebarButtonInner = () => (", src)
-        # Пункт «Задачи» рендерится в нескольких ветках меню — бейдж нужен во всех.
-        self.assertEqual(src.count("{renderTasksSidebarButtonInner()}"), 3)
+        # Пункт «Задачи» рендерится в нескольких ветках меню — бейдж нужен во
+        # всех четырёх: админ, менеджер отдела, тренер, рядовой сотрудник
+        # бэк-офиса. Своя кнопка вместо хелпера дала бы пункт без бейджа, и
+        # человек не увидел бы, что задача ждёт его действия.
+        self.assertEqual(src.count("{renderTasksSidebarButtonInner()}"), 4)
         self.assertIn("tasksActionRequiredCount,", src)
         self.assertIn("onActionNeedsChange={handleTasksActionNeedsChange}", src)
 

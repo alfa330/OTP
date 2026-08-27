@@ -4383,16 +4383,63 @@ def _resolve_requester():
     return requester_id, requester, None
 
 
+def _back_office_task_employee_role(requester_id, role):
+    """Роль бэк-офиса, если «Задачи» выданы человеку как РЯДОВОМУ своего отдела.
+
+    Возвращает 'hr_manager'/'accounting_manager' — ту роль, под которой слой
+    данных знает рядового сотрудника Бухгалтерии и HR, — либо None.
+
+    Проверяем ОТДЕЛ, а не только роль: остатки на 'operator' и 'trainee' (их
+    успели завести до появления собственных ролей) по роли неотличимы от
+    оператора линии, а раздел «Задачи» выдан отделу — строкой в
+    DEPARTMENT_VIEW_ALLOWLIST (src/utils/departmentViews.js), не роли. Их же
+    роль здесь и приводится к роли своего отдела: ниже по стеку отдела уже не
+    видно, database.py решает по одной только роли.
+
+    Обратная сторона той же проверки: 'hr_manager' в чужом отделе раздела не
+    получает — как и в add_user, где роль сверяется с отделом.
+    """
+    if role not in BACK_OFFICE_TASK_EMPLOYEE_ROLES:
+        return None
+    return _back_office_employee_role(db.get_user_department_id(requester_id))
+
+
+def _can_access_tasks(role, requester_id):
+    """Кто вообще попадает в раздел «Задачи». ОДНО правило на два места.
+
+    Зовут его гард роутов (_task_route_guard) и источник «Задачи» в колоколе
+    (_notifications_viewer_context). Раньше это были две дословные копии
+    условия, и разъехаться они могли только молча: открыть колокол, не открыв
+    раздел, — уведомление ведёт на пустой экран; открыть раздел, не открыв
+    колокол, — о новой задаче человек узнаёт, только зайдя руками.
+    """
+    role = _normalize_user_role(role)
+    if _is_admin_role(role) or role in ('sv', 'trainer'):
+        return True
+    if _headed_department_id(requester_id) is not None:
+        return True
+    return _back_office_task_employee_role(requester_id, role) is not None
+
+
 def _task_route_guard():
     requester_id, requester, error = _resolve_requester()
     if error:
         message, status_code = error
         return None, None, jsonify({"error": message}), status_code
     requester_role = _normalize_user_role(requester[3])
-    headed_dept_id = _headed_department_id(requester_id)
-    if not (_is_admin_role(requester_role) or requester_role in ('sv', 'trainer') or headed_dept_id is not None):
-        return None, None, jsonify({"error": "Only admin, sv, trainer and department heads can access tasks"}), 403
+    if not _can_access_tasks(requester_role, requester_id):
+        return None, None, jsonify({
+            "error": "Only admin, sv, trainer, department heads and back office employees can access tasks"
+        }), 403
     g.effective_task_role = _effective_scoped_manager_role(requester_role, requester_id)
+    # Рядовой бэк-офиса идёт в слой данных под ролью СВОЕГО ОТДЕЛА: отдела там
+    # не видно, а охват у него личный — задачи, где он постановщик, поручитель
+    # или исполнитель (database.TASK_PERSONAL_SCOPE_ROLES). Глава сюда не
+    # попадает: _effective_scoped_manager_role уже сделал его 'sv'.
+    back_office_role = _back_office_task_employee_role(requester_id, g.effective_task_role)
+    g.task_scope_is_personal = back_office_role is not None
+    if back_office_role is not None:
+        g.effective_task_role = back_office_role
     g.task_scope_department_id = None if _is_global_admin_requester(g.effective_task_role, requester_id) else _department_scope_id_for_requester(requester_id)
     return requester_id, requester, None, None
 
@@ -19995,7 +20042,15 @@ def get_task_departments():
         requester_role = getattr(g, 'effective_task_role', requester[3])
         departments = db.get_task_departments(requester_id, requester_role)
 
-        default_department_id = _department_scope_id_for_requester(requester_id)
+        # У личного охвата отдела по умолчанию нет. Отдел задачи — это отдел
+        # того, кто её ПОСТАВИЛ, поэтому подставить рядовому сотруднику его
+        # собственный отдел значит спрятать от него всё, что поручили извне:
+        # переключатель молча срезал бы задачу, пришедшую от админа из другого
+        # отдела. Ему нужны все свои задачи, а не задачи своего отдела.
+        default_department_id = (
+            None if getattr(g, 'task_scope_is_personal', False)
+            else _department_scope_id_for_requester(requester_id)
+        )
         # Отдел без единой видимой задачи по умолчанию не выбираем: раздел
         # открылся бы пустым, и это читалось бы как «задачи пропали».
         if default_department_id is not None and not any(
@@ -24094,6 +24149,14 @@ BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE = {
     'hr': 'hr_manager',
 }
 BACK_OFFICE_EMPLOYEE_ROLES = frozenset(BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.values())
+
+# Роли, которые в отделах бэк-офиса означают рядового сотрудника. Кроме двух
+# собственных ролей сюда входят 'operator' и 'trainee': на них успели завести
+# людей до появления своих должностей, и карта разделов
+# (DEPARTMENT_VIEW_ALLOWLIST) до сих пор держит для них те же самые разделы.
+# Пропуск в раздел «Задачи» такой роли даёт только вместе с отделом — см.
+# _back_office_task_employee_role.
+BACK_OFFICE_TASK_EMPLOYEE_ROLES = BACK_OFFICE_EMPLOYEE_ROLES | {'operator', 'trainee'}
 
 
 def _back_office_employee_role(department_id):
@@ -53708,11 +53771,11 @@ def _notifications_viewer_context(requester_id, requester):
     role = _normalize_user_role(requester[3] if requester else None)
     is_global, viewer_dept = _events_viewer_scope(requester_id, role)
     can_see_four_you, _ = _four_you_access_for_requester(requester_id, requester)
-    # «Задачи» в колоколе видят те же роли, что пускает в раздел _task_route_guard:
-    # админ-роли, СВ, тренеры и главы отделов. Остальным источник скрыт целиком —
+    # «Задачи» в колоколе видят те же, кого пускает в раздел _task_route_guard.
+    # Правило не повторяем — зовём ту же функцию: пока это были две дословные
+    # копии, разойтись они могли только молча. Остальным источник скрыт целиком —
     # ноль без запроса, а не 403 посреди сводки.
-    can_see_tasks = (_is_admin_role(role) or role in ('sv', 'trainer')
-                     or _headed_department_id(requester_id) is not None)
+    can_see_tasks = _can_access_tasks(role, requester_id)
 
     # Дни рождения живут по своему периметру — см. _birthdays_viewer_scope:
     # «Ивенты» считают тренера глобальным, а личные данные сотрудников чужого
