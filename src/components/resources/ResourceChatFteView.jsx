@@ -3,6 +3,7 @@ import axios from 'axios';
 import {
   CalendarDays,
   Clock3,
+  LayoutDashboard,
   MessageSquare,
   RefreshCw,
   Save,
@@ -10,6 +11,7 @@ import {
   TrendingUp,
   Users,
 } from 'lucide-react';
+import ResourceSchedulePlanner from './ResourceSchedulePlanner';
 import {
   Bar,
   CartesianGrid,
@@ -20,6 +22,19 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+
+// Раздел живёт на том же визуале и функционале, что «Расчет ресурсов · Линия»:
+// те же вкладки, те же карточки, тот же планировщик графиков. Вкладок «Звонки»
+// и «Биллинг Oktell» здесь нет — они про телефонию.
+const VIEW_TABS = [
+  { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
+  { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
+  { key: 'schedule_planner', label: 'Графики', icon: CalendarDays },
+  { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
+];
+
+const CHAT_API_PREFIX = '/api/resource_fte/chat';
+
 
 /*
   Расчет ресурсов · Чат.
@@ -138,6 +153,17 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
   const [isSaving, setIsSaving] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [plannerPeriodEnd, setPlannerPeriodEnd] = useState('');
+
+  const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
+  // Планировщик просит именно функцию сборки заголовков, а не готовый конфиг.
+  const buildHeaders = useCallback(
+    (extra = {}) => (typeof withAccessTokenHeader === 'function'
+      ? withAccessTokenHeader({ ...extra })
+      : { ...extra }),
+    [withAccessTokenHeader],
+  );
 
   const authConfig = useCallback(() => {
     const headers = typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader({}) : {};
@@ -159,6 +185,7 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
       setOverview(payload);
       setSettingsDraft(payload?.forecast?.settings ? { ...payload.forecast.settings } : null);
       setWeekStart(payload?.forecast?.week_start || '');
+      setPlannerPeriodEnd(payload?.forecast?.period_end || payload?.forecast?.week_end || '');
       setSelectedDayIndex(0);
     } catch (error) {
       const message = error?.response?.data?.error || error?.message || 'Не удалось загрузить данные';
@@ -262,6 +289,29 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
         </div>
       ) : null}
 
+      <div className="flex flex-col gap-3 rounded-xl border-2 border-slate-200 bg-white p-2 shadow-sm lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex gap-1 overflow-x-auto">
+          {VIEW_TABS.map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setActiveTab(tab.key)}
+                className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-semibold transition ${
+                  active ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <Icon size={16} />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {activeTab !== 'schedule_planner' ? (
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
         <button
           type="button"
@@ -292,7 +342,9 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
           </div>
         ) : null}
       </div>
+      ) : null}
 
+      {activeTab !== 'schedule_planner' && activeTab !== 'settings' ? (
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           icon={MessageSquare}
@@ -322,7 +374,9 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
           tone="amber"
         />
       </div>
+      ) : null}
 
+      {activeTab === 'settings' ? (
       <div className="rounded-xl border border-slate-200 bg-white p-4">
         <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800">
           <SlidersHorizontal className="h-4 w-4 text-slate-500" />
@@ -367,7 +421,25 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
           </span>
         </div>
       </div>
+      ) : null}
 
+      {activeTab === 'schedule_planner' ? (
+        <ResourceSchedulePlanner
+          apiRoot={apiRoot}
+          apiPrefix={CHAT_API_PREFIX}
+          buildHeaders={buildHeaders}
+          selectedWeekStart={weekStart}
+          selectedPeriodEnd={plannerPeriodEnd || weekStart}
+          onWeekStartChange={(value) => setWeekStart(value)}
+          onPeriodChange={(start, end) => {
+            setWeekStart(start);
+            setPlannerPeriodEnd(end);
+          }}
+          notify={(message, tone) => showToast?.(message, tone)}
+        />
+      ) : null}
+
+      {activeTab === 'overview' || activeTab === 'next_week' ? (
       <div className="rounded-xl border border-slate-200 bg-white p-4">
         <div className="mb-3 text-sm font-semibold text-slate-800">Прогноз по дням недели</div>
         <div className="overflow-x-auto">
@@ -415,8 +487,9 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
           </table>
         </div>
       </div>
+      ) : null}
 
-      {selectedDay ? (
+      {selectedDay && (activeTab === 'overview' || activeTab === 'next_week') ? (
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="mb-3 text-sm font-semibold text-slate-800">
             {selectedDay.label} · {formatDate(selectedDay.forecast_date)} — чаты и потребность по часам
@@ -450,7 +523,7 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
         </div>
       ) : null}
 
-      {historyChart.length ? (
+      {historyChart.length && activeTab === 'overview' ? (
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="mb-1 text-sm font-semibold text-slate-800">История объёма</div>
           <div className="mb-3 text-xs text-slate-500">
@@ -472,7 +545,7 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
         </div>
       ) : null}
 
-      {overview?.channels?.length ? (
+      {overview?.channels?.length && activeTab === 'overview' ? (
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="mb-3 text-sm font-semibold text-slate-800">Каналы за базовые недели</div>
           <div className="overflow-x-auto">

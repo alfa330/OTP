@@ -202,20 +202,38 @@ def _covered_days_tx(cursor, day_from: date, day_to: date) -> set:
     return {row[0].isoformat() for row in cursor.fetchall()}
 
 
+MAX_FORECAST_PERIOD_DAYS = 31
+
+
 def build_chat_forecast(db, week_start_value: Any = None,
-                        settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Почасовой прогноз на неделю: среднее того же дня недели в базовых неделях."""
+                        settings: Optional[Dict[str, Any]] = None,
+                        period_end_value: Any = None) -> Dict[str, Any]:
+    """Почасовой прогноз: среднее того же дня недели в базовых неделях.
+
+    Период по умолчанию — неделя от `week_start_value`. Планировщик графиков
+    умеет работать и с произвольным отрезком, поэтому принимаем `period_end_value`.
+    """
     with db._get_cursor() as cursor:
         settings = dict(settings or _get_chat_settings_tx(cursor))
         latest = _latest_chat_day_tx(cursor)
         requested = _parse_date(week_start_value)
         if requested is not None:
-            target_week = _week_start(requested)
+            period_start = requested
         elif latest is not None:
-            target_week = _week_start(latest) + timedelta(weeks=1)
+            period_start = _week_start(latest) + timedelta(weeks=1)
         else:
-            target_week = _week_start(date.today()) + timedelta(weeks=1)
+            period_start = _week_start(date.today()) + timedelta(weeks=1)
 
+        period_end = _parse_date(period_end_value) or (period_start + timedelta(days=6))
+        if period_end < period_start:
+            period_start, period_end = period_end, period_start
+        span = (period_end - period_start).days + 1
+        if span > MAX_FORECAST_PERIOD_DAYS:
+            period_end = period_start + timedelta(days=MAX_FORECAST_PERIOD_DAYS - 1)
+            span = MAX_FORECAST_PERIOD_DAYS
+
+        # Базовые недели отсчитываем от недели, в которую попадает начало периода.
+        target_week = _week_start(period_start)
         lookback_from = target_week - timedelta(weeks=MAX_BASE_LOOKBACK_WEEKS)
         covered = _covered_days_tx(cursor, lookback_from, target_week - timedelta(days=1))
         chosen = _covered_base_week_starts(target_week, settings["base_weeks"], covered)
@@ -227,11 +245,13 @@ def build_chat_forecast(db, week_start_value: Any = None,
 
     capacity = max(0.01, float(settings["capacity_per_hour"]))
     days: List[Dict[str, Any]] = []
-    for offset in range(7):
-        target_day = target_week + timedelta(days=offset)
+    for offset in range(span):
+        target_day = period_start + timedelta(days=offset)
         sources = []
         for base in base_weeks:
-            source_day = base + timedelta(days=offset)
+            # Сопоставляем по ДНЮ НЕДЕЛИ, а не по смещению в периоде: период может
+            # начинаться не с понедельника, и тогда смещение уводит на чужой день.
+            source_day = base + timedelta(days=target_day.weekday())
             per_hour = hourly.get(source_day.isoformat(), {})
             sources.append({
                 "date": source_day.isoformat(),
@@ -274,8 +294,10 @@ def build_chat_forecast(db, week_start_value: Any = None,
     shrink = min(max(float(settings["shrinkage_coeff"]), 0.01), 1.0)
     operators = total_fte_hours / weekly_hours
     return {
-        "week_start": target_week.isoformat(),
-        "week_end": (target_week + timedelta(days=6)).isoformat(),
+        "week_start": period_start.isoformat(),
+        "week_end": period_end.isoformat(),
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
         "base_week_starts": [item.isoformat() for item in base_weeks],
         "skipped_base_weeks": skipped_weeks,
         "settings": settings,

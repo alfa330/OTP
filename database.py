@@ -4100,6 +4100,17 @@ class Database:
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
             """)
+            # Планы графиков теперь общие для линии и чата, поэтому им нужен
+            # дискриминатор направления. DEFAULT 'line' — все существующие планы
+            # (и вся механика аукциона, что на них завязана) остаются линией.
+            cursor.execute("""
+                ALTER TABLE resource_saved_schedule_plans
+                ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(10) NOT NULL DEFAULT 'line';
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_plans_mode_period
+                ON resource_saved_schedule_plans(direction_mode, date_from, date_to, archived_at);
+            """)
             # Настройки распределения звонков на оценку («Деление звонков»): фильтр длительности
             # + флаг автораспределения. Singleton + аудит (кто/когда), история изменений отдельно.
             cursor.execute("""
@@ -8841,7 +8852,9 @@ class Database:
             "updated_at": plan_row[13].isoformat() if plan_row[13] else None,
         }
 
-    def get_resource_saved_schedule(self, date_from=None, date_to=None, plan_id=None):
+    def get_resource_saved_schedule(self, date_from=None, date_to=None, plan_id=None,
+                                    direction_mode='line'):
+        mode = 'chat' if str(direction_mode or 'line').lower() == 'chat' else 'line'
         with self._get_cursor() as cursor:
             if plan_id:
                 cursor.execute("""
@@ -8854,6 +8867,8 @@ class Database:
             else:
                 start_date = self._parse_resource_schedule_date_value(date_from, "date_from")
                 end_date = self._parse_resource_schedule_date_value(date_to or date_from, "date_to")
+                # Планы линии и чата лежат в одной таблице и различаются только
+                # направлением: без фильтра чат подхватил бы график линии на тот же период.
                 cursor.execute("""
                     SELECT id, date_from, date_to, title, selected_variant_key,
                            include_incident_uplift, summary, capacity, templates, meta,
@@ -8861,10 +8876,11 @@ class Database:
                     FROM resource_saved_schedule_plans
                     WHERE date_from = %s
                       AND date_to = %s
+                      AND direction_mode = %s
                       AND archived_at IS NULL
                     ORDER BY updated_at DESC, id DESC
                     LIMIT 1
-                """, (start_date, end_date))
+                """, (start_date, end_date, mode))
             plan_row = cursor.fetchone()
             if not plan_row:
                 return None
@@ -8879,7 +8895,8 @@ class Database:
             shift_rows = cursor.fetchall() or []
             return self._serialize_resource_saved_schedule_plan(plan_row, shift_rows)
 
-    def save_resource_saved_schedule(self, payload, updated_by=None):
+    def save_resource_saved_schedule(self, payload, updated_by=None, direction_mode='line'):
+        mode = 'chat' if str(direction_mode or 'line').lower() == 'chat' else 'line'
         safe_payload = payload or {}
         days = safe_payload.get("days") if isinstance(safe_payload.get("days"), list) else []
         if not days:
@@ -8946,11 +8963,12 @@ class Database:
                     FROM resource_saved_schedule_plans
                     WHERE date_from = %s
                       AND date_to = %s
+                      AND direction_mode = %s
                       AND archived_at IS NULL
                     ORDER BY updated_at DESC, id DESC
                     LIMIT 1
                     FOR UPDATE
-                """, (start_date, end_date))
+                """, (start_date, end_date, mode))
                 existing = cursor.fetchone()
                 plan_id = int(existing[0]) if existing else None
 
@@ -8966,6 +8984,7 @@ class Database:
                         capacity = %s,
                         templates = %s,
                         meta = %s,
+                        direction_mode = %s,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
@@ -8979,6 +8998,7 @@ class Database:
                     Json(capacity),
                     Json(templates),
                     Json(meta),
+                    mode,
                     updated_by,
                     plan_id,
                 ))
@@ -8987,9 +9007,9 @@ class Database:
                     INSERT INTO resource_saved_schedule_plans (
                         date_from, date_to, title, selected_variant_key,
                         include_incident_uplift, summary, capacity, templates,
-                        meta, created_by, updated_by
+                        meta, direction_mode, created_by, updated_by
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     start_date,
@@ -9001,6 +9021,7 @@ class Database:
                     Json(capacity),
                     Json(templates),
                     Json(meta),
+                    mode,
                     updated_by,
                     updated_by,
                 ))

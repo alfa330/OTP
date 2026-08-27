@@ -8007,6 +8007,63 @@ def api_resource_fte_chat_settings():
         return _resource_fte_error_response(error)
 
 
+@app.route('/api/resource_fte/chat/shift_templates', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_shift_templates():
+    """Шаблоны смен у чата те же, что у линии — иначе разъедутся правила смен."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        return jsonify({"status": "success", **get_resource_shift_templates()}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/saved_schedule', methods=['GET', 'PUT', 'POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_saved_schedule():
+    """Тот же склад планов, что у линии, но со своим направлением.
+
+    Без `direction_mode='chat'` чат подхватил бы график линии на тот же период.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        if request.method == 'GET':
+            schedule = db.get_resource_saved_schedule(
+                date_from=request.args.get('date_from'),
+                date_to=request.args.get('date_to'),
+                plan_id=request.args.get('plan_id'),
+                direction_mode='chat',
+            )
+            return jsonify({"status": "success", "schedule": schedule}), 200
+
+        payload = request.get_json(silent=True) or {}
+        result = db.save_resource_saved_schedule(
+            payload, updated_by=requester_id, direction_mode='chat')
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        code = str(error)
+        mapping = {
+            "RESOURCE_SCHEDULE_EMPTY": ("График пустой: нечего сохранять", 400),
+            "INVALID_RESOURCE_SCHEDULE_DATE": ("Некорректная дата графика", 400),
+            "INVALID_RESOURCE_SCHEDULE_PERIOD": ("Дата окончания графика раньше даты начала", 400),
+            "DATE_FROM_REQUIRED": ("Дата начала графика обязательна", 400),
+            "DATE_TO_REQUIRED": ("Дата окончания графика обязательна", 400)
+        }
+        message, status = mapping.get(code, ("Не удалось сохранить график", 400))
+        return jsonify({"error": message, "code": code}), status
+    except Exception as error:
+        logging.error(f"Resource chat saved schedule API error: {error}", exc_info=True)
+        return _resource_fte_error_response(error)
+
+
 @app.route('/api/resource_fte/chat/schedule_preview', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_chat_schedule_preview():
@@ -8022,7 +8079,12 @@ def api_resource_fte_chat_schedule_preview():
         return guard_response, guard_status
     try:
         payload = request.get_json(silent=True) or {}
-        forecast = build_chat_forecast(db, payload.get('week_start'))
+        # Планировщик графиков шлёт период (date_from/date_to), витрина — неделю.
+        forecast = build_chat_forecast(
+            db,
+            payload.get('date_from') or payload.get('week_start'),
+            period_end_value=payload.get('date_to'),
+        )
         templates = _normalize_shift_templates(payload.get('templates'))
         operator_capacity = payload.get('operator_capacity') or None
         preview = _generate_schedule_preview_from_forecast(

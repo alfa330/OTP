@@ -208,6 +208,61 @@ class ChatSectionFrontendTests(unittest.TestCase):
         self.assertIn("Расчет ресурсов · Чат", source)
         self.assertIn("ответ внутри чата", source)
 
+    def test_chat_reuses_the_ready_made_visual_and_planner(self):
+        """Чат должен жить на готовом визуале и функционале линии, а не на своём.
+
+        Иначе два раздела расходятся: у линии правят вкладки и планировщик,
+        а чат остаётся с самописной страницей.
+        """
+        source = _read(CHAT_VIEW)
+        self.assertIn("import ResourceSchedulePlanner from './ResourceSchedulePlanner'", source)
+        self.assertIn("<ResourceSchedulePlanner", source)
+        for tab in ("'Обзор'", "'Прогнозы'", "'Графики'", "'Настройки'"):
+            self.assertIn(tab, source, f"нет вкладки {tab}")
+
+    def test_chat_planner_points_at_chat_endpoints(self):
+        """Без своего префикса планировщик чата сохранял бы график в линию."""
+        source = _read(CHAT_VIEW)
+        self.assertIn("const CHAT_API_PREFIX = '/api/resource_fte/chat'", source)
+        self.assertIn("apiPrefix={CHAT_API_PREFIX}", source)
+        planner = _read(os.path.join(REPO_ROOT, "src", "components", "resources",
+                                     "ResourceSchedulePlanner.jsx"))
+        self.assertIn("apiPrefix = '/api/resource_fte'", planner,
+                      "у планировщика должен быть префикс с дефолтом линии")
+        self.assertNotIn("`${apiRoot}/api/resource_fte/", planner,
+                         "в планировщике не должно остаться жёстких путей")
+
+    def test_chat_has_no_telephony_tabs(self):
+        """«Звонки» и «Биллинг Oktell» к чату отношения не имеют.
+
+        Проверяем СПИСОК вкладок, а не весь файл: в комментарии их отсутствие
+        как раз объясняется, и по всему тексту проверка ловила бы объяснение.
+        """
+        source = _read(CHAT_VIEW)
+        tabs_block = source[source.index("const VIEW_TABS = ["):]
+        tabs_block = tabs_block[:tabs_block.index("];")]
+        for forbidden in ("oktell", "Звонки", "Биллинг"):
+            self.assertNotIn(forbidden.lower(), tabs_block.lower(),
+                             f"вкладки «{forbidden}» в чате быть не должно")
+        self.assertEqual(tabs_block.count("key:"), 4, "у чата ровно четыре вкладки")
+
+    def test_saved_schedule_is_scoped_by_direction(self):
+        """Планы линии и чата лежат в одной таблице — без фильтра они смешаются."""
+        schema = _read(os.path.join(REPO_ROOT, "database.py"))
+        self.assertIn("ADD COLUMN IF NOT EXISTS direction_mode", schema)
+        self.assertIn("direction_mode VARCHAR(10) NOT NULL DEFAULT 'line'", schema)
+        self.assertIn("AND direction_mode = %s", schema)
+        backend = _read(os.path.join(REPO_ROOT, "bot_schedule2.py"))
+        chunk = backend[backend.index("def api_resource_fte_chat_saved_schedule"):]
+        chunk = chunk[:chunk.index("@app.route('/api/resource_fte/chat/schedule_preview'")]
+        # считаем только исполняемые строки: в докстринге направление тоже упомянуто
+        code_lines = [ln for ln in chunk.splitlines()
+                      if "direction_mode='chat'" in ln and not ln.strip().startswith("#")
+                      and '"""' not in ln and "Без `" not in ln]
+        self.assertEqual(len(code_lines), 2,
+                         "и чтение, и запись плана чата должны идти со своим направлением; "
+                         f"нашлось: {code_lines}")
+
     def test_chat_view_uses_faicon_free_lucide_icons_only(self):
         """В разделе нет FaIcon — значит и незамапленных fa-токенов быть не может."""
         source = _read(CHAT_VIEW)

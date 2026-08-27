@@ -1352,6 +1352,9 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
 const ResourceSchedulePlanner = ({
   apiRoot,
   buildHeaders,
+  // Префикс ручек: линия ходит в /api/resource_fte, чат — в /api/resource_fte/chat.
+  // Сам планировщик одинаков, разница только в источнике потребности.
+  apiPrefix = '/api/resource_fte',
   selectedWeekStart,
   selectedPeriodEnd,
   onWeekStartChange,
@@ -1474,7 +1477,7 @@ const ResourceSchedulePlanner = ({
     setIsTemplatesLoading(true);
     setErrorText('');
     try {
-      const response = await axios.get(`${apiRoot}/api/resource_fte/shift_templates`, {
+      const response = await axios.get(`${apiRoot}${apiPrefix}/shift_templates`, {
         headers: buildHeaders(),
       });
       applyTemplates(response.data?.templates || []);
@@ -1483,7 +1486,7 @@ const ResourceSchedulePlanner = ({
     } finally {
       setIsTemplatesLoading(false);
     }
-  }, [apiRoot, applyTemplates, buildHeaders]);
+  }, [apiRoot, apiPrefix, applyTemplates, buildHeaders]);
 
   useEffect(() => {
     if (!templates.length) {
@@ -1515,7 +1518,7 @@ const ResourceSchedulePlanner = ({
     const dateTo = selectedPeriodEnd || selectedWeekStart;
     if (!silent) setIsSavedScheduleLoading(true);
     try {
-      const response = await axios.get(`${apiRoot}/api/resource_fte/saved_schedule`, {
+      const response = await axios.get(`${apiRoot}${apiPrefix}/saved_schedule`, {
         params: {
           date_from: dateFrom,
           date_to: dateTo,
@@ -1565,7 +1568,7 @@ const ResourceSchedulePlanner = ({
     } finally {
       if (!silent) setIsSavedScheduleLoading(false);
     }
-  }, [apiRoot, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart]);
+  }, [apiRoot, apiPrefix, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart]);
 
   useEffect(() => {
     loadSavedSchedule({ silent: true });
@@ -1616,7 +1619,7 @@ const ResourceSchedulePlanner = ({
     setErrorText('');
     try {
       const response = await axios.post(
-        `${apiRoot}/api/resource_fte/schedule_preview`,
+        `${apiRoot}${apiPrefix}/schedule_preview`,
         {
           date_from: selectedWeekStart,
           date_to: selectedPeriodEnd || selectedWeekStart,
@@ -1651,7 +1654,7 @@ const ResourceSchedulePlanner = ({
     } finally {
       setIsGenerating(false);
     }
-  }, [apiRoot, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart, templates]);
+  }, [apiRoot, apiPrefix, applyGeneratedVariant, buildHeaders, emit, normalizePreviewDays, selectedPeriodEnd, selectedWeekStart, templates]);
 
   useEffect(() => {
     if (!apiRoot || !nextMondayProjectionDate || !plannerDays.length) {
@@ -1663,7 +1666,7 @@ const ResourceSchedulePlanner = ({
     const loadProjection = async () => {
       try {
         const response = await axios.post(
-          `${apiRoot}/api/resource_fte/schedule_preview`,
+          `${apiRoot}${apiPrefix}/schedule_preview`,
           {
             date_from: nextMondayProjectionDate,
             date_to: nextMondayProjectionDate,
@@ -1707,6 +1710,7 @@ const ResourceSchedulePlanner = ({
     };
   }, [
     apiRoot,
+    apiPrefix,
     buildHeaders,
     includeIncidentUplift,
     nextMondayProjectionDate,
@@ -1862,7 +1866,7 @@ const ResourceSchedulePlanner = ({
     setIsSavingSchedule(true);
     try {
       const response = await axios.put(
-        `${apiRoot}/api/resource_fte/saved_schedule`,
+        `${apiRoot}${apiPrefix}/saved_schedule`,
         {
           id: savedSchedule?.id || null,
           date_from: selectedWeekStart || computedDays[0]?.date,
@@ -1900,6 +1904,7 @@ const ResourceSchedulePlanner = ({
     }
   }, [
     apiRoot,
+    apiPrefix,
     buildHeaders,
     capacityInfo,
     computedDays,
