@@ -89,6 +89,7 @@ from resource_fte.chat import (
     build_chat_forecast,
     get_chat_overview,
     get_chat_settings,
+    get_chat_shift_templates,
     update_chat_settings,
 )
 from resource_fte.schedule_generation import (
@@ -8010,14 +8011,14 @@ def api_resource_fte_chat_settings():
 @app.route('/api/resource_fte/chat/shift_templates', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_chat_shift_templates():
-    """Шаблоны смен у чата те же, что у линии — иначе разъедутся правила смен."""
+    """Шаблоны смен чата — из боевого графика «График чат (6).xlsx», а не дефолты линии."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, guard_response, guard_status = _resource_fte_route_guard()
     if guard_response is not None:
         return guard_response, guard_status
     try:
-        return jsonify({"status": "success", **get_resource_shift_templates()}), 200
+        return jsonify({"status": "success", **get_chat_shift_templates()}), 200
     except Exception as error:
         return _resource_fte_error_response(error)
 

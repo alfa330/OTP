@@ -256,6 +256,9 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
   }, [forecast, loadOverview]);
 
   const skipped = forecast?.skipped_base_weeks || [];
+  const capacity = forecast?.operator_capacity || null;
+  const offScale = capacity?.off_scale_rates || [];
+  const profile = overview?.weekday_profile || [];
 
   return (
     <div className="space-y-5 p-4 sm:p-6">
@@ -286,6 +289,14 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
       {loadError ? (
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {loadError}
+        </div>
+      ) : null}
+
+      {offScale.length ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          В чате только ставки 1 и 0,75. В направлении есть люди с другой ставкой —{' '}
+          {offScale.map((item) => `${formatNumber(item.rate, 2)}: ${formatInt(item.count)} чел.`).join(', ')}
+          {' '}— они не учтены в расчёте и не попадут в график. Похоже на расхождение в карточках.
         </div>
       ) : null}
 
@@ -372,6 +383,19 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
           value={formatNumber(totals.peak_fte, 1)}
           hint="самый нагруженный час недели"
           tone="amber"
+        />
+        <StatCard
+          icon={Users}
+          label="Есть сейчас, FTE"
+          value={formatNumber(totals.current_operator_fte, 2)}
+          hint={`${formatInt(totals.head_count)} чел. в направлении`}
+        />
+        <StatCard
+          icon={Users}
+          label="Запас / нехватка"
+          value={`${Number(totals.operator_fte_gap) >= 0 ? '+' : ''}${formatNumber(totals.operator_fte_gap, 2)}`}
+          hint={Number(totals.operator_fte_gap) >= 0 ? 'штата хватает' : 'штата не хватает'}
+          tone={Number(totals.operator_fte_gap) >= 0 ? 'green' : 'amber'}
         />
       </div>
       ) : null}
@@ -542,6 +566,51 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
               </ComposedChart>
             </ResponsiveContainer>
           </div>
+        </div>
+      ) : null}
+
+      {capacity && activeTab === 'overview' ? (
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="mb-3 text-sm font-semibold text-slate-800">
+            Состав направления и профиль по дням недели
+          </div>
+          <div className="mb-4 flex flex-wrap gap-4 text-sm">
+            {(capacity.rate_capacity || []).map((item) => (
+              <div key={item.rate} className="rounded-lg border border-slate-200 px-3 py-2">
+                <div className="text-xs text-slate-500">Ставка {formatNumber(item.rate, 2)}</div>
+                <div className="font-semibold text-slate-900">{formatInt(item.count)} чел.</div>
+                <div className="text-xs text-slate-500">
+                  смен в неделю: {formatInt(item.weekly_shift_capacity)}
+                </div>
+              </div>
+            ))}
+          </div>
+          {profile.length ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <th className="px-3 py-2">День</th>
+                    <th className="px-3 py-2 text-right">В среднем чатов</th>
+                    <th className="px-3 py-2 text-right">Пик в часе</th>
+                    <th className="px-3 py-2 text-right">Дней в выборке</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {profile.map((row) => (
+                    <tr key={row.weekday} className="border-b border-slate-100">
+                      <td className="px-3 py-2 font-medium text-slate-800">{row.short}</td>
+                      <td className="px-3 py-2 text-right">{formatInt(row.avg_chats)}</td>
+                      <td className="px-3 py-2 text-right">
+                        {row.peak_hour === null ? '—' : `${String(row.peak_hour).padStart(2, '0')}:00`}
+                      </td>
+                      <td className="px-3 py-2 text-right text-slate-500">{formatInt(row.days_in_sample)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

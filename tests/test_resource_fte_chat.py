@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import date
 
 from resource_fte.chat import (
+    CHAT_RATES,
+    CHAT_SHIFT_TEMPLATE_LABELS,
     CHAT_SETTINGS_LIMITS,
     DEFAULT_CHAT_SETTINGS,
     MAX_BASE_LOOKBACK_WEEKS,
@@ -14,6 +16,7 @@ from resource_fte.chat import (
     _covered_base_week_starts,
     _week_start,
     build_chat_forecast,
+    get_chat_shift_templates,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -151,6 +154,37 @@ class ChatForecastModelTests(unittest.TestCase):
                 f"в исполняемом коде чатовой модели не должно быть {forbidden}",
             )
 
+    def test_chat_has_only_two_rates(self):
+        """В чате ставки только 1 и 0,75 — половинной нет (решение владельца)."""
+        self.assertEqual(set(CHAT_RATES), {1.0, 0.75})
+        self.assertEqual(set(CHAT_SHIFT_TEMPLATE_LABELS), {1.0, 0.75})
+        payload = get_chat_shift_templates()
+        self.assertEqual({item["rate"] for item in payload["templates"]}, {1.0, 0.75})
+        self.assertEqual({item["rate"] for item in payload["rates"]}, {1.0, 0.75})
+
+    def test_shift_templates_come_from_the_owner_file(self):
+        """Смены чата — из боевого «График чат (6).xlsx», а не дефолты линии.
+
+        У линии есть 7*16 и 9*18, которых в чате нет, а в чате есть 12*21,
+        которого нет в дефолтах. Если наборы совпадут — значит взяли не тот.
+        """
+        from resource_fte.schedule_generation import DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS
+        chat_full = set(CHAT_SHIFT_TEMPLATE_LABELS[1.0])
+        line_full = set(DEFAULT_RESOURCE_SHIFT_TEMPLATE_LABELS[1.0])
+        self.assertIn("12*21", chat_full, "смена из файла владельца потеряна")
+        self.assertNotIn("7*16", chat_full, "смены линии в чат попадать не должны")
+        self.assertNotIn("9*18", chat_full, "смены линии в чат попадать не должны")
+        self.assertNotEqual(chat_full, line_full)
+        self.assertEqual(get_chat_shift_templates()["source"], "График чат (6).xlsx")
+
+    def test_every_chat_shift_parses_and_has_sane_duration(self):
+        for item in get_chat_shift_templates()["templates"]:
+            hours = item["durationMinutes"] / 60
+            if item["rate"] == 1.0:
+                self.assertTrue(9 <= hours <= 12, f"{item['label']}: {hours} ч")
+            else:
+                self.assertAlmostEqual(hours, 6.5, places=1, msg=item["label"])
+
     def test_settings_limits_cover_every_default(self):
         for key in DEFAULT_CHAT_SETTINGS:
             self.assertIn(key, CHAT_SETTINGS_LIMITS, f"нет границ для вводной {key}")
@@ -219,6 +253,14 @@ class ChatSectionFrontendTests(unittest.TestCase):
         self.assertIn("<ResourceSchedulePlanner", source)
         for tab in ("'Обзор'", "'Прогнозы'", "'Графики'", "'Настройки'"):
             self.assertIn(tab, source, f"нет вкладки {tab}")
+
+    def test_chat_templates_endpoint_serves_chat_set(self):
+        """Ручка чата обязана отдавать ЧАТОВЫЕ шаблоны, а не набор линии."""
+        backend = _read(os.path.join(REPO_ROOT, "bot_schedule2.py"))
+        chunk = backend[backend.index("def api_resource_fte_chat_shift_templates"):]
+        chunk = chunk[:chunk.index("@app.route", 10)]
+        self.assertIn("get_chat_shift_templates()", chunk)
+        self.assertNotIn("get_resource_shift_templates()", chunk)
 
     def test_chat_planner_points_at_chat_endpoints(self):
         """Без своего префикса планировщик чата сохранял бы график в линию."""

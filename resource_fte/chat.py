@@ -17,7 +17,10 @@
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from .common import WEEKDAYS_RU, _round_fte_to_half, _to_float, _to_int
+from .common import (
+    WEEKDAYS_RU, WORK_DAYS_PER_OPERATOR_WEEK,
+    _round_fte_to_half, _to_float, _to_int,
+)
 
 
 DEFAULT_CHAT_SETTINGS = {
@@ -38,6 +41,52 @@ CHAT_SETTINGS_LIMITS = {
 }
 
 CHAT_REQUEST_TYPE = "common"
+
+# Направление «Чат менеджер». Штат для расчёта берём по нему, а не по всем операторам.
+CHAT_DIRECTION_NAME_PATTERN = "%чат%"
+
+# Смены чат-направления взяты из боевого графика владельца «График чат (6).xlsx»:
+# это НЕ дефолтный набор линии — там свой состав (нет 7*16 и 9*18, зато есть 12*21).
+# Разложены по длительности: 9–12 ч это полная ставка, 6,5 ч — 0,75.
+CHAT_SHIFT_TEMPLATE_LABELS = {
+    1.0: [
+        "8*17",
+        "10*19",
+        "11*20",
+        "12*21",
+        "13*22",
+        "15*00",
+        "17*02",
+        "20*08",
+    ],
+    0.75: [
+        "9*15/30",
+        "11*17/30",
+        "12*18/30",
+        "13*19/30",
+    ],
+}
+
+# В чате только две ставки — 1,0 и 0,75 (решение владельца 27.08.2026).
+# Половинной ставки здесь нет, поэтому и шаблонов на неё быть не должно.
+CHAT_RATES = (1.0, 0.75)
+
+
+def get_chat_shift_templates() -> Dict[str, Any]:
+    """Шаблоны смен чата — из боевого графика, а не дефолты линии."""
+    from .schedule_generation import _normalize_shift_template
+
+    templates = []
+    index = 0
+    for rate, labels in CHAT_SHIFT_TEMPLATE_LABELS.items():
+        for label in labels:
+            templates.append(_normalize_shift_template(label, fallback_rate=rate, index=index))
+            index += 1
+    return {
+        "templates": templates,
+        "rates": [{"rate": 1.0, "label": "1"}, {"rate": 0.75, "label": "0.75"}],
+        "source": "График чат (6).xlsx",
+    }
 
 
 def _clamp(value: float, key: str) -> float:
@@ -242,6 +291,7 @@ def build_chat_forecast(db, week_start_value: Any = None,
         oldest = min(base_weeks)
         newest_end = max(base_weeks) + timedelta(days=6)
         hourly = _hourly_volume_tx(cursor, oldest, newest_end)
+        capacity_info = _chat_operator_capacity_tx(cursor)
 
     capacity = max(0.01, float(settings["capacity_per_hour"]))
     days: List[Dict[str, Any]] = []
@@ -292,7 +342,11 @@ def build_chat_forecast(db, week_start_value: Any = None,
     total_fte_hours = round(sum(d["forecast_fte_hours"] for d in days), 2)
     weekly_hours = max(1.0, float(settings["weekly_hours_per_operator"]))
     shrink = min(max(float(settings["shrinkage_coeff"]), 0.01), 1.0)
-    operators = total_fte_hours / weekly_hours
+    # Норма часов считается на длину периода, а не жёстко на неделю — как у линии.
+    period_hours_per_operator = weekly_hours * span / 7
+    operators = total_fte_hours / max(1.0, period_hours_per_operator)
+    operators_with_shrinkage = operators / shrink
+    current_fte = float(capacity_info.get("current_operator_fte") or 0.0)
     return {
         "week_start": period_start.isoformat(),
         "week_end": period_end.isoformat(),
@@ -302,14 +356,98 @@ def build_chat_forecast(db, week_start_value: Any = None,
         "skipped_base_weeks": skipped_weeks,
         "settings": settings,
         "days": days,
+        "operator_capacity": capacity_info,
         "totals": {
             "forecast_chats": total_chats,
             "forecast_fte_hours": total_fte_hours,
+            "period_days": span,
+            "period_hours_per_operator": round(period_hours_per_operator, 2),
             "operators": round(operators, 2),
-            "operators_with_shrinkage": round(operators / shrink, 2),
+            "operators_with_shrinkage": round(operators_with_shrinkage, 2),
             "peak_fte": round(max((d["peak_fte"] for d in days), default=0.0), 2),
+            "current_operator_fte": round(current_fte, 2),
+            "operator_fte_gap": round(current_fte - operators_with_shrinkage, 2),
+            "head_count": capacity_info.get("head_count", 0),
         },
     }
+
+
+def _chat_operator_capacity_tx(cursor) -> Dict[str, Any]:
+    """Текущий штат чат-направления по ставкам — аналог того, что линия берёт по своим."""
+    cursor.execute(
+        """
+        SELECT COALESCE(u.rate, 1.0), COUNT(*)
+        FROM users u
+        JOIN directions d ON d.id = u.direction_id
+        WHERE u.role = 'operator'
+          AND COALESCE(u.status, 'working') = 'working'
+          AND d.name ILIKE %s
+        GROUP BY COALESCE(u.rate, 1.0)
+        ORDER BY 1 DESC
+        """,
+        (CHAT_DIRECTION_NAME_PATTERN,),
+    )
+    rows = cursor.fetchall() or []
+    rate_capacity = []
+    head_count = 0
+    current_fte = 0.0
+    off_scale = []
+    for rate_raw, count_raw in rows:
+        rate = float(rate_raw or 1.0)
+        count = int(count_raw or 0)
+        if rate not in CHAT_RATES:
+            # Ставку вне набора направления в расчёт не берём, но и не прячем:
+            # это расхождение в карточках людей, и его должно быть видно.
+            off_scale.append({"rate": rate, "count": count})
+            continue
+        head_count += count
+        current_fte += count * rate
+        rate_capacity.append({
+            "rate": rate,
+            "count": count,
+            "daily_shift_capacity": count,
+            "weekly_shift_capacity": count * WORK_DAYS_PER_OPERATOR_WEEK,
+        })
+    return {
+        "head_count": head_count,
+        "current_operator_fte": round(current_fte, 4),
+        "rate_capacity": rate_capacity,
+        "rates": list(CHAT_RATES),
+        "off_scale_rates": off_scale,
+    }
+
+
+def _weekday_profile_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, Any]]:
+    """Средний профиль по дню недели и часу — то же, что «профиль» у линии."""
+    cursor.execute(
+        """
+        SELECT EXTRACT(ISODOW FROM day)::int - 1 AS wd,
+               EXTRACT(HOUR FROM request_start)::int AS hh,
+               COUNT(*)::float / COUNT(DISTINCT day) AS avg_chats,
+               COUNT(DISTINCT day) AS days
+        FROM c2d_requests
+        WHERE request_type = %s AND request_start IS NOT NULL
+          AND day BETWEEN %s AND %s
+        GROUP BY 1, 2
+        ORDER BY 1, 2
+        """,
+        (CHAT_REQUEST_TYPE, day_from, day_to),
+    )
+    by_weekday: Dict[int, Dict[str, Any]] = {}
+    for weekday, hour, avg_chats, days in cursor.fetchall():
+        entry = by_weekday.setdefault(int(weekday), {
+            "weekday": int(weekday),
+            "short": WEEKDAYS_RU[int(weekday)]["short"],
+            "label": WEEKDAYS_RU[int(weekday)]["label"],
+            "days_in_sample": int(days),
+            "hourly": [],
+        })
+        entry["hourly"].append({"hour": int(hour), "avg_chats": round(float(avg_chats), 2)})
+    for entry in by_weekday.values():
+        entry["avg_chats"] = round(sum(item["avg_chats"] for item in entry["hourly"]), 1)
+        entry["peak_hour"] = max(entry["hourly"], key=lambda x: x["avg_chats"])["hour"] \
+            if entry["hourly"] else None
+    return [by_weekday[key] for key in sorted(by_weekday)]
 
 
 def _daily_history_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, Any]]:
@@ -360,13 +498,15 @@ def get_chat_overview(db, week_start_value: Any = None,
     with db._get_cursor() as cursor:
         latest = _latest_chat_day_tx(cursor)
         if latest is None:
-            history, channels, coverage = [], [], {"from": None, "to": None, "days": 0}
+            history, channels, profile = [], [], []
+            coverage = {"from": None, "to": None, "days": 0}
         else:
             day_from = latest - timedelta(days=depth - 1)
             history = _daily_history_tx(cursor, day_from, latest)
             base_from = min(_parse_date(x) for x in forecast["base_week_starts"])
             base_to = max(_parse_date(x) for x in forecast["base_week_starts"]) + timedelta(days=6)
             channels = _channel_split_tx(cursor, base_from, base_to)
+            profile = _weekday_profile_tx(cursor, base_from, base_to)
             coverage = {"from": day_from.isoformat(), "to": latest.isoformat(),
                         "days": len(history)}
 
@@ -374,6 +514,7 @@ def get_chat_overview(db, week_start_value: Any = None,
         "forecast": forecast,
         "history": history,
         "channels": channels,
+        "weekday_profile": profile,
         "history_coverage": coverage,
         "latest_chat_day": latest.isoformat() if latest else None,
     }
