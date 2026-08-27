@@ -41538,7 +41538,7 @@ class Database:
                     operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                           d.name as direction, u.status, u.rate
+                           d.name as direction, u.status, u.rate, u.department_id
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
@@ -41553,7 +41553,7 @@ class Database:
                     operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                           d.name as direction, u.status, u.rate
+                           d.name as direction, u.status, u.rate, u.department_id
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
@@ -41566,7 +41566,9 @@ class Database:
 
             operator_ids = [row[0] for row in operators]
             result_map = {}
-            for op_id, name, supervisor_id, supervisor_name, direction, status, rate in operators:
+            # department_id едет во фронт: в «Графиках работы» админ переключает
+            # отдел, а состав операторов в ответе один на все отделы.
+            for op_id, name, supervisor_id, supervisor_name, direction, status, rate, department_id in operators:
                 result_map[op_id] = {
                     'id': op_id,
                     'name': name,
@@ -41575,6 +41577,7 @@ class Database:
                     'direction': direction,
                     'status': status,
                     'rate': float(rate) if rate else 1.0,
+                    'department_id': department_id,
                     'shifts': {},
                     'daysOff': [],
                     'scheduleStatusPeriods': [],
