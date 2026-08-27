@@ -4071,6 +4071,35 @@ class Database:
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
             """)
+            # Расчет ресурсов для ЧАТА. Отдельная singleton-таблица, а не колонки в
+            # resource_settings: у чата другая модель — среднего времени обработки нет
+            # вообще, вместо него цель по «ответу внутри чата» и ёмкость (чатов в час
+            # на одного чатника). Смешивать вводные линии и чата в одной строке нельзя:
+            # у них разный смысл и их правят разные люди.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS resource_chat_settings (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    target_reply_seconds INTEGER NOT NULL DEFAULT 300,
+                    capacity_per_hour NUMERIC(8,2) NOT NULL DEFAULT 17,
+                    shrinkage_coeff NUMERIC(8,6) NOT NULL DEFAULT 0.90,
+                    weekly_hours_per_operator NUMERIC(8,2) NOT NULL DEFAULT 40,
+                    base_weeks INTEGER NOT NULL DEFAULT 2,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT resource_chat_settings_singleton CHECK (id = 1),
+                    CONSTRAINT resource_chat_settings_target_check
+                        CHECK (target_reply_seconds BETWEEN 30 AND 3600),
+                    CONSTRAINT resource_chat_settings_capacity_check
+                        CHECK (capacity_per_hour > 0 AND capacity_per_hour <= 60),
+                    CONSTRAINT resource_chat_settings_base_weeks_check
+                        CHECK (base_weeks BETWEEN 1 AND 8)
+                );
+            """)
+            cursor.execute("""
+                INSERT INTO resource_chat_settings (id)
+                VALUES (1)
+                ON CONFLICT (id) DO NOTHING;
+            """)
             # Настройки распределения звонков на оценку («Деление звонков»): фильтр длительности
             # + флаг автораспределения. Singleton + аудит (кто/когда), история изменений отдельно.
             cursor.execute("""

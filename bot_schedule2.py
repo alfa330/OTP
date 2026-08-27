@@ -85,6 +85,16 @@ from resource_fte_service import (
     recalculate_resource_forecast,
     update_resource_settings,
 )
+from resource_fte.chat import (
+    build_chat_forecast,
+    get_chat_overview,
+    get_chat_settings,
+    update_chat_settings,
+)
+from resource_fte.schedule_generation import (
+    _generate_schedule_preview_from_forecast,
+    _normalize_shift_templates,
+)
 import uuid
 from passlib.hash import pbkdf2_sha256
 from werkzeug.utils import secure_filename
@@ -7951,6 +7961,80 @@ def api_resource_fte_shift_templates():
         return guard_response, guard_status
     try:
         return jsonify({"status": "success", **get_resource_shift_templates()}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/overview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_overview():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = get_chat_overview(
+            db,
+            week_start_value=request.args.get('week_start'),
+            history_days=request.args.get('history_days'),
+        )
+        return jsonify({"status": "success", **payload}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/settings', methods=['GET', 'PUT', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_settings():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        if request.method == 'GET':
+            return jsonify({"status": "success", "settings": get_chat_settings(db)}), 200
+        payload = request.get_json(silent=True) or {}
+        settings = update_chat_settings(db, payload, requester_id)
+        overview = get_chat_overview(db, week_start_value=payload.get('week_start'))
+        return jsonify({"status": "success", "settings": settings, **overview}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/schedule_preview', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_schedule_preview():
+    """Смены для чата строит ТОТ ЖЕ генератор, что и для линии.
+
+    Разница только во входе: почасовая потребность приходит из чатовой модели
+    (объём ÷ ёмкость), а не из объёма × AHT.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        forecast = build_chat_forecast(db, payload.get('week_start'))
+        templates = _normalize_shift_templates(payload.get('templates'))
+        operator_capacity = payload.get('operator_capacity') or None
+        preview = _generate_schedule_preview_from_forecast(
+            {"days": forecast["days"]},
+            templates,
+            operator_capacity=operator_capacity,
+            respect_operator_capacity=bool(payload.get('respect_operator_capacity')),
+            carry_in_shifts=payload.get('carry_in_shifts') or None,
+        )
+        return jsonify({"status": "success", "forecast": forecast, "preview": preview}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception as error:
         return _resource_fte_error_response(error)
 

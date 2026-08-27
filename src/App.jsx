@@ -149,6 +149,7 @@ const SalaryCalculatorPotok = lazyWithRetry(() => import('./components/salary/Sa
 const SalaryCalculatorVerificator = lazyWithRetry(() => import('./components/salary/SalaryCalculatorVerificator'));
 const SalaryCalculatorYandexReg = lazyWithRetry(() => import('./components/salary/SalaryCalculatorYandexReg'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
+const ResourceChatFteView = lazyWithRetry(() => import('./components/resources/ResourceChatFteView'));
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
@@ -334,6 +335,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     qr_access: 'QR access',
     recruiting: 'Recruiting',
     resource_fte: 'Resource FTE',
+    resource_fte_chat: 'Resource FTE (chat)',
     salary: 'Salary calculator',
     shift_auction: 'Shift auction',
     surveys: 'Surveys',
@@ -36452,15 +36454,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [promotingUserId, setPromotingUserId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
             const [showSidebarEmployeesDropdown, setShowSidebarEmployeesDropdown] = useState(false);
+            const [showSidebarResourceDropdown, setShowSidebarResourceDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
+            const sidebarResourceRef = useRef(null);
             const sidebarMenuScrollRef = useRef(null);
             const [employeesDropdownPos, setEmployeesDropdownPos] = useState({ top: 0, left: 0 });
+            const [resourceDropdownPos, setResourceDropdownPos] = useState({ top: 0, left: 0 });
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
             const [isEmployeesClosing, setIsEmployeesClosing] = useState(false);
+            const [isResourceClosing, setIsResourceClosing] = useState(false);
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeAdminTab, setActiveAdminTab] = useState("active");
@@ -37516,6 +37522,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } else {
                 setShowSidebarEmployeesDropdown(false);
                 setIsEmployeesClosing(false);
+                setShowSidebarResourceDropdown(false);
+                setIsResourceClosing(false);
                 setShowSidebarAccountDropdown(true);
             }
             };
@@ -37539,7 +37547,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } else {
                 setShowSidebarAccountDropdown(false);
                 setIsClosing(false);
+                setShowSidebarResourceDropdown(false);
+                setIsResourceClosing(false);
                 setShowSidebarEmployeesDropdown(true);
+            }
+            };
+
+            // «Расчет ресурсов» открывает выбор направления — линия или чат,
+            // тем же выпадающим меню, что «Аккаунт» и «Учет сотрудников».
+            const handleToggleResourceDropdown = (forceClose = null) => {
+            if (forceClose === true) {
+                setIsResourceClosing(true);
+                setTimeout(() => {
+                setShowSidebarResourceDropdown(false);
+                setIsResourceClosing(false);
+                }, 200);
+                return;
+            }
+
+            if (showSidebarResourceDropdown) {
+                setIsResourceClosing(true);
+                setTimeout(() => {
+                setShowSidebarResourceDropdown(false);
+                setIsResourceClosing(false);
+                }, 200);
+            } else {
+                setShowSidebarAccountDropdown(false);
+                setIsClosing(false);
+                setShowSidebarEmployeesDropdown(false);
+                setIsEmployeesClosing(false);
+                setShowSidebarResourceDropdown(true);
             }
             };
 
@@ -37991,10 +38028,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     handleToggleEmployeesDropdown(true);
                 }
                 }
+                if (sidebarResourceRef.current && !sidebarResourceRef.current.contains(e.target)) {
+                if (showSidebarResourceDropdown) {
+                    handleToggleResourceDropdown(true);
+                }
+                }
             }
             document.addEventListener("mousedown", handleClickOutside);
             return () => document.removeEventListener("mousedown", handleClickOutside);
-            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown]);
+            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown, showSidebarResourceDropdown]);
 
             useEffect(() => {
                 if (!showSidebarEmployeesDropdown && !isEmployeesClosing) return;
@@ -38040,6 +38082,53 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ro?.disconnect();
                 };
             }, [showSidebarEmployeesDropdown, isEmployeesClosing]);
+
+            // Меню «Расчет ресурсов» рисуется position:fixed, поэтому его координаты
+            // надо пересчитывать при скролле меню, ресайзе и сворачивании сайдбара —
+            // иначе оно уезжает от своего пункта. Один в один как у «Учета сотрудников».
+            useEffect(() => {
+                if (!showSidebarResourceDropdown && !isResourceClosing) return;
+
+                let rafId = null;
+                const updatePos = () => {
+                    const rect = sidebarResourceRef.current?.getBoundingClientRect();
+                    if (!rect) return;
+                    const nextTop = rect.top;
+                    const nextLeft = rect.right + 8;
+                    setResourceDropdownPos((prev) => {
+                        if (prev.top === nextTop && prev.left === nextLeft) return prev;
+                        return { top: nextTop, left: nextLeft };
+                    });
+                };
+
+                const scheduleUpdatePos = () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    rafId = requestAnimationFrame(updatePos);
+                };
+
+                scheduleUpdatePos();
+
+                const scrollEl = sidebarMenuScrollRef.current;
+                scrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
+                window.addEventListener('resize', scheduleUpdatePos);
+
+                const sidebarEl = sidebarResourceRef.current?.closest('.sidebar');
+                sidebarEl?.addEventListener('transitionend', scheduleUpdatePos);
+
+                let ro = null;
+                if (typeof ResizeObserver !== 'undefined') {
+                    ro = new ResizeObserver(scheduleUpdatePos);
+                    if (sidebarResourceRef.current) ro.observe(sidebarResourceRef.current);
+                }
+
+                return () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    scrollEl?.removeEventListener('scroll', scheduleUpdatePos);
+                    window.removeEventListener('resize', scheduleUpdatePos);
+                    sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
+                    ro?.disconnect();
+                };
+            }, [showSidebarResourceDropdown, isResourceClosing]);
 
             function TrainingModal({
                 isOpen,
@@ -38745,7 +38834,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const canOpenRequestedView =
                     requestedViewFromUrl &&
                     (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
-                    (requestedViewFromUrl !== 'resource_fte' || canAccessResourceFteSection) &&
+                    ((requestedViewFromUrl !== 'resource_fte' && requestedViewFromUrl !== 'resource_fte_chat') || canAccessResourceFteSection) &&
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
@@ -38811,7 +38900,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-                if (view === 'resource_fte' && !canAccessResourceFteSection) {
+                if ((view === 'resource_fte' || view === 'resource_fte_chat') && !canAccessResourceFteSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
@@ -44177,6 +44266,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sidebarLatestRef.current = {
                 handleToggleDropdown,
                 handleToggleEmployeesDropdown,
+                handleToggleResourceDropdown,
                 handleLogout,
                 openCallEvaluationSection,
                 fetchDirections,
@@ -44189,6 +44279,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             const stableSidebarHandleToggleDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleDropdown(arg), []);
             const stableSidebarHandleToggleEmployeesDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleEmployeesDropdown(arg), []);
+            const stableSidebarHandleToggleResourceDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleResourceDropdown(arg), []);
             const stableSidebarHandleLogout = useCallback(() => sidebarLatestRef.current.handleLogout(), []);
             const stableSidebarOpenCallEvaluationSection = useCallback((opts) => sidebarLatestRef.current.openCallEvaluationSection(opts), []);
             const stableSidebarFetchDirections = useCallback(() => sidebarLatestRef.current.fetchDirections(), []);
@@ -44684,13 +44775,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             {canAccessResourceFteSection && (
-                                                <li>
+                                                <li className="relative" ref={sidebarResourceRef}>
                                                     <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
+                                                        onClick={stableSidebarHandleToggleResourceDropdown}
+                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
+                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
+                                                        }`}
+                                                        aria-expanded={showSidebarResourceDropdown}
+                                                        aria-haspopup="menu"
                                                     >
                                                         <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                                     </button>
+
+                                                    {(showSidebarResourceDropdown || isResourceClosing) && (
+                                                        <div
+                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
+                                                            w-56
+                                                            ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                            style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
+                                                        >
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-headset mr-2"></FaIcon> Линия
+                                                            </button>
+
+                                                            <div className="border-t border-gray-200" />
+
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_chat', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_chat' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                 </li>
                                             )}
                                             <li>
@@ -44977,13 +45098,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
                                             {canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte') && (
-                                                <li>
+                                                <li className="relative" ref={sidebarResourceRef}>
                                                     <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'resource_fte' ? 'bg-blue-700' : ''}`}
+                                                        onClick={stableSidebarHandleToggleResourceDropdown}
+                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
+                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
+                                                        }`}
+                                                        aria-expanded={showSidebarResourceDropdown}
+                                                        aria-haspopup="menu"
                                                     >
                                                         <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
                                                     </button>
+
+                                                    {(showSidebarResourceDropdown || isResourceClosing) && (
+                                                        <div
+                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
+                                                            w-56
+                                                            ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                            style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
+                                                        >
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-headset mr-2"></FaIcon> Линия
+                                                            </button>
+
+                                                            <div className="border-t border-gray-200" />
+
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_chat', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_chat' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                 </li>
                                             )}
                                             {departmentAllowsView(user, 'shift_auction') && (
@@ -45440,9 +45591,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canChangeAccountAvatar,
                 showSidebarAccountDropdown,
                 showSidebarEmployeesDropdown,
+                showSidebarResourceDropdown,
                 isClosing,
                 isEmployeesClosing,
+                isResourceClosing,
                 employeesDropdownPos,
+                resourceDropdownPos,
                 pendingSurveysBadgeCount,
                 tasksActionRequiredCount,
                 eventsUnreadCount,
@@ -45459,6 +45613,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 handleSidebarViewNavigation,
                 stableSidebarHandleToggleDropdown,
                 stableSidebarHandleToggleEmployeesDropdown,
+                stableSidebarHandleToggleResourceDropdown,
                 stableSidebarHandleLogout,
                 stableSidebarOpenCallEvaluationSection,
                 stableSidebarFetchDirections,
@@ -45690,7 +45845,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
@@ -47499,6 +47654,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </Suspense>
                                 ))}
+                                {( view === "resource_fte_chat" && canAccessResourceFteSection && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <ResourceChatFteView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
                                 {( view === "departments" && isAdminLikeRole && (
@@ -48634,6 +48799,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
+                                            user={user}
+                                            showToast={showToast}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                        />
+                                    </Suspense>
+                                ))}
+                                {( view === "resource_fte_chat" && canAccessResourceFteSection && (
+                                    <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                        <ResourceChatFteView
                                             user={user}
                                             showToast={showToast}
                                             apiBaseUrl={API_BASE_URL}
