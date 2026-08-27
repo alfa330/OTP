@@ -1540,11 +1540,45 @@ const toTimeInputValue = (value) => {
 // комментарий. Об этом сказано прямо в самом блоке, а не только на сервере, —
 // иначе супервайзер не знает, что можно писать, и пишет обтекаемо.
 
+/* Пояснение под «i», а не строкой на экране.
+ *
+ * Правило владельца: постоянно висящий текст-подсказка — это шум. Пояснение
+ * нужно один раз, когда человек впервые не понял поле, и мешает всё остальное
+ * время. Поэтому оно живёт в подсказке у метки поля.
+ *
+ * Тултип берём готовый (HoverTooltip): он рисуется порталом в body с
+ * z-index 4000 и потому виден поверх модалки, у которой 100. Свой пришлось бы
+ * обрезать по краю окна.
+ *
+ * Кнопка, а не span: она получает фокус, и подсказка открывается с клавиатуры
+ * и по тапу на телефоне, где наведения нет вовсе.
+ */
+const CeInfo = ({ text, label = 'Подробнее' }) => (
+    <HoverTooltip text={text}>
+        <button
+            type="button"
+            className="ce-info"
+            aria-label={label}
+            onClick={e => e.preventDefault()}
+        >
+            <FaIcon className="fas fa-info-circle" aria-hidden="true" />
+        </button>
+    </HoverTooltip>
+);
+
 const CHECKPOINT_KIND_OPTIONS = [
-    { value: 'quality',   label: 'Контроль качества',  hint: 'Держим на контроле и следим за качеством работы' },
-    { value: 'probation', label: 'Испытательный срок', hint: 'К дате проверки принимаем решение по сотруднику' },
-    { value: 'recheck',   label: 'Повторная проверка', hint: 'Переслушиваем звонки к назначенной дате' },
+    { value: 'quality',   label: 'Контроль качества' },
+    { value: 'probation', label: 'Испытательный срок' },
+    { value: 'recheck',   label: 'Повторная проверка' },
 ];
+
+// Одна подсказка на все три вида вместо строки, менявшейся под переключателем:
+// объяснение нужно, когда выбираешь, а не всё время, пока заполняешь форму.
+const CHECKPOINT_KIND_HINT = [
+    'Контроль качества — держим на контроле и следим за качеством работы.',
+    'Испытательный срок — к дате проверки принимаем решение по сотруднику.',
+    'Повторная проверка — переслушиваем звонки к назначенной дате.',
+].join('\n');
 
 // Быстрые сроки закрывают почти все случаи — календарь рядом остаётся для
 // остальных. Одно нажатие вместо выбора числа в выпадающем календаре.
@@ -1705,7 +1739,7 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                     <div className="ce-cp-sub">
                         {draft.enabled
                             ? activeKind.label + ' · проверка ' + cpFormatDate(draft.dueDate) + ' (' + cpDueWording(draft.dueDate) + ')'
-                            : 'Назначить дату повторной проверки, чтобы не потерять срок'}
+                            : 'Назначить дату повторной проверки'}
                     </div>
                 </div>
                 <CheckpointSwitch
@@ -1730,7 +1764,10 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                     )}
 
                     <div className="ce-cp-field">
-                        <label className="label">Вид контроля</label>
+                        <label className="label">
+                            Вид контроля
+                            <CeInfo text={CHECKPOINT_KIND_HINT} label="Чем отличаются виды контроля" />
+                        </label>
                         <div className="ce-cp-kinds" role="group" aria-label="Вид контроля">
                             {CHECKPOINT_KIND_OPTIONS.map(option => (
                                 <button
@@ -1744,11 +1781,16 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                                 </button>
                             ))}
                         </div>
-                        <div className="ce-cp-due-note" style={{ marginTop: 6 }}>{activeKind.hint}</div>
                     </div>
 
                     <div className="ce-cp-field">
-                        <label className="label">Дата следующей проверки</label>
+                        <label className="label">
+                            Дата следующей проверки
+                            <CeInfo
+                                text={'Когда срок наступит, напомним в разделе «Тренинги» → «Контроль» и в колоколе.'}
+                                label="Как напомним о проверке"
+                            />
+                        </label>
                         <div className="ce-cp-date-row">
                             <input
                                 className="input"
@@ -1769,10 +1811,6 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                                     {term.label}
                                 </button>
                             ))}
-                        </div>
-                        <div className="ce-cp-due-note" style={{ marginTop: 6 }}>
-                            Напомним в разделе «Тренинги» → «Контроль» и в колоколе:{' '}
-                            <strong>{cpDueWording(draft.dueDate)}</strong>
                         </div>
                     </div>
 
@@ -1806,7 +1844,11 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                             <div className="ce-cp-private-head">
                                 <span className="ce-cp-private-label">
                                     <FaIcon className="fas fa-lock" aria-hidden="true" />
-                                    Внутренний комментарий · сотруднику не виден
+                                    Внутренний комментарий
+                                    <CeInfo
+                                        text={'Видят только вы и руководители. Сотруднику он не показывается нигде — ни в его оценках, ни в уведомлении.'}
+                                        label="Кому виден внутренний комментарий"
+                                    />
                                 </span>
                             </div>
                             <textarea
@@ -1827,13 +1869,14 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                     )}
 
                     <div className="ce-cp-notify">
-                        <div className="ce-cp-notify-text">
-                            <div className="ce-cp-notify-title">Сообщить сотруднику</div>
-                            <div className="ce-cp-notify-sub">
-                                {draft.notifyOperator
-                                    ? 'Увидит только дату проверки и «что проверить». Вид контроля, причину и внутренний комментарий — нет.'
-                                    : 'Сотрудник о проверке не узнает. Контроль останется только у вас и у руководителя.'}
-                            </div>
+                        <div className="ce-cp-notify-title">
+                            Сообщить сотруднику
+                            <CeInfo
+                                text={draft.notifyOperator
+                                    ? 'Сотрудник увидит только дату проверки и «что проверить повторно».\nВид контроля, причину постановки и внутренний комментарий — не увидит.'
+                                    : 'Сотрудник о проверке не узнает. Контроль останется только у вас и у руководителей.'}
+                                label="Что увидит сотрудник"
+                            />
                         </div>
                         <CheckpointSwitch
                             checked={draft.notifyOperator}
@@ -2037,7 +2080,8 @@ const FeedbackModal = ({
                                 <label className="label">Как проведена обратная связь</label>
                                 <textarea
                                     className="textarea"
-                                    rows={3}
+                                    rows={2}
+                                    style={{minHeight: 62}}
                                     placeholder="Например: индивидуальный разбор, прослушивание звонка, чек-лист ошибок"
                                     value={deliveryComment}
                                     onChange={e => setDeliveryComment(e.target.value)}
@@ -2045,7 +2089,13 @@ const FeedbackModal = ({
                             </div>
                             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
                                 <div className="field" style={{marginBottom: 0}}>
-                                    <label className="label">Дата</label>
+                                    <label className="label">
+                                        Дата
+                                        <CeInfo
+                                            text={'Из этих даты и времени создастся тренинг «Тренинг по качеству. Разбор ошибок» — он и попадёт сотруднику в оплачиваемые часы.'}
+                                            label="Что будет с тренингом"
+                                        />
+                                    </label>
                                     <input
                                         className="input"
                                         type="date"
@@ -2072,14 +2122,10 @@ const FeedbackModal = ({
                                     />
                                 </div>
                             </div>
-                            <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
-                                При сохранении будет автоматически создан/обновлен тренинг с причиной
-                                <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong>.
-                            </div>
                         </>
                     ) : (
                         <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
-                            При сохранении будет добавлен только комментарий ОС, тренинг создан не будет.
+                            Тренинг создан не будет — только комментарий ОС.
                         </div>
                     )}
                     <div style={{marginTop: 16}}>
@@ -2246,7 +2292,13 @@ const BatchFeedbackModal = ({
                     </div>
                     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
                         <div className="field" style={{marginBottom: 0}}>
-                            <label className="label">Дата</label>
+                            <label className="label">
+                                Дата
+                                <CeInfo
+                                    text={'Из этих даты и времени создастся ОДИН общий тренинг «Тренинг по качеству. Разбор ошибок» на всё выбранное.'}
+                                    label="Что будет с тренингом"
+                                />
+                            </label>
                             <input className="input" type="date" value={feedbackDate} onChange={e => setFeedbackDate(e.target.value)} />
                         </div>
                         <div className="field" style={{marginBottom: 0}}>
@@ -2285,12 +2337,8 @@ const BatchFeedbackModal = ({
                             </div>
                         ))}
                     </div>
-                    <div style={{marginTop: 10, fontSize: 12, color:'var(--text-2)'}}>
-                        При сохранении будет создан один общий тренинг
-                        <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong> на всё выбранное.
-                    </div>
                     {/* Контрольная точка ставится по СОТРУДНИКУ, поэтому на всю
-                        пачку она одна — как и общий тренинг выше. */}
+                        пачку она одна — как и общий тренинг. */}
                     <div style={{marginTop: 16}}>
                         <CheckpointBlock
                             draft={checkpointDraft}

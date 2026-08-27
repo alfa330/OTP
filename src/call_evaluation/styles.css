@@ -1690,8 +1690,25 @@
             color: var(--accent);
             font-weight: 600;
         }
-        .ce-cp-due-note { font-size: 12px; color: var(--text-2); }
-        .ce-cp-due-note strong { color: var(--text); font-weight: 600; }
+        /* Значок «i» у метки поля. Кнопка размером со строку метки, без фона:
+           она сопровождает подпись, а не соперничает с ней за внимание. */
+        .ce-info {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: 5px;
+            padding: 0;
+            width: 14px;
+            height: 14px;
+            border: none;
+            background: none;
+            color: var(--text-3);
+            cursor: help;
+            vertical-align: middle;
+            transition: color var(--transition);
+        }
+        .ce-info:hover, .ce-info:focus-visible { color: var(--accent); }
+        .ce-info svg { width: 13px; height: 13px; }
 
         /* Необязательное — за кнопкой, а не на виду. */
         .ce-cp-more {
@@ -1733,18 +1750,23 @@
         }
         .ce-cp-private textarea { background: var(--surface); }
 
-        /* Что увидит сотрудник — говорим прямо, иначе разделение видимости
-           остаётся обещанием в документе, а не свойством экрана. */
+        /* Что увидит сотрудник. Раньше здесь висели две строки объяснения; они
+           ушли под «i» у заголовка — само разделение видимости от этого не
+           пропало, оно по-прежнему названо словами, просто по запросу. */
         .ce-cp-notify {
             display: flex;
-            align-items: flex-start;
+            align-items: center;
             gap: 12px;
             padding-top: 12px;
             border-top: 1px dashed var(--border);
         }
-        .ce-cp-notify-text { flex: 1 1 auto; min-width: 0; }
-        .ce-cp-notify-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
-        .ce-cp-notify-sub { margin-top: 2px; font-size: 11.5px; color: var(--text-2); line-height: 1.45; }
+        .ce-cp-notify-title {
+            flex: 1 1 auto;
+            min-width: 0;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text);
+        }
 
         .ce-cp-note {
             display: flex;

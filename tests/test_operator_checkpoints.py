@@ -449,10 +449,37 @@ class JournalUiTests(unittest.TestCase):
         self.assertIn("if (!draft || !draft.enabled) return '';", body)
 
     def test_the_block_tells_what_the_employee_will_see(self):
-        """Разделение видимости должно быть свойством экрана, а не документа."""
+        """Разделение видимости должно быть свойством экрана, а не документа.
+
+        Текст ушёл из постоянной разметки под «i» (окно ОС разгружали по просьбе
+        владельца), но САМА гарантия обязана остаться названной словами —
+        иначе супервайзер не знает, что можно писать в служебные поля, и пишет
+        обтекаемо. Поэтому проверяем не «есть строка на экране», а «строка
+        доступна пользователю через подсказку».
+        """
         source = _read(MAIN_JSX_PATH)
-        self.assertIn('Вид контроля, причину и внутренний комментарий — нет.', source)
-        self.assertIn('сотруднику не виден', source)
+        self.assertIn('const CeInfo = ', source)
+        for promise in (
+            'Вид контроля, причину постановки и внутренний комментарий — не увидит.',
+            'Сотруднику он не показывается нигде',
+        ):
+            with self.subTest(promise=promise):
+                self.assertIn(promise, source)
+                # Обещание живёт в подсказке, а не в случайном месте файла.
+                before = source[:source.index(promise)]
+                self.assertIn('<CeInfo', before[-400:])
+
+    def test_permanent_hint_paragraphs_are_gone(self):
+        """Разгрузка окна: постоянных абзацев-пояснений в разметке быть не должно."""
+        source = _read(MAIN_JSX_PATH)
+        for noise in (
+            'При сохранении будет автоматически создан/обновлен тренинг',
+            'При сохранении будет создан один общий тренинг',
+            'Напомним в разделе «Тренинги»',
+            'ce-cp-notify-sub',
+        ):
+            with self.subTest(noise=noise):
+                self.assertNotIn(noise, source)
 
     def test_batch_window_has_the_same_block(self):
         source = _read(MAIN_JSX_PATH)
@@ -772,17 +799,91 @@ class RealPostgresTests(unittest.TestCase):
             EXECUTE FUNCTION bell_notify_change();
         """)
 
-    def test_table_is_not_on_prod_yet(self):
-        """Если таблица уже есть — её создал кто-то другой, и это надо заметить."""
+    def test_deployed_schema_matches_the_code(self):
+        """Схема на проде совпадает с тем, что описано в коде.
+
+        До выката тест проверял, что таблицы ещё нет. После выката смысл
+        другой и полезнее: сверить РАЗВЁРНУТУЮ схему с ожидаемой. Разворот
+        раздела «Тренинги» идёт под одним SAVEPOINT — упавшая инструкция
+        откатывает его молча, и «частично применилось» выглядит на проде ровно
+        как «применилось». До первого выката пропускается.
+        """
         cursor = prod_db.connection().cursor()
         try:
             cursor.execute("SELECT to_regclass('public.operator_checkpoints')")
-            existing = cursor.fetchone()[0]
+            if cursor.fetchone()[0] is None:
+                self.skipTest('operator_checkpoints ещё не развёрнута на проде')
+
+            cursor.execute("""
+                SELECT indexname FROM pg_indexes
+                 WHERE tablename = 'operator_checkpoints'
+            """)
+            indexes = {row[0] for row in cursor.fetchall()}
+
+            cursor.execute("""
+                SELECT indexdef FROM pg_indexes
+                 WHERE tablename = 'operator_checkpoints'
+                   AND indexname = 'uq_operator_checkpoints_feedback'
+            """)
+            unique_def = (cursor.fetchone() or [''])[0]
+
+            cursor.execute("""
+                SELECT tgname FROM pg_trigger
+                 WHERE tgrelid = 'public.operator_checkpoints'::regclass
+                   AND NOT tgisinternal
+            """)
+            triggers = {row[0] for row in cursor.fetchall()}
+
+            cursor.execute("""
+                SELECT conname FROM pg_constraint
+                 WHERE conrelid = 'public.operator_checkpoints'::regclass
+                   AND contype = 'c'
+            """)
+            checks = {row[0] for row in cursor.fetchall()}
         finally:
             prod_db.rollback()
             cursor.close()
-        if existing is not None:
-            self.skipTest('operator_checkpoints уже развёрнута на проде')
+
+        self.assertLessEqual(
+            {'uq_operator_checkpoints_feedback', 'idx_operator_checkpoints_open',
+             'idx_operator_checkpoints_operator'},
+            indexes, 'не все индексы доехали')
+        # Частичность индекса — не деталь: без неё повторная постановка на
+        # контроль по той же ОС стирала бы проведённую проверку.
+        self.assertIn("status)::text = 'open'", unique_def)
+        self.assertEqual(
+            {'trg_bell_checkpoints_insert', 'trg_bell_checkpoints'}, triggers,
+            'колокол не узнает о точке без обоих триггеров')
+        self.assertLessEqual(
+            {'operator_checkpoints_kind_check', 'operator_checkpoints_status_check'},
+            checks)
+
+    def test_trainings_section_schema_survived_the_migration(self):
+        """Схема раздела разворачивается ОДНИМ SAVEPOINT.
+
+        Если бы новая таблица уронила его, вместе с ней молча откатились бы
+        корпоративные темы и расширенный CHECK на причину тренинга — то есть
+        сломался бы соседний раздел, а не мой.
+        """
+        cursor = prod_db.connection().cursor()
+        try:
+            cursor.execute("SELECT to_regclass('public.operator_checkpoints')")
+            if cursor.fetchone()[0] is None:
+                self.skipTest('operator_checkpoints ещё не развёрнута на проде')
+            cursor.execute("SELECT to_regclass('public.training_topics')")
+            topics_table = cursor.fetchone()[0]
+            cursor.execute("""
+                SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                 WHERE conname = 'trainings_reason_check'
+            """)
+            reason_check = (cursor.fetchone() or [''])[0]
+        finally:
+            prod_db.rollback()
+            cursor.close()
+
+        self.assertIsNotNone(topics_table, 'справочник корпоративных тем пропал')
+        self.assertIn('topic_id IS NOT NULL', reason_check,
+                      'расширенный CHECK на причину тренинга откатился')
 
 
 if __name__ == '__main__':
