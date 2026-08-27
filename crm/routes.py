@@ -443,6 +443,10 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         """
         data = _payload()
         answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
+        # Снимок справочника берём свой: присланному верить нельзя, иначе
+        # достаточно было бы дописать «офис открыт», чтобы пройти проверку,
+        # которой не было.
+        answers = _with_lookup_snapshot(key, answers)
         verdict = scenarios.evaluate(
             key, answers,
             has_attachment=_bool(data.get('has_attachment')),
@@ -457,6 +461,22 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 'body': scenarios.render_body(key, answers, flags=verdict.get('flags', [])),
             }
         return jsonify(verdict)
+
+    def _with_lookup_snapshot(scenario_key, answers):
+        """Ответы со СВЕЖИМ снимком справочника вместо присланного клиентом.
+
+        Снимок офисов участвует в решении «отправлять или нет», поэтому его
+        нельзя брать из запроса: проверка, которую можно переписать в консоли
+        браузера, проверкой не является. У посылок снимок в решение не входит
+        (совпадение оценивает оператор), и подменять там нечего.
+        """
+        if scenarios.lookup_kind(scenario_key) != scenarios.LOOKUP_OFFICES:
+            return answers
+        with db._get_cursor() as cursor:
+            snapshot = _lookup_snapshot(cursor, scenarios.LOOKUP_OFFICES, answers)
+        answers = dict(answers)
+        answers[scenarios.OFFICES_ANSWER_KEY] = snapshot
+        return answers
 
     @crm_route('/scenarios/<key>/sapar', methods=('POST',))
     def crm_scenario_sapar(key, ctx):
@@ -518,6 +538,72 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "categories": scenarios.entry_category_verdicts(code, snapshot),
         })
 
+    def _lookup_snapshot(cursor, kind, answers):
+        """Снимок справочника по ответам мастера.
+
+        Один вход на обе проверки: тематика объявляет, по какому справочнику её
+        проверяют, а роут не знает названий тематик. Третья такая проверка
+        появится правкой сценария, а не правкой роутов.
+        """
+        def value(key):
+            return str(scenarios._value(answers, key) or '').strip()
+
+        if kind == scenarios.LOOKUP_PARCELS:
+            return {
+                'available': True,
+                'items': queries.parcel_matches(
+                    cursor,
+                    phone=value('contact_number'),
+                    licence=value('driver_licence'),
+                    name=value('driver_name'),
+                ),
+            }
+        if kind == scenarios.LOOKUP_OFFICES:
+            city = value('office_city')
+            if not city:
+                # Города нет — спрашивать справочник не о чем. Это не «офис
+                # закрыт»: недоступный снимок никого не блокирует.
+                return {'available': False, 'city': city, 'offices': []}
+            day = queries.today(cursor)
+            return {
+                'available': True,
+                'city': city,
+                'day': day.isoformat(),
+                'offices': queries.city_offices(cursor, city, day),
+            }
+        return {'available': False}
+
+    def _lookup_verdict(kind, snapshot, answers):
+        if kind == scenarios.LOOKUP_OFFICES:
+            return scenarios.office_verdict(snapshot, scenarios._value(answers, 'office'))
+        return scenarios.parcel_registry_verdict(snapshot)
+
+    @crm_route('/scenarios/<key>/lookup', methods=('POST',))
+    def crm_scenario_lookup(key, ctx):
+        """Обязательная проверка тематики по справочнику компании (ТЗ #201).
+
+        Обе проверки ТЗ звучат как «оператор открывает таблицу и смотрит», и обе
+        таблицы уже лежат в портале: реестр невостребованных посылок в разделе
+        «Посылки», статусы офисов на вкладке «Офисы» в вики. Смотрит в них
+        система — оператор видит готовый ответ и не переписывает в обращение то,
+        что у нас и так есть.
+
+        Ответ не «да/нет», а снимок плюс вердикт: у офисов снимок ещё и рисует
+        сам вопрос (список офисов города со статусами), а у посылок показывает
+        найденное — решить, та ли это посылка, может только человек.
+        """
+        kind = scenarios.lookup_kind(key)
+        if not kind:
+            return jsonify({"skipped": True, "verdict": {"outcome": scenarios.PASS}})
+        data = _payload()
+        answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
+        with db._get_cursor() as cursor:
+            snapshot = _lookup_snapshot(cursor, kind, answers)
+        return jsonify({
+            "snapshot": snapshot,
+            "verdict": _lookup_verdict(kind, snapshot, answers),
+        })
+
     @crm_route('/reports/scenarios')
     def crm_scenario_report(ctx):
         """Разбивка обращений по тематикам (ТЗ #29)."""
@@ -559,6 +645,11 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         attachment, attach_error = _attachment()
         if attach_error:
             return jsonify({"error": attach_error}), 400
+
+        # Статус офиса перечитываем сами — по той же причине, по которой сами
+        # спрашиваем Sapar. Заодно снимок остаётся в обращении: через месяц по
+        # нему видно, на каком основании обращение вообще отправили.
+        answers = _with_lookup_snapshot(scenario_key, answers)
 
         # Спрашиваем Sapar САМИ, а не верим снимку с клиента: иначе достаточно
         # было бы прислать «документы есть», чтобы пройти проверку, которой на
@@ -624,8 +715,13 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 subject=scenarios.render_subject(scenario_key, answers)[:300],
                 body=scenarios.render_body(scenario_key, answers, flags=flags),
                 priority='normal', source='manual',
-                client_name=None,
-                client_phone=(str(answers.get('contact_number') or '').strip() or None),
+                # ФИО и телефон водителя — то, чем обращение ищут. У тематик
+                # регионов ИИН не спрашивают (его нет в ТЗ), и без этих двух
+                # полей обращение находилось бы только по своему номеру.
+                client_name=(str(scenarios._value(answers, 'driver_name') or '').strip()
+                             or None),
+                client_phone=(str(scenarios._value(answers, 'contact_number') or '').strip()
+                              or None),
                 created_by=ctx['user_id'], created_by_name=ctx['name'],
                 department_id=ctx.get('department_id'),
                 due_at=service.compute_due_at(queue.get('sla_minutes')),

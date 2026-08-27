@@ -366,6 +366,49 @@ def schedule_state_on(schedule, day):
     return 'open' if normalized.get(DAY_CODES[day.weekday()]) else 'closed'
 
 
+# Подписи состояний. Те же слова, что на вкладке «Офисы»
+# (officeDayStatus.js): по ним оператор сверяет таблицу с тем, что ему
+# отвечает система, и разные формулировки читались бы как разные ответы.
+DAY_STATE_LABELS = {
+    'open': 'Открыт',
+    'closed': 'Закрыт',
+    'absent': 'Офиса в городе нет',
+    'none': 'Нет графика',
+}
+
+
+def day_state(*, no_office=False, record=None, closed_from=None, closed_until=None,
+              schedule=None, day=None):
+    """Состояние офиса за день: 'open' | 'closed' | 'absent' | 'none'.
+
+    Порядок ответов — тот же, что у officeDayStatus.js, и переставлять его
+    нельзя: он и есть правило. Отметка человека за ЭТОТ день сильнее закрытия на
+    срок («ремонт до 3 сентября, но сегодня всё-таки открыли»), закрытие на срок
+    сильнее ночного снимка (снимок считает по графику), а график отвечает
+    последним — когда за день не записано ничего.
+
+    Вторая копия правила, и это осознанно: первая живёт во фронте вики и рисует
+    таблицу, а по этой решает сервер — можно ли заводить обращение о том, что
+    офис не работает. Проверка, которую снимает отключённый JavaScript,
+    проверкой не является. Расхождение стережёт tests/test_wiki_offices.py:
+    случаи в нём те же, что в tests/wiki_office_day_status.test.mjs.
+
+    record — строка wiki_office_days за этот день ({'state', 'source'}) либо
+    None. 'manual' — отметка дежурного, 'auto' — ночной снимок.
+    """
+    if no_office:
+        return 'absent'
+    record = record or {}
+    state = record.get('state')
+    if state and record.get('source') == 'manual':
+        return state
+    if closure_covers(closed_from, closed_until, day):
+        return 'closed'
+    if state:
+        return state
+    return schedule_state_on(schedule, day) or 'none'
+
+
 def _day_payload(state, note, source, day, recorded_at):
     """Статус дня для клиента.
 

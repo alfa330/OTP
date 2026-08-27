@@ -15,7 +15,7 @@ from urllib.parse import quote
 from wiki import offices as wiki_offices
 from wiki.offices import (
     DAY_CODES, MAX_PHONES_PER_POINT, _day_payload, _office_row, _OFFICE_KEYS,
-    clean_phones, closure_covers, link_phones, normalize_schedule,
+    clean_phones, closure_covers, day_state, link_phones, normalize_schedule,
     parse_day, parse_map_coords, parse_page_coords, read_office_day, resolve_map_link,
     schedule_state_on, snapshot_offices_day, tile_is_valid, unwrap_map_link,
 )
@@ -666,6 +666,61 @@ class ClosureCoversTest(unittest.TestCase):
 
     def test_broken_day_is_not_covered(self):
         self.assertFalse(closure_covers(self.FROM, self.UNTIL, 'позавчера'))
+
+
+class DayStateTest(unittest.TestCase):
+    """Состояние офиса за день — порядок правил, а не сами состояния.
+
+    Вторая реализация officeDayStatus.js: первая рисует таблицу на вкладке
+    «Офисы», по этой сервер решает, можно ли заводить обращение «офис не
+    работает» (ТЗ #201, §3.2). Проверка, которую снимает отключённый
+    JavaScript, проверкой не является — поэтому копий две, и случаи здесь те же,
+    что в tests/wiki_office_day_status.test.mjs. Разойдутся — оператор увидит на
+    вкладке одно, а в обращении другое.
+    """
+
+    DAY = date(2026, 8, 17)          # понедельник, рабочий по _KOSTANAY
+    SUNDAY = date(2026, 8, 16)       # выходной по тому же графику
+
+    def state(self, **kwargs):
+        kwargs.setdefault('schedule', _KOSTANAY)
+        kwargs.setdefault('day', self.DAY)
+        return day_state(**kwargs)
+
+    def test_no_office_in_the_city_wins_over_everything(self):
+        self.assertEqual(self.state(no_office=True,
+                                    record={'state': 'open', 'source': 'manual'}),
+                         'absent')
+
+    def test_manual_mark_beats_the_schedule(self):
+        self.assertEqual(self.state(record={'state': 'closed', 'source': 'manual'}),
+                         'closed')
+
+    def test_manual_mark_beats_the_closure_period(self):
+        """«Ремонт до 3 сентября, но сегодня всё-таки открыли» — так и должно."""
+        self.assertEqual(
+            self.state(record={'state': 'open', 'source': 'manual'},
+                       closed_from=date(2026, 8, 15), closed_until=date(2026, 9, 3)),
+            'open')
+
+    def test_closure_beats_the_night_snapshot(self):
+        """Снимок считается по графику, а закрытие — это утверждение человека."""
+        self.assertEqual(
+            self.state(record={'state': 'open', 'source': 'auto'},
+                       closed_from=date(2026, 8, 15), closed_until=date(2026, 9, 3)),
+            'closed')
+
+    def test_snapshot_is_used_when_there_is_no_closure(self):
+        self.assertEqual(self.state(record={'state': 'closed', 'source': 'auto'}),
+                         'closed')
+
+    def test_schedule_answers_last(self):
+        self.assertEqual(self.state(), 'open')
+        self.assertEqual(self.state(day=self.SUNDAY), 'closed')
+
+    def test_no_schedule_is_not_closed(self):
+        """У офиса «онлайн» часов работы нет, и «Закрыт» про него — неправда."""
+        self.assertEqual(self.state(schedule=None), 'none')
 
 
 class SnapshotWithClosureTest(unittest.TestCase):

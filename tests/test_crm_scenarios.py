@@ -46,6 +46,32 @@ NEUTRAL = {
 }
 
 
+# Снимок статусов офисов — то, что приносит проверка §3.2 ТЗ #201. В тестах он
+# кладётся руками ровно потому же, почему в проде его кладёт сервер: варианты
+# вопроса «Адрес офиса» существуют только в нём.
+OFFICE_SNAPSHOT = {
+    'available': True,
+    'city': 'Астана',
+    'day': '2026-08-27',
+    'offices': [
+        {'id': 7, 'name': 'Офис Астана', 'address': 'проспект Сарыарка, 31',
+         'state': 'open', 'label': 'Открыт', 'note': None, 'closed_until': None},
+        {'id': 9, 'name': 'Tez Taxi', 'address': None,
+         'state': 'absent', 'label': 'Офиса в городе нет',
+         'note': None, 'closed_until': None},
+    ],
+}
+
+
+def closed_offices(**overrides):
+    """Тот же снимок, но офис в городе закрыт."""
+    office = dict(OFFICE_SNAPSHOT['offices'][0],
+                  state='closed', label='Закрыт', note='ремонт',
+                  closed_until='2026-08-31')
+    office.update(overrides)
+    return dict(OFFICE_SNAPSHOT, offices=[office])
+
+
 def full(scenario_key, **overrides):
     """Полный набор ответов, при котором тематика готова к отправке.
 
@@ -68,6 +94,15 @@ def full(scenario_key, **overrides):
             answers[key] = 'yes' if kind == sc.YESNO else {'value': 'no'}
         elif kind == sc.DATETIME:
             answers[key] = '2026-07-15T10:00'
+        elif kind == sc.CITY:
+            # Тот же город, что в снимке офисов: у статуса офиса они обязаны
+            # совпадать, иначе тест проверял бы несуществующую пару.
+            answers[key] = OFFICE_SNAPSHOT['city']
+        elif kind == sc.OFFICE:
+            # Варианты этого вопроса приезжают снимком проверки, а не лежат в
+            # сценарии, — значит и в тесте ответ берётся оттуда же.
+            answers[sc.OFFICES_ANSWER_KEY] = OFFICE_SNAPSHOT
+            answers[key] = str(OFFICE_SNAPSHOT['offices'][0]['id'])
         else:
             answers[key] = 'значение'
     answers.update(NEUTRAL.get(scenario_key, {}))
@@ -89,7 +124,7 @@ class CatalogTest(unittest.TestCase):
             [item['key'] for item in sc.SCENARIOS],
             ['sapar_docs_missing', 'sapar_sign_error', 'sapar_payment_required',
              'sapar_sign_status', 'sapar_service_error', 'parcel_location',
-             'yandex_termobox'],
+             'office_status', 'yandex_termobox'],
         )
 
     def test_sapar_topics_go_to_the_sapar_group(self):
@@ -97,9 +132,15 @@ class CatalogTest(unittest.TestCase):
                     'sapar_sign_status', 'sapar_service_error'):
             self.assertEqual(sc.get(key)['queue_code'], 'itaxi_sapar', key)
 
-    def test_parcels_go_elsewhere(self):
-        """Посылки — ответственному за посылки, а не в группу Sapar."""
-        self.assertEqual(sc.get('parcel_location')['queue_code'], 'parcels')
+    def test_region_topics_go_to_the_regions_group(self):
+        """ТЗ #201: обе тематики уходят офис-менеджерам городов, а не в Sapar.
+
+        Одна очередь на две тематики — потому что адресат один: группа «iTaxi
+        Вопросы/ответы». Разводить их по двум очередям значило бы дважды
+        привязывать один и тот же чат.
+        """
+        for key in ('parcel_location', 'office_status'):
+            self.assertEqual(sc.get(key)['queue_code'], 'regions', key)
 
     def test_every_topic_explains_when_it_is_used(self):
         for item in sc.SCENARIOS:
@@ -115,6 +156,7 @@ class CatalogTest(unittest.TestCase):
             'sapar_sign_status': sc.ATTACH_NONE,            # «скриншот не обязателен»
             'sapar_service_error': sc.ATTACH_IMAGE_OR_VIDEO,  # скриншот или запись экрана
             'parcel_location': sc.ATTACH_NONE,
+            'office_status': sc.ATTACH_NONE,                # вопрос по таблице, прикладывать нечего
             'yandex_termobox': sc.ATTACH_IMAGE,             # фото имеющегося термокороба
         }
         for key, kind in expected.items():
@@ -533,60 +575,202 @@ class ServiceErrorTest(unittest.TestCase):
 
 
 class ParcelTest(unittest.TestCase):
-    """Второй документ: «Уточнение местонахождения посылки»."""
+    """ТЗ #201, §2: «Уточнение посылки» — вопрос офис-менеджерам городов.
+
+    Тематика переписана целиком: раньше она спрашивала ИИН и город заказа и
+    уходила ответственному за посылки, теперь спрашивает то, что перечислено в
+    §2.3, и уходит в группу регионов. Старый набор вопросов приходил из первого
+    ТЗ (#160), где принимающей стороной были не офис-менеджеры.
+    """
 
     KEY = 'parcel_location'
 
-    def test_asks_what_the_specification_lists(self):
+    def test_asks_exactly_the_five_fields_from_the_specification(self):
         keys = [s['key'] for s in sc.get(self.KEY)['steps']]
-        self.assertEqual(keys, ['iin', 'contact_number', 'parcel_description',
-                                'city', 'order_date'])
+        self.assertEqual(keys, ['driver_name', 'driver_licence', 'contact_number',
+                                'delivery_date', 'parcel_description'])
 
-    def test_asks_for_the_driver_iin(self):
-        """Просьба СЗоВ 18.08.2026 (задача #173).
+    def test_none_of_the_five_can_be_skipped(self):
+        """§2.3: «Без заполнения всех пяти полей отправка недоступна»."""
+        for key in [s['key'] for s in sc.get(self.KEY)['steps']]:
+            answers = full(self.KEY)
+            answers.pop(key)
+            result = verdict(self.KEY, answers, has_attachment=False)
+            self.assertEqual(result['outcome'], sc.INCOMPLETE, key)
+            self.assertIn(key, result['missing'], key)
 
-        ИИН здесь не для красоты: он попадает в тему обращения и в поиск, и
-        только поэтому по одному водителю видно все его обращения сразу.
-        """
-        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'iin')
-        self.assertEqual(step['kind'], sc.IIN)
-        self.assertFalse(step.get('optional'), 'ИИН обязателен, иначе поиск по нему дырявый')
-        self.assertIn('ИИН 060606202020',
-                      sc.render_subject(self.KEY, full(self.KEY, iin='060606202020')))
-
-    def test_receiver_notification_question_is_gone(self):
-        """Просьба СЗоВ 18.08.2026 (задача #183): «убрать категорию 4».
-
-        Вопрос убран и из списка проверок, и из интервью — иначе оператор
-        по-прежнему обязан был бы что-то на него ответить.
-        """
-        scenario = sc.get(self.KEY)
-        self.assertNotIn('notified', [s['key'] for s in scenario['steps']])
-        self.assertFalse([c for c in scenario['checks'] if 'уведомлени' in c.lower()],
-                         scenario['checks'])
-        self.assertNotIn('notified', sc.STEP_GROUPS)
-
-    def test_sends_when_data_is_filled(self):
+    def test_sends_when_the_five_are_filled(self):
         self.assertEqual(verdict(self.KEY, full(self.KEY), has_attachment=False)['outcome'],
                          sc.READY)
 
-    def test_missing_data_blocks(self):
-        answers = full(self.KEY)
-        answers.pop('city')
-        self.assertEqual(verdict(self.KEY, answers, has_attachment=False)['outcome'],
-                         sc.INCOMPLETE)
+    def test_registry_check_is_mandatory(self):
+        """§2.2: проверка по реестру невостребованных посылок обязательна.
 
-    def test_registry_check_is_not_part_of_the_flow(self):
-        """Постановщик 11.08.2026 попросил не включать реестр: ссылки закрыты.
-
-        Сторожим именно это: возвращать проверку Google-таблицы в сценарий
-        нельзя без нового решения — прошлая попытка на ней и остановилась.
+        Это не откат решения от 11.08.2026 «не включать реестр в проверку»: тогда
+        реестром была закрытая Google-таблица, которую бот прочитать не мог.
+        Теперь реестр — раздел «Посылки» в самом портале (задача #240), и ТЗ #201
+        требует проверку прямо: без совпадения оператор отмечает «информация
+        отсутствует» и только тогда заполняет обращение.
         """
         scenario = sc.get(self.KEY)
-        blob = repr(scenario)
+        self.assertTrue(scenario['checks'])
+        self.assertIn('реестр', ' '.join(scenario['checks']).lower())
+        result = verdict(self.KEY, full(self.KEY), has_attachment=False,
+                         checks_confirmed=False)
+        self.assertEqual(result['outcome'], sc.INCOMPLETE)
+        self.assertIn('__checks__', result['missing'])
+
+    def test_google_sheet_is_not_back(self):
+        """Сторожим ровно то, на чём задача остановилась 11.08.2026.
+
+        Проверять можно только то, что читается изнутри портала. Ссылка на
+        Google-таблицу в сценарии означала бы возврат к проверке, которую бот
+        выполнить не может, — и снова «сдали и вернули».
+        """
+        blob = repr(sc.get(self.KEY))
         self.assertNotIn('docs.google.com', blob)
         self.assertNotIn('spreadsheet', blob.lower())
-        self.assertNotIn('реестр', ' '.join(scenario['checks']).lower())
+
+    def test_registry_is_asked_by_all_three_identifiers(self):
+        """Телефон, номер ВУ и ФИО — три ключа, все три из тех же пяти полей."""
+        self.assertEqual(sc.lookup_kind(self.KEY), sc.LOOKUP_PARCELS)
+        self.assertEqual(sorted(sc.lookup_inputs(sc.LOOKUP_PARCELS)),
+                         ['contact_number', 'driver_licence', 'driver_name'])
+
+    def test_a_match_stops_the_operator_but_does_not_decide_for_him(self):
+        """§2.2 отменяет обращение при записи, «совпадающей по водителю/посылке».
+
+        Совпадает ли она — суждение человека: у водителя бывает вторая посылка, а
+        по ФИО в реестр попадают полные тёзки. Поэтому найденное показывается
+        рядом с вопросом (BLOCKED), а не закрывает обращение само (CLOSE).
+        """
+        found = sc.parcel_registry_verdict({'available': True, 'items': [{
+            'received_on': '2026-08-12', 'city': 'Астана',
+            'office_name': 'Офис Астана', 'kind': 'parcel',
+            'status': 'in_office', 'description': 'синяя коробка Kaspi',
+        }]})
+        self.assertEqual(found['outcome'], sc.BLOCKED)
+        self.assertNotEqual(found['outcome'], sc.CLOSE)
+        self.assertEqual(len(found['items']), 1)
+        line = found['items'][0]
+        for part in ('12.08.2026', 'Астана', 'Офис Астана', 'в офисе', 'синяя коробка'):
+            self.assertIn(part, line)
+
+    def test_empty_registry_lets_the_operator_through(self):
+        """Пустой реестр ничего не доказывает — он и не должен ничего решать."""
+        self.assertEqual(sc.parcel_registry_verdict(
+            {'available': True, 'items': []})['outcome'], sc.PASS)
+        self.assertEqual(sc.parcel_registry_verdict(None)['outcome'], sc.PASS)
+
+    def test_subject_tells_the_tickets_apart(self):
+        """ИИН тематика больше не спрашивает (его нет в §2.3), а «Уточнение
+        посылки» одинаково у всех — в списке обращения были бы неразличимы."""
+        subject = sc.render_subject(self.KEY, full(self.KEY, driver_name='Иванов Иван'))
+        self.assertIn('Иванов Иван', subject)
+
+    def test_driver_data_goes_to_the_caption(self):
+        """ФИО, ВУ и телефон специалист копирует — с картинки этого не сделать."""
+        for key in ('driver_name', 'driver_licence', 'contact_number'):
+            self.assertIn(key, sc.BODY_DATA, key)
+        blocks = sc.body_blocks(self.KEY, full(self.KEY))
+        data = next(b for b in blocks if b['kind'] == sc.BLOCK_DATA)
+        self.assertEqual([row['label'] for row in data['rows']],
+                         ['ФИО водителя', 'Номер ВУ', 'Телефон'])
+
+
+class OfficeStatusTest(unittest.TestCase):
+    """ТЗ #201, §3: «Статус работы офиса»."""
+
+    KEY = 'office_status'
+
+    def test_asks_only_the_city_and_the_office(self):
+        """§3.3 перечисляет три поля, и третье — фиксированный вопрос.
+
+        Спрашивать его у оператора нечего: ответ всегда один и тот же. Он стоит
+        заголовком сообщения в группу — там, где его и читают.
+        """
+        keys = [s['key'] for s in sc.get(self.KEY)['steps']]
+        self.assertEqual(keys, ['office_city', 'office'])
+        self.assertEqual(sc.get(self.KEY)['group_title'],
+                         'Уточнение — работает офис или нет?')
+
+    def test_open_office_against_the_drivers_word_is_sent(self):
+        """§3.2: отправляем только при расхождении таблицы и слов водителя."""
+        self.assertEqual(verdict(self.KEY, full(self.KEY), has_attachment=False,
+                                 checks_confirmed=False)['outcome'], sc.READY)
+
+    def test_closed_office_needs_no_ticket(self):
+        answers = full(self.KEY)
+        answers[sc.OFFICES_ANSWER_KEY] = closed_offices()
+        result = verdict(self.KEY, answers, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.CLOSE)
+        self.assertIn('Закрыт', result['message'])
+        # Причина и срок — то, что оператор передаст водителю вместо обращения.
+        self.assertIn('ремонт', result['message'])
+        self.assertIn('31.08', result['message'])
+
+    def test_absent_office_needs_no_ticket(self):
+        """«Нет офиса» — такой же готовый ответ таблицы, как «Закрыт»."""
+        answers = full(self.KEY, office='9')
+        result = verdict(self.KEY, answers, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.CLOSE)
+        self.assertIn('Офиса в городе нет', result['message'])
+
+    def test_city_without_offices_needs_no_ticket(self):
+        answers = full(self.KEY)
+        answers[sc.OFFICES_ANSWER_KEY] = dict(OFFICE_SNAPSHOT, city='Риддер', offices=[])
+        result = verdict(self.KEY, answers, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.CLOSE)
+        self.assertIn('Риддер', result['message'])
+
+    def test_a_city_where_everything_is_closed_closes_before_the_choice(self):
+        """Выбирать из закрытых офисов оператора не заставляем.
+
+        Сами офисы уезжают отдельными строками, а не внутри фразы: в строке уже
+        есть разделители («Закрыт · ремонт · до 31.08»), и вторым уровнем тех же
+        точек не видно, где кончается один офис.
+        """
+        result = sc.office_verdict(closed_offices())
+        self.assertEqual(result['outcome'], sc.CLOSE)
+        self.assertNotIn('Закрыт', result['message'])
+        self.assertEqual(len(result['items']), 1)
+        self.assertIn('Закрыт', result['items'][0])
+        self.assertIn('ремонт', result['items'][0])
+
+    def test_no_schedule_is_not_read_as_closed(self):
+        """«Нет графика» — не ответ, а его отсутствие: спрашивать регион можно."""
+        snapshot = dict(OFFICE_SNAPSHOT, offices=[
+            dict(OFFICE_SNAPSHOT['offices'][0], state='none', label='Нет графика')])
+        self.assertEqual(sc.office_verdict(snapshot, '7')['outcome'], sc.PASS)
+
+    def test_silent_directory_does_not_decide_anything(self):
+        """Справочник не ответил — обращение не закрываем и не отправляем мимо
+        проверки: оператор просто не может выбрать офис."""
+        self.assertEqual(sc.office_verdict({'available': False})['outcome'], sc.PASS)
+        result = verdict(self.KEY, {'office_city': 'Астана'}, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.INCOMPLETE)
+        self.assertIn('office', result['missing'])
+
+    def test_office_answer_must_come_from_the_snapshot(self):
+        """Единственный вопрос, где членство в списке проверяется по-настоящему:
+        список приезжает тем же снимком, что лежит в ответах."""
+        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'office')
+        self.assertIsNone(sc.validate_step(
+            step, {sc.OFFICES_ANSWER_KEY: OFFICE_SNAPSHOT, 'office': '7'}))
+        self.assertIsNotNone(sc.validate_step(
+            step, {sc.OFFICES_ANSWER_KEY: OFFICE_SNAPSHOT, 'office': '404'}))
+
+    def test_message_carries_the_table_and_the_drivers_word(self):
+        """В группе должно быть видно и то, и другое: иначе вопрос «работает ли
+        офис» при статусе «Открыт» читается как бессмыслица."""
+        body = sc.render_body(self.KEY, full(self.KEY))
+        self.assertIn('Адрес офиса: Офис Астана · проспект Сарыарка, 31', body)
+        self.assertIn('По таблице статусов офисов:', body)
+        self.assertIn('Статус на сегодня: Открыт', body)
+        self.assertIn('Со слов водителя: офис не работает', body)
+
+    def test_subject_names_the_city(self):
+        self.assertIn('Астана', sc.render_subject(self.KEY, full(self.KEY)))
 
 
 class RenderTest(unittest.TestCase):
@@ -898,15 +1082,15 @@ class RulesAreDecidableTest(unittest.TestCase):
         screen = [s['key'] for s in sc.steps_of_group(scenario, 'Водитель и период')]
         self.assertEqual(screen[-2:], ['park', 'city'])
 
-    def test_parcel_city_comes_from_the_same_catalog(self):
-        """У посылок город — это город заказа, поэтому формулировка своя.
+    def test_office_city_comes_from_the_same_catalog(self):
+        """У статуса офиса город — это город офиса, поэтому вопрос свой.
 
         Справочник при этом общий: иначе в одной тематике выбирали бы из списка,
         а в другой писали руками, и «алматы» с «Алматы» снова разошлись бы.
         """
-        city = next(s for s in sc.get('parcel_location')['steps'] if s['key'] == 'city')
+        city = next(s for s in sc.get('office_status')['steps']
+                    if s['key'] == 'office_city')
         self.assertEqual(city['kind'], sc.CITY)
-        self.assertEqual(city['label'], 'Город, где выполнялся заказ')
         self.assertIsNot(city, sc.STEP_CITY)
 
     def test_reference_answers_are_required_but_not_checked_against_a_list(self):
@@ -934,12 +1118,17 @@ class RulesAreDecidableTest(unittest.TestCase):
         вписать его в шаблон — ответ оператора просто не доедет до группы, и
         никто этого не заметит. Поэтому каждый вопрос обязан быть либо в теме,
         либо в теле.
+
+        Спрашивается это только с тематик, которые пишут ТЕЛО сообщения сами:
+        там шаблон и есть всё сообщение. Тема своим шаблоном ничего не отменяет
+        — под ней по-прежнему печатается перечень ответов, и теряться там
+        нечему (так у тематик регионов: своя тема, обычное тело).
         """
         for scenario in sc.SCENARIOS:
+            if not scenario.get('body_template'):
+                continue
             templates = ' '.join(filter(None, (scenario.get('subject_template'),
                                                scenario.get('body_template'))))
-            if not templates:
-                continue
             for item in scenario['steps']:
                 if item['kind'] == sc.ATTACHMENT:
                     continue

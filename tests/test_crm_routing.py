@@ -21,6 +21,7 @@
 
 import unittest
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -78,14 +79,14 @@ KASPI_CHAT = -5137750718        # рабочий чат, за которым т�
 GONE_CHAT = -5999999999         # бота из него выгнали: в реестре его нет
 
 SAPAR = queue_row(2, 'itaxi_sapar', 'iTaxi Sapar', chat_id=SAPAR_CHAT)
-PARCELS = queue_row(3, 'parcels', 'Посылки', chat_id=PARCEL_CHAT)
+PARCELS = queue_row(3, 'regions', 'Регионы', chat_id=PARCEL_CHAT)
 NO_CHAT = queue_row(11, 'yandex_delivery', 'Яндекс Доставка', chat_id=None)
 OFF = queue_row(12, 'off_code', 'Выключенная', chat_id=-777, is_active=False)
 
 ALL_QUEUES = [SAPAR, PARCELS, NO_CHAT, OFF]
 ALL_CHATS = [
     chat_row(SAPAR_CHAT, 'Тест ТиТаксиSapar', 'iTaxi Sapar'),
-    chat_row(PARCEL_CHAT, 'Тест iCore красный', 'Посылки'),
+    chat_row(PARCEL_CHAT, 'Тест iCore красный', 'Регионы'),
     chat_row(KASPI_CHAT, 'Sapar/Kaspi - отмена'),
 ]
 
@@ -451,12 +452,13 @@ class CatalogAddressTest(unittest.TestCase):
         self.assertFalse(self.catalog()[1][0]['is_ready'])
 
 
+# Пять полей §2.3 ТЗ #201 — то, чем тематика «Уточнение посылки» отправляется.
 PARCEL_ANSWERS = {
-    'iin': '123456789012',
+    'driver_name': 'Иванов Иван Иванович',
+    'driver_licence': '123456789',
     'contact_number': '+7 777 000 00 00',
+    'delivery_date': '2026-08-20',
     'parcel_description': 'Пакет документов',
-    'city': 'Алматы',
-    'order_date': '2026-08-20',
 }
 
 
@@ -513,6 +515,98 @@ class TicketGoesToTheRoutedChatTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('Бывшая группа', response.get_json()['error'])
         self.assertFalse(self.created)
+
+
+# Офисы города, как их отдаёт справочник вики. Проверка §3.2 ТЗ #201 решает по
+# ним, спрашивать регион или нет, — значит и подделать их не должно быть можно.
+OPEN_OFFICE = {'id': 7, 'name': 'Офис Астана', 'address': 'проспект Сарыарка, 31',
+               'state': 'open', 'label': 'Открыт', 'note': None, 'closed_until': None}
+CLOSED_OFFICE = dict(OPEN_OFFICE, state='closed', label='Закрыт',
+                     note='ремонт', closed_until='2026-08-31')
+
+
+class OfficeSnapshotIsTheServersTest(unittest.TestCase):
+    """Статус офиса сервер перечитывает сам — как и данные Sapar.
+
+    Снимок участвует в решении «отправлять или нет», а приезжает он в тех же
+    ответах, что и всё остальное. Поверь мы присланному — достаточно было бы
+    дописать в запрос «офис открыт», чтобы пройти проверку, которой не было.
+    """
+
+    def setUp(self):
+        self.ctx = admin_ctx()
+        self.created = {}
+        self.offices = [OPEN_OFFICE]
+        patches = [
+            mock.patch.object(queries, 'load_access_context',
+                              lambda cursor, user_id: self.ctx),
+            mock.patch.object(queries, 'create_ticket', self._create),
+            mock.patch.object(queries, 'add_event', lambda cursor, **kw: None),
+            mock.patch.object(queries, 'get_ticket',
+                              lambda cursor, ticket_id, viewer_id=None: {'id': ticket_id}),
+            mock.patch.object(queries, 'today', lambda cursor: date(2026, 8, 27)),
+            mock.patch.object(queries, 'city_offices',
+                              lambda cursor, city, day: list(self.offices)),
+            mock.patch.object(service, 'deliver_ticket',
+                              lambda db, ticket_id, attachment=None: (True, None)),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def _create(self, cursor, **kwargs):
+        self.created = kwargs
+        return 77
+
+    def post(self, answers):
+        client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)
+        return client.post('/api/crm/tickets', json={
+            'scenario_key': 'office_status',
+            'answers': answers,
+            'checks_confirmed': True,
+        })
+
+    def test_open_office_is_sent_and_keeps_the_servers_snapshot(self):
+        response = self.post({'office_city': 'Астана', 'office': '7'})
+        self.assertEqual(response.status_code, 201, response.get_json())
+        snapshot = self.created['answers'][sc.OFFICES_ANSWER_KEY]
+        self.assertEqual(snapshot['offices'], [OPEN_OFFICE])
+        self.assertEqual(snapshot['day'], '2026-08-27')
+
+    def test_forged_snapshot_does_not_open_a_closed_office(self):
+        self.offices = [CLOSED_OFFICE]
+        response = self.post({
+            'office_city': 'Астана', 'office': '7',
+            # Клиент утверждает, что офис открыт. Справочник говорит обратное.
+            sc.OFFICES_ANSWER_KEY: {'available': True, 'city': 'Астана',
+                                           'offices': [OPEN_OFFICE]},
+        })
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('Закрыт', response.get_json()['error'])
+        self.assertFalse(self.created)
+
+    def test_lookup_answers_with_the_offices_and_the_verdict(self):
+        client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)
+        response = client.post('/api/crm/scenarios/office_status/lookup',
+                               json={'answers': {'office_city': 'Астана'}})
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data['snapshot']['offices'], [OPEN_OFFICE])
+        # Офис ещё не выбран, но открытый в городе есть — оператор идёт дальше.
+        self.assertEqual(data['verdict']['outcome'], sc.PASS)
+
+    def test_lookup_closes_the_ticket_when_the_whole_city_is_closed(self):
+        self.offices = [CLOSED_OFFICE]
+        client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)
+        response = client.post('/api/crm/scenarios/office_status/lookup',
+                               json={'answers': {'office_city': 'Астана'}})
+        self.assertEqual(response.get_json()['verdict']['outcome'], sc.CLOSE)
+
+    def test_topic_without_a_lookup_is_skipped(self):
+        client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)
+        response = client.post('/api/crm/scenarios/sapar_sign_status/lookup',
+                               json={'answers': {}})
+        self.assertTrue(response.get_json()['skipped'])
 
 
 if __name__ == '__main__':

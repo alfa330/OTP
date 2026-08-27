@@ -21,6 +21,7 @@ import {
   afterCategory, afterChecks, describeSnapshot, entryCategories, entryIsComplete,
   needsSaparCheck, nextStop, openStop, pairRows, periodLabel, periodOptions,
   blockedLabel, previousStop, routeNote, saparGroup, saparKey,
+  lookupInputs, lookupIsReady, lookupKey, needsLookup, officeOptions,
 } from '../src/components/crm/wizardRules.js';
 
 /* Эти тесты написаны по следам реальной поломки: шаг с вложением никогда не
@@ -662,4 +663,73 @@ test('период читается по-человечески, даже есл
   assert.equal(periodLabel('2026-12'), 'Декабрь 2026');
   assert.equal(periodLabel('чепуха'), '');
   assert.equal(periodLabel('2026-13'), '');
+});
+
+
+/* ─── Проверка по справочнику компании (ТЗ #201) ──────────────────────────── */
+
+const PARCELS = {
+  key: 'parcel_location',
+  lookup: 'parcels',
+  lookup_inputs: ['driver_name', 'driver_licence', 'contact_number'],
+  lookup_on_answer: false,
+  steps: [
+    { key: 'driver_name', kind: 'text' },
+    { key: 'driver_licence', kind: 'text' },
+    { key: 'contact_number', kind: 'text' },
+  ],
+};
+
+const OFFICES = {
+  key: 'office_status',
+  lookup: 'offices',
+  lookup_inputs: ['office_city'],
+  lookup_on_answer: true,
+  steps: [
+    { key: 'office_city', kind: 'city' },
+    { key: 'office', kind: 'office' },
+  ],
+};
+
+const DRIVER_FILLED = {
+  driver_name: 'Иванов Иван',
+  driver_licence: '123456789',
+  contact_number: '+7 771 000-00-00',
+};
+
+test('справочник не спрашивают, пока не заполнено то, по чему спрашивать', () => {
+  assert.equal(lookupIsReady(PARCELS, { driver_name: 'Иванов Иван' }), false);
+  assert.equal(needsLookup(PARCELS, { driver_name: 'Иванов Иван' }, ''), false);
+  assert.equal(needsLookup(PARCELS, DRIVER_FILLED, ''), true);
+});
+
+test('тот же набор ответов второй раз не спрашивают', () => {
+  const key = lookupKey(PARCELS, DRIVER_FILLED);
+  assert.equal(needsLookup(PARCELS, DRIVER_FILLED, key), false);
+  // Исправили телефон — это уже другой водитель, спрашиваем заново.
+  const fixed = { ...DRIVER_FILLED, contact_number: '+7 700 111-22-33' };
+  assert.equal(needsLookup(PARCELS, fixed, key), true);
+});
+
+test('тематика без проверки не ходит в справочник вовсе', () => {
+  assert.deepEqual(lookupInputs(SCENARIO), []);
+  assert.equal(needsLookup(SCENARIO, DRIVER_FILLED, ''), false);
+});
+
+test('офисы спрашиваются по одному городу', () => {
+  assert.deepEqual(lookupInputs(OFFICES), ['office_city']);
+  assert.equal(needsLookup(OFFICES, { office_city: 'Астана' }, ''), true);
+  assert.equal(needsLookup(OFFICES, {}, ''), false);
+});
+
+test('варианты «адреса офиса» берутся из снимка, а не из справочника фронта', () => {
+  const office = { key: 'office', kind: 'office' };
+  const city = { key: 'office_city', kind: 'city' };
+  const snapshot = { offices: [{ id: 7, name: 'Офис Астана', state: 'open' }] };
+
+  assert.deepEqual(officeOptions(office, snapshot), snapshot.offices);
+  // Снимка ещё нет — вопрос рисуется пустым списком, а не падает.
+  assert.deepEqual(officeOptions(office, null), []);
+  // Другому вопросу список офисов не достаётся.
+  assert.equal(officeOptions(city, snapshot), null);
 });

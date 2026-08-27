@@ -61,15 +61,25 @@ EXEMPT = {
 
 
 def _scoped_functions(module):
-    """{имя функции: список таблиц} — только те, чей SQL трогает таблицу со space_id."""
+    """{имя функции: список таблиц} — только те, чей SQL трогает таблицу со space_id.
+
+    Docstring из разбора исключён: SQL функции в нём не живёт, а имя таблицы
+    попадает туда постоянно — хоть ссылкой на файл тестов
+    (`tests/test_wiki_offices.py`), хоть объяснением, откуда пришли значения.
+    Так в список однажды попала `day_state` — чистая функция, которая базу не
+    видит вовсе и получает уже прочитанные поля.
+    """
     tree = ast.parse(inspect.getsource(module))
     found = {}
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         tables = set()
+        docstring = ast.get_docstring(node, clean=False)
         for inner in ast.walk(node):
             if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                if docstring is not None and inner.value == docstring:
+                    continue
                 for table in SCOPED_TABLES:
                     if table in inner.value:
                         tables.add(table)

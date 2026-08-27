@@ -14,9 +14,9 @@ import {
     CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterCategory, afterChecks, answerValue,
     blockedLabel, carryOver, checksAreComplete, checksPayload, describeSnapshot,
     entryCategories, entryIsComplete, groupCatalog, groupIsComplete, groupsOf, hasChecks,
-    localVerdict, missingGroup, needsSaparCheck, nextStop, openStop, pairRows, periodLabel,
-    periodOptions, previousStop, referenceOptions, routeNote, rowsOfGroup, saparKey,
-    stepIsComplete, toggleCheck,
+    localVerdict, lookupKey, missingGroup, needsLookup, needsSaparCheck, nextStop,
+    officeOptions, openStop, pairRows, periodLabel, periodOptions, previousStop,
+    referenceOptions, routeNote, rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -49,6 +49,9 @@ const OUTCOME = {
     ESCALATE: 'escalate',
 };
 
+// Справочники компании, по которым проверяются тематики регионов (ТЗ #201).
+const LOOKUP = { PARCELS: 'parcels', OFFICES: 'offices' };
+
 // Исходы проверки по ИИН — до выбора категории.
 const ENTRY = {
     DOCUMENTS: 'documents',
@@ -57,13 +60,26 @@ const ENTRY = {
     UNKNOWN: 'unknown',
 };
 
+/* Статус офиса → тон бейджа. Значения те же, что на вкладке «Офисы» в вики:
+   зелёный «Открыт», красный «Закрыт», серый — «нет офиса» и «нет графика», про
+   которые сказать нечего. */
+const OFFICE_TONE = { open: 'green', closed: 'red', absent: 'slate', none: 'slate' };
+
 const errorText = (error, fallback) => (
     error?.response?.data?.error || error?.message || fallback
 );
 
+/* '2026-08-31' → '31.08'. Год не пишем: закрытие офиса «до» — это дни, а не
+   годы, и четыре лишних знака в строке ничего не уточняют. */
+const formatDayShort = (iso) => {
+    const found = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || '').trim());
+    return found ? `${found[3]}.${found[2]}` : '';
+};
+
 /* ─── Поле одного вопроса ─────────────────────────────────────────────────── */
 
-const Field = ({ step, value, onChange, autoFocus, problem, options = null }) => {
+const Field = ({ step, value, onChange, autoFocus, problem, options = null,
+                offices = null }) => {
     const raw = value;
     const current = raw && typeof raw === 'object' ? raw.value : raw;
     const detail = raw && typeof raw === 'object' ? raw.detail : '';
@@ -72,6 +88,62 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null }) =>
     useEffect(() => { if (autoFocus) inputRef.current?.focus(); }, [autoFocus, step.key]);
 
     const control = (() => {
+        /* Офисы города — списком, а не выпадашкой, и это не украшение: статус
+           работы офиса и есть та самая обязательная проверка (§3.2 ТЗ). В
+           закрытом селекте оператор увидел бы его только после выбора, то есть
+           уже сделав выбор вслепую. Офисов в городе от одного до четырёх —
+           список умещается целиком. */
+        if (offices) {
+            if (!offices.length) {
+                return (
+                    <div className="rounded-xl bg-slate-50 px-3.5 py-3 text-[13px] text-slate-500">
+                        Выберите город — покажем офисы и их статус на сегодня.
+                    </div>
+                );
+            }
+            return (
+                <div className="space-y-1.5">
+                    {offices.map((office) => {
+                        const picked = String(current || '') === String(office.id);
+                        return (
+                            <button key={office.id} type="button"
+                                    aria-pressed={picked}
+                                    onClick={() => onChange(String(office.id))}
+                                    className={`w-full rounded-xl px-3.5 py-2.5 text-left transition-all active:scale-[0.99] ${
+                                        picked
+                                            ? 'bg-blue-50 ring-1 ring-blue-200'
+                                            : 'bg-slate-50 hover:bg-slate-100'
+                                    }`}>
+                                <span className="flex items-start justify-between gap-2">
+                                    <span className="min-w-0">
+                                        <span className="block text-[13.5px] font-medium text-slate-900">
+                                            {office.name}
+                                        </span>
+                                        {office.address && (
+                                            <span className="mt-0.5 block text-[12.5px] leading-snug text-slate-500">
+                                                {office.address}
+                                            </span>
+                                        )}
+                                    </span>
+                                    <IosBadge tone={OFFICE_TONE[office.state] || 'slate'}>
+                                        {office.label}
+                                    </IosBadge>
+                                </span>
+                                {/* Причина закрытия — то, что оператор и передаст
+                                    водителю вместо обращения в группу. */}
+                                {(office.note || office.closed_until) && (
+                                    <span className="mt-1 block text-[12px] leading-snug text-slate-500">
+                                        {[office.note, office.closed_until
+                                            ? `до ${formatDayShort(office.closed_until)}` : null]
+                                            .filter(Boolean).join(' · ')}
+                                    </span>
+                                )}
+                            </button>
+                        );
+                    })}
+                </div>
+            );
+        }
         // Вопрос из справочника: тот же селектор с поиском, что в остальном
         // портале. Пятнадцать парков и полторы сотни городов руками не листают.
         if (options) {
@@ -227,6 +299,9 @@ const TopicRoute = ({ item }) => {
     );
 };
 
+/* Полоса исхода умеет показать и НАЙДЕННОЕ — записи реестра невостребованных
+   посылок. Без них «в реестре есть запись» это утверждение, которое оператору
+   нечем проверить: та ли это посылка, решает он, а решать не по чему. */
 const OutcomeBar = ({ verdict, onDismiss, onSwitch }) => {
     const switching = verdict.outcome === OUTCOME.SWITCH;
     return (
@@ -241,6 +316,16 @@ const OutcomeBar = ({ verdict, onDismiss, onSwitch }) => {
                     <div className="text-[13px] leading-relaxed text-slate-700">
                         {verdict.message}
                     </div>
+                    {(verdict.items || []).length > 0 && (
+                        <ul className="mt-2 space-y-1">
+                            {verdict.items.map((item) => (
+                                <li key={item}
+                                    className="rounded-xl bg-white/70 px-3 py-2 text-[12.5px] leading-snug text-slate-700">
+                                    {item}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                     <div className="mt-2 flex flex-wrap gap-2">
                         {switching ? (
                             <button type="button" onClick={() => onSwitch(verdict.switch_to)}
@@ -312,6 +397,18 @@ const ClosedScreen = ({ verdict, onClose }) => {
             <p className="max-w-[440px] text-[13px] leading-relaxed text-slate-600">
                 {verdict.message}
             </p>
+            {/* То, на основании чего исход и получился: офисы города со
+                статусами. Строками, а не фразой через точки — оператор читает
+                это водителю. */}
+            {(verdict.items || []).length > 0 && (
+                <div className={`${iosCard} w-full divide-y divide-slate-100 text-left`}>
+                    {verdict.items.map((item) => (
+                        <div key={item} className="px-4 py-2.5 text-[13px] leading-relaxed text-slate-700">
+                            {item}
+                        </div>
+                    ))}
+                </div>
+            )}
             {script.length > 0 && (
                 <div className={`${iosCard} mt-1 w-full divide-y divide-slate-100 text-left`}>
                     <div className="px-4 py-2.5">
@@ -405,6 +502,10 @@ export default function TicketWizard({
     // Что ответил Sapar по ИИН и периоду, и по какой паре мы его спрашивали.
     const [saparSnapshot, setSaparSnapshot] = useState(null);
     const [saparChecked, setSaparChecked] = useState('');
+    // Что ответил справочник компании (реестр посылок или статусы офисов) и по
+    // каким ответам мы его спрашивали.
+    const [lookup, setLookup] = useState(null);
+    const [lookupChecked, setLookupChecked] = useState('');
     // Вход в тематику: сначала проверка по ИИН, категория — после неё.
     const [entry, setEntry] = useState(null);
     const [entryVerdict, setEntryVerdict] = useState(null);
@@ -456,6 +557,7 @@ export default function TicketWizard({
         setChecksConfirmed(false); setCheckedItems([]); setAttachment(null); setVerdict(null);
         setDismissed(null); setMissing({}); setPreview(null);
         setSaparSnapshot(null); setSaparChecked('');
+        setLookup(null); setLookupChecked('');
         setEntry(null); setEntryVerdict(null); setCategoryVerdicts({});
         setStartGroup(0); setCategoryPicked(false); setHandoff(null); setCopied(false);
         if (fileRef.current) fileRef.current.value = '';
@@ -484,6 +586,17 @@ export default function TicketWizard({
         });
     }, [answers, scenario, phase, dismissed, catalog]);
 
+    /* Статусы офисов спрашиваем сразу по городу, не дожидаясь «Далее»: их ответ
+       рисует следующий вопрос — список офисов со статусом на сегодня. У реестра
+       посылок ответ решает только «идти ли дальше», и он спрашивается по кнопке
+       (см. goNext), чтобы не дёргать базу на каждую букву в ФИО. */
+    useEffect(() => {
+        if (phase !== 'form' || !scenario?.lookup_on_answer) return;
+        if (!needsLookup(scenario, answers, lookupChecked)) return;
+        askLookup(answers);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [scenario, answers, phase, lookupChecked]);
+
     const startScenario = (key, { carried = null } = {}) => {
         const next = (catalog || []).find((item) => item.key === key) || null;
         const state = { answers: carried || answers, attachment: null, checksReady: false };
@@ -492,6 +605,8 @@ export default function TicketWizard({
         setDismissed(null);
         setMissing({});
         setHandoff(null);
+        setLookup(null);
+        setLookupChecked('');
         if (!entry) {
             // Без входа порядок прежний: первым экран «кто и за какой период»,
             // с него же запускается предпроверка Sapar.
@@ -634,6 +749,13 @@ export default function TicketWizard({
             const passed = await askSapar();
             if (!passed) return;
         }
+        /* Проверка по справочнику — там, где ТЗ ставит её: после данных, по
+           которым её вообще можно сделать, и до всего остального. */
+        if (scenario?.lookup && !scenario.lookup_on_answer
+            && needsLookup(scenario, answers, lookupChecked)) {
+            const passed = await askLookup();
+            if (!passed) return;
+        }
         if (entry) {
             // Чек-лист со входом идёт перед вопросами, а не между ними.
             goTo(openStopFromHere());
@@ -695,6 +817,50 @@ export default function TicketWizard({
             // Сеть или отказ — не повод держать оператора: идём по вопросам.
             setSaparChecked(saparKey(answers));
             setSaparSnapshot(null);
+            return true;
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    /* Спрашивает справочник компании — обязательную проверку тематики (ТЗ #201).
+       true — оператор идёт дальше, false — мастер остался на месте.
+
+       Отказ справочника оператора НЕ останавливает, как и молчание Sapar: по
+       «мы не смогли посмотреть» нельзя ни закрыть обращение, ни отправить его
+       мимо проверки, а работать надо в любом случае. Дальше решает сервер: он
+       перечитывает статус офиса сам и на отправке, и в предпросмотре. */
+    const askLookup = async (source = answers) => {
+        const key = lookupKey(scenario, source);
+        setBusy(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/crm/scenarios/${scenarioKey}/lookup`,
+                { answers: source },
+                { headers: headers() },
+            );
+            const { snapshot, verdict: hit } = response.data || {};
+            setLookup(snapshot || null);
+            setLookupChecked(key);
+            /* Выбранный офис мог остаться от прошлого города — снимаем сами.
+               Иначе в обращение уехал бы адрес, которого оператор в этом городе
+               не выбирал, а на экране стоял бы пустой выбор. */
+            const list = (snapshot && snapshot.offices) || [];
+            const picked = answerValue(source, 'office');
+            if (picked && !list.some((item) => String(item.id) === String(picked))) {
+                setAnswers((prev) => ({ ...prev, office: '' }));
+            }
+            if (!hit || hit.outcome === OUTCOME.PASS) return true;
+            if (hit.outcome === OUTCOME.CLOSE) {
+                setVerdict(hit);
+                setPhase('closed');
+                return false;
+            }
+            setVerdict({ ...hit, signature: `lookup:${key}` });
+            return false;
+        } catch (error) {
+            setLookup(null);
+            setLookupChecked(key);
             return true;
         } finally {
             setBusy(false);
@@ -1029,6 +1195,25 @@ export default function TicketWizard({
 
                 {phase === 'checks' && scenario && (
                     <div className="space-y-3">
+                        {/* Что ответил реестр невостребованных посылок. Пустой
+                            ответ показываем спокойной строкой, а не бейджем: он
+                            ничего не доказывает — раздел «Посылки» открылся
+                            недавно, и записи в нём может просто ещё не быть.
+                            Поэтому пункт проверки оператор всё равно отмечает
+                            сам, а строка лишь говорит, что искать вручную то же
+                            самое второй раз не нужно. */}
+                        {scenario.lookup === LOOKUP.PARCELS && lookup
+                            && !(lookup.items || []).length && (
+                            <div className="flex items-start gap-2.5 rounded-2xl bg-slate-50 px-3.5 py-3 ring-1 ring-slate-200/70">
+                                <span className="mt-[1px] shrink-0 text-slate-400">
+                                    <ShieldCheck size={16} />
+                                </span>
+                                <div className="text-[13px] leading-relaxed text-slate-600">
+                                    В реестре невостребованных посылок совпадений по этому
+                                    водителю не нашлось — ни по телефону, ни по ВУ, ни по ФИО.
+                                </div>
+                            </div>
+                        )}
                         {/* Два вида чек-листа. Обычный — нумерованный перечень и одна
                             галочка под ним. Тематика с checks_each отмечает каждый пункт
                             отдельно: тогда номер уступает место флажку, а строка сама
@@ -1181,6 +1366,7 @@ export default function TicketWizard({
                                        autoFocus={rowIndex === 0 && step === row[0]}
                                        problem={missing[step.key]}
                                        options={referenceOptions(step, { taxiParks })}
+                                       offices={officeOptions(step, lookup)}
                                        onChange={(value) => setAnswer(step.key, value)} />
                             )
                                 ))}
@@ -1206,9 +1392,21 @@ export default function TicketWizard({
                         </div>
                         <div>
                             <div className={iosGroupLabel}>Сообщение в группу</div>
-                            <pre className="mt-1.5 whitespace-pre-wrap break-words rounded-xl bg-slate-100 px-3.5 py-3 font-sans text-[13px] leading-relaxed text-slate-800">
+                            <div className="mt-1.5 rounded-xl bg-slate-100 px-3.5 py-3">
+                                {/* Первая строка карточки в группе — просьба тематики
+                                    (group_title). Раньше её в предпросмотре не было, и
+                                    оператор видел не то, что увидят коллеги: у «Статуса
+                                    работы офиса» именно она несёт сам вопрос из ТЗ
+                                    («Уточнение — работает офис или нет?»). */}
+                                {scenario?.group_title && (
+                                    <div className="mb-2 text-[13.5px] font-semibold leading-snug text-slate-900">
+                                        {scenario.group_title}
+                                    </div>
+                                )}
+                                <pre className="whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-slate-800">
 {preview.body}
-                            </pre>
+                                </pre>
+                            </div>
                         </div>
                         {attachment && (
                             <div className="flex items-center gap-1.5 px-1 text-[12px] text-slate-500">

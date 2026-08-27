@@ -294,6 +294,10 @@ DRAWERS = {
     'list': lambda canvas, block, measure: _draw_rows(canvas, block['rows'], measure),
     'sapar': lambda canvas, block, measure: _draw_rows(canvas, block['rows'], measure,
                                                        title=block.get('title')),
+    # Что сказал справочник компании. Рисуется теми же строками, что и снимок
+    # Sapar: это один жанр — «не оператор ответил, а система посмотрела».
+    'table': lambda canvas, block, measure: _draw_rows(canvas, block['rows'], measure,
+                                                       title=block.get('title')),
     'checks': _draw_checks,
     'actions': _draw_actions,
     'text': lambda canvas, block, measure: _draw_text(canvas, block['text'], measure),

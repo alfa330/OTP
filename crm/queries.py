@@ -1134,6 +1134,168 @@ def taxi_parks(cursor):
     return [row[0] for row in cursor.fetchall()]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Обязательные проверки тематик «Регионы» (ТЗ задачи #201)
+#
+# Обе проверки ТЗ описаны как «оператор открывает таблицу и смотрит». Обе
+# таблицы к этому времени уже живут в портале: реестр невостребованных посылок —
+# раздел «Посылки», статусы офисов — вкладка «Офисы» в вики. Поэтому смотрит в
+# них система, а оператор видит готовый ответ: уточнение владельца по разделу
+# «Посылки» звучало ровно так — «а не заставлять каждый раз брать информацию,
+# которая уже есть».
+#
+# Читаем чужие таблицы прямым SQL, как раздел уже читает справочник парков и
+# реестр чатов. Своих копий не заводим: у обеих таблиц есть хозяин (фронт-офисы
+# и вики), и вторая копия означала бы два ответа на один вопрос.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Сколько записей реестра показываем оператору. Совпадений по одному водителю
+# бывает несколько (две посылки в разных офисах), но экран проверки — не реестр:
+# он отвечает «есть или нет», а подробности лежат в разделе «Посылки».
+PARCEL_MATCH_LIMIT = 5
+
+_PARCEL_MATCH_COLUMNS = """
+    p.id, p.received_on, p.city, p.office_name, p.office_address,
+    p.driver_name, p.driver_phone, p.driver_license, p.kind, p.description,
+    p.status, p.status_changed_at
+"""
+
+
+def _parcel_match_row(row):
+    return {
+        'id': row[0],
+        'received_on': row[1].isoformat() if row[1] is not None else None,
+        'city': row[2],
+        'office_name': row[3],
+        'office_address': row[4],
+        'driver_name': row[5],
+        'driver_phone': row[6],
+        'driver_license': row[7],
+        'kind': row[8],
+        'description': row[9],
+        'status': row[10],
+        'status_changed_at': row[11].isoformat() if row[11] is not None else None,
+    }
+
+
+def parcel_matches(cursor, *, phone=None, licence=None, name=None,
+                   limit=PARCEL_MATCH_LIMIT):
+    """Записи реестра невостребованных посылок, похожие на этого водителя.
+
+    Три ключа, потому что три и есть в обращении: телефон, номер ВУ и ФИО.
+    Телефон сравниваем по последним девяти цифрам — в реестре он лежит как
+    «+77719736925», а оператор вставляет его из диспетчерской в любом виде;
+    ровно так же ищет и сам раздел «Посылки».
+
+    Совпадение НЕ закрывает обращение само: «совпадающая по водителю/посылке»
+    (§2.2 ТЗ) — суждение оператора, а не запроса. Наше дело — показать найденное
+    рядом с вопросом, а не решить за него, та ли это посылка.
+
+    Пустой список означает ровно одно: в НАШЕМ реестре записи нет. Реестр молодой
+    (раздел «Посылки» открыт 25.08.2026), и пока менеджеры не начали его вести,
+    пустой ответ ничего не доказывает — поэтому подтверждение оператора
+    остаётся обязательным пунктом проверки.
+    """
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    licence = ' '.join(str(licence or '').split()).strip()
+    name = ' '.join(str(name or '').split()).strip()
+
+    clauses, params = [], {'limit': max(1, int(limit or 1))}
+    if len(digits) >= 9:
+        params['phone'] = '%%%s%%' % digits[-9:]
+        clauses.append(
+            "regexp_replace(COALESCE(p.driver_phone, ''), '[^0-9]', '', 'g') LIKE %(phone)s")
+    if len(licence) >= 4:
+        params['licence'] = licence
+        clauses.append("LOWER(TRIM(COALESCE(p.driver_license, ''))) = LOWER(%(licence)s)")
+    # ФИО — самый слабый ключ: полных тёзок в парке хватает. Поэтому он ищет
+    # «содержит» и работает только вместе с показом найденного оператору.
+    if len(name) >= 5:
+        params['name'] = '%%%s%%' % name.replace('%', r'\%').replace('_', r'\_')
+        clauses.append("COALESCE(p.driver_name, '') ILIKE %(name)s")
+    if not clauses:
+        return []
+
+    cursor.execute(
+        'SELECT ' + _PARCEL_MATCH_COLUMNS +
+        '  FROM parcels p'
+        ' WHERE ' + ' OR '.join(clauses) +
+        ' ORDER BY p.received_on DESC NULLS LAST, p.id DESC'
+        ' LIMIT %(limit)s',
+        params,
+    )
+    return [_parcel_match_row(row) for row in cursor.fetchall()]
+
+
+def today(cursor):
+    """Сегодня по времени офисов.
+
+    Спрашиваем базу, а не процесс: строки wiki_office_days пишутся с той же
+    отметкой (`CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'`), и брать день из
+    двух разных источников значит однажды сравнить вчерашнюю отметку с
+    сегодняшним днём — под утро, когда UTC и Алматы стоят на разных датах.
+    """
+    cursor.execute('SELECT %s::date' % _NOW)
+    return cursor.fetchone()[0]
+
+
+def city_offices(cursor, city, day):
+    """Офисы города со статусом на день — вкладка «Офисы» вики, как её видит оператор.
+
+    Берём только НАШИ офисы (`kind = 'park'`): партнёрские точки
+    («Брендирование Алматы», «Офис Яндекса для водителей») водитель офисом парка
+    не считает, и в вопросе «работает офис или нет» они отвечали бы не о том.
+    Тот же фильтр стоит у раздела «Посылки».
+
+    Записи «офиса в городе нет» (`no_office`) из выборки НЕ убираем, в отличие от
+    посылок: там в такой офис нечего положить, а здесь это готовый ответ
+    водителю — по ТЗ «Нет офиса» и есть один из трёх статусов таблицы.
+
+    Пространство вики не спрашиваем: справочник офисов у компании один, и раздел
+    читает его так же, как реестр посылок, — целиком.
+    """
+    from wiki import offices as wiki_offices
+
+    cursor.execute(
+        """
+        SELECT o.id, o.name, o.city, o.address, o.address_note, o.phone,
+               o.no_office, o.schedule, o.closed_from, o.closed_until, o.closed_note,
+               d.state, d.source
+          FROM wiki_offices o
+          LEFT JOIN wiki_office_days d
+                 ON d.office_id = o.id AND d.day = %(day)s::date
+         WHERE o.status = 'active'
+           AND o.kind = 'park'
+           AND LOWER(TRIM(COALESCE(o.city, ''))) = LOWER(TRIM(%(city)s))
+         ORDER BY o.position, o.name
+        """,
+        {'city': str(city or ''), 'day': day},
+    )
+    items = []
+    for row in cursor.fetchall():
+        state = wiki_offices.day_state(
+            no_office=bool(row[6]), schedule=row[7],
+            closed_from=row[8], closed_until=row[9],
+            record={'state': row[11], 'source': row[12]} if row[11] else None,
+            day=day,
+        )
+        items.append({
+            'id': row[0],
+            'name': row[1],
+            'city': row[2],
+            'address': row[3],
+            'address_note': row[4],
+            'phone': row[5],
+            'state': state,
+            'label': wiki_offices.DAY_STATE_LABELS.get(state, state),
+            # Причина закрытия — то, ради чего вкладку «Офисы» и завели:
+            # «прорвало трубу» отвечает водителю лучше, чем слово «Закрыт».
+            'note': (row[10] if state == 'closed' and row[10] else None),
+            'closed_until': row[9].isoformat() if row[9] is not None else None,
+        })
+    return items
+
+
 def bot_chats(cursor):
     """Чаты, куда бот уже добавлен, — для привязки очереди к группе.
 

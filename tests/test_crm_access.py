@@ -359,9 +359,16 @@ class SchemaContractTest(unittest.TestCase):
         self.assertIn("ON crm_tickets USING gin ((answers ->> 'iin') gin_trgm_ops)", ddl)
 
     def test_scenario_queues_are_seeded(self):
-        """Очередь ищется сценарием по коду: не засеяли — тематика недоступна."""
+        """Очередь ищется сценарием по коду: не засеяли — тематика недоступна.
+
+        Список не переписываем руками, а сверяем с самими тематиками: так
+        новая тематика с новой очередью не сможет доехать до прода немой, а
+        очередь, из которой ушла последняя тематика, не останется висеть в
+        настройках пустой строкой.
+        """
+        from crm import scenarios
         codes = {code for code, _title, _descr, _order in schema._SEED_QUEUES}
-        self.assertEqual(codes, {'itaxi_sapar', 'parcels', 'yandex_delivery'})
+        self.assertEqual(codes, {item['queue_code'] for item in scenarios.SCENARIOS})
 
     def test_unread_has_a_partial_index(self):
         """Колокол спрашивает только непрочитанное — полный индекс тут лишний."""

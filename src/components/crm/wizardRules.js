@@ -294,6 +294,19 @@ export const referenceOptions = (step, { taxiParks = [] } = {}) => {
     return null;
 };
 
+/* Офисы города — варианты вопроса «Адрес офиса».
+ *
+ * Они не из справочника фронта и не из options: список зависит от ответа на
+ * предыдущий вопрос и приезжает вместе со статусами той самой проверкой,
+ * которую требует §3.2 ТЗ. Поэтому источник у них один — снимок.
+ *
+ * Пустой массив у вопроса, который снимка ещё не дождался, — не ошибка:
+ * оператор в этот момент выбирает город.
+ */
+export const officeOptions = (step, snapshot) => (
+    step?.kind === 'office' ? (snapshot?.offices || []) : null
+);
+
 /* Вопросы экрана, разложенные по строкам.
  *
  * Нужно ровно для одного: «Таксопарк» и «Город» — это одно «где», а не два
@@ -392,6 +405,38 @@ export const needsSaparCheck = (scenario, group, answers, checkedKey) => {
     if (!IIN_PATTERN.test(iin) || !PERIOD_PATTERN.test(period)) return false;
     return saparKey(answers) !== checkedKey;
 };
+
+/* ─── Проверка по справочнику компании (ТЗ #201) ─────────────────────────── */
+
+/* По каким ответам её спрашивают. Список приезжает с сервера вместе с
+ * тематикой: мастер не знает ни названий тематик, ни того, что именно
+ * проверяется, — иначе третья такая проверка означала бы третью правку
+ * интерфейса. */
+export const lookupInputs = (scenario) => (scenario?.lookup ? (scenario.lookup_inputs || []) : []);
+
+/* Ключ проверки: те же ответы, склеенные в строку. По нему видно, что
+ * спрашивать заново нечего — оператор вернулся назад и нажал «Далее» ещё раз. */
+export const lookupKey = (scenario, answers) => (
+    lookupInputs(scenario)
+        .map((key) => String(answerValue(answers, key) ?? '').trim())
+        .join('|')
+);
+
+export const lookupIsReady = (scenario, answers) => {
+    const inputs = lookupInputs(scenario);
+    return inputs.length > 0 && inputs.every((key) => isAnswered(answers?.[key]));
+};
+
+/* Спрашивать ли справочник прямо сейчас. Условия те же, что у Sapar: тематика
+ * с проверкой, ответы для неё заполнены и это не та же самая пара, которую уже
+ * спрашивали.
+ *
+ * Экран здесь не проверяется, в отличие от Sapar: у офисов ответ нужен, чтобы
+ * нарисовать сам вопрос, и ждать ухода с экрана значило бы показать пустой
+ * список. Когда спрашивать — говорит сама тематика (lookup_on_answer). */
+export const needsLookup = (scenario, answers, checkedKey) => (
+    lookupIsReady(scenario, answers) && lookupKey(scenario, answers) !== checkedKey
+);
 
 /* Снимок Sapar → как его показать оператору.
  *
