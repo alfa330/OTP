@@ -40900,15 +40900,52 @@ def export_work_schedules_excel():
             for value in _query_list('direction', 'directions')
             if str(value).strip()
         }
+        # Отдел и точечный отбор людей: раздел выгружает ровно то, что на
+        # экране, а не всех операторов, до которых дотягивается роль.
+        selected_department_id = None
+        for raw_value in _query_list('department_id'):
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                selected_department_id = parsed
+                break
+        selected_operator_ids = set()
+        for raw_value in _query_list('operator_id', 'operator_ids'):
+            for chunk in (raw_value.split(',') if ',' in raw_value else [raw_value]):
+                try:
+                    parsed = int(chunk.strip())
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    selected_operator_ids.add(parsed)
 
         operators = db.get_operators_with_shifts(start_date, end_date) or []
         operators = _filter_operators_for_requester_scope(user_data, requester_id, operators)
+
+        if selected_department_id is not None:
+            operators = [
+                op for op in operators
+                if str(op.get('department_id') or '') == str(selected_department_id)
+            ]
+
+        if selected_operator_ids:
+            operators = [
+                op for op in operators
+                if int(op.get('id') or 0) in selected_operator_ids
+            ]
 
         if selected_supervisor_ids:
             operators = [
                 op for op in operators
                 if int(op.get('supervisor_id') or 0) in selected_supervisor_ids
             ]
+
+        def _is_fired_status(raw_status):
+            # `dismissal` — устаревший псевдоним `fired`; без него уволенный
+            # оставался бы в выгрузке, хотя на экране его нет.
+            return str(raw_status or '').strip().lower() in {'fired', 'dismissal'}
 
         if selected_statuses:
             def _status_matches(raw_status):
@@ -40918,11 +40955,18 @@ def export_work_schedules_excel():
                         if current_status in {'bs', 'unpaid_leave'}:
                             return True
                         continue
+                    if selected_status == 'fired':
+                        if _is_fired_status(current_status):
+                            return True
+                        continue
                     if current_status == selected_status:
                         return True
                 return False
 
             operators = [op for op in operators if _status_matches(op.get('status'))]
+        else:
+            # Фильтр не задан — как в сетке: все, кроме уволенных.
+            operators = [op for op in operators if not _is_fired_status(op.get('status'))]
 
         if selected_directions:
             operators = [

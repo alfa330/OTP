@@ -17499,6 +17499,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             queryParams.append('supervisor_id', String(Math.trunc(parsed)));
                         }
                     });
+                    /* Статусы не выбраны — параметр не шлём: сервер сам отдаёт
+                       всех, кроме уволенных, ровно как показывает сетка. */
                     (selectedStatuses || []).forEach(statusValue => {
                         const normalized = String(statusValue || '').trim();
                         if (normalized) queryParams.append('status', normalized);
@@ -17506,6 +17508,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (selectedDirections || []).forEach(directionValue => {
                         const normalized = String(directionValue || '').trim();
                         if (normalized) queryParams.append('direction', normalized);
+                    });
+                    // Отдел и точечный отбор людей — те же, что на экране:
+                    // иначе админ, глядя на СЗоВ, выгружал бы все отделы разом.
+                    if (plannerDepartmentId) {
+                        queryParams.set('department_id', String(plannerDepartmentId));
+                    }
+                    (selectedOperatorIds || []).forEach(operatorId => {
+                        const normalized = String(operatorId || '').trim();
+                        if (normalized) queryParams.append('operator_id', normalized);
                     });
                     const query = queryParams.toString();
                     const response = await fetch(`${API_BASE_URL}/api/work_schedules/export_excel?${query}`, {
@@ -17641,24 +17652,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPlannerStatusMatchExportRangeDraft({ start: currentRange.start, end: selectedDateKey }, 'end');
             };
 
+            /* Отчёт соответствия берёт ТОТ ЖЕ отбор, что и сетка, — включая
+               отдел, точечный выбор людей и «уволенных нет по умолчанию».
+               Разъедься они, отчёт молча считал бы по другому составу. */
             const filterPlannerOperatorsForStatusMatchExport = (sourceOperators = []) => {
                 let filtered = Array.isArray(sourceOperators) ? [...sourceOperators] : [];
+                if (plannerDepartmentId) {
+                    filtered = filtered.filter(op => String(op?.department_id ?? '') === plannerDepartmentId);
+                }
                 if (Array.isArray(selectedSupervisors) && selectedSupervisors.length > 0) {
                     const supervisorSet = new Set(selectedSupervisors.map(v => String(v)));
                     filtered = filtered.filter(op => supervisorSet.has(String(op?.supervisor_id ?? '')));
                 }
                 if (Array.isArray(selectedStatuses) && selectedStatuses.length > 0) {
-                    filtered = filtered.filter(op => {
-                        const status = String(op?.status || '').trim();
-                        return selectedStatuses.some(sel => {
-                            if (sel === 'bs') return status === 'bs' || status === 'unpaid_leave';
-                            return String(sel) === status;
-                        });
-                    });
+                    filtered = filtered.filter(op => plannerOperatorMatchesStatusFilter(op, selectedStatuses));
+                } else {
+                    filtered = filtered.filter(op => !plannerIsFiredStatus(op?.status));
                 }
                 if (Array.isArray(selectedDirections) && selectedDirections.length > 0) {
                     const directionSet = new Set(selectedDirections.map(v => String(v)));
                     filtered = filtered.filter(op => directionSet.has(String(op?.direction || '')));
+                }
+                if (Array.isArray(selectedOperatorIds) && selectedOperatorIds.length > 0) {
+                    const idSet = new Set(selectedOperatorIds.map(v => String(v)));
+                    filtered = filtered.filter(op => idSet.has(String(op?.id ?? '')));
                 }
                 return filtered.sort((a, b) => {
                     const dirCmp = String(a?.direction || a?.direction_name || '').localeCompare(String(b?.direction || b?.direction_name || ''), 'ru');
@@ -26235,12 +26252,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     </div>
 
+                    {/* Подсказка нейтральная: это справка, а не предупреждение,
+                        и синей заливкой она спорила с содержимым сетки. */}
                     {!plannerReadOnly && (
-                    <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
-                        <FaIcon className="fas fa-info-circle mr-1"></FaIcon>
-                        <strong>Совет:</strong> Удерживайте Ctrl (или Cmd на Mac) и кликайте по дням для множественного выбора
-                        <span className="ml-2">
-                            • Офлайн-активность: зажмите правую кнопку и протяните по таймлайну (в обычном и в статусном режиме), затем отпустите.
+                    <div className="mb-2 flex items-start gap-2 rounded-xl bg-white px-3 py-2 text-[11.5px] leading-relaxed text-slate-500 ring-1 ring-slate-200/70">
+                        <FaIcon className="fas fa-info-circle mt-0.5 shrink-0 text-slate-400"></FaIcon>
+                        <span>
+                            <span className="font-semibold text-slate-600">Ctrl</span> (или <span className="font-semibold text-slate-600">Cmd</span>) + клик по дням — множественный выбор.
+                            <span className="ml-2">
+                                Офлайн-активность: зажмите правую кнопку и протяните по таймлайну, затем отпустите.
+                            </span>
                         </span>
                     </div>
                     )}
