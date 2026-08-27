@@ -527,21 +527,28 @@
         }
         .notification-settings-status.is-connected svg { color: var(--green); }
         .notification-settings-status.is-warning { color: var(--amber); }
-        .notification-settings-switch {
+        /* ── Тумблер (iOS) ────────────────────────────────────────────────
+           Единственный тумблер этой сборки. Исторически назывался
+           .notification-settings-switch и жил только в настройках уведомлений;
+           с блоком «Контрольная точка» в окне ОС у него появилось второе место,
+           и основным именем стало .ce-switch. Старые классы оставлены в тех же
+           правилах — переписывать готовую разметку настроек из-за
+           переименования незачем, а второй тумблер в окне был бы хуже. */
+        .ce-switch, .notification-settings-switch {
             position: relative;
             display: inline-flex;
             flex: 0 0 auto;
             margin-top: 2px;
             cursor: pointer;
         }
-        .notification-settings-switch input {
+        .ce-switch input, .notification-settings-switch input {
             position: absolute;
             width: 1px;
             height: 1px;
             opacity: 0;
             pointer-events: none;
         }
-        .notification-settings-switch-track {
+        .ce-switch-track, .notification-settings-switch-track {
             position: relative;
             display: block;
             width: 44px;
@@ -551,7 +558,7 @@
             background: #d8d8d4;
             transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
         }
-        .notification-settings-switch-thumb {
+        .ce-switch-thumb, .notification-settings-switch-thumb {
             position: absolute;
             top: 2px;
             left: 2px;
@@ -562,22 +569,26 @@
             box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
             transition: transform var(--transition);
         }
+        .ce-switch input:checked + .ce-switch-track,
         .notification-settings-switch input:checked + .notification-settings-switch-track {
             border-color: var(--green);
             background: var(--green);
         }
+        .ce-switch input:checked + .ce-switch-track .ce-switch-thumb,
         .notification-settings-switch input:checked + .notification-settings-switch-track .notification-settings-switch-thumb {
             transform: translateX(20px);
         }
+        .ce-switch input:focus-visible + .ce-switch-track,
         .notification-settings-switch input:focus-visible + .notification-settings-switch-track {
             box-shadow: 0 0 0 3px var(--accent-light);
             border-color: var(--accent);
         }
+        .ce-switch input:disabled + .ce-switch-track,
         .notification-settings-switch input:disabled + .notification-settings-switch-track {
             opacity: 0.5;
             cursor: not-allowed;
         }
-        .notification-settings-switch:has(input:disabled) { cursor: not-allowed; }
+        .ce-switch:has(input:disabled), .notification-settings-switch:has(input:disabled) { cursor: not-allowed; }
         .notification-settings-telegram-note {
             display: flex;
             align-items: center;
@@ -1573,3 +1584,194 @@
         .ce-toast-in { opacity: 1; transform: translateY(0); }
         .ce-toast-success { background: var(--green); }
         .ce-toast-error { background: var(--red); }
+
+        /* ── Блок «Контрольная точка по сотруднику» (окно «Дать ОС») ───────
+           Задача #86. Свёрнут по умолчанию: контроль ставят у меньшинства
+           разборов, и развёрнутая форма из шести полей была бы шумом на
+           каждом сохранении ОС. Пока тумблер выключен, блок — одна строка. */
+        .ce-cp {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: var(--surface);
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        .ce-cp.is-on { border-color: var(--border-strong); box-shadow: var(--shadow); }
+        .ce-cp-head {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px 14px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .ce-cp-head-text { flex: 1 1 auto; min-width: 0; }
+        .ce-cp-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--text);
+        }
+        .ce-cp-title svg { color: var(--text-3); }
+        .ce-cp.is-on .ce-cp-title svg { color: var(--accent); }
+        .ce-cp-sub { margin-top: 2px; font-size: 12px; color: var(--text-2); line-height: 1.45; }
+        .ce-cp-body {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            padding: 14px;
+            border-top: 1px solid var(--border);
+            animation: ceCpReveal 160ms ease;
+        }
+        @keyframes ceCpReveal {
+            from { opacity: 0; transform: translateY(-4px); }
+            to   { opacity: 1; transform: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .ce-cp-body { animation: none; }
+        }
+        .ce-cp-field { display: flex; flex-direction: column; }
+
+        /* Сегментный контрол вида контроля — один тап вместо выпадающего
+           списка: вариантов ровно три, и все они должны быть на виду. */
+        .ce-cp-kinds {
+            display: flex;
+            gap: 2px;
+            padding: 3px;
+            background: var(--surface-2);
+            border-radius: 10px;
+        }
+        .ce-cp-kind {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 7px 6px;
+            border: none;
+            border-radius: 8px;
+            background: transparent;
+            font-family: var(--font);
+            font-size: 12.5px;
+            font-weight: 500;
+            color: var(--text-2);
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition), box-shadow var(--transition);
+        }
+        .ce-cp-kind:hover { color: var(--text); }
+        .ce-cp-kind.is-active {
+            background: var(--surface);
+            color: var(--text);
+            font-weight: 600;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.10);
+        }
+
+        /* Дата + быстрые сроки. Чипы закрывают почти все случаи, поэтому
+           календарь рядом, но нажимать его обычно не нужно. */
+        .ce-cp-date-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+        .ce-cp-date-row .input { flex: 0 0 auto; width: auto; min-width: 152px; }
+        /* Чипы отдельной строкой, а не вперемешку с календарём: в одной строке
+           третий срывался на вторую и ряд выглядел рваным. */
+        .ce-cp-terms { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        .ce-cp-chip {
+            padding: 6px 11px;
+            border: 1px solid var(--border-strong);
+            border-radius: 999px;
+            background: var(--surface);
+            font-family: var(--font);
+            font-size: 12px;
+            color: var(--text-2);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: border-color var(--transition), color var(--transition), background var(--transition);
+        }
+        .ce-cp-chip:hover { border-color: var(--text-3); color: var(--text); }
+        .ce-cp-chip.is-active {
+            background: var(--accent-light);
+            border-color: var(--accent);
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .ce-cp-due-note { font-size: 12px; color: var(--text-2); }
+        .ce-cp-due-note strong { color: var(--text); font-weight: 600; }
+
+        /* Необязательное — за кнопкой, а не на виду. */
+        .ce-cp-more {
+            align-self: flex-start;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 6px 11px;
+            border: 1px dashed var(--border-strong);
+            border-radius: 999px;
+            background: transparent;
+            font-family: var(--font);
+            font-size: 12px;
+            color: var(--text-2);
+            cursor: pointer;
+            transition: border-color var(--transition), color var(--transition);
+        }
+        .ce-cp-more:hover { border-color: var(--text-3); color: var(--text); }
+        .ce-cp-private {
+            padding: 11px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface-2);
+        }
+        .ce-cp-private-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 7px;
+        }
+        .ce-cp-private-label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-2);
+        }
+        .ce-cp-private textarea { background: var(--surface); }
+
+        /* Что увидит сотрудник — говорим прямо, иначе разделение видимости
+           остаётся обещанием в документе, а не свойством экрана. */
+        .ce-cp-notify {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding-top: 12px;
+            border-top: 1px dashed var(--border);
+        }
+        .ce-cp-notify-text { flex: 1 1 auto; min-width: 0; }
+        .ce-cp-notify-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+        .ce-cp-notify-sub { margin-top: 2px; font-size: 11.5px; color: var(--text-2); line-height: 1.45; }
+
+        .ce-cp-note {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 9px 11px;
+            border: 1px solid #fde68a;
+            border-radius: var(--radius);
+            background: var(--amber-light);
+            font-size: 12px;
+            color: var(--amber);
+        }
+
+        /* Чип у оценки в журнале: «этот человек на контроле до такого-то». */
+        .ce-cp-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 9px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--surface-2);
+            font-size: 11.5px;
+            font-weight: 600;
+            color: var(--text-2);
+            font-variant-numeric: tabular-nums;
+        }
+        .ce-cp-badge.is-due { background: var(--amber-light); border-color: #fde68a; color: var(--amber); }
+        .ce-cp-badge.is-overdue { background: var(--red-light); border-color: #fecaca; color: var(--red); }
+        .ce-cp-badge.is-done { background: var(--green-light); border-color: #bbf7d0; color: var(--green); }

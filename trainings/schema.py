@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Схема раздела «Тренинги»: справочник корпоративных тем (training_topics)
-и привязка проведённого тренинга к теме (trainings.topic_id).
+"""Схема раздела «Тренинги»: справочник корпоративных тем (training_topics),
+привязка проведённого тренинга к теме (trainings.topic_id) и контрольные точки
+по сотруднику (operator_checkpoints) — вкладка «Контроль».
 
 Идемпотентно: CREATE TABLE / INDEX IF NOT EXISTS + ALTER ... ADD COLUMN IF NOT
 EXISTS. Вызывается один раз при старте из Database._init_db через
@@ -86,6 +87,34 @@ ARCHIVED_REASONS = ('Тех. сбой',)
 CALL_FEEDBACK_REASON = 'Обратная связь'
 
 
+# ── Контрольные точки по сотруднику ─────────────────────────────────────────
+# Вид контроля. Три значения — ровно те, что назвал заказчик задачи #86; шире
+# набор не делаем: тип, которого никто не выбирает, это лишняя строка в форме.
+CHECKPOINT_KINDS = ('quality', 'probation', 'recheck')
+
+CHECKPOINT_KIND_LABELS = {
+    'quality': 'Контроль качества',
+    'probation': 'Испытательный срок',
+    'recheck': 'Повторная проверка качества',
+}
+
+# Жизненный цикл точки. 'open' — ждёт проверки, 'done' — проверку провели,
+# 'cancelled' — контроль сняли, не проводя. Отдельного 'overdue' НЕТ намеренно:
+# просрочка это не состояние записи, а сравнение due_date с сегодняшним днём,
+# и хранить её означало бы вечно догонять календарь ночным заданием.
+CHECKPOINT_STATUSES = ('open', 'done', 'cancelled')
+
+CHECKPOINT_STATUS_LABELS = {
+    'open': 'Ждёт проверки',
+    'done': 'Проверено',
+    'cancelled': 'Контроль снят',
+}
+
+
+def checkpoint_kind_label(kind):
+    return CHECKPOINT_KIND_LABELS.get(str(kind or '').strip(), 'Контроль качества')
+
+
 def active_default_reasons():
     """Базовые темы, доступные для НОВОГО тренинга."""
     return tuple(reason for reason in DEFAULT_REASONS if reason not in ARCHIVED_REASONS)
@@ -148,6 +177,90 @@ _STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_trainings_topic
         ON trainings (topic_id, training_date DESC)
      WHERE topic_id IS NOT NULL
+    """,
+
+    # ──────────────────────────────────────────────────────────────────────
+    # КОНТРОЛЬНЫЕ ТОЧКИ ПО СОТРУДНИКУ (задача #86)
+    #
+    # Супервайзер провёл обратную связь по оценке и решил поставить человека
+    # на контроль: назначить дату повторной проверки и не потерять срок.
+    #
+    # Почему СВОЯ таблица, а не строка в `trainings` на будущую дату.
+    # `trainings` — журнал ПРОВЕДЁННЫХ занятий: его строки идут в оплачиваемые
+    # часы (_load_training_hours_by_operator_tx), в квоту звонков и в лист
+    # «Тренинги» выгрузки, и сотрудник видит их у себя в «Моих часах».
+    # Запланированная проверка не занятие: она ещё не состоялась, часов не
+    # даёт, а половина её полей — служебные и сотруднику не показываются
+    # вовсе. Плюс `trainings` требует start_time/end_time и держит
+    # UNIQUE(operator_id, date, start, end) — у точки времени нет, и его
+    # пришлось бы выдумывать, конфликтуя с настоящими занятиями того дня.
+    #
+    # Что видно сотруднику, а что нет (требование постановки):
+    #   видно      — дата проверки и `focus` («что нужно исправить»);
+    #   НЕ видно   — `kind` (в том числе «испытательный срок»), `reason`
+    #                и `internal_comment`.
+    # Разделение держится не комментарием, а разными наборами полей в двух
+    # ветках выдачи (см. bot_schedule2::_checkpoint_payload).
+    """
+    CREATE TABLE IF NOT EXISTS operator_checkpoints (
+        id                 SERIAL PRIMARY KEY,
+        operator_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        supervisor_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        feedback_id        INTEGER REFERENCES call_feedbacks(id) ON DELETE CASCADE,
+        call_id            INTEGER,
+        kind               VARCHAR(16) NOT NULL,
+        reason             TEXT NOT NULL,
+        due_date           DATE NOT NULL,
+        focus              TEXT NOT NULL,
+        internal_comment   TEXT,
+        notify_operator    BOOLEAN NOT NULL DEFAULT TRUE,
+        status             VARCHAR(16) NOT NULL DEFAULT 'open',
+        resolved_at        TIMESTAMP,
+        resolved_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        resolution_comment TEXT,
+        created_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at         TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at         TIMESTAMP NOT NULL DEFAULT %(now)s,
+        CONSTRAINT operator_checkpoints_kind_check
+            CHECK (kind IN ('quality', 'probation', 'recheck')),
+        CONSTRAINT operator_checkpoints_status_check
+            CHECK (status IN ('open', 'done', 'cancelled'))
+    )
+    """ % {'now': _NOW},
+
+    # Одна ОТКРЫТАЯ точка на одну обратную связь. Блок живёт ВНУТРИ окна
+    # «Дать ОС»: повторное сохранение той же ОС обязано править прежнюю точку,
+    # а не плодить вторую на каждое нажатие «Обновить ОС».
+    #
+    # Почему условие по статусу, а не просто UNIQUE(feedback_id). Одного и того
+    # же человека по одному и тому же разбору берут на контроль повторно:
+    # проверили, не выправилось — назначили ещё одну. С безусловным UNIQUE
+    # вторая проверка могла бы появиться только вместо первой, то есть стёрла
+    # бы факт, что первая была проведена.
+    #
+    # UNIQUE-индекс, а не UNIQUE-колонка: у пакетной ОС точка одна на всю
+    # пачку, остальные обратные связи остаются с NULL, а NULL в UNIQUE сам с
+    # собой не спорит.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_checkpoints_feedback
+        ON operator_checkpoints (feedback_id)
+     WHERE feedback_id IS NOT NULL AND status = 'open'
+    """,
+
+    # Главный экран раздела — «что горит»: открытые точки по возрастанию срока.
+    # Частичный: закрытые точки в списке не нужны, а составляют со временем
+    # его большую часть.
+    """
+    CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_open
+        ON operator_checkpoints (due_date, id)
+     WHERE status = 'open'
+    """,
+
+    # История по сотруднику: карточка «сколько раз ставили на контроль».
+    """
+    CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_operator
+        ON operator_checkpoints (operator_id, due_date DESC)
     """,
 ]
 

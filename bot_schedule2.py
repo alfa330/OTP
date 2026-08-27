@@ -2195,6 +2195,138 @@ def _ensure_call_access_for_requester(call_operator_id, requester, requester_id)
     return False
 
 
+# ── Контрольные точки по сотруднику (вкладка «Контроль» раздела «Тренинги») ──
+#
+# Ставятся из окна «Дать ОС» в «Журнале оценок»: супервайзер провёл обратную
+# связь и решил взять человека на контроль — назначает дату повторной проверки.
+# Сама сущность и правила видимости живут в trainings/checkpoints.py, здесь —
+# только то, что связывает их с портальными правилами доступа.
+
+def _checkpoints_api():
+    """Ленивый импорт модуля контрольных точек.
+
+    Лениво — как и остальные обращения монолита к пакету trainings: схема
+    раздела разворачивается под своим SAVEPOINT и может не примениться, и
+    падать импортом на старте приложения из-за одной вкладки нельзя.
+    """
+    from trainings import checkpoints as checkpoints_api
+    return checkpoints_api
+
+
+def _can_manage_checkpoints(requester_id, requester):
+    """Кто работает с контрольными точками.
+
+    Тот же круг, что ставит обратную связь: админ, супервайзер, глава отдела.
+    Тренер и оператор сюда не входят — решение о контроле служебное. Это ровно
+    та же граница, что у справочника тем в trainings/access.py: читать раздел
+    тренер может, вести — нет.
+    """
+    role = _normalize_user_role(requester[3] if requester else None)
+    return bool(
+        _is_admin_role(role)
+        or _is_supervisor_role(role)
+        or _headed_department_id(requester_id) is not None
+    )
+
+
+def _checkpoint_scope_for_requester(requester_id, requester):
+    """Описание границы «чьи точки видит этот человек».
+
+    Не SQL, а описание: одно и то же условие нужно списку вкладки и колоколу, а
+    там параметры именованные — см. trainings.checkpoints.scope_clause, который
+    и превращает описание в SQL. Два рукописных условия разъехались бы молча.
+
+    Сами границы те же, что у доступа к оценкам (_ensure_call_access_for_requester):
+    глава отдела — свои отделы, глобальный админ — всё, супервайзер — свой отдел
+    (а если отдела нет — своих операторов). Разъехаться этим двум местам нельзя:
+    список контроля обязан совпадать с тем, чьи оценки человек видит в журнале,
+    иначе во вкладке появились бы люди, чью карточку он открыть не может.
+    """
+    role = _normalize_user_role(requester[3] if requester else None)
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids and not _is_super_admin_role(role):
+        return {'scope': 'departments', 'department_ids': sorted(headed_dept_ids)}
+    if _is_global_admin_requester(role, requester_id):
+        return {'scope': 'all'}
+    if _is_supervisor_role(role):
+        department_id = _department_scope_id_for_requester(requester_id)
+        if department_id is not None:
+            return {'scope': 'departments', 'department_ids': [department_id]}
+        return {'scope': 'supervisor', 'supervisor_id': requester_id}
+    # Сюда попадает сотрудник: своя точка и только она.
+    return {'scope': 'self', 'user_id': requester_id}
+
+
+def _attach_checkpoints_to_evaluations(evaluations, requester_id, requester):
+    """Дописывает к каждой оценке её контрольную точку, если она есть.
+
+    Одним запросом на всю страницу журнала, а не по запросу на карточку.
+
+    Форма ответа зависит от того, КТО смотрит: полную карточку получают только
+    те, кому контроль и открыт (_can_manage_checkpoints — админ, супервайзер,
+    глава отдела), остальным уходит урезанная — без вида контроля, причины
+    постановки и внутреннего комментария (payload_for_operator).
+
+    Условие именно «кому открыт контроль», а НЕ «роль = оператор». Разница не
+    теоретическая: /api/call_evaluations пускает к чужим оценкам ещё и тренера
+    (_authorize_operator_scope: `role == 'trainer'` → True), а стажёр — это
+    роль 'trainee', и проверка на 'operator' его бы не поймала. С проверкой
+    «не оператор — значит руководитель» оба увидели бы «испытательный срок» и
+    служебную пометку супервайзера. Умолчание должно быть безопасным.
+
+    Урезание делается ВЫБОРОМ другого сборщика, а не удалением ключей из
+    общего словаря: новое служебное поле в таблице иначе утекло бы молча.
+
+    Сбой раздела не ломает журнал: без контрольных точек он работает ровно так
+    же, как работал до задачи #86.
+    """
+    rows = [
+        ev for ev in (evaluations or [])
+        if isinstance(ev, dict) and isinstance(ev.get('feedback'), dict) and ev['feedback'].get('id')
+    ]
+    if not rows:
+        return evaluations
+    try:
+        api = _checkpoints_api()
+        by_feedback = db.get_checkpoints_by_feedback_ids([ev['feedback']['id'] for ev in rows])
+    except Exception:
+        logging.exception('Контрольные точки: не удалось прочитать точки для журнала')
+        return evaluations
+    build = (api.payload_for_manager
+             if _can_manage_checkpoints(requester_id, requester)
+             else api.payload_for_operator)
+    for ev in rows:
+        item = by_feedback.get(int(ev['feedback']['id']))
+        ev['checkpoint'] = build(item) if item else None
+    return evaluations
+
+
+def _apply_feedback_checkpoint(cursor, *, raw_checkpoint, feedback_id, call_id,
+                               operator_id, supervisor_id, requester_id):
+    """Сохраняет/снимает контрольную точку вместе с обратной связью.
+
+    Возвращает готовую карточку точки либо None. Разбор входных данных к этому
+    моменту уже произошёл (parse_checkpoint_input вызывается ДО открытия
+    курсора), поэтому здесь остаётся только запись: ошибка валидации не должна
+    оставлять сохранённую ОС без точки, о которой пользователь думает, что она
+    есть.
+    """
+    api = _checkpoints_api()
+    if raw_checkpoint is None:
+        api.drop_for_feedback(cursor, feedback_id)
+        return None
+    checkpoint_id = api.upsert_for_feedback(
+        cursor,
+        feedback_id=feedback_id,
+        call_id=call_id,
+        operator_id=operator_id,
+        supervisor_id=supervisor_id,
+        requester_id=requester_id,
+        data=raw_checkpoint,
+    )
+    return api.payload_for_manager(api.fetch_one(cursor, checkpoint_id))
+
+
 def _build_call_feedback_training_comment(call_id, feedback_comment, delivery_comment):
     return (
         f"ОС по оценке #{call_id}\n"
@@ -13562,6 +13694,9 @@ def get_call_evaluations():
             reveal_sensitive,
             hide_hidden_operator_comments=(role == 'operator')
         )
+        # Контрольные точки — после обезличивания: сборщик карточки для
+        # сотрудника свой, и общий санитайзер про эти поля ничего не знает.
+        evaluations = _attach_checkpoints_to_evaluations(evaluations, requester_id, requester)
 
         # Получаем информацию о супервайзере для dispute button
         operator = db.get_user(id=operator_id)
@@ -13634,6 +13769,17 @@ def upsert_call_feedback(call_id):
 
         if end_time_value <= start_time_value:
             return jsonify({"error": "end_time must be later than start_time"}), 400
+
+        # Блок «Контрольная точка по сотруднику» (задача #86). Разбираем ДО
+        # первой записи: ошибка в блоке не должна оставлять сохранённую ОС без
+        # точки, которую супервайзер считает поставленной. Отсутствие блока и
+        # выключенный тумблер — это None, и обычное сохранение ОС им не
+        # затрагивается вовсе (прямой критерий приёмки задачи).
+        checkpoints_api = _checkpoints_api()
+        try:
+            checkpoint_input = checkpoints_api.parse_checkpoint_input(data.get('checkpoint'))
+        except checkpoints_api.CheckpointError as checkpoint_error:
+            return jsonify({"error": str(checkpoint_error)}), 400
 
         training_comment = _build_call_feedback_training_comment(
             call_id,
@@ -13825,6 +13971,20 @@ def upsert_call_feedback(call_id):
                 ))
                 feedback_id = int(cursor.fetchone()[0])
 
+            # Контрольная точка — в той же транзакции, что и сама ОС: они
+            # сохраняются одним нажатием, и «ОС записалась, а контроль нет»
+            # было бы худшим из возможных исходов — супервайзер ушёл бы,
+            # считая срок назначенным.
+            checkpoint_payload = _apply_feedback_checkpoint(
+                cursor,
+                raw_checkpoint=checkpoint_input,
+                feedback_id=feedback_id,
+                call_id=call_id,
+                operator_id=operator_id,
+                supervisor_id=requester_id,
+                requester_id=requester_id,
+            )
+
             # Keep shared-training comments accurate after share-aware edits.
             if keep_shared:
                 rebuilt = _rebuild_call_feedback_training_comment(cursor, training_id)
@@ -13874,6 +14034,7 @@ def upsert_call_feedback(call_id):
             "updated_at": feedback_row[7],
             "created_by_name": feedback_row[8],
             "updated_by_name": feedback_row[9],
+            "checkpoint": checkpoint_payload,
         }
 
         return jsonify({"status": "success", "feedback": feedback_payload}), 200
@@ -13931,6 +14092,16 @@ def create_call_feedback_batch():
 
         if end_time_value <= start_time_value:
             return jsonify({"error": "end_time must be later than start_time"}), 400
+
+        # Контрольная точка на всю пачку — ОДНА. Она ставится по сотруднику, а
+        # не по оценке: разбирали три звонка за один сеанс — контроль всё равно
+        # один, с одной датой повторной проверки. Привязываем её к обратной
+        # связи первой оценки пачки, чтобы у точки был обратный путь в журнал.
+        checkpoints_api = _checkpoints_api()
+        try:
+            checkpoint_input = checkpoints_api.parse_checkpoint_input(data.get('checkpoint'))
+        except checkpoints_api.CheckpointError as checkpoint_error:
+            return jsonify({"error": str(checkpoint_error)}), 400
 
         normalized_items = []
         seen_call_ids = set()
@@ -14067,13 +14238,149 @@ def create_call_feedback_batch():
                     (rebuilt, shared_training_id)
                 )
 
+            checkpoint_payload = None
+            if checkpoint_input is not None and created_ids:
+                checkpoint_payload = _apply_feedback_checkpoint(
+                    cursor,
+                    raw_checkpoint=checkpoint_input,
+                    feedback_id=created_ids[0],
+                    call_id=normalized_items[0]["call_id"],
+                    operator_id=operator_id,
+                    supervisor_id=requester_id,
+                    requester_id=requester_id,
+                )
+
         return jsonify({
             "status": "success",
             "created": len(created_ids),
-            "training_id": shared_training_id
+            "training_id": shared_training_id,
+            "checkpoint": checkpoint_payload
         }), 201
     except Exception as e:
         logging.exception("Error saving batch call feedback")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+# ── Вкладка «Контроль» раздела «Тренинги» ────────────────────────────────────
+# Точки СОЗДАЮТСЯ только из окна «Дать ОС» (см. выше): контроль без разбора
+# конкретной оценки — это уже не «контрольная точка после ОС», а отдельная
+# кадровая история, и заводить для неё вторую точку входа заказчик не просил.
+# Здесь — только чтение списка и его закрытие.
+
+@app.route('/api/training_checkpoints', methods=['GET'])
+@require_api_key
+def list_training_checkpoints():
+    """Контрольные точки в границах видимости запросившего.
+
+    По умолчанию — только открытые: вкладка отвечает на вопрос «кого я должен
+    проверить», а не «кого когда-либо ставили на контроль». История доступна
+    параметром status=all и нужна редко, поэтому в первой порции её нет.
+    """
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        if not _can_manage_checkpoints(requester_id, requester):
+            return jsonify({
+                "error": "Контрольные точки доступны супервайзерам и руководителям",
+                "code": "CHECKPOINTS_CLOSED",
+            }), 403
+
+        api = _checkpoints_api()
+        status_param = str(request.args.get('status') or 'open').strip().lower()
+        if status_param == 'all':
+            statuses = ('open', 'done', 'cancelled')
+        elif status_param == 'closed':
+            statuses = ('done', 'cancelled')
+        else:
+            statuses = ('open',)
+
+        operator_param = request.args.get('operator_id')
+        operator_id = int(operator_param) if operator_param and str(operator_param).isdigit() else None
+
+        scope = _checkpoint_scope_for_requester(requester_id, requester)
+
+        with db._get_cursor() as cursor:
+            rows = api.list_for_scope(
+                cursor,
+                scope=scope,
+                statuses=statuses,
+                operator_id=operator_id,
+            )
+
+        checkpoints = [api.payload_for_manager(row) for row in rows]
+        # Счётчики считаем здесь, а не вторым запросом: открытых точек на
+        # отдел единицы, они все в этой же выдаче, и отдельный COUNT был бы
+        # обращением к базе ради арифметики над готовым списком.
+        open_items = [item for item in checkpoints if item['status'] == 'open']
+        counts = {
+            "open": len(open_items),
+            "overdue": sum(1 for item in open_items if item['is_overdue']),
+            "today": sum(1 for item in open_items if item['days_left'] == 0),
+        }
+        return jsonify({"status": "success", "checkpoints": checkpoints, "counts": counts}), 200
+    except Exception:
+        logging.exception("Error listing operator checkpoints")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/training_checkpoints/<int:checkpoint_id>', methods=['POST'])
+@require_api_key
+def update_training_checkpoint(checkpoint_id):
+    """Закрыть точку («проверено» / «контроль снят») или вернуть её в работу.
+
+    Одной ручкой с полем action, а не тремя роутами: действия взаимно
+    исключают друг друга и меняют одну и ту же строку, а состояние у точки
+    ровно одно.
+    """
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        if not _can_manage_checkpoints(requester_id, requester):
+            return jsonify({
+                "error": "Контрольные точки доступны супервайзерам и руководителям",
+                "code": "CHECKPOINTS_CLOSED",
+            }), 403
+
+        data = request.get_json(silent=True) or {}
+        action = str(data.get('action') or '').strip().lower()
+        if action not in ('done', 'cancelled', 'reopen'):
+            return jsonify({"error": "Неизвестное действие"}), 400
+
+        comment = str(data.get('comment') or '').strip()
+        api = _checkpoints_api()
+        if len(comment) > api.MAX_TEXT_LENGTH:
+            return jsonify({"error": "Комментарий слишком длинный"}), 400
+
+        with db._get_cursor() as cursor:
+            item = api.fetch_one(cursor, checkpoint_id)
+            if not item:
+                return jsonify({"error": "Контрольная точка не найдена"}), 404
+            # Права на человека — те же, что на его оценки: кто не видит
+            # карточку сотрудника, тот не закрывает и его контроль.
+            if not _ensure_call_access_for_requester(item['operator_id'], requester, requester_id):
+                return jsonify({"error": "Forbidden for this operator"}), 403
+
+            if action == 'reopen':
+                changed = api.reopen(cursor, checkpoint_id, requester_id=requester_id)
+                if changed is None:
+                    return jsonify({"error": "Точка и так в работе"}), 409
+            else:
+                changed = api.resolve(cursor, checkpoint_id,
+                                      requester_id=requester_id, status=action, comment=comment)
+                if changed is None:
+                    return jsonify({"error": "Точка уже закрыта"}), 409
+
+            updated = api.fetch_one(cursor, checkpoint_id)
+
+        return jsonify({"status": "success", "checkpoint": api.payload_for_manager(updated)}), 200
+    except Exception:
+        logging.exception("Error updating operator checkpoint")
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -53103,6 +53410,13 @@ def _notifications_viewer_context(requester_id, requester):
         requester_id, role,
         **({} if is_global else {'known_department_id': viewer_dept}))
 
+    # Контрольные точки. Источник двусторонний: руководителю показываются точки
+    # его людей в день проверки, сотруднику — его собственная и сразу. Границу
+    # считает та же функция, что и список во вкладке «Контроль», — иначе
+    # колокол и раздел показывали бы разное.
+    checkpoints_scope = dict(_checkpoint_scope_for_requester(requester_id, requester))
+    checkpoints_scope['is_manager'] = bool(_can_manage_checkpoints(requester_id, requester))
+
     return {
         'user_id': int(requester_id),
         'role': role,
@@ -53111,6 +53425,7 @@ def _notifications_viewer_context(requester_id, requester):
         'can_see_four_you': bool(can_see_four_you),
         'birthday_is_global': bool(birthday_is_global),
         'birthday_department_id': birthday_department_id,
+        'checkpoints': checkpoints_scope,
         'hidden_sources': () if can_see_tasks else ('tasks',),
     }
 

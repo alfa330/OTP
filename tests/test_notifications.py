@@ -994,7 +994,7 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'surveys', 'survey_assignments', 'wiki_ack_assignments',
                            'tasks', 'task_assignees', 'task_action_reads',
                            'event_reads', 'four_you_reads', 'birthday_reads',
-                           'crm_tickets')
+                           'crm_tickets', 'operator_checkpoints')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""

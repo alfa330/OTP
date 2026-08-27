@@ -30,8 +30,8 @@ from datetime import datetime, time as day_time, timedelta
 # падает, а просто расходится числами на экране, поэтому все три сверяются
 # тестами: tests/test_notifications.py::TasksSourceRulesTest и
 # tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
-SOURCES = ('wiki_ack', 'tasks', 'crm', 'lms', 'surveys', 'events', 'four_you',
-           'birthdays')
+SOURCES = ('wiki_ack', 'tasks', 'checkpoints', 'crm', 'lms', 'surveys', 'events',
+           'four_you', 'birthdays')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -504,9 +504,106 @@ def birthdays(cursor, viewer, limit):
     } for row in rows]
 
 
+# ── Контроль: контрольные точки по сотруднику ────────────────────────────────
+def checkpoints(cursor, viewer, limit):
+    """Назначенные повторные проверки — с двух сторон одного события.
+
+    РУКОВОДИТЕЛЮ (супервайзер, глава отдела, админ) точка показывается только
+    когда СРОК НАСТУПИЛ: `due_date <= сегодня`. Пока проверка впереди, в
+    колоколе тихо — иначе назначенная на месяц вперёд точка висела бы там все
+    тридцать дней и приучила бы не смотреть на колокол вовсе. Просроченная
+    горит (`tone` = warning): «не потерять срок контроля» — это ровно та
+    задача, ради которой раздел и сделан.
+
+    СОТРУДНИКУ та же точка показывается СРАЗУ, с момента постановки: ему нужно
+    знать, что исправить к проверке, а не узнать об этом в день Х. И показывается
+    ему СОВСЕМ ДРУГОЙ ТЕКСТ — без вида контроля (в том числе без слов
+    «испытательный срок»), без причины постановки и без внутреннего комментария
+    супервайзера. Это требование постановки задачи #86, и держится оно тем, что
+    служебные колонки в этой ветке просто не выбираются из базы.
+
+    Точку нельзя «погасить» просмотром (её нет в mark_seen) — по той же причине,
+    что ознакомление и опрос: она снимается ДЕЙСТВИЕМ, когда проверку провели.
+    Иначе счётчик контроля обнулялся бы фактом открытия колокола, то есть врал.
+    """
+    is_manager = bool((viewer.get('checkpoints') or {}).get('is_manager'))
+    today = _almaty_now().date()
+    params = {'user_id': viewer['user_id'], 'limit': limit, 'today': today}
+
+    if not is_manager:
+        cursor.execute(
+            """
+            SELECT c.id, c.due_date, c.focus, COUNT(*) OVER () AS total
+              FROM operator_checkpoints c
+             WHERE c.status = 'open'
+               AND c.notify_operator
+               AND c.operator_id = %(user_id)s
+             ORDER BY c.due_date, c.id
+             LIMIT %(limit)s
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+        total = int(rows[0][3]) if rows else 0
+        return total, [{
+            'source': 'checkpoints',
+            'id': row[0],
+            # Заголовок нейтральный и одинаковый для всех видов контроля:
+            # «испытательный срок» сотруднику не показывается.
+            'title': 'Повторная проверка качества',
+            'body': ('до %s · %s' % (row[1].strftime('%d.%m'), row[2] or '')).strip(' ·'),
+            'at': None,
+            # Ведём в его собственные оценки: там та же проверка показана
+            # карточкой у оценки, из-за которой её назначили.
+            'view': 'evaluation',
+            'target': None,
+            'tone': 'default',
+        } for row in rows]
+
+    # Локальный импорт: раздел разворачивается под своим SAVEPOINT и может не
+    # примениться — падать импортом на старте всего колокола из-за этого нельзя.
+    from trainings.checkpoints import scope_clause
+    from trainings.schema import CHECKPOINT_KIND_LABELS
+    scope_sql = scope_clause(viewer.get('checkpoints') or {}, params)
+    cursor.execute(
+        """
+        SELECT c.id, op.name, c.kind, c.due_date, COUNT(*) OVER () AS total
+          FROM operator_checkpoints c
+          JOIN users op ON op.id = c.operator_id
+         WHERE c.status = 'open'
+           AND c.due_date <= %(today)s
+        """ + scope_sql + """
+         ORDER BY c.due_date, c.id
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    total = int(rows[0][4]) if rows else 0
+    items = []
+    for row in rows:
+        overdue_days = (today - row[3]).days
+        if overdue_days > 0:
+            body = 'просрочена на %d дн. · %s' % (overdue_days, CHECKPOINT_KIND_LABELS.get(row[2], ''))
+        else:
+            body = 'проверка сегодня · %s' % CHECKPOINT_KIND_LABELS.get(row[2], '')
+        items.append({
+            'source': 'checkpoints',
+            'id': row[0],
+            'title': row[1] or 'Сотрудник',
+            'body': body.strip(' ·'),
+            'at': None,
+            'view': 'trainings',
+            'target': row[0],
+            'tone': 'warning' if overdue_days > 0 else 'default',
+        })
+    return total, items
+
+
 _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
+    'checkpoints': checkpoints,
     'crm': crm,
     'lms': lms,
     'surveys': surveys,
@@ -639,6 +736,19 @@ def next_change_at(cursor, viewer):
                AND t.is_backlog = FALSE
                AND t.status IN ('assigned', 'in_progress', 'returned')
                AND t.due_at > %(now)s""")
+
+    if 'checkpoints' not in hidden and (viewer.get('checkpoints') or {}).get('is_manager'):
+        # Контрольная точка появляется у руководителя не от записи в базу, а от
+        # календаря: в полночь дня проверки. Триггеру тут взяться неоткуда —
+        # ровно тот же случай, что у именинников ниже.
+        from trainings.checkpoints import scope_clause
+        parts.append("""
+            SELECT MIN(c.due_date::timestamp)
+              FROM operator_checkpoints c
+              JOIN users op ON op.id = c.operator_id
+             WHERE c.status = 'open'
+               AND c.due_date::timestamp > %(now)s"""
+            + scope_clause(viewer.get('checkpoints') or {}, params))
 
     if 'wiki_ack' not in hidden:
         # Срок ознакомления: счётчик не меняет, но документ становится горящим

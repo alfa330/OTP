@@ -1525,12 +1525,361 @@ const toTimeInputValue = (value) => {
     return m ? m[1] : '';
 };
 
+// ─── Контрольная точка по сотруднику (задача #86) ──────────────────────
+//
+// Блок внутри окна «Дать ОС»: провёл обратную связь — можешь тут же взять
+// человека на контроль и назначить дату повторной проверки.
+//
+// Свёрнут по умолчанию, и это главное решение по интерфейсу: контроль ставят у
+// меньшинства разборов, а шесть развёрнутых полей на КАЖДОМ сохранении ОС были
+// бы шумом для всех остальных. Пока тумблер выключен, блок занимает одну
+// строку и ни на что не влияет — обязательность полей проверяется только при
+// включённом тумблере (прямой критерий приёмки задачи).
+//
+// Что не видно сотруднику: вид контроля, причина постановки и внутренний
+// комментарий. Об этом сказано прямо в самом блоке, а не только на сервере, —
+// иначе супервайзер не знает, что можно писать, и пишет обтекаемо.
+
+const CHECKPOINT_KIND_OPTIONS = [
+    { value: 'quality',   label: 'Контроль качества',  hint: 'Держим на контроле и следим за качеством работы' },
+    { value: 'probation', label: 'Испытательный срок', hint: 'К дате проверки принимаем решение по сотруднику' },
+    { value: 'recheck',   label: 'Повторная проверка', hint: 'Переслушиваем звонки к назначенной дате' },
+];
+
+// Быстрые сроки закрывают почти все случаи — календарь рядом остаётся для
+// остальных. Одно нажатие вместо выбора числа в выпадающем календаре.
+const CHECKPOINT_QUICK_TERMS = [
+    { days: 7,  label: 'Через неделю' },
+    { days: 14, label: 'Через 2 недели' },
+    { days: 30, label: 'Через месяц' },
+];
+
+// Полдень, а не полночь: у даты, собранной из полуночи, перевод часов и любой
+// сдвиг зоны уводят день на соседний. Для «сегодня + N дней» это критично.
+const cpToday = () => { const d = new Date(); d.setHours(12, 0, 0, 0); return d; };
+const cpDateKey = (d) => [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, '0'),
+    String(d.getDate()).padStart(2, '0'),
+].join('-');
+const cpDatePlusDays = (days) => { const d = cpToday(); d.setDate(d.getDate() + days); return cpDateKey(d); };
+
+const cpDaysLeft = (key) => {
+    if (!key) return null;
+    const parts = String(key).slice(0, 10).split('-').map(Number);
+    if (parts.length !== 3 || parts.some(Number.isNaN)) return null;
+    const target = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
+    return Math.round((target - cpToday()) / 86400000);
+};
+
+const cpFormatDate = (key) => {
+    if (!key) return '—';
+    const parts = String(key).slice(0, 10).split('-');
+    if (parts.length !== 3) return String(key);
+    return parts[2] + '.' + parts[1] + '.' + parts[0];
+};
+
+const cpDueWording = (key) => {
+    const left = cpDaysLeft(key);
+    if (left === null) return '';
+    if (left < 0) return 'просрочена на ' + Math.abs(left) + ' дн.';
+    if (left === 0) return 'сегодня';
+    if (left === 1) return 'завтра';
+    return 'через ' + left + ' дн.';
+};
+
+const emptyCheckpointDraft = () => ({
+    enabled: false,
+    kind: 'quality',
+    dueDate: cpDatePlusDays(7),
+    reason: '',
+    focus: '',
+    internalComment: '',
+    notifyOperator: true,
+});
+
+/* Черновик из уже сохранённой точки. Закрытая («проверено» / «контроль снят»)
+   в черновик НЕ разворачивается: она состоявшийся факт и живёт в истории, а
+   окно ОС предлагает поставить новую. */
+const checkpointDraftFrom = (checkpoint) => {
+    if (!checkpoint || checkpoint.status !== 'open') return emptyCheckpointDraft();
+    return {
+        enabled: true,
+        kind: checkpoint.kind || 'quality',
+        dueDate: String(checkpoint.due_date || '').slice(0, 10) || cpDatePlusDays(7),
+        reason: checkpoint.reason || '',
+        focus: checkpoint.focus || '',
+        internalComment: checkpoint.internal_comment || '',
+        notifyOperator: checkpoint.notify_operator !== false,
+    };
+};
+
+/* Первая незаполненная обязательная строка блока, либо ''. Порядок совпадает с
+   порядком полей на экране: подсказка обязана указывать на ближайшее сверху
+   поле, а не на случайное. Те же правила проверяет сервер
+   (trainings/checkpoints.py::parse_checkpoint_input) — здесь они ради того,
+   чтобы человек увидел причину до отправки, а не после. */
+const checkpointDraftError = (draft) => {
+    if (!draft || !draft.enabled) return '';
+    if (!draft.dueDate) return 'Укажите дату следующей проверки';
+    if (cpDaysLeft(draft.dueDate) < 0) return 'Дата проверки не может быть в прошлом';
+    if (!String(draft.reason || '').trim()) return 'Укажите причину постановки на контроль';
+    if (!String(draft.focus || '').trim()) return 'Укажите, что нужно проверить повторно';
+    return '';
+};
+
+const checkpointPayload = (draft) => {
+    if (!draft || !draft.enabled) return { enabled: false };
+    return {
+        enabled: true,
+        kind: draft.kind,
+        due_date: draft.dueDate,
+        reason: String(draft.reason || '').trim(),
+        focus: String(draft.focus || '').trim(),
+        internal_comment: String(draft.internalComment || '').trim(),
+        notify_operator: !!draft.notifyOperator,
+    };
+};
+
+const CheckpointSwitch = ({ checked, onChange, ariaLabel }) => (
+    <label className="ce-switch" onClick={e => e.stopPropagation()}>
+        <input
+            type="checkbox"
+            checked={!!checked}
+            onChange={e => onChange(!!e.target.checked)}
+            aria-label={ariaLabel}
+        />
+        <span className="ce-switch-track"><span className="ce-switch-thumb" /></span>
+    </label>
+);
+
+const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = null }) => {
+    const [showInternal, setShowInternal] = useState(false);
+    const rootRef = useRef(null);
+    const wasEnabledRef = useRef(draft.enabled);
+    const patch = (fields) => onChange({ ...draft, ...fields });
+    const activeKind = CHECKPOINT_KIND_OPTIONS.find(o => o.value === draft.kind) || CHECKPOINT_KIND_OPTIONS[0];
+    const activeTerm = CHECKPOINT_QUICK_TERMS.find(t => cpDatePlusDays(t.days) === draft.dueDate) || null;
+    const hasInternal = !!String(draft.internalComment || '').trim();
+
+    useEffect(() => {
+        // Уже написанный комментарий не прячем: свернув его, мы бы показали
+        // пустой блок там, где текст есть, и человек написал бы его заново.
+        if (hasInternal) setShowInternal(true);
+    }, [hasInternal]);
+
+    /* Блок стоит в самом низу окна: включённый тумблер раскрывает поля ЗА
+       нижней границей, и нажатие выглядит как «ничего не произошло».
+       Прокручиваем только на переходе выкл→вкл — на открытии окна с уже
+       поставленным контролем дёргать окно вниз нельзя, человек ещё не дочитал
+       саму обратную связь. */
+    useEffect(() => {
+        const justEnabled = draft.enabled && !wasEnabledRef.current;
+        wasEnabledRef.current = draft.enabled;
+        if (!justEnabled || !rootRef.current) return;
+        const node = rootRef.current;
+        const frame = requestAnimationFrame(() => {
+            node.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [draft.enabled]);
+
+    const toggleEnabled = () => patch({ enabled: !draft.enabled });
+
+    return (
+        <div className={'ce-cp' + (draft.enabled ? ' is-on' : '')} ref={rootRef}>
+            <div
+                className="ce-cp-head"
+                role="button"
+                tabIndex={0}
+                onClick={toggleEnabled}
+                onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleEnabled(); }
+                }}
+            >
+                <div className="ce-cp-head-text">
+                    <div className="ce-cp-title">
+                        <FaIcon className="fas fa-user-shield" aria-hidden="true" />
+                        Поставить на контроль
+                    </div>
+                    <div className="ce-cp-sub">
+                        {draft.enabled
+                            ? activeKind.label + ' · проверка ' + cpFormatDate(draft.dueDate) + ' (' + cpDueWording(draft.dueDate) + ')'
+                            : 'Назначить дату повторной проверки, чтобы не потерять срок'}
+                    </div>
+                </div>
+                <CheckpointSwitch
+                    checked={draft.enabled}
+                    onChange={value => patch({ enabled: value })}
+                    ariaLabel="Поставить сотрудника на контроль"
+                />
+            </div>
+
+            {draft.enabled && (
+                <div className="ce-cp-body">
+                    {otherOpenCheckpoint && (
+                        <div className="ce-cp-note">
+                            <FaIcon className="fas fa-exclamation-circle" aria-hidden="true" />
+                            <span>
+                                {(operatorName || 'Сотрудник') + ' уже на контроле до '
+                                    + cpFormatDate(otherOpenCheckpoint.due_date)
+                                    + (otherOpenCheckpoint.kind_label ? ' · ' + otherOpenCheckpoint.kind_label : '')
+                                    + '. Эта точка добавится отдельной.'}
+                            </span>
+                        </div>
+                    )}
+
+                    <div className="ce-cp-field">
+                        <label className="label">Вид контроля</label>
+                        <div className="ce-cp-kinds" role="group" aria-label="Вид контроля">
+                            {CHECKPOINT_KIND_OPTIONS.map(option => (
+                                <button
+                                    key={option.value}
+                                    type="button"
+                                    className={'ce-cp-kind' + (draft.kind === option.value ? ' is-active' : '')}
+                                    aria-pressed={draft.kind === option.value}
+                                    onClick={() => patch({ kind: option.value })}
+                                >
+                                    {option.label}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="ce-cp-due-note" style={{ marginTop: 6 }}>{activeKind.hint}</div>
+                    </div>
+
+                    <div className="ce-cp-field">
+                        <label className="label">Дата следующей проверки</label>
+                        <div className="ce-cp-date-row">
+                            <input
+                                className="input"
+                                type="date"
+                                min={cpDateKey(cpToday())}
+                                value={draft.dueDate}
+                                onChange={e => patch({ dueDate: e.target.value })}
+                            />
+                        </div>
+                        <div className="ce-cp-terms">
+                            {CHECKPOINT_QUICK_TERMS.map(term => (
+                                <button
+                                    key={term.days}
+                                    type="button"
+                                    className={'ce-cp-chip' + (activeTerm && activeTerm.days === term.days ? ' is-active' : '')}
+                                    onClick={() => patch({ dueDate: cpDatePlusDays(term.days) })}
+                                >
+                                    {term.label}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="ce-cp-due-note" style={{ marginTop: 6 }}>
+                            Напомним в разделе «Тренинги» → «Контроль» и в колоколе:{' '}
+                            <strong>{cpDueWording(draft.dueDate)}</strong>
+                        </div>
+                    </div>
+
+                    <div className="ce-cp-field">
+                        <label className="label">Причина постановки на контроль</label>
+                        <input
+                            className="input"
+                            type="text"
+                            maxLength={2000}
+                            placeholder="Например: третий разбор подряд с ошибкой в приветствии"
+                            value={draft.reason}
+                            onChange={e => patch({ reason: e.target.value })}
+                        />
+                    </div>
+
+                    <div className="ce-cp-field">
+                        <label className="label">Что проверить повторно</label>
+                        <textarea
+                            className="textarea"
+                            rows={2}
+                            maxLength={2000}
+                            style={{ minHeight: 62 }}
+                            placeholder="Например: приветствие по стандарту, уточняющие вопросы, работа с возражением"
+                            value={draft.focus}
+                            onChange={e => patch({ focus: e.target.value })}
+                        />
+                    </div>
+
+                    {showInternal ? (
+                        <div className="ce-cp-private">
+                            <div className="ce-cp-private-head">
+                                <span className="ce-cp-private-label">
+                                    <FaIcon className="fas fa-lock" aria-hidden="true" />
+                                    Внутренний комментарий · сотруднику не виден
+                                </span>
+                            </div>
+                            <textarea
+                                className="textarea"
+                                rows={2}
+                                maxLength={2000}
+                                style={{ minHeight: 58 }}
+                                placeholder="Пометка для себя и руководителя: что решаем по итогам проверки"
+                                value={draft.internalComment}
+                                onChange={e => patch({ internalComment: e.target.value })}
+                            />
+                        </div>
+                    ) : (
+                        <button type="button" className="ce-cp-more" onClick={() => setShowInternal(true)}>
+                            <FaIcon className="fas fa-lock" aria-hidden="true" />
+                            Внутренний комментарий
+                        </button>
+                    )}
+
+                    <div className="ce-cp-notify">
+                        <div className="ce-cp-notify-text">
+                            <div className="ce-cp-notify-title">Сообщить сотруднику</div>
+                            <div className="ce-cp-notify-sub">
+                                {draft.notifyOperator
+                                    ? 'Увидит только дату проверки и «что проверить». Вид контроля, причину и внутренний комментарий — нет.'
+                                    : 'Сотрудник о проверке не узнает. Контроль останется только у вас и у руководителя.'}
+                            </div>
+                        </div>
+                        <CheckpointSwitch
+                            checked={draft.notifyOperator}
+                            onChange={value => patch({ notifyOperator: value })}
+                            ariaLabel="Сообщить сотруднику о проверке"
+                        />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+/* Чип «на контроле» у строки оценки в журнале. Нейтральный, пока срок не
+   подошёл: цвет тут означает «горит», а не «есть контроль». */
+const CheckpointBadge = ({ checkpoint }) => {
+    if (!checkpoint) return null;
+    if (checkpoint.status === 'done') {
+        return (
+            <span className="ce-cp-badge is-done">
+                <FaIcon className="fas fa-check" aria-hidden="true" />
+                Проверено
+            </span>
+        );
+    }
+    if (checkpoint.status === 'cancelled') return null;
+    const left = cpDaysLeft(checkpoint.due_date);
+    const tone = left === null ? '' : (left < 0 ? ' is-overdue' : (left === 0 ? ' is-due' : ''));
+    return (
+        <span className={'ce-cp-badge' + tone}>
+            <FaIcon className="fas fa-user-shield" aria-hidden="true" />
+            На контроле до {cpFormatDate(checkpoint.due_date)}
+        </span>
+    );
+};
+
 const FeedbackModal = ({
     isOpen,
     onClose,
     call,
     userId,
-    onSaved
+    onSaved,
+    operatorName = '',
+    // Другая ОТКРЫТАЯ точка того же сотрудника, если она есть. Считается из
+    // уже загруженного журнала (см. App), отдельного запроса не стоит.
+    otherOpenCheckpoint = null
 }) => {
     const [feedbackComment, setFeedbackComment] = useState('');
     const [deliveryComment, setDeliveryComment] = useState('');
@@ -1538,6 +1887,7 @@ const FeedbackModal = ({
     const [startTime, setStartTime] = useState('');
     const [endTime, setEndTime] = useState('');
     const [skipTraining, setSkipTraining] = useState(false);
+    const [checkpointDraft, setCheckpointDraft] = useState(emptyCheckpointDraft);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const scoreValue = Number(call?.totalScore ?? call?._rawEvaluation?.score);
     const canSkipTraining = Number.isFinite(scoreValue) && scoreValue >= 90;
@@ -1555,15 +1905,19 @@ const FeedbackModal = ({
         setEndTime(toTimeInputValue(currentFeedback?.end_time));
         const existingTrainingId = Number(currentFeedback?.training_id || 0);
         setSkipTraining(Boolean(canSkipTraining && currentFeedback?.id && existingTrainingId <= 0));
+        setCheckpointDraft(checkpointDraftFrom(call?.checkpoint));
     }, [isOpen, call, canSkipTraining]);
 
     if (!isOpen || !call) return null;
 
     const hasExistingFeedback = !!call?.feedback?.id;
     const requiresTrainingFields = !(canSkipTraining && skipTraining);
+    // Пустая строка, пока тумблер контроля выключен, — блок ничего не требует.
+    const checkpointError = checkpointDraftError(checkpointDraft);
     const isDisabled =
         isSubmitting ||
         !feedbackComment.trim() ||
+        !!checkpointError ||
         (
             requiresTrainingFields && (
                 !deliveryComment.trim() ||
@@ -1585,7 +1939,8 @@ const FeedbackModal = ({
             delivery_comment: deliveryComment.trim(),
             date: feedbackDate,
             start_time: startTime,
-            end_time: endTime
+            end_time: endTime,
+            checkpoint: checkpointPayload(checkpointDraft)
         };
         if (!requiresTrainingFields) {
             payload.delivery_comment = payload.delivery_comment || 'Тренинг не требуется.';
@@ -1626,10 +1981,13 @@ const FeedbackModal = ({
                 if (d?.feedback) d.feedback.training_id = null;
             }
 
+            const baseToast = !requiresTrainingFields
+                ? (hasExistingFeedback ? 'Обратная связь обновлена без тренинга' : 'Обратная связь сохранена без тренинга')
+                : (hasExistingFeedback ? 'Обратная связь обновлена' : 'Обратная связь добавлена');
             emitCallEvaluationToast(
-                !requiresTrainingFields
-                    ? (hasExistingFeedback ? 'Обратная связь обновлена без тренинга' : 'Обратная связь сохранена без тренинга')
-                    : (hasExistingFeedback ? 'Обратная связь обновлена' : 'Обратная связь добавлена'),
+                checkpointDraft.enabled
+                    ? baseToast + '. Проверка назначена на ' + cpFormatDate(checkpointDraft.dueDate)
+                    : baseToast,
                 'success'
             );
             if (typeof onSaved === 'function') onSaved(d.feedback || null);
@@ -1724,8 +2082,23 @@ const FeedbackModal = ({
                             При сохранении будет добавлен только комментарий ОС, тренинг создан не будет.
                         </div>
                     )}
+                    <div style={{marginTop: 16}}>
+                        <CheckpointBlock
+                            draft={checkpointDraft}
+                            onChange={setCheckpointDraft}
+                            operatorName={operatorName}
+                            otherOpenCheckpoint={otherOpenCheckpoint}
+                        />
+                    </div>
                 </div>
                 <div className="modal-footer">
+                    {/* Почему кнопка неактивна — говорим словами. Молча
+                        погашенная кнопка заставляет угадывать. */}
+                    {checkpointError && (
+                        <span style={{marginRight:'auto', fontSize:12, color:'var(--amber)'}}>
+                            {checkpointError}
+                        </span>
+                    )}
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
                     <button className="btn btn-primary" onClick={submit} disabled={isDisabled}>
                         {isSubmitting
@@ -1746,7 +2119,9 @@ const BatchFeedbackModal = ({
     onClose,
     calls,
     userId,
-    onSaved
+    onSaved,
+    operatorName = '',
+    otherOpenCheckpoint = null
 }) => {
     const [deliveryComment, setDeliveryComment] = useState('');
     const [feedbackDate, setFeedbackDate] = useState('');
@@ -1754,6 +2129,7 @@ const BatchFeedbackModal = ({
     const [endTime, setEndTime] = useState('');
     const [comments, setComments] = useState({});
     const [audioUrls, setAudioUrls] = useState({});
+    const [checkpointDraft, setCheckpointDraft] = useState(emptyCheckpointDraft);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
     useEffect(() => {
@@ -1766,6 +2142,7 @@ const BatchFeedbackModal = ({
         const initial = {};
         (calls || []).forEach(c => { initial[c.id] = ''; });
         setComments(initial);
+        setCheckpointDraft(emptyCheckpointDraft());
     }, [isOpen, calls]);
 
     // Подгружаем аудиозаписи выбранных оценок, чтобы прослушать их при разборе.
@@ -1789,12 +2166,14 @@ const BatchFeedbackModal = ({
     if (!isOpen || !Array.isArray(calls) || calls.length === 0) return null;
 
     const allCommentsFilled = calls.every(c => String(comments[c.id] || '').trim());
+    const checkpointError = checkpointDraftError(checkpointDraft);
     const isDisabled =
         isSubmitting ||
         !deliveryComment.trim() ||
         !feedbackDate ||
         !startTime ||
         !endTime ||
+        !!checkpointError ||
         !allCommentsFilled;
 
     const submit = async () => {
@@ -1812,7 +2191,8 @@ const BatchFeedbackModal = ({
             items: calls.map(c => ({
                 call_id: c.id,
                 feedback_comment: String(comments[c.id] || '').trim()
-            }))
+            })),
+            checkpoint: checkpointPayload(checkpointDraft)
         };
 
         setIsSubmitting(true);
@@ -1829,7 +2209,11 @@ const BatchFeedbackModal = ({
             if (!r.ok || d?.status !== 'success') {
                 throw new Error(d?.error || 'Не удалось сохранить обратную связь');
             }
-            emitCallEvaluationToast(`Обратная связь добавлена для ${d.created ?? calls.length} оц.`, 'success');
+            emitCallEvaluationToast(
+                `Обратная связь добавлена для ${d.created ?? calls.length} оц.`
+                    + (checkpointDraft.enabled ? `. Проверка назначена на ${cpFormatDate(checkpointDraft.dueDate)}` : ''),
+                'success'
+            );
             if (typeof onSaved === 'function') onSaved();
             onClose?.();
         } catch (e) {
@@ -1905,8 +2289,23 @@ const BatchFeedbackModal = ({
                         При сохранении будет создан один общий тренинг
                         <strong style={{color:'var(--text)'}}> «Тренинг по качеству. Разбор ошибок»</strong> на всё выбранное.
                     </div>
+                    {/* Контрольная точка ставится по СОТРУДНИКУ, поэтому на всю
+                        пачку она одна — как и общий тренинг выше. */}
+                    <div style={{marginTop: 16}}>
+                        <CheckpointBlock
+                            draft={checkpointDraft}
+                            onChange={setCheckpointDraft}
+                            operatorName={operatorName}
+                            otherOpenCheckpoint={otherOpenCheckpoint}
+                        />
+                    </div>
                 </div>
                 <div className="modal-footer">
+                    {checkpointError && (
+                        <span style={{marginRight:'auto', fontSize:12, color:'var(--amber)'}}>
+                            {checkpointError}
+                        </span>
+                    )}
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
                     <button className="btn btn-primary" onClick={submit} disabled={isDisabled}>
                         {isSubmitting
@@ -4260,6 +4659,7 @@ const App = ({ user, initialSelection }) => {
         resolvedFirstContact: ev.question_resolved ? !!ev.resolved_first_contact : null,
         feedback: ev.feedback || null,
         feedbackSla: ev.feedback_sla || ev?.feedback?.sla || null,
+        checkpoint: ev.checkpoint || null,
         _rawEvaluation: ev
     }), []);
 
@@ -5132,6 +5532,20 @@ const App = ({ user, initialSelection }) => {
         setFeedbackTargetCall(null);
         await fetchEvaluations({ force: true });
     }, [fetchEvaluations]);
+
+    /* Уже открытая контрольная точка этого сотрудника по ДРУГОЙ оценке.
+       Считается из уже загруженного журнала: месяц оценок оператора и так в
+       состоянии, и отдельный запрос ради одной подсказки был бы платой ни за
+       что. Нужна, чтобы супервайзер не взял человека на контроль второй раз,
+       не зная о первом. */
+    const otherOpenCheckpointFor = useCallback((callId) => {
+        const found = (calls || []).find(item => (
+            item?.id !== callId
+            && item?.checkpoint
+            && item.checkpoint.status === 'open'
+        ));
+        return found ? found.checkpoint : null;
+    }, [calls]);
 
     // Оценка доступна для пакетной ОС: отправленная (не черновик/не импорт) и ещё без ОС.
     const isBatchEligible = useCallback((call) => (
@@ -6380,6 +6794,33 @@ const App = ({ user, initialSelection }) => {
                                                                 <div>
                                                                     <strong style={{color:'var(--text)'}}>Время:</strong> {call.feedback.date || '—'} {call.feedback.start_time || '—'}–{call.feedback.end_time || '—'}
                                                                 </div>
+                                                                {/* Контрольная точка — здесь, а не чипом в строке списка:
+                                                                    в колонке действий и так тесно, а «кого проверить»
+                                                                    целиком отвечает вкладка «Контроль». */}
+                                                                {call.checkpoint && call.checkpoint.status !== 'cancelled' && (
+                                                                    <div style={{marginTop:10, paddingTop:10, borderTop:'1px dashed var(--border)'}}>
+                                                                        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
+                                                                            <CheckpointBadge checkpoint={call.checkpoint} />
+                                                                            {call.checkpoint.kind_label && (
+                                                                                <span style={{fontSize:12}}>{call.checkpoint.kind_label}</span>
+                                                                            )}
+                                                                        </div>
+                                                                        <div style={{marginBottom:4}}>
+                                                                            <strong style={{color:'var(--text)'}}>Проверить повторно:</strong> {call.checkpoint.focus || '—'}
+                                                                        </div>
+                                                                        {call.checkpoint.reason && (
+                                                                            <div style={{marginBottom:4}}>
+                                                                                <strong style={{color:'var(--text)'}}>Причина контроля:</strong> {call.checkpoint.reason}
+                                                                            </div>
+                                                                        )}
+                                                                        {call.checkpoint.internal_comment && (
+                                                                            <div style={{display:'flex',gap:6,alignItems:'flex-start',color:'var(--text-3)'}}>
+                                                                                <FaIcon className="fas fa-lock" aria-hidden="true" style={{marginTop:3}} />
+                                                                                <span>{call.checkpoint.internal_comment}</span>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         )}
                                                         {call.audioUrl && call.directions?.[0]?.hasFileUpload && (
@@ -7512,6 +7953,8 @@ const App = ({ user, initialSelection }) => {
                 call={feedbackTargetCall}
                 userId={userId}
                 onSaved={handleFeedbackSaved}
+                operatorName={selectedOperator?.name || ''}
+                otherOpenCheckpoint={otherOpenCheckpointFor(feedbackTargetCall?.id)}
             />
             <BatchFeedbackModal
                 isOpen={showBatchFeedbackModal}
@@ -7519,6 +7962,8 @@ const App = ({ user, initialSelection }) => {
                 calls={batchModalCalls}
                 userId={userId}
                 onSaved={handleBatchFeedbackSaved}
+                operatorName={selectedOperator?.name || ''}
+                otherOpenCheckpoint={otherOpenCheckpointFor(null)}
             />
             {batchMode && !showBatchFeedbackModal && (
                 <div style={{

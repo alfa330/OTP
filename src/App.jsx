@@ -47445,6 +47445,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
                                             departments={departments}
+                                            onOpenJournal={openCallEvaluationSection}
                                         />
                                     </Suspense>
                                 ))}
@@ -48595,6 +48596,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
                                             departments={departments}
+                                            onOpenJournal={openCallEvaluationSection}
                                         />
                                     </Suspense>
                                 ))}
@@ -48977,6 +48979,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
                                             departments={departments}
+                                            onOpenJournal={openCallEvaluationSection}
                                         />
                                     </Suspense>
                                 ))}
@@ -50290,6 +50293,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                 </aside>
                                             </div>
+
+                                            {/* Назначенная повторная проверка (задача #86).
+                                                Сотруднику показывается только СРОК и «что подготовить»:
+                                                вид контроля, причина постановки и внутренний комментарий
+                                                супервайзера сюда не приходят вовсе — сервер отдаёт ему
+                                                урезанную карточку (trainings/checkpoints.py::payload_for_operator).
+                                                Плашка одна на страницу и только пока проверка не проведена. */}
+                                            {(() => {
+                                                const checkpoint = allEvals
+                                                    .map((ev) => ev?.checkpoint)
+                                                    .find((item) => item && item.status === 'open');
+                                                if (!checkpoint) return null;
+                                                const parts = String(checkpoint.due_date || '').slice(0, 10).split('-').map(Number);
+                                                let left = null;
+                                                if (parts.length === 3 && parts.every(Number.isFinite)) {
+                                                    const target = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
+                                                    const today = new Date();
+                                                    today.setHours(12, 0, 0, 0);
+                                                    left = Math.round((target - today) / 86400000);
+                                                }
+                                                const when = left === null
+                                                    ? ''
+                                                    : (left < 0 ? 'дата уже прошла' : (left === 0 ? 'сегодня' : (left === 1 ? 'завтра' : `через ${left} дн.`)));
+                                                return (
+                                                    <div className="mb-6 sm:mb-8 rounded-xl border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
+                                                        <FaIcon className="fas fa-user-shield text-amber-600 mt-0.5"></FaIcon>
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-semibold text-gray-900">
+                                                                Повторная проверка качества
+                                                                <span className="ml-2 font-normal text-amber-700 tabular-nums">
+                                                                    {formatDate(checkpoint.due_date)}{when ? ` · ${when}` : ''}
+                                                                </span>
+                                                            </div>
+                                                            {checkpoint.focus && (
+                                                                <div className="mt-1 text-sm text-gray-700">
+                                                                    <span className="text-gray-500">Что подготовить: </span>{checkpoint.focus}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })()}
 
                                             {/* KPI cards */}
                                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">

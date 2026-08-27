@@ -5869,6 +5869,22 @@ class Database:
                         targets := targets || ARRAY[OLD.assigned_to,
                                                     COALESCE(OLD.requested_by_id, OLD.created_by)];
                     END IF;
+                ELSIF TG_TABLE_NAME = 'operator_checkpoints' THEN
+                    -- Контрольная точка: будим супервайзера, который её ведёт,
+                    -- и самого сотрудника — но сотрудника ТОЛЬКО если ему
+                    -- решили сообщать (notify_operator). Иначе тычок пришёл бы
+                    -- человеку, которому в колоколе показывать нечего, и он
+                    -- увидел бы пустое обновление вместо строки.
+                    targets := ARRAY[NEW.supervisor_id, NEW.created_by];
+                    IF NEW.notify_operator THEN
+                        targets := targets || ARRAY[NEW.operator_id];
+                    END IF;
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.supervisor_id];
+                        IF OLD.notify_operator THEN
+                            targets := targets || ARRAY[OLD.operator_id];
+                        END IF;
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -5954,6 +5970,30 @@ class Database:
             # триггер, иначе добавленный соисполнитель не увидит задачу в колоколе
             # до следующего обновления по фокусу.
             ('trg_bell_task_assignees', 'task_assignees', 'AFTER INSERT OR DELETE', ''),
+            # Контрольные точки. Двумя триггерами, а не одним на INSERT OR
+            # UPDATE: WHEN у такого триггера НЕ может ссылаться на OLD
+            # («INSERT trigger's WHEN condition cannot reference OLD values»),
+            # и TG_OP в WHEN тоже недоступен — там разрешены только NEW/OLD.
+            # Тот же приём, что у ознакомлений и назначений опросов.
+            ('trg_bell_checkpoints_insert', 'operator_checkpoints', 'AFTER INSERT', ''),
+            # UPDATE обязателен: точку закрывают («проверено») и переносят срок,
+            # и оба действия обязаны гасить или двигать строку в колоколе. WHEN
+            # отсекает правки, которых сводка не видит, — иначе каждое повторное
+            # сохранение ОС слало бы тычок обоим ни за что.
+            (
+                'trg_bell_checkpoints',
+                'operator_checkpoints',
+                'AFTER UPDATE OF status, due_date, operator_id, supervisor_id, '
+                'notify_operator, focus',
+                """WHEN (
+                    OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.due_date IS DISTINCT FROM NEW.due_date
+                    OR OLD.operator_id IS DISTINCT FROM NEW.operator_id
+                    OR OLD.supervisor_id IS DISTINCT FROM NEW.supervisor_id
+                    OR OLD.notify_operator IS DISTINCT FROM NEW.notify_operator
+                    OR OLD.focus IS DISTINCT FROM NEW.focus
+                )""",
+            ),
             ('trg_bell_task_reads', 'task_action_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_event_reads', 'event_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_four_you_reads', 'four_you_reads', 'AFTER INSERT OR UPDATE', ''),
@@ -28419,6 +28459,23 @@ class Database:
                 }
 
             return evaluations
+
+    def get_checkpoints_by_feedback_ids(self, feedback_ids):
+        """{id обратной связи: контрольная точка} — для чипа в «Журнале оценок».
+
+        Отдельным запросом, а не колонками в get_call_evaluations: тот запрос —
+        UNION из оценённых звонков и неоценённых импортов, и каждая новая
+        колонка обязана быть добавлена в обе ветки с совпадающими типами.
+        Ради поля, которое есть у меньшинства строк, это плохой обмен: здесь
+        один короткий запрос по индексу uq_operator_checkpoints_feedback на всю
+        страницу журнала.
+        """
+        ids = [int(value) for value in (feedback_ids or []) if value is not None]
+        if not ids:
+            return {}
+        from trainings.checkpoints import fetch_by_feedback_ids
+        with self._get_cursor() as cursor:
+            return fetch_by_feedback_ids(cursor, ids)
 
     def get_call_reevaluation_requests(self, month=None, operator_id=None, supervisor_id=None, department_id=None):
         query = """
