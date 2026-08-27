@@ -87,9 +87,15 @@ from resource_fte_service import (
 )
 from resource_fte.chat import (
     build_chat_forecast,
+    build_chat_uplift_profile,
+    fit_first_reply_curve,
+    get_chat_analytics,
+    get_chat_day,
+    get_chat_operator_availability,
     get_chat_overview,
     get_chat_settings,
     get_chat_shift_templates,
+    recalculate_chat_forecast,
     update_chat_settings,
 )
 from resource_fte.schedule_generation import (
@@ -7978,6 +7984,9 @@ def api_resource_fte_chat_overview():
         payload = get_chat_overview(
             db,
             week_start_value=request.args.get('week_start'),
+            period_end_value=request.args.get('period_end'),
+            date_from=request.args.get('date_from'),
+            date_to=request.args.get('date_to'),
             history_days=request.args.get('history_days'),
         )
         return jsonify({"status": "success", **payload}), 200
@@ -8019,6 +8028,108 @@ def api_resource_fte_chat_shift_templates():
         return guard_response, guard_status
     try:
         return jsonify({"status": "success", **get_chat_shift_templates()}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/day/<string:report_date>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_day(report_date):
+    """Почасовая детализация дня чата: прогноз против факта и первый ответ."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        return jsonify({"status": "success", "day": get_chat_day(db, report_date)}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/operator_availability', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_operator_availability():
+    """Тот же расчёт доступности, что у линии, но границу направления ставит чат.
+
+    Направления в `resource_settings` общие, поэтому идём через обёртку из chat.py:
+    она сама разрешает чат-направления и передаёт их как override.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = get_chat_operator_availability(
+            db,
+            as_of_date_value=request.args.get('as_of'),
+            forecast_week_start_value=request.args.get('forecast_week_start'),
+            forecast_date_from_value=request.args.get('forecast_date_from') or request.args.get('forecast_period_start'),
+            forecast_date_to_value=request.args.get('forecast_date_to') or request.args.get('forecast_period_end')
+        )
+        return jsonify({"status": "success", "availability": payload}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/analytics', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_analytics():
+    """Вкладка «Чаты»: объём, первый ответ против цели, часы риска и каналы."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = get_chat_analytics(db, request.args.get('date_from'), request.args.get('date_to'))
+        return jsonify({"status": "success", **payload}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/recalculate', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_recalculate():
+    """Складывает прошедшие дни в `chat_resource_hours` — без этого наплыв пустой."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        result = recalculate_chat_forecast(db, as_of_date=payload.get('as_of_date') or payload.get('as_of'),
+                                           days=payload.get('days'))
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/fit_first_reply', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_fit_first_reply():
+    """Замер кривой первого ответа по нашим данным — коэффициенты не выдумываются."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+    try:
+        payload = request.get_json(silent=True) or {}
+        result = fit_first_reply_curve(db, days=payload.get('days'))
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception as error:
         return _resource_fte_error_response(error)
 
@@ -8080,11 +8191,18 @@ def api_resource_fte_chat_schedule_preview():
         return guard_response, guard_status
     try:
         payload = request.get_json(silent=True) or {}
+        # Наплыв обязан доходить до планировщика: генератор строит смены по
+        # `incident_uplift_fte`, и без профиля он видел голый прогноз, а витрина —
+        # прогноз с приростом. Линия делает ровно это же: `build_resource_schedule_preview`
+        # кладёт профиль в forecast_payload перед генерацией. Профиль — от последнего
+        # дня с данными, а не от периода графика: наплыв не свойство выбранного отрезка.
+        uplift = build_chat_uplift_profile(db)
         # Планировщик графиков шлёт период (date_from/date_to), витрина — неделю.
         forecast = build_chat_forecast(
             db,
             payload.get('date_from') or payload.get('week_start'),
             period_end_value=payload.get('date_to'),
+            uplift_profile=uplift,
         )
         templates = _normalize_shift_templates(payload.get('templates'))
         operator_capacity = payload.get('operator_capacity') or None

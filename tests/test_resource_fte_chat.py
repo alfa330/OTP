@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import date
 
 from resource_fte.chat import (
+    CHAT_ONLINE_STATUS_KEY,
     CHAT_RATES,
     CHAT_SHIFT_TEMPLATE_LABELS,
     CHAT_SETTINGS_LIMITS,
@@ -14,14 +15,21 @@ from resource_fte.chat import (
     MAX_BASE_LOOKBACK_WEEKS,
     _base_week_starts,
     _covered_base_week_starts,
+    _online_hours_tx,
+    _reply_stats_tx,
     _week_start,
     build_chat_forecast,
     get_chat_shift_templates,
+    resolve_chat_capacity,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_JSX = os.path.join(REPO_ROOT, "src", "App.jsx")
 CHAT_VIEW = os.path.join(REPO_ROOT, "src", "components", "resources", "ResourceChatFteView.jsx")
+CHAT_SHARED = os.path.join(REPO_ROOT, "src", "components", "resources", "resourceChatShared.jsx")
+LINE_VIEW = os.path.join(REPO_ROOT, "src", "components", "resources", "ResourceFteView.jsx")
+CHAT_MODEL = os.path.join(REPO_ROOT, "resource_fte", "chat.py")
+BACKEND = os.path.join(REPO_ROOT, "bot_schedule2.py")
 
 
 def _read(path):
@@ -53,6 +61,26 @@ class FakeCursor:
 
     def fetchall(self):
         return list(self._result)
+
+
+class RecordingCursor:
+    """Курсор, который ничего не отдаёт, но помнит, чем его позвали.
+
+    Так проверяется САМ запрос — откуда берётся факт и по какой цели считается
+    попадание, — не поднимая базу.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((" ".join(str(sql).split()), tuple(params or ())))
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
 
 
 class FakeDb:
@@ -186,10 +214,17 @@ class ChatForecastModelTests(unittest.TestCase):
                 self.assertAlmostEqual(hours, 6.5, places=1, msg=item["label"])
 
     def test_settings_limits_cover_every_default(self):
-        for key in DEFAULT_CHAT_SETTINGS:
+        """Границы нужны каждой ЧИСЛОВОЙ вводной.
+
+        У отметки времени замера и у режима округления диапазона нет по природе, а
+        коэффициенты кривой первого ответа до замера пусты — сравнивать None с числом
+        нечего. Проверяем то, что действительно можно выйти за край опечаткой.
+        """
+        for key, value in DEFAULT_CHAT_SETTINGS.items():
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
             self.assertIn(key, CHAT_SETTINGS_LIMITS, f"нет границ для вводной {key}")
             low, high = CHAT_SETTINGS_LIMITS[key]
-            value = DEFAULT_CHAT_SETTINGS[key]
             self.assertGreaterEqual(value, low)
             self.assertLessEqual(value, high)
 
@@ -286,7 +321,8 @@ class ChatSectionFrontendTests(unittest.TestCase):
         for forbidden in ("oktell", "Звонки", "Биллинг"):
             self.assertNotIn(forbidden.lower(), tabs_block.lower(),
                              f"вкладки «{forbidden}» в чате быть не должно")
-        self.assertEqual(tabs_block.count("key:"), 4, "у чата ровно четыре вкладки")
+        self.assertEqual(tabs_block.count("key:"), 5,
+                         "у чата пять вкладок: Обзор, Прогнозы, Чаты, Графики, Настройки")
 
     def test_saved_schedule_is_scoped_by_direction(self):
         """Планы линии и чата лежат в одной таблице — без фильтра они смешаются."""
@@ -361,6 +397,280 @@ class ChatSettingsTableTests(unittest.TestCase):
         chunk = chunk[:chunk.index("CREATE TABLE IF NOT EXISTS resource_chat_settings")]
         self.assertNotIn("capacity_per_hour", chunk)
         self.assertNotIn("target_reply_seconds", chunk)
+
+
+class ChatCapacityDerivationTests(unittest.TestCase):
+    """Ёмкость больше не вводится руками — она ВЫВОДИТСЯ из цели по сервису.
+
+    Раньше «17 чатов в час» было числом из головы: поправить цель ответа было
+    некому и незачем, расчёт её не замечал. Теперь цель — единственный рычаг,
+    поэтому её связь с ёмкостью надо сторожить.
+    """
+
+    def test_default_goal_reproduces_the_calibrated_capacity(self):
+        """Цель 5 минут по замеренной кривой даёт ~17,3 — то же, что считали руками."""
+        value = resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS))["value"]
+        self.assertGreaterEqual(value, 17.2)
+        self.assertLessEqual(value, 17.4)
+        self.assertEqual(
+            resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS, target_reply_seconds=300))["value"],
+            value,
+        )
+
+    def test_capacity_ignores_the_stored_number(self):
+        """`capacity_per_hour` в настройках — кэш последнего вывода, а не вводная.
+
+        Если подсунуть туда другое число и ёмкость поедет — значит рычагом снова
+        стало ручное поле, и цель ответа опять декоративная.
+        """
+        derived = resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS))["value"]
+        spoofed = resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS, capacity_per_hour=3.0))
+        self.assertEqual(spoofed["value"], derived)
+        self.assertEqual(spoofed["source"], "inside_chat")
+
+    def test_capacity_grows_with_a_softer_goal(self):
+        """Больше времени на ответ — больше чатов на человека. Иначе знак перепутан."""
+        values = [
+            resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS, target_reply_seconds=seconds))["value"]
+            for seconds in (120, 180, 240, 300, 360)
+        ]
+        for softer, tighter in zip(values[1:], values):
+            self.assertGreater(softer, tighter, f"ёмкость не монотонна по цели: {values}")
+
+    def test_manual_capacity_overrides_the_derived_one(self):
+        """Ручное переопределение остаётся — но оно должно быть ВИДНЫМ (`source`)."""
+        manual = resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS, capacity_manual=9.0))
+        self.assertAlmostEqual(manual["value"], 9.0, places=4)
+        self.assertEqual(manual["source"], "manual")
+        self.assertGreater(manual["inside_chat"], 17.0, "вывод из цели обязан остаться в ответе")
+        back = resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS, capacity_manual=None))
+        self.assertEqual(back["source"], "inside_chat")
+
+    def test_measured_first_reply_curve_binds_by_the_tighter_goal(self):
+        """Из двух целей связывает жёсткая, и в `source` написано какая.
+
+        Без этого нельзя объяснить в интерфейсе, откуда взялось число, — а
+        необъяснимое число владелец правит вслепую.
+        """
+        tight = resolve_chat_capacity(
+            dict(DEFAULT_CHAT_SETTINGS, first_reply_curve_a=1.0, first_reply_curve_b=0.2))
+        self.assertEqual(tight["source"], "first_reply")
+        self.assertAlmostEqual(tight["value"], min(tight["inside_chat"], tight["first_reply"]),
+                               places=4)
+        loose = resolve_chat_capacity(
+            dict(DEFAULT_CHAT_SETTINGS, first_reply_curve_a=1.0, first_reply_curve_b=0.02))
+        self.assertEqual(loose["source"], "inside_chat")
+        self.assertAlmostEqual(loose["value"], loose["inside_chat"], places=4)
+
+    def test_unreachable_first_reply_goal_is_reported_not_silently_clamped(self):
+        """Замер уже показывал: 60 с не берутся ни при каком штате (было ~357 с).
+
+        Если такую кривую молча зажать к нижней границе, модель начнёт требовать
+        людей под недостижимую цель. Поэтому — признак наружу, рычаг прежний.
+        """
+        resolved = resolve_chat_capacity(
+            dict(DEFAULT_CHAT_SETTINGS, first_reply_curve_a=5.9, first_reply_curve_b=0.05))
+        self.assertTrue(resolved["first_reply_target_unreachable"])
+        self.assertEqual(resolved["source"], "inside_chat")
+        self.assertAlmostEqual(resolved["value"], resolved["inside_chat"], places=4)
+        self.assertLess(resolved["first_reply"], 0,
+                        "недостижимость должна быть видна числом, а не спрятана")
+
+    def test_first_reply_curve_is_empty_until_measured(self):
+        """Коэффициенты первого ответа берутся ЗАМЕРОМ, выдумывать их нельзя."""
+        self.assertIsNone(DEFAULT_CHAT_SETTINGS["first_reply_curve_a"])
+        self.assertIsNone(DEFAULT_CHAT_SETTINGS["first_reply_curve_b"])
+        self.assertIsNone(DEFAULT_CHAT_SETTINGS["first_reply_curve_fitted_at"])
+        self.assertEqual(resolve_chat_capacity(dict(DEFAULT_CHAT_SETTINGS))["first_reply"], None)
+
+
+class ChatFactSourceTests(unittest.TestCase):
+    """Откуда берутся ФАКТ и «в цель» — на этом раздел легко сделать декоративным."""
+
+    def test_worked_hours_come_from_online_segments_not_from_the_shift_plan(self):
+        """График говорит, кого поставили; онлайн-сегменты — кто был в строю.
+
+        На графике смен разница между прогнозом и фактом обнуляется по построению,
+        и вкладка «Прогнозы» начинает показывать идеальное покрытие.
+        """
+        cursor = RecordingCursor()
+        _online_hours_tx(cursor, date(2026, 8, 1), date(2026, 8, 14))
+        sql, params = cursor.calls[0]
+        self.assertIn("operator_status_segments", sql)
+        self.assertIn("s.status_key = %s", sql)
+        self.assertEqual(CHAT_ONLINE_STATUS_KEY, "online")
+        self.assertIn("online", params)
+        for planned in ("work_schedules", "shift", "schedule_plan"):
+            self.assertNotIn(planned, sql.lower(),
+                             f"факт чатнико-часов не должен приходить из {planned}")
+
+    def test_in_target_is_measured_against_the_first_reply_goal(self):
+        """«В цель» в чате — про ПЕРВЫЙ ответ: только он лежит в нашей базе.
+
+        Цель «ответа внутри чата» живёт в API Chat2Desk и работает рычагом
+        ёмкости; мерить ею факт нечем.
+        """
+        cursor = RecordingCursor()
+        _reply_stats_tx(cursor, date(2026, 8, 1), date(2026, 8, 14), 60)
+        sql, params = cursor.calls[0]
+        self.assertIn("reaction_time <= %s", sql)
+        self.assertEqual(params[0], 60)
+        self.assertNotIn("request_time", sql)
+
+    def test_every_reply_call_passes_the_first_reply_goal(self):
+        """Подставить сюда цель «ответа внутри чата» — и доля в цель станет липовой."""
+        import ast
+        tree = ast.parse(_read(CHAT_MODEL))
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "_reply_stats_tx"]
+        self.assertGreaterEqual(len(calls), 4, "вызовы статистики ответов пропали")
+        for call in calls:
+            dumped = ast.dump(call.args[-1])
+            self.assertIn("target_first", dumped)
+            self.assertNotIn("target_reply_seconds", dumped)
+
+    def test_reaction_time_is_the_only_measure_of_the_reply(self):
+        """Парная половина AST-стража: request_time запрещён, reaction_time обязателен."""
+        source = _read(CHAT_MODEL)
+        self.assertIn("reaction_time", source)
+
+    def test_no_discount_for_unanswered_chats(self):
+        """Обработки требуют 100 % чатов — в отличие от линии с её 5 % потерь.
+
+        Чат не «теряется»: он висит открытым, пока клиент не получит ответ. Любой
+        множитель доли принятых занизил бы потребность в людях.
+        """
+        import ast
+        tree = ast.parse(_read(CHAT_MODEL))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    node.body = body[1:] or [ast.Pass()]
+        code = ast.dump(tree).lower()
+        for forbidden in ("answer_rate", "accepted", "lost_calls", "abandon"):
+            self.assertNotIn(forbidden, code,
+                             f"скидки на непринятые в чате нет — уберите {forbidden}")
+
+
+class ChatBackendRoutesTests(unittest.TestCase):
+    def test_new_chat_routes_are_declared_with_guard_and_preflight(self):
+        """Ручка без гарда открыта всем, без preflight — не отвечает браузеру."""
+        backend = _read(BACKEND)
+        pairs = (
+            ("/api/resource_fte/chat/day/<string:report_date>", "api_resource_fte_chat_day"),
+            ("/api/resource_fte/chat/operator_availability",
+             "api_resource_fte_chat_operator_availability"),
+            ("/api/resource_fte/chat/analytics", "api_resource_fte_chat_analytics"),
+            ("/api/resource_fte/chat/recalculate", "api_resource_fte_chat_recalculate"),
+            ("/api/resource_fte/chat/fit_first_reply", "api_resource_fte_chat_fit_first_reply"),
+        )
+        for route, handler in pairs:
+            self.assertIn(f"@app.route('{route}'", backend, f"нет ручки {route}")
+            chunk = backend[backend.index(f"def {handler}"):]
+            chunk = chunk[:chunk.index("@app.route", 10)]
+            self.assertIn("_resource_fte_route_guard()", chunk,
+                          f"{handler} должен проходить общий гард доступа")
+            self.assertIn("_build_cors_preflight_response()", chunk,
+                          f"{handler} должен отвечать на preflight")
+
+    def test_chat_routes_stay_ahead_of_the_line_ones(self):
+        """Порядок объявления решает, чья ручка поймает путь.
+
+        Чатовые `saved_schedule` и `schedule_preview` обязаны стоять до линейных,
+        иначе план чата уедет в линию.
+        """
+        backend = _read(BACKEND)
+        order = [
+            "@app.route('/api/resource_fte/chat/saved_schedule'",
+            "@app.route('/api/resource_fte/chat/schedule_preview'",
+            "@app.route('/api/resource_fte/schedule_preview'",
+            "@app.route('/api/resource_fte/saved_schedule'",
+        ]
+        positions = [backend.index(item) for item in order]
+        self.assertEqual(positions, sorted(positions), f"порядок блоков нарушен: {order}")
+        # новые ручки встали до чатового saved_schedule и не разорвали пару блоков
+        for handler in ("api_resource_fte_chat_analytics", "api_resource_fte_chat_recalculate"):
+            self.assertLess(backend.index(f"def {handler}"), positions[0])
+
+    def test_chat_overview_takes_both_periods(self):
+        """Без периода истории вкладка «Обзор» показывала бы всегда одно окно."""
+        backend = _read(BACKEND)
+        chunk = backend[backend.index("def api_resource_fte_chat_overview"):]
+        chunk = chunk[:chunk.index("@app.route", 10)]
+        for arg in ("week_start", "period_end", "date_from", "date_to"):
+            self.assertIn(f"'{arg}'", chunk, f"обзор чата не принимает {arg}")
+
+
+class ChatFrontendMetricsTests(unittest.TestCase):
+    """Витрина чата не должна обрасти телефонными показателями."""
+
+    FILES = (CHAT_VIEW, CHAT_SHARED)
+
+    def test_no_telephony_metrics_anywhere_in_the_chat_frontend(self):
+        """AHT, occupancy и utilization в чате не считаются и считаться не могут.
+
+        Список вкладок это не ловит: карточку «AHT периода» можно положить в любую
+        из них, и никто не заметит — она просто нарисует пустое место.
+        """
+        forbidden_words = (r"\bAHT\b", r"\bOCC\w*", r"\bUR\b",
+                           r"occupanc\w*", r"utilizat\w*",
+                           r"мин\w*\s+нагрузки", r"нагрузк\w*,\s*мин")
+        forbidden_keys = ("Aht", "OccUr", "aht_", "_aht")
+        for path in self.FILES:
+            source = _read(path)
+            for pattern in forbidden_words:
+                self.assertIsNone(
+                    re.search(pattern, source, flags=re.IGNORECASE),
+                    f"{os.path.basename(path)}: телефонный показатель {pattern}",
+                )
+            for key in forbidden_keys:
+                self.assertNotIn(key, source,
+                                 f"{os.path.basename(path)}: мёртвый ключ линии {key}")
+
+    def test_chat_keeps_its_own_display_preferences(self):
+        """Ключ линии тянет за собой мёртвые `forecastKpiAht`/`forecastKpiOccUr`.
+
+        Переиспользовать его нельзя: у пользователя, ходившего на линию, чат
+        поднялся бы с чужим набором колонок.
+        """
+        source = _read(CHAT_VIEW)
+        self.assertIn("const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_chat_display_v1'",
+                      source)
+        self.assertNotIn("otp_resource_fte_display_v1", source)
+        self.assertIn("const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1'",
+                      _read(LINE_VIEW), "ключ линии сменился — сверьте оба раздела")
+
+    def test_chat_frontend_never_builds_a_date_through_utc(self):
+        """`toISOString` уводит дату на день назад в Asia/Almaty.
+
+        Проверено: сдвиг недели с 2026-08-24 давал 2026-08-30 вместо 2026-08-31.
+        Даты собираются из getFullYear/getMonth/getDate — через `addDaysIso`.
+        """
+        for path in self.FILES:
+            self.assertNotIn("toISOString", _read(path),
+                             f"{os.path.basename(path)}: дата уедет на сутки назад")
+        self.assertIn("addDaysIso", _read(CHAT_SHARED))
+        self.assertIn("getFullYear()", _read(CHAT_SHARED))
+
+    def test_line_view_is_untouched_by_the_chat_work(self):
+        """Визуал линии переносится КОПИЕЙ: её файл читают чужие тесты дословно.
+
+        Общий вынос сломал бы tests/test_szov_wallboard.py и
+        tests/test_resource_fte_billing_frontend.py, которые ищут в нём точные
+        строки. Поэтому: ни одной чатовой ссылки в линии.
+        """
+        line = _read(LINE_VIEW)
+        for chat_token in ("resourceChatShared", "ResourceChatFteView", "CHAT_API_PREFIX",
+                           "resource_fte/chat"):
+            self.assertNotIn(chat_token, line, f"линия потянулась за чатом: {chat_token}")
+        # контрольные строки чужих тестов — сторожим их и отсюда, чтобы поломка
+        # всплыла в наборе чата, а не в чужом
+        self.assertIn("billingSlRatio >= 0.8 ? 'emerald'", line.replace("\n", " "))
+        self.assertIn('<option value="general">Общая (текущая)</option>', line)
+        self.assertIn("const slRatio = safeRatio(item.served_sl, item.arrived);", line)
 
 
 if __name__ == "__main__":

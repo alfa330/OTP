@@ -510,15 +510,30 @@ def _period_operator_availability_tx(
     period_end,
     settings: Optional[Dict[str, Any]] = None,
     include_details: bool = True,
+    direction_ids_override: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     if period_end < period_start:
         period_start, period_end = period_end, period_start
     period_days = max(1, (period_end - period_start).days + 1)
     threshold_days = period_days / 2.0
-    selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
-    direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
+    # Чат считает доступность по своим направлениям, а настройки здесь общие
+    # с линией: явно переданный список перебивает их, чтобы разделам не пришлось
+    # делить одно поле настроек на двоих.
+    if direction_ids_override is not None:
+        selected_direction_ids = _coerce_int_list(direction_ids_override)
+        # ПУСТОЙ список — это «ни одного направления», а не «фильтра нет». Разница
+        # молчаливая и дорогая: направление переименовали, поиск по нему ничего не
+        # нашёл — и раздел показал бы доступность операторов ВСЕЙ компании как свою.
+        force_direction_filter = True
+    else:
+        selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
+        force_direction_filter = False
+    direction_filter = (
+        "AND u.direction_id = ANY(%s)"
+        if (selected_direction_ids or force_direction_filter) else ""
+    )
     params = [period_start, period_end]
-    if selected_direction_ids:
+    if direction_filter:
         params.append(selected_direction_ids)
 
     if not include_details:
@@ -1517,6 +1532,7 @@ def get_resource_operator_availability_details(
     forecast_week_start_value: Optional[str] = None,
     forecast_date_from_value: Optional[str] = None,
     forecast_date_to_value: Optional[str] = None,
+    direction_ids_override: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     with db._get_cursor() as cursor:
         settings = _get_settings_tx(cursor)
@@ -1537,6 +1553,7 @@ def get_resource_operator_availability_details(
             period_end,
             settings,
             include_details=True,
+            direction_ids_override=direction_ids_override,
         )
         return {
             "period_start": period_start.isoformat(),

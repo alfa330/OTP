@@ -4100,6 +4100,68 @@ class Database:
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
             """)
+            # Ёмкость чата больше не вводится руками: она выводится из цели по ответу
+            # внутри чата через снятую по нашим данным кривую exp(a + b × нагрузка),
+            # поэтому её коэффициенты приезжают с дефолтами калибровки. Кривая ПЕРВОГО
+            # ответа — отдельная и остаётся NULL до замера: выдуманный коэффициент молча
+            # зажал бы штат под цель, которая на реальной кривой может быть недостижима.
+            # capacity_manual — аварийный рычаг: пока он NULL, ёмкость считается из цели.
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS target_first_reply_seconds INTEGER DEFAULT 60;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS capacity_curve_a REAL DEFAULT 4.7047;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS capacity_curve_b REAL DEFAULT 0.0578;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS first_reply_curve_a REAL;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS first_reply_curve_b REAL;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS first_reply_curve_fitted_at TIMESTAMPTZ;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS capacity_manual REAL;
+            """)
+            cursor.execute("""
+                ALTER TABLE resource_chat_settings
+                ADD COLUMN IF NOT EXISTS fte_rounding TEXT DEFAULT 'half';
+            """)
+            # Прогноз чата за прошедший час рядом с фактом того же часа. Без хранения
+            # истории нельзя ни посчитать наплыв (ФАКТ/ПРОГНОЗ по часам последних дней),
+            # ни показать, выдержал ли прогноз. Факт часов — онлайн-сегменты чатников,
+            # а не график смен, поэтому величина дробная. Уникальность (дата, час)
+            # делает пересчёт идемпотентным: он переписывает строку, а не плодит дубли.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_resource_hours (
+                    id BIGSERIAL PRIMARY KEY,
+                    report_date DATE NOT NULL,
+                    hour SMALLINT NOT NULL CHECK (hour BETWEEN 0 AND 23),
+                    forecast_chats REAL NOT NULL DEFAULT 0,
+                    forecast_fte REAL NOT NULL DEFAULT 0,
+                    actual_chats INTEGER NOT NULL DEFAULT 0,
+                    actual_online_hours REAL NOT NULL DEFAULT 0,
+                    answered_in_target INTEGER NOT NULL DEFAULT 0,
+                    answered_total INTEGER NOT NULL DEFAULT 0,
+                    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (report_date, hour)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_resource_hours_date
+                ON chat_resource_hours(report_date);
+            """)
             # Планы графиков теперь общие для линии и чата, поэтому им нужен
             # дискриминатор направления. DEFAULT 'line' — все существующие планы
             # (и вся механика аукциона, что на них завязана) остаются линией.
