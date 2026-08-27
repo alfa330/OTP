@@ -127,10 +127,34 @@ class FrontOfficeHeadSidebarTests(unittest.TestCase):
         )
 
     def test_planner_sync_actions_hidden_for_front_office(self):
+        """Синхронизации в «⋮» скрыты по ВЫБРАННОМУ в шапке отделу.
+
+        Раньше признак брался из отдела зрителя (plannerDepartmentCode), и
+        супер-админ, у которого своего отдела нет, видел кнопки всех отделов
+        разом. Теперь решает plannerScopeDepartmentCode — код отдела, чей
+        график открыт, — а роль на состав кнопок больше не влияет.
+        """
         app = _read(APP_PATH)
-        self.assertIn("const plannerSyncActionsHidden = plannerDepartmentCode === 'front_office';", app)
-        self.assertIn("{!plannerSyncActionsHidden && (isTezPlanner || isAdminLikePlanner) && (", app)
-        self.assertEqual(app.count("{!plannerSyncActionsHidden && !isTezPlanner && ("), 3)
+        self.assertIn("const plannerSyncActionsHidden = plannerScopeDepartmentCode === 'front_office';", app)
+        self.assertIn("const isTezPlanner = plannerScopeDepartmentCode === 'tez';", app)
+        # Binotel — только TEZ (и «Все отделы», где показываем объединение).
+        self.assertIn(
+            "const plannerShowBinotelSync = !plannerSyncActionsHidden"
+            " && (isTezPlanner || !plannerScopeDepartmentCode);",
+            app,
+        )
+        # Oktell и Chat2Desk — все, кроме TEZ и фронт-офисов.
+        self.assertIn(
+            "const plannerShowTelephonySync = !plannerSyncActionsHidden && !isTezPlanner;",
+            app,
+        )
+        self.assertEqual(app.count("{plannerShowTelephonySync && ("), 3)
+        self.assertEqual(app.count("{plannerShowBinotelSync && ("), 1)
+        # Заголовок группы не должен висеть над пустотой.
+        self.assertIn(
+            "const plannerShowSyncGroup = plannerShowBinotelSync || plannerShowTelephonySync;",
+            app,
+        )
 
     def test_break_rules_read_is_scoped_for_department_heads(self):
         endpoint = _function_source(BOT_PATH, "get_work_schedule_break_rules")
