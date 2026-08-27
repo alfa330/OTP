@@ -36,7 +36,8 @@ import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/sched
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal, IosSegmented } from './components/ui/ios';
+import CustomSelect from './components/ui/CustomSelect';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
@@ -2639,6 +2640,60 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         }
         return Number(total.toFixed(4));
         }
+
+        /* Статусы трудоустройства в фильтре «Графиков работы».
+           `unpaid_leave` — устаревший псевдоним `bs`, `dismissal` — псевдоним
+           `fired`: без приведения один человек попал бы и в «Уволенные», и в
+           «показать всех, кроме уволенных». */
+        const PLANNER_STATUS_FILTER_OPTIONS = [
+            { value: 'working', label: 'Работает' },
+            { value: 'bs', label: 'Б/С' },
+            { value: 'sick_leave', label: 'Больничный' },
+            { value: 'annual_leave', label: 'Ежегодный отпуск' },
+            { value: 'fired', label: 'Уволенные' }
+        ];
+
+        function plannerIsFiredStatus(value) {
+            const status = String(value || '').trim().toLowerCase();
+            return status === 'fired' || status === 'dismissal';
+        }
+
+        /* Подпись выбранного в кнопке фильтра: одного показываем по имени —
+           так видно, кто именно отобран, без раскрытия списка. */
+        function plannerSelectionSummary(values, options) {
+            const list = Array.isArray(values) ? values : [];
+            if (list.length === 1) {
+                const found = (options || []).find(opt => String(opt.value) === String(list[0]));
+                if (found) return found.label;
+            }
+            return `Выбрано: ${list.length}`;
+        }
+
+        function plannerOperatorMatchesStatusFilter(op, selected) {
+            const status = String(op?.status || '').trim().toLowerCase();
+            return (selected || []).some(sel => {
+                if (sel === 'bs') return status === 'bs' || status === 'unpaid_leave';
+                if (sel === 'fired') return plannerIsFiredStatus(status);
+                return sel === status;
+            });
+        }
+
+        /* Панель раздела и меню «⋮»: белые кнопки в стиле macOS. Цвет остаётся
+           только за смыслом (опасное действие, счётчик), назначение кнопки
+           цветом не кодируется — семь разных заливок в одном меню читались как
+           набор предупреждений, а не как список действий. */
+        const PLANNER_TOOLBAR_BTN = 'inline-flex items-center gap-2 rounded-xl bg-white px-3 py-2 text-[12.5px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70 transition-all hover:bg-slate-50 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed';
+        const PLANNER_MENU_ITEM = 'flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13px] font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent';
+        const PLANNER_MENU_GROUP = 'px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400';
+        const PLANNER_VIEW_MODE_OPTIONS = [
+            { value: 'day', label: 'День' },
+            { value: 'week', label: 'Неделя' },
+            { value: 'month', label: 'Месяц' }
+        ];
+        const PLANNER_DAY_SORT_OPTIONS = [
+            { value: 'default', label: 'По направлению и ФИО' },
+            { value: 'shift_start_asc', label: 'По началу смены' }
+        ];
 
         const PLANNER_SHIFT_TYPE_REGULAR = 'regular';
         const PLANNER_SHIFT_TYPE_OFFICE_PRACTICE = 'office_practice';
@@ -13881,14 +13936,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             }
 
-        function ShiftPlannerViewWithCalendar({ initialOperators, user }) {
-            // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
-            const plannerDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
-            const isTezPlanner = plannerDepartmentCode === 'tez';
-            const isAdminLikePlanner = isAdminLikeRoleFn(user?.role);
-            // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
-            // скрыты все кнопки синхронизаций и статусов Chat2Desk.
-            const plannerSyncActionsHidden = plannerDepartmentCode === 'front_office';
+        function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [] }) {
+            // Отдел ЗРИТЕЛЯ. Набор действий раздела зависит не от него, а от
+            // отдела, который выбран в шапке (plannerScopeDepartmentCode ниже):
+            // у глобального админа своего отдела может не быть вовсе, а список
+            // операторов приходит один на все отделы.
+            const plannerOwnDepartmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
             // Тренер открывает «Графики работы» строго на просмотр: любые
             // редактирующие действия скрыты, бэкенд тоже отклоняет запись.
             // Состав операторов задаёт сервер (отделы СЗоВ и ОП), поэтому seed
@@ -13981,8 +14034,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [viewMode, setViewMode] = useState('day');
             const [currentDate, setCurrentDate] = useState(() => new Date());
             const [selectedSupervisors, setSelectedSupervisors] = useState([]);
+            // Пустой список статусов = «все, кроме уволенных»: уволенные
+            // показываются только по явному выбору пункта «Уволенные».
             const [selectedStatuses, setSelectedStatuses] = useState([]);
             const [selectedDirections, setSelectedDirections] = useState([]);
+            // Точечный отбор людей поверх остальных фильтров: пусто = все.
+            const [selectedOperatorIds, setSelectedOperatorIds] = useState([]);
+            // Выбранный отдел: '' — «Все отделы». Значение по умолчанию ставит
+            // эффект ниже (свой отдел), когда список отделов уже известен.
+            const [plannerDepartmentId, setPlannerDepartmentId] = useState('');
+            const plannerDepartmentTouchedRef = useRef(false);
             const [daySortMode, setDaySortMode] = useState('default');
             const [breakDirectionGroups, setBreakDirectionGroups] = useState([]);
             const [breakGroupDraftDirections, setBreakGroupDraftDirections] = useState([]);
@@ -14190,12 +14251,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [swapJournalError, setSwapJournalError] = useState('');
             const [swapJournalItems, setSwapJournalItems] = useState([]);
             const [swapJournalSearch, setSwapJournalSearch] = useState('');
-            const [sidebarFilterMenus, setSidebarFilterMenus] = useState({
-                supervisors: false,
-                statuses: false,
-                directions: false,
-                breakGroups: false
-            });
+            // Фильтры переехали в выпадающие списки и своей развёртки больше не
+            // требуют; раскрывается только настройка групп направлений.
+            const [showBreakGroupsPanel, setShowBreakGroupsPanel] = useState(false);
             const [myScheduleData, setMyScheduleData] = useState(null);
             const [myLiveScheduleData, setMyLiveScheduleData] = useState(null);
             const [myScheduleLoading, setMyScheduleLoading] = useState(false);
@@ -15017,6 +15075,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (Array.isArray(parsed?.selectedDirections)) {
                         setSelectedDirections(parsed.selectedDirections.filter(v => typeof v === 'string'));
                     }
+                    /* Наличие ключа = отдел уже выбирали руками, в том числе
+                       выбором «Все отделы» (пустая строка). Поэтому проверяем
+                       тип, а не «непустое»: иначе дефолт «свой отдел» каждый
+                       раз перебивал бы осознанный выбор «все». */
+                    if (typeof parsed?.plannerDepartmentId === 'string') {
+                        plannerDepartmentTouchedRef.current = true;
+                        setPlannerDepartmentId(parsed.plannerDepartmentId);
+                    }
                     if (Array.isArray(parsed?.breakDirectionGroups)) {
                         setBreakDirectionGroups(sanitizeBreakDirectionGroups(parsed.breakDirectionGroups));
                     }
@@ -15049,6 +15115,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             selectedSupervisors,
                             selectedStatuses,
                             selectedDirections,
+                            // Отбор людей поиском намеренно НЕ храним: это
+                            // разовая сверка, а не постоянный фильтр — иначе
+                            // человек вернулся бы в раздел с двумя строками
+                            // и без видимой причины.
+                            plannerDepartmentId,
                             breakDirectionGroups,
                             breakReminderEnabled,
                             breakReminderLeadMinutes,
@@ -15065,6 +15136,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 selectedSupervisors,
                 selectedStatuses,
                 selectedDirections,
+                plannerDepartmentId,
                 breakDirectionGroups,
                 breakReminderEnabled,
                 breakReminderLeadMinutes,
@@ -15171,12 +15243,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user]);
 
             // Получаем уникальных супервайзеров (скрываем тех, у кого все операторы со статусом "fired")
+            /* Операторы выбранного отдела. Всё, что предлагается в фильтрах
+               (супервайзеры, направления, поиск по людям), считается по этому
+               списку, а не по всем операторам: иначе админ, открыв СЗоВ,
+               выбирал бы направления TEZ и получал пустую сетку. */
+            const plannerDepartmentOperators = useMemo(() => {
+                if (!plannerDepartmentId) return operators;
+                return operators.filter(op => String(op?.department_id ?? '') === plannerDepartmentId);
+            }, [operators, plannerDepartmentId]);
             const uniqueSupervisors = useMemo(() => {
                 const supervisorsMap = new Map();
                 const supervisorsOperators = new Map();
 
                 // Собираем всех операторов по супервайзерам
-                operators.forEach(op => {
+                plannerDepartmentOperators.forEach(op => {
                     if (op.supervisor_id && op.supervisor_name) {
                         if (!supervisorsOperators.has(op.supervisor_id)) {
                             supervisorsOperators.set(op.supervisor_id, []);
@@ -15193,22 +15273,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Фильтруем: оставляем только тех супервайзеров, у которых есть хотя бы один оператор не со статусом "fired"
                 const filtered = Array.from(supervisorsMap.values()).filter(sv => {
                     const svOps = supervisorsOperators.get(sv.id) || [];
-                    return svOps.some(op => op.status !== 'fired');
+                    return svOps.some(op => !plannerIsFiredStatus(op?.status));
                 });
 
                 return filtered.sort((a, b) => a.name.localeCompare(b.name));
-            }, [operators]);
+            }, [plannerDepartmentOperators]);
 
             // Получаем уникальные направления
             const uniqueDirections = useMemo(() => {
                 const directionsMap = new Map();
-                operators.forEach(op => {
+                plannerDepartmentOperators.forEach(op => {
                     if (op.direction) {
                         directionsMap.set(op.direction, op.direction);
                     }
                 });
                 return Array.from(directionsMap.values()).sort((a, b) => a.localeCompare(b));
-            }, [operators]);
+            }, [plannerDepartmentOperators]);
+
+            const plannerSupervisorOptions = useMemo(
+                () => uniqueSupervisors.map(sv => ({ value: String(sv.id), label: sv.name })),
+                [uniqueSupervisors]
+            );
+            const plannerDirectionOptions = useMemo(
+                () => uniqueDirections.map(dir => ({ value: dir, label: dir })),
+                [uniqueDirections]
+            );
+
+            /* Варианты для поиска по людям. Уволенных в списке нет, пока их не
+               включили фильтром статусов: иначе в подсказке поиска первым делом
+               попадались бы те, кого в графике всё равно не покажут. */
+            const plannerOperatorSearchOptions = useMemo(() => {
+                const showFired = selectedStatuses.includes('fired');
+                return plannerDepartmentOperators
+                    .filter(op => showFired || !plannerIsFiredStatus(op?.status))
+                    .map(op => ({
+                        value: String(op?.id ?? ''),
+                        label: String(op?.name || '').trim() || `#${op?.id}`,
+                        groupLabel: String(op?.direction || '').trim() || 'Без направления'
+                    }))
+                    .filter(opt => opt.value)
+                    .sort((a, b) => (
+                        a.groupLabel.localeCompare(b.groupLabel, 'ru') || a.label.localeCompare(b.label, 'ru')
+                    ));
+            }, [plannerDepartmentOperators, selectedStatuses]);
             const normalizePlannerBreakRuleRanges = (rules) => {
                 if (!Array.isArray(rules)) return [];
                 const normalized = rules
@@ -15479,18 +15586,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const removeBreakDirectionGroupAt = (groupIndex) => {
                 setBreakDirectionGroups(prev => sanitizeBreakDirectionGroups((prev || []).filter((_, idx) => idx !== groupIndex)));
             };
-            const toggleSidebarFilterMenu = (sectionKey) => {
-                setSidebarFilterMenus(prev => {
-                    const nextValue = !prev?.[sectionKey];
-                    return {
-                        supervisors: false,
-                        statuses: false,
-                        directions: false,
-                        breakGroups: false,
-                        [sectionKey]: nextValue
-                    };
-                });
-            };
             const getEarliestShiftStartMinuteForDate = (op, dateStr) => {
                 if (!op || !dateStr) return null;
                 const shifts = Array.isArray(op?.shifts?.[dateStr]) ? op.shifts[dateStr] : [];
@@ -15506,29 +15601,129 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return earliestMinute;
             };
 
-            // Фильтруем операторов по выбранным супервайзерам, статусам и направлениям
+            /* ─── Отдел, в котором работает раздел ───────────────────────────
+               Сервер отдаёт админу операторов ВСЕХ отделов сразу, поэтому
+               выбор отдела живёт на клиенте. Список вариантов строим не по
+               справочнику, а по фактически пришедшим операторам: иначе у
+               главы отдела в шапке висел бы выбор из одного пункта, а у
+               админа — отделы без единой смены. */
+            const plannerDepartmentOptions = useMemo(() => {
+                const present = new Set(
+                    (operators || [])
+                        .map(op => String(op?.department_id ?? ''))
+                        .filter(Boolean)
+                );
+                return (departments || [])
+                    .filter(dep => present.has(String(dep?.id ?? '')))
+                    .map(dep => ({ value: String(dep.id), label: String(dep.name || '').trim() || `Отдел ${dep.id}`, code: normalizeDepartmentCode(dep.code) }))
+                    .sort((a, b) => a.label.localeCompare(b.label, 'ru'));
+            }, [departments, operators]);
+            const plannerCanSwitchDepartment = plannerDepartmentOptions.length > 1;
+            const plannerOwnDepartmentId = useMemo(() => {
+                const headed = user?.headed_department_id ?? user?.headedDepartmentId;
+                if (headed !== null && headed !== undefined && headed !== '') return String(headed);
+                const own = user?.department_id ?? user?.departmentId;
+                return (own !== null && own !== undefined && own !== '') ? String(own) : '';
+            }, [user?.headed_department_id, user?.headedDepartmentId, user?.department_id, user?.departmentId]);
+            // Дефолт — свой отдел; ставится один раз, как только отделы приехали,
+            // и уступает и восстановленному из localStorage выбору, и ручному.
+            useEffect(() => {
+                if (plannerDepartmentTouchedRef.current) return;
+                if (plannerDepartmentOptions.length === 0) return;
+                plannerDepartmentTouchedRef.current = true;
+                if (plannerDepartmentOptions.some(opt => opt.value === plannerOwnDepartmentId)) {
+                    setPlannerDepartmentId(plannerOwnDepartmentId);
+                }
+            }, [plannerDepartmentOptions, plannerOwnDepartmentId]);
+            /* Код отдела, по которому раздел решает, какие действия показывать.
+               Для админа это ВЫБРАННЫЙ отдел, а не его собственный: в «⋮» должны
+               быть кнопки того отдела, чей график открыт. «Все отделы» — код
+               пустой, то есть показываем объединение всех действий. */
+            const plannerScopeDepartmentCode = useMemo(() => {
+                if (plannerDepartmentId) {
+                    const picked = plannerDepartmentOptions.find(opt => opt.value === plannerDepartmentId);
+                    if (picked) return picked.code;
+                }
+                // Отдел в выдаче ровно один — раздел и так работает по нему,
+                // даже если сам зритель ни к какому отделу не приписан.
+                if (plannerDepartmentOptions.length === 1) return plannerDepartmentOptions[0].code;
+                if (plannerCanSwitchDepartment) return '';
+                return plannerOwnDepartmentCode;
+            }, [plannerDepartmentId, plannerDepartmentOptions, plannerCanSwitchDepartment, plannerOwnDepartmentCode]);
+            const plannerDepartmentSelectOptions = useMemo(
+                () => [{ value: '', label: 'Все отделы' }, ...plannerDepartmentOptions],
+                [plannerDepartmentOptions]
+            );
+            // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
+            const isTezPlanner = plannerScopeDepartmentCode === 'tez';
+            // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
+            // скрыты все кнопки синхронизаций и статусов Chat2Desk.
+            const plannerSyncActionsHidden = plannerScopeDepartmentCode === 'front_office';
+            /* Какие синхронизации показывать. Решает ОТДЕЛ, а не роль: у
+               супер-админа своей телефонии нет, и раньше он видел разом кнопки
+               всех отделов — Binotel в СЗоВ и Oktell в TEZ. Пустой код — это
+               «Все отделы», там честно показываем объединение. */
+            const plannerShowBinotelSync = !plannerSyncActionsHidden && (isTezPlanner || !plannerScopeDepartmentCode);
+            const plannerShowTelephonySync = !plannerSyncActionsHidden && !isTezPlanner;
+            const plannerShowSyncGroup = plannerShowBinotelSync || plannerShowTelephonySync;
+
+            /* Счётчик активных фильтров. Отдел сюда не входит: это не фильтр, а
+               область работы раздела, и «Сбросить» её не трогает. */
+            const plannerActiveFiltersCount = (
+                (selectedOperatorIds.length > 0 ? 1 : 0)
+                + (selectedSupervisors.length > 0 ? 1 : 0)
+                + (selectedDirections.length > 0 ? 1 : 0)
+                + (selectedStatuses.length > 0 ? 1 : 0)
+            );
+            const resetPlannerFilters = useCallback(() => {
+                setSelectedOperatorIds([]);
+                setSelectedSupervisors([]);
+                setSelectedDirections([]);
+                setSelectedStatuses([]);
+            }, []);
+            /* Смена отдела обнуляет остальные фильтры: супервайзеры,
+               направления и люди у отделов свои, и после переключения сетка
+               оказалась бы пустой без единой подсказки почему. */
+            const changePlannerDepartment = useCallback((nextValue) => {
+                plannerDepartmentTouchedRef.current = true;
+                setPlannerDepartmentId(String(nextValue ?? ''));
+                setSelectedOperatorIds([]);
+                setSelectedSupervisors([]);
+                setSelectedDirections([]);
+            }, []);
+
+            // Фильтруем операторов по отделу, супервайзерам, статусам и направлениям
             const filteredOperators = useMemo(() => {
                 let filtered = [...operators];
+
+                // Фильтр по отделу
+                if (plannerDepartmentId) {
+                    filtered = filtered.filter(op => String(op?.department_id ?? '') === plannerDepartmentId);
+                }
 
                 // Фильтр по супервайзерам
                 if (selectedSupervisors.length > 0) {
                     filtered = filtered.filter(op => selectedSupervisors.includes(op.supervisor_id));
                 }
 
-                // Фильтр по статусам
+                /* Фильтр по статусам. Уволенных в графике по умолчанию нет:
+                   пустой выбор означает «все, кроме уволенных», и они
+                   появляются только когда пункт «Уволенные» отмечен явно. */
                 if (selectedStatuses.length > 0) {
-                    filtered = filtered.filter(op => {
-                        const status = String(op?.status || '');
-                        return selectedStatuses.some(sel => {
-                            if (sel === 'bs') return status === 'bs' || status === 'unpaid_leave';
-                            return sel === status;
-                        });
-                    });
+                    filtered = filtered.filter(op => plannerOperatorMatchesStatusFilter(op, selectedStatuses));
+                } else {
+                    filtered = filtered.filter(op => !plannerIsFiredStatus(op?.status));
                 }
 
                 // Фильтр по направлениям
                 if (selectedDirections.length > 0) {
                     filtered = filtered.filter(op => selectedDirections.includes(op.direction));
+                }
+
+                // Точечный отбор людей поиском
+                if (selectedOperatorIds.length > 0) {
+                    const idSet = new Set(selectedOperatorIds.map(id => String(id)));
+                    filtered = filtered.filter(op => idSet.has(String(op?.id ?? '')));
                 }
 
                 const shouldSortByDayShiftStart = viewMode === 'day' && daySortMode === 'shift_start_asc';
@@ -15561,7 +15756,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
 
                 return filtered;
-            }, [operators, selectedSupervisors, selectedStatuses, selectedDirections, viewMode, daySortMode, currentDate]);
+            }, [operators, plannerDepartmentId, selectedSupervisors, selectedStatuses, selectedDirections, selectedOperatorIds, viewMode, daySortMode, currentDate]);
 
             const dayRange = useMemo(() => [todayDateStr(new Date(currentDate))], [currentDate]);
             const weekRange = useMemo(() => {
@@ -25455,233 +25650,113 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className="flex flex-col gap-3">
                     <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
                         <div className="w-[260px] flex-shrink-0 space-y-3">
-                        <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0">
-                                    <div className="text-sm font-medium">Фильтр по супервайзерам</div>
-                                    <div className="text-[11px] text-slate-500">Выбрано: {selectedSupervisors.length}</div>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={() => toggleSidebarFilterMenu('supervisors')}
-                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.supervisors ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
-                                    title="Показать выбор"
-                                    aria-expanded={sidebarFilterMenus.supervisors ? 'true' : 'false'}
-                                >
-                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                </button>
-                            </div>
-                            {sidebarFilterMenus.supervisors && (
-                            <div className="mt-2 max-h-64 overflow-y-auto border rounded p-2">
-                                {uniqueSupervisors.length === 0 ? (
-                                    <div className="text-xs text-slate-400">Нет супервайзеров</div>
-                                ) : (
-                                    uniqueSupervisors.map(sv => (
-                                        <label key={sv.id} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedSupervisors.includes(sv.id)}
-                                                onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                        setSelectedSupervisors(prev => [...prev, sv.id]);
-                                                    } else {
-                                                        setSelectedSupervisors(prev => prev.filter(id => id !== sv.id));
-                                                    }
-                                                }}
-                                                className="rounded"
-                                            />
-                                            <span className="text-xs">{sv.name}</span>
-                                        </label>
-                                    ))
+                        <div className={`${iosCard} w-full p-3`}>
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                                <span className={iosGroupLabel}>Фильтры</span>
+                                {plannerActiveFiltersCount > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={resetPlannerFilters}
+                                        className="text-[11.5px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                    >
+                                        Сбросить{plannerActiveFiltersCount > 1 ? ` · ${plannerActiveFiltersCount}` : ''}
+                                    </button>
                                 )}
                             </div>
-                            )}
-                            {sidebarFilterMenus.supervisors && selectedSupervisors.length > 0 && (
-                                <button
-                                    onClick={() => setSelectedSupervisors([])}
-                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
-                                >
-                                    Сбросить фильтр
-                                </button>
-                            )}
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0">
-                                    <div className="text-sm font-medium">Фильтр по статусу</div>
-                                    <div className="text-[11px] text-slate-500">Выбрано: {selectedStatuses.length}</div>
+                            <div className="space-y-2.5">
+                                {/* Поиск по людям поверх остальных фильтров: набрал фамилию —
+                                    в сетке остались только отмеченные. Список закрывать после
+                                    каждого щелчка не нужно, обычно сверяют нескольких. */}
+                                <div>
+                                    <span className={IOS_FIELD_LABEL}>Сотрудники</span>
+                                    <CustomSelect
+                                        multiple
+                                        searchable
+                                        variant="ios"
+                                        className="w-full"
+                                        value={selectedOperatorIds}
+                                        onChange={setSelectedOperatorIds}
+                                        options={plannerOperatorSearchOptions}
+                                        placeholder="Все сотрудники"
+                                        searchPlaceholder="Фамилия или имя…"
+                                        ariaLabel="Поиск по сотрудникам"
+                                        renderValue={(vals) => plannerSelectionSummary(vals, plannerOperatorSearchOptions)}
+                                    />
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() => toggleSidebarFilterMenu('statuses')}
-                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.statuses ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
-                                    title="Показать выбор"
-                                    aria-expanded={sidebarFilterMenus.statuses ? 'true' : 'false'}
-                                >
-                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                </button>
-                            </div>
-                            {sidebarFilterMenus.statuses && (
-                            <div className="mt-2 max-h-64 overflow-y-auto border rounded p-2">
-                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedStatuses.includes('working')}
-                                        onChange={(e) => {
-                                            if (e.target.checked) {
-                                                setSelectedStatuses(prev => [...prev, 'working']);
-                                            } else {
-                                                setSelectedStatuses(prev => prev.filter(s => s !== 'working'));
-                                            }
-                                        }}
-                                        className="rounded"
+                                <div>
+                                    <span className={IOS_FIELD_LABEL}>Супервайзеры</span>
+                                    <CustomSelect
+                                        multiple
+                                        searchable
+                                        variant="ios"
+                                        className="w-full"
+                                        value={selectedSupervisors.map(String)}
+                                        onChange={(vals) => setSelectedSupervisors(
+                                            (vals || []).map(Number).filter(Number.isFinite)
+                                        )}
+                                        options={plannerSupervisorOptions}
+                                        placeholder="Все супервайзеры"
+                                        searchPlaceholder="Имя супервайзера…"
+                                        ariaLabel="Фильтр по супервайзерам"
+                                        renderValue={(vals) => plannerSelectionSummary(vals, plannerSupervisorOptions)}
                                     />
-                                    <span className="text-xs">Активный</span>
-                                </label>
-                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedStatuses.includes('bs')}
-                                        onChange={(e) => {
-                                            if (e.target.checked) {
-                                                setSelectedStatuses(prev => [...prev, 'bs']);
-                                            } else {
-                                                setSelectedStatuses(prev => prev.filter(s => s !== 'bs'));
-                                            }
-                                        }}
-                                        className="rounded"
-                                    />
-                                    <span className="text-xs">Б/С</span>
-                                </label>
-                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedStatuses.includes('sick_leave')}
-                                        onChange={(e) => {
-                                            if (e.target.checked) {
-                                                setSelectedStatuses(prev => [...prev, 'sick_leave']);
-                                            } else {
-                                                setSelectedStatuses(prev => prev.filter(s => s !== 'sick_leave'));
-                                            }
-                                        }}
-                                        className="rounded"
-                                    />
-                                    <span className="text-xs">Больничный</span>
-                                </label>
-                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedStatuses.includes('annual_leave')}
-                                        onChange={(e) => {
-                                            if (e.target.checked) {
-                                                setSelectedStatuses(prev => [...prev, 'annual_leave']);
-                                            } else {
-                                                setSelectedStatuses(prev => prev.filter(s => s !== 'annual_leave'));
-                                            }
-                                        }}
-                                        className="rounded"
-                                    />
-                                    <span className="text-xs">Ежегодный отпуск</span>
-                                </label>
-                                <label className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedStatuses.includes('fired')}
-                                        onChange={(e) => {
-                                            if (e.target.checked) {
-                                                setSelectedStatuses(prev => [...prev, 'fired']);
-                                            } else {
-                                                setSelectedStatuses(prev => prev.filter(s => s !== 'fired'));
-                                            }
-                                        }}
-                                        className="rounded"
-                                    />
-                                    <span className="text-xs">Уволенные</span>
-                                </label>
-                            </div>
-                            )}
-                            {sidebarFilterMenus.statuses && selectedStatuses.length > 0 && (
-                                <button
-                                    onClick={() => setSelectedStatuses([])}
-                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
-                                >
-                                    Сбросить фильтр
-                                </button>
-                            )}
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0">
-                                    <div className="text-sm font-medium">Фильтр по направлениям</div>
-                                    <div className="text-[11px] text-slate-500">Выбрано: {selectedDirections.length}</div>
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() => toggleSidebarFilterMenu('directions')}
-                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.directions ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
-                                    title="Показать выбор"
-                                    aria-expanded={sidebarFilterMenus.directions ? 'true' : 'false'}
-                                >
-                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                </button>
-                            </div>
-                            {sidebarFilterMenus.directions && (
-                            <div className="mt-2 max-h-64 overflow-y-auto border rounded p-2">
-                                {uniqueDirections.length === 0 ? (
-                                    <div className="text-xs text-slate-400">Нет направлений</div>
-                                ) : (
-                                    uniqueDirections.map(dir => (
-                                        <label key={dir} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedDirections.includes(dir)}
-                                                onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                        setSelectedDirections(prev => [...prev, dir]);
-                                                    } else {
-                                                        setSelectedDirections(prev => prev.filter(d => d !== dir));
-                                                    }
-                                                }}
-                                                className="rounded"
-                                            />
-                                            <span className="text-xs">{dir}</span>
-                                        </label>
-                                    ))
-                                )}
-                            </div>
-                            )}
-                            {sidebarFilterMenus.directions && selectedDirections.length > 0 && (
-                                <button
-                                    onClick={() => setSelectedDirections([])}
-                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
-                                >
-                                    Сбросить фильтр
-                                </button>
-                            )}
-                        </div>
-                        <div className="bg-white rounded-xl border border-slate-200 p-3 w-full">
-                            <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0">
-                                    <div className="text-sm font-medium">Группы направлений для перерывов</div>
-                                    <div className="text-[11px] text-slate-500">Групп: {breakDirectionGroups.length}</div>
+                                <div>
+                                    <span className={IOS_FIELD_LABEL}>Направления</span>
+                                    <CustomSelect
+                                        multiple
+                                        searchable
+                                        variant="ios"
+                                        className="w-full"
+                                        value={selectedDirections}
+                                        onChange={setSelectedDirections}
+                                        options={plannerDirectionOptions}
+                                        placeholder="Все направления"
+                                        searchPlaceholder="Название направления…"
+                                        ariaLabel="Фильтр по направлениям"
+                                        renderValue={(vals) => plannerSelectionSummary(vals, plannerDirectionOptions)}
+                                    />
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() => toggleSidebarFilterMenu('breakGroups')}
-                                    className={`w-8 h-8 rounded-lg border transition-all flex items-center justify-center ${sidebarFilterMenus.breakGroups ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
-                                    title="Показать выбор"
-                                    aria-expanded={sidebarFilterMenus.breakGroups ? 'true' : 'false'}
-                                >
-                                    <FaIcon className="fas fa-ellipsis-v"></FaIcon>
-                                </button>
+                                <div>
+                                    <span className={IOS_FIELD_LABEL}>Статус</span>
+                                    <CustomSelect
+                                        multiple
+                                        variant="ios"
+                                        className="w-full"
+                                        value={selectedStatuses}
+                                        onChange={setSelectedStatuses}
+                                        options={PLANNER_STATUS_FILTER_OPTIONS}
+                                        placeholder="Все, кроме уволенных"
+                                        ariaLabel="Фильтр по статусу"
+                                        renderValue={(vals) => plannerSelectionSummary(vals, PLANNER_STATUS_FILTER_OPTIONS)}
+                                    />
+                                </div>
                             </div>
-                            {sidebarFilterMenus.breakGroups && (
+                        </div>
+                        <div className={`${iosCard} w-full p-3`}>
+                            <button
+                                type="button"
+                                onClick={() => setShowBreakGroupsPanel(v => !v)}
+                                className="flex w-full items-center justify-between gap-2 text-left"
+                                aria-expanded={showBreakGroupsPanel ? 'true' : 'false'}
+                            >
+                                <span className="min-w-0">
+                                    <span className={`${iosGroupLabel} block px-0`}>Группы для перерывов</span>
+                                    <span className="mt-0.5 block text-[11.5px] text-slate-500">
+                                        {breakDirectionGroups.length === 0 ? 'Не заданы' : `Групп: ${breakDirectionGroups.length}`}
+                                    </span>
+                                </span>
+                                <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition-transform ${showBreakGroupsPanel ? 'rotate-180 bg-slate-100 text-slate-600' : ''}`}>
+                                    <FaIcon className="fas fa-chevron-down text-[11px]"></FaIcon>
+                                </span>
+                            </button>
+                            {showBreakGroupsPanel && (
                             <>
                             <div className="text-[11px] text-slate-500 mt-2 mb-2">
                                 Внутри одной группы перерывы не будут пересекаться между направлениями
                             </div>
 
-                            <div className="max-h-40 overflow-y-auto border rounded p-2">
+                            <div className="max-h-40 overflow-y-auto rounded-xl bg-slate-50 p-2 ring-1 ring-slate-200/70">
                                 {uniqueDirections.length === 0 ? (
                                     <div className="text-xs text-slate-400">Нет направлений</div>
                                 ) : (
@@ -25712,13 +25787,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                     onClick={addBreakDirectionGroupFromDraft}
                                     disabled={breakGroupDraftDirections.length < 2}
-                                    className="flex-1 px-2 py-1 text-xs bg-sky-600 hover:bg-sky-700 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex-1 rounded-xl bg-blue-600 px-3 py-2 text-[12.5px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     Создать группу
                                 </button>
                                 <button
                                     onClick={() => setBreakGroupDraftDirections([])}
-                                    className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
+                                    className="rounded-xl bg-slate-100 px-3 py-2 text-[12.5px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98]"
                                 >
                                     Сброс
                                 </button>
@@ -25726,25 +25801,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             <div className="mt-3 space-y-2">
                                 {breakDirectionGroups.length === 0 ? (
-                                    <div className="text-xs text-slate-400 border border-dashed rounded p-2">
+                                    <div className="rounded-xl border border-dashed border-slate-200 p-2 text-[11.5px] text-slate-400">
                                         Нет настроенных групп
                                     </div>
                                 ) : (
                                     breakDirectionGroups.map((group, idx) => (
-                                        <div key={`break-direction-group-${idx}`} className="border rounded p-2 bg-slate-50">
+                                        <div key={`break-direction-group-${idx}`} className="rounded-xl bg-slate-50 p-2 ring-1 ring-slate-200/70">
                                             <div className="flex items-center justify-between gap-2 mb-1">
-                                                <div className="text-xs font-medium text-slate-700">Группа {idx + 1}</div>
+                                                <div className="text-[11.5px] font-semibold text-slate-700">Группа {idx + 1}</div>
                                                 <button
                                                     onClick={() => removeBreakDirectionGroupAt(idx)}
-                                                    className="text-xs px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 text-red-700"
+                                                    className="grid h-6 w-6 place-items-center rounded-full text-rose-500 transition hover:bg-rose-50"
                                                     title="Удалить группу"
                                                 >
-                                                    <FaIcon className="fas fa-trash-alt"></FaIcon>
+                                                    <FaIcon className="fas fa-trash-alt text-[11px]"></FaIcon>
                                                 </button>
                                             </div>
                                             <div className="flex flex-wrap gap-1">
                                                 {group.map(dir => (
-                                                    <span key={`${idx}-${dir}`} className="px-2 py-0.5 text-[10px] rounded-full bg-white border text-slate-700">
+                                                    <span key={`${idx}-${dir}`} className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-600 ring-1 ring-slate-200/70">
                                                         {dir}
                                                     </span>
                                                 ))}
@@ -25757,7 +25832,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             {breakDirectionGroups.length > 0 && (
                                 <button
                                     onClick={() => setBreakDirectionGroups([])}
-                                    className="mt-2 w-full px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 rounded"
+                                    className="mt-2 w-full rounded-xl bg-slate-100 px-3 py-2 text-[12.5px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98]"
                                 >
                                     Очистить все группы
                                 </button>
@@ -25768,63 +25843,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     </div>
                     <div className="flex-1 min-w-0 flex flex-col h-full">
-                    <div className="flex items-center justify-between mb-3">
-                        <div className="flex gap-2 items-center">
-                        <h2 className="text-2xl font-semibold">Планировщик смен</h2>
-                        {plannerReadOnly && (
-                            <span className="ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-slate-600 text-xs font-medium" title="Раздел доступен только для просмотра">
-                                <FaIcon className="fas fa-eye text-slate-400"></FaIcon>
-                                Только просмотр
-                            </span>
-                        )}
-                        <div className="flex items-center gap-1 ml-4">
-                            <button onClick={() => setViewMode('day')} className={`px-3 py-1 rounded ${viewMode === 'day' ? 'bg-slate-800 text-white' : 'bg-white'}`}>День</button>
-                            <button onClick={() => setViewMode('week')} className={`px-3 py-1 rounded ${viewMode === 'week' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Неделя</button>
-                            <button onClick={() => setViewMode('month')} className={`px-3 py-1 rounded ${viewMode === 'month' ? 'bg-slate-800 text-white' : 'bg-white'}`}>Месяц</button>
-                        </div>
-                        {viewMode === 'day' && (
-                            <>
-                                <button
-                                    onClick={() => setShowDayBreaksModal(true)}
-                                    className="ml-3 px-3 py-1 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-sm font-medium flex items-center gap-2"
-                                    title="Показать перерывы операторов за выбранный день"
-                                >
-                                    <FaIcon className="fas fa-mug-hot text-amber-600"></FaIcon>
-                                    Перерывы
-                                    {dayBreaksStats.breaksCount > 0 && (
-                                        <span className="px-1.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[10px] leading-none">
-                                            {dayBreaksStats.breaksCount}
-                                        </span>
-                                    )}
-                                </button>
-                                {!plannerReadOnly && (
-                                <button
-                                    onClick={() => aggregateCurrentDayForAllOperators()}
-                                    disabled={dayAggregateLoading}
-                                    className="ml-3 px-3 py-1 rounded bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-sm font-medium flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                                    title="Ручной пересчет метрик за выбранный день для всех операторов"
-                                >
-                                    <FaIcon className={`fas ${dayAggregateLoading ? 'fa-spinner fa-spin' : 'fa-calculator'} text-emerald-600`}></FaIcon>
-                                    {dayAggregateLoading ? 'Агрегация...' : 'Агрегировать день (все)'}
-                                </button>
+                    <div className="mb-3 space-y-2">
+                        {/* Первая строка — «что за раздел и по какому отделу»,
+                            вторая — «за какой период и как показывать». */}
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+                                <h2 className="text-[22px] font-semibold tracking-[-0.01em] text-slate-900">Планировщик смен</h2>
+                                {plannerCanSwitchDepartment && (
+                                    <CustomSelect
+                                        variant="ios"
+                                        className="w-[210px]"
+                                        value={plannerDepartmentId}
+                                        onChange={changePlannerDepartment}
+                                        options={plannerDepartmentSelectOptions}
+                                        searchable={plannerDepartmentSelectOptions.length > 7}
+                                        searchPlaceholder="Название отдела…"
+                                        placeholder="Все отделы"
+                                        ariaLabel="Отдел"
+                                    />
                                 )}
-                                <div className="ml-3 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1">
-                                    <FaIcon className="fas fa-sort-amount-down text-slate-400 text-xs"></FaIcon>
-                                    <span className="text-xs text-slate-500 whitespace-nowrap">Сортировка</span>
-                                    <select
-                                        value={daySortMode}
-                                        onChange={(e) => setDaySortMode(e.target.value)}
-                                        className="text-xs border border-slate-300 rounded px-2 py-1 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        title="Сортировка операторов в режиме День"
-                                    >
-                                        <option value="default">Направление + ФИО</option>
-                                        <option value="shift_start_asc">По смене: ранняя -&gt; поздняя</option>
-                                    </select>
-                                </div>
-                            </>
-                        )}
-                        </div>
-                        <div className="flex gap-2 items-center">
+                                {plannerReadOnly && (
+                                    <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[11.5px] font-medium text-slate-500" title="Раздел доступен только для просмотра">
+                                        <FaIcon className="fas fa-eye text-slate-400"></FaIcon>
+                                        Только просмотр
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2">
                         {user?.role !== 'operator' && (
                             <>
                             <input
@@ -25853,7 +25898,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <button
                                     type="button"
                                     onClick={() => setShowPlannerTopActionsMenu(v => !v)}
-                                    className={`w-9 h-9 rounded-xl border shadow-sm transition-all flex items-center justify-center ${showPlannerTopActionsMenu ? 'bg-slate-800 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'}`}
+                                    className={`grid h-9 w-9 place-items-center rounded-full transition active:scale-95 ${showPlannerTopActionsMenu ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'}`}
                                     title="Действия"
                                     aria-haspopup="menu"
                                     aria-expanded={showPlannerTopActionsMenu ? 'true' : 'false'}
@@ -25863,223 +25908,228 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
 
                                 {!plannerReadOnly && showPlannerTopActionsMenu && (
-                                    <div className="absolute right-0 mt-2 w-[320px] rounded-2xl border border-slate-200 bg-white shadow-2xl z-[80] overflow-hidden">
-                                        <div className="px-3 py-2.5 bg-gradient-to-r from-slate-50 to-slate-100 border-b border-slate-200">
-                                            <div className="text-[11px] uppercase tracking-wide text-slate-500">Быстрые действия</div>
-                                            <div className="text-sm font-semibold text-slate-800">Планировщик</div>
-                                        </div>
+                                    <div
+                                        role="menu"
+                                        className="absolute right-0 z-[80] mt-2 w-[286px] overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl"
+                                        style={{ fontFamily: APPLE_FONT }}
+                                    >
+                                        {/* Действия сгруппированы по смыслу: обмен файлами,
+                                            подтягивание данных из телефонии, перерывы, отчёты,
+                                            спецрежим статусов. Состав групп зависит от ВЫБРАННОГО
+                                            отдела, а не от отдела зрителя. */}
+                                        <div className={PLANNER_MENU_GROUP}>Файлы</div>
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                handlePlannerExcelExport();
+                                            }}
+                                            disabled={excelTransferState.exporting || excelTransferState.importing}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Экспортировать график (видимый диапазон, формат День/Неделя/Месяц и активные фильтры) в Excel"
+                                        >
+                                            <FaIcon className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'} text-slate-400`}></FaIcon>
+                                            {excelTransferState.exporting ? 'Экспорт...' : 'Экспорт в Excel'}
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                triggerPlannerExcelImportSelect();
+                                            }}
+                                            disabled={excelTransferState.importing || excelTransferState.exporting}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Импортировать график из Excel (ФИО + даты)"
+                                        >
+                                            <FaIcon className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'} text-slate-400`}></FaIcon>
+                                            {excelTransferState.importing ? 'Импорт...' : 'Импорт из Excel'}
+                                        </button>
 
-                                        <div className="p-2 space-y-1">
+                                        {plannerShowSyncGroup && (
+                                            <div className={PLANNER_MENU_GROUP}>Синхронизация</div>
+                                        )}
+                                        {plannerShowBinotelSync && (
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                openPlannerBinotelSyncModal();
+                                            }}
+                                            disabled={plannerOktellSyncLoading || plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Скачать и импортировать статусы операторов из Binotel за выбранный период (до 10 дней)"
+                                        >
+                                            <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'} text-slate-400`}></FaIcon>
+                                            Статусы из Binotel
+                                        </button>
+                                        )}
+                                        {plannerShowTelephonySync && (
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                openPlannerOktellSyncModal();
+                                            }}
+                                            disabled={plannerOktellSyncLoading || plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Синхронизировать переключения статусов операторов напрямую из Oktell за выбранный период (до 3 дней). Чат-менеджеры не затрагиваются."
+                                        >
+                                            <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'} text-slate-400`}></FaIcon>
+                                            {plannerOktellSyncLoading ? 'Синхронизация...' : 'Статусы из Oktell'}
+                                        </button>
+                                        )}
+                                        {plannerShowTelephonySync && (
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                syncPlannerChat2DeskStatuses();
+                                            }}
+                                            disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Синхронизировать переключения рабочих статусов Chat2Desk за видимый диапазон"
+                                        >
+                                            <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'} text-slate-400`}></FaIcon>
+                                            {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Статусы из Chat2Desk'}
+                                        </button>
+                                        )}
+                                        {plannerShowTelephonySync && (
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                syncPlannerChat2DeskMetrics();
+                                            }}
+                                            disabled={plannerChatMetricsImportState.loading}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Синхронизировать метрики Chat2Desk за прошедший день"
+                                        >
+                                            <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'} text-slate-400`}></FaIcon>
+                                            {plannerChatMetricsImportState.loading ? 'Синхронизация...' : 'Метрики Chat2Desk'}
+                                        </button>
+                                        )}
+
+                                        <div className={PLANNER_MENU_GROUP}>Перерывы</div>
+                                        <button
+                                            onClick={openPlannerBreakRulesSettings}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Настроить автогенерацию перерывов по направлениям"
+                                        >
+                                            <FaIcon className="fas fa-sliders-h text-slate-400"></FaIcon>
+                                            Настройка перерывов
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                handlePlannerBreaksRecalculate();
+                                            }}
+                                            disabled={breakRecalculateState.loading || excelTransferState.importing || excelTransferState.exporting}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Пересчитать перерывы в видимом диапазоне по текущим правилам направлений"
+                                        >
+                                            <FaIcon className={`fas ${breakRecalculateState.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'} text-slate-400`}></FaIcon>
+                                            {breakRecalculateState.loading ? 'Пересчет...' : 'Пересчитать перерывы'}
+                                        </button>
+
+                                        <div className={PLANNER_MENU_GROUP}>Отчёты</div>
+                                        <button
+                                            onClick={() => {
+                                                setShowPlannerTopActionsMenu(false);
+                                                openPlannerStatusMatchExportModal();
+                                            }}
+                                            disabled={plannerStatusMatchExportLoading}
+                                            className={PLANNER_MENU_ITEM}
+                                            title="Выгрузить соответствие статусов с графиком за выбранный период"
+                                        >
+                                            <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-file-arrow-down'} text-slate-400`}></FaIcon>
+                                            {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Отчёт соответствия'}
+                                        </button>
+                                        {plannerStatusEffectiveAnalysis && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
-                                                    handlePlannerExcelExport();
+                                                    setShowPlannerStatusAnomalyModal(true);
                                                 }}
-                                                disabled={excelTransferState.exporting || excelTransferState.importing}
-                                                className="w-full px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Экспортировать график (видимый диапазон, формат День/Неделя/Месяц и активные фильтры) в Excel"
+                                                className={PLANNER_MENU_ITEM}
+                                                title="Отчёт по загруженным статусам операторов"
                                             >
-                                                <FaIcon className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
-                                                {excelTransferState.exporting ? 'Экспорт...' : 'Экспорт Excel'}
+                                                <FaIcon className="fas fa-chart-line text-slate-400"></FaIcon>
+                                                Отчёт статусов
                                             </button>
-
+                                        )}
+                                        {plannerStatusEffectiveAnalysis && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
-                                                    triggerPlannerExcelImportSelect();
+                                                    setPlannerStatusHourlyDayKey(prev => prev || (plannerStatusEffectiveAnalysis?.days?.[0]?.dateKey ? String(plannerStatusEffectiveAnalysis.days[0].dateKey) : ''));
+                                                    setPlannerStatusHourlyExpandedKey('');
+                                                    setShowPlannerStatusGroupingModal(true);
                                                 }}
-                                                disabled={excelTransferState.importing || excelTransferState.exporting}
-                                                className="w-full px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Импортировать график из Excel (ФИО + даты)"
+                                                className={PLANNER_MENU_ITEM}
+                                                title="Почасовая группировка операторов на смене"
                                             >
-                                                <FaIcon className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'}`}></FaIcon>
-                                                {excelTransferState.importing ? 'Импорт...' : 'Импорт Excel'}
+                                                <FaIcon className="fas fa-table text-slate-400"></FaIcon>
+                                                Почасовая группировка
                                             </button>
-
-                                            {!plannerSyncActionsHidden && (isTezPlanner || isAdminLikePlanner) && (
+                                        )}
+                                        {(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role)) && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
-                                                    openPlannerBinotelSyncModal();
+                                                    setShowSwapJournalModal(true);
                                                 }}
-                                                disabled={plannerOktellSyncLoading || plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
-                                                className="w-full px-3 py-2 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Скачать и импортировать статусы операторов из Binotel за выбранный период (до 10 дней)"
+                                                className={PLANNER_MENU_ITEM}
+                                                title="Журнал запросов на замену за выбранный месяц"
                                             >
-                                                <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
-                                                Синхронизация с Binotel
+                                                <FaIcon className="fas fa-right-left text-slate-400"></FaIcon>
+                                                Журнал замен
                                             </button>
-                                            )}
-                                            {!plannerSyncActionsHidden && !isTezPlanner && (
-                                            <button
-                                                onClick={() => {
-                                                    setShowPlannerTopActionsMenu(false);
-                                                    openPlannerOktellSyncModal();
-                                                }}
-                                                disabled={plannerOktellSyncLoading || plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
-                                                className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Синхронизировать переключения статусов операторов напрямую из Oktell за выбранный период (до 3 дней). Чат-менеджеры не затрагиваются."
-                                            >
-                                                <FaIcon className={`fas ${plannerOktellSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
-                                                {plannerOktellSyncLoading ? 'Синхронизация...' : 'Синхронизация с Oktell'}
-                                            </button>
-                                            )}
+                                        )}
 
-                                            {!plannerSyncActionsHidden && !isTezPlanner && (
-                                            <button
-                                                onClick={() => {
-                                                    setShowPlannerTopActionsMenu(false);
-                                                    syncPlannerChat2DeskStatuses();
-                                                }}
-                                                disabled={plannerStatusAnomalyLoading || plannerStatusApiSyncLoading}
-                                                className="w-full px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Синхронизировать переключения рабочих статусов Chat2Desk за видимый диапазон"
-                                            >
-                                                <FaIcon className={`fas ${plannerStatusApiSyncLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`}></FaIcon>
-                                                {plannerStatusApiSyncLoading ? 'Синхронизация...' : 'Статусы Chat2Desk'}
-                                            </button>
-                                            )}
-
-                                            {!plannerSyncActionsHidden && !isTezPlanner && (
-                                            <button
-                                                onClick={() => {
-                                                    setShowPlannerTopActionsMenu(false);
-                                                    syncPlannerChat2DeskMetrics();
-                                                }}
-                                                disabled={plannerChatMetricsImportState.loading}
-                                                className="w-full px-3 py-2 rounded-xl border border-cyan-200 bg-cyan-50 hover:bg-cyan-100 text-cyan-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Синхронизировать метрики Chat2Desk за прошедший день"
-                                            >
-                                                <FaIcon className={`fas ${plannerChatMetricsImportState.loading ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'}`}></FaIcon>
-                                                {plannerChatMetricsImportState.loading ? 'Синхронизация...' : 'Синхронизация Chat2Desk'}
-                                            </button>
-                                            )}
-
-                                            <button
-                                                onClick={() => {
-                                                    setShowPlannerTopActionsMenu(false);
-                                                    openPlannerStatusMatchExportModal();
-                                                }}
-                                                disabled={plannerStatusMatchExportLoading}
-                                                className="w-full px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Выгрузить соответствие статусов с графиком за выбранный период"
-                                            >
-                                                <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-file-arrow-down'}`}></FaIcon>
-                                                {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Отчет соответствия'}
-                                            </button>
-
-                                            <button
-                                                onClick={openPlannerBreakRulesSettings}
-                                                className="w-full px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-sm font-medium flex items-center gap-2"
-                                                title="Настроить автогенерацию перерывов по направлениям"
-                                            >
-                                                <FaIcon className="fas fa-sliders-h"></FaIcon>
-                                                Настройка перерывов
-                                            </button>
-
-                                            <button
-                                                onClick={() => {
-                                                    setShowPlannerTopActionsMenu(false);
-                                                    handlePlannerBreaksRecalculate();
-                                                }}
-                                                disabled={breakRecalculateState.loading || excelTransferState.importing || excelTransferState.exporting}
-                                                className="w-full px-3 py-2 rounded-xl border border-teal-200 bg-teal-50 hover:bg-teal-100 text-teal-700 text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
-                                                title="Пересчитать перерывы в видимом диапазоне по текущим правилам направлений"
-                                            >
-                                                <FaIcon className={`fas ${breakRecalculateState.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'}`}></FaIcon>
-                                                {breakRecalculateState.loading ? 'Пересчет...' : 'Пересчитать перерывы'}
-                                            </button>
-
-                                            {plannerStatusEffectiveAnalysis && (
-                                                <button
-                                                    onClick={() => {
-                                                        setShowPlannerTopActionsMenu(false);
-                                                        setShowPlannerStatusAnomalyModal(true);
-                                                    }}
-                                                    className="w-full px-3 py-2 rounded-xl border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 text-sm font-medium flex items-center gap-2"
-                                                >
-                                                    <FaIcon className="fas fa-chart-line"></FaIcon>
-                                                    Открыть отчет статусов
-                                                </button>
-                                            )}
-                                            {plannerStatusEffectiveAnalysis && (
-                                                <button
-                                                    onClick={() => {
-                                                        setShowPlannerTopActionsMenu(false);
-                                                        setPlannerStatusHourlyDayKey(prev => prev || (plannerStatusEffectiveAnalysis?.days?.[0]?.dateKey ? String(plannerStatusEffectiveAnalysis.days[0].dateKey) : ''));
-                                                        setPlannerStatusHourlyExpandedKey('');
-                                                        setShowPlannerStatusGroupingModal(true);
-                                                    }}
-                                                    className="w-full px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 text-sm font-medium flex items-center gap-2"
-                                                    title="Почасовая группировка операторов на смене"
-                                                >
-                                                    <FaIcon className="fas fa-table"></FaIcon>
-                                                    Почасовая группировка
-                                                </button>
-                                            )}
-
-                                            {(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role)) && (
-                                                <button
-                                                    onClick={() => {
-                                                        setShowPlannerTopActionsMenu(false);
-                                                        setShowSwapJournalModal(true);
-                                                    }}
-                                                    className="w-full px-3 py-2 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-700 text-sm font-medium flex items-center gap-2"
-                                                    title="Журнал запросов на замену за выбранный месяц"
-                                                >
-                                                    <FaIcon className="fas fa-right-left"></FaIcon>
-                                                    Журнал замен
-                                                </button>
-                                            )}
-                                        </div>
-
-                                        <div className="border-t border-slate-200 p-2 space-y-1">
-                                            <div className="px-1 text-[11px] uppercase tracking-wide text-slate-500">Статусы и масштаб</div>
-                                            {viewMode === 'day' && (
+                                        {viewMode === 'day' && (
+                                            <>
+                                                <div className={PLANNER_MENU_GROUP}>Спецрежим статусов</div>
                                                 <button
                                                     onClick={() => setPlannerStatusSpecialViewEnabled(v => !v)}
                                                     disabled={!plannerStatusEffectiveAnalysis}
-                                                    className={`w-full px-3 py-2 rounded-xl border text-sm font-medium flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${plannerStatusSpecialViewEnabled ? 'border-rose-300 bg-rose-100 text-rose-800' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'}`}
+                                                    className={PLANNER_MENU_ITEM}
                                                     title={plannerStatusEffectiveAnalysis ? 'Включить/выключить спецрежим просмотра статусов' : 'Сначала загрузите CSV со статусами'}
                                                 >
-                                                    <FaIcon className={`fas ${plannerStatusSpecialViewEnabled ? 'fa-toggle-on' : 'fa-toggle-off'}`}></FaIcon>
-                                                    Режим статусов
+                                                    <FaIcon className={`fas ${plannerStatusSpecialViewEnabled ? 'fa-toggle-on text-blue-500' : 'fa-toggle-off text-slate-400'}`}></FaIcon>
+                                                    <span className="min-w-0 flex-1 truncate">Режим статусов</span>
+                                                    <span className="shrink-0 text-[11.5px] text-slate-400">
+                                                        {plannerStatusSpecialViewEnabled ? 'вкл' : 'выкл'}
+                                                    </span>
                                                 </button>
-                                            )}
-
-                                            {viewMode === 'day' && plannerStatusSpecialViewEnabled && (
-                                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-2 py-2">
-                                                    <span className="text-xs text-slate-500">Масштаб</span>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => changePlannerStatusTimelineZoom(-0.25)}
-                                                        className="w-7 h-7 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
-                                                        title="Уменьшить таймлайн"
-                                                    >
-                                                        <FaIcon className="fas fa-minus text-[10px]"></FaIcon>
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setPlannerStatusTimelineZoom(1)}
-                                                        className="px-2 h-7 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-medium text-slate-700 tabular-nums"
-                                                        title="Сбросить масштаб"
-                                                    >
-                                                        {Math.round((plannerStatusTimelineZoom || 1) * 100)}%
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => changePlannerStatusTimelineZoom(0.25)}
-                                                        className="w-7 h-7 rounded border border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
-                                                        title="Увеличить таймлайн"
-                                                    >
-                                                        <FaIcon className="fas fa-plus text-[10px]"></FaIcon>
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
+                                                {plannerStatusSpecialViewEnabled && (
+                                                    <div className="flex items-center gap-2 rounded-xl px-2.5 py-1.5">
+                                                        <span className="flex-1 text-[13px] font-medium text-slate-500">Масштаб</span>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => changePlannerStatusTimelineZoom(-0.25)}
+                                                            className="grid h-7 w-7 place-items-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200 active:scale-95"
+                                                            title="Уменьшить таймлайн"
+                                                        >
+                                                            <FaIcon className="fas fa-minus text-[10px]"></FaIcon>
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setPlannerStatusTimelineZoom(1)}
+                                                            className="h-7 rounded-lg bg-slate-100 px-2 text-[11.5px] font-medium tabular-nums text-slate-600 transition hover:bg-slate-200"
+                                                            title="Сбросить масштаб"
+                                                        >
+                                                            {Math.round((plannerStatusTimelineZoom || 1) * 100)}%
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => changePlannerStatusTimelineZoom(0.25)}
+                                                            className="grid h-7 w-7 place-items-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200 active:scale-95"
+                                                            title="Увеличить таймлайн"
+                                                        >
+                                                            <FaIcon className="fas fa-plus text-[10px]"></FaIcon>
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
 
                                         {plannerStatusEffectiveAnalysis && (
-                                            <div className="border-t border-slate-200 p-2">
+                                            <>
+                                                <div className="my-1.5 h-px bg-slate-200/70" />
                                                 <button
                                                     onClick={() => {
                                                         setShowPlannerTopActionsMenu(false);
@@ -26095,22 +26145,93 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setPlannerStatusGroupingDirectionKeys([]);
                                                         setPlannerStatusAnomalyExpandedDays({});
                                                     }}
-                                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-sm font-medium flex items-center gap-2"
+                                                    className="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13px] font-medium text-rose-600 transition hover:bg-rose-50"
                                                     title="Очистить загруженные статусы"
                                                 >
-                                                    <FaIcon className="fas fa-trash-alt"></FaIcon>
+                                                    <FaIcon className="fas fa-trash-alt text-rose-500"></FaIcon>
                                                     Очистить статусы
                                                 </button>
-                                            </div>
+                                            </>
                                         )}
                                     </div>
                                 )}
                             </div>
                             </>
                         )}
-                        <button onClick={() => paginatePlannerDates(-1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-left"></FaIcon></button>
-                        <div className="text-sm">{currentDate.toLocaleDateString()}</div>
-                        <button onClick={() => paginatePlannerDates(1)} className="px-2 py-1 bg-white rounded"><FaIcon className="fas fa-angle-right"></FaIcon></button>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <IosSegmented
+                                    value={viewMode}
+                                    options={PLANNER_VIEW_MODE_OPTIONS}
+                                    onChange={setViewMode}
+                                    ariaLabel="Период"
+                                />
+                                <div className="inline-flex items-center gap-0.5 rounded-[10px] bg-white p-[3px] shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70">
+                                    <button
+                                        type="button"
+                                        onClick={() => paginatePlannerDates(-1)}
+                                        className="grid h-7 w-7 place-items-center rounded-[8px] text-slate-500 transition hover:bg-slate-100 active:scale-95"
+                                        aria-label="Предыдущий период"
+                                        title="Предыдущий период"
+                                    >
+                                        <FaIcon className="fas fa-angle-left text-[12px]"></FaIcon>
+                                    </button>
+                                    <span className="px-2 text-[12.5px] font-medium tabular-nums text-slate-700">{currentDate.toLocaleDateString()}</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => paginatePlannerDates(1)}
+                                        className="grid h-7 w-7 place-items-center rounded-[8px] text-slate-500 transition hover:bg-slate-100 active:scale-95"
+                                        aria-label="Следующий период"
+                                        title="Следующий период"
+                                    >
+                                        <FaIcon className="fas fa-angle-right text-[12px]"></FaIcon>
+                                    </button>
+                                </div>
+                            </div>
+                            {viewMode === 'day' && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowDayBreaksModal(true)}
+                                        className={PLANNER_TOOLBAR_BTN}
+                                        title="Показать перерывы операторов за выбранный день"
+                                    >
+                                        <FaIcon className="fas fa-mug-hot text-slate-400"></FaIcon>
+                                        Перерывы
+                                        {dayBreaksStats.breaksCount > 0 && (
+                                            <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10.5px] font-semibold leading-none tabular-nums text-slate-500">
+                                                {dayBreaksStats.breaksCount}
+                                            </span>
+                                        )}
+                                    </button>
+                                    {!plannerReadOnly && (
+                                    <button
+                                        type="button"
+                                        onClick={() => aggregateCurrentDayForAllOperators()}
+                                        disabled={dayAggregateLoading}
+                                        className={PLANNER_TOOLBAR_BTN}
+                                        title="Ручной пересчет метрик за выбранный день для всех операторов"
+                                    >
+                                        <FaIcon className={`fas ${dayAggregateLoading ? 'fa-spinner fa-spin' : 'fa-calculator'} text-slate-400`}></FaIcon>
+                                        {dayAggregateLoading ? 'Агрегация...' : 'Агрегировать день'}
+                                    </button>
+                                    )}
+                                    <div className="inline-flex items-center gap-1.5">
+                                        <span className="text-[11.5px] text-slate-400">Сортировка</span>
+                                        <CustomSelect
+                                            variant="ios"
+                                            className="w-[190px]"
+                                            value={daySortMode}
+                                            onChange={setDaySortMode}
+                                            options={PLANNER_DAY_SORT_OPTIONS}
+                                            ariaLabel="Сортировка операторов в режиме «День»"
+                                        />
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -47673,7 +47794,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </Suspense>
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
                                 {( view === "departments" && isAdminLikeRole && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <DepartmentsView
@@ -48824,12 +48945,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </Suspense>
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
                             </>
                         )}
                         {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                             <>
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "events" && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
