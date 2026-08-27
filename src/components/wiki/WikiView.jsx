@@ -403,6 +403,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         };
     }, [structure, activeSpace]);
     const canManageSpaces = !!structure?.can_manage_spaces;
+    /* Строит ли человек дерево ХОТЯ БЫ ГДЕ-ТО. Считает сервер: с 27.08.2026
+       подразделы заводит не только носитель способности, но и тот, кому выдали
+       ветку тумблером «Может заводить подразделы», — а способности вики у него
+       нет вовсе, и по ней половину «Структура» ему было бы не показать. */
+    const canBuildSections = !!structure?.can_manage_some_sections;
 
     /* Запоминаем ФАКТИЧЕСКИ показанное пространство, а не то, что попросили:
        после архивации выбранного иначе сохранился бы идентификатор, которого
@@ -528,8 +533,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        руками, и на такой сборке половина обязана просто не появиться. */
     const catalogModes = useMemo(() => [
         ...(isEditor && features.catalog_articles ? ['catalog'] : []),
-        ...((canManageStructure || canGrantAccess) && features.catalog_structure
-            ? ['structure'] : []),
+        ...((canManageStructure || canGrantAccess || canBuildSections)
+            && features.catalog_structure ? ['structure'] : []),
         // Тренажёры — редактору: это инструмент того, кто СТАВИТ тренажёр в
         // статью. Читателю он не нужен, тренажёр к нему приходит кнопкой в тексте.
         ...(isEditor && features.catalog_trainers ? ['trainers'] : []),
@@ -546,8 +551,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
            Число берём из каталога — он уже посчитал периметр, и половина
            появляется ровно тогда, когда за ней есть что показать. */
         ...(isEditor && (catalog?.migration?.pending || 0) > 0 ? ['migration'] : []),
-    ], [isEditor, canManageStructure, canGrantAccess, canGrantGuest, canManageAccess,
-        features, catalog]);
+    ], [isEditor, canManageStructure, canGrantAccess, canBuildSections, canGrantGuest,
+        canManageAccess, features, catalog]);
 
     /* Смена вики в шапке — смена всего дерева: раздел, выбранный в прежней, в
        новой не существует, а поднятый выбор пережил бы её молча и повесил бы в

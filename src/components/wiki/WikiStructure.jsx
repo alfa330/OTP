@@ -229,20 +229,35 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
 
                        Правка дерева — не то же самое, что выдача доступа:
                        супервайзер раздаёт операторов, но структуру не трогает,
-                       и у него в меню остаётся один пункт. */
-                    canManageStructure && { key: 'child', label: 'Добавить подраздел', icon: Plus,
-                      onSelect: () => onAddChild(section) },
-                    canManageStructure && { key: 'edit', label: 'Изменить раздел', icon: Pencil,
-                      onSelect: () => onEdit(section) },
+                       и у него в меню остаётся один пункт.
+
+                       Права здесь ПОСТРОЧНЫЕ и приезжают с сервера
+                       (can_add_subsection / can_edit_section): с 27.08.2026
+                       дерево строит не только носитель способности, но и тот,
+                       кому выдали ветку тумблером «Может заводить подразделы»,
+                       — а он вправе это ровно внутри своей ветки. Считать
+                       границу второй раз на клиенте нельзя: расходится это
+                       всегда в сторону «кнопку показали, а API ответил 403». */
+                    section.can_add_subsection && {
+                        key: 'child', label: 'Добавить подраздел', icon: Plus,
+                        onSelect: () => onAddChild(section) },
+                    section.can_edit_section && {
+                        key: 'edit', label: 'Изменить раздел', icon: Pencil,
+                        onSelect: () => onEdit(section) },
                     /* Порядок разделов задавался только временем создания: поле
                        position в API было, интерфейса к нему не было. Пункта нет
                        на краю ветки (переставлять некуда) и во время поиска —
                        двигать строку относительно соседей, которых на экране
-                       нет, значит стрелять вслепую. */
-                    canManageStructure && canMove && !first && {
+                       нет, значит стрелять вслепую.
+
+                       Перестановка правит position У ДВУХ СОСЕДЕЙ, поэтому
+                       право нужно на обоих. Отдельной проверки соседа тут нет
+                       намеренно: can_edit_section считается по РОДИТЕЛЮ строки,
+                       а у соседей по ветке родитель один и тот же. */
+                    section.can_edit_section && canMove && !first && {
                         key: 'up', label: 'Переместить выше', icon: ArrowUp,
                         separatorBefore: true, onSelect: () => onMove(section, -1) },
-                    canManageStructure && canMove && !last && {
+                    section.can_edit_section && canMove && !last && {
                         key: 'down', label: 'Переместить ниже', icon: ArrowDown,
                         separatorBefore: first, onSelect: () => onMove(section, 1) },
                     /* Пункт есть, только если сервер сказал, что этот человек
@@ -254,13 +269,18 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
                         // Черта отделяет доступ от правки дерева — но только если
                         // сверху что-то есть: у супервайзера это единственный
                         // пункт, и линия висела бы над ним ни к чему.
-                        separatorBefore: canManageStructure,
+                        separatorBefore: !!(section.can_add_subsection
+                                            || section.can_edit_section),
                         // Число правил прямо в пункте: у раздела без единого
                         // правила это единственное место, где видно, что
                         // открывать его некому.
                         hint: orphan ? 'нет правил' : String(section.rules_count),
                         onSelect: () => onAccess(section),
                     },
+                    /* Архив уносит раздел вместе со статьями внутри — решение
+                       владельца 27.08.2026 оставило его у того, кто ветку выдал.
+                       Поэтому пункт остаётся на ГЛОБАЛЬНОЙ способности, а не на
+                       построчном признаке. */
                     canManageStructure && { key: 'archive', label: 'Убрать в архив', icon: Archive,
                       danger: true, separatorBefore: true,
                       onSelect: () => onArchive(section) },
@@ -303,14 +323,19 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
         }
     }, [collapsed, closedSpaces]);
 
+    /* Строит ли человек дерево ХОТЯ БЫ ГДЕ-ТО. Считает сервер: у держателя
+       ветки способности can_manage_structure нет, а форму раздела он открывает
+       — и справочник отделов ей нужен так же. */
+    const canBuildSomewhere = !!structure?.can_manage_some_sections;
+
     useEffect(() => {
         // Справочник нужен только форме раздела; кто структуру не правит —
         // и форму не открывает, а лишний запрос отвечал бы 403 в консоль.
-        if (!canManageStructure) { setDepartments([]); return; }
+        if (!canBuildSomewhere) { setDepartments([]); return; }
         axios.get(`${base}/access/subjects`, { headers })
             .then((r) => setDepartments(r.data?.department || []))
             .catch(() => setDepartments([]));   // не админ — справочник недоступен, это норма
-    }, [base, headers, canManageStructure]);
+    }, [base, headers, canBuildSomewhere]);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
@@ -793,11 +818,21 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 value={sectionModal.parent_section_id}
                                 onChange={(v) => setSectionModal({ ...sectionModal, parent_section_id: v })}
                                 options={[
-                                    { value: '', label: 'Верхний уровень' },
+                                    /* Верхний уровень пространства — это новая ветка,
+                                       а не подраздел. Держателю ветки её заводить
+                                       нечем, и предлагать пункт, на который сервер
+                                       ответит 403, нельзя. */
+                                    ...(canManageStructure ? [{ value: '', label: 'Верхний уровень' }] : []),
                                     // Вкладка целиком показывает и архив (он тут по делу),
                                     // но вкладывать живой раздел в архивный нельзя.
                                     ...selectableSections(sections, sectionModal.parent_section_id)
                                         .filter((s) => s.space_id === sectionModal.space_id && s.id !== sectionModal.id)
+                                        /* Только те родители, внутрь которых человек
+                                           вправе положить подраздел. Признак построчный
+                                           и приезжает с сервера — тот же, по которому
+                                           показан пункт «Добавить подраздел». */
+                                        .filter((s) => canManageStructure || s.can_add_subsection
+                                            || String(s.id) === String(sectionModal.parent_section_id))
                                         // Путь целиком: одноимённые ветки СЗоВ и ОП
                                         // в плоском списке неразличимы.
                                         .map((s) => ({ value: String(s.id), label: sectionPathLabel(sections, s.id) })),
@@ -879,6 +914,11 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             )}
                         </div>
 
+                        {/* Публичный раздел виден МИМО ветки — это выдача доступа
+                            всей компании, а не устройство своего дерева, и держателю
+                            ветки её не выдавали. Блока у него нет вовсе: тумблер,
+                            на который сервер отвечает 403, хуже отсутствующего. */}
+                        {canManageStructure && (
                         <div className={`${iosCard} p-3.5`}>
                             <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
@@ -975,6 +1015,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 </div>
                             )}
                         </div>
+                        )}
                     </div>
                 )}
             </IosModal>

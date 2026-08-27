@@ -116,8 +116,11 @@ class MoveSectionTest(unittest.TestCase):
 class MoveSectionRouteTest(_RouteHarness, unittest.TestCase):
     """PATCH /sections/<id> со сменой пространства."""
 
-    # (name, department_id пространства, space_id, parent_section_id, department_id)
-    SECTION_ROW = ('Оператор', None, 1, None, None)
+    # (name, department_id пространства, space_id, parent_section_id, department_id,
+    #  visibility_scope, status, owner_user_id)
+    # Последние три читает граница держателя ветки (routes_structure): он правит
+    # название и отдел, но не публичность, архив и владельца.
+    SECTION_ROW = ('Оператор', None, 1, None, None, 'restricted', 'active', None)
 
     def _client(self, context=None):
         client, cursor = self.build(
@@ -198,7 +201,8 @@ class MoveSectionRouteTest(_RouteHarness, unittest.TestCase):
         """Ветка отдела уникальна в пределах (пространство, родитель, отдел)."""
         client, cursor = self._client()
         cursor.fetchone.side_effect = [
-            ('ОП', None, 1, None, 367),       # переезжает ветка отдела 367
+            ('ОП', None, 1, None, 367,        # переезжает ветка отдела 367
+             'restricted', 'active', None),
             (None, 'active'),                 # целевое пространство
             ('ОП',),                          # там такая ветка уже есть
         ]

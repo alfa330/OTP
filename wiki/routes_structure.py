@@ -142,6 +142,24 @@ _SECTION_ABOVE_GRANTOR = (
     "WIKI_SECTION_ABOVE_GRANTOR",
 )
 
+# Отказ на структурных дверях. Форма та же, что у декоратора wiki_route
+# (wiki/routes.py): фронт уже умеет читать required и показывает по нему,
+# какого именно права не хватило. Заводить второй формат ради тех же дверей
+# значило бы, что клиент однажды разберёт один и не разберёт другой.
+_STRUCTURE_REQUIRED = {
+    "error": "Недостаточно прав: нужно «%s»" % CAPABILITY_TITLES['can_manage_structure'],
+    "code": "WIKI_FORBIDDEN",
+    "required": "can_manage_structure",
+}
+
+# Отказ тому, у кого право на структуру ЕСТЬ, но не здесь: он вышел за
+# выданную ему ветку. Текст называет причину прямо — «нет прав» на своей же
+# ветке отправило бы человека искать несуществующую ошибку.
+_OUTSIDE_MY_BRANCH = (
+    "Этот раздел вне вашей ветки — дерево тут строит вышестоящий руководитель",
+    "WIKI_SECTION_OUTSIDE_BRANCH",
+)
+
 _SUBJECT_SCOPE_ERRORS = {
     'user': 'Этот сотрудник из другого отдела',
     'group': 'Эта группа из другого отдела',
@@ -191,6 +209,32 @@ def register(bp, wiki_route, db, log_ip):
         if departments is None:
             return True
         return structure.space_open_to(cursor, space_id, departments)
+
+    def _manage_sections(cursor, ctx):
+        """Где человек вправе строить дерево. None — без границы.
+
+        Решение владельца 27.08.2026. До него дерево правил только носитель
+        способности can_manage_structure — директор и назначенный руками
+        администратор вики. Коммерческому директору выписали личное правило на
+        его ветку со всеми шестью правами и «вместе с подразделами», и он всё
+        равно не мог завести подраздел: шесть прав правила описывают
+        СОДЕРЖИМОЕ, а способностью они не становятся по построению
+        (wiki/access.py: capabilities_from_grants). Право строить дерево теперь
+        живёт отдельным тумблером правила — «Может заводить подразделы».
+
+        None означает «без границы» и возвращается ТОЛЬКО носителю способности:
+        у него дверь и была открыта, и сужать её эта правка не должна. Всем
+        остальным возвращается множество разделов — оно же и есть граница.
+
+        Ветка «глава отдела строит у себя» тут по-прежнему НЕ появляется:
+        решение владельца 21.08.2026 («руководитель не может добавлять разделы
+        и подразделы») в силе, и должность 'admin' сама по себе не открывает
+        ничего. Открывает выписанное правило — то есть чужое решение, а не
+        собственная должность.
+        """
+        if ctx['capabilities'].get('can_manage_structure'):
+            return None
+        return queries.manage_section_ids(cursor, ctx, ctx['subjects'])
 
     def _grant_ceiling(ctx):
         """До какого уровня должности человек вправе открывать разделы.
@@ -299,6 +343,13 @@ def register(bp, wiki_route, db, log_ip):
         # Раздающему без границы отдела она не нужна вовсе — у мастер-ключа сняты
         # все три, и считать дерево ради ответа «да» незачем.
         role_levels = {} if grant_departments is None else structure.section_role_levels(cursor)
+        # Где человек вправе строить дерево. None — без границы (носитель
+        # can_manage_structure). Множество — выданные ему ветки: по нему строка
+        # получает свои can_add_subsection / can_edit_section, и фронт не считает
+        # границу второй раз. Ровно та же причина, что у can_grant_access ниже:
+        # второй расчёт на клиенте расходится всегда в сторону «кнопку показали,
+        # а API ответил 403».
+        manage = _manage_sections(cursor, ctx)
         by_id = {s['id']: s for s in sections}
         branch_of = {}
 
@@ -337,13 +388,28 @@ def register(bp, wiki_route, db, log_ip):
                          and wiki_access.may_manage_section_level(
                              ctx['otp_role'], role_levels.get(section['id']))))
             )
+            # Право строить дерево ИМЕННО ТУТ. Заводить подразделы — внутри
+            # выданной ветки и всего, что под ней; править — сами подразделы,
+            # то есть разделы, чей РОДИТЕЛЬ в этой ветке. Якорь ветки человек
+            # не правит: его открыл вышестоящий, и переписывать собственную
+            # границу нельзя (та же граница стоит на PATCH /sections/<id>).
+            #
+            # Считаем по manage, а НЕ по can_manage: can_manage — это «структура
+            # ИЛИ мастер-ключ», и носитель одного лишь can_manage_access видел
+            # бы кнопки, которых сервер ему не даст (двери структуры спрашивают
+            # can_manage_structure). Это расхождение было и до правки; здесь оно
+            # закрывается тем, что признак строки и сама дверь считают одно и
+            # то же одной функцией.
+            can_add_here = manage is None or section['id'] in manage
+            can_edit_here = manage is None or section['parent_section_id'] in manage
             # Раздел, которым человек УПРАВЛЯЕТ, остаётся в ответе, даже если он
             # его не читает. Иначе супервайзер не увидел бы во вкладке
             # «Структура» ни одной ветки своего отдела: правило на чтение ему
             # никто не выписывал, и раздавать операторам было бы негде.
             # Витрина статей такие разделы отсеивает по accessible=false —
             # тем же способом, что и чужие разделы у администратора.
-            if section['id'] not in allowed and not can_manage and not can_grant_here:
+            if (section['id'] not in allowed and not can_manage
+                    and not can_grant_here and not can_add_here and not can_edit_here):
                 continue
             permissions = wiki_access.resolve_article_permissions(
                 capabilities=ctx['capabilities'],
@@ -360,6 +426,8 @@ def register(bp, wiki_route, db, log_ip):
             # самого раздела) считались бы дважды и однажды разошлись бы — а
             # расходится это всегда в сторону «показали кнопку, а API ответил 403».
             section['can_grant_access'] = can_grant_here
+            section['can_add_subsection'] = can_add_here
+            section['can_edit_section'] = can_edit_here
             section['public_department_ids'] = public_departments.get(section['id'], [])
             section['context_only'] = False
             visible.append(section)
@@ -398,6 +466,8 @@ def register(bp, wiki_route, db, log_ip):
                 node['accessible'] = False
                 node['readable_count'] = 0
                 node['can_grant_access'] = False
+                node['can_add_subsection'] = False
+                node['can_edit_section'] = False
                 node['public_department_ids'] = public_departments.get(node['id'], [])
                 node['context_only'] = True
                 shown.add(node['id'])
@@ -420,6 +490,10 @@ def register(bp, wiki_route, db, log_ip):
                        if sp['id'] in own_spaces or sp['id'] in used_spaces],
             "sections": visible,
             "can_manage_structure": can_manage,
+            # Строит ли человек дерево ХОТЯ БЫ ГДЕ-ТО. Нужно экрану, чтобы
+            # решить, грузить ли справочник отделов для формы раздела: сама
+            # форма открывается со строки, а справочник — один на экран.
+            "can_manage_some_sections": manage is None or bool(manage),
             "can_manage_access": bool(ctx['capabilities'].get('can_manage_access')),
             # Заводить пространства и двигать их границу вправе только
             # супер-админ — конструктор спрашивает об этом сервер, а не считает
@@ -526,12 +600,29 @@ def register(bp, wiki_route, db, log_ip):
         return jsonify({"status": "ok"})
 
     # ── Разделы ──────────────────────────────────────────────────────────
-    @wiki_route('/sections', methods=('GET', 'POST'), capability='can_manage_structure')
+    # Способность СНЯТА с декоратора и проверяется внутри. Причина: дверь
+    # перестала быть одной — сверх носителя can_manage_structure сюда теперь
+    # входит тот, кому выписали ветку тумблером «Может заводить подразделы»
+    # (_manage_sections). Декоратор про раздел не знает вовсе и отказал бы
+    # раньше, чем стало бы понятно, КУДА человек кладёт подраздел.
+    @wiki_route('/sections', methods=('GET', 'POST'))
     def wiki_sections(cursor, ctx):
+        manage = _manage_sections(cursor, ctx)
         if request.method == 'GET':
+            # Плоский список всех разделов пространства — по-прежнему только
+            # управляющему структурой: это справочник целиком, а не своя ветка.
+            if manage is not None:
+                return jsonify(_STRUCTURE_REQUIRED), 403
             return jsonify({"items": structure.list_sections(
                 cursor, space_id=_int_or_none(request.args.get('space_id')),
                 include_archived=True)})
+
+        # Тому, кто дерево не строит НИГДЕ, отказываем первым делом — до
+        # разбора тела и до похода за пространством. Иначе оператор получал бы
+        # «Пространство не найдено» вместо «нужно управление структурой»:
+        # отказ не про то, отправляющий искать несуществующую опечатку в форме.
+        if manage is not None and not manage:
+            return jsonify(_STRUCTURE_REQUIRED), 403
 
         data = _body()
         name = _clean(data.get('name'))
@@ -564,6 +655,39 @@ def register(bp, wiki_route, db, log_ip):
         # которая пробила бы границу отдела.
         parent_section_id = _int_or_none(data.get('parent_section_id'))
         department_id = _int_or_none(data.get('department_id'))
+        owner_user_id = _int_or_none(data.get('owner_user_id'))
+
+        # ── Тот, кому выдана ВЕТКА, а не способность ─────────────────────
+        if manage is not None:
+            # Раздел верхнего уровня — это новая ветка пространства, а не
+            # подраздел. Право называется «может заводить подразделы» и
+            # читается буквально: без родителя заводить нечего.
+            if not parent_section_id or parent_section_id not in manage:
+                return jsonify({"error": _OUTSIDE_MY_BRANCH[0],
+                                "code": _OUTSIDE_MY_BRANCH[1]}), 403
+            # Родитель обязан лежать в том же пространстве, куда кладут
+            # подраздел: иначе раздел уехал бы в пространство, которого ему
+            # никто не выдавал, оставшись «внутри» своей ветки по дереву.
+            if structure.section_exists(cursor, parent_section_id) != space_id:
+                return jsonify({
+                    "error": "Родительский раздел лежит в другом пространстве",
+                    "code": "WIKI_SECTION_PARENT_SPACE",
+                }), 400
+            # Публичный раздел виден мимо ветки — это выдача доступа всей
+            # компании, а не устройство своего дерева. Владельца раздела
+            # назначает тот же, кто раздаёт доступ.
+            scope = 'restricted'
+            owner_user_id = None
+            # Ветку можно завести только на отдел, которому выдано САМО
+            # пространство. Иначе внутри своей ветки заводится ветка чужого
+            # клиента, и по ней начинают считаться права его сотрудников.
+            if department_id and not structure.space_open_to(
+                    cursor, space_id, [department_id]):
+                return jsonify({
+                    "error": "Этому отделу пространство не выдано",
+                    "code": "WIKI_DEPARTMENT_SCOPE",
+                }), 403
+
         taken = structure.department_branch_taken(
             cursor, space_id=space_id, parent_section_id=parent_section_id,
             department_id=department_id)
@@ -584,7 +708,7 @@ def register(bp, wiki_route, db, log_ip):
                 cursor, space_id, _clean(data.get('slug'), 200) or _slugify(name)),
             description=_clean(data.get('description'), 2000),
             icon=_clean(data.get('icon'), 64), visibility_scope=scope,
-            owner_user_id=_int_or_none(data.get('owner_user_id')),
+            owner_user_id=owner_user_id,
             created_by=ctx['user_id'],
         )
         if scope == 'public' and isinstance(data.get('public_department_ids'), list):
@@ -597,13 +721,22 @@ def register(bp, wiki_route, db, log_ip):
                            ip_address=log_ip())
         return jsonify({"id": section_id}), 201
 
-    @wiki_route('/sections/<int:section_id>', methods=('PATCH', 'DELETE'),
-                capability='can_manage_structure')
+    # Способность снята с декоратора по той же причине, что и у POST /sections:
+    # дверь открыта и носителю can_manage_structure, и тому, кому выдали ветку.
+    # Кому именно — зависит от раздела, а декоратор про раздел не знает.
+    @wiki_route('/sections/<int:section_id>', methods=('PATCH', 'DELETE'))
     def wiki_section_item(cursor, ctx, section_id):
+        # Тому, кто дерево не строит НИГДЕ, отказываем до похода за разделом:
+        # иначе оператор получал бы «Раздел не найден» вместо «нужно управление
+        # структурой» — отказ не про то.
+        manage = _manage_sections(cursor, ctx)
+        if manage is not None and not manage:
+            return jsonify(_STRUCTURE_REQUIRED), 403
+
         cursor.execute(
             """
             SELECT s.name, sp.department_id, s.space_id, s.parent_section_id,
-                   s.department_id
+                   s.department_id, s.visibility_scope, s.status, s.owner_user_id
               FROM wiki_sections s JOIN wiki_spaces sp ON sp.id = s.space_id
              WHERE s.id = %s
             """,
@@ -620,8 +753,33 @@ def register(bp, wiki_route, db, log_ip):
         section_exists_space_id = row[2]
         section_parent_id = row[3]
         section_department_id = row[4]
+        section_scope = row[5]
+        section_status = row[6]
+        section_owner_id = row[7]
+
+        # ── Граница того, кому выдана ВЕТКА, а не способность ────────────
+        #
+        # Править он вправе ПОДРАЗДЕЛЫ — то есть разделы, лежащие внутри
+        # выданного ему. Сам выданный раздел не его: тумблер называется «может
+        # заводить подразделы», а раздел-якорь ему открыл вышестоящий, и
+        # переименовать или унести его значило бы переписать собственную
+        # границу. Поэтому проверяется РОДИТЕЛЬ, а не сам раздел, — множество
+        # manage уже включает и якорь, и всё поддерево под ним.
+        if manage is not None and section_parent_id not in manage:
+            return jsonify({"error": _OUTSIDE_MY_BRANCH[0],
+                            "code": _OUTSIDE_MY_BRANCH[1]}), 403
 
         if request.method == 'DELETE':
+            # Архив уносит раздел вместе со статьями внутри, и решение владельца
+            # 27.08.2026 — «заводить и править»: снос ветки остаётся у того, кто
+            # её выдал. Отказ отдельным текстом, а не общим «нет прав»: человек
+            # только что переименовал этот же раздел, и «нет прав» выглядело бы
+            # поломкой.
+            if manage is not None:
+                return jsonify({
+                    "error": "Убрать раздел в архив может вышестоящий руководитель",
+                    "code": "WIKI_SECTION_ARCHIVE_FORBIDDEN",
+                }), 403
             structure.update_section(cursor, section_id, {'status': 'archived'})
             queries.log_action(cursor, actor_id=ctx['user_id'], action='section.archive',
                                entity_type='section', entity_id=section_id,
@@ -629,6 +787,55 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"status": "archived"})
 
         data = _body()
+
+        # ── Что именно вправе поменять держатель ветки ───────────────────
+        #
+        # Название, описание, значок, порядок и отдел ветки — да. Публичность,
+        # архив, владелец и родитель — нет: первое открывает раздел мимо ветки,
+        # второе уносит статьи, третье и четвёртое двигают сам раздел по дереву.
+        #
+        # Отказ идёт СРАВНЕНИЕМ с текущим значением, а не по наличию ключа:
+        # форма шлёт весь набор полей при каждом сохранении, и запрет «по ключу»
+        # отказывал бы в обычном переименовании. Ровно так уже ломался переезд
+        # между пространствами — см. блок ниже.
+        if manage is not None:
+            requested_scope = data.get('visibility_scope')
+            if requested_scope in ('public', 'restricted') and requested_scope != section_scope:
+                return jsonify({
+                    "error": "Публичным раздел делает вышестоящий руководитель",
+                    "code": "WIKI_SECTION_PUBLIC_FORBIDDEN",
+                }), 403
+            if data.get('status') in ('active', 'archived') and data['status'] != section_status:
+                return jsonify({
+                    "error": "Убрать раздел в архив или вернуть из архива может "
+                             "вышестоящий руководитель",
+                    "code": "WIKI_SECTION_ARCHIVE_FORBIDDEN",
+                }), 403
+            if 'owner_user_id' in data and _int_or_none(
+                    data['owner_user_id']) != section_owner_id:
+                return jsonify({
+                    "error": "Владельца раздела назначает вышестоящий руководитель",
+                    "code": "WIKI_SECTION_OWNER_FORBIDDEN",
+                }), 403
+            if 'parent_section_id' in data and _int_or_none(
+                    data['parent_section_id']) != section_parent_id:
+                return jsonify({
+                    "error": "Перенести раздел в другую ветку может вышестоящий "
+                             "руководитель",
+                    "code": "WIKI_SECTION_MOVE_FORBIDDEN",
+                }), 403
+            if ('department_id' in data and _int_or_none(data['department_id'])
+                    and not structure.space_open_to(
+                        cursor, section_exists_space_id,
+                        [_int_or_none(data['department_id'])])):
+                return jsonify({
+                    "error": "Этому отделу пространство не выдано",
+                    "code": "WIKI_DEPARTMENT_SCOPE",
+                }), 403
+            # Список отделов публичного раздела — часть публичности, и меняет
+            # его тот же, кто её включает. Ключ просто не доезжает до
+            # set_public_departments ниже.
+            data.pop('public_department_ids', None)
 
         # ── Переезд в другое пространство ────────────────────────────────
         # Форма шлёт space_id при КАЖДОМ сохранении, поэтому переездом считается
@@ -783,8 +990,14 @@ def register(bp, wiki_route, db, log_ip):
         # Третий вход — право раздавать доступ: супервайзеру справочник нужен
         # для точечных правил (группа, направление), а способностей can_manage_*
         # у него нет. Без этого форма открывалась с пустыми списками.
+        #
+        # Четвёртый — держатель ветки: справочник отделов нужен форме раздела
+        # («Отдел ветки»), а способности управлять структурой у него нет.
+        # Проверка стоит последней и стоит запроса, поэтому считается только
+        # когда первые три не сработали.
         if not (caps.get('can_manage_structure') or caps.get('can_manage_access')
-                or _grant_ceiling(ctx) is not None):
+                or _grant_ceiling(ctx) is not None
+                or _manage_sections(cursor, ctx)):
             return jsonify({"error": "Недостаточно прав для этого действия",
                             "code": "WIKI_FORBIDDEN"}), 403
         # Справочник сужен той же границей, что и проверка на записи: свой
@@ -839,6 +1052,13 @@ def register(bp, wiki_route, db, log_ip):
                 # отказом с обратной стороны стола.
                 "grantable": [key for key in PERMISSION_FIELDS
                               if ctx['role_capabilities'].get(key)],
+                # Тумблер «Может заводить подразделы» — не седьмое право на
+                # содержимое, а передача управления деревом. Выдаёт его тот, у
+                # кого управление деревом есть В ДОЛЖНОСТИ: право, полученное
+                # самим раздающим из правила, дальше не передаётся — иначе одна
+                # выдача сверху расползлась бы вниз по всей ветке сама собой.
+                "grantable_structure": bool(
+                    ctx['role_capabilities'].get('can_manage_structure')),
             })
 
         data = _body()
@@ -938,11 +1158,32 @@ def register(bp, wiki_route, db, log_ip):
                 "required": beyond,
             }), 403
 
+        # ── Право строить дерево внутри ветки ────────────────────────
+        #
+        # Проверка отдельная от блока beyond выше и стоит по той же причине, по
+        # какой сам тумблер не стал седьмым правом: шесть прав — про содержимое
+        # раздела, а этот — про устройство дерева, и сверяется он с
+        # can_manage_structure, которого в PERMISSION_FIELDS нет вовсе.
+        #
+        # Сверяемся со способностями ДОЛЖНОСТИ: у коммерческого директора право
+        # строить дерево приходит из правила, и передать его дальше он не
+        # должен — иначе лестница выдачи разъезжается сама, без чьего-либо
+        # решения.
+        manage_subsections = bool(data.get('manage_subsections'))
+        if manage_subsections and not ctx['role_capabilities'].get('can_manage_structure'):
+            return jsonify({
+                "error": "Право заводить подразделы выдаёт тот, кто управляет "
+                         "структурой вики",
+                "code": "WIKI_GRANT_BEYOND_SELF",
+                "required": ['can_manage_structure'],
+            }), 403
+
         rule_id = structure.upsert_section_rule(
             cursor, section_id=section_id, subject_type=subject_type,
             subject_id=subject_id, subject_role=subject_role,
             permissions=permissions,
             grant_subsections=bool(data.get('grant_subsections', True)),
+            manage_subsections=manage_subsections,
             min_role_level=min_role_level,
             created_by=ctx['user_id'],
         )
@@ -951,7 +1192,9 @@ def register(bp, wiki_route, db, log_ip):
                            target_user_id=subject_id if subject_type == 'user' else None,
                            details={'rule_id': rule_id, 'subject_type': subject_type,
                                     'subject_id': subject_id, 'subject_role': subject_role,
-                                    'min_role_level': min_role_level, **permissions},
+                                    'min_role_level': min_role_level,
+                                    'manage_subsections': manage_subsections,
+                                    **permissions},
                            ip_address=log_ip())
         return jsonify({"id": rule_id}), 201
 

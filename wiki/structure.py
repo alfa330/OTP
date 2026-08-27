@@ -447,8 +447,8 @@ def move_section_to_space(cursor, section_id, *, space_id, parent_section_id=Non
 
 _RULE_KEYS = ('id', 'section_id', 'section_name', 'subject_type', 'subject_id',
               'subject_role', 'can_read', 'can_create', 'can_edit', 'can_delete',
-              'can_publish', 'can_approve', 'grant_subsections', 'min_role_level',
-              'subject_label')
+              'can_publish', 'can_approve', 'grant_subsections', 'manage_subsections',
+              'min_role_level', 'subject_label')
 
 
 def list_section_rules(cursor, section_id=None):
@@ -462,7 +462,8 @@ def list_section_rules(cursor, section_id=None):
         """
         SELECT r.id, r.section_id, s.name AS section_name, r.subject_type, r.subject_id,
                r.subject_role, r.can_read, r.can_create, r.can_edit, r.can_delete,
-               r.can_publish, r.can_approve, r.grant_subsections, r.min_role_level,
+               r.can_publish, r.can_approve, r.grant_subsections,
+               r.manage_subsections, r.min_role_level,
                CASE r.subject_type
                    WHEN 'department'      THEN (SELECT name FROM departments WHERE id = r.subject_id)
                    WHEN 'department_head' THEN (SELECT 'Глава: ' || name FROM departments WHERE id = r.subject_id)
@@ -484,17 +485,23 @@ def list_section_rules(cursor, section_id=None):
 
 def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject_role,
                         permissions, grant_subsections, created_by,
-                        min_role_level=None):
-    """Создать или обновить правило. Уникальность — по паре (раздел, субъект)."""
+                        min_role_level=None, manage_subsections=False):
+    """Создать или обновить правило. Уникальность — по паре (раздел, субъект).
+
+    manage_subsections — право строить дерево внутри этой ветки. Отдельным
+    аргументом, а не седьмым ключом permissions: шесть прав описывают
+    содержимое раздела и попадают в capabilities_from_grants, а это — про
+    устройство дерева, и в способности оно не превращается никогда.
+    """
     cursor.execute(
         """
         INSERT INTO wiki_section_access_rules
             (section_id, subject_type, subject_id, subject_role,
              can_read, can_create, can_edit, can_delete, can_publish, can_approve,
-             grant_subsections, min_role_level, created_by)
+             grant_subsections, manage_subsections, min_role_level, created_by)
         VALUES (%(section)s, %(stype)s, %(sid)s, %(srole)s,
                 %(read)s, %(create)s, %(edit)s, %(delete)s, %(publish)s, %(approve)s,
-                %(deep)s, %(level)s, %(by)s)
+                %(deep)s, %(manage)s, %(level)s, %(by)s)
         ON CONFLICT (section_id, subject_type,
                      COALESCE(subject_id, -1), COALESCE(subject_role, ''),
                      COALESCE(min_role_level, -1))
@@ -504,8 +511,9 @@ def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject
                       can_delete        = EXCLUDED.can_delete,
                       can_publish       = EXCLUDED.can_publish,
                       can_approve       = EXCLUDED.can_approve,
-                      grant_subsections = EXCLUDED.grant_subsections,
-                      min_role_level    = EXCLUDED.min_role_level,
+                      grant_subsections  = EXCLUDED.grant_subsections,
+                      manage_subsections = EXCLUDED.manage_subsections,
+                      min_role_level     = EXCLUDED.min_role_level,
                       updated_at        = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
         RETURNING id
         """,
@@ -517,7 +525,8 @@ def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject
          'delete': permissions.get('can_delete', False),
          'publish': permissions.get('can_publish', False),
          'approve': permissions.get('can_approve', False),
-         'deep': grant_subsections, 'level': min_role_level, 'by': created_by},
+         'deep': grant_subsections, 'manage': bool(manage_subsections),
+         'level': min_role_level, 'by': created_by},
     )
     return cursor.fetchone()[0]
 

@@ -290,6 +290,10 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     // Какие права этот раздающий вправе поставить. Приезжает вместе с потолком
     // и границей отдела — тремя измерениями выдачи (routes_structure).
     const [grantable, setGrantable] = useState(null);
+    /* Вправе ли ЭТОТ раздающий передать управление деревом. Считает сервер по
+       способностям ДОЛЖНОСТИ: право, полученное из правила, дальше не
+       передаётся, иначе лестница выдачи расползлась бы вниз сама собой. */
+    const [grantableStructure, setGrantableStructure] = useState(false);
     const [people, setPeople] = useState([]);
     const [catalog, setCatalog] = useState({});
     const [loading, setLoading] = useState(true);
@@ -319,6 +323,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                 setCeiling(r.data?.grant_ceiling ?? null);
                 setGrantDepartments(r.data?.grant_departments ?? null);
                 setGrantable(r.data?.grantable ?? null);
+                setGrantableStructure(!!r.data?.grantable_structure);
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
             .finally(() => setLoading(false));
@@ -432,6 +437,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
             ...draft.permissions,
             grant_subsections: draft.grant_subsections,
+            manage_subsections: !!draft.manage_subsections,
         }, { headers })
             .then(() => { toast('Правило сохранено', 'success'); setDraft(null); loadRules(); reload?.(); })
             .catch((e) => toast(errText(e, 'Не удалось сохранить правило'), 'error'))
@@ -623,6 +629,13 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                                 {rule.grant_subsections && (
                                                     <IosBadge tone="slate">+ подразделы</IosBadge>
                                                 )}
+                                                {/* Право на ДЕРЕВО, а не на статьи. Тон тот
+                                                    же синий, что у выданных прав, — новый цвет
+                                                    здесь ничего бы не значил; отличает его
+                                                    подпись. */}
+                                                {rule.manage_subsections && (
+                                                    <IosBadge tone="blue">строит подразделы</IosBadge>
+                                                )}
                                             </div>
                                         </div>
                                         {/* Правило можно было только снести и завести
@@ -640,6 +653,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                                 subject_role: rule.subject_role || 'operator',
                                                 min_role_level: rule.min_role_level ?? '',
                                                 grant_subsections: !!rule.grant_subsections,
+                                                manage_subsections: !!rule.manage_subsections,
                                                 permissions: permissionsOf(rule),
                                             })}
                                             className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
@@ -665,6 +679,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 onClick={() => setDraft({
                                     subject_type: 'user', subject_id: '', subject_role: 'operator',
                                     min_role_level: '', grant_subsections: false,
+                                    manage_subsections: false,
                                     permissions: { ...NO_PERMISSIONS, can_read: true },
                                 })}
                             >
@@ -837,6 +852,30 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 onChange={(v) => setDraft({ ...draft, grant_subsections: v })}
                             />
                         </div>
+
+                        {/* Передача управления ВЕТКОЙ. Тумблера нет у того, кто сам
+                            структуру не ведёт: сервер такое правило отвергнет, и
+                            галочка соврала бы. Шести прав выше он не касается —
+                            те про статьи, этот про дерево. */}
+                        {grantableStructure && (
+                            <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
+                                <div className="min-w-0">
+                                    <div className="text-[13.5px] font-medium text-slate-900">
+                                        Может заводить подразделы
+                                    </div>
+                                    <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
+                                        Строит дерево внутри этого раздела: заводит подразделы и
+                                        переименовывает их. Убрать раздел в архив, сделать
+                                        публичным или перенести в другую ветку — по-прежнему
+                                        только у вас.
+                                    </p>
+                                </div>
+                                <IosToggle
+                                    checked={!!draft.manage_subsections}
+                                    onChange={(v) => setDraft({ ...draft, manage_subsections: v })}
+                                />
+                            </div>
+                        )}
 
                     </div>
                 )}

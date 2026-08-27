@@ -59,7 +59,7 @@ class _RouteHarness:
     тянет за собой и все его тесты, и они начинают исполняться дважды.
     """
 
-    def build(self, context, granted=None, spaces=(11,)):
+    def build(self, context, granted=None, spaces=(11,), manage_sections=()):
         """granted — права, УЖЕ выписанные человеку правилами (см.
         queries.granted_rule_rights). Заглушка обязательна: курсор здесь один на
         все запросы и отвечает всем одними и теми же строками, а расчёт
@@ -71,7 +71,14 @@ class _RouteHarness:
         настоящий spaces_for_user на этом курсоре вернул бы пустой список — и
         каждый роут отвечал бы 403 «нет пространства» ДО гейта прав, то есть
         наборы ниже проверяли бы не то, что написано в их названиях. Пустой
-        кортеж передают там, где проверяют как раз саму границу."""
+        кортеж передают там, где проверяют как раз саму границу.
+
+        manage_sections — разделы, внутри которых человеку выдано право строить
+        дерево (тумблер правила «Может заводить подразделы», см.
+        queries.manage_section_ids). По умолчанию пусто: подавляющее
+        большинство наборов проверяет как раз отказ. Заглушка обязательна по
+        той же причине, что и у granted, — настоящий запрос на MagicMock-курсоре
+        сдвинул бы нумерацию execute() у всех, кто её считает."""
         cursor = MagicMock()
         cursor.fetchone.return_value = None
         cursor.fetchall.return_value = []
@@ -92,6 +99,10 @@ class _RouteHarness:
         self._orig_granted = queries.granted_rule_rights
         queries.granted_rule_rights = lambda _c, _s, _u: (dict(granted or {}), [])
         self.addCleanup(setattr, queries, 'granted_rule_rights', self._orig_granted)
+
+        self._orig_manage = queries.manage_section_ids
+        queries.manage_section_ids = lambda _c, _ctx, _s: frozenset(manage_sections)
+        self.addCleanup(setattr, queries, 'manage_section_ids', self._orig_manage)
 
         self._orig_spaces = queries.spaces_for_user
         # **_k — под include_guest: справочники спрашивают пространства без
@@ -449,8 +460,11 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
 
         client, cursor = self._admin()
         # SELECT в начале обработчика: имя, отдел пространства, space_id,
-        # родитель, отдел самого раздела.
-        cursor.fetchone.return_value = ('Оператор', None, 1, 5, None)
+        # родитель, отдел самого раздела, публичность, статус, владелец.
+        # Последние три читает граница держателя ветки (routes_structure):
+        # он правит название и отдел, но не публичность, архив и владельца.
+        cursor.fetchone.return_value = ('Оператор', None, 1, 5, None,
+                                        'restricted', 'active', None)
         response = client.patch('/api/wiki/sections/9', json={'department_id': None})
 
         self.assertEqual(response.status_code, 200)

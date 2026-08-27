@@ -511,20 +511,36 @@ _SECTION_RIGHTS_CTE = """
 WITH RECURSIVE section_rights_all AS (
     SELECT r.section_id, r.grant_subsections AS deep, 0 AS depth,
            r.can_read, r.can_create, r.can_edit,
-           r.can_delete, r.can_publish, r.can_approve
+           r.can_delete, r.can_publish, r.can_approve,
+           r.manage_subsections
       FROM wiki_section_access_rules r
       JOIN wiki_sections s ON s.id = r.section_id AND s.status = 'active'
      WHERE (""" + SUBJECT_MATCH + """)
      UNION ALL
+    -- Вниз по ветке спускаются ДВА разных права, и условия у них разные.
+    --
+    -- Шесть прав на содержимое идут вглубь только с тумблером «вместе с
+    -- подразделами» (parent.deep) — это его дословное обещание. Право строить
+    -- дерево (manage_subsections) идёт вглубь ВСЕГДА: «может заводить
+    -- подразделы» без подразделов не значит ничего, и требовать для него
+    -- второй тумблер значило бы завести молчаливый отказ — галочка стоит,
+    -- кнопки нет.
+    --
+    -- Поэтому обход продолжается по любому из двух признаков, а шесть прав в
+    -- потомке гасятся, если вглубь их никто не пускал: иначе право строить
+    -- дерево протащило бы за собой чтение и правку статей всей ветки.
     SELECT child.id, parent.deep, parent.depth + 1,
-           parent.can_read, parent.can_create, parent.can_edit,
-           parent.can_delete, parent.can_publish, parent.can_approve
+           parent.can_read    AND parent.deep, parent.can_create AND parent.deep,
+           parent.can_edit    AND parent.deep, parent.can_delete AND parent.deep,
+           parent.can_publish AND parent.deep, parent.can_approve AND parent.deep,
+           parent.manage_subsections
       FROM wiki_sections child
       JOIN section_rights_all parent ON child.parent_section_id = parent.section_id
      -- Ограничитель на случай битого дерева: сервер петель не допускает, но
      -- зациклиться здесь значит подвесить запрос (та же защита стоит в
      -- structure.section_branch_department).
-     WHERE parent.deep AND child.status = 'active' AND parent.depth < 50
+     WHERE (parent.deep OR parent.manage_subsections)
+       AND child.status = 'active' AND parent.depth < 50
 ),
 -- Граница пространства — последнее слово о том, что человек видит, и правило
 -- её не отменяет (см. _SPACE_GATE_SQL). Стоит она здесь, а не у каждого
@@ -535,7 +551,8 @@ WITH RECURSIVE section_rights_all AS (
 -- section_id мимо allowed_section_ids.
 section_rights AS (
     SELECT sr.section_id, sr.can_read, sr.can_create, sr.can_edit,
-           sr.can_delete, sr.can_publish, sr.can_approve
+           sr.can_delete, sr.can_publish, sr.can_approve,
+           sr.manage_subsections
       FROM section_rights_all sr
       JOIN wiki_sections s ON s.id = sr.section_id
      WHERE NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
@@ -574,6 +591,35 @@ def section_rules_for_user(cursor, section_ids, subjects, user_id):
     for row in cursor.fetchall():
         result.setdefault(row[0], []).append(dict(zip(keys, row[1:])))
     return result
+
+
+def manage_section_ids(cursor, ctx, subjects):
+    """Разделы, ВНУТРИ которых человек вправе строить дерево.
+
+    Тумблер правила «Может заводить подразделы» (manage_subsections) плюс всё,
+    что лежит под таким разделом, — распространение считает общий
+    _SECTION_RIGHTS_CTE, чтобы «вглубь» значило одно и то же и в правах на
+    статьи, и здесь.
+
+    Это НЕ способность. Способность глобальна: can_manage_structure открывает
+    пространство целиком, а тут человек ограничен выданной ему веткой. Поэтому
+    множество и возвращается множеством разделов, а не флагом: каждая дверь
+    структуры спрашивает про КОНКРЕТНЫЙ раздел.
+
+    В ручном режиме доступа правила не действуют вовсе (см. load_capabilities),
+    и право строить дерево вместе с ними: раздел, выданный руками, в периметре
+    правил не участвует, и поднимать по нему право значило бы выдать то, чем
+    негде воспользоваться.
+    """
+    if ctx.get('access_mode') == 'manual':
+        return frozenset()
+    cursor.execute(
+        _SECTION_RIGHTS_CTE + """
+        SELECT section_id FROM section_rights WHERE manage_subsections
+        """,
+        subject_params(subjects, ctx['user_id']),
+    )
+    return frozenset(int(row[0]) for row in cursor.fetchall())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
