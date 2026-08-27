@@ -15062,9 +15062,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         );
                     }
                     if (Array.isArray(parsed?.selectedStatuses)) {
-                        const allowed = new Set(['working', 'fired', 'bs', 'sick_leave', 'annual_leave', 'dismissal', 'unpaid_leave']);
+                        const allowed = new Set(['working', 'bs', 'sick_leave', 'annual_leave', 'unpaid_leave']);
                         const normalized = [];
                         (parsed.selectedStatuses || []).forEach(v => {
+                            // 'fired'/'dismissal' сюда не попадают намеренно:
+                            // уволенные обязаны быть НЕ выбраны при каждом
+                            // заходе, а не только при первом.
                             if (typeof v !== 'string' || !allowed.has(v)) return;
                             // Миграция старого фильтра unpaid_leave -> единый пункт Б/С (bs)
                             const next = (v === 'unpaid_leave') ? 'bs' : v;
@@ -15113,7 +15116,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             currentDate: todayDateStr(new Date(currentDate)),
                             viewMode,
                             selectedSupervisors,
-                            selectedStatuses,
+                            /* «Уволенные» не запоминаем: требование — чтобы они
+                               НЕ были выбраны по умолчанию всегда, а не только
+                               при первом заходе. Разовый просмотр уволенного
+                               иначе тянулся бы за человеком неделями. */
+                            selectedStatuses: selectedStatuses.filter(v => v !== 'fired'),
                             selectedDirections,
                             // Отбор людей поиском намеренно НЕ храним: это
                             // разовая сверка, а не постоянный фильтр — иначе
@@ -25781,16 +25788,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const groupIndex = breakDirectionGroupMembership.get(normalizeBreakDirectionKey(dir));
                                         const isSelectedForDraft = breakGroupDraftDirections.includes(dir);
                                         return (
-                                            <label key={`break-group-${dir}`} className="flex items-center gap-2 py-1 cursor-pointer hover:bg-slate-50 rounded px-1">
+                                            <label key={`break-group-${dir}`} className="flex cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 transition-colors hover:bg-white">
                                                 <input
                                                     type="checkbox"
                                                     checked={isSelectedForDraft}
                                                     onChange={() => toggleBreakGroupDraftDirection(dir)}
-                                                    className="rounded"
+                                                    className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500/60"
                                                 />
-                                                <span className="text-xs flex-1 truncate">{dir}</span>
+                                                <span className="flex-1 truncate text-[11.5px] text-slate-700">{dir}</span>
                                                 {Number.isInteger(groupIndex) && (
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                                                    <span className="rounded-full bg-white px-1.5 py-0.5 text-[10px] font-medium text-slate-500 ring-1 ring-slate-200/70">
                                                         G{groupIndex + 1}
                                                     </span>
                                                 )}
