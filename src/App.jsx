@@ -350,6 +350,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
 const APP_SUBVIEW_ANALYTICS_NAMES = Object.freeze({
     call_evaluation_analytics: 'Call evaluation analytics',
     call_evaluation_calibration: 'Call evaluation calibration',
+    call_evaluation_checkpoints: 'Call evaluation checkpoints',
     call_evaluation_journal: 'Call evaluation journal',
     call_evaluation_requests: 'Call evaluation requests',
     lms_admin: 'LMS admin',
@@ -39050,7 +39051,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         frameWindow.postMessage(callEvaluationInitPayload, window.location.origin);
                     } else if (event.data?.type === 'CALL_EVALUATION_SECTION_VIEW') {
                         const sectionId = normalizeAnalyticsToken(event.data?.section) || 'journal';
-                        if (['analytics', 'journal', 'requests', 'calibration'].includes(sectionId)) {
+                        if (['analytics', 'journal', 'requests', 'calibration', 'checkpoints'].includes(sectionId)) {
                             setCallEvalActiveTab(sectionId);
                         }
                     }
@@ -44325,6 +44326,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         requestId: Number(prev?.requestId || 0) + 1,
                     }));
                 }
+                /* «Контроль» — вкладка внутри «Журнала оценок», а тот живёт в
+                   iframe: одним navigateToView туда не попасть, нужна ещё и
+                   вкладка. Открываем тем же путём, что и остальные переходы в
+                   журнал, — своя копия этой механики разъехалась бы. */
+                if (nextView === 'call_evaluation') {
+                    sidebarLatestRef.current.openCallEvaluationSection?.({ section: 'checkpoints' });
+                    return;
+                }
                 sidebarLatestRef.current.navigateToView?.(nextView);
             }, []);
             /* Бейджи «Ивенты» и «4 You» питаются из ответа колокола. Оба числа
@@ -47600,7 +47609,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
                                             departments={departments}
-                                            onOpenJournal={openCallEvaluationSection}
                                         />
                                     </Suspense>
                                 ))}
@@ -48761,7 +48769,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
                                             departments={departments}
-                                            onOpenJournal={openCallEvaluationSection}
                                         />
                                     </Suspense>
                                 ))}
@@ -49154,7 +49161,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             showToast={showToast}
                                             departments={departments}
-                                            onOpenJournal={openCallEvaluationSection}
                                         />
                                     </Suspense>
                                 ))}

@@ -1,10 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Контрольные точки по сотруднику — вкладка «Контроль» раздела «Тренинги».
+"""Контрольные точки по сотруднику — вкладка «Контроль» в «Журнале оценок».
 
 Что это. Супервайзер провёл обратную связь по оценке звонка и решил, что
 человека нужно взять на контроль: назначает дату повторной проверки, пишет,
 почему берёт, и что именно проверит. До этого срок контроля жил в голове и в
 переписке — и терялся.
+
+Почему модуль лежит в пакете `trainings`, хотя вкладка живёт в «Журнале
+оценок». Так сложилось: сначала «Контроль» был третьей вкладкой раздела
+«Тренинги», потом владелец перенёс его к оценкам — там его и ставят, из окна
+«Дать ОС». Переносить сам файл и переименовывать ручку `/api/training_checkpoints`
+не стали: имя модуля и адрес пользователю не видны, а переезд ручки означал бы
+окно, в котором закешированный у людей старый бандл получает 404 (фронт на
+GitHub Pages и бэкенд на Render выкатываются независимо).
 
 Почему модуль отдельный и без Flask. Здесь только разбор входных данных,
 SQL и форма ответа: это ровно та часть, которая должна быть проверена
@@ -145,7 +153,11 @@ _SELECT_COLUMNS = """
     op.name  AS operator_name,
     op.status AS operator_status,
     sv.name  AS supervisor_name,
-    rb.name  AS resolved_by_name
+    rb.name  AS resolved_by_name,
+    -- Месяц оценки, из-за которой поставили на контроль. Нужен «Журналу
+    -- оценок»: он грузит оценки помесячно, и без месяца переход «Открыть
+    -- оценку» открывал бы текущий месяц, где нужной оценки может не быть.
+    ev.month AS call_month
 """
 
 _FROM_JOINS = """
@@ -153,6 +165,7 @@ _FROM_JOINS = """
     JOIN users op ON op.id = c.operator_id
     LEFT JOIN users sv ON sv.id = c.supervisor_id
     LEFT JOIN users rb ON rb.id = c.resolved_by
+    LEFT JOIN calls ev ON ev.id = c.call_id
 """
 
 
@@ -182,6 +195,7 @@ def _row_to_dict(row):
         'operator_status': row[18],
         'supervisor_name': row[19] or '',
         'resolved_by_name': row[20] or '',
+        'call_month': row[21] or None,
     }
 
 
@@ -460,6 +474,7 @@ def payload_for_manager(item, *, today=None):
         'supervisor_id': item['supervisor_id'],
         'supervisor_name': item['supervisor_name'],
         'call_id': item['call_id'],
+        'call_month': item['call_month'],
         'feedback_id': item['feedback_id'],
         'kind': item['kind'],
         'kind_label': checkpoint_kind_label(item['kind']),

@@ -1797,3 +1797,118 @@
         .ce-cp-badge.is-due { background: var(--amber-light); border-color: #fde68a; color: var(--amber); }
         .ce-cp-badge.is-overdue { background: var(--red-light); border-color: #fecaca; color: var(--red); }
         .ce-cp-badge.is-done { background: var(--green-light); border-color: #bbf7d0; color: var(--green); }
+
+        /* ── Раздел «Контроль» ─────────────────────────────────────────────
+           Список «кого проверить и когда». Цветом отмечено только то, что
+           горит: просрочено — красным, сегодня — янтарным. Сам факт контроля
+           не авария и не красится. */
+        .ce-cpl-count {
+            margin-left: 6px;
+            font-family: var(--font-mono);
+            font-size: 11.5px;
+            font-weight: 600;
+            color: var(--text-3);
+        }
+        .btn-primary .ce-cpl-count { color: rgba(255, 255, 255, 0.75); }
+
+        .ce-cpl-group { padding: 0 20px; }
+        .ce-cpl-group:first-child { padding-top: 16px; }
+        .ce-cpl-group-title {
+            display: flex;
+            align-items: center;
+            margin: 0 0 10px 2px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-3);
+        }
+        .ce-cpl-group-title.tone-red { color: var(--red); }
+        .ce-cpl-group-title.tone-amber { color: var(--amber); }
+
+        /* auto-fit, а не фиксированные две колонки: пустая дорожка
+           схлопывается, и группа из одной карточки занимает всю ширину, а не
+           половину с пустотой справа. Групп по одному элементу здесь
+           большинство — это обычный состав очереди, а не редкий случай. */
+        .ce-cpl-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            gap: 10px;
+            margin-bottom: 22px;
+        }
+
+        .ce-cpl-card {
+            padding: 14px 16px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .ce-cpl-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .ce-cpl-who { min-width: 0; }
+        .ce-cpl-name { font-size: 14px; font-weight: 600; color: var(--text); }
+        .ce-cpl-due {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 3px;
+            font-size: 12.5px;
+            font-variant-numeric: tabular-nums;
+        }
+        .ce-cpl-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+
+        .ce-cpl-focus { margin-top: 10px; font-size: 13px; line-height: 1.5; color: var(--text); }
+        .ce-cpl-muted { color: var(--text-3); }
+
+        .ce-cpl-details {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 10px;
+            padding: 10px 12px;
+            border-radius: var(--radius);
+            background: var(--surface-2);
+            font-size: 12.5px;
+            line-height: 1.5;
+            color: var(--text-2);
+        }
+        .ce-cpl-private { display: flex; align-items: flex-start; gap: 7px; color: var(--text-3); }
+        .ce-cpl-private svg { margin-top: 3px; flex: 0 0 auto; }
+
+        .ce-cpl-actions {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+        .ce-cpl-link {
+            padding: 0;
+            border: none;
+            background: none;
+            font-family: var(--font);
+            font-size: 12.5px;
+            font-weight: 500;
+            color: var(--text-2);
+            cursor: pointer;
+            transition: color var(--transition);
+        }
+        .ce-cpl-link:hover { color: var(--text); }
+        .ce-cpl-link-accent {
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent);
+        }
+        .ce-cpl-link-accent:hover { color: var(--accent-hover); }
+
+        .ce-cpl-meta { margin-top: 8px; font-size: 11.5px; color: var(--text-3); }

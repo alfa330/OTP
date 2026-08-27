@@ -35,7 +35,7 @@ SCHEMA_PATH = ROOT / "trainings" / "schema.py"
 SOURCES_PATH = ROOT / "notifications" / "sources.py"
 MAIN_JSX_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"
 TRAININGS_VIEW_PATH = ROOT / "src" / "components" / "trainings" / "TrainingsView.jsx"
-CHECKPOINTS_TAB_PATH = ROOT / "src" / "components" / "trainings" / "CheckpointsTab.jsx"
+TRAININGS_CONSTANTS_PATH = ROOT / "src" / "components" / "trainings" / "constants.js"
 BELL_PATH = ROOT / "src" / "components" / "notifications" / "NotificationsBell.jsx"
 
 
@@ -158,6 +158,7 @@ def _stored_item(**overrides):
         'resolution_comment': '',
         'created_at': '2026-08-27 10:00',
         'updated_at': '2026-08-27 10:00',
+        'call_month': '2026-09',
         'operator_name': 'Ким Оксана',
         'operator_status': 'working',
         'supervisor_name': 'Ядигаров Руслан',
@@ -520,31 +521,63 @@ class OperatorBannerTests(unittest.TestCase):
         self.assertIn("item.status === 'open'", self._banner())
 
 
-class TrainingsTabTests(unittest.TestCase):
-    def test_tab_is_registered(self):
-        source = _read(TRAININGS_VIEW_PATH)
-        self.assertIn('TAB_CHECKPOINTS', source)
-        self.assertIn("label: 'Контроль'", source)
-        self.assertIn('<CheckpointsTab', source)
+class JournalCheckpointsSectionTests(unittest.TestCase):
+    """Раздел «Контроль» живёт в «Журнале оценок» (решение владельца 27.08.2026).
 
-    def test_month_picker_is_hidden_on_the_tab(self):
+    Сначала он был третьей вкладкой раздела «Тренинги»; владелец перенёс его к
+    оценкам — контроль ставят из окна «Дать ОС», разбирая звонок, и проверять
+    идут туда же. Тесты сторожат ОБА конца переезда: что вкладка появилась в
+    журнале и что в «Тренингах» от неё не осталось следов.
+    """
+
+    def test_section_is_registered_in_the_journal(self):
+        source = _read(MAIN_JSX_PATH)
+        self.assertIn("activeSection === 'checkpoints'", source)
+        self.assertIn("setActiveSection('checkpoints')", source)
+        self.assertIn('const CheckpointCard = ', source)
+        self.assertIn('const CheckpointResolveModal = ', source)
+
+    def test_trainings_section_has_no_trace_of_it(self):
+        for path in (TRAININGS_VIEW_PATH, TRAININGS_CONSTANTS_PATH):
+            source = _read(path)
+            for noise in ('TAB_CHECKPOINTS', 'CheckpointsTab', 'checkpointDaysLeft',
+                          'checkpoints', 'Контроль'):
+                with self.subTest(path=path.name, noise=noise):
+                    self.assertNotIn(noise, source)
+
+    def test_month_filter_is_hidden_in_the_section(self):
         """Контроль — очередь дел, а не отчёт за месяц."""
-        source = _read(TRAININGS_VIEW_PATH)
-        self.assertIn('{activeTab !== TAB_CHECKPOINTS && <MonthPicker', source)
+        source = _read(MAIN_JSX_PATH)
+        self.assertIn("{activeSection !== 'checkpoints' && (", source)
 
-    def test_tab_disappears_when_the_server_says_no(self):
-        source = _read(TRAININGS_VIEW_PATH)
-        self.assertIn('setCheckpointsAllowed(false)', source)
-        self.assertIn('checkpointsAllowed', source)
-
-    def test_tab_falls_back_when_the_saved_tab_is_gone(self):
-        source = _read(TRAININGS_VIEW_PATH)
-        self.assertIn('(tab === TAB_CHECKPOINTS && !checkpointsAllowed) ? TAB_TOPICS : tab', source)
+    def test_section_is_closed_to_those_without_the_right(self):
+        """Кнопки не должно быть у того, кому сервер ответит 403."""
+        source = _read(MAIN_JSX_PATH)
+        self.assertIn('const canUseCheckpoints = isAdminRole || isSupervisorRole || isDepartmentHead;',
+                      source)
+        self.assertIn('{canUseCheckpoints && (', source)
 
     def test_days_are_recomputed_on_the_client(self):
         """Раздел держат открытым сутками — серверное days_left устареет в полночь."""
-        source = _read(CHECKPOINTS_TAB_PATH)
-        self.assertIn('checkpointDaysLeft', source)
+        source = _read(MAIN_JSX_PATH)
+        start = source.index('const groupCheckpoints = ')
+        end = source.index('const CheckpointCard = ', start)
+        self.assertIn('cpDaysLeft(item.due_date)', source[start:end])
+
+    def test_jump_to_evaluation_carries_the_month(self):
+        """Журнал грузит оценки помесячно: без месяца переход открыл бы не тот."""
+        source = _read(MAIN_JSX_PATH)
+        start = source.index('const openCheckpointEvaluation = ')
+        end = source.index('const fetchReevaluationRequests = ', start)
+        body = source[start:end]
+        self.assertIn('item?.call_month', body)
+        self.assertIn('setSelectedMonth', body)
+        self.assertIn("setActiveSection('journal')", body)
+
+    def test_bell_leads_to_the_journal(self):
+        source = _read(SOURCES_PATH)
+        self.assertIn("'view': 'call_evaluation',", source)
+        self.assertNotIn("'view': 'trainings',", source)
 
 
 class RealPostgresTests(unittest.TestCase):
@@ -616,6 +649,11 @@ class RealPostgresTests(unittest.TestCase):
                    (102, 'Свой отдел, другой СВ', 'working', 10, 8),
                    (103, 'Чужой отдел', 'working', 20, 9),
                    (7, 'Супервайзер', 'working', 10, NULL::int)
+        -- Подменяем и `calls`: карточка несёт месяц оценки, и без подмены
+        -- запрос читал бы боевые звонки, а тест зависел бы от их содержимого.
+        ), calls(id, month) AS (
+            VALUES (4821, '2026-07'), (4822, '2026-08'),
+                   (4823, '2026-08'), (4824, '2026-06')
         )
         """.format(d3=day(3), d5=day(5), d10=day(10), dm5=day(-5), ts=stamp)
 

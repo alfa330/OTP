@@ -34,16 +34,6 @@ export const GROUP_VIEWS = [VIEW_CARDS, VIEW_ROWS, VIEW_CALENDAR];
 
 export const TAB_TOPICS = 'topics';
 export const TAB_GROUPS = 'groups';
-export const TAB_CHECKPOINTS = 'checkpoints';
-
-// Виды контроля по сотруднику (задача #86). Подписи повторяют серверные
-// (trainings/schema.py::CHECKPOINT_KIND_LABELS) и нужны как запасной вариант:
-// сервер присылает готовый kind_label, но у старого ответа его может не быть.
-export const CHECKPOINT_KIND_LABELS = {
-    quality: 'Контроль качества',
-    probation: 'Испытательный срок',
-    recheck: 'Повторная проверка качества',
-};
 
 // Ключи настроек. Отдельные, потому что вид у двух вкладок разный по смыслу:
 // на темах календаря нет, и «последний вид» одной вкладки не должен
@@ -68,7 +58,7 @@ export function readPrefs() {
     try {
         const raw = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
         return {
-            tab: [TAB_TOPICS, TAB_GROUPS, TAB_CHECKPOINTS].includes(raw.tab) ? raw.tab : DEFAULT_PREFS.tab,
+            tab: [TAB_TOPICS, TAB_GROUPS].includes(raw.tab) ? raw.tab : DEFAULT_PREFS.tab,
             topicView: TOPIC_VIEWS.includes(raw.topicView) ? raw.topicView : DEFAULT_PREFS.topicView,
             groupView: GROUP_VIEWS.includes(raw.groupView) ? raw.groupView : DEFAULT_PREFS.groupView,
         };
@@ -181,23 +171,6 @@ export function plural(count, one, few, many) {
 
 export const pluralPeople = (count) => plural(count, 'сотрудник', 'сотрудника', 'сотрудников');
 export const pluralSessions = (count) => plural(count, 'занятие', 'занятия', 'занятий');
-export const pluralDays = (count) => plural(count, 'день', 'дня', 'дней');
-
-/* Сколько дней до контрольной точки: 0 — сегодня, отрицательное — просрочено.
- *
- * Считается на клиенте, хотя сервер присылает days_left готовым. Причина
- * простая: раздел открывают и держат сутками, и после полуночи серверное
- * число молча устареет — «сегодня» останется висеть на вчерашней дате.
- * Полдень, а не полночь: у даты, собранной из полуночи, перевод часов уводит
- * день на соседний. */
-export function checkpointDaysLeft(dueDate) {
-    const parts = String(dueDate || '').slice(0, 10).split('-').map(Number);
-    if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value))) return null;
-    const target = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
-    const today = new Date();
-    today.setHours(12, 0, 0, 0);
-    return Math.round((target - today) / 86400000);
-}
 
 /* ── Сводка по темам за месяц ───────────────────────────────────────────── */
 

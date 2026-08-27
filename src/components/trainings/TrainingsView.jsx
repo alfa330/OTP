@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { BookOpen, Users2, Plus, ShieldCheck } from 'lucide-react';
+import { BookOpen, Users2, Plus } from 'lucide-react';
 import { APPLE_FONT, iosBtnSecondary, IosModal, IosBadge } from '../ui/ios';
 import useStableCallback from '../wiki/useStableCallback';
 import MonthPicker from './MonthPicker';
@@ -10,10 +10,9 @@ import SessionModal from './SessionModal';
 import TopicModal from './TopicModal';
 import RolloutSheet from './RolloutSheet';
 import SessionList from './SessionList';
-import CheckpointsTab from './CheckpointsTab';
 import { ErrorBlock } from './pieces';
 import {
-    TAB_TOPICS, TAB_GROUPS, TAB_CHECKPOINTS, FAMILY_CORPORATE, TOPIC_KIND_LABELS,
+    TAB_TOPICS, TAB_GROUPS, FAMILY_CORPORATE, TOPIC_KIND_LABELS,
     buildTopicSummaries, sortTopicSummaries,
     readPrefs, writePrefs, readMonth, writeMonth,
     formatMonth, formatDuration, durationMinutes,
@@ -44,10 +43,6 @@ export default function TrainingsView({
     showToast,
     withAccessTokenHeader,
     departments: departmentsProp = null,
-    // Переход «Открыть в журнале» из вкладки «Контроль». Приходит пропом, а не
-    // собирается здесь: журнал живёт в iframe, и открывает его App своим
-    // openCallEvaluationSection — своя копия этой механики разъехалась бы.
-    onOpenJournal = null,
 }) {
     const toast = useStableCallback(showToast);
 
@@ -62,20 +57,6 @@ export default function TrainingsView({
     const [departments, setDepartments] = useState(departmentsProp || []);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState('');
-
-    /* Контрольные точки (вкладка «Контроль»). Живут ОТДЕЛЬНО от месяца: это
-     * очередь дел, а не отчёт за период, — см. CheckpointsTab. Грузятся сразу,
-     * а не по открытию вкладки: на самой вкладке стоит счётчик «сколько на
-     * контроле», и без данных он был бы пустым ровно до того момента, когда на
-     * него уже поздно смотреть. */
-    const [checkpoints, setCheckpoints] = useState([]);
-    const [checkpointCounts, setCheckpointCounts] = useState(null);
-    const [checkpointScope, setCheckpointScope] = useState('open');
-    const [checkpointsLoading, setCheckpointsLoading] = useState(true);
-    const [checkpointsError, setCheckpointsError] = useState('');
-    // Вкладка есть не у всех: сервер отвечает 403 тем, кому контроль не открыт
-    // (оператор, тренер). Скрываем её по ответу, а не по угаданной роли.
-    const [checkpointsAllowed, setCheckpointsAllowed] = useState(true);
 
     const [sessionModal, setSessionModal] = useState(null);      // {initial, defaultPeopleIds, lockedTopicId}
     const [topicModal, setTopicModal] = useState(null);          // {topic} | {}
@@ -161,47 +142,6 @@ export default function TrainingsView({
             .catch(() => { /* СВ его и не должен видеть */ });
         return () => { alive = false; };
     }, [apiBaseUrl, headers, user?.id, departmentsProp]);
-
-    const loadCheckpoints = useCallback(async (targetScope) => {
-        setCheckpointsLoading(true);
-        setCheckpointsError('');
-        try {
-            const response = await axios.get(
-                `${apiBaseUrl}/api/training_checkpoints?status=${encodeURIComponent(targetScope)}`, headers,
-            );
-            setCheckpoints(Array.isArray(response?.data?.checkpoints) ? response.data.checkpoints : []);
-            setCheckpointCounts(response?.data?.counts || null);
-            setCheckpointsAllowed(true);
-        } catch (error) {
-            if (error?.response?.status === 403) {
-                setCheckpointsAllowed(false);
-                setCheckpoints([]);
-                setCheckpointCounts(null);
-            } else {
-                setCheckpointsError(errText(error, 'Не удалось загрузить контроль'));
-            }
-        } finally {
-            setCheckpointsLoading(false);
-        }
-    }, [apiBaseUrl, headers]);
-
-    useEffect(() => {
-        if (!user?.id) return;
-        loadCheckpoints(checkpointScope);
-    }, [user?.id, checkpointScope, loadCheckpoints]);
-
-    const resolveCheckpoint = useCallback(async (item, action, comment) => {
-        try {
-            await axios.post(`${apiBaseUrl}/api/training_checkpoints/${item.id}`,
-                { action, comment: comment || '' }, headers);
-            await loadCheckpoints(checkpointScope);
-            toast?.(action === 'reopen'
-                ? 'Точка снова в работе'
-                : (action === 'cancelled' ? 'Контроль снят' : 'Проверка отмечена'), 'success');
-        } catch (error) {
-            toast?.(errText(error, 'Не удалось обновить контрольную точку'), 'error');
-        }
-    }, [apiBaseUrl, headers, loadCheckpoints, checkpointScope, toast]);
 
     const reload = useCallback(async () => {
         try {
@@ -374,21 +314,10 @@ export default function TrainingsView({
 
     /* ── Разметка ───────────────────────────────────────────────────────── */
 
-    const openCheckpoints = Number(checkpointCounts?.open || 0);
-    const dueCheckpoints = Number(checkpointCounts?.overdue || 0) + Number(checkpointCounts?.today || 0);
-
     const tabs = [
         { key: TAB_TOPICS, label: 'По темам', icon: BookOpen },
         { key: TAB_GROUPS, label: 'По группам', icon: Users2 },
-        ...(checkpointsAllowed
-            ? [{ key: TAB_CHECKPOINTS, label: 'Контроль', icon: ShieldCheck, count: openCheckpoints, alert: dueCheckpoints > 0 }]
-            : []),
     ];
-
-    /* Вкладка закрылась под пользователем — уводим на первую. Иначе человек с
-     * запомненной вкладкой «Контроль», у которого её отобрали, увидел бы
-     * пустой экран без единой активной кнопки. */
-    const activeTab = (tab === TAB_CHECKPOINTS && !checkpointsAllowed) ? TAB_TOPICS : tab;
 
     const monthTotals = useMemo(() => {
         const people = new Set(trainings.map((item) => item.operator_id));
@@ -404,13 +333,11 @@ export default function TrainingsView({
                 <div className="min-w-0">
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Тренинги</h2>
                     <p className="text-xs text-slate-500">
-                        {activeTab === TAB_CHECKPOINTS
-                            ? 'Кого взяли на контроль и когда нужно проверить повторно'
-                            : (loading || monthTotals.sessions === 0
-                                ? 'Кто, когда и по какой теме проводил занятия'
-                                : `${formatMonth(month)}: ${monthTotals.sessions} ${pluralSessions(monthTotals.sessions)} · `
-                                  + `${monthTotals.people} ${pluralPeople(monthTotals.people)}`
-                                  + (monthTotals.minutes > 0 ? ` · ${formatDuration(monthTotals.minutes)} в часах` : ''))}
+                        {loading || monthTotals.sessions === 0
+                            ? 'Кто, когда и по какой теме проводил занятия'
+                            : `${formatMonth(month)}: ${monthTotals.sessions} ${pluralSessions(monthTotals.sessions)} · `
+                              + `${monthTotals.people} ${pluralPeople(monthTotals.people)}`
+                              + (monthTotals.minutes > 0 ? ` · ${formatDuration(monthTotals.minutes)} в часах` : '')}
                     </p>
                 </div>
 
@@ -418,10 +345,7 @@ export default function TrainingsView({
                     в одну строку не влезают, и без переноса подпись «По группам»
                     ломалась на два слова и уезжала за край. */}
                 <div className="flex flex-wrap items-center gap-2">
-                    {/* Месяц у контроля смысла не имеет: точка на октябрь обязана
-                        быть видна в августе. Прячем, чтобы не спрашивать
-                        человека о том, что ни на что не влияет. */}
-                    {activeTab !== TAB_CHECKPOINTS && <MonthPicker value={month} onChange={setMonth} />}
+                    <MonthPicker value={month} onChange={setMonth} />
                     <div className="flex rounded-xl bg-slate-100 p-1">
                         {tabs.map((item) => (
                             <button
@@ -429,52 +353,23 @@ export default function TrainingsView({
                                 type="button"
                                 onClick={() => setTab(item.key)}
                                 className={`flex items-center gap-1.5 whitespace-nowrap rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
-                                    activeTab === item.key
+                                    tab === item.key
                                         ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                                         : 'text-slate-500 hover:text-slate-700'
                                 }`}
                             >
                                 <item.icon size={13} className="shrink-0" /> {item.label}
-                                {/* Число — только когда есть что показать, и красное
-                                    только когда срок уже наступил: спокойная очередь
-                                    не должна выглядеть аварией. */}
-                                {Number.isFinite(item.count) && item.count > 0 && (
-                                    <span className={`tabular-nums ${item.alert ? 'text-rose-600' : 'text-slate-400'}`}>
-                                        {item.count}
-                                    </span>
-                                )}
                             </button>
                         ))}
                     </div>
                 </div>
             </div>
 
-            {loadError && !loading && activeTab !== TAB_CHECKPOINTS && (
+            {loadError && !loading && (
                 <ErrorBlock text={loadError} onRetry={() => { setLoadError(''); reload(); }} />
             )}
 
-            {activeTab === TAB_CHECKPOINTS && (
-                <CheckpointsTab
-                    checkpoints={checkpoints}
-                    counts={checkpointCounts}
-                    loading={checkpointsLoading}
-                    loadError={checkpointsError}
-                    scope={checkpointScope}
-                    onScopeChange={setCheckpointScope}
-                    onReload={() => loadCheckpoints(checkpointScope)}
-                    onResolve={resolveCheckpoint}
-                    onOpenJournal={onOpenJournal
-                        ? (item) => onOpenJournal({
-                            operatorId: item.operator_id,
-                            operatorName: item.operator_name,
-                            supervisorId: item.supervisor_id,
-                            section: 'journal',
-                        })
-                        : null}
-                />
-            )}
-
-            {!loadError && activeTab === TAB_TOPICS && (
+            {!loadError && tab === TAB_TOPICS && (
                 <TopicsTab
                     month={month}
                     summaries={summaries}
@@ -492,7 +387,7 @@ export default function TrainingsView({
                 />
             )}
 
-            {!loadError && activeTab === TAB_GROUPS && (
+            {!loadError && tab === TAB_GROUPS && (
                 <GroupsTab
                     month={month}
                     trainings={trainings}

@@ -1,5 +1,5 @@
 ﻿import '../staleBundleRecovery';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
@@ -1787,7 +1787,7 @@ const CheckpointBlock = ({ draft, onChange, operatorName, otherOpenCheckpoint = 
                         <label className="label">
                             Дата следующей проверки
                             <CeInfo
-                                text={'Когда срок наступит, напомним в разделе «Тренинги» → «Контроль» и в колоколе.'}
+                                text={'Когда срок наступит, напомним во вкладке «Контроль» и в колоколе.'}
                                 label="Как напомним о проверке"
                             />
                         </label>
@@ -1910,6 +1910,201 @@ const CheckpointBadge = ({ checkpoint }) => {
             <FaIcon className="fas fa-user-shield" aria-hidden="true" />
             На контроле до {cpFormatDate(checkpoint.due_date)}
         </span>
+    );
+};
+
+/* ─── Раздел «Контроль» ────────────────────────────────────────────────
+ *
+ * Отвечает на один вопрос: «кого я должен проверить и когда». Поэтому по
+ * умолчанию показываются только открытые точки, а порядок один — по сроку:
+ * просроченное оказывается сверху само, отдельного «сначала горящее» не нужно.
+ *
+ * Живёт здесь, а не в «Тренингах» (где был сначала): контроль ставят из окна
+ * «Дать ОС», разбирая звонок, — и проверять идут туда же. В одном разделе
+ * переход «Открыть оценку» это простая смена состояния, а не сообщение между
+ * вкладкой портала и iframe.
+ *
+ * Месяца у раздела нет намеренно, и селектор месяца над ним скрыт: контроль —
+ * это очередь дел, а не отчёт за период. Точка, назначенная на октябрь, обязана
+ * быть видна в августе, иначе о ней вспомнят только в октябре.
+ */
+
+const CHECKPOINT_SCOPE_OPEN = 'open';
+const CHECKPOINT_SCOPE_ALL = 'all';
+
+/* Границы групп — не «красиво», а по тому, как человек планирует: просроченное
+   и сегодняшнее делают сейчас, неделя — ближайший план, остальное просто должно
+   быть видно, чтобы не забыться. */
+const groupCheckpoints = (items) => {
+    const buckets = { overdue: [], today: [], week: [], later: [] };
+    (items || []).forEach((item) => {
+        if (item.status !== 'open') return;
+        const left = cpDaysLeft(item.due_date);
+        if (left === null) buckets.later.push(item);
+        else if (left < 0) buckets.overdue.push(item);
+        else if (left === 0) buckets.today.push(item);
+        else if (left <= 7) buckets.week.push(item);
+        else buckets.later.push(item);
+    });
+    return [
+        { key: 'overdue', title: 'Просрочено', tone: 'red', items: buckets.overdue },
+        { key: 'today', title: 'Проверить сегодня', tone: 'amber', items: buckets.today },
+        { key: 'week', title: 'Ближайшая неделя', tone: 'muted', items: buckets.week },
+        { key: 'later', title: 'Позже', tone: 'muted', items: buckets.later },
+    ].filter(group => group.items.length > 0);
+};
+
+const CheckpointCard = ({ item, onResolveClick, onReopen, onOpenEvaluation }) => {
+    const [showDetails, setShowDetails] = useState(false);
+    const left = cpDaysLeft(item.due_date);
+    const isOpen = item.status === 'open';
+    const overdue = isOpen && left !== null && left < 0;
+    const dueToday = isOpen && left === 0;
+    const hasDetails = !!(item.reason || item.internal_comment);
+    const dueColor = overdue ? 'var(--red)' : (dueToday ? 'var(--amber)' : 'var(--text-2)');
+
+    return (
+        <div className="ce-cpl-card">
+            <div className="ce-cpl-head">
+                <div className="ce-cpl-who">
+                    <div className="ce-cpl-name">{item.operator_name || `Сотрудник #${item.operator_id}`}</div>
+                    <div className="ce-cpl-due" style={{ color: dueColor }}>
+                        <FaIcon className="fas fa-calendar-check" aria-hidden="true" />
+                        {cpFormatDate(item.due_date)}
+                        {isOpen && cpDueWording(item.due_date) ? ' · ' + cpDueWording(item.due_date) : ''}
+                    </div>
+                </div>
+                <div className="ce-cpl-tags">
+                    <span className={'badge ' + (overdue ? 'badge-red' : (dueToday ? 'badge-amber' : 'badge-muted'))}>
+                        {item.kind_label || 'Контроль качества'}
+                    </span>
+                    {item.status === 'done' && <span className="badge badge-green">Проверено</span>}
+                    {item.status === 'cancelled' && <span className="badge badge-muted">Контроль снят</span>}
+                </div>
+            </div>
+
+            <div className="ce-cpl-focus">
+                <span className="ce-cpl-muted">Проверить: </span>{item.focus || '—'}
+            </div>
+
+            {showDetails && (
+                <div className="ce-cpl-details">
+                    {item.reason && (
+                        <div><span className="ce-cpl-muted">Причина контроля: </span>{item.reason}</div>
+                    )}
+                    {item.internal_comment && (
+                        <div className="ce-cpl-private">
+                            <FaIcon className="fas fa-lock" aria-hidden="true" />
+                            <span>{item.internal_comment}</span>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {!isOpen && item.resolution_comment && (
+                <div className="ce-cpl-focus">
+                    <span className="ce-cpl-muted">Итог: </span>{item.resolution_comment}
+                </div>
+            )}
+
+            <div className="ce-cpl-actions">
+                {isOpen ? (
+                    <>
+                        <button className="btn btn-primary btn-sm" onClick={() => onResolveClick(item, 'done')}>
+                            <FaIcon className="fas fa-check" /> Проверено
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => onResolveClick(item, 'cancelled')}>
+                            Снять контроль
+                        </button>
+                    </>
+                ) : (
+                    <button className="btn btn-secondary btn-sm" onClick={() => onReopen(item)}>
+                        <FaIcon className="fas fa-redo" /> Вернуть в работу
+                    </button>
+                )}
+                {hasDetails && (
+                    <button type="button" className="ce-cpl-link" onClick={() => setShowDetails(v => !v)}>
+                        {showDetails ? 'Скрыть подробности' : 'Подробности'}
+                    </button>
+                )}
+                {item.call_id && (
+                    <button
+                        type="button"
+                        className="ce-cpl-link ce-cpl-link-accent"
+                        onClick={() => onOpenEvaluation(item)}
+                    >
+                        Открыть оценку <FaIcon className="fas fa-arrow-right" aria-hidden="true" />
+                    </button>
+                )}
+            </div>
+
+            {!isOpen && (item.resolved_at || item.resolved_by_name) && (
+                <div className="ce-cpl-meta">
+                    {(item.resolved_by_name || 'Закрыто') + (item.resolved_at ? ' · ' + item.resolved_at : '')}
+                </div>
+            )}
+        </div>
+    );
+};
+
+/* Итог проверки пишут не всегда, но когда пишут — он важен: по нему принимают
+   решение по испытательному сроку. Поэтому отдельное окно с полем, а не
+   мгновенное закрытие по нажатию. */
+const CheckpointResolveModal = ({ target, onClose, onSubmit }) => {
+    const [comment, setComment] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+
+    useEffect(() => { if (target) setComment(''); }, [target]);
+    if (!target) return null;
+
+    const isCancel = target.action === 'cancelled';
+    const submit = async () => {
+        setIsSaving(true);
+        try {
+            await onSubmit(target.item, target.action, comment);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    return (
+        <div className="modal-backdrop" onClick={onClose}>
+            <div className="modal" style={{maxWidth: 460}} onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <div>
+                        <h2>{isCancel ? 'Снять контроль' : 'Проверка проведена'}</h2>
+                        <div className="modal-header-sub">{target.item.operator_name || ''}</div>
+                    </div>
+                    <button className="close-btn" onClick={onClose}><FaIcon className="fas fa-times" /></button>
+                </div>
+                <div className="modal-body">
+                    <div style={{fontSize: 12.5, color: 'var(--text-2)', marginBottom: 10, lineHeight: 1.5}}>
+                        {isCancel
+                            ? 'Проверка не понадобилась. Точка уйдёт в историю, сотруднику ничего не покажем.'
+                            : 'Точка уйдёт из списка. Итог видят только руководители — сотрудник его не увидит.'}
+                    </div>
+                    <textarea
+                        className="textarea"
+                        rows={3}
+                        maxLength={2000}
+                        style={{minHeight: 78}}
+                        placeholder={isCancel
+                            ? 'Почему сняли контроль (необязательно)'
+                            : 'Что показала проверка (необязательно)'}
+                        value={comment}
+                        onChange={e => setComment(e.target.value)}
+                    />
+                </div>
+                <div className="modal-footer">
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                    <button className="btn btn-primary" onClick={submit} disabled={isSaving}>
+                        {isSaving
+                            ? <><span className="spinner" /> Сохранение...</>
+                            : (isCancel ? 'Снять контроль' : 'Готово')}
+                    </button>
+                </div>
+            </div>
+        </div>
     );
 };
 
@@ -4459,6 +4654,10 @@ const App = ({ user, initialSelection }) => {
     const canManageCalibrationRooms = isGlobalAdminRole || isSupervisorRole;
     const canUseAnalytics = isAdminRole || isSupervisorRole;
     const canManageEvaluationNotifications = isAdminRole || isDepartmentHead;
+    /* Раздел «Контроль» — тот же круг, что ставит обратную связь: админ,
+       супервайзер, глава отдела. Повторяет серверный _can_manage_checkpoints;
+       разъехаться им нельзя, иначе вкладка нарисуется и отдаст 403. */
+    const canUseCheckpoints = isAdminRole || isSupervisorRole || isDepartmentHead;
     const [calls, setCalls] = useState([]);
     const [directions, setDirections] = useState([]);
     const [operators, setOperators] = useState([]);
@@ -4493,6 +4692,12 @@ const App = ({ user, initialSelection }) => {
     const [reevaluationRequests, setReevaluationRequests] = useState([]);
     const [reevaluationSearch, setReevaluationSearch] = useState('');
     const [isRequestsLoading, setIsRequestsLoading] = useState(false);
+    const [checkpoints, setCheckpoints] = useState([]);
+    const [checkpointCounts, setCheckpointCounts] = useState(null);
+    const [checkpointScope, setCheckpointScope] = useState('open');
+    const [isCheckpointsLoading, setIsCheckpointsLoading] = useState(false);
+    const [checkpointsError, setCheckpointsError] = useState('');
+    const [checkpointResolveTarget, setCheckpointResolveTarget] = useState(null);
     const [calibrationRooms, setCalibrationRooms] = useState([]);
     const [isCalibrationLoading, setIsCalibrationLoading] = useState(false);
     const [isCalibrationExporting, setIsCalibrationExporting] = useState(false);
@@ -4974,6 +5179,7 @@ const App = ({ user, initialSelection }) => {
         if (
             requestedSection === 'journal' ||
             (requestedSection === 'requests' && canUseRequests) ||
+            (requestedSection === 'checkpoints' && canUseCheckpoints) ||
             (requestedSection === 'calibration' && canUseCalibration) ||
             (requestedSection === 'analytics' && canUseAnalytics)
         ) {
@@ -5201,6 +5407,77 @@ const App = ({ user, initialSelection }) => {
 
     useEffect(() => { fetchEvaluations(); }, [fetchEvaluations]);
 
+    /* Список грузится СРАЗУ, а не по открытию раздела: число на кнопке
+       «Контроль» — это и есть напоминание «не потерять срок», и пустым до
+       первого захода оно было бы бесполезно. Запрос один и по индексу. */
+    const fetchCheckpoints = useCallback(async (scope) => {
+        if (!canUseCheckpoints || !userId) return;
+        setIsCheckpointsLoading(true);
+        setCheckpointsError('');
+        try {
+            const r = await authFetch(
+                `${API_BASE_URL}/api/training_checkpoints?status=${encodeURIComponent(scope)}`,
+                { headers: { 'X-User-Id': userId } }
+            );
+            const d = await readJsonSafe(r);
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось загрузить контроль');
+            }
+            setCheckpoints(Array.isArray(d.checkpoints) ? d.checkpoints : []);
+            setCheckpointCounts(d.counts || null);
+        } catch (e) {
+            setCheckpoints([]);
+            setCheckpointCounts(null);
+            setCheckpointsError(e.message);
+        } finally {
+            setIsCheckpointsLoading(false);
+        }
+    }, [canUseCheckpoints, userId]);
+
+    useEffect(() => { fetchCheckpoints(checkpointScope); }, [fetchCheckpoints, checkpointScope]);
+
+    const resolveCheckpoint = useCallback(async (item, action, comment) => {
+        try {
+            const r = await authFetch(`${API_BASE_URL}/api/training_checkpoints/${item.id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-User-Id': userId },
+                body: JSON.stringify({ action, comment: comment || '' })
+            });
+            const d = await readJsonSafe(r);
+            if (!r.ok || d?.status !== 'success') {
+                throw new Error(d?.error || 'Не удалось обновить контрольную точку');
+            }
+            setCheckpointResolveTarget(null);
+            await fetchCheckpoints(checkpointScope);
+            emitCallEvaluationToast(
+                action === 'reopen'
+                    ? 'Точка снова в работе'
+                    : (action === 'cancelled' ? 'Контроль снят' : 'Проверка отмечена'),
+                'success'
+            );
+        } catch (e) {
+            emitCallEvaluationToast(`Ошибка: ${e.message}`, 'error');
+        }
+    }, [userId, fetchCheckpoints, checkpointScope]);
+
+    /* Переход к оценке, из-за которой поставили на контроль. Раздел живёт в том
+       же приложении, что и журнал, поэтому это простая смена состояния — не
+       нужно ни сообщений в iframe, ни перезагрузки.
+
+       Месяц берём из самой точки (`call_month`): журнал грузит оценки помесячно,
+       и без него открылся бы текущий месяц, где нужной оценки может не быть.
+       Строку разворачиваем заранее — список приедет и отрисует её раскрытой. */
+    const openCheckpointEvaluation = useCallback((item) => {
+        if (item?.call_month) setSelectedMonth(item.call_month);
+        if (item?.supervisor_id) setSelectedSupervisor(Number(item.supervisor_id) || null);
+        if (item?.operator_id) {
+            setOperatorFromToken({ id: item.operator_id, name: item.operator_name || '' });
+        }
+        setCalls([]);
+        setExpandedId(item?.call_id ? Number(item.call_id) : null);
+        setActiveSection('journal');
+    }, []);
+
     const fetchReevaluationRequests = useCallback(async ({ force = false } = {}) => {
         if (!userId || !canUseRequests) {
             setReevaluationRequests([]);
@@ -5361,6 +5638,7 @@ const App = ({ user, initialSelection }) => {
             if (
                 normalizedSection === 'journal' ||
                 (normalizedSection === 'requests' && canUseRequests) ||
+                (normalizedSection === 'checkpoints' && canUseCheckpoints) ||
                 (normalizedSection === 'calibration' && canUseCalibration) ||
                 (normalizedSection === 'analytics' && canUseAnalytics)
             ) {
@@ -5845,11 +6123,17 @@ const App = ({ user, initialSelection }) => {
     // и источник (random_chat_source) считает бэкенд.
     const isRandomChatDirection = !!selectedOperatorDirectionMeta?.random_chat_eligible;
     const randomChatSource = selectedOperatorDirectionMeta?.random_chat_source || 'chat2desk';
+    const checkpointGroups = useMemo(() => groupCheckpoints(checkpoints), [checkpoints]);
+    const closedCheckpoints = useMemo(
+        () => checkpoints.filter(item => item.status !== 'open'), [checkpoints]);
+
     const sectionTitle = activeSection === 'requests'
         ? 'Журнал запросов'
-        : activeSection === 'calibration'
-            ? 'Калибровка звонков'
-            : 'Журнал оценок';
+        : activeSection === 'checkpoints'
+            ? 'Контроль'
+            : activeSection === 'calibration'
+                ? 'Калибровка звонков'
+                : 'Журнал оценок';
     const reevaluationSearchNormalized = String(reevaluationSearch || '').trim().toLowerCase();
     const filteredReevaluationRequests = reevaluationRequests.filter((item) => {
         if (!reevaluationSearchNormalized) return true;
@@ -6490,6 +6774,26 @@ const App = ({ user, initialSelection }) => {
                             >
                                 Журнал запросов
                             </button>
+                            {canUseCheckpoints && (
+                            <button
+                                className={`btn btn-sm ${activeSection === 'checkpoints' ? 'btn-primary' : 'btn-secondary'}`}
+                                onClick={() => setActiveSection('checkpoints')}
+                            >
+                                Контроль
+                                {/* Число — только когда есть что проверять, и
+                                    красное только когда срок уже наступил:
+                                    спокойная очередь не должна выглядеть аварией. */}
+                                {Number(checkpointCounts?.open || 0) > 0 && (
+                                    <span
+                                        className="ce-cpl-count"
+                                        style={{ color: (Number(checkpointCounts?.overdue || 0) + Number(checkpointCounts?.today || 0)) > 0
+                                            ? 'var(--red)' : undefined }}
+                                    >
+                                        {checkpointCounts.open}
+                                    </span>
+                                )}
+                            </button>
+                            )}
                         </div>
                     )}
                     {canUseCalibration && (
@@ -6513,7 +6817,7 @@ const App = ({ user, initialSelection }) => {
                         <span className="panel-title">{sectionTitle}</span>
                     </div>
                     <div className="filters">
-                        {(isAdminRole || isSupervisorRole) && activeSection !== 'requests' && (
+                        {(isAdminRole || isSupervisorRole) && activeSection !== 'requests' && activeSection !== 'checkpoints' && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
                                 <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setCalls([]); setExpandedId(null); }}>
@@ -6535,12 +6839,36 @@ const App = ({ user, initialSelection }) => {
                                 </select>
                             </div>
                         )}
+                        {/* Месяц у контроля смысла не имеет: точка на октябрь
+                            обязана быть видна в августе. Не спрашиваем о том,
+                            что ни на что не влияет. */}
+                        {activeSection !== 'checkpoints' && (
                         <div className="filter-group">
                             <label className="label">Месяц</label>
                             <select className="select" value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)}>
                                 {months.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                             </select>
                         </div>
+                        )}
+                        {activeSection === 'checkpoints' && (
+                            <div className="filter-group">
+                                <label className="label">Показать</label>
+                                <div className="section-switch">
+                                    <button
+                                        className={`btn btn-sm ${checkpointScope === 'open' ? 'btn-primary' : 'btn-secondary'}`}
+                                        onClick={() => setCheckpointScope('open')}
+                                    >
+                                        На контроле
+                                    </button>
+                                    <button
+                                        className={`btn btn-sm ${checkpointScope === 'all' ? 'btn-primary' : 'btn-secondary'}`}
+                                        onClick={() => setCheckpointScope('all')}
+                                    >
+                                        История
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                         {activeSection === 'requests' && (
                             <div className="filter-group" style={{ minWidth: 280 }}>
                                 <label className="label">Поиск</label>
@@ -7218,6 +7546,90 @@ const App = ({ user, initialSelection }) => {
                         <div className="panel-footer">
                             <span className="panel-footer-info">
                                 {requestFooterInfo || 'Нет данных для отображения'}
+                            </span>
+                            <div style={{ display: 'flex', gap: 8 }} />
+                        </div>
+                    </>
+                ) : activeSection === 'checkpoints' ? (
+                    /* Сводных плиток здесь намеренно нет: общее число уже стоит
+                       на кнопке раздела, а «просрочено» и «сегодня» — в
+                       заголовках соответствующих групп. Одно и то же число
+                       трижды на экране — это шум, а не забота. */
+                    <>
+                        <div className="table-wrap">
+                            {isCheckpointsLoading ? (
+                                <div className="ce-cpl-list">
+                                    {[...Array(3)].map((_, idx) => (
+                                        <div key={idx} className="ce-cpl-card">
+                                            <div className="skeleton" style={{height:16,width:'35%',marginBottom:10}} />
+                                            <div className="skeleton" style={{height:14,width:'55%',marginBottom:8}} />
+                                            <div className="skeleton" style={{height:14,width:'80%'}} />
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : checkpointsError ? (
+                                <div className="empty-state">
+                                    <div className="empty-state-icon"><FaIcon className="fas fa-exclamation-circle" /></div>
+                                    <h3>Не удалось загрузить контроль</h3>
+                                    <p>{checkpointsError}</p>
+                                    <button className="btn btn-secondary btn-sm" style={{marginTop:12}} onClick={() => fetchCheckpoints(checkpointScope)}>
+                                        Повторить
+                                    </button>
+                                </div>
+                            ) : checkpoints.length === 0 ? (
+                                <div className="empty-state">
+                                    <div className="empty-state-icon"><FaIcon className="fas fa-user-shield" /></div>
+                                    <h3>{checkpointScope === 'all' ? 'Контрольных точек не было' : 'Никого не нужно проверять'}</h3>
+                                    <p>Контроль ставится во вкладке «Журнал»: откройте оценку, нажмите «ОС» и включите «Поставить на контроль».</p>
+                                </div>
+                            ) : (
+                                <>
+                                    {checkpointGroups.map(group => (
+                                        <div key={group.key} className="ce-cpl-group">
+                                            <div className={`ce-cpl-group-title tone-${group.tone}`}>
+                                                {group.title}
+                                                <span className="ce-cpl-count">{group.items.length}</span>
+                                            </div>
+                                            <div className="ce-cpl-list">
+                                                {group.items.map(item => (
+                                                    <CheckpointCard
+                                                        key={item.id}
+                                                        item={item}
+                                                        onResolveClick={(target, action) => setCheckpointResolveTarget({ item: target, action })}
+                                                        onReopen={(target) => resolveCheckpoint(target, 'reopen', '')}
+                                                        onOpenEvaluation={openCheckpointEvaluation}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {closedCheckpoints.length > 0 && (
+                                        <div className="ce-cpl-group">
+                                            <div className="ce-cpl-group-title tone-muted">
+                                                Закрытые
+                                                <span className="ce-cpl-count">{closedCheckpoints.length}</span>
+                                            </div>
+                                            <div className="ce-cpl-list">
+                                                {closedCheckpoints.map(item => (
+                                                    <CheckpointCard
+                                                        key={item.id}
+                                                        item={item}
+                                                        onResolveClick={(target, action) => setCheckpointResolveTarget({ item: target, action })}
+                                                        onReopen={(target) => resolveCheckpoint(target, 'reopen', '')}
+                                                        onOpenEvaluation={openCheckpointEvaluation}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                        <div className="panel-footer">
+                            <span className="panel-footer-info">
+                                {checkpoints.length === 0
+                                    ? 'Нет данных для отображения'
+                                    : `Показано: ${checkpoints.length}`}
                             </span>
                             <div style={{ display: 'flex', gap: 8 }} />
                         </div>
@@ -8003,6 +8415,11 @@ const App = ({ user, initialSelection }) => {
                 onSaved={handleFeedbackSaved}
                 operatorName={selectedOperator?.name || ''}
                 otherOpenCheckpoint={otherOpenCheckpointFor(feedbackTargetCall?.id)}
+            />
+            <CheckpointResolveModal
+                target={checkpointResolveTarget}
+                onClose={() => setCheckpointResolveTarget(null)}
+                onSubmit={resolveCheckpoint}
             />
             <BatchFeedbackModal
                 isOpen={showBatchFeedbackModal}
