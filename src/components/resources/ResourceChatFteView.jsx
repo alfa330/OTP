@@ -1735,6 +1735,7 @@ const ResourceChatFteView = ({ user, showToast, apiBaseUrl, withAccessTokenHeade
         <ResourceSchedulePlanner
           apiRoot={apiRoot}
           apiPrefix={CHAT_API_PREFIX}
+          enableShiftAuction={false}
           buildHeaders={buildHeaders}
           selectedWeekStart={forecastStart}
           selectedPeriodEnd={forecastEnd || forecastStart}

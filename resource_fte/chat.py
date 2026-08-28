@@ -1180,6 +1180,38 @@ def _chat_direction_ids_tx(cursor) -> List[int]:
     return [int(row[0]) for row in cursor.fetchall()]
 
 
+def get_chat_schedule_inputs(db, period_start_value: Any) -> Dict[str, Any]:
+    """Штат и переходящие ночные смены для планировщика графиков чата.
+
+    Линия считает их НА СЕРВЕРЕ (`build_resource_schedule_preview`), а планировщик
+    шлёт только период и шаблоны — один и тот же компонент на два направления.
+    Пока чат брал эти данные из тела запроса, они всегда приходили пустыми:
+    генератор не знал ни состава по ставкам, ни смены `20*08`, уходящей за полночь,
+    и утро первого дня периода оставалось непокрытым.
+    """
+    period_start = _parse_date(period_start_value)
+    if period_start is None:
+        raise ValueError("INVALID_CHAT_DATE")
+
+    from resource_fte_service import _resource_work_shift_carry_in_tx
+
+    with db._get_cursor() as cursor:
+        capacity_info = _chat_operator_capacity_tx(cursor)
+        direction_ids = _chat_direction_ids_tx(cursor)
+        # Направление не нашлось (например, его переименовали) — переносить чужие
+        # ночные смены нельзя: в график чата уехали бы люди всей компании.
+        carry_in = (
+            _resource_work_shift_carry_in_tx(
+                cursor, period_start, {"selected_direction_ids": direction_ids})
+            if direction_ids else []
+        )
+    return {
+        "operator_capacity": capacity_info,
+        "carry_in_shifts": carry_in,
+        "direction_ids": direction_ids,
+    }
+
+
 def get_chat_operator_availability(db, as_of_date_value: Optional[str] = None,
                                    forecast_week_start_value: Optional[str] = None,
                                    forecast_date_from_value: Optional[str] = None,

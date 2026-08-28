@@ -673,5 +673,58 @@ class ChatFrontendMetricsTests(unittest.TestCase):
         self.assertIn("const slRatio = safeRatio(item.served_sl, item.arrived);", line)
 
 
+PLANNER = os.path.join(REPO_ROOT, "src", "components", "resources", "ResourceSchedulePlanner.jsx")
+
+
+class ChatPlannerBoundaryTests(unittest.TestCase):
+    """Планировщик один на два направления — границы между ними держат эти стражи."""
+
+    def test_shift_templates_are_stored_per_direction(self):
+        """Общий ключ хранилища давал чату шаблоны ЛИНИИ.
+
+        Наборы разные (в чате нет 7*16 и 9*18, зато есть 12*21), а на одном ключе
+        чат читал закешированные шаблоны линии, до своей ручки не доходил вовсе
+        и предлагал ставку 0,5, которой в чате не существует.
+        """
+        planner = _read(PLANNER)
+        self.assertIn("const templateStorageKey = (apiPrefix) =>", planner)
+        self.assertIn("loadStoredTemplates(apiPrefix)", planner)
+        self.assertIn("storeTemplates(normalized, apiPrefix)", planner)
+        self.assertIn("removeItem(templateStorageKey(apiPrefix))", planner)
+        # Голого обращения к общему ключу не должно остаться нигде: единственные два
+        # места — объявление константы и сам построитель ключа направления. Их вырезаем
+        # и смотрим, что в остальном файле ключ не упоминается.
+        start = planner.index("const templateStorageKey")
+        end = planner.index(");", start) + 2
+        rest = planner[:start] + planner[end:]
+        rest = "\n".join(
+            line for line in rest.splitlines() if "const TEMPLATE_STORAGE_KEY" not in line
+        )
+        self.assertNotIn(
+            "TEMPLATE_STORAGE_KEY", rest,
+            "общий ключ шаблонов используется напрямую — чат подхватит смены линии")
+
+    def test_chat_does_not_touch_the_line_shift_auction(self):
+        """Аукцион у чата будет ОТДЕЛЬНЫЙ — здешний трогать нельзя.
+
+        Решение владельца 28.08.2026: после генерации график чата никуда не
+        отправляется. Значит из чатового планировщика убраны и переключатель
+        источника «Аукцион», и кнопка перехода, и запрос снапшота.
+        """
+        planner = _read(PLANNER)
+        self.assertIn("enableShiftAuction = true,", planner)
+        # Запрос к общему аукциону закрыт флагом.
+        fetch_guard = planner[planner.index("if (!enableShiftAuction) return;"):]
+        self.assertIn("coverageSource !== 'auction'", fetch_guard[:200])
+        # Переключатель источника и кнопка перехода — тоже.
+        self.assertIn("...(enableShiftAuction ? [['auction', 'Аукцион']] : [])", planner)
+        self.assertIn("enableShiftAuction && typeof onOpenShiftAuction === 'function'", planner)
+
+        chat = _read(CHAT_VIEW)
+        self.assertIn("enableShiftAuction={false}", chat)
+        # И ни одного прямого обращения к аукциону из витрины чата.
+        self.assertNotIn("shift_auction", chat)
+
+
 if __name__ == "__main__":
     unittest.main()

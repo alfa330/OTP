@@ -268,19 +268,28 @@ const normalizeTemplateForLocalUse = (template) => {
   };
 };
 
-const loadStoredTemplates = () => {
+// Ключ хранилища — СВОЙ на каждое направление. Наборы смен разные (в чате нет 7*16
+// и 9*18, зато есть 12*21), и на общем ключе чат читал шаблоны линии, до своей ручки
+// не доходил вовсе и предлагал ставку 0,5, которой в чате не существует.
+const templateStorageKey = (apiPrefix) => (
+  String(apiPrefix || '').includes('/chat')
+    ? `${TEMPLATE_STORAGE_KEY}_chat`
+    : TEMPLATE_STORAGE_KEY
+);
+
+const loadStoredTemplates = (apiPrefix) => {
   if (typeof window === 'undefined') return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(TEMPLATE_STORAGE_KEY) || '[]');
+    const parsed = JSON.parse(window.localStorage.getItem(templateStorageKey(apiPrefix)) || '[]');
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 };
 
-const storeTemplates = (templates) => {
+const storeTemplates = (templates, apiPrefix) => {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(TEMPLATE_STORAGE_KEY, JSON.stringify(templates || []));
+  window.localStorage.setItem(templateStorageKey(apiPrefix), JSON.stringify(templates || []));
 };
 
 const getCoverageVisualState = (row) => {
@@ -1362,8 +1371,11 @@ const ResourceSchedulePlanner = ({
   weekPicker,
   notify,
   onOpenShiftAuction,
+  // Аукцион смен пока только у линии. У чата он будет ОТДЕЛЬНЫЙ (решение владельца
+  // 28.08.2026), поэтому здешнего касаться нельзя: график чата никуда не отправляется.
+  enableShiftAuction = true,
 }) => {
-  const [templates, setTemplates] = useState(() => loadStoredTemplates());
+  const [templates, setTemplates] = useState(() => loadStoredTemplates(apiPrefix));
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [plannerDays, setPlannerDays] = useState([]);
   const [savedSchedule, setSavedSchedule] = useState(null);
@@ -1468,9 +1480,9 @@ const ResourceSchedulePlanner = ({
       };
     });
     setTemplates(normalized);
-    storeTemplates(normalized);
+    storeTemplates(normalized, apiPrefix);
     setSelectedTemplateId((current) => (normalized.some((item) => item.id === current) ? current : normalized[0]?.id || ''));
-  }, []);
+  }, [apiPrefix]);
 
   const loadDefaultTemplates = useCallback(async () => {
     if (!apiRoot) return;
@@ -1741,11 +1753,12 @@ const ResourceSchedulePlanner = ({
   }, [apiRoot, buildHeaders, emit]);
 
   useEffect(() => {
+    if (!enableShiftAuction) return;
     if (coverageSource !== 'auction') return;
     if (auctionLoading) return;
     if (auctionLoadedAt) return;
     fetchAuctionLots();
-  }, [auctionLoadedAt, auctionLoading, coverageSource, fetchAuctionLots]);
+  }, [auctionLoadedAt, auctionLoading, coverageSource, enableShiftAuction, fetchAuctionLots]);
 
   const auctionShiftsByDate = useMemo(() => {
     const map = new Map();
@@ -2359,9 +2372,9 @@ const ResourceSchedulePlanner = ({
   }, [activeDayIndex, activeDayIsReadOnly, applyPlannerDaysUpdate, pushHistorySnapshot]);
 
   const resetTemplates = useCallback(() => {
-    if (typeof window !== 'undefined') window.localStorage.removeItem(TEMPLATE_STORAGE_KEY);
+    if (typeof window !== 'undefined') window.localStorage.removeItem(templateStorageKey(apiPrefix));
     loadDefaultTemplates();
-  }, [loadDefaultTemplates]);
+  }, [apiPrefix, loadDefaultTemplates]);
 
   return (
     <div className={`space-y-4 ${hasScheduleToSave ? 'pb-24' : ''}`}>
@@ -2394,7 +2407,7 @@ const ResourceSchedulePlanner = ({
             )}
           </div>
           <div className="flex flex-wrap gap-2 xl:justify-end">
-            {typeof onOpenShiftAuction === 'function' ? (
+            {enableShiftAuction && typeof onOpenShiftAuction === 'function' ? (
               <button
                 type="button"
                 onClick={() => onOpenShiftAuction({
@@ -2577,7 +2590,7 @@ const ResourceSchedulePlanner = ({
                 <div className="inline-flex h-10 overflow-hidden rounded-lg border border-slate-200 bg-white p-1" title="Источник данных для покрытия FTE">
                   {[
                     ['planner', 'Расписание'],
-                    ['auction', 'Аукцион'],
+                    ...(enableShiftAuction ? [['auction', 'Аукцион']] : []),
                   ].map(([key, label]) => (
                     <button
                       key={key}

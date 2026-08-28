@@ -93,6 +93,7 @@ from resource_fte.chat import (
     get_chat_day,
     get_chat_operator_availability,
     get_chat_overview,
+    get_chat_schedule_inputs,
     get_chat_settings,
     get_chat_shift_templates,
     recalculate_chat_forecast,
@@ -8252,13 +8253,20 @@ def api_resource_fte_chat_schedule_preview():
             uplift_profile=uplift,
         )
         templates = _normalize_shift_templates(payload.get('templates'))
-        operator_capacity = payload.get('operator_capacity') or None
+        # Штат и переходящие ночные смены считаем на сервере — как линия. Планировщик
+        # общий на два направления и шлёт только период с шаблонами, поэтому взятые
+        # из тела запроса они всегда были пусты: генератор не видел ни состава по
+        # ставкам, ни смены за полночь, и утро первого дня оставалось непокрытым.
+        schedule_inputs = get_chat_schedule_inputs(
+            db, payload.get('date_from') or payload.get('week_start') or forecast['period_start'])
+        operator_capacity = payload.get('operator_capacity') or schedule_inputs['operator_capacity']
+        carry_in_shifts = payload.get('carry_in_shifts') or schedule_inputs['carry_in_shifts']
         preview = _generate_schedule_preview_from_forecast(
             {"days": forecast["days"]},
             templates,
             operator_capacity=operator_capacity,
             respect_operator_capacity=bool(payload.get('respect_operator_capacity')),
-            carry_in_shifts=payload.get('carry_in_shifts') or None,
+            carry_in_shifts=carry_in_shifts or None,
         )
         return jsonify({"status": "success", "forecast": forecast, "preview": preview}), 200
     except ValueError as error:
