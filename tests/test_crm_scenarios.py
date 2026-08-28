@@ -725,6 +725,47 @@ class ParcelTest(unittest.TestCase):
                          ['ФИО водителя', 'Номер ВУ', 'Телефон', 'Город'])
 
 
+class CardOrTextTest(unittest.TestCase):
+    """Чем обращение уходит в группу: картинкой или текстом.
+
+    Решение владельца 28.08.2026: картинка остаётся только у вопросов Sapar —
+    там её есть чем наполнить (до восемнадцати строк, плашки, галочки). У
+    остальных тематик сообщение короткое, и картинка ради него заставляла
+    открывать вложение, чтобы прочитать то, что уместилось бы в тексте.
+    """
+
+    def test_only_sapar_questions_go_as_a_card(self):
+        card = {item['key'] for item in sc.SCENARIOS if sc.sends_card(item['key'])}
+        sapar = {item['key'] for item in sc.SCENARIOS
+                 if item['queue_code'] == 'itaxi_sapar'}
+        self.assertEqual(card, sapar)
+        self.assertFalse(sc.sends_card('parcel_location'))
+        self.assertFalse(sc.sends_card('office_status'))
+        self.assertFalse(sc.sends_card('yandex_termobox'))
+
+    def test_the_rule_is_set_on_the_queue_not_on_each_topic(self):
+        """Шестая категория Sapar поедет карточкой сама — про неё не забудут."""
+        self.assertEqual(sc.CARD_QUEUES, frozenset({'itaxi_sapar'}))
+
+    def test_unknown_topic_does_not_pretend_to_have_a_card(self):
+        self.assertFalse(sc.sends_card(''))
+        self.assertFalse(sc.sends_card('нет такой тематики'))
+
+    def test_short_topics_really_are_short(self):
+        """Основание правила: у тематик без картинки сообщение в шесть строк.
+
+        Сторожим саму причину, а не только следствие: если тематика без картинки
+        разрастётся до полутора десятков строк, решение придётся пересматривать,
+        и лучше узнать об этом от теста.
+        """
+        for item in sc.SCENARIOS:
+            if sc.sends_card(item['key']):
+                continue
+            body = sc.render_body(item['key'], full(item['key']))
+            lines = [line for line in body.split(chr(10)) if line.strip()]
+            self.assertLessEqual(len(lines), 8, item['key'])
+
+
 class OfficeStatusTest(unittest.TestCase):
     """ТЗ #201, §3: «Статус работы офиса»."""
 

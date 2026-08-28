@@ -64,12 +64,17 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
                                       payload['queue_title'] or '')
     due_text = _due_text(payload['due_at'])
 
-    # Данные водителя уходят ПОДПИСЬЮ, а не на картинку: ИИН из картинки не
-    # скопировать, а с него и начинается работа специалиста в группе.
+    # Данные водителя уходят ПОДПИСЬЮ к картинке, а не на саму картинку: ИИН с
+    # неё не скопировать, а с него и начинается работа специалиста в группе. У
+    # тематик без картинки они и так стоят строками в тексте обращения.
     data_rows = [row for block in blocks if block['kind'] == scenarios.BLOCK_DATA
                  for row in block['rows']]
-    picture = _card_png(ticket_id, heading=heading, subtitle=subtitle,
-                        blocks=[b for b in blocks if b['kind'] != scenarios.BLOCK_DATA])
+    # Картинку рисуем только тем тематикам, у которых её есть чем наполнить
+    # (scenarios.CARD_QUEUES). Остальные уходят текстом — тем же самым, что
+    # раньше служил запасным путём, а не урезанным его вариантом.
+    picture = (_card_png(ticket_id, heading=heading, subtitle=subtitle,
+                         blocks=[b for b in blocks if b['kind'] != scenarios.BLOCK_DATA])
+               if scenarios.sends_card(payload['scenario_key']) else None)
 
     if picture is not None:
         caption = telegram.build_card_caption(
@@ -87,6 +92,7 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
             picture = None
 
     if picture is None:
+        client_name, client_phone = _client_line(payload, data_rows)
         text = telegram.build_ticket_message(
             ticket_id=ticket_id,
             subject=payload['subject'],
@@ -94,8 +100,8 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
             queue_title=payload['queue_title'],
             heading=scenario.get('group_title'),
             priority=payload['priority'],
-            client_name=payload['client_name'],
-            client_phone=payload['client_phone'],
+            client_name=client_name,
+            client_phone=client_phone,
             due_text=due_text,
             own_wording=bool(scenario.get('body_template')),
         )
@@ -126,14 +132,33 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
                           actor_name=payload['created_by_name'],
                           payload={'queue': payload['queue_title']})
 
-    # Скриншот оператора идёт следом реплаем: место фото в сообщении занято
-    # карточкой, а склеивать их в альбом нельзя — на альбом не отвечают одним
-    # реплаем, и ответ группы перестал бы находить обращение.
+    # Скриншот оператора идёт следом реплаем на корень нити — само обращение (у
+    # Sapar это карточка, у остальных текст). Склеивать их в альбом нельзя: на
+    # альбом не отвечают одним реплаем, и ответ группы перестал бы находить
+    # обращение.
     if attachment is not None:
         _send_attachment(db, ticket_id, payload['chat_id'], message_id, attachment,
                          author_user_id=payload['created_by'],
                          author_name=payload['created_by_name'])
     return True, None
+
+
+def _client_line(payload, data_rows):
+    """ФИО и телефон подписью «Клиент» — только если их нет в самом обращении.
+
+    У тематик регионов они стоят строками блока данных («ФИО водителя», «Телефон»),
+    и подпись повторяла бы их слово в слово: одно и то же дважды в одном
+    сообщении. Там, где водителя в тексте не называют, подпись остаётся
+    единственным местом, где он назван, — поэтому правило по значению, а не по
+    тематике.
+    """
+    named = {str(row.get('value') or '').strip() for row in data_rows or ()}
+
+    def keep(value):
+        text = str(value or '').strip()
+        return text if text and text not in named else None
+
+    return keep(payload.get('client_name')), keep(payload.get('client_phone'))
 
 
 def _card_png(ticket_id, *, heading, subtitle, blocks):

@@ -165,6 +165,31 @@ PAYLOAD = {
 }
 
 
+# Обращение тематики регионов: коротким тематикам картинка больше не рисуется,
+# поэтому рядом с «сапаровским» PAYLOAD нужен и такой.
+PARCEL_PAYLOAD = dict(
+    PAYLOAD,
+    subject='Уточнение посылки · Атырау · Тестов Тест Тестович',
+    body=('ФИО водителя: Тестов Тест Тестович\n'
+          'Номер ВУ: 123456789\n'
+          'Телефон: +7 777 000 00 00\n'
+          'Город: Атырау\n'
+          '\n'
+          'Дата доставки: 20.08.2026\n'
+          'Описание посылки: синяя коробка Kaspi'),
+    priority='normal',
+    client_name='Тестов Тест Тестович',
+    client_phone='+7 777 000 00 00',
+    queue_title='Регионы',
+    scenario_key='parcel_location',
+    answers={
+        'driver_name': 'Тестов Тест Тестович', 'driver_licence': '123456789',
+        'contact_number': '+7 777 000 00 00', 'parcel_city': 'Атырау',
+        'delivery_date': '2026-08-20', 'parcel_description': 'синяя коробка Kaspi',
+    },
+)
+
+
 class ServiceCase(unittest.TestCase):
     def setUp(self):
         self.db = FakeDb()
@@ -187,12 +212,17 @@ class ServiceCase(unittest.TestCase):
 
 
 class DeliveryTest(ServiceCase):
-    """Обращение уходит в группу КАРТИНКОЙ (ТЗ #206), подпись несёт данные.
+    """Вопросы Sapar уходят в группу КАРТИНКОЙ (ТЗ #206), подпись несёт данные.
 
     Картинка — не украшение: разметка Telegram не умеет ни плашек, ни галочек
     в кружках, а СЗоВ приложила к задаче именно такой макет. Зато с картинки
     нельзя ни скопировать ИИН, ни нажать ссылку — поэтому и то, и другое обязано
     остаться в подписи, и это здесь проверяется.
+
+    С 28.08.2026 картинка осталась ТОЛЬКО у Sapar (решение владельца): у
+    коротких тематик в сообщении четыре-шесть строк, и вложение ради них
+    заставляло открывать картинку, чтобы прочитать то, что уместилось бы в
+    самом сообщении. Тесты ниже держат обе стороны правила.
     """
 
     def test_ticket_goes_to_the_group_as_a_card(self):
@@ -273,6 +303,53 @@ class DeliveryTest(ServiceCase):
         self.assertIn('Обращение №42', transport.sent[0]['text'])
         # Текстовый путь берёт готовый текст обращения — тот же, что в карточке.
         self.assertIn(PAYLOAD['body'], transport.sent[0]['text'])
+
+    def test_short_topics_go_as_plain_text(self):
+        """Решение владельца 28.08.2026: картинка только у вопросов Sapar.
+
+        У «Уточнения посылки» в сообщении шесть строк. Картинкой они
+        превращались во вложение, которое надо открыть, чтобы прочитать, и
+        которое не находится поиском по чату.
+        """
+        _queries, transport = self.wire(payload=dict(PARCEL_PAYLOAD))
+        ok, error = service.deliver_ticket(self.db, 42)
+
+        self.assertTrue(ok, error)
+        self.assertEqual(transport.files, [], 'картинка нарисовалась там, где её убрали')
+        self.assertEqual(len(transport.sent), 1)
+        text = transport.sent[0]['text']
+        # Текст несёт то же, что несла карточка с подписью: просьбу тематики,
+        # ссылку на обращение и все данные водителя.
+        self.assertIn('Просьба уточнить, где посылка водителя', text)
+        self.assertIn('Обращение №42', text)
+        self.assertIn('ticket_id=42', text)
+        for value in ('Тестов Тест Тестович', '123456789', '+7 777 000 00 00', 'Атырау'):
+            self.assertIn(value, text, value)
+
+    def test_the_driver_is_not_named_twice_in_one_message(self):
+        """ФИО и телефон стоят строками обращения — подпись «Клиент» их повторяла.
+
+        Пока обращение уходило картинкой, подписи «Клиент» в тексте никто не
+        видел. Как только короткие тематики поехали текстом, она встала прямо
+        под теми же самыми двумя строками.
+        """
+        _queries, transport = self.wire(payload=dict(PARCEL_PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        text = transport.sent[0]['text']
+
+        self.assertNotIn('Клиент', text)
+        self.assertEqual(text.count('Тестов Тест Тестович'), 1)
+        self.assertEqual(text.count('+7 777 000 00 00'), 1)
+
+    def test_the_client_line_survives_where_the_text_does_not_name_the_driver(self):
+        """Правило по значению, а не по тематике: назвали иначе — подпись нужна."""
+        _queries, transport = self.wire(payload=dict(
+            PARCEL_PAYLOAD, client_name='Петров Пётр', client_phone='+7 700 111 22 33'))
+        service.deliver_ticket(self.db, 42)
+        text = transport.sent[0]['text']
+
+        self.assertIn('Клиент', text)
+        self.assertIn('Петров Пётр', text)
 
     def test_ticket_without_a_topic_goes_as_text(self):
         """Рисовать нечего: у обращения без сценария нет ни блоков, ни просьбы."""
