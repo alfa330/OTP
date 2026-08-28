@@ -311,6 +311,10 @@ class ScheduleChangeActorWiringTests(unittest.TestCase):
             "operator_cancel_post_auction_claim",
             "admin_claim_shift_for_operator",
             "respond_shift_swap_request",
+            # Заявку на изменение смены в график вписывает не публичный
+            # respond_shift_change_request, а этот приватный шаг — историю
+            # сторожим там, где происходит сама запись.
+            "_apply_shift_change_request_tx",
             "save_shift",
             "delete_shift",
             "toggle_day_off",

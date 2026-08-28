@@ -2275,6 +2275,38 @@ def _checkpoint_scope_for_requester(requester_id, requester):
     return {'scope': 'self', 'user_id': requester_id}
 
 
+def _shift_change_scope_for_requester(requester_id, requester):
+    """Описание границы «чьи заявки на изменение смены видит этот человек».
+
+    Зеркалит _filter_operators_for_requester_scope — тот же периметр, по
+    которому раздел «Графики работы» решает, чьи смены человек вообще видит.
+    Описанием, а не SQL: условие нужно колоколу с именованными параметрами
+    (см. notifications.sources.shift_requests), а сам список очереди собирается
+    прогоном id через _filter_operators_for_requester_scope. Два рукописных
+    условия разъехались бы молча.
+
+    Тренер здесь ОТДЕЛЬНО получает 'none', хотя графики он видит: решать по
+    заявкам ему нельзя (мутации идут через _resolve_management_requester), а
+    уведомление о том, чего не можешь сделать, — это ровно тот шум, ради
+    отсутствия которого раздел и делался.
+    """
+    role = _normalize_user_role(requester[3] if requester else None)
+    if _is_global_admin_requester(role, requester_id):
+        return {'scope': 'all'}
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids:
+        return {'scope': 'departments', 'department_ids': sorted(headed_dept_ids)}
+    if role == 'trainer':
+        return {'scope': 'none'}
+    if _is_supervisor_role(role):
+        department_id = _department_scope_id_for_requester(requester_id)
+        if department_id is None:
+            # Тот же фолбэк, что и в планировщике: у СВ без отдела границы нет.
+            return {'scope': 'all'}
+        return {'scope': 'departments', 'department_ids': [department_id]}
+    return {'scope': 'self', 'user_id': requester_id}
+
+
 def _attach_checkpoints_to_evaluations(evaluations, requester_id, requester):
     """Дописывает к каждой оценке её контрольную точку, если она есть.
 
@@ -39949,6 +39981,188 @@ def get_shift_swap_journal():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/work_schedules/shift_change/requests', methods=['GET', 'POST'])
+@require_api_key
+def shift_change_requests():
+    """
+    Заявки оператора на изменение СВОЕЙ смены (задача #17).
+
+    GET:  свои заявки (свежие сверху) + счётчик ожидающих.
+    POST: подать заявку.
+          {kind: 'shorten'|'extra', shift_date: 'YYYY-MM-DD', payload: {...}, comment?}
+          payload для 'shorten': {segment:{start,end}, newStart, newEnd}
+          payload для 'extra':   {start, end}
+
+    Отделу front_office раздел ДОСТУПЕН, в отличие от обменов: обмен показывает
+    смены коллег, а здесь оператор просит только про себя и только у своего
+    руководителя — прятать тут нечего.
+    """
+    try:
+        requester_id, _user_data, err = _work_schedule_operator_requester()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+
+        if request.method == 'GET':
+            raw_limit = request.args.get('limit')
+            try:
+                limit = int(raw_limit) if raw_limit is not None else 100
+            except ValueError:
+                return jsonify({"error": "Invalid limit"}), 400
+            return jsonify(db.get_shift_change_requests_for_operator(
+                operator_id=requester_id,
+                limit=limit
+            )), 200
+
+        data = request.get_json(silent=True) or {}
+        kind = data.get('kind')
+        shift_date = data.get('shift_date')
+        payload = data.get('payload')
+        if not kind or not shift_date:
+            return jsonify({"error": "kind and shift_date are required"}), 400
+
+        created = db.create_shift_change_request(
+            operator_id=requester_id,
+            request_kind=kind,
+            shift_date=shift_date,
+            payload=payload,
+            request_comment=data.get('comment')
+        )
+        return jsonify({"message": "Shift change request created", "request": created}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in shift change requests endpoint: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/shift_change/seen', methods=['POST'])
+@require_api_key
+def mark_shift_change_requests_seen():
+    """Оператор посмотрел решения по своим заявкам — погасить уведомления."""
+    try:
+        requester_id, _user_data, err = _work_schedule_operator_requester()
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+        return jsonify({"updated": db.mark_shift_change_requests_seen(requester_id)}), 200
+    except Exception as e:
+        logging.error(f"Error marking shift change requests seen: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/shift_change/review', methods=['GET'])
+@require_api_key
+def review_shift_change_requests():
+    """
+    Очередь «Запросы» в разделе «Графики работы».
+
+    Query params: status (можно повторять; по умолчанию все), start_date, end_date, limit.
+
+    Смотреть очередь может тот же, кто видит графики, — включая тренера
+    (у него это чтение). Разбирать заявки тренер не может: решение идёт через
+    _resolve_management_requester, как и любая правка графика.
+    """
+    try:
+        requester_id, user_data, auth_error = _resolve_work_schedule_viewer()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        statuses = [s for s in request.args.getlist('status') if s]
+        start_date = (request.args.get('start_date') or '').strip() or None
+        end_date = (request.args.get('end_date') or '').strip() or None
+
+        raw_limit = request.args.get('limit')
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 300
+        except ValueError:
+            return jsonify({"error": "Invalid limit"}), 400
+
+        candidate_ids = db.get_shift_change_request_operator_ids(
+            statuses=statuses, start_date=start_date, end_date=end_date
+        )
+        allowed = _filter_operators_for_requester_scope(
+            user_data, requester_id, [{'id': oid} for oid in candidate_ids]
+        )
+        allowed_ids = [
+            operator_id for operator_id in (_operator_item_id(item) for item in allowed)
+            if operator_id is not None
+        ]
+
+        payload = db.get_shift_change_requests_for_review(
+            operator_ids=allowed_ids,
+            statuses=statuses,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit
+        )
+        # Тренеру очередь видна, но кнопок решения у него быть не должно —
+        # то же правило, что и plannerReadOnly во фронте.
+        payload['canReview'] = bool(
+            _is_admin_role(user_data[3])
+            or _is_supervisor_role(user_data[3])
+            or _headed_department_id(requester_id) is not None
+        )
+        return jsonify(payload), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error listing shift change requests for review: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/shift_change/respond', methods=['POST'])
+@require_api_key
+def respond_shift_change_request():
+    """
+    Решение по заявке: {request_id, action: 'approve'|'reject'|'cancel', comment?}
+
+    'cancel' — отзыв автором, поэтому сюда пускаем и оператора. 'approve' и
+    'reject' — правка чужого графика, значит только управленец, и обязательно
+    в своём периметре: иначе по одному id можно было бы согласовать смену в
+    чужом отделе.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        request_id = data.get('request_id')
+        action = str(data.get('action') or '').strip().lower()
+        if not request_id or action not in ('approve', 'reject', 'cancel'):
+            return jsonify({"error": "request_id and a valid action are required"}), 400
+
+        if action == 'cancel':
+            requester_id, _user_data, err = _work_schedule_operator_requester()
+            if err:
+                return jsonify({"error": err[0]}), err[1]
+        else:
+            requester_id, user_data, err = _resolve_management_requester()
+            if err:
+                return jsonify({"error": err[0]}), err[1]
+
+            target_operator_id = db.get_shift_change_request_operator(request_id)
+            if target_operator_id is None:
+                return jsonify({"error": "Заявка не найдена"}), 404
+            allowed = _filter_operators_for_requester_scope(
+                user_data, requester_id, [{'id': target_operator_id}]
+            )
+            if not allowed:
+                return jsonify({"error": "Forbidden"}), 403
+
+        updated = db.respond_shift_change_request(
+            request_id=request_id,
+            reviewer_id=requester_id,
+            action=action,
+            response_comment=data.get('comment')
+        )
+        return jsonify({"message": "Shift change request updated", "request": updated}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error responding to shift change request: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/work_schedules/history', methods=['GET'])
 @require_api_key
 def get_work_schedule_history():
@@ -53811,6 +54025,9 @@ def _notifications_viewer_context(requester_id, requester):
         'birthday_is_global': bool(birthday_is_global),
         'birthday_department_id': birthday_department_id,
         'checkpoints': checkpoints_scope,
+        # Заявки на изменение смены. Источник двусторонний: руководителю —
+        # очередь его периметра, оператору — решения по его собственным заявкам.
+        'shift_requests': _shift_change_scope_for_requester(requester_id, requester),
         'hidden_sources': () if can_see_tasks else ('tasks',),
     }
 

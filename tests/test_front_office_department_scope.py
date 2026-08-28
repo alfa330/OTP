@@ -187,10 +187,16 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
     def test_tabs_and_swap_buttons_are_hidden(self):
         source = _read(APP_PATH)
 
-        # Переключатель табов (Смены/Замены/Смены коллег) скрыт целиком.
-        switcher_start = source.index("setShowSwapCreateModal(false);\n                                                        setSwapCandidatesSearch('');")
-        switcher_region = source[switcher_start - 2000:switcher_start]
-        self.assertIn("{!operatorColleagueShiftsHidden && (", switcher_region)
+        # Скрыты именно «Замены» и «Смены коллег», а не переключатель целиком:
+        # рядом с ними живут «Смены» и «Запросы», которые фронт-офису доступны
+        # (заявка на изменение своей смены чужих смен не показывает).
+        for label in ("Замены", "Смены коллег"):
+            tab_at = source.index("                                                    %s\n" % label)
+            self.assertIn(
+                "{!operatorColleagueShiftsHidden && (",
+                source[tab_at - 900:tab_at],
+                "таб «%s» перестал быть скрыт у фронт-офиса" % label,
+            )
 
         # Обе кнопки «Обменять» обёрнуты в гвард.
         self.assertGreaterEqual(source.count("{!operatorColleagueShiftsHidden && ("), 3)
@@ -209,9 +215,14 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
     def test_hidden_operator_cannot_stay_on_colleague_tabs(self):
         source = _read(APP_PATH)
 
+        # «Запросы» из этого правила исключены намеренно: там оператор просит
+        # про СВОЮ смену у своего руководителя и ничьих чужих смен не видит,
+        # то есть скрывать нечего. Скрыты по-прежнему «Замены» и «Смены коллег».
         self.assertIn(
-            "if (operatorColleagueShiftsHidden && operatorSelfTab !== 'schedule') {",
-            source,
+            "if (operatorColleagueShiftsHidden\n"
+            "                    && operatorSelfTab !== 'schedule'\n"
+            "                    && operatorSelfTab !== 'requests') {",
+            source.replace("\r\n", "\n"),
         )
         self.assertIn("setOperatorSelfTab('schedule');", source)
 

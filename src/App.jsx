@@ -36,7 +36,11 @@ import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/sched
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal, IosSegmented } from './components/ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSegmented } from './components/ui/ios';
+// Только сам пикер: minutesToTime/timeToMinutes у модуля свои, а в App.jsx
+// функции с такими именами уже есть — импорт «звёздочкой» их бы перекрыл.
+import { IosTimePicker } from './components/ui/TimePicker';
+import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
@@ -13936,7 +13940,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             }
 
-        function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [] }) {
+        function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null }) {
             // Отдел ЗРИТЕЛЯ. Набор действий раздела зависит не от него, а от
             // отдела, который выбран в шапке (plannerScopeDepartmentCode ниже):
             // у глобального админа своего отдела может не быть вовсе, а список
@@ -14303,6 +14307,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 comment: ''
             });
             const [swapDraftRequests, setSwapDraftRequests] = useState([]);
+
+            /* ─── Заявки на изменение своей смены (задача #17) ───────────────
+               Отдельно от обменов: у обмена вторая сторона — коллега, здесь —
+               руководитель. Оператор просит сократить смену или добавить к дню
+               ещё одну часть; согласованная заявка сама правит график.
+
+               Отделу front_office раздел доступен, в отличие от «Замен»: тут
+               оператор не видит ничьих смен, кроме своих, — прятать нечего. */
+            const [shiftChangeRequests, setShiftChangeRequests] = useState([]);
+            const [shiftChangeLoading, setShiftChangeLoading] = useState(false);
+            const [shiftChangeError, setShiftChangeError] = useState('');
+            const [shiftChangeSubmitting, setShiftChangeSubmitting] = useState(false);
+            const [shiftChangeCancellingId, setShiftChangeCancellingId] = useState(null);
+            const [showShiftChangeModal, setShowShiftChangeModal] = useState(false);
+            const [shiftChangeForm, setShiftChangeForm] = useState({
+                kind: 'shorten',
+                date: '',
+                // Исходный кусок смены — снимок на момент открытия формы. Сервер
+                // сверит его с графиком ещё раз при согласовании: между подачей
+                // и решением смену могли подвинуть.
+                segment: null,
+                newStart: '',
+                newEnd: '',
+                start: '',
+                end: '',
+                comment: ''
+            });
+
+            /* Очередь «Запросы» в «Графиках работы»: заявки операторов периметра. */
+            const [reviewRequests, setReviewRequests] = useState([]);
+            const [reviewPendingCount, setReviewPendingCount] = useState(0);
+            const [reviewCanReview, setReviewCanReview] = useState(false);
+            const [reviewLoading, setReviewLoading] = useState(false);
+            const [reviewError, setReviewError] = useState('');
+            const [showReviewModal, setShowReviewModal] = useState(false);
+            const [reviewRespondingId, setReviewRespondingId] = useState(null);
+            const [reviewStatusFilter, setReviewStatusFilter] = useState('pending');
+            const [reviewComments, setReviewComments] = useState({});
+
             const swapDraftColorPalette = useMemo(() => ([
                 {
                     key: 'amber',
@@ -22589,9 +22632,392 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!isOperatorSelfSchedules || !user) return;
                 loadSwapRequests({ silent: false });
             }, [isOperatorSelfSchedules, user, loadSwapRequests]);
-            // Если сменам коллег закрыт доступ — не даём остаться на скрытых табах.
+
+﻿            /* ─── Заявки на изменение смены: загрузка и действия ──────────────
+               Арифметика времени здесь ПОВТОРЯЕТ серверную (_shift_change_minutes)
+               намеренно: без неё оператор узнавал бы об ошибке только после
+               отправки. Сервер всё равно проверяет всё заново — клиентская
+               проверка тут ради подсказки, а не вместо права. */
+            const shiftChangeMinutes = useCallback((startValue, endValue) => {
+                const startMin = timeToMinutes(startValue);
+                let endMin = timeToMinutes(endValue);
+                if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return null;
+                // Полночь как конец смены пишут и как 00:00, и как 24:00.
+                if (endMin <= startMin) endMin += 1440;
+                // Ровно сутки — это «09:00 — 09:00»: чаще всего второе поле
+                // просто не поменяли. Граница строгая, как и на сервере.
+                if (endMin - startMin >= 1440) return null;
+                return { startMin, endMin };
+            }, []);
+
+            const loadShiftChangeRequests = useCallback(async ({ silent = false } = {}) => {
+                if (!isOperatorSelfSchedules || !user) return;
+                if (!silent) setShiftChangeLoading(true);
+                try {
+                    if (!silent) setShiftChangeError('');
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/requests?limit=100`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+                    setShiftChangeRequests(Array.isArray(payload?.requests) ? payload.requests : []);
+                } catch (error) {
+                    if (!silent) setShiftChangeError(error?.message || 'Не удалось загрузить заявки');
+                    console.warn('Error loading shift change requests:', error);
+                } finally {
+                    if (!silent) setShiftChangeLoading(false);
+                }
+            }, [isOperatorSelfSchedules, user]);
+
             useEffect(() => {
-                if (operatorColleagueShiftsHidden && operatorSelfTab !== 'schedule') {
+                if (!isOperatorSelfSchedules || !user) return;
+                loadShiftChangeRequests({ silent: false });
+            }, [isOperatorSelfSchedules, user, loadShiftChangeRequests]);
+
+            /* Решения по заявкам гасим ОТКРЫТИЕМ вкладки, а не кнопкой в колоколе:
+               «вам ответили» нельзя закрыть, просто увидев строку в сводке —
+               ответ нужно прочитать. Тот же приём, что у обращений (crm). */
+            const shiftChangeUnseenCount = useMemo(() => (
+                (shiftChangeRequests || []).filter(item => (
+                    (item?.status === 'approved' || item?.status === 'rejected')
+                    && !item?.operatorSeenAt
+                )).length
+            ), [shiftChangeRequests]);
+
+            useEffect(() => {
+                if (operatorSelfTab !== 'requests' || shiftChangeUnseenCount === 0) return;
+                let cancelled = false;
+                (async () => {
+                    try {
+                        await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/seen`, {
+                            method: 'POST',
+                            credentials: 'include',
+                            headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() }
+                        });
+                        if (!cancelled) loadShiftChangeRequests({ silent: true });
+                    } catch (error) {
+                        console.warn('Error marking shift change requests seen:', error);
+                    }
+                })();
+                return () => { cancelled = true; };
+            }, [operatorSelfTab, shiftChangeUnseenCount, loadShiftChangeRequests]);
+
+            /* Смены выбранного дня. Берём из «живой» выдачи (−7/+90 дней), а не
+               из видимого периода: заявку подают и на день, которого нет на
+               экране, — например открыв «Запросы» в режиме месяца. */
+            const shiftChangeShiftsForDate = useCallback((dayKey) => {
+                const src = myLiveScheduleData || myScheduleData;
+                const map = src?.shifts;
+                if (!dayKey || !map || typeof map !== 'object') return [];
+                return Array.isArray(map[dayKey]) ? map[dayKey] : [];
+            }, [myLiveScheduleData, myScheduleData]);
+
+            const shiftChangeSegmentKey = useCallback(
+                (seg) => `${seg?.start || ''}|${seg?.end || ''}`, []
+            );
+
+            const shiftChangeDayShifts = useMemo(
+                () => shiftChangeShiftsForDate(shiftChangeForm?.date),
+                [shiftChangeShiftsForDate, shiftChangeForm?.date]
+            );
+
+            /* Какой кусок смены сокращаем. Когда кусок в дне один, выбор не
+               спрашиваем — это был бы вопрос с единственным ответом. */
+            const shiftChangeSelectedSegment = useMemo(() => {
+                if (shiftChangeForm?.kind !== 'shorten') return null;
+                const list = shiftChangeDayShifts;
+                if (list.length === 0) return null;
+                const found = list.find(seg => shiftChangeSegmentKey(seg) === shiftChangeForm?.segmentKey);
+                const seg = found || (list.length === 1 ? list[0] : null);
+                if (!seg) return null;
+                const bounds = shiftChangeMinutes(seg.start, seg.end);
+                return bounds ? { start: seg.start, end: seg.end, ...bounds } : null;
+            }, [shiftChangeForm?.kind, shiftChangeForm?.segmentKey, shiftChangeDayShifts,
+                shiftChangeSegmentKey, shiftChangeMinutes]);
+
+            const openShiftChangeModal = useCallback((kind, dayCard = null, seg = null) => {
+                const dateStr = String(dayCard?.date || '');
+                setShiftChangeForm({
+                    kind: kind === 'extra' ? 'extra' : 'shorten',
+                    date: dateStr,
+                    segmentKey: seg ? `${seg.start || ''}|${seg.end || ''}` : '',
+                    newStart: (kind !== 'extra' && seg) ? String(seg.start || '') : '',
+                    newEnd: (kind !== 'extra' && seg) ? String(seg.end || '') : '',
+                    start: '',
+                    end: '',
+                    comment: ''
+                });
+                setShiftChangeError('');
+                setShowShiftChangeModal(true);
+            }, []);
+
+            /* Выбрали другой день/кусок — новые границы обязаны переехать за ним.
+               Иначе в форме остаётся время от прошлой смены, и «внутри смены»
+               перестаёт выполняться без всякого действия пользователя. */
+            const setShiftChangeDate = useCallback((nextDate) => {
+                const dateStr = String(nextDate || '');
+                const list = shiftChangeShiftsForDate(dateStr);
+                const only = list.length === 1 ? list[0] : null;
+                setShiftChangeForm(prev => ({
+                    ...prev,
+                    date: dateStr,
+                    segmentKey: only ? `${only.start}|${only.end}` : '',
+                    newStart: only ? String(only.start || '') : '',
+                    newEnd: only ? String(only.end || '') : '',
+                }));
+                setShiftChangeError('');
+            }, [shiftChangeShiftsForDate]);
+
+            const selectShiftChangeSegment = useCallback((seg) => {
+                setShiftChangeForm(prev => ({
+                    ...prev,
+                    segmentKey: `${seg?.start || ''}|${seg?.end || ''}`,
+                    newStart: String(seg?.start || ''),
+                    newEnd: String(seg?.end || ''),
+                }));
+                setShiftChangeError('');
+            }, []);
+
+            const setShiftChangeKind = useCallback((nextKind) => {
+                setShiftChangeForm(prev => {
+                    if (prev.kind === nextKind) return prev;
+                    const list = shiftChangeShiftsForDate(prev.date);
+                    const only = list.length === 1 ? list[0] : null;
+                    return {
+                        ...prev,
+                        kind: nextKind,
+                        segmentKey: nextKind === 'shorten' && only ? `${only.start}|${only.end}` : '',
+                        newStart: nextKind === 'shorten' && only ? String(only.start || '') : '',
+                        newEnd: nextKind === 'shorten' && only ? String(only.end || '') : '',
+                        start: '',
+                        end: '',
+                    };
+                });
+                setShiftChangeError('');
+            }, [shiftChangeShiftsForDate]);
+
+            /* Что именно не так с заполненной формой, или null. Одно место на
+               подсказку под формой и на блокировку кнопки: два независимых
+               условия разъехались бы, и кнопка гасла бы без объяснения. */
+            const shiftChangeFormProblem = useMemo(() => {
+                const form = shiftChangeForm;
+                if (!form?.date) return 'Не выбран день';
+                if (form.kind === 'extra') {
+                    if (!form.start || !form.end) return 'Укажите начало и конец';
+                    const bounds = shiftChangeMinutes(form.start, form.end);
+                    if (!bounds) return 'Часть смены не может быть длиннее суток';
+                    if (bounds.endMin <= bounds.startMin) return 'Конец должен быть позже начала';
+                    return null;
+                }
+                if (shiftChangeDayShifts.length === 0) return 'В этот день смен нет';
+                const seg = shiftChangeSelectedSegment;
+                if (!seg) return 'Выберите смену';
+                if (!form.newStart || !form.newEnd) return 'Укажите новые границы';
+                const bounds = shiftChangeMinutes(form.newStart, form.newEnd);
+                if (!bounds) return 'Смена не может быть длиннее суток';
+                let { startMin, endMin } = bounds;
+                // Ночная смена: 17:00-02:00 живёт как 1020-1560, а «01:00» из
+                // пикера приезжает как 60. Поднимаем в систему координат куска.
+                if (startMin < seg.startMin && startMin + 1440 <= seg.endMin) {
+                    startMin += 1440;
+                    endMin += 1440;
+                }
+                while (endMin <= startMin) endMin += 1440;
+                if (startMin < seg.startMin || endMin > seg.endMin) {
+                    return 'Новые границы должны быть внутри смены';
+                }
+                if (startMin === seg.startMin && endMin === seg.endMin) {
+                    return 'Границы смены не изменились';
+                }
+                return null;
+            }, [shiftChangeForm, shiftChangeMinutes, shiftChangeDayShifts, shiftChangeSelectedSegment]);
+
+            const submitShiftChangeRequest = useCallback(async () => {
+                if (shiftChangeFormProblem || shiftChangeSubmitting) return;
+                const form = shiftChangeForm;
+                const payload = form.kind === 'extra'
+                    ? { start: form.start, end: form.end }
+                    : {
+                        segment: {
+                            start: shiftChangeSelectedSegment.start,
+                            end: shiftChangeSelectedSegment.end
+                        },
+                        newStart: form.newStart,
+                        newEnd: form.newEnd
+                    };
+                setShiftChangeSubmitting(true);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/requests`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() },
+                        body: JSON.stringify({
+                            kind: form.kind,
+                            shift_date: form.date,
+                            payload,
+                            comment: form.comment || undefined
+                        })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                    setShowShiftChangeModal(false);
+                    setShiftChangeError('');
+                    /* Уводим на «Запросы»: заявку часто подают прямо из карточки
+                       дня, и без этого единственным подтверждением была бы
+                       закрывшаяся модалка — в проекте тосты в основном бандле
+                       никуда не выводятся (window.showToast здесь не задан). */
+                    setOperatorSelfTab('requests');
+                    await loadShiftChangeRequests({ silent: true });
+                    emitAppToast('Заявка отправлена руководителю', 'success');
+                } catch (error) {
+                    setShiftChangeError(error?.message || 'Не удалось отправить заявку');
+                } finally {
+                    setShiftChangeSubmitting(false);
+                }
+            }, [shiftChangeForm, shiftChangeFormProblem, shiftChangeSubmitting,
+                shiftChangeSelectedSegment, loadShiftChangeRequests]);
+
+            const cancelShiftChangeRequest = useCallback(async (requestId) => {
+                if (!requestId || shiftChangeCancellingId) return;
+                setShiftChangeCancellingId(requestId);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/respond`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() },
+                        body: JSON.stringify({ request_id: requestId, action: 'cancel' })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                    await loadShiftChangeRequests({ silent: true });
+                    emitAppToast('Заявка отозвана', 'success');
+                } catch (error) {
+                    setShiftChangeError(error?.message || 'Не удалось отозвать заявку');
+                } finally {
+                    setShiftChangeCancellingId(null);
+                }
+            }, [shiftChangeCancellingId, loadShiftChangeRequests]);
+
+            /* ─── Очередь «Запросы» у руководителя ──────────────────────────── */
+            const loadReviewRequests = useCallback(async ({ silent = false } = {}) => {
+                if (isOperatorSelfSchedules || !user) return;
+                if (!silent) setReviewLoading(true);
+                try {
+                    if (!silent) setReviewError('');
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/review?limit=300`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+                    setReviewRequests(Array.isArray(payload?.requests) ? payload.requests : []);
+                    setReviewPendingCount(Number(payload?.pendingCount) || 0);
+                    setReviewCanReview(Boolean(payload?.canReview));
+                } catch (error) {
+                    if (!silent) setReviewError(error?.message || 'Не удалось загрузить запросы');
+                    console.warn('Error loading shift change review queue:', error);
+                } finally {
+                    if (!silent) setReviewLoading(false);
+                }
+            }, [isOperatorSelfSchedules, user]);
+
+            useEffect(() => {
+                if (isOperatorSelfSchedules || !user) return;
+                loadReviewRequests({ silent: false });
+            }, [isOperatorSelfSchedules, user, loadReviewRequests]);
+
+            /* Пришли из колокола. Оператору открываем вкладку «Запросы» (там же
+               гаснет отметка «не видел решение»), руководителю — очередь на
+               разбор. Реагируем на nonce, а не на id: два уведомления об одной
+               заявке подряд должны открывать раздел оба раза. */
+            useEffect(() => {
+                if (!shiftRequestFocus?.nonce) return;
+                if (isOperatorSelfSchedules) {
+                    setOperatorSelfTab('requests');
+                    loadShiftChangeRequests({ silent: true });
+                    return;
+                }
+                setReviewError('');
+                setReviewStatusFilter('pending');
+                setShowReviewModal(true);
+                loadReviewRequests({ silent: true });
+            }, [shiftRequestFocus?.nonce, isOperatorSelfSchedules,
+                loadShiftChangeRequests, loadReviewRequests]);
+
+            const respondReviewRequest = useCallback(async (requestId, action) => {
+                if (!requestId || reviewRespondingId) return;
+                setReviewRespondingId(requestId);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/respond`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() },
+                        body: JSON.stringify({
+                            request_id: requestId,
+                            action,
+                            comment: (reviewComments?.[requestId] || '').trim() || undefined
+                        })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                    setReviewComments(prev => {
+                        const next = { ...prev };
+                        delete next[requestId];
+                        return next;
+                    });
+                    await loadReviewRequests({ silent: true });
+                    if (action === 'approve') {
+                        // Согласование ПРАВИТ график — сетку надо перечитать,
+                        // иначе руководитель видит старые часы до перезагрузки.
+                        await fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                        emitAppToast('Заявка одобрена, смена обновлена', 'success');
+                    } else {
+                        emitAppToast('Заявка отклонена', 'success');
+                    }
+                } catch (error) {
+                    setReviewError(error?.message || 'Не удалось обработать заявку');
+                } finally {
+                    setReviewRespondingId(null);
+                }
+            }, [reviewRespondingId, reviewComments, loadReviewRequests, fetchPlannerSchedulesByMonths, plannerPreloadMonthKeys]);
+
+            const reviewVisibleRequests = useMemo(() => (
+                reviewStatusFilter === 'pending'
+                    ? (reviewRequests || []).filter(item => item?.status === 'pending')
+                    : (reviewRequests || [])
+            ), [reviewRequests, reviewStatusFilter]);
+
+            /* Подписи вида и статуса — один словарь на оба экрана. Две копии
+               разошлись бы на первой же правке формулировки. */
+            const SHIFT_CHANGE_KIND_LABELS = {
+                shorten: 'Сокращение смены',
+                extra: 'Дополнительная часть смены'
+            };
+            const SHIFT_CHANGE_STATUS_META = {
+                pending: { label: 'На рассмотрении', tone: 'amber' },
+                approved: { label: 'Одобрена', tone: 'green' },
+                rejected: { label: 'Отклонена', tone: 'red' },
+                cancelled: { label: 'Отозвана', tone: 'slate' }
+            };
+            /* Что именно просят — одной строкой. Считаем из payload, а не из
+               minutesBefore/After: человеку нужны времена, а не только дельта. */
+            const shiftChangeIntervalText = useCallback((item) => {
+                const payload = item?.payload || {};
+                if (item?.kind === 'extra') {
+                    return `${payload.start || '—'} — ${payload.end || '—'}`;
+                }
+                const seg = payload.segment || {};
+                return `${seg.start || '—'} — ${seg.end || '—'} → ${payload.newStart || '—'} — ${payload.newEnd || '—'}`;
+            }, []);
+
+            // Если сменам коллег закрыт доступ — не даём остаться на скрытых табах.
+            // «Запросы» сюда НЕ входят: там оператор просит про свою же смену у
+            // своего руководителя и ничьих чужих смен не видит.
+            useEffect(() => {
+                if (operatorColleagueShiftsHidden
+                    && operatorSelfTab !== 'schedule'
+                    && operatorSelfTab !== 'requests') {
                     setOperatorSelfTab('schedule');
                 }
             }, [operatorColleagueShiftsHidden, operatorSelfTab]);
@@ -23921,17 +24347,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 </div>
                                                             ))
                                                         )}
-                                                        {!operatorColleagueShiftsHidden && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
-                                                            tabIndex={isExpanded ? 0 : -1}
-                                                            className="inline-flex items-center gap-1 pt-0.5 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
-                                                        >
-                                                            <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
-                                                            Обменять{shifts.length > 1 ? '' : ' смену'}
-                                                        </button>
-                                                        )}
+                                                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
+                                                            {!operatorColleagueShiftsHidden && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleOpenSwapModalForOwnShift(dayCard, seg)}
+                                                                tabIndex={isExpanded ? 0 : -1}
+                                                                className="inline-flex items-center gap-1 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                                            >
+                                                                <FaIcon className="fas fa-right-left text-[10px]"></FaIcon>
+                                                                Обменять{shifts.length > 1 ? '' : ' смену'}
+                                                            </button>
+                                                            )}
+                                                            {/* Прошедший день не меняем: часы за него уже посчитаны.
+                                                                То же правило стоит на сервере — здесь оно только
+                                                                затем, чтобы не показывать заведомо мёртвую кнопку. */}
+                                                            {dayCard.date >= todayDateStr(new Date()) && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openShiftChangeModal('shorten', dayCard, seg)}
+                                                                tabIndex={isExpanded ? 0 : -1}
+                                                                className="inline-flex items-center gap-1 text-[12px] font-medium text-blue-600 transition-colors hover:text-blue-700"
+                                                            >
+                                                                <FaIcon className="fas fa-compress text-[10px]"></FaIcon>
+                                                                Сократить
+                                                            </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 );
                                             })}
@@ -24002,7 +24444,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-calendar-user text-blue-600"></FaIcon>
                                                 Мои смены
                                             </h2>
-                                            {!operatorColleagueShiftsHidden && (
+                                            {/* «Запросы» есть у всех, включая фронт-офисы: там оператор
+                                                просит про свою же смену у своего руководителя, а не
+                                                смотрит смены коллег. Поэтому группа кнопок рендерится
+                                                всегда, а под флагом прячутся только два таба. */}
                                             <div className="flex items-center rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
                                                 <button
                                                     onClick={() => {
@@ -24015,6 +24460,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 >
                                                     Смены
                                                 </button>
+                                                {!operatorColleagueShiftsHidden && (
                                                 <button
                                                     onClick={() => setOperatorSelfTab('swaps')}
                                                     className={`px-3.5 py-1.5 text-sm font-medium inline-flex items-center gap-1.5 border-l border-slate-200 transition-colors ${operatorSelfTab === 'swaps' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
@@ -24026,14 +24472,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </span>
                                                     )}
                                                 </button>
+                                                )}
+                                                <button
+                                                    onClick={() => setOperatorSelfTab('requests')}
+                                                    className={`px-3.5 py-1.5 text-sm font-medium inline-flex items-center gap-1.5 border-l border-slate-200 transition-colors ${operatorSelfTab === 'requests' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                                                >
+                                                    Запросы
+                                                    {/* Бейдж — только про НЕПРОЧИТАННЫЕ решения. Свои
+                                                        ожидающие заявки сюда не считаем: оператор их
+                                                        только что отправил, напоминать не о чем. */}
+                                                    {shiftChangeUnseenCount > 0 && (
+                                                        <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${operatorSelfTab === 'requests' ? 'bg-white/20 text-white' : 'bg-amber-500 text-white'}`}>
+                                                            {shiftChangeUnseenCount}
+                                                        </span>
+                                                    )}
+                                                </button>
+                                                {!operatorColleagueShiftsHidden && (
                                                 <button
                                                     onClick={() => setOperatorSelfTab('direction')}
                                                     className={`px-3.5 py-1.5 text-sm font-medium border-l border-slate-200 transition-colors ${operatorSelfTab === 'direction' ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                                                 >
                                                     Смены коллег
                                                 </button>
+                                                )}
                                             </div>
-                                            )}
                                         </div>
                                         {operatorSelfTab === 'schedule' && (
                                             <div className="flex items-center gap-1.5 w-full sm:w-auto">
@@ -24085,6 +24547,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 disabled={swapRequestsLoading}
                                             >
                                                 {swapRequestsLoading ? <FaIcon className="fas fa-spinner fa-spin text-xs"></FaIcon> : <FaIcon className="fas fa-rotate text-xs text-slate-500"></FaIcon>}
+                                                Обновить
+                                            </button>
+                                        </div>
+                                    )}
+                                    {operatorSelfTab === 'requests' && (
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => openShiftChangeModal('shorten', { date: todayDateStr(new Date()) })}
+                                                className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                                            >
+                                                <FaIcon className="fas fa-plus text-xs"></FaIcon>
+                                                Новый запрос
+                                            </button>
+                                            <button
+                                                onClick={() => loadShiftChangeRequests({ silent: false })}
+                                                className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium inline-flex items-center gap-1.5 transition-colors shadow-sm"
+                                                disabled={shiftChangeLoading}
+                                            >
+                                                {shiftChangeLoading ? <FaIcon className="fas fa-spinner fa-spin text-xs"></FaIcon> : <FaIcon className="fas fa-rotate text-xs text-slate-500"></FaIcon>}
                                                 Обновить
                                             </button>
                                         </div>
@@ -24537,6 +25019,261 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                         </>
                                     )}
+                                    {operatorSelfTab === 'requests' && (
+                                        <div className="space-y-3 px-3 pb-3 sm:px-0">
+                                            {/* Пояснение живёт под «i»: оно нужно один раз, а место
+                                                занимало бы всегда. Само правило — на сервере. */}
+                                            <div className={`${iosCard} flex items-start gap-2.5 px-3.5 py-2.5`}>
+                                                <FaIcon className="fas fa-info-circle mt-0.5 shrink-0 text-slate-400"></FaIcon>
+                                                <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-slate-500">
+                                                    Заявка уходит вашему руководителю. После одобрения смена
+                                                    меняется в графике сама.
+                                                    <span className="ml-1.5 inline-flex align-middle">
+                                                        <IosHint
+                                                            align="left"
+                                                            text="Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Заявки принимаются на сегодня и на 45 дней вперёд."
+                                                        />
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            {shiftChangeError && (
+                                                <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
+                                                    {shiftChangeError}
+                                                </div>
+                                            )}
+
+                                            {shiftChangeLoading && shiftChangeRequests.length === 0 ? (
+                                                <div className={`${iosCard} px-4 py-8 text-center text-[13px] text-slate-500`}>
+                                                    <FaIcon className="fas fa-spinner fa-spin mr-2 text-slate-400"></FaIcon>
+                                                    Загружаем заявки…
+                                                </div>
+                                            ) : shiftChangeRequests.length === 0 ? (
+                                                <div className={`${iosCard} px-4 py-10 text-center`}>
+                                                    <div className="mx-auto mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                                                        <FaIcon className="fas fa-calendar-check"></FaIcon>
+                                                    </div>
+                                                    <div className="text-[14px] font-semibold text-slate-700">Заявок пока нет</div>
+                                                    <div className="mt-0.5 text-[12.5px] text-slate-500">
+                                                        Сократить смену или попросить дополнительную часть можно кнопкой «Новый запрос».
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                                    {shiftChangeRequests.map(item => {
+                                                        const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
+                                                        const deltaMin = Number(item?.minutesDelta) || 0;
+                                                        return (
+                                                            <div key={`scr-${item.id}`} className="px-4 py-3">
+                                                                <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
+                                                                    <div className="min-w-0">
+                                                                        <div className="flex flex-wrap items-center gap-2">
+                                                                            <span className="text-[14px] font-semibold text-slate-900">
+                                                                                {SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
+                                                                            </span>
+                                                                            <IosBadge tone={statusMeta.tone}>{statusMeta.label}</IosBadge>
+                                                                        </div>
+                                                                        <div className="mt-1 text-[12.5px] tabular-nums text-slate-600">
+                                                                            {formatDateRuDayMonth(parseDateStr(item.shiftDate))}
+                                                                            <span className="text-slate-400"> · </span>
+                                                                            {shiftChangeIntervalText(item)}
+                                                                            {deltaMin !== 0 && (
+                                                                                <span className={deltaMin < 0 ? ' text-rose-600' : ' text-emerald-600'}>
+                                                                                    {' '}({deltaMin > 0 ? '+' : '−'}{formatMinutesOnly(Math.abs(deltaMin))})
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        {item.requestComment && (
+                                                                            <div className="mt-1 text-[12px] leading-snug text-slate-500">
+                                                                                {item.requestComment}
+                                                                            </div>
+                                                                        )}
+                                                                        {item.responseComment && (
+                                                                            <div className="mt-1 text-[12px] leading-snug text-slate-600">
+                                                                                <span className="text-slate-400">Ответ: </span>
+                                                                                {item.responseComment}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    {item.status === 'pending' && (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => cancelShiftChangeRequest(item.id)}
+                                                                            disabled={shiftChangeCancellingId === item.id}
+                                                                            className="shrink-0 rounded-lg px-2.5 py-1 text-[12px] font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98] disabled:opacity-50"
+                                                                        >
+                                                                            {shiftChangeCancellingId === item.id ? 'Отзываем…' : 'Отозвать'}
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* ── Модалка «Новая заявка по смене» ───────────────────────── */}
+                                    <IosModal
+                                        open={showShiftChangeModal}
+                                        onClose={() => setShowShiftChangeModal(false)}
+                                        title="Заявка по смене"
+                                        subtitle="Уйдёт вашему руководителю на согласование"
+                                        maxWidth="max-w-md"
+                                        footer={(
+                                            <div className="flex w-full flex-col gap-2 sm:flex-row sm:justify-end">
+                                                <button
+                                                    type="button"
+                                                    className={`${iosBtnSecondary} w-full sm:w-auto`}
+                                                    onClick={() => setShowShiftChangeModal(false)}
+                                                >
+                                                    Отмена
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className={`${iosBtnPrimary} w-full sm:w-auto`}
+                                                    disabled={!!shiftChangeFormProblem || shiftChangeSubmitting}
+                                                    onClick={submitShiftChangeRequest}
+                                                >
+                                                    {shiftChangeSubmitting ? 'Отправляем…' : 'Отправить'}
+                                                </button>
+                                            </div>
+                                        )}
+                                    >
+                                        <div className="space-y-4">
+                                            <IosSegmented
+                                                value={shiftChangeForm.kind}
+                                                onChange={setShiftChangeKind}
+                                                stretch
+                                                ariaLabel="Что нужно изменить"
+                                                options={[
+                                                    { value: 'shorten', label: 'Сократить' },
+                                                    { value: 'extra', label: 'Доп. часть' },
+                                                ]}
+                                            />
+
+                                            <div className="space-y-1.5">
+                                                <div className={iosGroupLabel}>День</div>
+                                                <IosDatePicker
+                                                    value={shiftChangeForm.date}
+                                                    onChange={setShiftChangeDate}
+                                                    min={todayDateStr(new Date())}
+                                                    max={todayDateStr(addDays(new Date(), 45))}
+                                                    ariaLabel="День смены"
+                                                />
+                                            </div>
+
+                                            {shiftChangeForm.kind === 'shorten' ? (
+                                                <>
+                                                    {shiftChangeDayShifts.length === 0 ? (
+                                                        <div className="rounded-xl bg-slate-100 px-3.5 py-2.5 text-[12.5px] text-slate-500">
+                                                            В этот день смен нет. Чтобы выйти дополнительно, переключитесь на «Доп. часть».
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            {/* Выбор куска показываем только когда их правда несколько:
+                                                                вопрос с одним ответом — тот самый лишний шум. */}
+                                                            {shiftChangeDayShifts.length > 1 && (
+                                                                <div className="space-y-1.5">
+                                                                    <div className={iosGroupLabel}>Какая смена</div>
+                                                                    <div className="flex flex-wrap gap-1.5">
+                                                                        {shiftChangeDayShifts.map((seg, idx) => {
+                                                                            const key = `${seg.start}|${seg.end}`;
+                                                                            const active = shiftChangeSegmentKey(shiftChangeSelectedSegment || {}) === key;
+                                                                            return (
+                                                                                <button
+                                                                                    key={`scr-seg-${idx}`}
+                                                                                    type="button"
+                                                                                    onClick={() => selectShiftChangeSegment(seg)}
+                                                                                    className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium tabular-nums transition active:scale-[0.98] ${
+                                                                                        active
+                                                                                            ? 'bg-blue-600 text-white shadow-sm'
+                                                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                                                    }`}
+                                                                                >
+                                                                                    {seg.start} — {seg.end}
+                                                                                </button>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <div className="space-y-1.5">
+                                                                    <div className={iosGroupLabel}>Начало</div>
+                                                                    <IosTimePicker
+                                                                        value={shiftChangeForm.newStart}
+                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newStart: v }))}
+                                                                        ariaLabel="Новое начало смены"
+                                                                    />
+                                                                </div>
+                                                                <div className="space-y-1.5">
+                                                                    <div className={iosGroupLabel}>Конец</div>
+                                                                    <IosTimePicker
+                                                                        value={shiftChangeForm.newEnd}
+                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newEnd: v }))}
+                                                                        ariaLabel="Новый конец смены"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            {shiftChangeSelectedSegment && (
+                                                                <div className="text-[12px] tabular-nums text-slate-500">
+                                                                    Сейчас {shiftChangeSelectedSegment.start} — {shiftChangeSelectedSegment.end}
+                                                                    <span className="text-slate-400"> · </span>
+                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </>
+                                            ) : (
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div className="space-y-1.5">
+                                                        <div className={iosGroupLabel}>Начало</div>
+                                                        <IosTimePicker
+                                                            value={shiftChangeForm.start}
+                                                            onChange={(v) => setShiftChangeForm(prev => ({ ...prev, start: v }))}
+                                                            ariaLabel="Начало дополнительной части"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5">
+                                                        <div className={iosGroupLabel}>Конец</div>
+                                                        <IosTimePicker
+                                                            value={shiftChangeForm.end}
+                                                            onChange={(v) => setShiftChangeForm(prev => ({ ...prev, end: v }))}
+                                                            ariaLabel="Конец дополнительной части"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            <div className="space-y-1.5">
+                                                <div className={iosGroupLabel}>Комментарий · необязательно</div>
+                                                <textarea
+                                                    rows={2}
+                                                    value={shiftChangeForm.comment}
+                                                    onChange={(e) => setShiftChangeForm(prev => ({ ...prev, comment: e.target.value }))}
+                                                    placeholder="Причина — руководителю будет понятнее"
+                                                    className={`${iosInput} resize-none`}
+                                                />
+                                            </div>
+
+                                            {/* Одна строка на всё: и почему кнопка недоступна, и что
+                                                ответил сервер. Два разных места под одну мысль
+                                                читались бы как две разные проблемы. */}
+                                            {(shiftChangeError || shiftChangeFormProblem) && (
+                                                <div className={`rounded-xl px-3.5 py-2.5 text-[12.5px] ${
+                                                    shiftChangeError
+                                                        ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200/70'
+                                                        : 'bg-slate-100 text-slate-500'
+                                                }`}>
+                                                    {shiftChangeError || shiftChangeFormProblem}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </IosModal>
+
                                     {operatorSelfTab === 'swaps' && (
                                         <div className="space-y-0 sm:space-y-3 pb-2">
                                             <SimpleModal
@@ -26215,8 +26952,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </button>
                                 </div>
                             </div>
-                            {viewMode === 'day' && (
-                                <div className="flex flex-wrap items-center gap-2">
+                            {/* Панель действий. «Перерывы», «Агрегировать день» и
+                                «Сортировка» имеют смысл только в режиме «День», а
+                                «Запросы» — нет: заявки приходят на любые даты, и
+                                счётчик, пропадающий при переключении на «Неделя»,
+                                прятал бы неразобранную очередь. */}
+                            <div className="flex flex-wrap items-center gap-2">
+                                    {viewMode === 'day' && (
+                                    <>
                                     <button
                                         type="button"
                                         onClick={() => setShowDayBreaksModal(true)}
@@ -26243,6 +26986,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {dayAggregateLoading ? 'Агрегация...' : 'Агрегировать день'}
                                     </button>
                                     )}
+                                    </>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setReviewError('');
+                                            setShowReviewModal(true);
+                                            loadReviewRequests({ silent: true });
+                                        }}
+                                        className={PLANNER_TOOLBAR_BTN}
+                                        title="Заявки операторов на сокращение смены и дополнительную часть"
+                                    >
+                                        <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-inbox'} text-slate-400`}></FaIcon>
+                                        Запросы
+                                        {/* Счётчик — только ожидающие. Цветом помечаем то, что
+                                            требует действия; ноль не рисуем вовсе. */}
+                                        {reviewPendingCount > 0 && (
+                                            <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10.5px] font-semibold leading-none tabular-nums text-white">
+                                                {reviewPendingCount}
+                                            </span>
+                                        )}
+                                    </button>
+                                    {viewMode === 'day' && (
                                     <div className="inline-flex items-center gap-1.5">
                                         <span className="text-[11.5px] text-slate-400">Сортировка</span>
                                         <CustomSelect
@@ -26254,8 +27020,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             ariaLabel="Сортировка операторов в режиме «День»"
                                         />
                                     </div>
-                                </div>
-                            )}
+                                    )}
+                            </div>
                         </div>
                     </div>
 
@@ -32495,6 +33261,178 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </SimpleModal>
 
+﻿                {/* ── Очередь «Запросы»: заявки операторов на изменение смены ─────
+                    Разбирается здесь, а не в отдельном разделе: решение меняет
+                    график, и человек уже стоит перед ним. */}
+                <IosModal
+                    open={showReviewModal}
+                    onClose={() => setShowReviewModal(false)}
+                    title="Запросы по сменам"
+                    subtitle="Заявки операторов на сокращение смены и дополнительную часть"
+                    maxWidth="max-w-2xl"
+                    footer={(
+                        <div className="flex w-full items-center justify-between gap-2">
+                            <span className="text-[12px] text-slate-500">
+                                {reviewPendingCount > 0
+                                    ? `Ожидают решения: ${reviewPendingCount}`
+                                    : 'Нерассмотренных заявок нет'}
+                            </span>
+                            <button
+                                type="button"
+                                className={`${iosBtnSecondary} shrink-0`}
+                                onClick={() => setShowReviewModal(false)}
+                            >
+                                Закрыть
+                            </button>
+                        </div>
+                    )}
+                >
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                            <IosSegmented
+                                value={reviewStatusFilter}
+                                onChange={setReviewStatusFilter}
+                                ariaLabel="Какие заявки показывать"
+                                options={[
+                                    { value: 'pending', label: 'Ожидают' },
+                                    { value: 'all', label: 'Все' },
+                                ]}
+                            />
+                            <div className="flex items-center gap-1.5">
+                                <IosHint
+                                    align="right"
+                                    text="Одобрение сразу правит график: смена сокращается или в день добавляется новая часть, перерывы пересчитываются по правилам направления, а изменение попадает в историю графика. Отклонение график не трогает. Оператор увидит решение в разделе «Мои смены»."
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => loadReviewRequests({ silent: false })}
+                                    disabled={reviewLoading}
+                                    className={`${iosBtnGhost} shrink-0`}
+                                >
+                                    <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-rotate'} text-[11px] text-slate-400`}></FaIcon>
+                                    Обновить
+                                </button>
+                            </div>
+                        </div>
+
+                        {reviewError && (
+                            <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
+                                {reviewError}
+                            </div>
+                        )}
+
+                        {reviewLoading && reviewRequests.length === 0 ? (
+                            <div className="px-4 py-10 text-center text-[13px] text-slate-500">
+                                <FaIcon className="fas fa-spinner fa-spin mr-2 text-slate-400"></FaIcon>
+                                Загружаем запросы…
+                            </div>
+                        ) : reviewVisibleRequests.length === 0 ? (
+                            <div className="px-4 py-10 text-center">
+                                <div className="mx-auto mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                                    <FaIcon className="fas fa-inbox"></FaIcon>
+                                </div>
+                                <div className="text-[14px] font-semibold text-slate-700">
+                                    {reviewStatusFilter === 'pending' ? 'Всё разобрано' : 'Заявок нет'}
+                                </div>
+                                <div className="mt-0.5 text-[12.5px] text-slate-500">
+                                    {reviewStatusFilter === 'pending'
+                                        ? 'Новые заявки появятся здесь и в колоколе.'
+                                        : 'Операторы вашего отдела ещё не подавали заявок.'}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                {reviewVisibleRequests.map(item => {
+                                    const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
+                                    const deltaMin = Number(item?.minutesDelta) || 0;
+                                    const busy = reviewRespondingId === item.id;
+                                    return (
+                                        <div key={`review-${item.id}`} className="px-4 py-3">
+                                            <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                                                <div className="min-w-0">
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <span className="text-[14px] font-semibold text-slate-900">
+                                                            {item.operator?.name || 'Сотрудник'}
+                                                        </span>
+                                                        {item.status !== 'pending' && (
+                                                            <IosBadge tone={statusMeta.tone}>{statusMeta.label}</IosBadge>
+                                                        )}
+                                                    </div>
+                                                    <div className="mt-0.5 text-[12.5px] text-slate-500">
+                                                        {SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
+                                                        {item.operator?.direction && (
+                                                            <>
+                                                                <span className="text-slate-300"> · </span>
+                                                                {item.operator.direction}
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                    <div className="mt-1 text-[12.5px] tabular-nums text-slate-600">
+                                                        {formatDateRuDayMonth(parseDateStr(item.shiftDate))}
+                                                        <span className="text-slate-400"> · </span>
+                                                        {shiftChangeIntervalText(item)}
+                                                        {deltaMin !== 0 && (
+                                                            <span className={deltaMin < 0 ? ' text-rose-600' : ' text-emerald-600'}>
+                                                                {' '}({deltaMin > 0 ? '+' : '−'}{formatMinutesOnly(Math.abs(deltaMin))})
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    {item.requestComment && (
+                                                        <div className="mt-1 text-[12px] leading-snug text-slate-500">
+                                                            {item.requestComment}
+                                                        </div>
+                                                    )}
+                                                    {item.status !== 'pending' && item.responseComment && (
+                                                        <div className="mt-1 text-[12px] leading-snug text-slate-600">
+                                                            <span className="text-slate-400">Ответ: </span>
+                                                            {item.responseComment}
+                                                        </div>
+                                                    )}
+                                                    {item.status !== 'pending' && item.reviewedBy?.name && (
+                                                        <div className="mt-0.5 text-[11.5px] text-slate-400">
+                                                            {statusMeta.label}: {item.reviewedBy.name}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {item.status === 'pending' && reviewCanReview && (
+                                                <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                    <input
+                                                        type="text"
+                                                        value={reviewComments?.[item.id] || ''}
+                                                        onChange={(e) => setReviewComments(prev => ({ ...prev, [item.id]: e.target.value }))}
+                                                        placeholder="Комментарий · необязательно"
+                                                        className={`${iosInput} flex-1 !py-2 !text-[13px]`}
+                                                    />
+                                                    <div className="flex shrink-0 gap-2">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => respondReviewRequest(item.id, 'reject')}
+                                                            disabled={busy}
+                                                            className="rounded-xl bg-slate-100 px-3.5 py-2 text-[13px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
+                                                        >
+                                                            Отклонить
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => respondReviewRequest(item.id, 'approve')}
+                                                            disabled={busy}
+                                                            className="rounded-xl bg-blue-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50"
+                                                        >
+                                                            {busy ? 'Применяем…' : 'Одобрить'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </IosModal>
+
                 <SimpleModal open={showDayBreaksModal} onClose={() => setShowDayBreaksModal(false)}>
                     <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-200">
                         <div>
@@ -36158,6 +37096,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [pinnedTaskPipRequestId, setPinnedTaskPipRequestId] = useState(0);
             const [pinnedTaskActionLoadingKey, setPinnedTaskActionLoadingKey] = useState('');
             const [taskFocusRequest, setTaskFocusRequest] = useState(null);
+            // Клик по уведомлению о заявке на изменение смены: раздел один,
+            // а открывать его надо по-разному оператору и руководителю.
+            const [shiftRequestFocus, setShiftRequestFocus] = useState(null);
             const [taskRefreshToken, setTaskRefreshToken] = useState(0);
             const [resourceFteInitialView, setResourceFteInitialView] = useState('');
             const [shiftAuctionInitialPeriod, setShiftAuctionInitialPeriod] = useState(null);
@@ -44482,6 +45423,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         requestId: Number(prev?.requestId || 0) + 1,
                     }));
                 }
+                /* Заявки по сменам: один и тот же раздел открывается по-разному
+                   у двух сторон — оператору нужна вкладка «Запросы», а
+                   руководителю очередь на разбор. Кто есть кто, решает сам
+                   раздел: тут ролей не знаем, а дублировать их проверку — это
+                   третья копия правила ради одного перехода. */
+                if (nextView === 'work_schedules' && Number(target)) {
+                    setShiftRequestFocus((prev) => ({
+                        requestId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
+                    }));
+                }
                 /* «Контроль» — вкладка внутри «Журнала оценок», а тот живёт в
                    iframe: одним navigateToView туда не попасть, нужна ещё и
                    вкладка. Открываем тем же путём, что и остальные переходы в
@@ -47837,7 +48789,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </Suspense>
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
                                 {( view === "departments" && isAdminLikeRole && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <DepartmentsView
@@ -48988,7 +49940,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </Suspense>
                                 ))}
                                 {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
                             </>
                         )}
                         {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
@@ -49012,7 +49964,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onActionNeedsChange={handleTasksActionNeedsChange}
                                     />
                                 ))}
-                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments}/>))}
+                                {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {( view === "events" && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>

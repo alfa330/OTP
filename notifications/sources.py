@@ -30,8 +30,8 @@ from datetime import datetime, time as day_time, timedelta
 # падает, а просто расходится числами на экране, поэтому все три сверяются
 # тестами: tests/test_notifications.py::TasksSourceRulesTest и
 # tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
-SOURCES = ('wiki_ack', 'tasks', 'checkpoints', 'crm', 'lms', 'surveys', 'events',
-           'four_you', 'birthdays')
+SOURCES = ('wiki_ack', 'tasks', 'checkpoints', 'shift_requests', 'crm', 'lms',
+           'surveys', 'events', 'four_you', 'birthdays')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -604,10 +604,128 @@ def checkpoints(cursor, viewer, limit):
     return total, items
 
 
+# ── Заявки на изменение смены ────────────────────────────────────────────────
+
+# Подписи вида заявки. Короткие: в колоколе строка — не место для пересказа
+# интервалов, точные времена человек увидит в самой заявке.
+_SHIFT_REQUEST_KIND_LABELS = {
+    'shorten': 'сокращение смены',
+    'extra': 'дополнительная часть смены',
+}
+
+_SHIFT_REQUEST_DECISION_LABELS = {
+    'approved': 'Заявка по смене одобрена',
+    'rejected': 'Заявка по смене отклонена',
+}
+
+
+def _shift_request_scope_clause(descriptor, params):
+    """SQL-условие «чьи заявки видит руководитель» + параметры в params.
+
+    Описание границы приходит из bot_schedule2._shift_change_scope_for_requester —
+    там же, где оно посчитано для самого раздела. Здесь только перевод в SQL.
+    """
+    descriptor = descriptor or {}
+    scope = str(descriptor.get('scope') or 'none')
+    if scope == 'all':
+        return ''
+    if scope == 'departments':
+        ids = [int(value) for value in (descriptor.get('department_ids') or [])]
+        if not ids:
+            return ' AND FALSE'
+        params['scr_departments'] = ids
+        return ' AND op.department_id = ANY(%(scr_departments)s)'
+    return ' AND FALSE'
+
+
+def shift_requests(cursor, viewer, limit):
+    """Заявки на изменение смены — с двух сторон одного события (задача #17).
+
+    РУКОВОДИТЕЛЮ (супервайзер, глава отдела, админ) показываются ОЖИДАЮЩИЕ
+    заявки его периметра: это очередь, которую он разбирает кнопкой «Запросы»
+    в «Графиках работы». Разобранная заявка из колокола уходит сама — гасить
+    её просмотром нельзя, она снимается ДЕЙСТВИЕМ, как ознакомление и опрос.
+    Иначе очередь согласования обнулялась бы взглядом на колокол, то есть врала.
+
+    ОПЕРАТОРУ показывается РЕШЕНИЕ по его собственной заявке — и только пока он
+    его не видел (operator_seen_at). Ожидающую свою заявку ему не показываем:
+    он сам её только что отправил, напоминать об этом нечем.
+
+    Отклонённая заявка идёт нейтральным тоном, а не warning: warning в колоколе
+    зарезервирован под просрочку — под то, что горит. Отказ — это ответ, а не
+    горящий срок.
+    """
+    scope = viewer.get('shift_requests') or {}
+    scope_kind = str(scope.get('scope') or 'none')
+    params = {'user_id': viewer['user_id'], 'limit': limit}
+
+    if scope_kind in ('none', 'self'):
+        cursor.execute(
+            """
+            SELECT r.id, r.status, r.request_kind, r.shift_date, r.reviewed_at,
+                   COUNT(*) OVER () AS total
+              FROM work_shift_change_requests r
+             WHERE r.operator_id = %(user_id)s
+               AND r.status IN ('approved', 'rejected')
+               AND r.operator_seen_at IS NULL
+             ORDER BY r.reviewed_at DESC NULLS LAST, r.id DESC
+             LIMIT %(limit)s
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+        total = int(rows[0][5]) if rows else 0
+        return total, [{
+            'source': 'shift_requests',
+            'id': row[0],
+            'title': _SHIFT_REQUEST_DECISION_LABELS.get(row[1], 'Решение по заявке'),
+            'body': ('%s · %s' % (
+                row[3].strftime('%d.%m'),
+                _SHIFT_REQUEST_KIND_LABELS.get(row[2], ''),
+            )).strip(' ·'),
+            'at': _iso(row[4]),
+            'view': 'work_schedules',
+            'target': row[0],
+            'tone': 'default',
+        } for row in rows]
+
+    scope_sql = _shift_request_scope_clause(scope, params)
+    cursor.execute(
+        """
+        SELECT r.id, op.name, r.request_kind, r.shift_date, r.created_at,
+               COUNT(*) OVER () AS total
+          FROM work_shift_change_requests r
+          JOIN users op ON op.id = r.operator_id
+         WHERE r.status = 'pending'
+           AND r.operator_id <> %(user_id)s
+        """ + scope_sql + """
+         ORDER BY r.shift_date, r.id
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    total = int(rows[0][5]) if rows else 0
+    return total, [{
+        'source': 'shift_requests',
+        'id': row[0],
+        'title': row[1] or 'Сотрудник',
+        'body': ('%s · %s' % (
+            row[3].strftime('%d.%m'),
+            _SHIFT_REQUEST_KIND_LABELS.get(row[2], ''),
+        )).strip(' ·'),
+        'at': _iso(row[4]),
+        'view': 'work_schedules',
+        'target': row[0],
+        'tone': 'default',
+    } for row in rows]
+
+
 _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
     'checkpoints': checkpoints,
+    'shift_requests': shift_requests,
     'crm': crm,
     'lms': lms,
     'surveys': surveys,

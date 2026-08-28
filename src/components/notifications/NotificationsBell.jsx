@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, Cake, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, ShieldCheck, X } from 'lucide-react';
+import { Bell, BookLock, Cake, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, ShieldCheck, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import {
@@ -33,6 +33,7 @@ const SOURCE_META = {
     wiki_ack: { label: 'Ознакомление', icon: BookLock, tint: 'text-amber-600 bg-amber-50' },
     tasks: { label: 'Задачи', icon: ListChecks, tint: 'text-blue-600 bg-blue-50' },
     checkpoints: { label: 'Контроль', icon: ShieldCheck, tint: 'text-orange-600 bg-orange-50' },
+    shift_requests: { label: 'Запросы по сменам', icon: CalendarClock, tint: 'text-teal-600 bg-teal-50' },
     crm: { label: 'Обращения', icon: Headset, tint: 'text-emerald-600 bg-emerald-50' },
     lms: { label: 'Обучение', icon: GraduationCap, tint: 'text-indigo-600 bg-indigo-50' },
     surveys: { label: 'Опросы', icon: ClipboardList, tint: 'text-sky-600 bg-sky-50' },

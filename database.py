@@ -569,6 +569,7 @@ WORK_SHIFT_CHANGE_SOURCES = (
     'auction_topup_cancel',  # оператор отменил свой добор
     'auction_admin',       # смену с аукциона выдал/снял администратор
     'swap',                # обмен сменами между операторами
+    'shift_request',       # заявка оператора на сокращение/доп. часть смены
     'import',              # загрузка графика из файла
     'status_period',       # отпуск/больничный/увольнение стирает смены периода
     'system',              # источник не определён
@@ -3265,6 +3266,41 @@ class Database:
                     CONSTRAINT work_shift_swap_requests_participants_check CHECK (requester_operator_id <> target_operator_id)
                 );
             """)
+            # Заявки на изменение СВОЕЙ смены (оператор -> супервайзер), задача #17.
+            #
+            # Отдельная таблица, а не ещё один request_type у обменов: у обмена
+            # две стороны-оператора и решение принимает второй оператор, здесь же
+            # вторая сторона — руководитель, и согласование идёт по периметру
+            # отдела. Общая таблица потребовала бы делать target_operator_id
+            # необязательным и разводить проверки прав по колонке вида заявки.
+            #
+            # supervisor_id — СНИМОК руководителя на момент подачи. Он нужен
+            # триггеру колокола: вычислять СВ через группу в PL/pgSQL значило бы
+            # продублировать _get_operator_group_id_tx на SQL. На право
+            # согласовать он не влияет — там периметр отдела, как везде.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_shift_change_requests (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    department_id INTEGER NULL REFERENCES departments(id) ON DELETE SET NULL,
+                    supervisor_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    request_kind VARCHAR(16) NOT NULL,
+                    shift_date DATE NOT NULL,
+                    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    request_comment TEXT NULL,
+                    response_comment TEXT NULL,
+                    reviewed_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    reviewed_at TIMESTAMP NULL,
+                    operator_seen_at TIMESTAMP NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT work_shift_change_requests_kind_check
+                        CHECK (request_kind IN ('shorten', 'extra')),
+                    CONSTRAINT work_shift_change_requests_status_check
+                        CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled'))
+                );
+            """)
             # Special statuses by period (vacation/sick leave/unpaid leave/dismissal)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_schedule_status_periods (
@@ -3296,6 +3332,22 @@ class Database:
             cursor.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_work_schedule_break_dir_settings_direction
                 ON work_schedule_break_direction_settings(LOWER(TRIM(direction_name)));
+            """)
+            # Заявки на изменение смены: три выборки и три индекса под них —
+            # свои заявки оператора, очередь «Запросы» у руководителя (по дате
+            # смены, а не по дате подачи: разбирают день, а не ленту) и адресный
+            # счётчик колокола у конкретного СВ.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shift_change_requests_operator
+                ON work_shift_change_requests(operator_id, created_at DESC);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shift_change_requests_status_date
+                ON work_shift_change_requests(status, shift_date);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shift_change_requests_supervisor_status
+                ON work_shift_change_requests(supervisor_id, status);
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_start
@@ -6012,6 +6064,18 @@ class Database:
                             targets := targets || ARRAY[OLD.operator_id];
                         END IF;
                     END IF;
+                ELSIF TG_TABLE_NAME = 'work_shift_change_requests' THEN
+                    -- Заявка на изменение смены: будим руководителя-снимок (у
+                    -- него заявка встаёт в очередь «Запросы») и самого автора
+                    -- (ему приходит решение). Периметр согласования шире одного
+                    -- СВ — заявку разберёт любой управленец отдела, — но тычок
+                    -- адресный: вычислять весь состав отдела в PL/pgSQL значило
+                    -- бы продублировать здесь _filter_operators_for_requester_scope.
+                    -- Остальные увидят заявку при обновлении по фокусу.
+                    targets := ARRAY[NEW.operator_id, NEW.supervisor_id];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.supervisor_id];
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -6128,6 +6192,21 @@ class Database:
             # перезаписывается по дате, а не вставляется заново, — на одном
             # INSERT тычок ушёл бы только в первый день жизни строки.
             ('trg_bell_birthday_reads', 'birthday_reads', 'AFTER INSERT OR UPDATE', ''),
+            # Заявка на изменение смены: подача (INSERT) и решение/отзыв/отметка
+            # прочтения (UPDATE). WHEN на UPDATE обязателен — updated_at трогает
+            # каждая правка, а колокол интересует только смена статуса и гашение.
+            ('trg_bell_shift_change_requests_insert', 'work_shift_change_requests',
+             'AFTER INSERT', ''),
+            (
+                'trg_bell_shift_change_requests',
+                'work_shift_change_requests',
+                'AFTER UPDATE OF status, operator_seen_at, supervisor_id',
+                """WHEN (
+                    OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.operator_seen_at IS DISTINCT FROM NEW.operator_seen_at
+                    OR OLD.supervisor_id IS DISTINCT FROM NEW.supervisor_id
+                )""",
+            ),
         ):
             # Таблицы разделов создаются выше в этой же транзакции, каждая под
             # своим SAVEPOINT. Если схема раздела не применилась, его таблицы
@@ -43731,6 +43810,655 @@ class Database:
                 )
             row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
             return self._serialize_shift_swap_request_row(row)
+
+    # ------------------------------------------------------------------
+    # Заявки на изменение своей смены (оператор -> руководитель), задача #17
+    # ------------------------------------------------------------------
+    #
+    # Два вида, оба сводятся к одной операции над интервалами дня:
+    #   shorten — у существующего куска смены двигаются границы ВНУТРЬ
+    #             (прийти позже и/или уйти раньше);
+    #   extra   — в день добавляется ещё один кусок, в том числе в выходной.
+    #
+    # Арифметику берём ту же, что у обменов: окно из трёх суток (вчера/сегодня/
+    # завтра) и склейка интервалов. Иначе ночная смена 17:00-02:00 распадалась бы
+    # на два несвязанных куска, и «уйти на час раньше» упиралось бы в полночь.
+
+    SHIFT_CHANGE_REQUEST_KINDS = ('shorten', 'extra')
+    SHIFT_CHANGE_REQUEST_STATUSES = ('pending', 'approved', 'rejected', 'cancelled')
+    # Окно, внутри которого заявка вообще имеет смысл. Смена дальше чем через
+    # полтора месяца ещё не факт что останется в графике, а прошедшую менять
+    # поздно: часы за неё уже посчитаны.
+    SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS = 45
+
+    def _normalize_shift_change_kind(self, value):
+        kind = str(value or '').strip().lower()
+        if kind not in self.SHIFT_CHANGE_REQUEST_KINDS:
+            raise ValueError("request_kind must be 'shorten' or 'extra'")
+        return kind
+
+    def _shift_change_minutes(self, start_value, end_value):
+        """Интервал в минутах от полуночи дня заявки, конец может уйти за 1440.
+
+        Отдельная функция, а не _schedule_interval_minutes: там «конец меньше
+        начала» всегда означает ночную смену, а здесь надо ещё и отсечь
+        интервал длиннее суток — иначе опечатка превращается в 30-часовую смену.
+        """
+        start_obj = self._normalize_schedule_time(start_value, 'start_time')
+        end_obj = self._normalize_schedule_time(end_value, 'end_time')
+        start_min = start_obj.hour * 60 + start_obj.minute
+        end_min = end_obj.hour * 60 + end_obj.minute
+        if end_min <= start_min:
+            # Полночь как конец смены пишут и как 00:00, и как 24:00.
+            end_min += 1440
+        # Ровно сутки — это «09:00 — 09:00», то есть чаще всего оператор
+        # просто не поменял второе поле. Пропустив такое, мы записали бы ему
+        # круглосуточную смену, поэтому граница строгая.
+        if end_min - start_min >= 1440:
+            raise ValueError("Интервал должен быть короче суток")
+        return int(start_min), int(end_min)
+
+    def _load_shift_change_window_tx(self, cursor, operator_id, shift_date_obj):
+        """Смены оператора за окно вчера/сегодня/завтра одним набором интервалов."""
+        prev_date_obj = shift_date_obj - timedelta(days=1)
+        next_date_obj = shift_date_obj + timedelta(days=1)
+        day_map = self._load_operator_shift_map_for_period_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            start_date_obj=prev_date_obj,
+            end_date_obj=next_date_obj
+        )
+        window = self._build_swap_window_intervals(
+            prev_day_shifts=day_map.get(prev_date_obj.strftime('%Y-%m-%d'), []),
+            day_shifts=day_map.get(shift_date_obj.strftime('%Y-%m-%d'), []),
+            next_day_shifts=day_map.get(next_date_obj.strftime('%Y-%m-%d'), [])
+        )
+        return day_map, window
+
+    def _normalize_shift_change_payload(self, kind, raw_payload):
+        """Привести тело заявки к каноничному виду и проверить его самосогласованность.
+
+        Проверка «а есть ли такая смена на самом деле» здесь НЕ делается: она
+        нужна и при подаче, и повторно при согласовании (график мог измениться),
+        поэтому живёт в _validate_shift_change_against_schedule.
+        """
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        if kind == 'extra':
+            start_min, end_min = self._shift_change_minutes(
+                payload.get('start'), payload.get('end')
+            )
+            return {
+                'start': _minutes_to_time(start_min),
+                'end': _minutes_to_time(end_min),
+                'startMin': start_min,
+                'endMin': end_min,
+            }
+
+        segment = payload.get('segment') if isinstance(payload.get('segment'), dict) else {}
+        seg_start_min, seg_end_min = self._shift_change_minutes(
+            segment.get('start'), segment.get('end')
+        )
+        new_start_min, new_end_min = self._shift_change_minutes(
+            payload.get('newStart'), payload.get('newEnd')
+        )
+        # Ночная смена: кусок 17:00-02:00 приезжает как 1020-1560, а новые
+        # границы оператор выбирает из того же списка времён, поэтому 01:00
+        # доедет как 60. Поднимаем их в систему координат самого куска.
+        if new_start_min < seg_start_min and new_start_min + 1440 <= seg_end_min:
+            new_start_min += 1440
+            new_end_min += 1440
+        while new_end_min <= new_start_min:
+            new_end_min += 1440
+        if new_start_min < seg_start_min or new_end_min > seg_end_min:
+            raise ValueError("Новые границы должны быть внутри смены")
+        if new_start_min == seg_start_min and new_end_min == seg_end_min:
+            raise ValueError("Границы смены не изменились")
+        return {
+            'segment': {
+                'start': _minutes_to_time(seg_start_min),
+                'end': _minutes_to_time(seg_end_min),
+                'startMin': seg_start_min,
+                'endMin': seg_end_min,
+            },
+            'newStart': _minutes_to_time(new_start_min),
+            'newEnd': _minutes_to_time(new_end_min),
+            'newStartMin': new_start_min,
+            'newEndMin': new_end_min,
+        }
+
+    def _validate_shift_change_against_schedule(self, kind, payload, window_intervals):
+        """Сверить заявку с ГРАФИКОМ НА СЕЙЧАС. Зовётся дважды: при подаче и при согласовании.
+
+        Между подачей и решением руководителя смену могли подвинуть, обменять
+        или стереть отпуском. Принять заявку «вслепую» значило бы вписать в
+        график интервал, которого оператор уже не просил.
+        """
+        if kind == 'extra':
+            start_min = int(payload['startMin'])
+            end_min = int(payload['endMin'])
+            if self._swap_extract_interval(window_intervals, start_min, end_min):
+                raise ValueError("В это время у оператора уже есть смена")
+            return
+
+        seg = payload['segment']
+        if not self._swap_is_interval_fully_covered(
+            window_intervals, int(seg['startMin']), int(seg['endMin'])
+        ):
+            raise ValueError("Смена изменилась — заявка больше не соответствует графику")
+
+    def _apply_shift_change_request_tx(self, cursor, operator_id, shift_date_obj,
+                                       kind, payload, actor_id):
+        """Вписать одобренную заявку в график. Возвращает список затронутых дат.
+
+        Пишем ровно тем же путём, что и обмен сменами: снимок дня до правки,
+        очистка затронутых дней, _save_shift_tx на каждый кусок, запись в
+        историю изменений. Свой INSERT в work_shifts здесь был бы дырой —
+        именно _save_shift_tx чистит пересечения, раскладывает перерывы по
+        правилам направления и снимает выходной.
+        """
+        day_map, window = self._load_shift_change_window_tx(cursor, operator_id, shift_date_obj)
+        self._validate_shift_change_against_schedule(kind, payload, window)
+
+        if kind == 'extra':
+            next_intervals = self._merge_break_intervals([
+                *window,
+                {'start': int(payload['startMin']), 'end': int(payload['endMin'])},
+            ])
+        else:
+            seg = payload['segment']
+            next_intervals = self._merge_break_intervals([
+                *self._swap_subtract_intervals(
+                    window, [{'start': int(seg['startMin']), 'end': int(seg['endMin'])}]
+                ),
+                {'start': int(payload['newStartMin']), 'end': int(payload['newEndMin'])},
+            ])
+
+        window_offsets = [-1, 0, 1]
+        save_day_map = self._swap_serialize_intervals_to_day_map(
+            next_intervals, shift_date_obj, allowed_day_offsets=window_offsets
+        )
+
+        def _signature(shifts):
+            sign = []
+            for seg_item in (shifts or []):
+                if not isinstance(seg_item, dict):
+                    continue
+                if not seg_item.get('start') or not seg_item.get('end'):
+                    continue
+                sign.append(f"{seg_item['start']}|{seg_item['end']}")
+            sign.sort()
+            return sign
+
+        affected_dates = []
+        day_off_dates = []
+        for offset in window_offsets:
+            day_obj = shift_date_obj + timedelta(days=offset)
+            day_key = day_obj.strftime('%Y-%m-%d')
+            before_shifts = day_map.get(day_key) or []
+            after_shifts = save_day_map.get(day_key) or []
+            if _signature(before_shifts) != _signature(after_shifts):
+                affected_dates.append(day_obj)
+                # День опустел — ставим выходной, а не пустую ячейку: пустая
+                # читается как «график ещё не составили» (задача #37).
+                if before_shifts and not after_shifts:
+                    day_off_dates.append(day_obj)
+        if not affected_dates:
+            return []
+
+        now = self._almaty_now()
+        breaks_snapshots = {}
+        for day_obj in affected_dates:
+            breaks_snapshots[(int(operator_id), day_obj.strftime('%Y-%m-%d'))] = (
+                self._load_day_shift_breaks_tx(cursor, operator_id, day_obj)
+            )
+
+        audit_actor = self._schedule_change_actor(
+            cursor, actor_id=actor_id, source='shift_request'
+        )
+        audit_before = self._snapshot_schedule_days_tx(
+            cursor, [(int(operator_id), day_obj) for day_obj in affected_dates]
+        )
+
+        for day_obj in affected_dates:
+            self._clear_day_schedule_tx(cursor, operator_id, day_obj)
+
+        direction_keys = {}
+        for day_obj in affected_dates:
+            day_key = day_obj.strftime('%Y-%m-%d')
+            for seg_item in (save_day_map.get(day_key) or []):
+                self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=operator_id,
+                    shift_date=day_obj,
+                    start_time=self._normalize_schedule_time(seg_item.get('start'), 'start_time'),
+                    end_time=self._normalize_schedule_time(seg_item.get('end'), 'end_time'),
+                    shift_type=seg_item.get('shift_type'),
+                    breaks=None,
+                    now=now,
+                    day_breaks_snapshot=breaks_snapshots.get((int(operator_id), day_key)),
+                    extra_occupied=self._extra_occupied_from_day_snapshots(
+                        cursor=cursor,
+                        day_breaks_snapshots=breaks_snapshots,
+                        operator_id=operator_id,
+                        shift_date=day_obj,
+                        now=now,
+                        direction_key_cache=direction_keys
+                    )
+                )
+
+        for day_obj in day_off_dates:
+            self._set_day_off_tx(cursor, operator_id, day_obj)
+
+        self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
+        self._recalculate_auto_daily_hours_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=min(affected_dates),
+            end_date=max(affected_dates)
+        )
+        return affected_dates
+
+    SHIFT_CHANGE_REQUEST_SELECT = """
+        SELECT
+            r.id,
+            r.operator_id,
+            op.name AS operator_name,
+            r.department_id,
+            dep.name AS department_name,
+            r.supervisor_id,
+            sv.name AS supervisor_name,
+            r.request_kind,
+            r.shift_date,
+            r.payload_json,
+            r.status,
+            r.request_comment,
+            r.response_comment,
+            r.reviewed_by,
+            rev.name AS reviewed_by_name,
+            r.reviewed_at,
+            r.operator_seen_at,
+            r.created_at,
+            r.updated_at,
+            dir.name AS direction_name
+        FROM work_shift_change_requests r
+        JOIN users op ON op.id = r.operator_id
+        LEFT JOIN departments dep ON dep.id = r.department_id
+        LEFT JOIN users sv ON sv.id = r.supervisor_id
+        LEFT JOIN users rev ON rev.id = r.reviewed_by
+        LEFT JOIN directions dir ON dir.id = op.direction_id
+    """
+
+    def _serialize_shift_change_request_row(self, row):
+        if not row:
+            return None
+        (
+            request_id, operator_id, operator_name, department_id, department_name,
+            supervisor_id, supervisor_name, request_kind, shift_date, payload_json,
+            status, request_comment, response_comment, reviewed_by, reviewed_by_name,
+            reviewed_at, operator_seen_at, created_at, updated_at, direction_name
+        ) = row
+
+        payload = payload_json if isinstance(payload_json, dict) else {}
+
+        def _fmt_dt(value):
+            return value.isoformat() if isinstance(value, datetime) else None
+
+        kind = str(request_kind or '')
+        # Итоговый интервал считаем на сервере: клиентов у заявки трое
+        # (свой список оператора, очередь руководителя, колокол), и три копии
+        # арифметики «сколько часов уходит» разошлись бы на ночных сменах.
+        if kind == 'extra':
+            before_min = 0
+            after_min = max(0, int(payload.get('endMin') or 0) - int(payload.get('startMin') or 0))
+        else:
+            seg = payload.get('segment') if isinstance(payload.get('segment'), dict) else {}
+            before_min = max(0, int(seg.get('endMin') or 0) - int(seg.get('startMin') or 0))
+            after_min = max(0, int(payload.get('newEndMin') or 0) - int(payload.get('newStartMin') or 0))
+
+        return {
+            'id': int(request_id),
+            'operator': {
+                'id': int(operator_id),
+                'name': operator_name,
+                'direction': direction_name,
+            },
+            'department': {
+                'id': int(department_id) if department_id is not None else None,
+                'name': department_name,
+            },
+            'supervisor': {
+                'id': int(supervisor_id) if supervisor_id is not None else None,
+                'name': supervisor_name,
+            },
+            'kind': kind,
+            'shiftDate': shift_date.strftime('%Y-%m-%d') if isinstance(shift_date, date) else str(shift_date),
+            'payload': payload,
+            'status': str(status),
+            'requestComment': request_comment,
+            'responseComment': response_comment,
+            'reviewedBy': {
+                'id': int(reviewed_by) if reviewed_by is not None else None,
+                'name': reviewed_by_name,
+            },
+            'reviewedAt': _fmt_dt(reviewed_at),
+            'operatorSeenAt': _fmt_dt(operator_seen_at),
+            'createdAt': _fmt_dt(created_at),
+            'updatedAt': _fmt_dt(updated_at),
+            'minutesBefore': before_min,
+            'minutesAfter': after_min,
+            'minutesDelta': after_min - before_min,
+        }
+
+    def _select_shift_change_request_by_id_tx(self, cursor, request_id):
+        cursor.execute(
+            self.SHIFT_CHANGE_REQUEST_SELECT + " WHERE r.id = %s",
+            (int(request_id),)
+        )
+        return cursor.fetchone()
+
+    def create_shift_change_request(self, operator_id, request_kind, shift_date,
+                                    payload, request_comment=None):
+        """Подать заявку на сокращение смены или на доп. часть смены."""
+        operator_id = int(operator_id)
+        kind = self._normalize_shift_change_kind(request_kind)
+        shift_date_obj = self._normalize_schedule_date(shift_date)
+        normalized_payload = self._normalize_shift_change_payload(kind, payload)
+
+        comment = str(request_comment or '').strip() or None
+
+        today = self._almaty_now().date()
+        if shift_date_obj < today:
+            raise ValueError("Прошедшую смену изменить нельзя")
+        if (shift_date_obj - today).days > self.SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS:
+            raise ValueError(
+                f"Смена слишком далеко: заявки принимаются на "
+                f"{self.SHIFT_CHANGE_REQUEST_MAX_AHEAD_DAYS} дней вперёд"
+            )
+
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT id, role FROM users WHERE id = %s", (operator_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Оператор не найден")
+            if normalize_role_value(row[1]) != 'operator':
+                raise ValueError("Заявку на изменение смены подаёт оператор")
+
+            # Один незакрытый запрос на день и вид. Второй такой же — это не
+            # новая просьба, а повтор: руководитель увидел бы в очереди две
+            # строки об одном и том же и не понял бы, какую разбирать.
+            cursor.execute(
+                """
+                SELECT id FROM work_shift_change_requests
+                WHERE operator_id = %s AND shift_date = %s
+                  AND request_kind = %s AND status = 'pending'
+                LIMIT 1
+                """,
+                (operator_id, shift_date_obj, kind)
+            )
+            if cursor.fetchone():
+                raise ValueError("По этому дню уже есть заявка на рассмотрении")
+
+            _day_map, window = self._load_shift_change_window_tx(cursor, operator_id, shift_date_obj)
+            if kind == 'shorten' and not window:
+                raise ValueError("В этот день смен нет")
+            self._validate_shift_change_against_schedule(kind, normalized_payload, window)
+
+            # Отдел берём этим же курсором. get_user_department_id открыл бы
+            # ВТОРОЕ соединение, пока первое ещё держит транзакцию, а пул тут
+            # общий с SSE аукциона и циклом бота.
+            cursor.execute("SELECT department_id FROM users WHERE id = %s", (operator_id,))
+            dep_row = cursor.fetchone()
+            department_id = dep_row[0] if dep_row else None
+            group_id = self._get_operator_group_id_tx(cursor, operator_id, shift_date_obj)
+            supervisor_id = self._group_active_supervisor_id_tx(cursor, group_id) if group_id else None
+
+            cursor.execute(
+                """
+                INSERT INTO work_shift_change_requests
+                    (operator_id, department_id, supervisor_id, request_kind,
+                     shift_date, payload_json, request_comment)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+                RETURNING id
+                """,
+                (operator_id, department_id, supervisor_id, kind,
+                 shift_date_obj, json.dumps(normalized_payload, ensure_ascii=False), comment)
+            )
+            new_id = cursor.fetchone()[0]
+            return self._serialize_shift_change_request_row(
+                self._select_shift_change_request_by_id_tx(cursor, new_id)
+            )
+
+    def get_shift_change_requests_for_operator(self, operator_id, limit=100):
+        """Свои заявки оператора, свежие сверху."""
+        operator_id = int(operator_id)
+        limit = max(1, min(int(limit or 100), 500))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                self.SHIFT_CHANGE_REQUEST_SELECT
+                + " WHERE r.operator_id = %s ORDER BY r.created_at DESC, r.id DESC LIMIT %s",
+                (operator_id, limit)
+            )
+            rows = cursor.fetchall() or []
+        items = [self._serialize_shift_change_request_row(row) for row in rows]
+        return {
+            'requests': items,
+            'pendingCount': sum(1 for it in items if it['status'] == 'pending'),
+        }
+
+    def get_shift_change_requests_for_review(self, operator_ids, statuses=None,
+                                             start_date=None, end_date=None, limit=300):
+        """Очередь «Запросы» для руководителя: заявки операторов из его периметра.
+
+        Периметр приходит СПИСКОМ id, а не ролью: границу отдела считает
+        bot_schedule2._filter_operators_for_requester_scope, и второй копии
+        этого правила в SQL быть не должно.
+        """
+        ids = [int(v) for v in (operator_ids or []) if v is not None]
+        if not ids:
+            return {'requests': [], 'pendingCount': 0}
+
+        limit = max(1, min(int(limit or 300), 1000))
+        conditions = ["r.operator_id = ANY(%(ids)s)"]
+        params = {'ids': ids, 'limit': limit}
+
+        status_list = [
+            str(s).strip().lower() for s in (statuses or [])
+            if str(s).strip().lower() in self.SHIFT_CHANGE_REQUEST_STATUSES
+        ]
+        if status_list:
+            conditions.append("r.status = ANY(%(statuses)s)")
+            params['statuses'] = status_list
+        if start_date:
+            conditions.append("r.shift_date >= %(start_date)s")
+            params['start_date'] = self._normalize_schedule_date(start_date)
+        if end_date:
+            conditions.append("r.shift_date <= %(end_date)s")
+            params['end_date'] = self._normalize_schedule_date(end_date)
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                self.SHIFT_CHANGE_REQUEST_SELECT
+                + " WHERE " + " AND ".join(conditions)
+                # Ожидающие всегда сверху: очередь существует ради них, а
+                # разобранные заявки в ней — только история.
+                + " ORDER BY (r.status = 'pending') DESC, r.shift_date ASC,"
+                  " r.created_at ASC, r.id ASC LIMIT %(limit)s",
+                params
+            )
+            rows = cursor.fetchall() or []
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM work_shift_change_requests
+                WHERE operator_id = ANY(%s) AND status = 'pending'
+                """,
+                (ids,)
+            )
+            pending_total = int((cursor.fetchone() or [0])[0])
+
+        return {
+            'requests': [self._serialize_shift_change_request_row(row) for row in rows],
+            'pendingCount': pending_total,
+        }
+
+    def respond_shift_change_request(self, request_id, reviewer_id, action,
+                                     response_comment=None):
+        """Согласовать, отклонить или отозвать заявку.
+
+        `approve` сразу правит график — это и есть требование задачи #17
+        («при одобрении смена должна проставиться автоматически»). Отзыв
+        (`cancel`) доступен только автору и график не трогает.
+        """
+        request_id = int(request_id)
+        reviewer_id = int(reviewer_id)
+        action_norm = str(action or '').strip().lower()
+        if action_norm not in ('approve', 'reject', 'cancel'):
+            raise ValueError("action must be 'approve', 'reject' or 'cancel'")
+
+        comment = str(response_comment or '').strip() or None
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, operator_id, request_kind, shift_date, payload_json, status
+                FROM work_shift_change_requests
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (request_id,)
+            )
+            locked = cursor.fetchone()
+            if not locked:
+                raise ValueError("Заявка не найдена")
+            _lid, operator_id, request_kind, shift_date_obj, payload_raw, current_status = locked
+            operator_id = int(operator_id)
+            if str(current_status) != 'pending':
+                raise ValueError(f"Заявка уже обработана (статус: {current_status})")
+
+            if action_norm == 'cancel':
+                if reviewer_id != operator_id:
+                    raise ValueError("Отозвать заявку может только её автор")
+                cursor.execute(
+                    """
+                    UPDATE work_shift_change_requests
+                    SET status = 'cancelled',
+                        response_comment = %s,
+                        reviewed_by = %s,
+                        reviewed_at = CURRENT_TIMESTAMP,
+                        -- Своё же действие оператору не показываем как новость.
+                        operator_seen_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (comment, reviewer_id, request_id)
+                )
+                return self._serialize_shift_change_request_row(
+                    self._select_shift_change_request_by_id_tx(cursor, request_id)
+                )
+
+            if reviewer_id == operator_id:
+                raise ValueError("Свою заявку согласовать нельзя")
+
+            if action_norm == 'reject':
+                cursor.execute(
+                    """
+                    UPDATE work_shift_change_requests
+                    SET status = 'rejected',
+                        response_comment = %s,
+                        reviewed_by = %s,
+                        reviewed_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (comment, reviewer_id, request_id)
+                )
+                return self._serialize_shift_change_request_row(
+                    self._select_shift_change_request_by_id_tx(cursor, request_id)
+                )
+
+            kind = self._normalize_shift_change_kind(request_kind)
+            payload = payload_raw if isinstance(payload_raw, dict) else {}
+            self._apply_shift_change_request_tx(
+                cursor=cursor,
+                operator_id=operator_id,
+                shift_date_obj=shift_date_obj,
+                kind=kind,
+                payload=payload,
+                actor_id=reviewer_id
+            )
+            cursor.execute(
+                """
+                UPDATE work_shift_change_requests
+                SET status = 'approved',
+                    response_comment = %s,
+                    reviewed_by = %s,
+                    reviewed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (comment, reviewer_id, request_id)
+            )
+            return self._serialize_shift_change_request_row(
+                self._select_shift_change_request_by_id_tx(cursor, request_id)
+            )
+
+    def mark_shift_change_requests_seen(self, operator_id):
+        """Погасить у оператора уведомления о разобранных заявках."""
+        operator_id = int(operator_id)
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE work_shift_change_requests
+                SET operator_seen_at = CURRENT_TIMESTAMP
+                WHERE operator_id = %s
+                  AND status IN ('approved', 'rejected')
+                  AND operator_seen_at IS NULL
+                """,
+                (operator_id,)
+            )
+            return cursor.rowcount or 0
+
+    def get_shift_change_request_operator(self, request_id):
+        """Чью смену просят изменить. Нужен роуту, чтобы проверить периметр
+        согласующего ДО того, как заявка будет тронута."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT operator_id FROM work_shift_change_requests WHERE id = %s",
+                (int(request_id),)
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+
+    def get_shift_change_request_operator_ids(self, statuses=None,
+                                              start_date=None, end_date=None):
+        """Кандидаты для очереди «Запросы»: у кого вообще есть заявки в периоде.
+
+        Отдаём голые id, потому что границу отдела считает вызывающая сторона
+        (_filter_operators_for_requester_scope). Так же устроена история
+        изменений графика — одно правило видимости на весь раздел.
+        """
+        conditions = []
+        params = {}
+        status_list = [
+            str(s).strip().lower() for s in (statuses or [])
+            if str(s).strip().lower() in self.SHIFT_CHANGE_REQUEST_STATUSES
+        ]
+        if status_list:
+            conditions.append("status = ANY(%(statuses)s)")
+            params['statuses'] = status_list
+        if start_date:
+            conditions.append("shift_date >= %(start_date)s")
+            params['start_date'] = self._normalize_schedule_date(start_date)
+        if end_date:
+            conditions.append("shift_date <= %(end_date)s")
+            params['end_date'] = self._normalize_schedule_date(end_date)
+
+        where_sql = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT operator_id FROM work_shift_change_requests" + where_sql,
+                params
+            )
+            return [int(row[0]) for row in (cursor.fetchall() or []) if row[0] is not None]
 
     # ------------------------------------------------------------------
     # История изменений графика
