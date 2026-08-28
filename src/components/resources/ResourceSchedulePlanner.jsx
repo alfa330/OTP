@@ -277,6 +277,19 @@ const templateStorageKey = (apiPrefix) => (
     : TEMPLATE_STORAGE_KEY
 );
 
+// Ставки — тоже СВОИ на каждое направление: у линии есть половинная, в чате её нет
+// (решение владельца 27.08.2026). Направление выводим из apiPrefix тем же приёмом, что и
+// ключ хранилища выше, а не отдельным пропом: проп новая витрина может забыть проставить,
+// и редактор молча вернул бы чату ставку 0,5 — шаблоны на неё генератор чата не возьмёт.
+const LINE_TEMPLATE_RATES = [1, 0.75, 0.5];
+const CHAT_TEMPLATE_RATES = [1, 0.75];
+
+const templateRatesFor = (apiPrefix) => (
+  String(apiPrefix || '').includes('/chat')
+    ? CHAT_TEMPLATE_RATES
+    : LINE_TEMPLATE_RATES
+);
+
 const loadStoredTemplates = (apiPrefix) => {
   if (typeof window === 'undefined') return [];
   try {
@@ -609,6 +622,8 @@ const FteSumValue = ({ rounded, real, suffix = 'FTE-ч', className = 'text-slate
 
 const ShiftTemplateEditor = ({
   templates,
+  // Ставки направления: сам редактор направления не знает, ему их передают.
+  rates = LINE_TEMPLATE_RATES,
   selectedTemplateId,
   onTemplatesChange,
   onSelectedTemplateChange,
@@ -627,11 +642,17 @@ const ShiftTemplateEditor = ({
   };
 
   const addTemplate = () => {
-    const parsed = parseTemplateLabel('9*18');
+    // Новая строка — копия ПЕРВОГО шаблона текущего направления. Раньше здесь был
+    // зашит линейный «9*18», которого в чате нет: такая строка уезжала в генерацию
+    // чужой сменой. Запасной ярлык нужен только пока ручка направления не ответила.
+    const source = templates.find((template) => template.enabled !== false) || templates[0] || null;
+    const label = String(source?.label || '9*18');
+    const rate = rates.includes(Number(source?.rate)) ? Number(source.rate) : rates[0];
+    const parsed = parseTemplateLabel(label);
     const item = {
       id: `local-${Date.now()}`,
-      rate: 1,
-      label: '9*18',
+      rate,
+      label,
       enabled: true,
       ...parsed,
     };
@@ -699,9 +720,9 @@ const ShiftTemplateEditor = ({
                         onChange={(event) => updateTemplate(template.id, { rate: Number(event.target.value) })}
                         className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                       >
-                        <option value="1">1</option>
-                        <option value="0.75">0.75</option>
-                        <option value="0.5">0.5</option>
+                        {rates.map((rate) => (
+                          <option key={rate} value={String(rate)}>{rate}</option>
+                        ))}
                       </select>
                     </td>
                     <td className="px-3 py-2">
@@ -752,8 +773,11 @@ const ShiftTemplateEditor = ({
               </option>
             ))}
           </select>
-          <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-            {[1, 0.75, 0.5].map((rate) => (
+          <div
+            className="mt-3 grid gap-2 text-center text-xs"
+            style={{ gridTemplateColumns: `repeat(${rates.length}, minmax(0, 1fr))` }}
+          >
+            {rates.map((rate) => (
               <div key={rate} className="rounded-lg bg-white px-2 py-2">
                 <div className="font-semibold text-slate-900">{rate}</div>
                 <div className="text-slate-500">
@@ -2549,6 +2573,7 @@ const ResourceSchedulePlanner = ({
 
       <ShiftTemplateEditor
         templates={templates}
+        rates={templateRatesFor(apiPrefix)}
         selectedTemplateId={selectedTemplateId}
         onTemplatesChange={applyTemplates}
         onSelectedTemplateChange={setSelectedTemplateId}

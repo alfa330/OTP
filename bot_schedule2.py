@@ -86,10 +86,18 @@ from resource_fte_service import (
     update_resource_settings,
 )
 from resource_fte.chat import (
+    CHAT_BILLING_GROUP_BY,
+    CHAT_BILLING_MAX_RANGE_DAYS,
+    CHAT_BILLING_SL_DEFAULT_SECONDS,
+    CHAT_BILLING_SL_SECONDS_LIMITS,
     build_chat_forecast,
     build_chat_uplift_profile,
     fit_first_reply_curve,
     get_chat_analytics,
+    get_chat_billing_detail_export_rows,
+    get_chat_billing_details,
+    get_chat_billing_operators,
+    get_chat_billing_report,
     get_chat_day,
     get_chat_operator_availability,
     get_chat_overview,
@@ -8111,6 +8119,201 @@ def api_resource_fte_chat_shift_templates():
     except Exception as error:
         return _resource_fte_error_response(error)
 
+
+def _chat_billing_parse_request_args():
+    """Период и окно времени для биллинга чата.
+
+    Разбор дат переиспользуем у линии — он уже написан без зависимости от Oktell.
+    А вот проверку готовности Oktell брать нельзя: чатовый биллинг считается по
+    c2d_requests, телефония ему не нужна, и на стенде без OKTELL_IP он обязан работать.
+    """
+    params, error_response, error_status = _oktell_billing_parse_date_args()
+    if params is None:
+        return None, error_response, error_status
+
+    minute_from = _oktell_billing_parse_time(request.args.get('time_from') or '00:00')
+    minute_to = _oktell_billing_parse_time(request.args.get('time_to') or '23:59')
+    if minute_from is None or minute_to is None:
+        return None, jsonify({"error": "time_from и time_to должны быть в формате HH:MM"}), 400
+    if minute_to < minute_from:
+        return None, jsonify({"error": "time_to должен быть не раньше time_from"}), 400
+
+    try:
+        sl_seconds = int(request.args.get('sl_seconds') or 60)
+    except (TypeError, ValueError):
+        return None, jsonify({"error": "sl_seconds должен быть целым числом"}), 400
+
+    return {
+        **params,
+        'minute_from': minute_from,
+        'minute_to': minute_to,
+        'sl_seconds': max(1, min(3600, sl_seconds)),
+    }, None, None
+
+
+def _chat_billing_response_meta(params, group_by=None):
+    """Мету фронт читает из ответа и рисует в шапке отчёта — отдаём её всеми ручками."""
+    meta = {
+        **_oktell_billing_response_meta(params),
+        "sl_threshold_seconds": params['sl_seconds'],
+    }
+    if group_by is not None:
+        meta["group_by"] = group_by
+    return meta
+
+
+@app.route('/api/resource_fte/chat/billing', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_billing():
+    """Биллинг чата: объём и сервис по таксопаркам.
+
+    У линии это парки и линии Oktell, у чата — канал (channel_name, он же парк)
+    и транспорт. Колонок про время разговора здесь нет: среднего времени обработки
+    в чатовой модели не существует.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _chat_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    group_by = str(request.args.get('group_by') or 'park').strip().lower()
+    if group_by not in ('park', 'transport'):
+        return jsonify({"error": "group_by должен быть park или transport"}), 400
+
+    try:
+        payload = get_chat_billing_report(
+            db, params['start_day'], params['end_day'],
+            minute_from=params['minute_from'], minute_to=params['minute_to'],
+            sl_seconds=params['sl_seconds'], group_by=group_by,
+        )
+        return jsonify({"status": "success",
+                        **_chat_billing_response_meta(params, group_by),
+                        **payload}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/billing_operators', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_billing_operators():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _chat_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    try:
+        payload = get_chat_billing_operators(
+            db, params['start_day'], params['end_day'],
+            minute_from=params['minute_from'], minute_to=params['minute_to'],
+            sl_seconds=params['sl_seconds'],
+        )
+        return jsonify({"status": "success",
+                        **_chat_billing_response_meta(params),
+                        **payload}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/billing_details', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_billing_details():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _chat_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    try:
+        page = max(1, int(request.args.get('page') or 1))
+        per_page = max(1, min(200, int(request.args.get('per_page') or 25)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "page и per_page должны быть целыми числами"}), 400
+
+    try:
+        payload = get_chat_billing_details(
+            db, params['start_day'], params['end_day'],
+            minute_from=params['minute_from'], minute_to=params['minute_to'],
+            sl_seconds=params['sl_seconds'], page=page, per_page=per_page,
+        )
+        return jsonify({"status": "success",
+                        **_chat_billing_response_meta(params),
+                        **payload}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+@app.route('/api/resource_fte/chat/billing_export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_chat_billing_export():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _chat_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+
+    try:
+        rows = get_chat_billing_detail_export_rows(
+            db, params['start_day'], params['end_day'],
+            minute_from=params['minute_from'], minute_to=params['minute_to'],
+            sl_seconds=params['sl_seconds'],
+        )
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = 'Чаты'
+        headers = list(rows[0].keys()) if rows else [
+            'Дата', 'Час', 'Парк', 'Транспорт', 'Чатник', 'Первый ответ, с', 'В цель']
+        sheet.append(headers)
+        for cell in sheet[1]:
+            cell.font = Font(bold=True)
+        for row in rows:
+            sheet.append([row.get(key) for key in headers])
+        for index, header in enumerate(headers, start=1):
+            width = max(len(str(header)) + 2,
+                        *(len(str(row.get(header) or '')) + 2 for row in rows[:200]) or [12])
+            sheet.column_dimensions[get_column_letter(index)].width = min(40, width)
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("Chat billing export failed")
+        return jsonify({"error": "Не удалось сформировать выгрузку биллинга чата"}), 500
+
+    filename = (
+        "chat_billing_"
+        f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
+    )
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
 @app.route('/api/resource_fte/chat/day/<string:report_date>', methods=['GET', 'OPTIONS'])
 @require_api_key

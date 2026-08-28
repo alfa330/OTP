@@ -16,8 +16,10 @@ import {
   FileDown,
   FileUp,
   Gavel,
+  Gauge,
   LayoutDashboard,
   ListChecks,
+  MessageSquare,
   Receipt,
   RefreshCw,
   Save,
@@ -26,6 +28,8 @@ import {
   PhoneCall,
   PhoneMissed,
   ShieldAlert,
+  Target,
+  Timer,
   TrendingUp,
   UploadCloud,
   Users,
@@ -290,11 +294,18 @@ const inputClass =
 
 const DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_fte_display_v1';
 
+// Ключ вкладки биллинга общий у обоих направлений: на него завязан внешний
+// переход initialDashboardView, и переименовать его в одном направлении нельзя.
+const BILLING_VIEW_KEY = 'oktell_billing';
+
 const VIEW_TABS = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
   { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
   { key: 'schedule_planner', label: 'Графики', icon: CalendarDays },
   { key: 'losses', label: 'Звонки', icon: PhoneCall },
+  // Ту же вкладку показывает чат (VIEW_TABS_CHAT, подпись «Биллинг»). Ключ у них
+  // один: сокращать его до key: 'billing' в одном из направлений нельзя — тогда
+  // внешний переход initialDashboardView привёл бы в пустоту.
   { key: 'oktell_billing', label: 'Биллинг Oktell', icon: Receipt },
   { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
 ];
@@ -534,13 +545,16 @@ const OVERVIEW_TREND_TOOLTIP_CONFIG = {
   forecastFte: { group: 'Сумма FTE в час', label: 'Прогноз', digits: 2, groupOrder: 4, itemOrder: 2 },
 };
 
-const loadDisplayOptions = () => {
-  if (typeof window === 'undefined') return { ...DEFAULT_DISPLAY_OPTIONS };
+// Ключ и набор приходят из конфигурации направления: у линии в её ключе лежат
+// показатели, которых в чате нет вовсе, и на общем ключе они подмешались бы
+// мёртвыми тумблерами.
+const loadDisplayOptions = (storageKey = DISPLAY_PREFERENCES_STORAGE_KEY, defaults = DEFAULT_DISPLAY_OPTIONS) => {
+  if (typeof window === 'undefined') return { ...defaults };
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(DISPLAY_PREFERENCES_STORAGE_KEY) || '{}');
-    return { ...DEFAULT_DISPLAY_OPTIONS, ...(parsed && typeof parsed === 'object' ? parsed : {}) };
+    const parsed = JSON.parse(window.localStorage.getItem(storageKey) || '{}');
+    return { ...defaults, ...(parsed && typeof parsed === 'object' ? parsed : {}) };
   } catch {
-    return { ...DEFAULT_DISPLAY_OPTIONS };
+    return { ...defaults };
   }
 };
 
@@ -670,6 +684,10 @@ const OperatorSummaryCard = ({
   partialCount,
   unavailableCount,
   onOpen,
+  label = 'Операторы',
+  fteWord = 'FTE',
+  excludedCount = 0,
+  excludedFte = 0,
 }) => {
   const requiredNumber = Number(requiredFte || 0);
   const requiredWithUpliftNumber = Number(requiredWithUplift ?? requiredFte ?? 0);
@@ -686,7 +704,7 @@ const OperatorSummaryCard = ({
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Операторы</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
           <div className={`mt-2 grid gap-3 ${hasUpliftRequirement ? 'grid-cols-3' : 'grid-cols-2'}`}>
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Нужно</div>
@@ -713,12 +731,12 @@ const OperatorSummaryCard = ({
       <div className={`mt-3 grid gap-2 text-xs text-slate-600 ${hasUpliftRequirement ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
         <div className="rounded-lg bg-slate-50 px-3 py-2">
           <span className="block text-slate-500">Разница</span>
-          <b className={`tabular-nums ${Number(gap || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(gap, 2)} FTE</b>
+          <b className={`tabular-nums ${Number(gap || 0) < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(gap, 2)} {fteWord}</b>
         </div>
         {hasUpliftRequirement ? (
           <div className="rounded-lg bg-emerald-50 px-3 py-2">
             <span className="block text-emerald-700">Разница с приростом</span>
-            <b className={`tabular-nums ${upliftGap < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(upliftGap, 2)} FTE</b>
+            <b className={`tabular-nums ${upliftGap < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{formatSignedNumber(upliftGap, 2)} {fteWord}</b>
           </div>
         ) : null}
         <div className="rounded-lg bg-slate-50 px-3 py-2">
@@ -728,10 +746,15 @@ const OperatorSummaryCard = ({
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 tabular-nums">
         <span>Без усушки: {formatNumber(baseFte, 2)}</span>
-        <span>Текущий FTE: {formatNumber(currentFte, 2)}</span>
+        <span>Текущий {fteWord}: {formatNumber(currentFte, 2)}</span>
         <span>Часть периода: {formatInt(partialCount)}</span>
         <span>Не работают: {formatInt(unavailableCount)}</span>
       </div>
+      {Number(excludedCount || 0) > 0 ? (
+        <div className="mt-2 text-xs text-amber-700 tabular-nums">
+          Вне ставок направления: {formatInt(excludedCount)} чел. ({formatSignedNumber(-Math.abs(Number(excludedFte || 0)), 2)})
+        </div>
+      ) : null}
       <div className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700">
         <Eye size={14} aria-hidden="true" />
         Детали расчета
@@ -1009,8 +1032,14 @@ const FORECAST_CHART_LEGEND_ITEMS = [
   { key: 'forecastChartActualFte', label: 'Факт FTE', color: '#059669', shape: 'dashed', requires: 'actual' },
 ];
 
-const ForecastChartLegend = ({ displayOptions, toggleDisplayOption, incidentUpliftAvailable, showActualLoad }) => {
-  const items = FORECAST_CHART_LEGEND_ITEMS.filter((item) => {
+const ForecastChartLegend = ({
+  displayOptions,
+  toggleDisplayOption,
+  incidentUpliftAvailable,
+  showActualLoad,
+  legendItems = FORECAST_CHART_LEGEND_ITEMS,
+}) => {
+  const items = legendItems.filter((item) => {
     if (item.requires === 'uplift') return incidentUpliftAvailable;
     if (item.requires === 'actual') return showActualLoad;
     return true;
@@ -1102,8 +1131,9 @@ const ForecastDisplayPanel = ({
   incidentUpliftAvailable,
   showActualLoad,
   forecastActualLoadAvailable,
+  panelGroups = FORECAST_PANEL_GROUPS,
 }) => {
-  const hiddenCount = FORECAST_PANEL_GROUPS.reduce((acc, group) => (
+  const hiddenCount = panelGroups.reduce((acc, group) => (
     acc + group.items.filter(([key, , requires]) => {
       if (requires === 'uplift' && !incidentUpliftAvailable) return false;
       if (requires === 'actual' && !showActualLoad) return false;
@@ -1130,7 +1160,7 @@ const ForecastDisplayPanel = ({
             </button>
           </div>
           <div className="max-h-[60vh] space-y-3 overflow-y-auto p-3">
-            {FORECAST_PANEL_GROUPS.map((group) => {
+            {panelGroups.map((group) => {
               const visibleItems = group.items.filter(([, , requires]) => {
                 if (requires === 'uplift' && !incidentUpliftAvailable) return false;
                 if (requires === 'actual' && !showActualLoad) return false;
@@ -1197,21 +1227,673 @@ const ForecastDisplayPanel = ({
   );
 };
 
-const OverviewTrendTooltip = ({ active, label, payload }) => {
+// ===========================================================================
+// НАПРАВЛЕНИЯ РАЗДЕЛА: линия и чат — один компонент.
+//
+// Решение владельца 28.08.2026: «переиспользовать раздел линии, но под чат
+// направление». Значит ни копии, ни параллельной реализации: всё, что
+// различается, лежит здесь декларативно, а разметка спрашивает флаг из cfg,
+// а не имя направления. При direction='line' конфигурация отдаёт ровно
+// сегодняшние значения, поэтому каждое условие сворачивается в текущую ветку
+// и линия не меняется ни на йоту.
+// ===========================================================================
+
+// >>> CHAT_DIRECTION_CONFIG_START
+// Всё чатовое живёт между этими метками. Страж чатовых показателей читает
+// только этот кусок файла: телефонные показатели линии в общем файле законны,
+// а вот протечь в чат они не должны.
+
+// Вкладок у чата шесть. Ключи общие с линией — иначе внешний переход на
+// 'losses' привёл бы в пустоту, а initialDashboardView перестал бы работать.
+const VIEW_TABS_CHAT = [
+  { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
+  { key: 'next_week', label: 'Прогнозы', icon: TrendingUp },
+  { key: 'schedule_planner', label: 'Графики', icon: CalendarDays },
+  { key: 'losses', label: 'Чаты', icon: MessageSquare },
+  // Биллинг. Ключ вкладки приходит константой BILLING_VIEW_KEY: он общий с
+  // линией, и свой короткий key: 'billing' развёл бы направления, а на общий
+  // ключ завязан внешний переход initialDashboardView. Подпись при этом своя —
+  // имени телефонии в чате не место, здесь считаются обращения.
+  { key: BILLING_VIEW_KEY, label: 'Биллинг', icon: Receipt },
+  { key: 'settings', label: 'Настройки', icon: SlidersHorizontal },
+];
+
+const CHAT_API_PREFIX = '/api/resource_fte/chat';
+
+const CHAT_DISPLAY_PREFERENCES_STORAGE_KEY = 'otp_resource_chat_display_v1';
+
+// В расчёт чата идут только ставки 1 и 0,75 — тот же набор, что CHAT_RATES на
+// сервере. Плашка сверху обещает это прямым текстом, значит и карточка
+// доступности обязана считать по нему же, иначе на экране два разных числа
+// про один и тот же штат.
+const CHAT_RATE_VALUES = [1, 0.75];
+
+const isChatRate = (rate) => CHAT_RATE_VALUES.some((allowed) => Math.abs(Number(rate || 0) - allowed) < 0.001);
+
+const CHAT_DISPLAY_GROUPS = [
+  {
+    title: 'Обзор · Карточки',
+    items: [
+      ['metricForecastChats', 'Прогноз чатов'],
+      ['metricForecastFteHours', 'Чатнико-часы прогноза'],
+      ['metricActualFteHours', 'Факт чатнико-часов'],
+      ['metricFteDelta', 'Разница с прогнозом'],
+      ['metricInTargetShare', 'Первый ответ в цель'],
+      ['metricCoveredDays', 'Дней с чатами'],
+    ],
+  },
+  {
+    title: 'Обзор · Тренд',
+    items: [
+      ['trendChats', 'Чаты'],
+      ['trendNeedFte', 'Потребность, чатнико-часы'],
+      ['trendActualFte', 'Факт, чатнико-часы'],
+    ],
+  },
+  {
+    title: 'Прогнозы · KPI',
+    items: [
+      ['forecastKpiFteHours', 'Чатнико-часы периода'],
+      ['forecastKpiOperators', 'Чатники'],
+      ['forecastKpiCapacity', 'Ёмкость'],
+      ['forecastKpiTarget', 'Цель ответа'],
+      ['forecastKpiShrinkage', 'Усушка'],
+      ['forecastKpiUplift', 'Возможный прирост'],
+    ],
+  },
+  {
+    title: 'Прогнозы · График',
+    items: [
+      ['forecastChartChats', 'Чаты (бар)'],
+      ['forecastChartUplift', 'Прирост чатов'],
+      ['forecastChartFte', 'Потребность'],
+      ['forecastChartAdjustedFte', 'Потребность с приростом'],
+      ['forecastChartActualChats', 'Факт чатов'],
+    ],
+  },
+  {
+    title: 'Прогнозы · Таблица',
+    items: [
+      ['forecastTableUplift', 'Прирост'],
+      ['forecastTableAdjustedFte', 'С приростом'],
+      ['forecastTableActualChats', 'Факт чатов'],
+      ['forecastTableActualHours', 'Факт чатнико-часов'],
+      ['forecastTableFirstReply', 'Первый ответ'],
+    ],
+  },
+];
+
+const CHAT_DEFAULT_DISPLAY_OPTIONS = CHAT_DISPLAY_GROUPS.reduce((acc, group) => {
+  group.items.forEach(([key]) => {
+    // По умолчанию включено всё, кроме побочных колонок и редких карточек:
+    // раздел должен открываться читаемым, а не полотном из двух десятков столбцов.
+    acc[key] = ![
+      'metricCoveredDays',
+      'forecastKpiTarget',
+      'forecastKpiShrinkage',
+      'forecastTableUplift',
+      'forecastTableAdjustedFte',
+      'forecastTableActualHours',
+      'forecastTableFirstReply',
+    ].includes(key);
+  });
+  return acc;
+}, {});
+
+const CHAT_FORECAST_CHART_LEGEND_ITEMS = [
+  { key: 'forecastChartChats', label: 'Чаты', color: '#60a5fa', shape: 'bar' },
+  { key: 'forecastChartUplift', label: 'Прирост чатов', color: '#34d399', shape: 'bar', requires: 'uplift' },
+  { key: 'forecastChartActualChats', label: 'Факт чатов', color: '#10b981', shape: 'bar', requires: 'actual' },
+  { key: 'forecastChartFte', label: 'Нужно чатников', color: '#2563eb', shape: 'line' },
+  { key: 'forecastChartAdjustedFte', label: 'Нужно чатников с приростом', color: '#059669', shape: 'dashed', requires: 'uplift' },
+];
+
+const CHAT_FORECAST_PANEL_GROUPS = [
+  {
+    title: 'KPI периода',
+    items: [
+      ['forecastKpiFteHours', 'Чатнико-часы периода'],
+      ['forecastKpiOperators', 'Чатники'],
+      ['forecastKpiCapacity', 'Ёмкость'],
+      ['forecastKpiTarget', 'Цель ответа'],
+      ['forecastKpiShrinkage', 'Усушка'],
+      ['forecastKpiUplift', 'Возможный прирост'],
+    ],
+  },
+  {
+    title: 'Серии графика',
+    items: [
+      ['forecastChartChats', 'Чаты (бар)'],
+      ['forecastChartUplift', 'Прирост чатов', 'uplift'],
+      ['forecastChartActualChats', 'Факт чатов', 'actual'],
+      ['forecastChartFte', 'Потребность'],
+      ['forecastChartAdjustedFte', 'Потребность с приростом', 'uplift'],
+    ],
+  },
+  {
+    title: 'Колонки таблицы',
+    items: [
+      ['forecastTableUplift', 'Прирост', 'uplift'],
+      ['forecastTableAdjustedFte', 'С приростом', 'uplift'],
+      ['forecastTableActualChats', 'Факт чатов', 'actual'],
+      ['forecastTableActualHours', 'Факт чатнико-часов', 'actual'],
+      ['forecastTableFirstReply', 'Первый ответ', 'actual'],
+    ],
+  },
+];
+
+const CHAT_OVERVIEW_TREND_TOOLTIP_CONFIG = {
+  calls: { group: 'Чаты', label: 'Факт', digits: 0, groupOrder: 1, itemOrder: 1 },
+  actualFte: { group: 'Чатнико-часы', label: 'Факт', digits: 2, groupOrder: 2, itemOrder: 1 },
+  forecastFte: { group: 'Чатнико-часы', label: 'Потребность', digits: 2, groupOrder: 2, itemOrder: 2 },
+};
+
+const CHAT_FTE_ROUNDING_LABELS = [
+  ['half', 'до половины'],
+  ['exact', 'без округления'],
+  ['ceil', 'вверх'],
+];
+
+const describeChatTarget = (seconds) => {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  if (!minutes) return `${rest} сек`;
+  return rest ? `${minutes} мин ${rest} сек` : `${minutes} мин`;
+};
+
+const formatReplySeconds = (value) => (
+  value === null || value === undefined || value === '' ? '—' : `${formatNumber(value, 0)} с`
+);
+
+const chatCapacityPerHour = (payload) => {
+  const settings = payload?.settings || {};
+  const totals = payload?.forecast?.totals || {};
+  return Math.max(0.01, Number(settings.capacity_per_hour || totals.capacity_per_hour || 17));
+};
+
+// Дерево рендера остаётся направлением-слепым: чатовый ответ приводится к той же
+// форме, что отдаёт линейный бэкенд. Единицы при этом НЕ переименовываются в
+// «звонки» — подписи берутся из cfg.unit, поэтому на экране чата везде «чаты»
+// и «чатнико-часы». Всё, чего у чата нет, остаётся undefined, а рендер этих
+// блоков закрыт флагами cfg — пустые нули просочиться не могут.
+const adaptChatUpliftSources = (sources) => (Array.isArray(sources) ? sources : []).map((item) => ({
+  ...item,
+  calls: item.chats ?? item.calls,
+  delta_calls: item.delta_chats ?? item.delta_calls,
+  actual_calls: item.actual_chats ?? item.actual_calls,
+  forecast_calls: item.forecast_chats ?? item.forecast_calls,
+}));
+
+const adaptChatForecastDay = (day) => ({
+  ...day,
+  forecast_calls: Number(day.forecast_chats || 0),
+  forecast_daily_fte: Number(day.forecast_fte_hours || 0),
+  incident_uplift_calls: Number(day.incident_uplift_chats || 0),
+  incident_uplift_fte: Number(day.incident_uplift_fte_hours || 0),
+  incident_adjusted_daily_fte: Number(day.forecast_fte_hours || 0) + Number(day.incident_uplift_fte_hours || 0),
+  has_actual_report: Boolean(day.has_actual),
+  actual_received_calls: Number(day.actual_chats || 0),
+  actual_report_fte: Number(day.actual_online_hours || 0),
+  hourly_forecast: (day.hourly_forecast || []).map((row) => ({
+    ...row,
+    forecast_calls: Number(row.forecast_chats || 0),
+    incident_uplift_calls: Number(row.incident_uplift_chats || 0),
+    incident_adjusted_calls: Number(row.incident_adjusted_chats ?? row.forecast_chats ?? 0),
+    source_calls: adaptChatUpliftSources(row.source_chats || row.source_calls),
+    incident_uplift_sources: adaptChatUpliftSources(row.incident_uplift_sources),
+  })),
+});
+
+const adaptChatOverview = (payload) => {
+  const data = payload || {};
+  const forecast = data.forecast || {};
+  const totals = forecast.totals || {};
+  const settings = data.settings || {};
+  const capacity = chatCapacityPerHour(data);
+  const actualDays = data.actual?.days || [];
+  const uplift = data.uplift || null;
+  const shrink = Math.min(Math.max(Number(settings.shrinkage_coeff || 0.9), 0.01), 1);
+  const perOperator = Number(totals.period_hours_per_operator || 0);
+  // «Требуется с приростом» чат готовым не отдаёт — считаем по той же формуле,
+  // что и сервер: часы с приростом ÷ норма ÷ усушка.
+  const adjustedOperators = perOperator > 0
+    ? (Number(totals.forecast_fte_hours || 0) + Number(totals.uplift_fte_hours || 0)) / perOperator / shrink
+    : Number(totals.operators_with_shrinkage || 0);
+  const sourceDates = Array.isArray(uplift?.source_dates) ? uplift.source_dates : [];
+  return {
+    ...data,
+    settings,
+    directions: [],
+    loaded_report_dates: data.covered_days || [],
+    history: actualDays.map((row) => ({
+      report_date: row.date,
+      weekday_short: row.short,
+      total_received: Number(row.chats || 0),
+      total_accepted: Number(row.answered || 0),
+      forecast_calls_total: Number(row.forecast_chats || 0),
+      // Потребность дня — та же формула часа, только сложенная: объём ÷ ёмкость.
+      forecast_fte_total: Number(row.chats || 0) / capacity,
+      actual_report_fte_total: Number(row.actual_online_hours || 0),
+      in_target: Number(row.in_target || 0),
+      in_target_share: Number(row.in_target_share || 0),
+    })),
+    next_week_forecast: {
+      days: (forecast.days || []).map(adaptChatForecastDay),
+      period_start: forecast.period_start || '',
+      period_end: forecast.period_end || '',
+      periodFteHours: Number(totals.forecast_fte_hours || 0),
+      periodCalls: Number(totals.forecast_chats || 0),
+      periodDays: Number(totals.period_days || 0),
+      baseOperators: Number(totals.operators || 0),
+      operatorsWithShrinkage: Number(totals.operators_with_shrinkage || 0),
+      incidentAdjustedOperatorsWithShrinkage: adjustedOperators,
+      currentOperatorFte: Number(totals.current_operator_fte || 0),
+      operatorFteGap: Number(totals.operator_fte_gap || 0),
+      shrinkage: Number(settings.shrinkage_coeff || 0),
+      incidentUpliftCalls: Number(totals.uplift_chats || 0),
+      incidentUpliftFteHours: Number(totals.uplift_fte_hours || 0),
+      incidentUplift: { source_day_count: Number(uplift?.source_day_count || 0) },
+      capacityPerHour: capacity,
+      periodOperatorCount: Number(totals.head_count || 0),
+      historyComplete: true,
+      history_periods: [],
+      base_week_starts: forecast.base_week_starts || [],
+      skipped_base_weeks: forecast.skipped_base_weeks || [],
+      operator_capacity: forecast.operator_capacity || {},
+    },
+    incident_uplift_dashboard: uplift ? {
+      daily: (uplift.daily || []).map((row) => ({
+        ...row,
+        forecast_calls: Number(row.forecast_chats || 0),
+        actual_calls: Number(row.actual_chats || 0),
+        positive_delta_calls: Number(row.positive_delta_chats || 0),
+        delta_calls: Number(row.actual_chats || 0) - Number(row.forecast_chats || 0),
+        positive_hour_share: Number(row.source_hour_count || 0) > 0
+          ? Number(row.positive_hour_count || 0) / Number(row.source_hour_count || 1)
+          : 0,
+      })),
+      hourly: (uplift.hourly || []).map((row) => ({
+        ...row,
+        weighted_delta_calls: Number(row.weighted_delta_chats || 0),
+      })),
+      daily_summary: {
+        held_day_count: Number(uplift.daily_summary?.held_day_count || 0),
+        overload_day_count: Number(uplift.daily_summary?.overload_day_count || 0),
+        source_day_count: Number(uplift.daily_summary?.source_day_count || 0),
+        total_forecast_calls: Number(uplift.daily_summary?.total_forecast_chats || 0),
+        total_actual_calls: Number(uplift.daily_summary?.total_actual_chats || 0),
+        total_delta_calls: Number(uplift.daily_summary?.total_delta_chats || 0),
+        total_positive_delta_calls: Number(uplift.daily_summary?.total_positive_delta_chats || 0),
+      },
+      // Даты источника приходят от свежей к старой.
+      source_start: sourceDates.length ? sourceDates[sourceDates.length - 1] : '',
+      source_end: sourceDates.length ? sourceDates[0] : '',
+      window_start: uplift.forecast_window_start || '',
+      window_end: uplift.forecast_window_end || '',
+      projection: {},
+    } : {},
+  };
+};
+
+const adaptChatDay = (day) => (day ? {
+  ...day,
+  summary: { ...(day.summary || {}), report_date: day.date },
+} : day);
+
+// ── Биллинг чата ──────────────────────────────────────────────────────────
+// Тот же экран, что у линии, но модель другая: среднего времени обработки в
+// чате нет, поэтому колонок про длительность здесь тоже нет. Считаются объём
+// обращений и скорость первого ответа.
+
+const CHAT_BILLING_MODES = [
+  { key: 'park', label: 'Таксопарки' },
+  { key: 'transport', label: 'Транспорт' },
+  { key: 'operator', label: 'Чатники' },
+  { key: 'detail', label: 'Детализация' },
+];
+
+// Порог «в цель» по умолчанию — тот же, что у ручки биллинга чата на сервере.
+const CHAT_BILLING_SL_DEFAULT_SECONDS = 60;
+
+// Средний первый ответ: сумма реакций делится на тех, кому ответили. Делить на
+// все обращения нельзя — оставшиеся без ответа не имеют времени реакции вовсе.
+const chatBillingReplyLabel = (item) => {
+  const seconds = safeRatio(item?.first_reply_seconds, item?.answered);
+  return seconds === null ? '—' : formatDurationHms(seconds);
+};
+
+// Обе доли в чате «чем больше, тем лучше», поэтому и AR красится шкалой SL:
+// у линии AR — доля потерянных, у чата — доля отвеченных.
+const chatBillingShareClass = billingSlClass;
+
+const CHAT_BILLING_COLUMNS = [
+  { key: 'chats', label: 'Поступило' },
+  { key: 'answered', label: 'Обслужено' },
+  { key: 'no_reply', label: 'Потеряно' },
+  { key: 'first_reply', label: 'Ср. первый ответ' },
+  { key: 'ar', label: 'AR' },
+  { key: 'sl', label: 'SL' },
+];
+
+const chatBillingRowKey = (item, mode) => (mode === 'operator'
+  ? String(item.operator || '')
+  : `${item.park || ''}|${item.transport || ''}`);
+
+const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' }) => {
+  const renderMetricsCells = (item) => {
+    const arRatio = safeRatio(item.answered, item.chats);
+    const slRatio = safeRatio(item.answered_sl, item.chats);
+    return (
+      <>
+        <td className="px-3 py-2.5 text-right font-semibold text-slate-900">{formatInt(item.chats)}</td>
+        <td className="px-3 py-2.5 text-right text-emerald-700">{formatInt(item.answered)}</td>
+        <td className="px-3 py-2.5 text-right text-rose-600">{formatInt(item.no_reply)}</td>
+        <td className="px-3 py-2.5 text-right text-slate-700">{chatBillingReplyLabel(item)}</td>
+        <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(arRatio)}`}>
+          {arRatio === null ? '—' : formatPercent(arRatio, 1)}
+        </td>
+        <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(slRatio)}`}>
+          {slRatio === null ? '—' : formatPercent(slRatio, 1)}
+        </td>
+      </>
+    );
+  };
+
+  const firstColumnLabel = mode === 'operator'
+    ? 'Чатник'
+    : mode === 'transport' ? 'Транспорт' : 'Таксопарк';
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[760px] divide-y divide-slate-200 text-sm tabular-nums">
+        <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="px-3 py-2.5 text-left font-semibold">{firstColumnLabel}</th>
+            {CHAT_BILLING_COLUMNS.map((column) => (
+              <th key={column.key} className="px-3 py-2.5 text-right font-semibold">{column.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.map((item) => (
+            <tr key={chatBillingRowKey(item, mode)} className="transition hover:bg-slate-50/70">
+              {mode === 'transport' ? (
+                <td className="px-3 py-2.5">
+                  <div className="font-medium text-slate-900">{item.transport || 'Без транспорта'}</div>
+                  <div className="text-xs text-slate-400">{billingParkLabel(item.park)}</div>
+                </td>
+              ) : (
+                <td className="px-3 py-2.5 font-medium text-slate-900">
+                  {mode === 'operator' ? (item.operator || '—') : billingParkLabel(item.park)}
+                </td>
+              )}
+              {renderMetricsCells(item)}
+            </tr>
+          ))}
+        </tbody>
+        {totals ? (
+          <tfoot>
+            <tr className="bg-slate-50 font-semibold text-slate-950">
+              <td className="px-3 py-2.5">{totalsLabel}</td>
+              {renderMetricsCells(totals)}
+            </tr>
+          </tfoot>
+        ) : null}
+      </table>
+    </div>
+  );
+};
+
+// Разрез по людям — та же таблица: показатели у чатника и у таксопарка одни.
+const ChatBillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => (
+  <ChatBillingTable rows={rows} totals={totals} totalsLabel={totalsLabel} mode="operator" />
+);
+
+const ChatBillingDetailTable = ({ rows }) => (
+  <div className="overflow-x-auto">
+    <table className="w-full min-w-[980px] divide-y divide-slate-200 text-sm tabular-nums">
+      <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
+        <tr>
+          <th className="px-3 py-2.5 text-left font-semibold">Дата</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Таксопарк</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Транспорт</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Клиент</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Чатник</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Время до первого ответа оператора">Первый ответ</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Первый ответ уложился в цель">В цель</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-slate-100">
+        {rows.map((item) => (
+          <tr key={item.id} className="transition hover:bg-slate-50/70">
+            <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{billingOccurredAtLabel(item.started_at)}</td>
+            <td className="px-3 py-2.5 font-medium text-slate-900">{billingParkLabel(item.park)}</td>
+            <td className="px-3 py-2.5 text-slate-700">{item.transport || '—'}</td>
+            <td className="px-3 py-2.5 text-slate-700">{item.client || '—'}</td>
+            <td className="px-3 py-2.5 text-slate-700">{item.operator || '—'}</td>
+            <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium text-slate-900">
+              {item.first_reply_seconds === null || item.first_reply_seconds === undefined
+                ? '—'
+                : formatDurationHms(item.first_reply_seconds)}
+            </td>
+            <td className="px-3 py-2.5 text-right text-emerald-700">{Number(item.answered_sl) > 0 ? '1' : '—'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
+// Способности линии, которые держатся на телефонии. У чата выключены все —
+// объявляем их одним набором, чтобы новый признак линии нельзя было забыть.
+const CHAT_TELEPHONY_OFF = {
+  hasAht: false,
+  hasOccUr: false,
+  hasAnswerRate: false,
+  hasWorkloadMinutes: false,
+  hasLosses: false,
+  hasUpload: false,
+  hasOktellSync: false,
+  hasShiftAuction: false,
+  hasDirectionPicker: false,
+  // Биллинг здесь — телефонный: очереди, время разговора, выгрузка по
+  // эффективности операторов. Он у чата выключен, а свой, по обращениям,
+  // включается поверх набора в CHAT_DIRECTION.
+  hasBilling: false,
+  hasBillingTalkTime: false,
+  hasBillingExportTypes: false,
+};
+
+const CHAT_DIRECTION = {
+  apiPrefix: CHAT_API_PREFIX,
+  storageKey: CHAT_DISPLAY_PREFERENCES_STORAGE_KEY,
+  tabs: VIEW_TABS_CHAT,
+  displayGroups: CHAT_DISPLAY_GROUPS,
+  defaultDisplayOptions: CHAT_DEFAULT_DISPLAY_OPTIONS,
+  chartLegend: CHAT_FORECAST_CHART_LEGEND_ITEMS,
+  forecastPanelGroups: CHAT_FORECAST_PANEL_GROUPS,
+  trendTooltipConfig: CHAT_OVERVIEW_TREND_TOOLTIP_CONFIG,
+  rates: CHAT_RATE_VALUES,
+  title: 'Расчет ресурсов · Чат',
+  subtitle: (
+    'Считаем от цели по сервису, а не от среднего времени обработки: в чатах оно '
+    + 'меряет ожидание клиента, а не работу оператора. Потребность — это объём чатов, '
+    + 'делённый на то, сколько чатов в час держит один человек при цели «ответ внутри чата».'
+  ),
+  historyPickerLabel: 'Период истории',
+  historyPickerHint: 'точка = есть чаты',
+  overviewTrendTitle: 'Сводка по периоду',
+  overviewTrendText: 'Объём чатов, потребность по модели и фактически отработанные чатнико-часы.',
+  forecastTitle: 'Прогноз чатнико-часов по выбранному периоду',
+  forecastText: 'Для каждого дня берётся среднее того же дня недели по базовым неделям. Ёмкость выведена из цели по сервису.',
+  lossesTabTitle: 'Аналитика чатов',
+  unit: {
+    manyCap: 'Чаты',
+    many: 'чатов',
+    short: 'чат.',
+    fteWord: 'чатники',
+    fteHoursCap: 'Чатнико-часы периода',
+    fteHoursShort: 'чатнико-часов',
+    dayFteCaption: 'чатнико-часов',
+    operators: 'Чатники',
+    leftAxis: 'чаты',
+    rightAxis: 'чатники',
+    needFte: 'Нужно чатников',
+    tooltipForecastMany: 'Прогноз чатов',
+    tooltipAdjustedMany: 'Чатов с приростом',
+    tooltipForecastFte: 'Нужно чатников',
+    tooltipAdjustedFte: 'Чатников с приростом',
+  },
+  trendKeys: { calls: 'trendChats', forecastFte: 'trendNeedFte', actualFte: 'trendActualFte' },
+  forecastChartKeys: { calls: 'forecastChartChats', actualCalls: 'forecastChartActualChats' },
+  forecastTableKeys: { actualCalls: 'forecastTableActualChats', actualFte: 'forecastTableActualHours' },
+  overviewParams: { forecastFrom: 'week_start', forecastTo: 'period_end' },
+  billing: {
+    // Ручки: `${apiPrefix}/billing`, `_operators`, `_details`, `_export`.
+    endpoint: 'billing',
+    modes: CHAT_BILLING_MODES,
+    slDefaultSeconds: CHAT_BILLING_SL_DEFAULT_SECONDS,
+    arClass: chatBillingShareClass,
+    title: 'Биллинг чатов',
+    text: 'Обращения из базы: объём и скорость первого ответа по дням за выбранный период и окно времени.',
+    loadingText: 'Собираем обращения...',
+    errorText: 'Не удалось получить данные по обращениям',
+    detailTitle: 'Детализация обращений',
+    detailNote: 'Одна строка — одно обращение; «первый ответ» — время реакции оператора, «в цель» — попадание в порог.',
+    emptyText: 'За выбранный период и окно времени обращений не нашлось.',
+    idleText: 'Выберите период и окно времени, затем нажмите «Сформировать» — обращения придут из базы.',
+    summaryTitle: (mode) => (mode === 'operator'
+      ? 'Итоги за период по чатникам'
+      : mode === 'transport' ? 'Итоги за период по транспорту' : 'Итоги за период по таксопаркам'),
+    daySummary: (mode, day) => (mode === 'operator'
+      ? `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. первый ответ ${chatBillingReplyLabel(day.totals)}`
+      : `Поступило ${formatInt(day.totals?.chats)} · Обслужено ${formatInt(day.totals?.answered)} · Потеряно ${formatInt(day.totals?.no_reply)}`),
+    modeHint: (mode, slSeconds) => (mode === 'detail'
+      ? 'Одна строка — одно обращение; на странице 25 строк'
+      : `SL — доля обращений, где первый ответ уложился в ≤ ${slSeconds} сек; AR — доля отвеченных`),
+    exportFileName: (mode, applied) => `chat_billing_${applied.from}_${applied.to}.xlsx`,
+  },
+  ...CHAT_TELEPHONY_OFF,
+  // Единственное исключение из набора выше: вкладка биллинга у чата своя — те же
+  // четыре ручки, но по обращениям. Времени разговора и обработки в чатовой
+  // модели нет, поэтому hasBillingTalkTime остаётся выключенным: ни карточек, ни
+  // колонок о длительности. Выгрузки «по эффективности операторов» у чата тоже
+  // нет — hasBillingExportTypes из набора не переопределяется.
+  hasBilling: true,
+  hasHistoryPairs: false,
+  hasUpliftProjection: false,
+  hasActualPeakHours: false,
+  hasWeekPicker: false,
+  localDates: true,
+  adaptOverview: adaptChatOverview,
+  adaptDay: adaptChatDay,
+};
+// <<< CHAT_DIRECTION_CONFIG_END
+
+const LINE_DIRECTION = {
+  apiPrefix: '/api/resource_fte',
+  storageKey: DISPLAY_PREFERENCES_STORAGE_KEY,
+  tabs: VIEW_TABS,
+  displayGroups: DISPLAY_GROUPS,
+  defaultDisplayOptions: DEFAULT_DISPLAY_OPTIONS,
+  chartLegend: FORECAST_CHART_LEGEND_ITEMS,
+  forecastPanelGroups: FORECAST_PANEL_GROUPS,
+  trendTooltipConfig: OVERVIEW_TREND_TOOLTIP_CONFIG,
+  rates: null,
+  title: 'Расчет ресурсов / FTE',
+  subtitle: '',
+  historyPickerLabel: 'Период анализа',
+  historyPickerHint: 'точка = есть отчет',
+  overviewTrendTitle: 'Сводка по периоду',
+  overviewTrendText: 'Динамика звонков и FTE по загруженным дням в выбранном диапазоне.',
+  forecastTitle: 'Прогноз FTE по выбранному периоду',
+  forecastText: 'Для каждого дня берутся две исторические даты: минус 21 и минус 14 дней. AHT считается отдельно по дню.',
+  lossesTabTitle: 'Аналитика звонков',
+  unit: {
+    manyCap: 'Звонки',
+    many: 'звонков',
+    short: 'зв.',
+    fteWord: 'FTE',
+    fteHoursCap: 'FTE-часы периода',
+    fteHoursShort: 'FTE-ч',
+    dayFteCaption: 'FTE прогноз',
+    operators: 'Операторы',
+    leftAxis: 'звонки / мин',
+    rightAxis: 'FTE',
+    needFte: 'FTE',
+    tooltipForecastMany: 'Прогноз звонков',
+    tooltipAdjustedMany: 'Звонков с приростом',
+    tooltipForecastFte: 'Прогноз FTE',
+    tooltipAdjustedFte: 'FTE с приростом',
+  },
+  trendKeys: { calls: 'chartCalls', forecastFte: 'chartFte', actualFte: 'chartActual' },
+  forecastChartKeys: { calls: 'forecastChartCalls', actualCalls: 'forecastChartActualWorkload' },
+  forecastTableKeys: { actualCalls: 'forecastTableActualCalls', actualFte: 'forecastTableActualFte' },
+  overviewParams: { forecastFrom: 'forecast_date_from', forecastTo: 'forecast_date_to' },
+  billing: {
+    // Ручки: `${apiPrefix}/oktell_billing`, `_operators`, `_details`, `_export`.
+    endpoint: 'oktell_billing',
+    modes: BILLING_MODES,
+    slDefaultSeconds: 20,
+    arClass: billingArClass,
+    title: 'Биллинг Oktell',
+    text: 'Входящие звонки напрямую из базы Oktell: детализация по дням за выбранный период и окно времени.',
+    loadingText: 'Получаем данные из Oktell...',
+    errorText: 'Не удалось получить данные из Oktell',
+    detailTitle: 'Детализация звонков',
+    detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только отвеченные звонки.',
+    emptyText: 'Oktell не вернул входящих звонков за указанный период и окно времени.',
+    idleText: 'Выберите период и окно времени, затем нажмите «Сформировать» — данные придут напрямую из Oktell.',
+    summaryTitle: (mode) => (mode === 'operator'
+      ? 'Итоги за период по операторам'
+      : mode === 'line' ? 'Итоги за период по номерам' : 'Итоги за период по таксопаркам'),
+    daySummary: (mode, day) => (mode === 'operator'
+      ? `Операторов ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.served)} · Разговоры ${formatDurationHms(day.totals?.talk_in_seconds)}`
+      : `Поступило ${formatInt(day.totals?.arrived)} · Обслужено ${formatInt(day.totals?.served)} · Потеряно ${formatInt(day.totals?.lost)}`),
+    // Подсказки режимов у линии остаются в разметке: в подсказке про SL стоит
+    // число из ответа, и вынос её в строку конфигурации сменил бы разметку.
+    modeHint: null,
+    exportFileName: (mode, applied) => `oktell_billing_${mode}_${applied.from}_${applied.to}.xlsx`,
+  },
+  hasAht: true,
+  hasOccUr: true,
+  hasAnswerRate: true,
+  hasWorkloadMinutes: true,
+  hasLosses: true,
+  hasUpload: true,
+  hasOktellSync: true,
+  hasShiftAuction: true,
+  hasDirectionPicker: true,
+  hasBilling: true,
+  hasBillingTalkTime: true,
+  hasBillingExportTypes: true,
+  hasHistoryPairs: true,
+  hasUpliftProjection: true,
+  hasActualPeakHours: true,
+  hasWeekPicker: true,
+  localDates: false,
+  adaptOverview: (payload) => payload,
+  adaptDay: (day) => day,
+};
+
+const DIRECTION_CONFIG = { line: LINE_DIRECTION, chat: CHAT_DIRECTION };
+
+const OverviewTrendTooltip = ({ active, label, payload, config = OVERVIEW_TREND_TOOLTIP_CONFIG }) => {
   if (!active || !payload?.length) return null;
 
   const groups = payload.reduce((acc, entry) => {
     const key = entry.dataKey || entry.name;
-    const config = OVERVIEW_TREND_TOOLTIP_CONFIG[key];
-    if (!config) return acc;
-    if (!acc[config.group]) {
-      acc[config.group] = {
-        order: config.groupOrder,
+    const entryConfig = config[key];
+    if (!entryConfig) return acc;
+    if (!acc[entryConfig.group]) {
+      acc[entryConfig.group] = {
+        order: entryConfig.groupOrder,
         items: [],
       };
     }
-    acc[config.group].items.push({
-      ...config,
+    acc[entryConfig.group].items.push({
+      ...entryConfig,
       value: entry.value,
       color: entry.color || entry.stroke || entry.fill || '#64748b',
     });
@@ -2008,7 +2690,25 @@ const WeekForecastPicker = ({
   );
 };
 
-const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, initialDashboardView, onOpenShiftAuction }) => {
+const ResourceFteView = ({
+  direction = 'line',
+  apiBaseUrl,
+  withAccessTokenHeader,
+  user,
+  showToast,
+  initialDashboardView,
+  onOpenShiftAuction,
+}) => {
+  const cfg = DIRECTION_CONFIG[direction] || DIRECTION_CONFIG.line;
+  const isChat = cfg === DIRECTION_CONFIG.chat;
+  // Даты собираем из локальных компонент там, где направление это требует:
+  // toISOString в Asia/Almaty (UTC+5) с полуночи до пяти утра отдаёт ВЧЕРА.
+  const readToday = () => (cfg.localDates ? toIsoDate(new Date()) : todayIso());
+  const readMonthStart = () => {
+    if (!cfg.localDates) return monthStartIso();
+    const now = new Date();
+    return toIsoDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  };
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const fileInputRef = useRef(null);
   const showToastRef = useRef(showToast);
@@ -2017,22 +2717,29 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [selectedDate, setSelectedDate] = useState('');
   const [selectedDay, setSelectedDay] = useState(null);
   const [isDayLoading, setIsDayLoading] = useState(false);
-  const [dateFrom, setDateFrom] = useState(monthStartIso);
-  const [dateTo, setDateTo] = useState(todayIso);
+  const [dateFrom, setDateFrom] = useState(readMonthStart);
+  const [dateTo, setDateTo] = useState(readToday);
   const [uploadFile, setUploadFile] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState(null);
   const [activeDashboardView, setActiveDashboardView] = useState(initialDashboardView || 'overview');
-  const [displayOptions, setDisplayOptions] = useState(loadDisplayOptions);
-  const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso());
-  const [selectedForecastPeriodEnd, setSelectedForecastPeriodEnd] = useState(() => addDaysIso(getNextWeekStartIso(), 6));
+  const [displayOptions, setDisplayOptions] = useState(
+    () => loadDisplayOptions(cfg.storageKey, cfg.defaultDisplayOptions),
+  );
+  // «Сегодня» берём через readToday: у направления с локальными датами ночная
+  // смена суток иначе увела бы стартовую неделю прогноза на неделю назад.
+  const [selectedForecastWeekStart, setSelectedForecastWeekStart] = useState(() => getNextWeekStartIso(readToday()));
+  const [selectedForecastPeriodEnd, setSelectedForecastPeriodEnd] = useState(() => addDaysIso(getNextWeekStartIso(readToday()), 6));
   const [selectedForecastDate, setSelectedForecastDate] = useState('');
   const [isForecastPanelOpen, setIsForecastPanelOpen] = useState(false);
-  const showForecastActualLoad = Boolean(displayOptions.forecastShowActualLoad);
+  const showForecastActualLoadOption = Boolean(displayOptions.forecastShowActualLoad);
   const [hoveredForecastHour, setHoveredForecastHour] = useState(null);
   const [pinnedForecastHour, setPinnedForecastHour] = useState(null);
+  // Раздел живёт открытым сутками: после полуночи текущим остался бы вчерашний
+  // день — ни бейджа, ни подгрузки факта. Дату пересматриваем по таймеру.
+  const [tickToday, setTickToday] = useState(readToday);
   const [callsChartMode, setCallsChartMode] = useState('losses');
   const [loadedDateCache, setLoadedDateCache] = useState([]);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
@@ -2066,6 +2773,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const [billingExpandedDays, setBillingExpandedDays] = useState(() => new Set());
   const [billingDetailPage, setBillingDetailPage] = useState(1);
   const billingAttemptedRef = useRef({});
+  // Метки актуальности загрузок. Быстрый перещёлк периода держит в полёте
+  // несколько запросов, и поздний ответ на РАННИЙ запрос затирал свежие данные.
+  const overviewRequestRef = useRef(0);
+  const dayRequestRef = useRef(0);
+  const analyticsRequestRef = useRef(0);
+  // У линии аналитика приходит внутри витрины, у чата — отдельной ручкой:
+  // это структурная разница, поэтому у неё свой период и своё состояние.
+  const [analyticsFrom, setAnalyticsFrom] = useState('');
+  const [analyticsTo, setAnalyticsTo] = useState('');
+  const [analytics, setAnalytics] = useState(null);
+  const [isAnalyticsLoading, setIsAnalyticsLoading] = useState(false);
+  const [chatsChartMode, setChatsChartMode] = useState('volume');
   const [isOperatorDetailsOpen, setIsOperatorDetailsOpen] = useState(false);
   const [operatorAvailabilityDetailsByKey, setOperatorAvailabilityDetailsByKey] = useState({});
   const [isOperatorDetailsLoading, setIsOperatorDetailsLoading] = useState(false);
@@ -2084,6 +2803,24 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     if (initialDashboardView) setActiveDashboardView(initialDashboardView);
   }, [initialDashboardView]);
 
+  useEffect(() => {
+    // Ключи вкладок общие, но набор у направлений разный: внешний переход на
+    // чужую вкладку (например, на биллинг из чата) иначе оставил бы пустой экран.
+    if (cfg.tabs.some((tab) => tab.key === activeDashboardView)) return;
+    setActiveDashboardView('overview');
+  }, [activeDashboardView, cfg.tabs]);
+
+  useEffect(() => {
+    if (!cfg.localDates) return undefined;
+    const timer = setInterval(() => {
+      setTickToday((current) => {
+        const next = toIsoDate(new Date());
+        return next === current ? current : next;
+      });
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [cfg.localDates]);
+
   const notify = useCallback((message, type = 'success') => {
     if (typeof showToastRef.current === 'function') showToastRef.current(message, type);
   }, []);
@@ -2095,18 +2832,21 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
   const fetchOverview = useCallback(async () => {
     if (!apiRoot) return;
+    const requestId = overviewRequestRef.current + 1;
+    overviewRequestRef.current = requestId;
     setIsLoading(true);
     try {
-      const response = await axios.get(`${apiRoot}/api/resource_fte/overview`, {
+      const response = await axios.get(`${apiRoot}${cfg.apiPrefix}/overview`, {
         params: {
           date_from: dateFrom || undefined,
           date_to: dateTo || undefined,
-          forecast_date_from: selectedForecastWeekStart || undefined,
-          forecast_date_to: selectedForecastPeriodEnd || undefined,
+          [cfg.overviewParams.forecastFrom]: selectedForecastWeekStart || undefined,
+          [cfg.overviewParams.forecastTo]: selectedForecastPeriodEnd || undefined,
         },
         headers: buildHeaders(),
       });
-      const payload = response.data || {};
+      if (overviewRequestRef.current !== requestId) return;
+      const payload = cfg.adaptOverview(response.data || {});
       setOverview(payload);
       setOperatorAvailabilityDetailsByKey({});
       setSettingsDraft(payload.settings || null);
@@ -2123,11 +2863,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       const firstDate = payload.history?.[0]?.report_date || '';
       setSelectedDate((current) => current || firstDate);
     } catch (error) {
+      if (overviewRequestRef.current !== requestId) return;
       notify(error?.response?.data?.error || 'Не удалось загрузить расчет ресурсов', 'error');
     } finally {
-      setIsLoading(false);
+      if (overviewRequestRef.current === requestId) setIsLoading(false);
     }
-  }, [apiRoot, buildHeaders, dateFrom, dateTo, notify, selectedForecastPeriodEnd, selectedForecastWeekStart]);
+  }, [apiRoot, buildHeaders, cfg, dateFrom, dateTo, notify, selectedForecastPeriodEnd, selectedForecastWeekStart]);
 
   const fetchDay = useCallback(
     async (date) => {
@@ -2136,21 +2877,45 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         setIsDayLoading(false);
         return;
       }
+      const requestId = dayRequestRef.current + 1;
+      dayRequestRef.current = requestId;
       setIsDayLoading(true);
       try {
-        const response = await axios.get(`${apiRoot}/api/resource_fte/day/${date}`, {
+        const response = await axios.get(`${apiRoot}${cfg.apiPrefix}/day/${date}`, {
           headers: buildHeaders(),
         });
-        setSelectedDay(response.data?.day || null);
+        if (dayRequestRef.current !== requestId) return;
+        setSelectedDay(cfg.adaptDay(response.data?.day || null));
       } catch (error) {
+        if (dayRequestRef.current !== requestId) return;
         setSelectedDay(null);
         notify(error?.response?.data?.error || 'Не удалось открыть день', 'error');
       } finally {
-        setIsDayLoading(false);
+        if (dayRequestRef.current === requestId) setIsDayLoading(false);
       }
     },
-    [apiRoot, buildHeaders, notify],
+    [apiRoot, buildHeaders, cfg, notify],
   );
+
+  const fetchChatAnalytics = useCallback(async (from, to) => {
+    if (!apiRoot) return;
+    const requestId = analyticsRequestRef.current + 1;
+    analyticsRequestRef.current = requestId;
+    setIsAnalyticsLoading(true);
+    try {
+      const response = await axios.get(`${apiRoot}${cfg.apiPrefix}/analytics`, {
+        params: { date_from: from || undefined, date_to: to || undefined },
+        headers: buildHeaders(),
+      });
+      if (analyticsRequestRef.current !== requestId) return;
+      setAnalytics(response.data || null);
+    } catch (error) {
+      if (analyticsRequestRef.current !== requestId) return;
+      notify(error?.response?.data?.error || 'Не удалось загрузить аналитику чатов', 'error');
+    } finally {
+      if (analyticsRequestRef.current === requestId) setIsAnalyticsLoading(false);
+    }
+  }, [apiRoot, buildHeaders, cfg, notify]);
 
   const billingAppliedKey = `${billingApplied.from}|${billingApplied.to}|${billingApplied.timeFrom}|${billingApplied.timeTo}`;
 
@@ -2161,11 +2926,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     setIsBillingLoading(true);
     setBillingErrors((current) => ({ ...current, [targetMode]: '' }));
     try {
+      // Ручки биллинга у направлений разные (`oktell_billing…` против
+      // `chat/billing…`), а хвосты одинаковые — поэтому в конфигурации лежит
+      // только основа пути.
       const endpoint = targetMode === 'detail'
-        ? `${apiRoot}/api/resource_fte/oktell_billing_details`
+        ? `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_details`
         : targetMode === 'operator'
-          ? `${apiRoot}/api/resource_fte/oktell_billing_operators`
-          : `${apiRoot}/api/resource_fte/oktell_billing`;
+          ? `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_operators`
+          : `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}`;
       const params = {
         date_from: billingApplied.from,
         date_to: billingApplied.to,
@@ -2190,12 +2958,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       }
     } catch (error) {
       setBillingReports((current) => ({ ...current, [targetMode]: null }));
-      const message = error?.response?.data?.error || 'Не удалось получить данные из Oktell';
+      const message = error?.response?.data?.error || cfg.billing.errorText;
       setBillingErrors((current) => ({ ...current, [targetMode]: message }));
     } finally {
       setIsBillingLoading(false);
     }
-  }, [apiRoot, billingApplied, billingAppliedKey, buildHeaders]);
+  }, [apiRoot, billingApplied, billingAppliedKey, buildHeaders, cfg]);
 
   const buildBillingReport = useCallback(() => {
     billingAttemptedRef.current = {};
@@ -2209,7 +2977,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     if (!apiRoot) return;
     setIsBillingExporting(true);
     try {
-      const response = await axios.get(`${apiRoot}/api/resource_fte/oktell_billing_export`, {
+      const response = await axios.get(`${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_export`, {
         params: {
           date_from: billingApplied.from,
           date_to: billingApplied.to,
@@ -2226,7 +2994,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       link.href = url;
       link.download = billingExportType === 'efficiency'
         ? `operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx`
-        : `oktell_billing_${billingMode}_${billingApplied.from}_${billingApplied.to}.xlsx`;
+        : cfg.billing.exportFileName(billingMode, billingApplied);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -2243,15 +3011,28 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     } finally {
       setIsBillingExporting(false);
     }
-  }, [apiRoot, billingApplied, billingExportType, billingMode, buildHeaders, notify]);
+  }, [apiRoot, billingApplied, billingExportType, billingMode, buildHeaders, cfg, notify]);
 
   useEffect(() => {
     fetchOverview();
   }, [fetchOverview]);
 
   useEffect(() => {
+    if (isChat) return;
     fetchDay(selectedDate);
-  }, [fetchDay, selectedDate]);
+  }, [fetchDay, isChat, selectedDate]);
+
+  useEffect(() => {
+    if (!isChat || activeDashboardView !== 'losses') return;
+    if (!analyticsFrom || !analyticsTo) {
+      const latest = overview?.latest_chat_day || '';
+      if (!latest) return;
+      setAnalyticsTo(latest);
+      setAnalyticsFrom(addDaysIso(latest, -13));
+      return;
+    }
+    fetchChatAnalytics(analyticsFrom, analyticsTo);
+  }, [activeDashboardView, analyticsFrom, analyticsTo, fetchChatAnalytics, isChat, overview?.latest_chat_day]);
 
   useEffect(() => {
     if (activeDashboardView !== 'oktell_billing' || isBillingLoading) return;
@@ -2294,6 +3075,16 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       billingTotals.served,
     )
     : null;
+  // Чат: доли считаются от числа обращений, а средний первый ответ — от тех,
+  // кому ответили. Времени разговора и обработки в чатовой модели нет.
+  const billingChatArRatio = billingTotals ? safeRatio(billingTotals.answered, billingTotals.chats) : null;
+  const billingChatSlRatio = billingTotals ? safeRatio(billingTotals.answered_sl, billingTotals.chats) : null;
+  const billingChatReplySeconds = billingTotals ? safeRatio(billingTotals.first_reply_seconds, billingTotals.answered) : null;
+  const billingSlSeconds = billingReport?.sl_threshold_seconds ?? cfg.billing.slDefaultSeconds;
+  // Таблицы биллинга у направлений свои: у чата в них нет колонок о длительности.
+  const BillingSummaryTable = cfg.hasBillingTalkTime ? BillingTable : ChatBillingTable;
+  const BillingPeopleTable = cfg.hasBillingTalkTime ? BillingOperatorTable : ChatBillingOperatorTable;
+  const BillingRowsTable = cfg.hasBillingTalkTime ? BillingDetailTable : ChatBillingDetailTable;
   const billingAllExpanded = billingDays.length > 0 && billingDays.every((day) => billingExpandedDays.has(day.date));
   const toggleBillingDay = (date) => {
     setBillingExpandedDays((current) => {
@@ -2309,8 +3100,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(DISPLAY_PREFERENCES_STORAGE_KEY, JSON.stringify(displayOptions));
-  }, [displayOptions]);
+    window.localStorage.setItem(cfg.storageKey, JSON.stringify(displayOptions));
+  }, [cfg.storageKey, displayOptions]);
 
   const selectedDayMatchesDate = Boolean(selectedDate && selectedDay?.summary?.report_date === selectedDate);
   const selectedSummary = selectedDayMatchesDate ? selectedDay?.summary : null;
@@ -2373,6 +3164,55 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       fteDelta: actualFteTotal - forecastFteTotal,
     };
   }, [overview?.history]);
+
+  // Ёмкость чата ВЫВОДИТСЯ из цели по сервису; здесь она только показывается
+  // вместе с тем, из какой именно цели получена.
+  const chatCapacityExplain = overview?.capacity_explain || {};
+  const chatCapacityPerHourValue = Math.max(0.01, Number(
+    overview?.settings?.capacity_per_hour || overview?.forecast?.totals?.capacity_per_hour || 17,
+  ));
+  const chatTargetFirstSeconds = Number(overview?.settings?.target_first_reply_seconds || 60);
+  const chatCapacityIsManual = settingsDraft?.capacity_manual !== null
+    && settingsDraft?.capacity_manual !== undefined
+    && settingsDraft?.capacity_manual !== '';
+  const chatOffScaleRates = overview?.forecast?.operator_capacity?.off_scale_rates || [];
+  const chatSkippedBaseWeeks = overview?.forecast?.skipped_base_weeks || [];
+  const chatBaseWeekStarts = overview?.forecast?.base_week_starts || [];
+
+  // Итоги периода у чата: потерь нет (обработки требуют 100 % чатов), зато есть
+  // доля первого ответа в цель и отработанные чатнико-часы.
+  const chatOverviewSummary = useMemo(() => {
+    const rows = overview?.history || [];
+    const chats = rows.reduce((sum, row) => sum + Number(row.total_received || 0), 0);
+    const inTarget = rows.reduce((sum, row) => sum + Number(row.in_target || 0), 0);
+    const online = rows.reduce((sum, row) => sum + Number(row.actual_report_fte_total || 0), 0);
+    const need = rows.reduce((sum, row) => sum + Number(row.forecast_fte_total || 0), 0);
+    return {
+      chats,
+      inTarget,
+      online,
+      need,
+      days: rows.length,
+      inTargetShare: chats > 0 ? inTarget / chats : 0,
+    };
+  }, [overview?.history]);
+
+  const analyticsTotals = analytics?.totals || {};
+  const analyticsDays = analytics?.days || [];
+  const analyticsRiskHours = analytics?.risk_hours || [];
+  const analyticsChannels = analytics?.channels || [];
+  const analyticsChartData = useMemo(() => analyticsDays.map((row) => {
+    const chats = Number(row.chats || 0);
+    const inTarget = Number(row.in_target || 0);
+    return {
+      date: formatDate(row.date).slice(0, 5),
+      chats,
+      forecastChats: Number(row.forecast_chats || 0),
+      inTarget,
+      outOfTarget: Math.max(0, chats - inTarget),
+      firstReply: row.avg_first_reply_seconds === null ? null : Number(row.avg_first_reply_seconds),
+    };
+  }), [analyticsDays]);
 
   const selectedDayHours = selectedDayMatchesDate ? selectedDay?.hours || [] : [];
 
@@ -2527,9 +3367,42 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     ));
   }, [nextWeekForecast.days]);
 
+  // Факт часа у чата лежит НЕ в прогнозе, а в детализации дня: склеиваем по номеру
+  // часа, чтобы дальше дерево рендера читало одни и те же поля для обоих направлений.
+  const chatDayHoursByHour = useMemo(() => {
+    if (!isChat) return null;
+    const matches = selectedDay?.date && selectedDay.date === selectedForecastDay?.forecast_date;
+    const rows = matches ? (selectedDay?.hours || []) : [];
+    return rows.reduce((acc, row) => ({ ...acc, [Number(row.hour)]: row }), {});
+  }, [isChat, selectedDay, selectedForecastDay]);
+
+  const chatDayActualAvailable = Boolean(
+    chatDayHoursByHour && Object.keys(chatDayHoursByHour).length > 0 && selectedForecastDay?.has_actual_report,
+  );
+
+  const forecastHourlyRows = useMemo(() => {
+    const rows = selectedForecastDay?.hourly_forecast || [];
+    if (!isChat || !chatDayHoursByHour) return rows;
+    return rows.map((row) => {
+      const actual = chatDayHoursByHour[Number(row.hour)] || null;
+      if (!actual) return row;
+      return {
+        ...row,
+        has_actual_report: true,
+        actual_received_calls: Number(actual.chats || 0),
+        actual_report_fte: Number(actual.actual_online_hours || 0),
+        actual_first_reply_seconds: actual.avg_first_reply_seconds,
+      };
+    });
+  }, [chatDayHoursByHour, isChat, selectedForecastDay]);
+
+  // Тумблер «сравнивать с фактом» — телефонный: у чата факт часа показывается,
+  // как только детализация дня приехала.
+  const showForecastActualLoad = isChat ? chatDayActualAvailable : showForecastActualLoadOption;
+
   const selectedForecastHourlyData = useMemo(
     () =>
-      (selectedForecastDay?.hourly_forecast || []).map((row) => ({
+      forecastHourlyRows.map((row) => ({
         hourNumber: Number(row.hour),
         hour: `${String(row.hour).padStart(2, '0')}:00`,
         calls: Number(row.forecast_calls || 0),
@@ -2542,29 +3415,41 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         upliftWorkload: Number(row.incident_uplift_workload_minutes || 0),
         adjustedWorkload: Number(row.incident_adjusted_workload_minutes ?? row.forecast_workload_minutes ?? 0),
         actualWorkload: row.has_actual_report ? Number(row.actual_workload_minutes || 0) : null,
+        actualCalls: row.has_actual_report ? Number(row.actual_received_calls || 0) : null,
         actualFte: row.has_actual_report ? Number(row.actual_report_fte || 0) : null,
       })),
-    [selectedForecastDay],
+    [forecastHourlyRows],
   );
 
   const selectedForecastPeakHours = useMemo(
     () =>
-      [...(selectedForecastDay?.hourly_forecast || [])]
+      [...forecastHourlyRows]
         .sort((a, b) => Number(b.forecast_fte || 0) - Number(a.forecast_fte || 0))
         .slice(0, 5),
-    [selectedForecastDay],
+    [forecastHourlyRows],
   );
 
   const selectedActualPeakHours = useMemo(
     () =>
-      [...(selectedForecastDay?.hourly_forecast || [])]
+      [...forecastHourlyRows]
         .filter((row) => row.has_actual_report)
         .sort((a, b) => Number(b.actual_report_fte || 0) - Number(a.actual_report_fte || 0))
         .slice(0, 5),
-    [selectedForecastDay],
+    [forecastHourlyRows],
   );
 
-  const todayValue = todayIso();
+  const todayValue = cfg.localDates ? tickToday : todayIso();
+  useEffect(() => {
+    if (!isChat) return;
+    if (!selectedForecastDate || selectedForecastDate > todayValue) {
+      // Сдвигаем метку: ответ уже улетевшего запроса не должен вернуть на экран
+      // детализацию прежнего дня поверх пустоты будущего.
+      dayRequestRef.current += 1;
+      setSelectedDay(null);
+      return;
+    }
+    fetchDay(selectedForecastDate);
+  }, [fetchDay, isChat, selectedForecastDate, todayValue]);
   const selectedForecastHasActualLoad = Boolean(
     selectedForecastDay?.has_actual_report && selectedForecastDay?.forecast_date <= todayValue,
   );
@@ -2676,6 +3561,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       }),
     [incidentProjection.days],
   );
+  // Проекция на 7 дней есть только у линии; у чата прирост приходит вместе с
+  // прогнозом периода, и окно берётся из ответа наплыва.
+  const upliftPeriodCalls = cfg.hasUpliftProjection
+    ? Number(incidentProjection.incident_uplift_calls || 0)
+    : Number(nextWeekForecast.incidentUpliftCalls || 0);
+  const upliftPeriodFteHours = cfg.hasUpliftProjection
+    ? Number(incidentProjection.incident_uplift_fte_hours || 0)
+    : Number(nextWeekForecast.incidentUpliftFteHours || 0);
+  const upliftWindowStart = cfg.hasUpliftProjection ? incidentProjection.period_start : incidentRiskProfile.window_start;
+  const upliftWindowEnd = cfg.hasUpliftProjection ? incidentProjection.period_end : incidentRiskProfile.window_end;
+
   const activeForecastHour = hoveredForecastHour ?? pinnedForecastHour;
   const activeForecastHourLabel = activeForecastHour !== null ? `${String(activeForecastHour).padStart(2, '0')}:00` : null;
   useEffect(() => {
@@ -2698,7 +3594,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     ({ active, label }) => {
       if (!active) return null;
       const hour = hourFromChartLabel(label);
-      const row = (selectedForecastDay?.hourly_forecast || []).find((item) => Number(item.hour) === Number(hour));
+      const row = forecastHourlyRows.find((item) => Number(item.hour) === Number(hour));
       if (!row) return null;
       return (
         <div className="min-w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
@@ -2706,33 +3602,40 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           {showForecastActualLoad && selectedForecastHasActualLoad ? (
             <div className="space-y-2">
               <div className="rounded-md bg-slate-50 px-2 py-1.5">
-                <div className="mb-1 font-medium text-slate-500">Звонки</div>
+                <div className="mb-1 font-medium text-slate-500">{cfg.unit.manyCap}</div>
                 <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_calls, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>Возможный прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_calls, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>С учетом прироста</span><b className="text-slate-900">{formatNumber(row.incident_adjusted_calls ?? row.forecast_calls, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatInt(row.actual_received_calls) : '-'}</b></div>
               </div>
+              {cfg.hasWorkloadMinutes ? (
               <div className="rounded-md bg-slate-50 px-2 py-1.5">
                 <div className="mb-1 font-medium text-slate-500">Минуты нагрузки</div>
                 <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>Прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_workload_minutes, 1)}</b></div>
                 <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_workload_minutes, 1) : '-'}</b></div>
               </div>
+              ) : null}
               <div className="rounded-md bg-slate-50 px-2 py-1.5">
-                <div className="mb-1 font-medium text-slate-500">FTE</div>
+                <div className="mb-1 font-medium text-slate-500">{cfg.unit.rightAxis}</div>
                 <div className="flex justify-between gap-6"><span>Прогноз</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
                 <div className="flex justify-between gap-6"><span>Прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_fte, 2)}</b></div>
                 <div className="flex justify-between gap-6"><span>Факт</span><b className="text-emerald-700">{row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}</b></div>
+                {!cfg.hasWorkloadMinutes && row.has_actual_report ? (
+                  <div className="flex justify-between gap-6"><span>Первый ответ</span><b className="text-slate-900">{formatReplySeconds(row.actual_first_reply_seconds)}</b></div>
+                ) : null}
               </div>
             </div>
           ) : (
             <div className="space-y-1 text-slate-600">
-              <div className="flex justify-between gap-6"><span>Прогноз звонков</span><b className="text-slate-900">{formatNumber(row.forecast_calls, 1)}</b></div>
+              <div className="flex justify-between gap-6"><span>{cfg.unit.tooltipForecastMany}</span><b className="text-slate-900">{formatNumber(row.forecast_calls, 1)}</b></div>
               <div className="flex justify-between gap-6"><span>Возможный прирост</span><b className="text-emerald-700">+{formatNumber(row.incident_uplift_calls, 1)}</b></div>
-              <div className="flex justify-between gap-6"><span>Звонков с приростом</span><b className="text-slate-900">{formatNumber(row.incident_adjusted_calls ?? row.forecast_calls, 1)}</b></div>
-              <div className="flex justify-between gap-6"><span>Прогноз минут</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
-              <div className="flex justify-between gap-6"><span>Прогноз FTE</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
-              <div className="flex justify-between gap-6"><span>FTE с приростом</span><b className="text-emerald-700">{formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2)}</b></div>
+              <div className="flex justify-between gap-6"><span>{cfg.unit.tooltipAdjustedMany}</span><b className="text-slate-900">{formatNumber(row.incident_adjusted_calls ?? row.forecast_calls, 1)}</b></div>
+              {cfg.hasWorkloadMinutes ? (
+                <div className="flex justify-between gap-6"><span>Прогноз минут</span><b className="text-blue-700">{formatNumber(row.forecast_workload_minutes, 1)}</b></div>
+              ) : null}
+              <div className="flex justify-between gap-6"><span>{cfg.unit.tooltipForecastFte}</span><b className="text-blue-700">{formatNumber(row.forecast_fte, 2)}</b></div>
+              <div className="flex justify-between gap-6"><span>{cfg.unit.tooltipAdjustedFte}</span><b className="text-emerald-700">{formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2)}</b></div>
             </div>
           )}
           {pinnedForecastHour !== null && Number(pinnedForecastHour) === Number(row.hour) ? (
@@ -2741,17 +3644,27 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         </div>
       );
     },
-    [pinnedForecastHour, selectedForecastDay?.hourly_forecast, selectedForecastHasActualLoad, showForecastActualLoad],
+    [cfg, forecastHourlyRows, pinnedForecastHour, selectedForecastHasActualLoad, showForecastActualLoad],
   );
 
-  const visibleMetricCount = [
-    displayOptions.metricOperators,
-    displayOptions.metricWeeklyFte,
-    displayOptions.metricBaseOperators,
-    displayOptions.metricHistoryWarnings,
-    displayOptions.metricLostCalls,
-    displayOptions.metricLossRate,
-  ].filter(Boolean).length;
+  const visibleMetricCount = (isChat
+    ? [
+      'metricForecastChats',
+      'metricForecastFteHours',
+      'metricActualFteHours',
+      'metricFteDelta',
+      'metricInTargetShare',
+      'metricCoveredDays',
+    ]
+    : [
+      'metricOperators',
+      'metricWeeklyFte',
+      'metricBaseOperators',
+      'metricHistoryWarnings',
+      'metricLostCalls',
+      'metricLossRate',
+    ]
+  ).filter((key) => displayOptions[key]).length;
 
   const toggleDisplayOption = useCallback((key, value) => {
     setDisplayOptions((current) => ({ ...current, [key]: Boolean(value) }));
@@ -2826,14 +3739,19 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const handleRecalculate = async () => {
     setIsRecalculating(true);
     try {
-      await axios.post(
-        `${apiRoot}/api/resource_fte/recalculate`,
+      const response = await axios.post(
+        `${apiRoot}${cfg.apiPrefix}/recalculate`,
         {},
         { headers: buildHeaders() },
       );
-      notify('Прогноз пересчитан');
+      if (isChat) {
+        const payload = response.data || {};
+        notify(`Пересчитано дней: ${formatInt(payload.days)}, часов: ${formatInt(payload.rows)}`);
+      } else {
+        notify('Прогноз пересчитан');
+      }
       await fetchOverview();
-      await fetchDay(selectedDate);
+      if (!isChat) await fetchDay(selectedDate);
     } catch (error) {
       notify(error?.response?.data?.error || 'Не удалось пересчитать прогноз', 'error');
     } finally {
@@ -2843,18 +3761,78 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
   const handleSaveSettings = async () => {
     try {
-      const response = await axios.put(`${apiRoot}/api/resource_fte/settings`, settingsDraft, {
+      // У чата свой список полей: answer_rate/occ/ur/shift_rounding здесь нет, а
+      // общий объект настроек утянул бы в запрос вводные линии.
+      const body = isChat ? {
+        target_reply_seconds: settingsDraft?.target_reply_seconds,
+        target_first_reply_seconds: settingsDraft?.target_first_reply_seconds,
+        capacity_manual: settingsDraft?.capacity_manual,
+        shrinkage_coeff: settingsDraft?.shrinkage_coeff,
+        weekly_hours_per_operator: settingsDraft?.weekly_hours_per_operator,
+        base_weeks: settingsDraft?.base_weeks,
+        fte_rounding: settingsDraft?.fte_rounding,
+        week_start: selectedForecastWeekStart || undefined,
+      } : settingsDraft;
+      const response = await axios.put(`${apiRoot}${cfg.apiPrefix}/settings`, body, {
         headers: buildHeaders({
           'Content-Type': 'application/json',
         }),
       });
       notify('Настройки сохранены');
-      setOverview(response.data?.overview || overview);
-      setSettingsDraft(response.data?.settings || settingsDraft);
-      await fetchDay(selectedDate);
+      if (isChat) {
+        // Витрину из ответа брать нельзя: PUT считает свои 7 дней, а календари
+        // показывают выбранный период — цифры одного отрезка встали бы под
+        // датами другого. Перезапрашиваем витрину выбранными периодами.
+        if (response.data?.settings) setSettingsDraft({ ...response.data.settings });
+        await fetchOverview();
+      } else {
+        setOverview(response.data?.overview || overview);
+        setSettingsDraft(response.data?.settings || settingsDraft);
+        await fetchDay(selectedDate);
+      }
     } catch (error) {
       notify(error?.response?.data?.error || 'Не удалось сохранить настройки', 'error');
     }
+  };
+
+  // Замер кривой первого ответа: ёмкость чата выводится из цели, а не вводится руками.
+  const [isFittingFirstReply, setIsFittingFirstReply] = useState(false);
+  const handleFitFirstReplyCurve = async () => {
+    setIsFittingFirstReply(true);
+    try {
+      const response = await axios.post(
+        `${apiRoot}${cfg.apiPrefix}/fit_first_reply`,
+        {},
+        { headers: buildHeaders() },
+      );
+      const payload = response.data || {};
+      if (!payload.fitted) {
+        notify(payload.reason === 'NO_CHAT_DATA'
+          ? 'Замерить не по чему: чатов за период нет'
+          : `Точек для замера мало: ${formatInt(payload.points)}`, 'error');
+      } else if (payload.target_unreachable) {
+        notify('Замер выполнен: цель первого ответа на этой кривой недостижима', 'error');
+      } else {
+        notify(`Кривая замерена по ${formatInt(payload.points)} часам, связь ${formatNumber(payload.correlation, 2)}`);
+      }
+      await fetchOverview();
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось замерить кривую', 'error');
+    } finally {
+      setIsFittingFirstReply(false);
+    }
+  };
+
+  const shiftForecastPeriod = (deltaWeeks) => {
+    if (!selectedForecastWeekStart) return;
+    // Только addDaysIso: приведение к UTC уводило неделю на сутки назад.
+    const start = addDaysIso(selectedForecastWeekStart, deltaWeeks * 7);
+    const end = selectedForecastPeriodEnd
+      ? addDaysIso(selectedForecastPeriodEnd, deltaWeeks * 7)
+      : addDaysIso(start, 6);
+    setSelectedForecastWeekStart(start);
+    setSelectedForecastPeriodEnd(end);
+    setSelectedForecastDate(start);
   };
 
   const resourceDirections = overview?.directions || [];
@@ -2878,27 +3856,83 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   const selectedDirectionIds = (settingsDraft?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
   const selectedDirectionSet = new Set(selectedDirectionIds);
   const availabilityDirectionIds = (overview?.settings?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
-  const periodAvailableOperatorFte = Number(
-    nextWeekForecast.periodAvailableOperatorFte ?? nextWeekForecast.currentOperatorFte ?? 0,
-  );
-  const periodAvailableOperatorCount = Number(nextWeekForecast.periodAvailableOperatorCount ?? 0);
-  const periodOperatorCount = Number(nextWeekForecast.periodOperatorCount ?? periodAvailableOperatorCount);
-  const periodPartialOperatorCount = Number(nextWeekForecast.periodPartialOperatorCount ?? 0);
-  const periodUnavailableOperatorCount = Number(nextWeekForecast.periodUnavailableOperatorCount ?? 0);
-  const periodAvailableOperatorFteGap = Number(
-    nextWeekForecast.periodAvailableOperatorFteGap ?? (
-      periodAvailableOperatorFte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
-    ),
-  );
   const operatorAvailabilityCacheKey = [
     forecastPeriodStart || '',
     forecastPeriodEnd || '',
     availabilityDirectionIds.join(','),
   ].join('|');
   const operatorAvailabilityDetailsPayload = operatorAvailabilityDetailsByKey[operatorAvailabilityCacheKey] || null;
-  const operatorDetailsForecast = operatorAvailabilityDetailsPayload
-    ? { ...nextWeekForecast, ...operatorAvailabilityDetailsPayload }
-    : nextWeekForecast;
+  // Витрина линии приносит доступность вместе с прогнозом; у чата её отдаёт
+  // отдельная ручка, и разбивку по ставкам надо пересобрать: ручка считает ВСЕ
+  // ставки направления, включая 0,5, которой в чате нет. Из-за этого «Есть
+  // сейчас» и «Доступно» показывали два разных числа про один штат.
+  const availabilityBase = cfg.rates ? (operatorAvailabilityDetailsPayload || {}) : nextWeekForecast;
+  const restrictedAvailability = useMemo(() => {
+    if (!cfg.rates) return null;
+    const rows = Array.isArray(operatorAvailabilityDetailsPayload?.periodAvailableOperatorRates)
+      ? operatorAvailabilityDetailsPayload.periodAvailableOperatorRates
+      : [];
+    if (!rows.length) return null;
+    return rows.reduce((acc, row) => {
+      const rate = Number(row.rate || 0);
+      const count = Number(row.count || 0);
+      const fte = Number(row.fte ?? rate * count);
+      const totalCount = Number(row.total_count ?? count);
+      if (isChatRate(rate)) {
+        acc.fte += fte;
+        acc.count += count;
+        acc.totalCount += totalCount;
+      } else {
+        acc.excludedFte += fte;
+        acc.excludedCount += count;
+      }
+      return acc;
+    }, { fte: 0, count: 0, totalCount: 0, excludedFte: 0, excludedCount: 0 });
+  }, [cfg.rates, operatorAvailabilityDetailsPayload]);
+  const periodAvailableOperatorFte = restrictedAvailability
+    ? restrictedAvailability.fte
+    : Number(availabilityBase.periodAvailableOperatorFte ?? nextWeekForecast.currentOperatorFte ?? 0);
+  const periodAvailableOperatorCount = restrictedAvailability
+    ? restrictedAvailability.count
+    : Number(availabilityBase.periodAvailableOperatorCount ?? 0);
+  const periodOperatorCount = restrictedAvailability
+    ? restrictedAvailability.totalCount
+    : Number(availabilityBase.periodOperatorCount ?? periodAvailableOperatorCount);
+  const periodPartialOperatorCount = Number(availabilityBase.periodPartialOperatorCount ?? 0);
+  const periodUnavailableOperatorCount = Number(availabilityBase.periodUnavailableOperatorCount ?? 0);
+  const periodAvailableOperatorFteGap = restrictedAvailability
+    ? restrictedAvailability.fte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
+    : Number(
+      availabilityBase.periodAvailableOperatorFteGap ?? (
+        periodAvailableOperatorFte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
+      ),
+    );
+  const operatorDetailsForecast = useMemo(() => {
+    const merged = operatorAvailabilityDetailsPayload
+      ? { ...nextWeekForecast, ...operatorAvailabilityDetailsPayload }
+      : nextWeekForecast;
+    if (!cfg.rates) return merged;
+    // Люди вне ставок направления помечаются незасчитанными — иначе сумма
+    // вкладов в модальном окне не сходилась бы с «Доступно» на карточке.
+    return {
+      ...merged,
+      periodOperatorAvailabilityDetails: (Array.isArray(merged.periodOperatorAvailabilityDetails)
+        ? merged.periodOperatorAvailabilityDetails
+        : []).map((operator) => (
+        isChatRate(operator?.rate) ? operator : { ...operator, included: false, fteContribution: 0 }
+      )),
+      periodAvailableOperatorFte,
+      periodAvailableOperatorCount,
+      periodAvailableOperatorFteGap,
+    };
+  }, [
+    cfg.rates,
+    nextWeekForecast,
+    operatorAvailabilityDetailsPayload,
+    periodAvailableOperatorCount,
+    periodAvailableOperatorFte,
+    periodAvailableOperatorFteGap,
+  ]);
 
   const fetchOperatorAvailabilityDetails = useCallback(async () => {
     if (!apiRoot || !forecastPeriodStart || !forecastPeriodEnd) return null;
@@ -2909,7 +3943,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     setIsOperatorDetailsLoading(true);
     setOperatorDetailsError('');
     try {
-      const response = await axios.get(`${apiRoot}/api/resource_fte/operator_availability`, {
+      const response = await axios.get(`${apiRoot}${cfg.apiPrefix}/operator_availability`, {
         params: {
           forecast_date_from: forecastPeriodStart,
           forecast_date_to: forecastPeriodEnd,
@@ -2933,6 +3967,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
   }, [
     apiRoot,
     buildHeaders,
+    cfg,
     forecastPeriodEnd,
     forecastPeriodStart,
     notify,
@@ -2949,6 +3984,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
     if (isOperatorDetailsOpen) fetchOperatorAvailabilityDetails();
   }, [fetchOperatorAvailabilityDetails, isOperatorDetailsOpen]);
 
+  useEffect(() => {
+    // Витрина чата не приносит доступность внутри прогноза — запрашиваем сразу,
+    // иначе карточка «Чатники» откроется с нулями.
+    if (!cfg.rates) return;
+    fetchOperatorAvailabilityDetails();
+  }, [cfg.rates, fetchOperatorAvailabilityDetails]);
+
   const toggleResourceDirection = (directionId, checked) => {
     setSettingsDraft((current) => {
       const currentIds = (current?.selected_direction_ids || []).map((item) => Number(item)).filter(Boolean);
@@ -2964,14 +4006,20 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       <div className={`${activeDashboardView === 'schedule_planner' ? 'relative' : 'sticky top-0'} z-20 border-b border-slate-200 bg-white/95 px-4 py-4 backdrop-blur md:px-6`}>
         <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-950">Расчет ресурсов / FTE</h1>
+            <h1 className={`text-2xl font-semibold text-slate-950${isChat ? ' flex items-center gap-2' : ''}`}>
+              {isChat ? <MessageSquare className="h-5 w-5 text-blue-600" aria-hidden="true" /> : null}
+              {cfg.title}
+            </h1>
+            {cfg.subtitle ? (
+              <p className="mt-1 max-w-3xl text-sm text-slate-600">{cfg.subtitle}</p>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-3">
             {activeDashboardView === 'overview' || activeDashboardView === 'losses' ? (
               <div className="w-full sm:w-[330px]">
                 <CalendarPicker
                   mode="range"
-                  label="Период анализа"
+                  label={cfg.historyPickerLabel}
                   startValue={dateFrom}
                   endValue={dateTo}
                   onRangeChange={(start, end) => {
@@ -2979,10 +4027,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     setDateTo(end);
                   }}
                   loadedDates={loadedReportDates}
-                  hint="точка = есть отчет"
+                  hint={cfg.historyPickerHint}
                 />
               </div>
             ) : null}
+            {cfg.hasUpload ? (
             <div className="w-full sm:w-[240px]">
               <button
                 type="button"
@@ -3000,6 +4049,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 <UploadCloud size={17} className="shrink-0 text-blue-600" />
               </button>
             </div>
+            ) : null}
+            {cfg.hasOktellSync ? (
             <div className="w-full sm:w-[240px]">
               <button
                 type="button"
@@ -3017,6 +4068,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 <RefreshCw size={17} className={`shrink-0 text-sky-600 ${isOktellSyncing ? 'animate-spin' : ''}`} />
               </button>
             </div>
+            ) : null}
             <button
               type="button"
               onClick={fetchOverview}
@@ -3029,7 +4081,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         </div>
       </div>
 
-      {isUploadModalOpen && (
+      {cfg.hasUpload && isUploadModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
           <form onSubmit={handleUpload} className="w-full max-w-xl rounded-2xl border-2 border-slate-200 bg-white px-5 py-7 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
@@ -3116,7 +4168,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         </div>
       )}
 
-      {isOktellSyncModalOpen && (
+      {cfg.hasOktellSync && isOktellSyncModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border-2 border-slate-200 bg-white px-5 py-7 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
@@ -3184,7 +4236,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
       <div className="space-y-6 p-4 md:p-6">
         <div className="flex flex-col gap-3 rounded-xl border-2 border-slate-200 bg-white p-2 shadow-sm lg:flex-row lg:items-center lg:justify-between">
           <div className="flex gap-1 overflow-x-auto">
-            {VIEW_TABS.map((tab) => {
+            {cfg.tabs.map((tab) => {
               const Icon = tab.icon;
               const active = activeDashboardView === tab.key;
               return (
@@ -3212,9 +4264,75 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           </button>
         </div>
 
+        {isChat && chatOffScaleRates.length ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            В чате только ставки 1 и 0,75. В направлении есть люди с другой ставкой —{' '}
+            {chatOffScaleRates.map((item) => `${formatNumber(item.rate, 2)}: ${formatInt(item.count)} чел.`).join(', ')}
+            {' '}— они не учтены в расчёте и не попадут в график. Похоже на расхождение в карточках.
+          </div>
+        ) : null}
+
         {activeDashboardView !== 'settings' && activeDashboardView !== 'next_week' && activeDashboardView !== 'schedule_planner' && activeDashboardView !== 'oktell_billing' && visibleMetricCount > 0 && (
           <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>
-            {displayOptions.metricOperators && (
+            {isChat ? (
+              <>
+                {displayOptions.metricForecastChats ? (
+                  <StatCard
+                    icon={MessageSquare}
+                    label="Прогноз чатов"
+                    value={formatInt(nextWeekForecast.periodCalls)}
+                    hint={`Период ${formatDate(nextWeekForecast.period_start)} — ${formatDate(nextWeekForecast.period_end)}`}
+                    tone="blue"
+                  />
+                ) : null}
+                {displayOptions.metricForecastFteHours ? (
+                  <StatCard
+                    icon={TrendingUp}
+                    label="Чатнико-часы прогноза"
+                    value={formatNumber(nextWeekForecast.periodFteHours, 1)}
+                    hint="Объём ÷ ёмкость, по часам"
+                    tone="blue"
+                  />
+                ) : null}
+                {displayOptions.metricActualFteHours ? (
+                  <StatCard
+                    icon={Clock3}
+                    label="Факт чатнико-часов"
+                    value={formatNumber(chatOverviewSummary.online, 1)}
+                    hint="Онлайн-сегменты чатников за период истории"
+                    tone="emerald"
+                  />
+                ) : null}
+                {displayOptions.metricFteDelta ? (
+                  <StatCard
+                    icon={ShieldAlert}
+                    label="Разница с прогнозом"
+                    value={formatSignedNumber(chatOverviewSummary.online - chatOverviewSummary.need, 1)}
+                    hint="Факт минус потребность за период истории"
+                    tone={chatOverviewSummary.online - chatOverviewSummary.need < -0.5 ? 'rose' : 'emerald'}
+                  />
+                ) : null}
+                {displayOptions.metricInTargetShare ? (
+                  <StatCard
+                    icon={Target}
+                    label="Первый ответ в цель"
+                    value={formatPercent(chatOverviewSummary.inTargetShare)}
+                    hint={`Цель ${describeChatTarget(overview?.settings?.target_first_reply_seconds || 60)} до первой реплики`}
+                    tone={chatOverviewSummary.inTargetShare < 0.8 ? 'amber' : 'emerald'}
+                  />
+                ) : null}
+                {displayOptions.metricCoveredDays ? (
+                  <StatCard
+                    icon={CalendarDays}
+                    label="Дней с чатами"
+                    value={formatInt(chatOverviewSummary.days)}
+                    hint="В выбранном периоде истории"
+                    tone="slate"
+                  />
+                ) : null}
+              </>
+            ) : null}
+            {!isChat && displayOptions.metricOperators && (
               <StatCard
                 icon={TrendingUp}
                 label="Прогноз FTE периода"
@@ -3223,10 +4341,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 tone="blue"
               />
             )}
-            {displayOptions.metricWeeklyFte && (
+            {!isChat && displayOptions.metricWeeklyFte && (
               <StatCard icon={Users} label="Факт FTE периода" value={formatNumber(overviewPeriodSummary.actualFteTotal, 1)} hint="Из разговорной нагрузки отчетов, без смен" tone="emerald" />
             )}
-            {displayOptions.metricBaseOperators && (
+            {!isChat && displayOptions.metricBaseOperators && (
               <StatCard
                 icon={Clock3}
                 label="Разница FTE"
@@ -3235,13 +4353,13 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 tone={overviewPeriodSummary.fteDelta < -0.5 ? 'rose' : overviewPeriodSummary.fteDelta > 0.5 ? 'emerald' : 'slate'}
               />
             )}
-            {displayOptions.metricHistoryWarnings && (
+            {!isChat && displayOptions.metricHistoryWarnings && (
               <StatCard icon={CalendarDays} label="Дни с отчетами" value={overviewPeriodSummary.days} hint="В выбранном периоде анализа" tone="slate" />
             )}
-            {displayOptions.metricLostCalls && (
+            {!isChat && displayOptions.metricLostCalls && (
               <StatCard icon={PhoneMissed} label="Потерянные звонки" value={formatInt(periodLossSummary.totalLost)} hint={`Принято: ${formatInt(periodLossSummary.totalAccepted)}`} tone="rose" />
             )}
-            {displayOptions.metricLossRate && (
+            {!isChat && displayOptions.metricLossRate && (
               <StatCard icon={ShieldAlert} label="Доля потерь" value={formatPercent(periodLossSummary.lossRate)} hint={periodLossSummary.worstDay ? `Пик: ${formatDate(periodLossSummary.worstDay.report_date)}` : 'За выбранный период'} tone={periodLossSummary.lossRate > 0.08 ? 'rose' : 'amber'} />
             )}
           </div>
@@ -3251,8 +4369,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h2 className="text-lg font-semibold text-slate-950">Сводка по периоду</h2>
-                <p className="text-sm text-slate-500">Динамика звонков и FTE по загруженным дням в выбранном диапазоне.</p>
+                <h2 className="text-lg font-semibold text-slate-950">{cfg.overviewTrendTitle}</h2>
+                <p className="text-sm text-slate-500">{cfg.overviewTrendText}</p>
               </div>
               <div className="text-sm text-slate-500">{(overview?.history || []).length} дней в истории</div>
             </div>
@@ -3264,17 +4382,22 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
                     <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                    <Tooltip content={<OverviewTrendTooltip />} />
-                    {displayOptions.chartCalls && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
-                    {displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
-                    {displayOptions.chartFte && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
-                    {displayOptions.chartActual && <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} dot={false} />}
-                    {displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
+                    <Tooltip content={<OverviewTrendTooltip config={cfg.trendTooltipConfig} />} />
+                    {displayOptions[cfg.trendKeys.calls] && <Bar yAxisId="left" dataKey="calls" fill="#bfdbfe" radius={[4, 4, 0, 0]} />}
+                    {cfg.hasLosses && displayOptions.chartLosses && <Bar yAxisId="left" dataKey="lost" fill="#fecdd3" radius={[4, 4, 0, 0]} />}
+                    {displayOptions[cfg.trendKeys.forecastFte] && <Line yAxisId="right" type="monotone" dataKey="forecastFte" stroke="#2563eb" strokeWidth={2} dot={false} />}
+                    {displayOptions[cfg.trendKeys.actualFte] && <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} dot={false} />}
+                    {cfg.hasLosses && displayOptions.chartLossRate && <Line yAxisId="right" type="monotone" dataKey="lossRate" stroke="#e11d48" strokeWidth={2} dot={false} />}
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
             ) : (
-              <EmptyState title="Нет данных для сводки" text="Загрузите первый ежедневный CSV, чтобы увидеть динамику." />
+              <EmptyState
+                title="Нет данных для сводки"
+                text={cfg.hasUpload
+                  ? 'Загрузите первый ежедневный CSV, чтобы увидеть динамику.'
+                  : 'За выбранный период данных не нашлось. Выберите другой отрезок в календаре.'}
+              />
             )}
           </section>
         )}
@@ -3314,18 +4437,18 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 <div className="mt-1.5 text-xs text-slate-500">только часы выше прогноза</div>
               </div>
               <div className="rounded-2xl bg-slate-50 p-4">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Прирост 7 дней</div>
-                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-emerald-600">+{formatInt(incidentProjection.incident_uplift_calls)}</div>
-                <div className="mt-1.5 text-xs text-slate-500">звонков · {formatDate(incidentProjection.period_start)} — {formatDate(incidentProjection.period_end)}</div>
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{cfg.hasUpliftProjection ? 'Прирост 7 дней' : 'Прирост периода'}</div>
+                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-emerald-600">+{formatInt(upliftPeriodCalls)}</div>
+                <div className="mt-1.5 text-xs text-slate-500">{cfg.unit.many} · {formatDate(upliftWindowStart)} — {formatDate(upliftWindowEnd)}</div>
               </div>
               <div className="col-span-2 rounded-2xl bg-slate-50 p-4 md:col-span-1">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Доп. FTE</div>
-                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-emerald-600">+{formatNumber(incidentProjection.incident_uplift_fte_hours, 1)}</div>
-                <div className="mt-1.5 text-xs text-slate-500">FTE-ч на ближайшие 7 дней</div>
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{cfg.hasUpliftProjection ? 'Доп. FTE' : 'Доп. чатнико-часы'}</div>
+                <div className="mt-2 text-[26px] font-semibold leading-none tabular-nums text-emerald-600">+{formatNumber(upliftPeriodFteHours, 1)}</div>
+                <div className="mt-1.5 text-xs text-slate-500">{cfg.hasUpliftProjection ? 'FTE-ч на ближайшие 7 дней' : 'на окно прироста'}</div>
               </div>
             </div>
 
-            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+            <div className={`mt-5 grid gap-4 ${cfg.hasUpliftProjection ? 'xl:grid-cols-2' : ''}`}>
               <div className="min-w-0 rounded-2xl bg-slate-50 p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -3354,6 +4477,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 )}
               </div>
 
+              {cfg.hasUpliftProjection ? (
               <div className="min-w-0 rounded-2xl bg-slate-50 p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -3381,6 +4505,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   <EmptyState title="Нет прогноза прироста" text="После расчета FTE здесь появится разложение риска на ближайшие 7 дней." />
                 )}
               </div>
+              ) : null}
             </div>
 
             <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -3421,7 +4546,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <div key={row.hour} className="rounded-2xl bg-slate-50 p-3.5">
                       <div className="flex items-center justify-between gap-3">
                         <div className="font-semibold text-slate-900">{row.hourLabel}</div>
-                        <div className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">+{formatNumber(row.weightedDeltaCalls, 1)} зв.</div>
+                        <div className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">+{formatNumber(row.weightedDeltaCalls, 1)} {cfg.unit.short}</div>
                       </div>
                       <div className="mt-2.5 grid grid-cols-3 gap-2 text-xs text-slate-500">
                         <span>риск <b className="font-semibold text-emerald-700">{formatPercent(row.growthRatio, 0)}</b></span>
@@ -3438,7 +4563,73 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           </section>
         )}
 
-        {activeDashboardView === 'losses' && (
+        {isChat && activeDashboardView === 'overview' && (
+          <div className="grid gap-6 xl:grid-cols-2">
+            <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-950">Профиль по дням недели</h2>
+              <p className="text-sm text-slate-500">Средний объём и пиковый час по базовым неделям.</p>
+              {(overview?.weekday_profile || []).length ? (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                        <th className="px-3 py-2">День</th>
+                        <th className="px-3 py-2 text-right">В среднем чатов</th>
+                        <th className="px-3 py-2 text-right">Пик в часе</th>
+                        <th className="px-3 py-2 text-right">Дней в выборке</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(overview?.weekday_profile || []).map((row) => (
+                        <tr key={row.weekday} className="border-b border-slate-100">
+                          <td className="px-3 py-2 font-medium text-slate-800">{row.short}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{formatInt(row.avg_chats)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {row.peak_hour === null || row.peak_hour === undefined ? '—' : `${String(row.peak_hour).padStart(2, '0')}:00`}
+                          </td>
+                          <td className="px-3 py-2 text-right text-slate-500 tabular-nums">{formatInt(row.days_in_sample)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <EmptyState title="Профиль пуст" text="Для базовых недель нет данных по чатам." />
+              )}
+            </section>
+
+            <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-950">Каналы</h2>
+              <p className="text-sm text-slate-500">Откуда приходят обращения за базовые недели.</p>
+              {(overview?.channels || []).length ? (
+                <div className="mt-4 overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                        <th className="px-3 py-2">Канал</th>
+                        <th className="px-3 py-2 text-right">Чатов</th>
+                        <th className="px-3 py-2 text-right">Доля</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(overview?.channels || []).map((channel) => (
+                        <tr key={channel.channel} className="border-b border-slate-100">
+                          <td className="px-3 py-2 text-slate-800">{channel.channel}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{formatInt(channel.chats)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{formatPercent(channel.share)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <EmptyState title="Каналов нет" text="За базовые недели обращения не найдены." />
+              )}
+            </section>
+          </div>
+        )}
+
+        {cfg.hasLosses && activeDashboardView === 'losses' && (
           <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
@@ -3762,7 +4953,248 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
           </section>
         )}
 
-        {activeDashboardView === 'oktell_billing' && (
+        {isChat && activeDashboardView === 'losses' && (
+          <div className="space-y-6">
+            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-950">Аналитика чатов</h2>
+                  <p className="text-sm text-slate-500">
+                    «В цель» здесь и везде на вкладке — про ПЕРВЫЙ ответ клиенту, единственную
+                    измеримую по нашей базе метрику сервиса.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="inline-flex w-fit rounded-lg border border-slate-200 bg-slate-50 p-1">
+                    {[
+                      ['volume', 'Факт/Прогноз'],
+                      ['reply', 'Первый ответ вне цели'],
+                    ].map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setChatsChartMode(mode)}
+                        className={`h-8 rounded-md px-3 text-xs font-semibold transition ${
+                          chatsChartMode === mode
+                            ? 'bg-slate-900 text-white shadow-sm'
+                            : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="w-full sm:w-[300px]">
+                    <CalendarPicker
+                      mode="range"
+                      label="Период аналитики"
+                      startValue={analyticsFrom}
+                      endValue={analyticsTo}
+                      onRangeChange={(start, end) => {
+                        setAnalyticsFrom(start);
+                        setAnalyticsTo(end);
+                      }}
+                      loadedDates={loadedReportDates}
+                      hint={cfg.historyPickerHint}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <StatCard
+                  icon={MessageSquare}
+                  label="Чатов"
+                  value={formatInt(analyticsTotals.chats)}
+                  hint={`${formatInt(analytics?.range?.days)} дн. в периоде`}
+                  tone="blue"
+                  emphasis="compact"
+                />
+                <StatCard
+                  icon={Target}
+                  label="Первый ответ в цель"
+                  value={formatPercent(analyticsTotals.in_target_share)}
+                  hint={`Цель ${describeChatTarget(analyticsTotals.target_first_reply_seconds || chatTargetFirstSeconds)}`}
+                  tone={Number(analyticsTotals.in_target_share || 0) < 0.8 ? 'amber' : 'emerald'}
+                  emphasis="compact"
+                />
+                <StatCard
+                  icon={AlertTriangle}
+                  label="Без ответа"
+                  value={formatInt(analyticsTotals.no_reply)}
+                  hint="Оператор так и не написал первым"
+                  tone="rose"
+                  emphasis="compact"
+                />
+                <StatCard
+                  icon={Timer}
+                  label="Среднее время первого ответа"
+                  value={formatReplySeconds(analyticsTotals.avg_first_reply_seconds)}
+                  hint="По отвеченным чатам периода"
+                  tone="slate"
+                  emphasis="compact"
+                />
+                <StatCard
+                  icon={Clock3}
+                  label="Факт чатнико-часов"
+                  value={formatNumber(analyticsTotals.actual_online_hours, 1)}
+                  hint="Онлайн-сегменты чатников"
+                  tone="emerald"
+                  emphasis="compact"
+                />
+              </div>
+
+              <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+                <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <BarChart3 size={16} />
+                    {chatsChartMode === 'volume' ? 'Объём по дням: факт против прогноза' : 'Первый ответ по дням'}
+                  </div>
+                  {analyticsChartData.length ? (
+                    <div className="h-72">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={analyticsChartData} margin={{ top: 10, right: 18, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                          <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                          <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                          <Tooltip formatter={(value, name) => [formatNumber(value, 0), name]} />
+                          {chatsChartMode === 'volume' ? (
+                            <>
+                              <Bar yAxisId="left" dataKey="forecastChats" name="Прогноз" fill="#bfdbfe" radius={[4, 4, 0, 0]} />
+                              <Bar yAxisId="left" dataKey="chats" name="Факт" fill="#22c55e" radius={[4, 4, 0, 0]} />
+                            </>
+                          ) : (
+                            <>
+                              <Bar yAxisId="left" dataKey="inTarget" name="В цель" stackId="reply" fill="#bbf7d0" radius={[0, 0, 0, 0]} />
+                              <Bar yAxisId="left" dataKey="outOfTarget" name="Вне цели" stackId="reply" fill="#fecdd3" radius={[4, 4, 0, 0]} />
+                              <Line yAxisId="right" type="monotone" dataKey="firstReply" name="Среднее, с" stroke="#e11d48" strokeWidth={2} dot={false} />
+                            </>
+                          )}
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                  ) : (
+                    <EmptyState
+                      title="Нет данных по чатам"
+                      text={isAnalyticsLoading ? 'Загружаем период…' : 'За выбранный период обращений не нашлось.'}
+                    />
+                  )}
+                  {chatsChartMode === 'volume' ? (
+                    <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                      Прогноз берётся из сохранённой истории пересчётов. Пока «Пересчитать» не нажимали,
+                      столбец прогноза пуст — это не дефект, а незаполненная история.
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <ShieldAlert size={16} />
+                    Топ часов риска
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Худшая доля НА ОБЪЁМЕ: провалить ночной час с тремя чатами дешевле, чем дневной с сотней.
+                  </p>
+                  <div className="mt-4 space-y-3">
+                    {analyticsRiskHours.length ? analyticsRiskHours.map((row) => (
+                      <div key={row.hour} className="rounded-lg border border-slate-200 bg-white p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="font-semibold text-slate-900 tabular-nums">{row.hour_label}</div>
+                          <div className="rounded-md bg-rose-100 px-2 py-1 text-xs font-semibold text-rose-700">
+                            {formatPercent(1 - Number(row.in_target_share || 0))}
+                          </div>
+                        </div>
+                        <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-500">
+                          <span>чаты: <b className="text-slate-800">{formatInt(row.chats)}</b></span>
+                          <span>без ответа: <b className="text-rose-700">{formatInt(row.no_reply)}</b></span>
+                          <span>ответ: <b className="text-slate-800">{formatReplySeconds(row.avg_first_reply_seconds)}</b></span>
+                        </div>
+                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+                          <div className="h-full rounded-full bg-rose-500" style={{ width: `${Math.min(100, (1 - Number(row.in_target_share || 0)) * 100)}%` }} />
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-500">
+                        За период нет часов с провалом первого ответа.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+              <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-950">По дням</h2>
+                <p className="text-sm text-slate-500">Объём, первый ответ и отработанные чатнико-часы.</p>
+                <div className="mt-4 overflow-x-auto">
+                  <table className="min-w-full text-sm tabular-nums">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                        <th className="px-3 py-2">День</th>
+                        <th className="px-3 py-2">Дата</th>
+                        <th className="px-3 py-2 text-right">Чаты</th>
+                        <th className="px-3 py-2 text-right">Прогноз</th>
+                        <th className="px-3 py-2 text-right">В цель</th>
+                        <th className="px-3 py-2 text-right">Без ответа</th>
+                        <th className="px-3 py-2 text-right">Первый ответ</th>
+                        <th className="px-3 py-2 text-right">Чатнико-часы</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {analyticsDays.map((row) => (
+                        <tr key={row.date} className="border-b border-slate-100">
+                          <td className="px-3 py-2 font-medium text-slate-800">{row.short}</td>
+                          <td className="px-3 py-2 text-slate-600">{formatDate(row.date)}</td>
+                          <td className="px-3 py-2 text-right">{formatInt(row.chats)}</td>
+                          <td className="px-3 py-2 text-right text-blue-700">{formatNumber(row.forecast_chats, 0)}</td>
+                          <td className={`px-3 py-2 text-right font-semibold ${Number(row.in_target_share || 0) < 0.8 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                            {formatPercent(row.in_target_share)}
+                          </td>
+                          <td className="px-3 py-2 text-right text-rose-700">{formatInt(row.no_reply)}</td>
+                          <td className="px-3 py-2 text-right">{formatReplySeconds(row.avg_first_reply_seconds)}</td>
+                          <td className="px-3 py-2 text-right">{formatNumber(row.actual_online_hours, 1)}</td>
+                        </tr>
+                      ))}
+                      {!analyticsDays.length ? (
+                        <tr>
+                          <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                            {isAnalyticsLoading ? 'Загружаем период…' : 'За выбранный период данных нет'}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-950">Каналы периода</h2>
+                <p className="text-sm text-slate-500">Доля обращений по источникам.</p>
+                <div className="mt-4 space-y-2">
+                  {analyticsChannels.length ? analyticsChannels.map((channel) => (
+                    <div key={channel.channel} className="rounded-lg bg-slate-50 p-3">
+                      <div className="flex items-center justify-between gap-3 text-sm">
+                        <span className="font-medium text-slate-800">{channel.channel}</span>
+                        <span className="tabular-nums text-slate-600">{formatInt(channel.chats)} · {formatPercent(channel.share)}</span>
+                      </div>
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
+                        <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(100, Number(channel.share || 0) * 100)}%` }} />
+                      </div>
+                    </div>
+                  )) : (
+                    <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">
+                      За выбранный период каналов нет.
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
+          </div>
+        )}
+
+        {cfg.hasBilling && activeDashboardView === 'oktell_billing' && (
           <>
             <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
@@ -3771,8 +5203,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <Receipt size={20} />
                   </span>
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-950">Биллинг Oktell</h2>
-                    <p className="text-sm text-slate-500">Входящие звонки напрямую из базы Oktell: детализация по дням за выбранный период и окно времени.</p>
+                    <h2 className="text-lg font-semibold text-slate-950">{cfg.billing.title}</h2>
+                    <p className="text-sm text-slate-500">{cfg.billing.text}</p>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
@@ -3808,6 +5240,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <RefreshCw size={16} className={isBillingLoading ? 'animate-spin' : ''} />
                     {isBillingLoading ? 'Загрузка...' : 'Сформировать'}
                   </button>
+                  {cfg.hasBillingExportTypes && (
                   <select
                     value={billingExportType}
                     onChange={(event) => setBillingExportType(event.target.value)}
@@ -3819,6 +5252,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <option value="general">Общая (текущая)</option>
                     <option value="efficiency">По эффективности операторов</option>
                   </select>
+                  )}
                   <button
                     type="button"
                     onClick={exportBillingExcel}
@@ -3840,7 +5274,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               </div>
               <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className="inline-flex max-w-full w-fit overflow-x-auto rounded-xl bg-slate-100 p-1">
-                  {BILLING_MODES.map((item) => (
+                  {cfg.billing.modes.map((item) => (
                     <button
                       key={item.key}
                       type="button"
@@ -3858,10 +5292,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                   <span className="tabular-nums">{billingPeriodDays > 0 ? `${billingPeriodDays} дн. · ${formatDate(billingFrom)} — ${formatDate(billingTo)}` : 'Период не выбран'}</span>
                   <span className="tabular-nums">время {billingTimeFrom}–{billingTimeTo} включительно</span>
-                  {billingExportType === 'efficiency' ? (
+                  {cfg.hasBillingExportTypes && billingExportType === 'efficiency' ? (
                     <span>Excel по эффективности считается за полные дни; фильтр времени не применяется</span>
                   ) : null}
-                  {billingMode === 'operator' ? (
+                  {cfg.billing.modeHint ? (
+                    <span>{cfg.billing.modeHint(billingMode, billingSlSeconds)}</span>
+                  ) : billingMode === 'operator' ? (
                     <span>OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз</span>
                   ) : billingMode === 'detail' ? (
                     <span>Одна строка — один звонок; на странице 25 звонков</span>
@@ -3883,7 +5319,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
             {isBillingLoading && (
               <div className="flex min-h-[220px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white p-8 text-sm text-slate-500 shadow-sm">
                 <RefreshCw size={16} className="animate-spin" />
-                Получаем данные из Oktell...
+                {cfg.billing.loadingText}
               </div>
             )}
 
@@ -3892,7 +5328,34 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               || (billingMode !== 'detail' && billingTotals && billingDays.length > 0)
             ) && (
               <>
-                {billingMode !== 'detail' && (billingMode === 'operator' ? (
+                {billingMode !== 'detail' && (!cfg.hasBillingTalkTime ? (
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                    <StatCard icon={MessageSquare} label="Поступило" value={formatInt(billingTotals.chats)} hint="Обращения за период" tone="blue" />
+                    <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.answered)} hint="Получили ответ оператора" tone="emerald" />
+                    <StatCard icon={ShieldAlert} label="Потеряно" value={formatInt(billingTotals.no_reply)} hint="Остались без ответа" tone="rose" />
+                    <StatCard
+                      icon={Clock3}
+                      label="Ср. первый ответ"
+                      value={billingChatReplySeconds === null ? '—' : formatDurationHms(billingChatReplySeconds)}
+                      hint="Реакция на обращение"
+                      tone="slate"
+                    />
+                    <StatCard
+                      icon={Target}
+                      label="AR"
+                      value={billingChatArRatio === null ? '—' : formatPercent(billingChatArRatio, 1)}
+                      hint="Доля отвеченных обращений"
+                      tone={billingChatArRatio !== null && billingChatArRatio >= 0.9 ? 'emerald' : billingChatArRatio !== null && billingChatArRatio >= 0.75 ? 'amber' : 'rose'}
+                    />
+                    <StatCard
+                      icon={TrendingUp}
+                      label="SL"
+                      value={billingChatSlRatio === null ? '—' : formatPercent(billingChatSlRatio, 1)}
+                      hint={`Первый ответ за ≤ ${billingSlSeconds} сек от поступивших`}
+                      tone={billingChatSlRatio !== null && billingChatSlRatio >= 0.8 ? 'emerald' : billingChatSlRatio !== null && billingChatSlRatio >= 0.6 ? 'amber' : 'rose'}
+                    />
+                  </div>
+                ) : billingMode === 'operator' ? (
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
                     <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.served)} hint="Входящие, отвеченные оператором" tone="emerald" />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_in_seconds)} hint={`Исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}`} tone="blue" />
@@ -3939,15 +5402,15 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 {billingMode === 'detail' ? (
                   <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                     <div className="border-b border-slate-100 px-4 py-3">
-                      <h3 className="text-base font-semibold text-slate-950">Детализация звонков</h3>
+                      <h3 className="text-base font-semibold text-slate-950">{cfg.billing.detailTitle}</h3>
                       <p className="text-xs tabular-nums text-slate-500">
                         {formatDate(billingReport.date_from)} — {formatDate(billingReport.date_to)} · {billingReport.time_from}–{billingReport.time_to}
                       </p>
                       <p className="mt-1 text-xs text-slate-500">
-                        IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только отвеченные звонки.
+                        {cfg.billing.detailNote}
                       </p>
                     </div>
-                    <BillingDetailTable rows={billingDetailRows} />
+                    <BillingRowsTable rows={billingDetailRows} />
                     <div className="flex flex-col gap-3 border-t border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="text-xs tabular-nums text-slate-500">
                         Строки {formatInt(billingDetailPageStart)}–{formatInt(billingDetailPageEnd)} из {formatInt(billingDetailTotal)}
@@ -3988,14 +5451,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                       <div className="border-b border-slate-100 px-4 py-3">
                         <h3 className="text-base font-semibold text-slate-950">
-                          {billingMode === 'operator' ? 'Итоги за период по операторам' : billingMode === 'line' ? 'Итоги за период по номерам' : 'Итоги за период по таксопаркам'}
+                          {cfg.billing.summaryTitle(billingMode)}
                         </h3>
                         <p className="text-xs tabular-nums text-slate-500">{formatDate(billingReport.date_from)} — {formatDate(billingReport.date_to)} · {billingReport.time_from}–{billingReport.time_to}</p>
                       </div>
                       {billingMode === 'operator' ? (
-                        <BillingOperatorTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
+                        <BillingPeopleTable rows={billingReport.operators || []} totals={billingTotals} totalsLabel="Итого за период" />
                       ) : (
-                        <BillingTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
+                        <BillingSummaryTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
                       )}
                     </section>
 
@@ -4013,8 +5476,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     <div className="space-y-3">
                       {billingDays.map((day) => {
                         const expanded = billingExpandedDays.has(day.date);
-                        const dayAr = billingMode === 'operator' ? null : safeRatio(day.totals?.lost, day.totals?.arrived);
-                        const daySl = billingMode === 'operator' ? null : safeRatio(day.totals?.served_sl, day.totals?.arrived);
+                        const dayAr = billingMode === 'operator' ? null : cfg.hasBillingTalkTime
+                          ? safeRatio(day.totals?.lost, day.totals?.arrived)
+                          : safeRatio(day.totals?.answered, day.totals?.chats);
+                        const daySl = billingMode === 'operator' ? null : cfg.hasBillingTalkTime
+                          ? safeRatio(day.totals?.served_sl, day.totals?.arrived)
+                          : safeRatio(day.totals?.answered_sl, day.totals?.chats);
                         const dayOcc = billingMode === 'operator' ? billingOperatorActivity(day.totals || {}).occ : null;
                         return (
                           <section key={day.date} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -4030,9 +5497,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                 <div className="min-w-0">
                                   <div className="truncate text-sm font-semibold capitalize text-slate-950">{billingDayLabel(day.date)}</div>
                                   <div className="truncate text-xs tabular-nums text-slate-500">
-                                    {billingMode === 'operator'
-                                      ? `Операторов ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.served)} · Разговоры ${formatDurationHms(day.totals?.talk_in_seconds)}`
-                                      : `Поступило ${formatInt(day.totals?.arrived)} · Обслужено ${formatInt(day.totals?.served)} · Потеряно ${formatInt(day.totals?.lost)}`}
+                                    {cfg.billing.daySummary(billingMode, day)}
                                   </div>
                                 </div>
                               </div>
@@ -4043,7 +5508,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   </span>
                                 ) : (
                                   <>
-                                    <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingArClass(dayAr)}`}>
+                                    <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${cfg.billing.arClass(dayAr)}`}>
                                       AR {dayAr === null ? '—' : formatPercent(dayAr, 1)}
                                     </span>
                                     <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingSlClass(daySl)}`}>
@@ -4057,9 +5522,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             {expanded ? (
                               <div className="border-t border-slate-100">
                                 {billingMode === 'operator' ? (
-                                  <BillingOperatorTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
+                                  <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
                                 ) : (
-                                  <BillingTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />
+                                  <BillingSummaryTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />
                                 )}
                               </div>
                             ) : null}
@@ -4077,14 +5542,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
             ) && (
               <EmptyState
                 title="Нет данных за выбранный период"
-                text="Oktell не вернул входящих звонков за указанный период и окно времени."
+                text={cfg.billing.emptyText}
               />
             )}
 
             {!isBillingLoading && !billingReport && !billingError && (
               <EmptyState
                 title="Отчет еще не сформирован"
-                text="Выберите период и окно времени, затем нажмите «Сформировать» — данные придут напрямую из Oktell."
+                text={cfg.billing.idleText}
               />
             )}
           </>
@@ -4093,6 +5558,8 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
         {activeDashboardView === 'schedule_planner' && (
           <ResourceSchedulePlanner
             apiRoot={apiRoot}
+            apiPrefix={cfg.apiPrefix}
+            enableShiftAuction={cfg.hasShiftAuction}
             buildHeaders={buildHeaders}
             selectedWeekStart={selectedForecastWeekStart}
             selectedPeriodEnd={selectedForecastPeriodEnd}
@@ -4102,7 +5569,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               setSelectedForecastPeriodEnd(end);
               setSelectedForecastDate(start);
             }}
-            weekPicker={(
+            weekPicker={cfg.hasWeekPicker ? (
               <WeekForecastPicker
                 startValue={selectedForecastWeekStart}
                 endValue={selectedForecastPeriodEnd}
@@ -4114,15 +5581,246 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 loadedDates={loadedReportDates}
                 compact
               />
-            )}
+            ) : undefined}
             notify={notify}
-            onOpenShiftAuction={onOpenShiftAuction}
+            onOpenShiftAuction={cfg.hasShiftAuction ? onOpenShiftAuction : undefined}
           />
         )}
 
         {(activeDashboardView === 'settings' || activeDashboardView === 'next_week') && (
-        <div className={`grid gap-6 ${activeDashboardView === 'settings' ? 'xl:grid-cols-[320px_minmax(0,1fr)]' : 'xl:grid-cols-1'}`}>
-          {activeDashboardView === 'settings' && (
+        <div className={`grid gap-6 ${activeDashboardView === 'settings' && !isChat ? 'xl:grid-cols-[320px_minmax(0,1fr)]' : 'xl:grid-cols-1'}`}>
+          {activeDashboardView === 'settings' && isChat && (
+          <aside className="space-y-4">
+            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="mb-1 flex items-center gap-2 text-lg font-semibold text-slate-950">
+                <Target size={18} />
+                Две цели по сервису
+              </div>
+              <p className="text-sm text-slate-500">
+                Слева — рычаг расчёта, справа — то, что мы реально меряем по базе. Путать их нельзя.
+              </p>
+              <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                <label className="block rounded-xl border-2 border-amber-300 bg-amber-50 p-4">
+                  <span className="text-sm font-semibold text-amber-900">Среднее время внутри чата, сек</span>
+                  <p className="mt-1 text-xs leading-snug text-amber-800">
+                    Главная вводная: из неё выводится ёмкость. Ниже цель — больше людей.
+                    Факта по ней в базе нет, он живёт только в API Chat2Desk.
+                  </p>
+                  <input
+                    type="number"
+                    step={10}
+                    min={30}
+                    max={3600}
+                    value={settingsDraft?.target_reply_seconds ?? ''}
+                    onChange={(event) => setSettingsDraft((current) => ({
+                      ...(current || {}),
+                      target_reply_seconds: event.target.value === '' ? '' : Number(event.target.value),
+                    }))}
+                    className={`${inputClass} mt-3 w-full border-amber-300 bg-white`}
+                  />
+                  <span className="mt-2 block text-xs font-medium text-amber-900">
+                    Сейчас: {describeChatTarget(settingsDraft?.target_reply_seconds)}
+                  </span>
+                </label>
+
+                <label className="block rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <span className="text-sm font-semibold text-slate-900">Первый ответ (реакция), сек</span>
+                  <p className="mt-1 text-xs leading-snug text-slate-500">
+                    Время до первой реплики оператора. Единственная цель, факт по которой
+                    есть у нас в базе — по ней и считается «в цель» на вкладке «Чаты».
+                  </p>
+                  <input
+                    type="number"
+                    step={10}
+                    min={10}
+                    max={3600}
+                    value={settingsDraft?.target_first_reply_seconds ?? ''}
+                    onChange={(event) => setSettingsDraft((current) => ({
+                      ...(current || {}),
+                      target_first_reply_seconds: event.target.value === '' ? '' : Number(event.target.value),
+                    }))}
+                    className={`${inputClass} mt-3 w-full`}
+                  />
+                  <span className="mt-2 block text-xs font-medium text-slate-600">
+                    Сейчас: {describeChatTarget(settingsDraft?.target_first_reply_seconds)}
+                  </span>
+                </label>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                      <Gauge size={16} className="text-slate-500" />
+                      Ёмкость: {formatNumber(chatCapacityExplain.used ?? chatCapacityPerHourValue, 2)} чатов в час на человека
+                    </div>
+                    <p className="mt-1 max-w-2xl text-xs leading-snug text-slate-600">
+                      {chatCapacityExplain.source === 'manual'
+                        ? 'Задана вручную и перебивает вывод из цели.'
+                        : chatCapacityExplain.source === 'first_reply'
+                          ? 'Связала цель первого ответа — она жёстче «ответа внутри чата».'
+                          : 'Выведена из цели «ответ внутри чата» по замеренной кривой.'}
+                      {' '}Из цели: {formatNumber(chatCapacityExplain.derived, 2)}
+                      {chatCapacityExplain.derived_first_reply
+                        ? `; по первому ответу: ${formatNumber(chatCapacityExplain.derived_first_reply, 2)}`
+                        : '; кривая первого ответа ещё не замерена'}.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {chatCapacityIsManual ? (
+                      <>
+                        <input
+                          type="number"
+                          step={0.5}
+                          min={0.5}
+                          max={60}
+                          value={settingsDraft?.capacity_manual ?? ''}
+                          onChange={(event) => setSettingsDraft((current) => ({
+                            ...(current || {}),
+                            capacity_manual: event.target.value === '' ? '' : Number(event.target.value),
+                          }))}
+                          className={`${inputClass} w-32`}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setSettingsDraft((current) => ({ ...(current || {}), capacity_manual: null }))}
+                          className="inline-flex h-10 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                        >
+                          Вернуть вывод из цели
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setSettingsDraft((current) => ({
+                          ...(current || {}),
+                          capacity_manual: Number(chatCapacityExplain.used ?? chatCapacityPerHourValue),
+                        }))}
+                        className="inline-flex h-10 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+                      >
+                        Задать вручную
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleFitFirstReplyCurve}
+                      disabled={isFittingFirstReply}
+                      className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-60"
+                    >
+                      <RefreshCw size={16} className={isFittingFirstReply ? 'animate-spin' : ''} />
+                      {isFittingFirstReply ? 'Замеряем…' : 'Замерить кривую первого ответа'}
+                    </button>
+                  </div>
+                </div>
+
+                {chatCapacityExplain.first_reply_target_unreachable ? (
+                  <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      <AlertTriangle size={14} />
+                      Цель первого ответа не достигается наращиванием людей
+                    </div>
+                    <p className="mt-1 text-xs leading-snug">
+                      Замер показал: даже в самой разгруженной полосе первый ответ не укладывается
+                      в {describeChatTarget(chatTargetFirstSeconds)}. Причина не в общей нехватке штата, а в
+                      ночных часах с одним-двумя чатниками, шаблонах и переключении между каналами.
+                      Число мы не подгоняем — рычагом остаётся «ответ внутри чата».
+                    </p>
+                  </div>
+                ) : null}
+
+                <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+                  Обработки требуют 100 % чатов. На линии допустимы 5 % потерь, в чате — нет:
+                  обращение не «теряется», оно висит открытым, пока клиент не получит ответ.
+                  Скидки на непринятые в чатовой модели нет — это объяснение, а не поле ввода.
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="mb-1 text-lg font-semibold text-slate-950">Вводные расчёта</div>
+              <p className="text-sm text-slate-500">Пересчёт людей из чатнико-часов.</p>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <label className="block">
+                  <span className="text-xs font-medium text-slate-600">Коэффициент усушки</span>
+                  <input
+                    type="number"
+                    step={0.05}
+                    min={0.1}
+                    max={1}
+                    value={settingsDraft?.shrinkage_coeff ?? ''}
+                    onChange={(event) => setSettingsDraft((current) => ({
+                      ...(current || {}),
+                      shrinkage_coeff: event.target.value === '' ? '' : Number(event.target.value),
+                    }))}
+                    className={`${inputClass} mt-1 w-full`}
+                  />
+                  <span className="mt-1 block text-[11px] leading-snug text-slate-500">Отпуска, больничные, обучение. 0,9 — как на линии</span>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-slate-600">Часов в неделю на человека</span>
+                  <input
+                    type="number"
+                    step={1}
+                    min={1}
+                    max={168}
+                    value={settingsDraft?.weekly_hours_per_operator ?? ''}
+                    onChange={(event) => setSettingsDraft((current) => ({
+                      ...(current || {}),
+                      weekly_hours_per_operator: event.target.value === '' ? '' : Number(event.target.value),
+                    }))}
+                    className={`${inputClass} mt-1 w-full`}
+                  />
+                  <span className="mt-1 block text-[11px] leading-snug text-slate-500">Норма для пересчёта чатнико-часов в людей</span>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-slate-600">Недель в базе прогноза</span>
+                  <input
+                    type="number"
+                    step={1}
+                    min={1}
+                    max={8}
+                    value={settingsDraft?.base_weeks ?? ''}
+                    onChange={(event) => setSettingsDraft((current) => ({
+                      ...(current || {}),
+                      base_weeks: event.target.value === '' ? '' : Number(event.target.value),
+                    }))}
+                    className={`${inputClass} mt-1 w-full`}
+                  />
+                  <span className="mt-1 block text-[11px] leading-snug text-slate-500">Сколько последних ПОЛНЫХ недель усредняем по дням недели</span>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-medium text-slate-600">Округление потребности</span>
+                  <select
+                    value={settingsDraft?.fte_rounding || 'half'}
+                    onChange={(event) => setSettingsDraft((current) => ({ ...(current || {}), fte_rounding: event.target.value }))}
+                    className={`${inputClass} mt-1 w-full`}
+                  >
+                    {CHAT_FTE_ROUNDING_LABELS.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                  <span className="mt-1 block text-[11px] leading-snug text-slate-500">Как показывать потребность часа при раскладке смен</span>
+                </label>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleSaveSettings}
+                  disabled={!settingsDraft}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-60"
+                >
+                  <Save size={16} />
+                  Сохранить и пересчитать
+                </button>
+                <span className="text-xs text-slate-500">
+                  Ёмкость пересчитается сама: она следует за целью, а не вводится рядом с ней.
+                </span>
+              </div>
+            </section>
+          </aside>
+          )}
+          {activeDashboardView === 'settings' && !isChat && (
           <aside className="space-y-4">
             <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -4167,6 +5865,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                       <option value="floor">вниз</option>
                     </select>
                   </label>
+                  {cfg.hasDirectionPicker ? (
                   <div className="col-span-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -4199,6 +5898,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                       )}
                     </div>
                   </div>
+                  ) : null}
                   <button type="button" onClick={handleSaveSettings} className="col-span-2 inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800">
                     <Save size={16} />
                     Сохранить
@@ -4219,7 +5919,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   </div>
                   <button
                     type="button"
-                    onClick={() => setDisplayOptions({ ...DEFAULT_DISPLAY_OPTIONS })}
+                    onClick={() => setDisplayOptions({ ...cfg.defaultDisplayOptions })}
                     className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
                   >
                     <RefreshCw size={16} />
@@ -4227,7 +5927,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                   </button>
                 </div>
                 <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  {DISPLAY_GROUPS.map((group) => (
+                  {cfg.displayGroups.map((group) => (
                     <div key={group.title} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                       <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
                         <ListChecks size={16} />
@@ -4253,12 +5953,28 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
               <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-950">Прогноз FTE по выбранному периоду</h2>
-                    <p className="text-sm text-slate-500">
-                      Для каждого дня берутся две исторические даты: минус 21 и минус 14 дней. AHT считается отдельно по дню.
-                    </p>
+                    <h2 className="text-lg font-semibold text-slate-950">{cfg.forecastTitle}</h2>
+                    <p className="text-sm text-slate-500">{cfg.forecastText}</p>
                   </div>
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    {isChat ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => shiftForecastPeriod(-1)}
+                          className="inline-flex h-10 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                        >
+                          ← Неделя назад
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => shiftForecastPeriod(1)}
+                          className="inline-flex h-10 items-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                        >
+                          Неделя вперёд →
+                        </button>
+                      </>
+                    ) : null}
                     <button
                       type="button"
                       onClick={handleRecalculate}
@@ -4278,9 +5994,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                       <div className="xl:col-span-2">
                         <StatCard
                           icon={TrendingUp}
-                          label="FTE-часы периода"
+                          label={cfg.unit.fteHoursCap}
                           value={formatNumber(nextWeekForecast.periodFteHours ?? nextWeekForecast.weeklyFteHours, 1)}
-                          hint={`${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн. в периоде`}
+                          hint={isChat
+                            ? `${formatInt(nextWeekForecast.periodDays)} дн. · ${formatInt(nextWeekForecast.periodCalls)} ${cfg.unit.many}`
+                            : `${formatInt(nextWeekForecast.periodDays || (nextWeekForecast.days || []).length)} дн. в периоде`}
                           tone="blue"
                           emphasis="primary"
                           accent
@@ -4299,25 +6017,53 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                         totalCount={periodOperatorCount}
                         partialCount={periodPartialOperatorCount}
                         unavailableCount={periodUnavailableOperatorCount}
+                        label={cfg.unit.operators}
+                        fteWord={cfg.unit.fteWord}
+                        excludedCount={restrictedAvailability?.excludedCount || 0}
+                        excludedFte={restrictedAvailability?.excludedFte || 0}
                         onOpen={openOperatorDetails}
                       />
                     ) : null}
                   </div>
                 ) : null}
 
-                {(displayOptions.forecastKpiUplift || displayOptions.forecastKpiAht || displayOptions.forecastKpiAnswerRate || displayOptions.forecastKpiOccUr || displayOptions.forecastKpiShrinkage) ? (
+                {(displayOptions.forecastKpiUplift || displayOptions.forecastKpiAht || displayOptions.forecastKpiAnswerRate || displayOptions.forecastKpiOccUr || displayOptions.forecastKpiShrinkage || displayOptions.forecastKpiCapacity || displayOptions.forecastKpiTarget) ? (
                   <div className="mt-3 grid gap-2 grid-cols-2 md:grid-cols-3 xl:grid-cols-5 [&>*]:min-w-0">
+                    {isChat && displayOptions.forecastKpiCapacity ? (
+                      <StatCard
+                        icon={Gauge}
+                        label="Ёмкость"
+                        value={`${formatNumber(chatCapacityPerHourValue, 1)} чат/ч`}
+                        hint={chatCapacityExplain.source === 'manual'
+                          ? 'Задана вручную'
+                          : chatCapacityExplain.source === 'first_reply'
+                            ? 'Связала цель первого ответа'
+                            : 'Выведена из «ответа внутри чата»'}
+                        tone="amber"
+                        emphasis="compact"
+                      />
+                    ) : null}
+                    {isChat && displayOptions.forecastKpiTarget ? (
+                      <StatCard
+                        icon={Target}
+                        label="Цель ответа"
+                        value={describeChatTarget(overview?.settings?.target_reply_seconds)}
+                        hint={`Первый ответ ${describeChatTarget(chatTargetFirstSeconds)}`}
+                        tone="blue"
+                        emphasis="compact"
+                      />
+                    ) : null}
                     {displayOptions.forecastKpiUplift ? (
                       <StatCard
                         icon={TrendingUp}
                         label="Возможный прирост"
-                        value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} зв.`}
-                        hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} FTE-ч · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
+                        value={`+${formatInt(nextWeekForecast.incidentUpliftCalls)} ${cfg.unit.short}`}
+                        hint={`+${formatNumber(nextWeekForecast.incidentUpliftFteHours, 1)} ${cfg.unit.fteHoursShort} · ${Number(nextWeekForecast.incidentUplift?.source_day_count || 0)}/6 дн.`}
                         tone="emerald"
                         emphasis="compact"
                       />
                     ) : null}
-                    {displayOptions.forecastKpiAht ? (
+                    {cfg.hasAht && displayOptions.forecastKpiAht ? (
                       <StatCard
                         icon={Clock3}
                         label="AHT периода"
@@ -4327,7 +6073,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                         emphasis="compact"
                       />
                     ) : null}
-                    {displayOptions.forecastKpiAnswerRate ? (
+                    {cfg.hasAnswerRate && displayOptions.forecastKpiAnswerRate ? (
                       <StatCard
                         icon={PhoneCall}
                         label="Принято"
@@ -4337,7 +6083,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                         emphasis="compact"
                       />
                     ) : null}
-                    {displayOptions.forecastKpiOccUr ? (
+                    {cfg.hasOccUr && displayOptions.forecastKpiOccUr ? (
                       <StatCard
                         icon={Users}
                         label="OCC / UR"
@@ -4362,17 +6108,35 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
 
                 <div className="mt-5 grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
                   <aside className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <WeekForecastPicker
-                      startValue={forecastPeriodStart}
-                      endValue={forecastPeriodEnd}
-                      onRangeChange={(start, end) => {
-                        setSelectedForecastWeekStart(start);
-                        setSelectedForecastPeriodEnd(end);
-                        setSelectedForecastDate(start);
-                      }}
-                      loadedDates={loadedReportDates}
-                    />
-                    {!forecastPeriodComplete ? (
+                    {cfg.hasWeekPicker ? (
+                      <WeekForecastPicker
+                        startValue={forecastPeriodStart}
+                        endValue={forecastPeriodEnd}
+                        onRangeChange={(start, end) => {
+                          setSelectedForecastWeekStart(start);
+                          setSelectedForecastPeriodEnd(end);
+                          setSelectedForecastDate(start);
+                        }}
+                        loadedDates={loadedReportDates}
+                      />
+                    ) : (
+                      <CalendarPicker
+                        mode="range"
+                        label="Период прогноза"
+                        startValue={forecastPeriodStart}
+                        endValue={forecastPeriodEnd}
+                        onRangeChange={(start, end) => {
+                          setSelectedForecastWeekStart(start);
+                          setSelectedForecastPeriodEnd(end);
+                          setSelectedForecastDate(start);
+                        }}
+                        loadedDates={loadedReportDates}
+                        hint={chatBaseWeekStarts.length
+                          ? `База: ${chatBaseWeekStarts.map((item) => formatDate(item).slice(0, 5)).join(', ')}`
+                          : undefined}
+                      />
+                    )}
+                    {cfg.hasHistoryPairs && !forecastPeriodComplete ? (
                       <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                         <div className="flex items-center gap-1 font-semibold">
                           <AlertTriangle size={13} />
@@ -4380,6 +6144,17 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                         </div>
                         <div className="mt-1 text-slate-600">
                           Исторические периоды: {(forecastHistoryPeriods || []).map((period) => `${formatDate(period.start)}-${formatDate(period.end)}`).join(', ')}
+                        </div>
+                      </div>
+                    ) : null}
+                    {!cfg.hasHistoryPairs && chatSkippedBaseWeeks.length ? (
+                      <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        <div className="flex items-center gap-1 font-semibold">
+                          <AlertTriangle size={13} />
+                          Неполные недели пропущены
+                        </div>
+                        <div className="mt-1 text-slate-600">
+                          {chatSkippedBaseWeeks.map((item) => formatDate(item.week_start)).join(', ')}
                         </div>
                       </div>
                     ) : null}
@@ -4402,7 +6177,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                           const factDelta = hasActual ? actualFte - forecastFte : null;
                           const hasUplift = Number(profile.incident_uplift_calls || 0) > 0.01;
                           const callShare = Math.min(100, (Number(profile.forecast_calls || 0) / maxDailyCalls) * 100);
-                          const accentClass = profile.insufficient_history ? 'bg-amber-400' : 'bg-emerald-500';
+                          const enoughSources = cfg.hasHistoryPairs
+                            ? !profile.insufficient_history
+                            : Number(profile.used_source_count || 0) > 1;
+                          const accentClass = enoughSources ? 'bg-emerald-500' : 'bg-amber-400';
                           const ariaLabel = `${profile.short} ${formatDate(profile.forecast_date)}, прогноз ${formatNumber(forecastFte, 2)} FTE${profile.insufficient_history ? ', истории не хватает' : ''}${hasActual ? `, факт ${formatNumber(actualFte, 2)} FTE` : ''}`;
                           return (
                             <button
@@ -4433,30 +6211,38 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   <div className="text-xs text-slate-500 tabular-nums">{formatDate(profile.forecast_date)}</div>
                                 </div>
                                 <div className="text-right">
-                                  <div className="text-base font-semibold tabular-nums text-slate-950">{formatNumber(forecastFte, 2)}</div>
-                                  <div className="text-[10px] uppercase tracking-wide text-slate-500">FTE прогноз</div>
+                                  <div className="text-base font-semibold tabular-nums text-slate-950">{formatNumber(forecastFte, cfg.hasHistoryPairs ? 2 : 1)}</div>
+                                  <div className="text-[10px] uppercase tracking-wide text-slate-500">{cfg.unit.dayFteCaption}</div>
                                 </div>
                               </div>
 
                               <div className="mt-2.5 flex items-center gap-2 text-xs">
                                 <span className="inline-flex min-w-0 items-center gap-1 text-slate-600">
-                                  <PhoneCall size={11} className="shrink-0 text-slate-400" aria-hidden="true" />
+                                  {isChat
+                                    ? <MessageSquare size={11} className="shrink-0 text-slate-400" aria-hidden="true" />
+                                    : <PhoneCall size={11} className="shrink-0 text-slate-400" aria-hidden="true" />}
                                   <b className="text-slate-900 tabular-nums">{formatInt(profile.forecast_calls)}</b>
-                                  <span className="text-slate-400">зв.</span>
+                                  <span className="text-slate-400">{cfg.unit.short}</span>
                                 </span>
-                                <span
-                                  className={`ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
-                                    profile.insufficient_history
-                                      ? 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200'
-                                      : 'bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-200'
-                                  }`}
-                                  title={profile.insufficient_history ? 'Для дня не хватает исторических точек' : 'Обе исторические точки в наличии'}
-                                >
-                                  {profile.insufficient_history
-                                    ? <AlertTriangle size={11} aria-hidden="true" />
-                                    : <CheckCircle2 size={11} aria-hidden="true" />}
-                                  <span className="tabular-nums">{profile.history_count}/2</span>
-                                </span>
+                                {cfg.hasHistoryPairs ? (
+                                  <span
+                                    className={`ml-auto inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
+                                      profile.insufficient_history
+                                        ? 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200'
+                                        : 'bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-200'
+                                    }`}
+                                    title={profile.insufficient_history ? 'Для дня не хватает исторических точек' : 'Обе исторические точки в наличии'}
+                                  >
+                                    {profile.insufficient_history
+                                      ? <AlertTriangle size={11} aria-hidden="true" />
+                                      : <CheckCircle2 size={11} aria-hidden="true" />}
+                                    <span className="tabular-nums">{profile.history_count}/2</span>
+                                  </span>
+                                ) : (
+                                  <span className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-700">
+                                    пик {formatNumber(profile.peak_fte, 1)}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-100" role="presentation" aria-hidden="true">
@@ -4473,7 +6259,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                     Возможный прирост
                                   </span>
                                   <span className="tabular-nums">
-                                    +{formatInt(profile.incident_uplift_calls)} зв. · +{formatNumber(profile.incident_uplift_fte, 2)} FTE
+                                    +{formatInt(profile.incident_uplift_calls)} {cfg.unit.short} · +{formatNumber(profile.incident_uplift_fte, 2)} {cfg.unit.fteWord}
                                   </span>
                                 </div>
                               ) : null}
@@ -4482,7 +6268,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                 <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]">
                                   <span className="inline-flex items-center gap-1 text-slate-600">
                                     <CheckCircle2 size={11} className="text-emerald-600" aria-hidden="true" />
-                                    Факт <b className="text-slate-900 tabular-nums">{formatNumber(actualFte, 2)}</b>
+                                    Факт <b className="text-slate-900 tabular-nums">{formatNumber(actualFte, cfg.hasHistoryPairs ? 2 : 1)}</b>
                                   </span>
                                   {factDelta !== null ? (
                                     <span
@@ -4516,16 +6302,27 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
                               <h3 className="text-base font-semibold text-slate-950">
-                                Почасовой FTE: {selectedForecastDay.short} · {formatDate(selectedForecastDay.forecast_date)}
+                                {isChat ? 'Потребность по часам' : 'Почасовой FTE'}: {selectedForecastDay.short} · {formatDate(selectedForecastDay.forecast_date)}
                               </h3>
-                              <p className="text-sm text-slate-500">Разбивка использует AHT дня {formatSeconds(selectedForecastDay.forecast_aht_seconds)} и единые коэффициенты.</p>
+                              <p className="text-sm text-slate-500">
+                                {isChat
+                                  ? `Час считается как чаты часа ÷ ${formatNumber(chatCapacityPerHourValue, 1)} чатов в час на человека.`
+                                  : `Разбивка использует AHT дня ${formatSeconds(selectedForecastDay.forecast_aht_seconds)} и единые коэффициенты.`}
+                              </p>
                             </div>
                             <div className="flex flex-wrap gap-2">
-                              <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastDay.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                                {selectedForecastDay.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
-                                История {selectedForecastDay.history_count}/2
-                              </span>
-                              {showForecastActualLoad ? (
+                              {cfg.hasHistoryPairs ? (
+                                <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastDay.insufficient_history ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                                  {selectedForecastDay.insufficient_history ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                                  История {selectedForecastDay.history_count}/2
+                                </span>
+                              ) : (
+                                <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastHasActualLoad ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+                                  {selectedForecastHasActualLoad ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                                  {selectedForecastHasActualLoad ? 'Факт дня есть' : 'День ещё не прошёл'}
+                                </span>
+                              )}
+                              {cfg.hasHistoryPairs && showForecastActualLoad ? (
                                 <span className={`inline-flex w-fit items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${selectedForecastHasActualLoad ? 'bg-blue-50 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
                                   {selectedForecastHasActualLoad ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
                                   {selectedForecastHasActualLoad ? 'Факт отчета загружен' : 'Факта отчета нет'}
@@ -4534,7 +6331,34 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             </div>
                           </div>
 
-                          {showForecastActualLoad && selectedForecastHasActualLoad ? (
+                          {isChat ? (
+                            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Чаты</div>
+                                <b className="tabular-nums">{formatInt(selectedForecastDay.forecast_calls)}</b>
+                                {selectedForecastHasActualLoad ? (
+                                  <div className="mt-1 text-[11px] font-semibold text-emerald-700">факт {formatInt(selectedForecastDay.actual_received_calls)}</div>
+                                ) : null}
+                              </div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Чатнико-часы</div>
+                                <b className="tabular-nums">{formatNumber(selectedForecastDay.forecast_daily_fte, 1)}</b>
+                                {selectedForecastHasActualLoad ? (
+                                  <div className="mt-1 text-[11px] font-semibold text-emerald-700">факт {formatNumber(selectedForecastDay.actual_report_fte, 1)}</div>
+                                ) : null}
+                              </div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Пиковый час</div>
+                                <b className="tabular-nums">{selectedForecastPeakHours[0] ? `${String(selectedForecastPeakHours[0].hour).padStart(2, '0')}:00` : '—'}</b>
+                              </div>
+                              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                                <div className="text-xs text-slate-500">Первый ответ в цель</div>
+                                <b className="tabular-nums">
+                                  {selectedForecastDay.has_actual ? formatPercent(selectedForecastDay.in_target_share) : '—'}
+                                </b>
+                              </div>
+                            </div>
+                          ) : showForecastActualLoad && selectedForecastHasActualLoad ? (
                             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                               <div className="rounded-lg bg-slate-50 px-3 py-2">
                                 <div className="text-xs text-slate-500">Звонки</div>
@@ -4590,19 +6414,19 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                 <YAxis
                                   yAxisId="left"
                                   tick={{ fontSize: 11 }}
-                                  label={{ value: 'звонки / мин', angle: -90, position: 'insideLeft', offset: 12, style: { fontSize: 11, fill: '#64748b' } }}
+                                  label={{ value: cfg.unit.leftAxis, angle: -90, position: 'insideLeft', offset: 12, style: { fontSize: 11, fill: '#64748b' } }}
                                 />
                                 <YAxis
                                   yAxisId="right"
                                   orientation="right"
                                   tick={{ fontSize: 11 }}
-                                  label={{ value: 'FTE', angle: 90, position: 'insideRight', offset: 8, style: { fontSize: 11, fill: '#64748b' } }}
+                                  label={{ value: cfg.unit.rightAxis, angle: 90, position: 'insideRight', offset: 8, style: { fontSize: 11, fill: '#64748b' } }}
                                 />
                                 <Tooltip content={<ForecastHourlyTooltip />} />
                                 {activeForecastHourLabel ? (
                                   <ReferenceLine yAxisId="left" x={activeForecastHourLabel} stroke={pinnedForecastHour !== null ? '#0f172a' : '#64748b'} strokeDasharray="4 4" />
                                 ) : null}
-                                {displayOptions.forecastChartCalls ? (
+                                {displayOptions[cfg.forecastChartKeys.calls] ? (
                                   <Bar yAxisId="left" dataKey="calls" stackId="calls" fill="#bfdbfe" radius={incidentUpliftAvailable && displayOptions.forecastChartUplift ? [0, 0, 0, 0] : [4, 4, 0, 0]}>
                                     {selectedForecastHourlyData.map((item) => (
                                       <Cell
@@ -4622,8 +6446,11 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                     ))}
                                   </Bar>
                                 ) : null}
-                                {displayOptions.forecastChartWorkload ? (
+                                {cfg.hasWorkloadMinutes && displayOptions.forecastChartWorkload ? (
                                   <Line yAxisId="left" type="monotone" dataKey="workload" stroke="#3b82f6" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
+                                ) : null}
+                                {isChat && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualChats ? (
+                                  <Bar yAxisId="left" dataKey="actualCalls" fill="#34d399" radius={[4, 4, 0, 0]} />
                                 ) : null}
                                 {displayOptions.forecastChartFte ? (
                                   <Line yAxisId="right" type="monotone" dataKey="fte" stroke="#2563eb" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
@@ -4631,10 +6458,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                 {incidentUpliftAvailable && displayOptions.forecastChartAdjustedFte ? (
                                   <Line yAxisId="right" type="monotone" dataKey="adjustedFte" stroke="#059669" strokeWidth={2} strokeDasharray="4 3" dot={false} activeDot={{ r: 5 }} />
                                 ) : null}
-                                {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualWorkload ? (
+                                {cfg.hasWorkloadMinutes && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualWorkload ? (
                                   <Line yAxisId="left" type="monotone" dataKey="actualWorkload" stroke="#10b981" strokeWidth={2} dot={false} activeDot={{ r: 5 }} />
                                 ) : null}
-                                {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualFte ? (
+                                {cfg.hasWorkloadMinutes && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastChartActualFte ? (
                                   <Line yAxisId="right" type="monotone" dataKey="actualFte" stroke="#059669" strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 5 }} />
                                 ) : null}
                               </ComposedChart>
@@ -4645,8 +6472,9 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             toggleDisplayOption={toggleDisplayOption}
                             incidentUpliftAvailable={incidentUpliftAvailable}
                             showActualLoad={showForecastActualLoad && selectedForecastHasActualLoad}
+                            legendItems={cfg.chartLegend}
                           />
-                          {showForecastActualLoad && !selectedForecastHasActualLoad ? (
+                          {cfg.hasWorkloadMinutes && showForecastActualLoad && !selectedForecastHasActualLoad ? (
                             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
                               Для выбранного дня нет загруженного отчета или день еще не прошел, поэтому факт нагрузки не отображается.
                             </div>
@@ -4662,7 +6490,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   <th className="px-3 py-3 text-right">
                                     <span className="inline-flex items-center justify-end gap-1.5">
                                       <span className="inline-block h-2 w-2 rounded-full bg-blue-400" />
-                                      Звонки
+                                      {cfg.unit.manyCap}
                                     </span>
                                   </th>
                                   {incidentUpliftAvailable && displayOptions.forecastTableUplift ? (
@@ -4673,21 +6501,21 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                       </span>
                                     </th>
                                   ) : null}
-                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualCalls ? (
+                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions[cfg.forecastTableKeys.actualCalls] ? (
                                     <th className="px-3 py-3 text-right">
                                       <span className="inline-flex items-center justify-end gap-1.5">
                                         <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-                                        Факт звонков
+                                        Факт {cfg.unit.many}
                                       </span>
                                     </th>
                                   ) : null}
-                                  {displayOptions.forecastTableAht ? (
+                                  {cfg.hasAht && displayOptions.forecastTableAht ? (
                                     <th className="px-3 py-3 text-right">AHT дня</th>
                                   ) : null}
-                                  {displayOptions.forecastTableWorkload ? (
+                                  {cfg.hasWorkloadMinutes && displayOptions.forecastTableWorkload ? (
                                     <th className="px-3 py-3 text-right">Минут нагрузки</th>
                                   ) : null}
-                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualWorkload ? (
+                                  {cfg.hasWorkloadMinutes && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualWorkload ? (
                                     <th className="px-3 py-3 text-right">
                                       <span className="inline-flex items-center justify-end gap-1.5">
                                         <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
@@ -4698,29 +6526,32 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                   <th className="px-3 py-3 text-right">
                                     <span className="inline-flex items-center justify-end gap-1.5">
                                       <span className="inline-block h-2 w-2 rounded-full bg-blue-600" />
-                                      FTE
+                                      {cfg.unit.needFte}
                                     </span>
                                   </th>
                                   {incidentUpliftAvailable && displayOptions.forecastTableAdjustedFte ? (
                                     <th className="px-3 py-3 text-right">
                                       <span className="inline-flex items-center justify-end gap-1.5">
                                         <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />
-                                        FTE с приростом
+                                        {isChat ? 'С приростом' : 'FTE с приростом'}
                                       </span>
                                     </th>
                                   ) : null}
-                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualFte ? (
+                                  {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions[cfg.forecastTableKeys.actualFte] ? (
                                     <th className="px-3 py-3 text-right">
                                       <span className="inline-flex items-center justify-end gap-1.5">
                                         <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />
-                                        Факт FTE
+                                        {isChat ? 'Факт чатнико-часов' : 'Факт FTE'}
                                       </span>
                                     </th>
+                                  ) : null}
+                                  {isChat && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableFirstReply ? (
+                                    <th className="px-3 py-3 text-right">Первый ответ</th>
                                   ) : null}
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100 bg-white">
-                                {(selectedForecastDay.hourly_forecast || []).map((row) => {
+                                {forecastHourlyRows.map((row) => {
                                   const rowIsActive = activeForecastHour !== null && Number(row.hour) === Number(activeForecastHour);
                                   const rowIsPinned = pinnedForecastHour !== null && Number(row.hour) === Number(pinnedForecastHour);
                                   return (
@@ -4762,7 +6593,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           </span>
                                         </td>
                                       ) : null}
-                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualCalls ? (
+                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions[cfg.forecastTableKeys.actualCalls] ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             className={`inline-flex items-center justify-end rounded-md border px-2 py-1 font-medium text-emerald-700 transition ${
@@ -4773,7 +6604,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           </span>
                                         </td>
                                       ) : null}
-                                      {displayOptions.forecastTableAht ? (
+                                      {cfg.hasAht && displayOptions.forecastTableAht ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             title={formatAhtTooltip(row.forecast_aht_seconds)}
@@ -4785,7 +6616,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           </span>
                                         </td>
                                       ) : null}
-                                      {displayOptions.forecastTableWorkload ? (
+                                      {cfg.hasWorkloadMinutes && displayOptions.forecastTableWorkload ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             title={formatWorkloadTooltip(row, nextWeekForecast.answerRate)}
@@ -4797,7 +6628,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                           </span>
                                         </td>
                                       ) : null}
-                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualWorkload ? (
+                                      {cfg.hasWorkloadMinutes && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualWorkload ? (
                                         <td className="px-3 py-2 text-right">
                                           <span
                                             title={formatActualLoadTooltip(row, nextWeekForecast.effectiveMinutes)}
@@ -4813,9 +6644,14 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                       {incidentUpliftAvailable && displayOptions.forecastTableAdjustedFte ? (
                                         <td className="px-3 py-2 text-right font-semibold text-emerald-700">{formatNumber(row.incident_adjusted_fte ?? row.forecast_fte, 2)}</td>
                                       ) : null}
-                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableActualFte ? (
+                                      {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions[cfg.forecastTableKeys.actualFte] ? (
                                         <td className="px-3 py-2 text-right font-semibold text-emerald-700">
                                           {row.has_actual_report ? formatNumber(row.actual_report_fte, 2) : '-'}
+                                        </td>
+                                      ) : null}
+                                      {isChat && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastTableFirstReply ? (
+                                        <td className="px-3 py-2 text-right text-slate-700">
+                                          {formatReplySeconds(row.actual_first_reply_seconds)}
                                         </td>
                                       ) : null}
                                     </tr>
@@ -4829,7 +6665,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             <div className="rounded-lg border border-slate-200 bg-white p-4">
                               <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                                 <TrendingUp size={16} aria-hidden="true" />
-                                Пиковые часы прогноз
+                                {isChat ? 'Пиковые часы' : 'Пиковые часы прогноз'}
                               </div>
                               <div className="mt-4 space-y-3">
                                 {(() => {
@@ -4856,9 +6692,12 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                                       >
                                         <div className="flex items-center justify-between">
                                           <span className="font-semibold text-slate-900 tabular-nums">{String(row.hour).padStart(2, '0')}:00</span>
-                                          <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-800 tabular-nums">{formatNumber(row.forecast_fte, 2)} FTE</span>
+                                          <span className="rounded-md bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-800 tabular-nums">{formatNumber(row.forecast_fte, 2)}{cfg.hasWorkloadMinutes ? ' FTE' : ''}</span>
                                         </div>
-                                        <div className="mt-2 text-xs text-slate-500 tabular-nums">Звонки: {formatNumber(row.forecast_calls, 1)} · нагрузка: {formatNumber(row.forecast_workload_minutes, 1)} мин</div>
+                                        <div className="mt-2 text-xs text-slate-500 tabular-nums">
+                                          {cfg.unit.manyCap}: {formatNumber(row.forecast_calls, 1)}
+                                          {cfg.hasWorkloadMinutes ? ` · нагрузка: ${formatNumber(row.forecast_workload_minutes, 1)} мин` : ''}
+                                        </div>
                                         <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200" role="progressbar" aria-valuenow={Math.round(barWidth)} aria-valuemin={0} aria-valuemax={100}>
                                           <div className="h-full rounded-full bg-blue-600 transition-[width] duration-300 motion-reduce:transition-none" style={{ width: `${barWidth}%` }} />
                                         </div>
@@ -4869,7 +6708,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                               </div>
                             </div>
 
-                            {showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastShowActualPeakHours ? (
+                            {cfg.hasActualPeakHours && showForecastActualLoad && selectedForecastHasActualLoad && displayOptions.forecastShowActualPeakHours ? (
                               <div className="rounded-lg border border-emerald-100 bg-white p-4">
                                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                                   <TrendingUp size={16} className="text-emerald-600" aria-hidden="true" />
@@ -4919,8 +6758,10 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                     ) : (
                       <EmptyState
                         title="Нет прогноза"
-                        text="Загрузите исторические отчеты, чтобы построить прогноз выбранного периода."
-                        action={(
+                        text={cfg.hasUpload
+                          ? 'Загрузите исторические отчеты, чтобы построить прогноз выбранного периода.'
+                          : 'Для выбранного периода не нашлось базовых недель с чатами. Сдвиньте период или выберите другой отрезок.'}
+                        action={cfg.hasUpload ? (
                           <button
                             type="button"
                             onClick={() => setIsUploadModalOpen(true)}
@@ -4929,7 +6770,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                             <UploadCloud size={16} aria-hidden="true" />
                             Загрузить отчёт
                           </button>
-                        )}
+                        ) : undefined}
                       />
                     )}
                   </div>
@@ -4946,6 +6787,7 @@ const ResourceFteView = ({ apiBaseUrl, withAccessTokenHeader, user, showToast, i
                 incidentUpliftAvailable={incidentUpliftAvailable}
                 showActualLoad={showForecastActualLoad && selectedForecastHasActualLoad}
                 forecastActualLoadAvailable={forecastActualLoadAvailable}
+                panelGroups={cfg.forecastPanelGroups}
               />
             ) : null}
 

@@ -206,18 +206,25 @@ def resolve_chat_capacity(settings: Dict[str, Any]) -> Dict[str, Any]:
     if candidates:
         source, value = min(candidates, key=lambda item: item[1])
     else:
-        # Обе цели недостижимы — держимся на «ответе внутри чата» и говорим об этом
-        # признаками, а не подогнанным числом.
-        source, value = "inside_chat", max(inside, floor)
+        # Обе цели недостижимы: ёмкости, при которой они выполняются, не существует.
+        # Числа здесь нет и быть не может. Пол лимитов (0,5 чата в час) выглядел бы
+        # ответом на выставленную цель и заставлял раздел просить в 35 раз больше
+        # людей, поэтому наружу уходит признак, а витрина показывает предупреждение.
+        source, value = "unreachable", None
 
     manual = settings.get("capacity_manual")
     if manual is not None and _to_float(manual, 0.0) > 0:
-        value = _to_float(manual, value)
+        # Ручное переопределение — аварийный рычаг: им владелец продолжает считать
+        # даже там, где ни одна цель не берётся.
+        value = _to_float(manual, 0.0)
         source = "manual"
 
     return {
-        "value": round(_clamp(value, "capacity_per_hour"), 4),
+        "value": None if value is None else round(_clamp(value, "capacity_per_hour"), 4),
         "source": source,
+        # Расчёт потребности невозможен: витрина обязана показать предупреждение
+        # вместо числа, а не подставить своё.
+        "capacity_unavailable": value is None,
         "inside_chat": round(inside, 4),
         "first_reply": round(first_reply, 4) if first_reply is not None else None,
         "first_reply_target_unreachable": bool(first_unreachable),
@@ -246,7 +253,21 @@ def _capacity_explain(settings: Dict[str, Any]) -> Dict[str, Any]:
         "used": resolved["value"],
         "source": resolved["source"],
         "first_reply_target_unreachable": resolved["first_reply_target_unreachable"],
+        "inside_chat_target_unreachable": resolved["inside_chat_target_unreachable"],
+        "capacity_unavailable": resolved["capacity_unavailable"],
     }
+
+
+def _capacity_for_math(settings: Dict[str, Any]) -> Optional[float]:
+    """Ёмкость, пригодной для расчёта, либо None — когда ни одна цель не достижима.
+
+    Подставлять здесь любое число нельзя: потребность, посчитанная от подставленной
+    ёмкости, выглядит как ответ на цель, которой не существует.
+    """
+    if settings.get("capacity_unavailable"):
+        return None
+    value = _to_float(settings.get("capacity_per_hour"), 0.0)
+    return value if value > 0 else None
 
 
 def _round_chat_fte(value: float, mode: Any) -> float:
@@ -284,8 +305,11 @@ def _as_chat_settings(row: Any) -> Dict[str, Any]:
         else DEFAULT_CHAT_SETTINGS["fte_rounding"],
     }
     # Ёмкость больше не вводится руками — колонка держит лишь кэш последнего значения,
-    # поэтому при чтении она всегда пересобирается из целей.
-    settings["capacity_per_hour"] = resolve_chat_capacity(settings)["value"]
+    # поэтому при чтении она всегда пересобирается из целей. Может выйти пустой:
+    # значит, ни одна цель не достижима и потребность считать нечем.
+    resolved = resolve_chat_capacity(settings)
+    settings["capacity_per_hour"] = resolved["value"]
+    settings["capacity_unavailable"] = resolved["capacity_unavailable"]
     return settings
 
 
@@ -328,8 +352,13 @@ def _save_chat_settings_tx(cursor, values: Dict[str, Any],
             updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
         """,
+        # capacity_per_hour в таблице — кэш под NOT NULL: положить в него пустоту
+        # нельзя, а чтение всё равно пересобирает ёмкость из целей. При недостижимой
+        # цели пишем дефолт калибровки — расчётом он не становится.
         (values["target_reply_seconds"], values["target_first_reply_seconds"],
-         values["capacity_per_hour"], values["capacity_curve_a"], values["capacity_curve_b"],
+         values["capacity_per_hour"] if values["capacity_per_hour"] is not None
+         else DEFAULT_CHAT_SETTINGS["capacity_per_hour"],
+         values["capacity_curve_a"], values["capacity_curve_b"],
          values["capacity_manual"], values["shrinkage_coeff"],
          values["weekly_hours_per_operator"], values["base_weeks"],
          values["fte_rounding"], user_id),
@@ -360,7 +389,9 @@ def update_chat_settings(db, payload: Dict[str, Any],
             nxt["capacity_manual"] = None
         else:
             nxt["capacity_manual"] = _clamp(_to_float(raw, 0.0), "capacity_manual")
-    nxt["capacity_per_hour"] = resolve_chat_capacity(nxt)["value"]
+    resolved = resolve_chat_capacity(nxt)
+    nxt["capacity_per_hour"] = resolved["value"]
+    nxt["capacity_unavailable"] = resolved["capacity_unavailable"]
 
     with db._get_cursor() as cursor:
         _save_chat_settings_tx(cursor, nxt, user_id)
@@ -1002,8 +1033,14 @@ def build_chat_forecast(db, week_start_value: Any = None,
         hourly = _hourly_volume_tx(cursor, oldest, newest_end)
         capacity_info = _chat_operator_capacity_tx(cursor)
 
-    capacity = max(0.01, float(settings["capacity_per_hour"]))
+    # Ёмкости может не быть вовсе: ни одна цель по сервису не достижима. Объём чатов
+    # при этом остаётся измеренным и считается как обычно, а всё, что делится на
+    # ёмкость, уходит пустым — витрина показывает предупреждение вместо числа.
+    capacity = _capacity_for_math(settings)
     rounding = settings.get("fte_rounding", DEFAULT_CHAT_SETTINGS["fte_rounding"])
+
+    def _fte_round(value: Optional[float], digits: int = 4) -> Optional[float]:
+        return None if value is None else round(value, digits)
     uplift_profile = uplift_profile or _empty_chat_uplift_profile()
     uplift_by_hour = {int(item["hour"]): item for item in uplift_profile.get("hourly", [])}
     window_start = (_parse_date(uplift_profile.get("forecast_window_start"))
@@ -1036,7 +1073,7 @@ def build_chat_forecast(db, week_start_value: Any = None,
         hourly_forecast = []
         for hour in range(24):
             chats = sum(item["hourly"].get(hour, 0) for item in used) / divisor
-            required = chats / capacity
+            required = None if capacity is None else chats / capacity
             uplift_hour = uplift_by_hour.get(hour, {}) if window_active else {}
             base_ratio = _to_float(uplift_hour.get("growth_ratio"))
             ratio = base_ratio * future_weight
@@ -1046,29 +1083,32 @@ def build_chat_forecast(db, week_start_value: Any = None,
                 # процент от нуля тоже ноль — тогда берём саму прибавку в чатах.
                 uplift_chats = _to_float(uplift_hour.get("weighted_delta_chats")) * future_weight
             uplift_chats = max(0.0, uplift_chats)
-            uplift_fte = uplift_chats / capacity
+            uplift_fte = None if capacity is None else uplift_chats / capacity
             hourly_forecast.append({
                 "hour": hour,
                 "forecast_chats": round(chats, 2),
-                "forecast_fte": round(required, 4),
-                "rounded_fte": _round_chat_fte(required, rounding),
+                "forecast_fte": _fte_round(required),
+                "rounded_fte": None if required is None else _round_chat_fte(required, rounding),
                 "incident_uplift_ratio": round(ratio, 4),
                 "incident_base_uplift_ratio": round(base_ratio, 4),
                 "incident_future_weight": round(future_weight, 4),
                 "incident_uplift_window_active": window_active,
                 "incident_uplift_confidence": _to_float(uplift_hour.get("confidence")),
                 "incident_uplift_chats": round(uplift_chats, 2),
-                "incident_uplift_fte": round(uplift_fte, 4),
+                "incident_uplift_fte": _fte_round(uplift_fte),
                 "incident_adjusted_chats": round(chats + uplift_chats, 2),
-                "incident_adjusted_fte": round(required + uplift_fte, 4),
+                "incident_adjusted_fte": (None if required is None
+                                          else round(required + uplift_fte, 4)),
                 "incident_uplift_sources": uplift_hour.get("sources") or [],
             })
 
         weekday = WEEKDAYS_RU[target_day.weekday()]
         day_uplift_chats = sum(r["incident_uplift_chats"] for r in hourly_forecast)
-        day_uplift_fte = sum(r["incident_uplift_fte"] for r in hourly_forecast)
         day_chats = sum(r["forecast_chats"] for r in hourly_forecast)
-        day_fte_hours = sum(r["forecast_fte"] for r in hourly_forecast)
+        day_uplift_fte = (None if capacity is None
+                          else sum(r["incident_uplift_fte"] for r in hourly_forecast))
+        day_fte_hours = (None if capacity is None
+                         else sum(r["forecast_fte"] for r in hourly_forecast))
         days.append({
             "forecast_date": target_day.isoformat(),
             "weekday": target_day.weekday(),
@@ -1077,28 +1117,39 @@ def build_chat_forecast(db, week_start_value: Any = None,
             "sources": sources,
             "used_source_count": divisor,
             "forecast_chats": round(day_chats, 1),
-            "forecast_fte_hours": round(day_fte_hours, 2),
-            "peak_fte": round(max((r["forecast_fte"] for r in hourly_forecast), default=0.0), 2),
+            "forecast_fte_hours": _fte_round(day_fte_hours, 2),
+            "peak_fte": (None if capacity is None else
+                         round(max((r["forecast_fte"] for r in hourly_forecast), default=0.0), 2)),
             "incident_uplift_chats": round(day_uplift_chats, 1),
-            "incident_uplift_fte_hours": round(day_uplift_fte, 2),
+            "incident_uplift_fte_hours": _fte_round(day_uplift_fte, 2),
             "incident_uplift_ratio": round(day_uplift_chats / day_chats, 4) if day_chats > 0 else 0.0,
             "incident_uplift_window_active": window_active,
             "incident_future_weight": round(future_weight, 4),
             "incident_adjusted_chats": round(day_chats + day_uplift_chats, 1),
-            "incident_adjusted_fte_hours": round(day_fte_hours + day_uplift_fte, 2),
+            "incident_adjusted_fte_hours": (None if day_fte_hours is None
+                                            else round(day_fte_hours + day_uplift_fte, 2)),
             "hourly_forecast": hourly_forecast,
         })
 
     total_chats = round(sum(d["forecast_chats"] for d in days), 1)
-    total_fte_hours = round(sum(d["forecast_fte_hours"] for d in days), 2)
     total_uplift_chats = round(sum(d["incident_uplift_chats"] for d in days), 1)
-    total_uplift_fte_hours = round(sum(d["incident_uplift_fte_hours"] for d in days), 2)
-    weekly_hours = max(1.0, float(settings["weekly_hours_per_operator"]))
+    total_fte_hours = (None if capacity is None
+                       else round(sum(d["forecast_fte_hours"] for d in days), 2))
+    total_uplift_fte_hours = (None if capacity is None
+                              else round(sum(d["incident_uplift_fte_hours"] for d in days), 2))
+    weekly_hours = float(settings["weekly_hours_per_operator"])
     shrink = min(max(float(settings["shrinkage_coeff"]), 0.01), 1.0)
     # Норма часов считается на длину периода, а не жёстко на неделю — как у линии.
+    # Делим на ФАКТИЧЕСКУЮ норму и лишь отсекаем неположительную (как в
+    # resource_fte/calculations.py). Пол max(1.0, ...) на этом месте занижал
+    # потребность в разы: на однодневном периоде норма 0,14 ч подменялась единицей.
     period_hours_per_operator = weekly_hours * span / 7
-    operators = total_fte_hours / max(1.0, period_hours_per_operator)
-    operators_with_shrinkage = operators / shrink
+    if capacity is None:
+        operators = operators_with_shrinkage = None
+    else:
+        operators = (total_fte_hours / period_hours_per_operator
+                     if period_hours_per_operator > 0 else 0.0)
+        operators_with_shrinkage = operators / shrink
     current_fte = float(capacity_info.get("current_operator_fte") or 0.0)
     return {
         "week_start": period_start.isoformat(),
@@ -1109,19 +1160,24 @@ def build_chat_forecast(db, week_start_value: Any = None,
         "skipped_base_weeks": skipped_weeks,
         "settings": settings,
         "days": days,
+        "capacity_unavailable": capacity is None,
         "operator_capacity": capacity_info,
         "totals": {
             "forecast_chats": total_chats,
             "forecast_fte_hours": total_fte_hours,
             "period_days": span,
             "period_hours_per_operator": round(period_hours_per_operator, 2),
-            "operators": round(operators, 2),
-            "operators_with_shrinkage": round(operators_with_shrinkage, 2),
-            "peak_fte": round(max((d["peak_fte"] for d in days), default=0.0), 2),
+            "operators": _fte_round(operators, 2),
+            "operators_with_shrinkage": _fte_round(operators_with_shrinkage, 2),
+            "peak_fte": (None if capacity is None else
+                         round(max((d["peak_fte"] for d in days), default=0.0), 2)),
             "current_operator_fte": round(current_fte, 2),
-            "operator_fte_gap": round(current_fte - operators_with_shrinkage, 2),
+            "operator_fte_gap": (None if operators_with_shrinkage is None
+                                 else round(current_fte - operators_with_shrinkage, 2)),
             "head_count": capacity_info.get("head_count", 0),
-            "capacity_per_hour": round(capacity, 4),
+            "capacity_per_hour": _fte_round(capacity),
+            # Потребность не посчитана: ни одна цель по сервису не достижима.
+            "capacity_unavailable": capacity is None,
             "target_reply_seconds": _to_int(settings.get("target_reply_seconds"), 300),
             "uplift_chats": total_uplift_chats,
             "uplift_fte_hours": total_uplift_fte_hours,
@@ -1236,20 +1292,37 @@ def get_chat_operator_availability(db, as_of_date_value: Optional[str] = None,
 
 
 def _weekday_profile_tx(cursor, day_from: date, day_to: date) -> List[Dict[str, Any]]:
-    """Средний профиль по дню недели и часу — то же, что «профиль» у линии."""
+    """Средний профиль по дню недели и часу — то же, что «профиль» у линии.
+
+    Знаменатель среднего — число ДНЕЙ ВЫБОРКИ этого дня недели, один и тот же для
+    всех 24 часов. Считать его внутри пары (день недели, час) нельзя: ночной час,
+    в который чат пришёл лишь в одну из двух пятниц, делился бы на единицу и
+    показывал двойной объём, а «Дней в выборке» рядом — единицу вместо двойки.
+    """
     cursor.execute(
         """
-        SELECT EXTRACT(ISODOW FROM day)::int - 1 AS wd,
-               EXTRACT(HOUR FROM request_start)::int AS hh,
-               COUNT(*)::float / COUNT(DISTINCT day) AS avg_chats,
-               COUNT(DISTINCT day) AS days
-        FROM c2d_requests
-        WHERE request_type = %s AND request_start IS NOT NULL
-          AND day BETWEEN %s AND %s
-        GROUP BY 1, 2
+        WITH sample_days AS (
+            SELECT DISTINCT day
+            FROM c2d_requests
+            WHERE request_type = %s AND request_start IS NOT NULL
+              AND day BETWEEN %s AND %s
+        ), weekday_days AS (
+            SELECT EXTRACT(ISODOW FROM day)::int - 1 AS wd, COUNT(*)::int AS days
+            FROM sample_days
+            GROUP BY 1
+        )
+        SELECT w.wd,
+               EXTRACT(HOUR FROM r.request_start)::int AS hh,
+               COUNT(*)::float / w.days AS avg_chats,
+               w.days
+        FROM c2d_requests r
+        JOIN weekday_days w ON w.wd = EXTRACT(ISODOW FROM r.day)::int - 1
+        WHERE r.request_type = %s AND r.request_start IS NOT NULL
+          AND r.day BETWEEN %s AND %s
+        GROUP BY w.wd, 2, w.days
         ORDER BY 1, 2
         """,
-        (CHAT_REQUEST_TYPE, day_from, day_to),
+        (CHAT_REQUEST_TYPE, day_from, day_to, CHAT_REQUEST_TYPE, day_from, day_to),
     )
     by_weekday: Dict[int, Dict[str, Any]] = {}
     for weekday, hour, avg_chats, days in cursor.fetchall():
@@ -1341,7 +1414,7 @@ def get_chat_day(db, day_value: Any) -> Dict[str, Any]:
     if day is None:
         raise ValueError("INVALID_CHAT_DATE")
     settings = get_chat_settings(db)
-    capacity = max(0.01, float(settings["capacity_per_hour"]))
+    capacity = _capacity_for_math(settings)
     target_first = settings["target_first_reply_seconds"]
     key = day.isoformat()
 
@@ -1365,20 +1438,23 @@ def get_chat_day(db, day_value: Any) -> Dict[str, Any]:
         stats = replies.get(hour) or {}
         chats = int(volume.get(hour, 0))
         forecast_chats = _to_float(forecast_row.get("forecast_chats"))
-        forecast_fte = _to_float(forecast_row.get("forecast_fte"))
+        # Без ёмкости часов чатника не существует — ноль на их месте выглядел бы
+        # идеальным перекрытием, поэтому и потребность, и разницу оставляем пустыми.
+        forecast_fte = (None if capacity is None
+                        else _to_float(forecast_row.get("forecast_fte")))
         worked = _to_float(online.get(hour), 0.0)
         hours.append({
             "hour": hour,
             "hour_label": _hour_label(hour),
             "chats": chats,
             "forecast_chats": round(forecast_chats, 2),
-            "forecast_fte": round(forecast_fte, 4),
+            "forecast_fte": None if forecast_fte is None else round(forecast_fte, 4),
             "actual_online_hours": round(worked, 2),
             "in_target": int(stats.get("in_target") or 0),
             "answered": int(stats.get("answered") or 0),
             "no_reply": int(stats.get("no_reply") or 0),
             "avg_first_reply_seconds": stats.get("avg_first_reply"),
-            "delta_fte": round(worked - forecast_fte, 4),
+            "delta_fte": None if forecast_fte is None else round(worked - forecast_fte, 4),
         })
 
     total_chats = sum(row["chats"] for row in hours)
@@ -1386,7 +1462,8 @@ def get_chat_day(db, day_value: Any) -> Dict[str, Any]:
     total_answered = sum(row["answered"] for row in hours)
     total_no_reply = sum(row["no_reply"] for row in hours)
     total_online = sum(row["actual_online_hours"] for row in hours)
-    total_forecast_fte = sum(row["forecast_fte"] for row in hours)
+    total_forecast_fte = (None if capacity is None
+                          else sum(row["forecast_fte"] for row in hours))
     weighted_first_reply = sum(
         (row["avg_first_reply_seconds"] or 0) * row["answered"] for row in hours)
     weekday = WEEKDAYS_RU[day.weekday()]
@@ -1398,9 +1475,11 @@ def get_chat_day(db, day_value: Any) -> Dict[str, Any]:
         "summary": {
             "chats": total_chats,
             "forecast_chats": round(sum(row["forecast_chats"] for row in hours), 1),
-            "forecast_fte_hours": round(total_forecast_fte, 2),
+            "forecast_fte_hours": (None if total_forecast_fte is None
+                                   else round(total_forecast_fte, 2)),
             "actual_online_hours": round(total_online, 2),
-            "delta_fte_hours": round(total_online - total_forecast_fte, 2),
+            "delta_fte_hours": (None if total_forecast_fte is None
+                                else round(total_online - total_forecast_fte, 2)),
             "in_target": total_in_target,
             "answered": total_answered,
             "no_reply": total_no_reply,
@@ -1408,7 +1487,8 @@ def get_chat_day(db, day_value: Any) -> Dict[str, Any]:
             "avg_first_reply_seconds": round(weighted_first_reply / total_answered, 1)
             if total_answered else None,
             "target_first_reply_seconds": target_first,
-            "capacity_per_hour": round(capacity, 4),
+            "capacity_per_hour": None if capacity is None else round(capacity, 4),
+            "capacity_unavailable": capacity is None,
         },
         "hours": hours,
     }
@@ -1436,7 +1516,7 @@ def get_chat_analytics(db, date_from: Any = None, date_to: Any = None) -> Dict[s
     """
     settings = get_chat_settings(db)
     target_first = settings["target_first_reply_seconds"]
-    capacity = max(0.01, float(settings["capacity_per_hour"]))
+    capacity = _capacity_for_math(settings)
 
     with db._get_cursor() as cursor:
         bounds = _analytics_range(cursor, date_from, date_to)
@@ -1445,7 +1525,8 @@ def get_chat_analytics(db, date_from: Any = None, date_to: Any = None) -> Dict[s
                     "totals": {"chats": 0, "in_target": 0, "no_reply": 0,
                                "in_target_share": 0.0, "avg_first_reply_seconds": None,
                                "target_first_reply_seconds": target_first,
-                               "capacity_per_hour": round(capacity, 4)},
+                               "capacity_per_hour": None if capacity is None else round(capacity, 4),
+                               "capacity_unavailable": capacity is None},
                     "range": {"from": None, "to": None, "days": 0}}
         day_from, day_to = bounds
         volume = _hourly_volume_tx(cursor, day_from, day_to)
@@ -1467,7 +1548,10 @@ def get_chat_analytics(db, date_from: Any = None, date_to: Any = None) -> Dict[s
         replies_day = replies.get(key, {})
         online_day = online.get(key, {})
         stored_day = stored.get(key, {})
-        if not per_hour and not replies_day:
+        if not per_hour and not replies_day and not online_day:
+            # Пропускаем только по-настоящему пустой день. Раньше выход стоял до того,
+            # как учтены онлайн-часы, и день без чатов (сбой выгрузки, праздник) уносил
+            # с собой ФАКТ отработанных часов — итог по людям молча уменьшался.
             continue
         day_chats = day_in_target = day_answered = day_no_reply = 0
         day_first_reply_sum = 0.0
@@ -1555,7 +1639,8 @@ def get_chat_analytics(db, date_from: Any = None, date_to: Any = None) -> Dict[s
             "avg_first_reply_seconds": round(total_first_reply / total_answered, 1)
             if total_answered else None,
             "target_first_reply_seconds": target_first,
-            "capacity_per_hour": round(capacity, 4),
+            "capacity_per_hour": None if capacity is None else round(capacity, 4),
+            "capacity_unavailable": capacity is None,
             "actual_online_hours": round(sum(row["actual_online_hours"] for row in hours), 2),
         },
         "range": {"from": day_from.isoformat(), "to": day_to.isoformat(), "days": len(days)},
@@ -1761,7 +1846,9 @@ def get_chat_overview(db, week_start_value: Any = None,
         day["has_actual"] = True
         day["actual_chats"] = chats
         day["actual_online_hours"] = worked
-        day["actual_delta_fte_hours"] = round(worked - day["forecast_fte_hours"], 2)
+        day["actual_delta_fte_hours"] = (
+            None if day["forecast_fte_hours"] is None
+            else round(worked - day["forecast_fte_hours"], 2))
         day["in_target_share"] = round(in_target / chats, 4) if chats else 0.0
 
     # Разница «факт − прогноз» считается по ТЕМ ЖЕ дням, где факт есть. Раньше факт
@@ -1769,11 +1856,15 @@ def get_chat_overview(db, week_start_value: Any = None,
     # следующую неделю (факта нет вовсе) давал «−840 часов» при нулевом факте, а
     # половина прошедшей недели — «−480» там, где план сошёлся день в день.
     # `actual_comparable_days` говорит витрине, по скольким дням сравнение вообще шло.
+    # Без ёмкости сравнивать не с чем: прогноза в часах нет, и «факт − прогноз»
+    # выродился бы в сам факт.
+    plan_missing = bool(forecast["totals"].get("capacity_unavailable"))
     forecast["totals"]["actual_fte_hours"] = round(actual_fte_hours, 2)
-    forecast["totals"]["actual_forecast_hours"] = round(comparable_forecast_hours, 2)
+    forecast["totals"]["actual_forecast_hours"] = (
+        None if plan_missing else round(comparable_forecast_hours, 2))
     forecast["totals"]["actual_comparable_days"] = comparable_days
-    forecast["totals"]["actual_forecast_delta"] = round(
-        actual_fte_hours - comparable_forecast_hours, 2)
+    forecast["totals"]["actual_forecast_delta"] = (
+        None if plan_missing else round(actual_fte_hours - comparable_forecast_hours, 2))
     # Из какого окна взят прирост и сколько дней периода в это окно попало — иначе
     # «+N чатов» в шапке выглядит свойством открытой недели.
     forecast["totals"]["uplift_window_start"] = uplift.get("forecast_window_start")
@@ -1796,3 +1887,327 @@ def get_chat_overview(db, week_start_value: Any = None,
                    "to": actual_range[1].isoformat() if actual_range else None},
         "latest_chat_day": latest.isoformat() if latest else None,
     }
+
+
+# --- «Биллинг чата» -----------------------------------------------------------------
+# Полный аналог биллинга линии, но на наших данных: Oktell здесь не нужен, всё лежит в
+# c2d_requests. Разрез у линии «таксопарк / номер линии»; у нас таксопарк лежит в
+# `channel_name` (Техподдержка iTaxi, Jana Taxi, Ноль такси и ещё десяток), а `transport`
+# — это канал связи, которым клиент пришёл. Отсюда разрез «парк / транспорт».
+#
+# Колонки читаются так же, как на линии, только по-чатовому:
+#   Поступило → чатов; Обслужено → отвечено (reaction_time есть); Потеряно → без ответа;
+#   Ср. ожидание → средний первый ответ; AR → доля отвеченных;
+#   SL → доля первых ответов в пределах порога.
+# Колонок «Ср. разговор», «Время разговора» и «Общее время» здесь НЕТ: это время
+# обработки, которого в чатовой модели быть не должно (см. шапку модуля).
+
+CHAT_BILLING_MAX_RANGE_DAYS = 31
+CHAT_BILLING_SL_SECONDS_LIMITS = (1, 600)
+CHAT_BILLING_SL_DEFAULT_SECONDS = DEFAULT_CHAT_SETTINGS["target_first_reply_seconds"]
+CHAT_BILLING_PER_PAGE_LIMITS = (1, 100)
+# Потолок построчной выгрузки: Excel на большем всё равно нечитаем, а полный скан
+# периода без границы кладёт запрос.
+CHAT_BILLING_DETAIL_EXPORT_LIMIT = 10000
+
+CHAT_BILLING_NO_PARK = "Без парка"
+CHAT_BILLING_NO_TRANSPORT = "Без канала"
+
+# Счётчики сырые: доли и средние считает витрина, как у линии, — иначе одно и то же
+# число округлялось бы дважды и таблица не сходилась бы с итогом.
+CHAT_BILLING_METRICS = (
+    "chats", "answered", "no_reply", "answered_sl", "first_reply_seconds",
+)
+CHAT_BILLING_OPERATOR_METRICS = CHAT_BILLING_METRICS + (
+    "incoming_messages", "outgoing_messages",
+)
+
+CHAT_BILLING_GROUP_BY = ("park", "transport")
+
+_CHAT_BILLING_PARK_SQL = "COALESCE(NULLIF(r.channel_name, ''), '%s')" % CHAT_BILLING_NO_PARK
+_CHAT_BILLING_TRANSPORT_SQL = (
+    "COALESCE(NULLIF(r.transport, ''), '%s')" % CHAT_BILLING_NO_TRANSPORT)
+_CHAT_BILLING_OPERATOR_SQL = "COALESCE(NULLIF(u.name, ''), NULLIF(r.c2d_operator_name, ''))"
+
+
+def _chat_billing_window(day_from: date, day_to: date,
+                         minute_from: int, minute_to: int) -> Tuple[str, List[Any]]:
+    """Общий WHERE биллинга: период по дню плюс окно времени суток по началу чата.
+
+    Окно накладывается только когда оно уже полных суток: лишнее условие в WHERE
+    отрезает индекс по `day` и заставляет читать таблицу целиком.
+    """
+    where = ["r.request_type = %s", "r.request_start IS NOT NULL", "r.day BETWEEN %s AND %s"]
+    params: List[Any] = [CHAT_REQUEST_TYPE, day_from, day_to]
+    if int(minute_from) > 0 or int(minute_to) < 1439:
+        where.append("(EXTRACT(HOUR FROM r.request_start)::int * 60"
+                     " + EXTRACT(MINUTE FROM r.request_start)::int) BETWEEN %s AND %s")
+        params.extend([int(minute_from), int(minute_to)])
+    return " AND ".join(where), params
+
+
+def _chat_billing_blank(metrics: Tuple[str, ...]) -> Dict[str, int]:
+    return {key: 0 for key in metrics}
+
+
+def _chat_billing_merge(target: Dict[str, int], row: Dict[str, int],
+                        metrics: Tuple[str, ...]) -> None:
+    for key in metrics:
+        target[key] += row[key]
+
+
+def _chat_billing_rows_tx(cursor, day_from: date, day_to: date, minute_from: int,
+                          minute_to: int, sl_seconds: int,
+                          group_by: str) -> List[Tuple[Any, ...]]:
+    """Строки (день x парк [x транспорт]) за период."""
+    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    transport_sql = _CHAT_BILLING_TRANSPORT_SQL if group_by == "transport" else "''"
+    cursor.execute(
+        f"""
+        SELECT r.day,
+               {_CHAT_BILLING_PARK_SQL} AS park,
+               {transport_sql} AS transport_name,
+               COUNT(*)::int,
+               COUNT(r.reaction_time)::int,
+               COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
+               COALESCE(SUM(r.reaction_time), 0)::float
+        FROM c2d_requests r
+        WHERE {where}
+        GROUP BY 1, 2, 3
+        ORDER BY 1, 2, 3
+        """,
+        [int(sl_seconds)] + params,
+    )
+    return cursor.fetchall()
+
+
+def get_chat_billing_report(db, day_from: date, day_to: date, minute_from: int = 0,
+                            minute_to: int = 1439,
+                            sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS,
+                            group_by: str = "park") -> Dict[str, Any]:
+    """{days, parks, totals} — та же форма ответа, что у биллинга линии."""
+    include_transport = group_by == "transport"
+    with db._get_cursor() as cursor:
+        raw_rows = _chat_billing_rows_tx(cursor, day_from, day_to, minute_from,
+                                         minute_to, sl_seconds, group_by)
+
+    days_map: Dict[str, Dict[Tuple[str, str], Dict[str, int]]] = {}
+    parks_map: Dict[Tuple[str, str], Dict[str, int]] = {}
+    totals = _chat_billing_blank(CHAT_BILLING_METRICS)
+    for day_value, park, transport_name, chats, answered, answered_sl, reply_sum in raw_rows:
+        chats = max(0, int(chats or 0))
+        answered = max(0, int(answered or 0))
+        row = {
+            "chats": chats,
+            "answered": answered,
+            # «Потеряно» в чате — это чат, на который так и не ответили. Он не
+            # теряется, как звонок: он висит открытым, пока клиент ждёт.
+            "no_reply": max(0, chats - answered),
+            "answered_sl": max(0, int(answered_sl or 0)),
+            "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
+        }
+        key = (str(park or ""), str(transport_name or "") if include_transport else "")
+        day_key = day_value.isoformat()
+        _chat_billing_merge(days_map.setdefault(day_key, {}).setdefault(
+            key, _chat_billing_blank(CHAT_BILLING_METRICS)), row, CHAT_BILLING_METRICS)
+        _chat_billing_merge(parks_map.setdefault(
+            key, _chat_billing_blank(CHAT_BILLING_METRICS)), row, CHAT_BILLING_METRICS)
+        _chat_billing_merge(totals, row, CHAT_BILLING_METRICS)
+
+    def _sorted_parks(source: Dict[Tuple[str, str], Dict[str, int]]) -> List[Dict[str, Any]]:
+        items = []
+        for (park, transport_name), metrics in source.items():
+            item = {"park": park, **metrics}
+            if include_transport:
+                item["transport"] = transport_name
+            items.append(item)
+        items.sort(key=lambda item: (-item["chats"], item["park"], item.get("transport") or ""))
+        return items
+
+    days = []
+    for day_key in sorted(days_map):
+        park_rows = _sorted_parks(days_map[day_key])
+        day_totals = _chat_billing_blank(CHAT_BILLING_METRICS)
+        for item in park_rows:
+            _chat_billing_merge(day_totals, item, CHAT_BILLING_METRICS)
+        days.append({"date": day_key, "parks": park_rows, "totals": day_totals})
+
+    return {"days": days, "parks": _sorted_parks(parks_map), "totals": totals}
+
+
+def get_chat_billing_operators(db, day_from: date, day_to: date, minute_from: int = 0,
+                               minute_to: int = 1439,
+                               sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS
+                               ) -> Dict[str, Any]:
+    """{days, operators, totals} — тот же разрез, но по чатникам.
+
+    Имя берём из нашей карточки, а если чат ещё не привязан к человеку — из
+    Chat2Desk. Непривязанные чаты в разрез по людям не попадают: они не про то,
+    как работал конкретный чатник.
+    """
+    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    with db._get_cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT r.day,
+                   {_CHAT_BILLING_OPERATOR_SQL} AS operator_name,
+                   COUNT(*)::int,
+                   COUNT(r.reaction_time)::int,
+                   COUNT(*) FILTER (WHERE r.reaction_time <= %s)::int,
+                   COALESCE(SUM(r.reaction_time), 0)::float,
+                   COALESCE(SUM(r.incoming_messages), 0)::int,
+                   COALESCE(SUM(r.outgoing_messages), 0)::int
+            FROM c2d_requests r
+            LEFT JOIN users u ON u.id = r.operator_id
+            WHERE {where} AND {_CHAT_BILLING_OPERATOR_SQL} IS NOT NULL
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+            """,
+            [int(sl_seconds)] + params,
+        )
+        raw_rows = cursor.fetchall()
+
+    days_map: Dict[str, Dict[str, Dict[str, int]]] = {}
+    operators_map: Dict[str, Dict[str, int]] = {}
+    totals = _chat_billing_blank(CHAT_BILLING_OPERATOR_METRICS)
+    for (day_value, operator_name, chats, answered, answered_sl,
+         reply_sum, incoming, outgoing) in raw_rows:
+        chats = max(0, int(chats or 0))
+        answered = max(0, int(answered or 0))
+        row = {
+            "chats": chats,
+            "answered": answered,
+            "no_reply": max(0, chats - answered),
+            "answered_sl": max(0, int(answered_sl or 0)),
+            "first_reply_seconds": int(round(_to_float(reply_sum, 0.0))),
+            "incoming_messages": max(0, int(incoming or 0)),
+            "outgoing_messages": max(0, int(outgoing or 0)),
+        }
+        entry = days_map.setdefault(day_value.isoformat(), {}).setdefault(
+            str(operator_name), _chat_billing_blank(CHAT_BILLING_OPERATOR_METRICS))
+        _chat_billing_merge(entry, row, CHAT_BILLING_OPERATOR_METRICS)
+
+    days = []
+    for day_key in sorted(days_map):
+        rows = [{"operator": name, **metrics} for name, metrics in days_map[day_key].items()]
+        rows.sort(key=lambda item: (-item["chats"], item["operator"]))
+        day_totals = _chat_billing_blank(CHAT_BILLING_OPERATOR_METRICS)
+        for item in rows:
+            _chat_billing_merge(day_totals, item, CHAT_BILLING_OPERATOR_METRICS)
+            _chat_billing_merge(operators_map.setdefault(
+                item["operator"], _chat_billing_blank(CHAT_BILLING_OPERATOR_METRICS)),
+                item, CHAT_BILLING_OPERATOR_METRICS)
+        _chat_billing_merge(totals, day_totals, CHAT_BILLING_OPERATOR_METRICS)
+        days.append({"date": day_key, "operators": rows, "totals": day_totals})
+
+    operators = [{"operator": name, **metrics} for name, metrics in operators_map.items()]
+    operators.sort(key=lambda item: (-item["chats"], item["operator"]))
+    return {"days": days, "operators": operators, "totals": totals}
+
+
+def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str, Any]:
+    (request_id, started_at, park, transport_name, client, operator_name,
+     reply_seconds, incoming, outgoing) = raw
+    answered = reply_seconds is not None
+    return {
+        "id": int(request_id or 0),
+        "started_at": started_at.strftime("%Y-%m-%d %H:%M:%S") if started_at else "",
+        "park": str(park or ""),
+        "transport": str(transport_name or ""),
+        "client": str(client or ""),
+        "operator": str(operator_name or ""),
+        "first_reply_seconds": int(reply_seconds) if answered else None,
+        "no_reply": 0 if answered else 1,
+        "answered_sl": 1 if answered and int(reply_seconds) <= int(sl_seconds) else 0,
+        "incoming_messages": max(0, int(incoming or 0)),
+        "outgoing_messages": max(0, int(outgoing or 0)),
+    }
+
+
+_CHAT_BILLING_DETAIL_SELECT = f"""
+    r.request_id,
+    r.request_start,
+    {_CHAT_BILLING_PARK_SQL} AS park,
+    {_CHAT_BILLING_TRANSPORT_SQL} AS transport_name,
+    COALESCE(NULLIF(r.client_name, ''), NULLIF(r.client_phone, ''), '') AS client,
+    COALESCE({_CHAT_BILLING_OPERATOR_SQL}, '') AS operator_name,
+    r.reaction_time,
+    r.incoming_messages,
+    r.outgoing_messages
+"""
+
+
+def get_chat_billing_details(db, day_from: date, day_to: date, minute_from: int = 0,
+                             minute_to: int = 1439,
+                             sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS,
+                             page: int = 1, per_page: int = 25,
+                             snapshot_id: Optional[int] = None) -> Dict[str, Any]:
+    """Одна строка = один чат. Снимок по максимальному `request_id` держит выборку.
+
+    Без снимка ночной синк Chat2Desk дописывает свежие чаты между переходами по
+    страницам, и уже просмотренные строки съезжают вниз.
+    """
+    page = max(1, int(page))
+    low, high = CHAT_BILLING_PER_PAGE_LIMITS
+    per_page = max(low, min(high, int(per_page)))
+    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    if snapshot_id is not None:
+        where += " AND r.request_id <= %s"
+        params = params + [int(snapshot_id)]
+
+    with db._get_cursor() as cursor:
+        # Счётчик отдельным запросом, а не окном COUNT(*) OVER(): на странице за
+        # хвостом выборки окно не возвращает ни строки, и общее число обнуляется.
+        cursor.execute(
+            f"SELECT COUNT(*)::int, MAX(r.request_id) FROM c2d_requests r WHERE {where}",
+            params)
+        head = cursor.fetchone() or (0, None)
+        total = int(head[0] or 0)
+        resolved_snapshot = snapshot_id if snapshot_id is not None else (
+            int(head[1]) if head[1] is not None else None)
+        cursor.execute(
+            f"""
+            SELECT {_CHAT_BILLING_DETAIL_SELECT}
+            FROM c2d_requests r
+            LEFT JOIN users u ON u.id = r.operator_id
+            WHERE {where}
+            ORDER BY r.request_start DESC, r.request_id DESC
+            LIMIT %s OFFSET %s
+            """,
+            params + [per_page, (page - 1) * per_page],
+        )
+        raw_rows = cursor.fetchall()
+
+    return {
+        "rows": [_chat_billing_detail_row(raw, sl_seconds) for raw in raw_rows],
+        "snapshot_id": resolved_snapshot,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": (total + per_page - 1) // per_page if total else 0,
+        },
+    }
+
+
+def get_chat_billing_detail_export_rows(db, day_from: date, day_to: date,
+                                        minute_from: int = 0, minute_to: int = 1439,
+                                        sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS,
+                                        limit: int = CHAT_BILLING_DETAIL_EXPORT_LIMIT
+                                        ) -> List[Dict[str, Any]]:
+    """Построчная детализация для выгрузки: свежие чаты сверху, с потолком строк."""
+    where, params = _chat_billing_window(day_from, day_to, minute_from, minute_to)
+    with db._get_cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT {_CHAT_BILLING_DETAIL_SELECT}
+            FROM c2d_requests r
+            LEFT JOIN users u ON u.id = r.operator_id
+            WHERE {where}
+            ORDER BY r.request_start DESC, r.request_id DESC
+            LIMIT %s
+            """,
+            params + [max(1, int(limit))],
+        )
+        raw_rows = cursor.fetchall()
+    return [_chat_billing_detail_row(raw, sl_seconds) for raw in raw_rows]

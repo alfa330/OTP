@@ -10037,6 +10037,9 @@ class Database:
              AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
             WHERE p.id = %s
               AND p.archived_at IS NULL
+              -- То же условие и по прямому номеру плана: через эту выборку идут проверка
+              -- периода и все засевы лотов, поэтому она закрывает запись, а не только показ.
+              AND COALESCE(p.direction_mode, 'line') = 'line'
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
         """, (plan_id,))
         return cursor.fetchone()
@@ -10056,6 +10059,12 @@ class Database:
               ON s.plan_id = p.id
              AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
             WHERE p.archived_at IS NULL
+              -- Аукцион смен — только для ЛИНИИ. У чата он будет свой (решение владельца
+              -- 28.08.2026), и его график после генерации никуда не отправляется. Планы
+              -- обоих направлений лежат в одной таблице, поэтому без этого условия
+              -- сохранённая неделя чата вставала в список периодов аукциона линии
+              -- неотличимой строкой — те же даты, тот же пустой заголовок.
+              AND COALESCE(p.direction_mode, 'line') = 'line'
               AND p.date_to = p.date_from + 6
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
             HAVING COUNT(s.id) > 0
