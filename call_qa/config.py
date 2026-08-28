@@ -126,22 +126,31 @@ EMBED_MAX_CHUNKS = int(env("EMBED_MAX_CHUNKS", "16"))
 # эскалирует ~все звонки и выходит ДОРОЖЕ чистого Opus. Механизм эскалации сохранён:
 # задайте CLAUDE_MODEL_BULK дешевле HARD — и двухуровневость включится сама. ---
 #
-# Провайдер выбирается ПО ИМЕНИ МОДЕЛИ (см. call_qa/providers.py): всё, что начинается
-# с «gemini», уходит в Vertex, остальное — в Anthropic. Отдельного переключателя нет
+# Провайдер выбирается ПО ИМЕНИ МОДЕЛИ (см. call_qa/providers.py): «gemini*» уходит в
+# Vertex, «glm*» — в Z.ai, остальное — в Anthropic. Отдельного переключателя нет
 # намеренно: модель уже входит в evaluation_fingerprint и в ai_review_cache, и второй
 # независимый флаг означал бы оценки, подписанные не тем провайдером.
 # Имена AI_QA_MODEL_* — основные; CLAUDE_MODEL_* оставлены как совместимость, потому
 # что они уже заданы на Render и в скриптах. ---
 #
-# Умолчание — `gemini-3.7-flash`. Не ради экономии: баланс Anthropic исчерпан, и на
-# Claude сейчас отказывает даже подсчёт токенов, то есть раздел не работает вовсе.
-# Из моделей Gemini выбрана эта: замер 24.08.2026 на 24 звонках Основа ОП дал ей
-# лучшее совпадение штрафующих вердиктов с Opus 4.8 (84,8 %) при 1 603 выходных
-# токенах и 24 с на звонок. Оговорка, которую нельзя терять: Opus она НЕ повторяет —
-# около трети его штрафов пропускает и примерно столько же ставит своих.
-# Вернуться на Claude — одна переменная: AI_QA_MODEL_BULK=claude-opus-4-8 (и HARD).
-CLAUDE_MODEL_BULK = env("AI_QA_MODEL_BULK") or env("CLAUDE_MODEL_BULK", "gemini-3.7-flash")
-CLAUDE_MODEL_HARD = env("AI_QA_MODEL_HARD") or env("CLAUDE_MODEL_HARD", "gemini-3.7-flash")
+# Умолчание — `glm-5.3-flash`. Замер 28.08.2026 на 140 звонках Основа ОП (2 520
+# критериев, тем же промптом и той же схемой, эталон — сохранённые оценки Opus 4.8):
+#
+#   модель                штрафов  совпало  точность  полнота  медиана  выход
+#   Opus 4.8 (эталон)         554        —         —        —        —  1 977
+#   glm-5.3-flash (high)      476    79,5 %    67,4 %   57,9 %     91 с  3 956
+#   gemini-3.7-flash          500    79,6 %    64,8 %   58,5 %     16 с  1 675
+#
+# GLM обходит Gemini по точности при равной полноте — то есть реже штрафует зря, а
+# ложный штраф дороже пропуска: он попадает в карточку оператора и создаёт СВ работу,
+# которую тот всё равно отменит. Плюс только на нём схема соблюдена на ВСЕХ 140
+# звонках (у Gemini и у Claude — на 139). Месяц Основа ОП: 10 435 ₸ против 34 600 ₸.
+# Оговорка, которую нельзя терять: Opus он НЕ повторяет, как и Gemini, — около трети
+# его штрафов пропускает и примерно столько же ставит своих.
+# Откат — одна переменная: AI_QA_MODEL_BULK=gemini-3.7-flash (и HARD), или
+# claude-opus-4-8 для возврата на Anthropic.
+CLAUDE_MODEL_BULK = env("AI_QA_MODEL_BULK") or env("CLAUDE_MODEL_BULK", "glm-5.3-flash")
+CLAUDE_MODEL_HARD = env("AI_QA_MODEL_HARD") or env("CLAUDE_MODEL_HARD", "glm-5.3-flash")
 ESCALATE_CONF = float(env("CLAUDE_ESCALATE_CONF", "0.6"))          # не выше порога — критерий уходит на HARD-модель
 # Тег для кэша/меты (при смене моделей меняется → старые кэш-оценки не подмешиваются).
 CLAUDE_MODEL = env("CLAUDE_MODEL", f"{CLAUDE_MODEL_BULK}+{CLAUDE_MODEL_HARD}")
@@ -186,10 +195,37 @@ VERTEX_CACHE_TTL_S = int(env("VERTEX_CACHE_TTL_S", "3600"))
 # прогон отвечает 429.
 VERTEX_LOCAL_BATCH_WORKERS = int(env("VERTEX_LOCAL_BATCH_WORKERS", "4"))
 
+# --- LLM (Z.ai / GLM). Значения по умолчанию — из замера 28.08.2026 на 140 звонках
+# Основа ОП тем же промптом и той же схемой, что у Claude и Gemini. ---
+ZAI_URL = env("ZAI_URL", "https://api.z.ai/api/paas/v4/chat/completions")
+# Диапазон temperature у Z.ai полуоткрытый — (0, 1); ноль формально вне его, хотя на
+# практике принимается. Держим то же значение, что у Vertex, чтобы прогоны сравнивались.
+ZAI_TEMPERATURE = float(env("ZAI_TEMPERATURE", "0.1"))
+# «Мышление» у GLM-5.3-Flash не отключается вовсе: thinking={'type':'disabled'} даёт
+# 400 с кодом 1210 и подсказкой «please use low, high, or max». Ступеней ровно три —
+# medium/minimal/none отвергаются тем же кодом. Умолчание вендора max ХУДШЕЕ по всем
+# статьям: 388 с и 18 626 выходных токенов против 89 с и 3 956 у high, при полноте
+# 47 % против 55 %. Уровень поэтому задаётся явно и НИКОГДА не остаётся вендорским.
+ZAI_REASONING_EFFORT = env("ZAI_REASONING_EFFORT", "high")
+# Оценка на high идёт около 91 с при p90 116 с — таймаут Vertex (180 с) здесь мал
+# на длинных звонках, берём с запасом.
+ZAI_TIMEOUT = float(env("ZAI_TIMEOUT", "300"))
+ZAI_TRIES = int(env("ZAI_TRIES", "4"))
+ZAI_RETRY_BASE_S = float(env("ZAI_RETRY_BASE_S", "8"))
+# Пакетного API у glm-5.3-flash нет (проверено: /files с purpose=batch отвечает 400 со
+# списком, где самая свежая модель — glm-5.1), поэтому ночной прогон идёт тем же
+# локальным путём, что у Vertex. Потоков меньше, чем звонок в секунду: публичных
+# лимитов RPM/TPM Z.ai не раскрывает, они видны только в кабинете.
+ZAI_LOCAL_BATCH_WORKERS = int(env("ZAI_LOCAL_BATCH_WORKERS", "4"))
+
 
 def anthropic_key():
     """Принимаем оба имени: ANTHROPIC_API_KEY или CLAUDE_API_KEY."""
     return env("ANTHROPIC_API_KEY") or env("CLAUDE_API_KEY")
+
+
+def zai_key():
+    return env("ZAI_API_KEY")
 
 # --- Субъекты оценки ---
 # Раздел начинался со звонков; у Верификаторов ОП единица оценки — эпизод

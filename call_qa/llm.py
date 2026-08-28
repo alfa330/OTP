@@ -2,10 +2,13 @@
 Структурный вывод через output_config.format (json_schema). Используется оценщиком,
 формулировкой разборов и пакетной оценкой — правки протокола API делаются здесь один раз.
 
-Провайдеров два: Anthropic (Claude) и Vertex (Gemini). Выбор — по имени модели, а не
-по отдельному флагу, поэтому вызывающему коду достаточно передать `model`; всё, что
-начинается с «gemini», уходит в call_qa/providers.py. Так подпись оценки (модель в
-evaluation_fingerprint) и фактический адресат запроса не могут разойтись."""
+Провайдеров три: Anthropic (Claude), Vertex (Gemini) и Z.ai (GLM). Выбор — по имени
+модели, а не по отдельному флагу, поэтому вызывающему коду достаточно передать `model`;
+всё, что не Claude, уходит в call_qa/providers.py. Так подпись оценки (модель в
+evaluation_fingerprint) и фактический адресат запроса не могут разойтись.
+
+Форма тела Anthropic здесь не просто «одна из трёх» — она общий контракт: в ней
+замораживаются заявки батча и в неё укладывают ответ остальные провайдеры."""
 from __future__ import annotations
 import json
 import time
@@ -42,7 +45,7 @@ def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=Fal
     effort/thinking переопределяют дефолты для дешёвых вспомогательных вызовов
     (описание вложений): рассуждать над картинкой не нужно, а effort='high'
     удваивал бы её цену."""
-    if providers.provider_for(model) == providers.VERTEX:
+    if providers.provider_for(model) != providers.ANTHROPIC:
         return providers.build_body(
             model=model, system=system, user=user, schema=schema, max_tokens=max_tokens,
             cache_system=cache_system, cache_ttl=cache_ttl, effort=effort, thinking=thinking)
@@ -73,7 +76,7 @@ def parse_message(message: dict) -> dict:
 
 
 def post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
-    if body.get("_provider") == providers.VERTEX:
+    if body.get("_provider"):
         return providers.post_body(body, timeout=timeout, include_meta=include_meta)
     started = time.perf_counter()
     r = httpx.post(_API_URL, json=body, headers=_headers(), timeout=timeout)

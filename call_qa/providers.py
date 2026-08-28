@@ -1,9 +1,13 @@
-"""Провайдеры LLM для оценки: Anthropic (Claude) и Vertex (Gemini) за одним контрактом.
+"""Провайдеры LLM для оценки: Anthropic (Claude), Vertex (Gemini) и Z.ai (GLM).
 
 Провайдер выбирается ПО ИМЕНИ МОДЕЛИ, а не отдельным флагом: модель уже входит в
 `evaluation_fingerprint`, лежит в `ai_review_cache` и в `ai_evaluation_runs.model`,
 поэтому второй независимый переключатель означал бы два источника правды и оценки,
-подписанные не тем провайдером. Достаточно задать `AI_QA_MODEL_BULK=gemini-3.7-flash`.
+подписанные не тем провайдером. Достаточно задать `AI_QA_MODEL_BULK=glm-5.3-flash`.
+
+Штатный провайдер с 28.08.2026 — Z.ai; его особенности собраны в разделе «Z.ai (GLM)»
+внизу файла, и читать их надо до любой правки: у этой модели нельзя выключить
+«мышление», нет строгой JSON-схемы и нет пакетного режима.
 
 Почему Vertex, а не ключ AI Studio: у сервисного аккаунта нет постоянного ключа
 (короткий OAuth-токен в заголовке), расход попадает в общий счёт Google Cloud проекта,
@@ -37,22 +41,39 @@ from . import config
 
 ANTHROPIC = "anthropic"
 VERTEX = "vertex"
+ZAI = "zai"
+
+# Префикс имени модели → провайдер. Порядок проверки не важен: префиксы не пересекаются.
+_BY_PREFIX = (("gemini", VERTEX), ("glm", ZAI))
 
 # Формы ответа Vertex, на которых имеет смысл повторить: 429 — общая квота проекта на
 # модель (ловил на плотном прогоне), 499/500/503 — обрывы на стороне Google.
+# У Z.ai те же коды плюс собственные 1302 (превышен лимит) и 1305 (сервис перегружен),
+# оба приходят по HTTP 429.
 _RETRYABLE = (429, 499, 500, 502, 503, 504)
 
 
 def provider_for(model: str) -> str:
-    """Провайдер по имени модели. Всё, что не Gemini, считается Anthropic —
+    """Провайдер по имени модели. Всё, что не Gemini и не GLM, считается Anthropic —
     так старые записи (`model='claude-opus-4-8+claude-opus-4-8'`) остаются валидными."""
-    return VERTEX if str(model or "").lower().startswith("gemini") else ANTHROPIC
+    name = str(model or "").lower()
+    for prefix, provider in _BY_PREFIX:
+        if name.startswith(prefix):
+            return provider
+    return ANTHROPIC
 
 
 def provider_for_tag(model_tag: str) -> str:
-    """Провайдер по составному тегу `bulk+hard`, который лежит в `CLAUDE_MODEL`."""
+    """Провайдер по составному тегу `bulk+hard`, который лежит в `CLAUDE_MODEL`.
+
+    Смешанная пара подписывается ANTHROPIC: это не штатный режим, и безопаснее
+    подписать прогон прежним провайдером, чем объявить его целиком чужим.
+    """
     parts = [p for p in str(model_tag or "").split("+") if p]
-    return VERTEX if parts and all(provider_for(p) == VERTEX for p in parts) else ANTHROPIC
+    if not parts:
+        return ANTHROPIC
+    first = provider_for(parts[0])
+    return first if all(provider_for(p) == first for p in parts) else ANTHROPIC
 
 
 # ── авторизация и соединение ────────────────────────────────────────────────
@@ -217,6 +238,27 @@ def _forget_cache(name: str) -> None:
 
 def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=False,
                cache_ttl=None, effort=None, thinking=None) -> dict:
+    """Тело запроса для любого не-Anthropic провайдера. Кто именно — решает имя модели.
+
+    Anthropic сюда не попадает: его тело собирает сам llm.build_body, потому что
+    именно его форма и есть общий контракт (батч, манифест, разбор ответа).
+    """
+    builder = _zai_build_body if provider_for(model) == ZAI else _vertex_build_body
+    return builder(model=model, system=system, user=user, schema=schema,
+                   max_tokens=max_tokens, cache_system=cache_system,
+                   cache_ttl=cache_ttl, effort=effort, thinking=thinking)
+
+
+def post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
+    """Отправка тела, собранного build_body(). Адресат берётся из маркера `_provider`,
+    а не из текущей конфигурации: замороженный в манифесте батча запрос обязан уйти
+    тому же провайдеру, который его собрал, даже если умолчание с тех пор сменили."""
+    sender = _zai_post_body if body.get("_provider") == ZAI else _vertex_post_body
+    return sender(body, timeout=timeout, include_meta=include_meta)
+
+
+def _vertex_build_body(*, model, system, user, schema, max_tokens=8000, cache_system=False,
+                       cache_ttl=None, effort=None, thinking=None) -> dict:
     """Тело запроса Vertex в той же форме вызова, что и у Anthropic.
 
     Помечено `_provider`, чтобы `llm.post_body` знал, куда его отправлять, и чтобы
@@ -294,7 +336,7 @@ def _usage(body: dict) -> dict:
     }
 
 
-def post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
+def _vertex_post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
     """Отправляет тело, собранное build_body(), и разбирает JSON-ответ."""
     model = body["model"]
     region = body.get("region") or config.VERTEX_LLM_REGION
@@ -345,5 +387,171 @@ def post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
             "latency_ms": round((time.perf_counter() - started) * 1000),
             "provider": VERTEX,
             "cached_system": bool(cache_name),
+        }
+    return parsed
+
+
+# ── Z.ai (GLM) ──────────────────────────────────────────────────────────────
+#
+# Третий провайдер. Всё, что о нём надо знать перед правкой, — четыре факта,
+# проверенные запросами 28.08.2026 на 140 звонках Основа ОП:
+#
+# 1. «Мышление» ОТКЛЮЧИТЬ НЕЛЬЗЯ. `thinking={'type':'disabled'}` → HTTP 400, код 1210:
+#    «This model always engages in thinking and cannot be disabled; please use low,
+#    high, or max». Ступеней ровно три, `medium`/`minimal`/`none` отвергаются тем же
+#    кодом. Умолчание вендора — `max`, и оно ХУДШЕЕ: 388 с и 18 626 выходных токенов
+#    на звонок против 89 с и 3 956 у `high`, при этом качество ниже (полнота 47 %
+#    против 55 %). Чем дольше эта модель думает, тем мягче становится. Поэтому
+#    уровень задаётся всегда и явно, из ZAI_REASONING_EFFORT.
+# 2. Строгой JSON Schema НЕТ. `response_format={'type':'json_schema','strict':True}`
+#    принимается, но не соблюдается: ответ приезжает обёрнутым в ```json, разбор
+#    падает, и это стоит ~180 с впустую. Работает только `json_object`, а сама схема
+#    описана в системном промпте — оценщик так и делает.
+# 3. Пакетного режима для этой модели НЕТ: `/files` с purpose=batch отвечает 400 со
+#    списком поддерживаемых моделей, самая свежая там `glm-5.1`. Ночной прогон идёт
+#    тем же локальным путём, что у Vertex (batch_eval._run_locally).
+# 4. Кеш промпта АВТОМАТИЧЕСКИЙ и бесплатный: попадание в 90 % запросов, в среднем
+#    4 015 токенов из 5 511. Ничего настраивать не нужно, `cache_system` игнорируется.
+#
+# Токены «мышления» уже включены в completion_tokens (замер: 49 всего, из них 27
+# reasoning), поэтому в выход они попадают сами — прибавлять их отдельно нельзя,
+# иначе счёт удвоится.
+
+_ZAI_LOCK = threading.Lock()
+_ZAI_CLIENT: httpx.Client | None = None
+
+
+class ZaiError(RuntimeError):
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"Z.ai HTTP {status}: {detail}")
+        self.status = status
+        self.detail = detail
+
+
+def _zai_http() -> httpx.Client:
+    """Одно TLS-соединение на процесс — по той же причине, что и у Vertex."""
+    global _ZAI_CLIENT
+    with _ZAI_LOCK:
+        if _ZAI_CLIENT is None:
+            _ZAI_CLIENT = httpx.Client(
+                timeout=config.ZAI_TIMEOUT,
+                limits=httpx.Limits(max_keepalive_connections=8, max_connections=16))
+        return _ZAI_CLIENT
+
+
+def _zai_build_body(*, model, system, user, schema, max_tokens=8000, cache_system=False,
+                    cache_ttl=None, effort=None, thinking=None) -> dict:
+    """Тело запроса Z.ai в той же форме вызова, что и у остальных.
+
+    `schema` в запрос НЕ уходит (см. факт 2 выше) — она уже описана в системном
+    промпте оценщика. `cache_system` и `cache_ttl` игнорируются: кеш автоматический.
+    `thinking` здесь означает уровень рассуждений, а не бюджет токенов, как у Vertex.
+    """
+    if not isinstance(user, str):
+        raise NotImplementedError(
+            "Z.ai-провайдер принимает только текстовое сообщение; "
+            "вложения чатов остаются на Claude (call_qa/media.py)")
+    return {
+        "_provider": ZAI,
+        "model": model,
+        "payload": {
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "max_tokens": int(max_tokens),
+            "temperature": config.ZAI_TEMPERATURE,
+            "reasoning_effort": _zai_effort(thinking if thinking is not None else effort),
+            "response_format": {"type": "json_object"},
+        },
+    }
+
+
+_ZAI_EFFORTS = ("low", "high", "max")
+
+
+def _zai_effort(value) -> str:
+    """Уровень рассуждений: только low/high/max, иначе умолчание из конфигурации.
+
+    Проверка не формальная. `thinking` у Vertex — это ЧИСЛО (бюджет токенов), а у
+    media.py — СЛОВАРЬ `{'type': 'disabled'}`; без фильтра сюда приехала бы строка
+    вроде «{'type': 'disabled'}», Z.ai ответил бы 400 кодом 1210, и выглядело бы это
+    как поломка модели, а не как чужой параметр не в том поле.
+    """
+    level = str(value).strip().lower() if value is not None else ""
+    return level if level in _ZAI_EFFORTS else config.ZAI_REASONING_EFFORT
+
+
+def _zai_usage(body: dict) -> dict:
+    """usage Z.ai → имена Anthropic, которые уже читают runtime_store и батч."""
+    u = body.get("usage") or {}
+    cached = int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    prompt = int(u.get("prompt_tokens") or 0)
+    thoughts = int((u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
+    return {
+        "input_tokens": max(0, prompt - cached),
+        # completion_tokens УЖЕ включает токены рассуждений — не прибавлять.
+        "output_tokens": int(u.get("completion_tokens") or 0),
+        "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": 0,
+        "thoughts_tokens": thoughts,
+    }
+
+
+def _zai_post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
+    """Отправляет тело, собранное build_body(), и разбирает JSON-ответ."""
+    key = config.zai_key()
+    if not key:
+        raise RuntimeError("нет ключа Z.ai (ZAI_API_KEY)")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    payload = body["payload"]
+    # Таймаут вызывающего — это НИЖНЯЯ граница, а не верхняя. Интерактивная оценка
+    # зашивает 120 с (evaluator.py:230); они калибровались под Claude и Gemini, где
+    # звонок считается за 16-45 с. У GLM на reasoning_effort=high медиана 91 с, p90
+    # 116 с, максимум на 140 звонках 155 с — с чужим лимитом карточка отваливалась бы
+    # по таймауту на каждом десятом длинном разговоре, и выглядело бы это как отказ
+    # провайдера. Поднимаем до ZAI_TIMEOUT, урезать себя ниже — нельзя.
+    timeout = max(float(timeout or 0), config.ZAI_TIMEOUT)
+    started = time.perf_counter()
+
+    last = None
+    answer = None
+    for attempt in range(max(1, config.ZAI_TRIES)):
+        response = _zai_http().post(config.ZAI_URL, json=payload, headers=headers,
+                                    timeout=timeout)
+        if response.status_code == 200:
+            answer = response.json()
+            break
+        last = response
+        if response.status_code in _RETRYABLE and attempt + 1 < config.ZAI_TRIES:
+            time.sleep(config.ZAI_RETRY_BASE_S * (attempt + 1))
+            continue
+        break
+    if answer is None:
+        raise ZaiError(last.status_code if last is not None else 0,
+                       last.text[:400] if last is not None else "нет ответа")
+
+    choice = (answer.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    text = (message.get("content") or "").strip()
+    finish = choice.get("finish_reason")
+    if not text:
+        # Пустой content — это НЕУДАЧА, а не пустая оценка: при reasoning_effort=max
+        # модель отдаёт HTTP 200 с нулём символов, потратив весь лимит на рассуждения.
+        # Молча вернув {}, мы записали бы звонку зачёт по всем критериям.
+        raise ZaiError(200, f"пустой ответ, finish_reason={finish}, "
+                            f"рассуждений {len(message.get('reasoning_content') or '')} симв")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ZaiError(200, f"ответ не JSON ({exc}): {text[:200]}") from exc
+    if include_meta:
+        parsed["_llm_meta"] = {
+            "request_id": answer.get("id"),
+            "model": answer.get("model") or body["model"],
+            "stop_reason": finish,
+            "usage": _zai_usage(answer),
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "provider": ZAI,
+            "reasoning_effort": payload.get("reasoning_effort"),
         }
     return parsed

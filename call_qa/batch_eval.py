@@ -55,18 +55,22 @@ def _subject_key(subject: dict) -> str:
     """Ключ чекпоинта: id звонка и id эпизода — независимые последовательности."""
     return f"{subject.get('subject_kind') or config.SUBJECT_CALL}:{subject['id']}"
 
-_BATCH_PRICE_ENV = {
-    "input": "CLAUDE_BATCH_INPUT_USD_PER_MTOK",
-    "output": "CLAUDE_BATCH_OUTPUT_USD_PER_MTOK",
-    "cache_write": "CLAUDE_BATCH_CACHE_WRITE_USD_PER_MTOK",
-    "cache_read": "CLAUDE_BATCH_CACHE_READ_USD_PER_MTOK",
+# Ставки для итоговой строки прогона. У Anthropic отдельный набор со скидкой батча;
+# у Vertex и Z.ai наш прогон идёт обычными вызовами (_run_locally), скидки нет, и
+# считать его по CLAUDE_BATCH_* значило бы завысить счёт в десятки раз.
+_BATCH_PRICE_PREFIX = {
+    providers.ANTHROPIC: "CLAUDE_BATCH_",
+    providers.VERTEX: "GEMINI_",
+    providers.ZAI: "ZAI_",
 }
+_BATCH_PRICE_KEYS = ("input", "output", "cache_write", "cache_read")
 
 
-def _batch_cost(usage: dict) -> float | None:
+def _batch_cost(usage: dict, model: str | None = None) -> float | None:
+    prefix = _BATCH_PRICE_PREFIX[providers.provider_for_tag(model or config.CLAUDE_MODEL)]
     prices = {}
-    for key, env_name in _BATCH_PRICE_ENV.items():
-        raw = config.env(env_name)
+    for key in _BATCH_PRICE_KEYS:
+        raw = config.env(f"{prefix}{key.upper()}_USD_PER_MTOK")
         if raw is None:
             return None
         prices[key] = float(raw)
@@ -509,15 +513,46 @@ def _dir_cache() -> dict:
 _LOCAL_PREFIX = "local:"
 
 
+def _run_cost():
+    """Чем подписать себестоимость строки прогона в ai_evaluation_runs.
+
+    У Anthropic пакетный путь идёт со скидкой 50 %, а автоподсчёт в runtime_store
+    знает только полные ставки CLAUDE_* — поэтому там цена остаётся пустой, как и
+    была, и считается один раз в сводке по batch-тарифам. У Vertex и Z.ai пакетного
+    режима нет: прогон идёт обычными вызовами по обычному прайсу, автоподсчёт для них
+    точен, и колонка наконец перестаёт быть пустой. Без неё экономию нового
+    провайдера нечем подтвердить по журналу.
+    """
+    if providers.provider_for(config.CLAUDE_MODEL_BULK) == providers.ANTHROPIC:
+        return None
+    return runtime_store.AUTO_COST
+
+
+def _local_limits() -> tuple[int, float]:
+    """Потоки и таймаут локального прогона — свои у каждого провайдера.
+
+    У Z.ai оценка на reasoning_effort=high идёт около 91 с при p90 116 с, и таймаут
+    Vertex (180 с) обрезал бы хвост длинных звонков. Публичных лимитов RPM/TPM Z.ai
+    не раскрывает, поэтому потоков столько же, сколько у Vertex.
+    """
+    if providers.provider_for(config.CLAUDE_MODEL_BULK) == providers.ZAI:
+        return config.ZAI_LOCAL_BATCH_WORKERS, config.ZAI_TIMEOUT
+    return config.VERTEX_LOCAL_BATCH_WORKERS, config.VERTEX_TIMEOUT
+
+
 def _run_locally(requests_: list[dict], workdir: str, marker: str) -> str:
     """Пакетный прогон без Batch API — для провайдеров, у которых его формы у нас нет.
 
     У Vertex пакетный режим — задание с файлом на GCS (проверено: работает и на
     моделях 3.x, но только в регионе `global`), и это отдельное хранилище со своей
-    уборкой. Пока оно не написано, ночной прогон на Gemini идёт обычными вызовами в
-    несколько потоков. Дороже ровно вдвое (нет скидки батча) и не мгновенно, но
-    остальной конвейер — отпечатки, локи, карточки, сохранение прогонов — работает
-    без единой правки: результат укладывается в ту же форму, что отдаёт Anthropic.
+    уборкой; пока оно не написано, прогон на Gemini идёт обычными вызовами.
+    У Z.ai пакетный режим есть, но НЕ для нашей модели: `/files` с purpose=batch
+    отвечает 400 со списком поддерживаемых, где самая свежая — `glm-5.1`. Ждать его
+    нечего, этот путь для GLM постоянный.
+
+    Дороже ровно вдвое (нет скидки батча) и не мгновенно, но остальной конвейер —
+    отпечатки, локи, карточки, сохранение прогонов — работает без единой правки:
+    результат укладывается в ту же форму, что отдаёт Anthropic.
 
     Результат пишется файлом до возврата: прогон в 19 тыс. звонков нельзя терять
     из-за обрыва на предпоследнем.
@@ -533,13 +568,14 @@ def _run_locally(requests_: list[dict], workdir: str, marker: str) -> str:
                     continue
         log(f"локальный прогон продолжается: уже готово {len(done)}")
     todo = [r for r in requests_ if r["custom_id"] not in done]
+    workers, timeout = _local_limits()
     log(f"пакетного API у провайдера нет — считаю сам: {len(todo)} оценок, "
-        f"модель {config.CLAUDE_MODEL_BULK}, потоков {config.VERTEX_LOCAL_BATCH_WORKERS}")
+        f"модель {config.CLAUDE_MODEL_BULK}, потоков {workers}")
 
     def one(item):
         custom_id = item["custom_id"]
         try:
-            parsed = llm.post_body(item["params"], timeout=config.VERTEX_TIMEOUT,
+            parsed = llm.post_body(item["params"], timeout=timeout,
                                    include_meta=True)
             meta = parsed.pop("_llm_meta", None) or {}
             return {"custom_id": custom_id, "result": {"type": "succeeded", "message": {
@@ -553,7 +589,7 @@ def _run_locally(requests_: list[dict], workdir: str, marker: str) -> str:
                     "result": {"type": "errored", "error": {"message": str(exc)[:500]}}}
 
     with open(path, "a", encoding="utf-8") as out:
-        with ThreadPoolExecutor(max_workers=max(1, config.VERTEX_LOCAL_BATCH_WORKERS)) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             for done_count, row in enumerate(pool.map(one, todo), 1):
                 out.write(json.dumps(row, ensure_ascii=False) + chr(10))
                 out.flush()
@@ -906,7 +942,7 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                 retrieval_config=entry["retrieval_config"], status="succeeded",
                 per_criterion=result.get("per_criterion") or [], payload=persisted_payload,
                 started_at=started_at, completed_at=completed_at,
-                llm_meta=result.get("_llm_meta"), estimated_cost=None,
+                llm_meta=result.get("_llm_meta"), estimated_cost=_run_cost(),
             )
             _retry(lambda: _cache_put(cid, cache_model, payload, strict=True,
                                       subject_kind=subject_kind),
@@ -983,7 +1019,7 @@ def main():
         exact = sum(1 for d in diffs if d <= 5)
         log(f"согласие ИИ↔человек: средн. |Δ| = {sum(diffs)/len(diffs):.1f} баллов; "
             f"в пределах 5 баллов: {exact}/{len(diffs)} ({100*exact//len(diffs)}%)")
-    estimated_cost = _batch_cost(u)
+    estimated_cost = _batch_cost(u, config.CLAUDE_MODEL)
     cost = (f" | стоимость LLM (batch): ${estimated_cost:.2f}" if estimated_cost is not None else
             " | batch-тарифы не заданы, стоимость не оценивается")
     log(f"токены: in={u['input']} out={u['output']} cache_w={u['cache_write']} cache_r={u['cache_read']}{cost}")

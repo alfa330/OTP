@@ -18,6 +18,9 @@ class RuntimeSchemaUnavailable(RuntimeError):
 
 
 _AUTO_COST = object()
+# Публичное имя того же сентинела: пакетный прогон обязан уметь ПОПРОСИТЬ автоподсчёт,
+# а не только смолчать про цену. См. batch_eval._run_cost.
+AUTO_COST = _AUTO_COST
 
 
 def is_schema_compat_error(exc: Exception) -> bool:
@@ -434,11 +437,13 @@ def _usage_totals(llm_meta: dict | None) -> dict:
 def _estimate_cost(usage: dict, model: str | None = None) -> float | None:
     """Use deployment-supplied prices; never bake a time-sensitive price table.
 
-    Префикс переменных зависит от провайдера: у Gemini другие ставки, и считать его
-    расход по CLAUDE_* значило бы завысить счёт на порядок. Если для провайдера цены
-    не заданы, стоимость остаётся пустой — это честнее выдуманного числа.
+    Префикс переменных зависит от провайдера: у Gemini ставки на порядок ниже, чем у
+    Claude, а у GLM — ещё на порядок ниже, и считать один расход по чужим ставкам
+    значило бы завысить счёт в разы. Если для провайдера цены не заданы, стоимость
+    остаётся пустой — это честнее выдуманного числа.
     """
-    prefix = "GEMINI_" if providers.provider_for_tag(model or "") == providers.VERTEX else "CLAUDE_"
+    _PREFIX = {providers.VERTEX: "GEMINI_", providers.ZAI: "ZAI_", providers.ANTHROPIC: "CLAUDE_"}
+    prefix = _PREFIX[providers.provider_for_tag(model or "")]
     keys = {
         "input_tokens": f"{prefix}INPUT_USD_PER_MTOK",
         "output_tokens": f"{prefix}OUTPUT_USD_PER_MTOK",
