@@ -581,17 +581,47 @@ class ParcelTest(unittest.TestCase):
     уходила ответственному за посылки, теперь спрашивает то, что перечислено в
     §2.3, и уходит в группу регионов. Старый набор вопросов приходил из первого
     ТЗ (#160), где принимающей стороной были не офис-менеджеры.
+
+    Шестое поле — город: постановщик вернула задачу 27.08.2026 с просьбой
+    «рядом с фио, номера ВУ и телефона добавить поле для выбора города». В §2.3
+    его нет, поэтому тесты ниже держат обе вещи сразу: пять полей ТЗ на месте, и
+    город стоит там, где его просили, а не отдельным экраном.
     """
 
     KEY = 'parcel_location'
 
-    def test_asks_exactly_the_five_fields_from_the_specification(self):
+    def test_asks_the_five_fields_of_the_specification_and_the_city(self):
         keys = [s['key'] for s in sc.get(self.KEY)['steps']]
         self.assertEqual(keys, ['driver_name', 'driver_licence', 'contact_number',
-                                'delivery_date', 'parcel_description'])
+                                'parcel_city', 'delivery_date', 'parcel_description'])
 
-    def test_none_of_the_five_can_be_skipped(self):
-        """§2.3: «Без заполнения всех пяти полей отправка недоступна»."""
+    def test_the_city_stands_next_to_the_driver_data(self):
+        """Возврат 27.08.2026: «рядом с фио, номера ВУ и телефона».
+
+        Три вещи разом. Город на том же экране, что данные водителя, — своего
+        экрана он не заводит: один вопрос на экране это лишнее нажатие «Далее»
+        посреди разговора с Яндексом. Спрашивается ВЫБОРОМ из справочника, как и
+        просили («поле для выбора»), а не свободной строкой: получателю город
+        служит адресом, и «Актау» с «г. Актау» для него два разных города. И он
+        обязателен — иначе поле, добавленное ради адресации, осталось бы пустым.
+        """
+        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'parcel_city')
+        self.assertEqual(step['kind'], sc.CITY)
+        self.assertFalse(step.get('optional'))
+        self.assertEqual(step['group'], 'Водитель')
+        self.assertEqual(sc.all_groups(sc.get(self.KEY)), ['Водитель', 'Посылка'])
+        answers = full(self.KEY)
+        answers.pop('parcel_city')
+        result = verdict(self.KEY, answers, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.INCOMPLETE)
+        self.assertIn('parcel_city', result['missing'])
+
+    def test_none_of_the_fields_can_be_skipped(self):
+        """§2.3: «Без заполнения всех пяти полей отправка недоступна».
+
+        Шестое поле, город, обязательно на тех же правах: его добавили в
+        обращение, чтобы группа знала адресата, — «если знаете» тут не работает.
+        """
         for key in [s['key'] for s in sc.get(self.KEY)['steps']]:
             answers = full(self.KEY)
             answers.pop(key)
@@ -599,7 +629,7 @@ class ParcelTest(unittest.TestCase):
             self.assertEqual(result['outcome'], sc.INCOMPLETE, key)
             self.assertIn(key, result['missing'], key)
 
-    def test_sends_when_the_five_are_filled(self):
+    def test_sends_when_everything_is_filled(self):
         self.assertEqual(verdict(self.KEY, full(self.KEY), has_attachment=False)['outcome'],
                          sc.READY)
 
@@ -632,10 +662,17 @@ class ParcelTest(unittest.TestCase):
         self.assertNotIn('spreadsheet', blob.lower())
 
     def test_registry_is_asked_by_all_three_identifiers(self):
-        """Телефон, номер ВУ и ФИО — три ключа, все три из тех же пяти полей."""
+        """Телефон, номер ВУ и ФИО — три ключа, все три из тех же пяти полей.
+
+        Города среди них нет намеренно: посылку в реестр заносит офис, а не
+        звонящий, и запись по тому же водителю могла лечь в соседний город.
+        Сузив поиск городом, мы спрятали бы от оператора то самое совпадение,
+        из-за которого обращение не нужно отправлять.
+        """
         self.assertEqual(sc.lookup_kind(self.KEY), sc.LOOKUP_PARCELS)
         self.assertEqual(sorted(sc.lookup_inputs(sc.LOOKUP_PARCELS)),
                          ['contact_number', 'driver_licence', 'driver_name'])
+        self.assertNotIn('parcel_city', sc.lookup_inputs(sc.LOOKUP_PARCELS))
 
     def test_a_match_stops_the_operator_but_does_not_decide_for_him(self):
         """§2.2 отменяет обращение при записи, «совпадающей по водителю/посылке».
@@ -664,18 +701,28 @@ class ParcelTest(unittest.TestCase):
 
     def test_subject_tells_the_tickets_apart(self):
         """ИИН тематика больше не спрашивает (его нет в §2.3), а «Уточнение
-        посылки» одинаково у всех — в списке обращения были бы неразличимы."""
+        посылки» одинаково у всех — в списке обращения были бы неразличимы.
+
+        Город в теме — по той же причине, по которой он есть у соседней
+        тематики: обращение адресуется офис-менеджеру города, и в списке это
+        первое, по чему его разбирают.
+        """
         subject = sc.render_subject(self.KEY, full(self.KEY, driver_name='Иванов Иван'))
         self.assertIn('Иванов Иван', subject)
+        self.assertIn(OFFICE_SNAPSHOT['city'], subject)
 
     def test_driver_data_goes_to_the_caption(self):
-        """ФИО, ВУ и телефон специалист копирует — с картинки этого не сделать."""
-        for key in ('driver_name', 'driver_licence', 'contact_number'):
+        """ФИО, ВУ, телефон и город копирует специалист — с картинки этого не сделать.
+
+        Город здесь не украшение подписи: обращение получает группа
+        офис-менеджеров ВСЕХ городов, и первым делом они смотрят именно его.
+        """
+        for key in ('driver_name', 'driver_licence', 'contact_number', 'parcel_city'):
             self.assertIn(key, sc.BODY_DATA, key)
         blocks = sc.body_blocks(self.KEY, full(self.KEY))
         data = next(b for b in blocks if b['kind'] == sc.BLOCK_DATA)
         self.assertEqual([row['label'] for row in data['rows']],
-                         ['ФИО водителя', 'Номер ВУ', 'Телефон'])
+                         ['ФИО водителя', 'Номер ВУ', 'Телефон', 'Город'])
 
 
 class OfficeStatusTest(unittest.TestCase):
