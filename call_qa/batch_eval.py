@@ -27,6 +27,7 @@ import sys
 import json
 import time
 import argparse
+import collections
 import tempfile
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -376,10 +377,12 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
     cached = media_mod._lookup(pending)
     todo = [item for item in pending
             if (cached.get((item["message_id"], item["source_hash"])) or {}).get("status") != "ready"]
-    images = sum(1 for i in pending if i["media_kind"] == "image")
-    docs = len(pending) - images
-    log(f"вложения: картинок {images}, документов {docs}; к описанию {len(todo)} "
-        f"(остальные уже расшифрованы)")
+    by_kind = collections.Counter(i["media_kind"] for i in pending)
+    # Видео перечисляется наравне с остальными: до 28.08.2026 его не читал никто,
+    # и в логе прогона его отсутствие было незаметно — «картинок X, документов Y»
+    # выглядело полным перечислением.
+    parts = ", ".join(f"{kind} {count}" for kind, count in sorted(by_kind.items()))
+    log(f"вложения: {parts or 'нет'}; к описанию {len(todo)} (остальные уже расшифрованы)")
     if todo:
         # id уже отправленных частей батча переживают обрыв: без этого повтор
         # отправил бы те же картинки вторым батчем и заплатил дважды.
