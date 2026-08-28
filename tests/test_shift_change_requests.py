@@ -278,16 +278,53 @@ class RouteGuardTests(unittest.TestCase):
         body = self._route_body('respond_shift_change_request')
         self.assertIn("_work_schedule_operator_requester()", body)
 
-    def test_scope_mirrors_the_planner_and_excludes_trainer(self):
-        """Тренер видит графики, но решать не может — уведомлять его о том,
-        чего он не сделает, значит слать шум."""
+    def _notify_scope_body(self):
         index = self.source.find("def _shift_change_scope_for_requester(")
         self.assertNotEqual(index, -1)
-        body = self.source[index:index + 2000]
+        return self.source[index:index + 2600]
+
+    def test_notify_scope_excludes_trainer(self):
+        """Тренер видит графики, но решать не может — уведомлять его о том,
+        чего он не сделает, значит слать шум."""
+        body = self._notify_scope_body()
         self.assertIn("'trainer'", body)
         self.assertIn("'none'", body)
-        self.assertIn("_is_global_admin_requester", body)
+
+    def test_notify_scope_is_not_the_visibility_perimeter(self):
+        """Уведомление адресное, а не «всем, кто видит раздел».
+
+        Первая версия зеркалила периметр видимости, и каждый глобальный админ
+        получал уведомление о КАЖДОЙ заявке в компании, а супервайзер — о
+        заявках всего отдела, включая чужих операторов.
+        """
+        body = self._notify_scope_body()
+        self.assertNotIn("_is_global_admin_requester", body)
+        self.assertNotIn("'scope': 'all'", body)
+        self.assertNotIn("_department_scope_id_for_requester", body)
+
+    def test_notify_scope_targets_direct_supervisor(self):
+        body = self._notify_scope_body()
+        self.assertIn("descriptor['supervisor_id'] = int(requester_id)", body)
+
+    def test_head_notifications_are_opt_in(self):
+        body = self._notify_scope_body()
         self.assertIn("_headed_department_ids", body)
+        self.assertIn("get_shift_change_notify_optin", body)
+
+    def test_only_department_head_can_subscribe(self):
+        """У прямого СВ выключателя нет: заявку его человека нельзя
+        пропустить по своему желанию."""
+        index = self.source.find("def _shift_change_can_watch_department(")
+        self.assertNotEqual(index, -1)
+        body = self.source[index:index + 700]
+        self.assertIn("_headed_department_ids", body)
+        self.assertIn("'trainer'", body)
+
+    def test_watch_route_is_guarded(self):
+        body = self._route_body('set_shift_change_watch')
+        self.assertIn("_resolve_work_schedule_viewer()", body)
+        self.assertIn("_shift_change_can_watch_department(", body)
+        self.assertIn("403", body)
 
 
 class NotificationSourceTests(unittest.TestCase):
@@ -308,6 +345,51 @@ class NotificationSourceTests(unittest.TestCase):
         self.assertIn("r.status = 'pending'", body)
         self.assertIn("r.operator_id <> %(user_id)s", body)
 
+    def test_side_is_chosen_by_role_not_by_scope_shape(self):
+        """Пустая граница руководителя не должна ронять его на операторскую
+        ветку — иначе он перестал бы видеть заявки вовсе."""
+        source = SOURCES_PATH.read_text(encoding="utf-8-sig")
+        index = source.find("def shift_requests(")
+        body = source[index:index + 2000]
+        self.assertIn("viewer.get('role')", body)
+        self.assertIn("== 'operator'", body)
+
+    def test_scope_clause_targets_supervisor_and_opted_in_head(self):
+        source = SOURCES_PATH.read_text(encoding="utf-8-sig")
+        index = source.find("def _shift_request_scope_clause(")
+        self.assertNotEqual(index, -1)
+        body = source[index:index + 2000]
+        self.assertIn("r.supervisor_id = %(scr_supervisor)s", body)
+        self.assertIn("op.department_id = ANY(%(scr_departments)s)", body)
+        # Без подписки главе отдела достаются только «беспризорные» заявки.
+        self.assertIn("r.supervisor_id IS NULL", body)
+        self.assertIn("head_all", body)
+        # Границы «видно всё» у уведомлений больше нет.
+        self.assertNotIn("if scope == 'all'", body)
+
+    def test_trigger_targets_are_narrow(self):
+        """Триггер колокола будит того же, кого и сводка: автора, прямого СВ и
+        подписанного главу отдела. Админов в списке быть не должно."""
+        source = DATABASE_PATH.read_text(encoding="utf-8-sig")
+        index = source.find("ELSIF TG_TABLE_NAME = 'work_shift_change_requests'")
+        self.assertNotEqual(index, -1)
+        body = source[index:index + 2200]
+        self.assertIn("NEW.operator_id", body)
+        self.assertIn("NEW.supervisor_id", body)
+        self.assertIn("shift_change_notify_optin", body)
+        self.assertIn("d.head_user_id", body)
+        # Заявка без СВ обязана дойти до главы отдела и без подписки.
+        self.assertIn("NEW.supervisor_id IS NULL", body)
+
+    def test_optin_table_is_idempotent(self):
+        source = DATABASE_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("CREATE TABLE IF NOT EXISTS shift_change_notify_optin", source)
+
+    def test_unsubscribe_deletes_the_row(self):
+        """«Не подписан» — одно состояние, и двух его записей быть не должно."""
+        method = _method_source('set_shift_change_notify_optin')
+        self.assertIn("DELETE FROM shift_change_notify_optin", method)
+
     def test_viewer_context_carries_the_scope(self):
         source = BOT_PATH.read_text(encoding="utf-8-sig")
         self.assertIn("'shift_requests': _shift_change_scope_for_requester(", source)
@@ -327,6 +409,62 @@ class NotificationSourceTests(unittest.TestCase):
         sources = SOURCES_PATH.read_text(encoding="utf-8-sig")
         mark_seen_index = sources.find("def mark_seen(")
         self.assertNotIn("shift_requests", sources[mark_seen_index:])
+
+
+class ScopeClauseBehaviourTests(unittest.TestCase):
+    """Не текст условия, а его поведение: кого оно впустит, а кого нет.
+
+    Проверка строкой поймала бы переименование, но не смену смысла — а именно
+    смысл тут и ломался: границей уведомления был периметр видимости.
+    """
+
+    def setUp(self):
+        from notifications.sources import _shift_request_scope_clause
+        self.clause = _shift_request_scope_clause
+
+    def _build(self, descriptor):
+        params = {}
+        return self.clause(descriptor, params), params
+
+    def test_unknown_descriptor_lets_nobody_through(self):
+        for descriptor in (None, {}, {'scope': 'all'}, {'scope': 'departments'}):
+            with self.subTest(descriptor=descriptor):
+                sql, _ = self._build(descriptor)
+                self.assertEqual(sql.strip(), 'AND FALSE')
+
+    def test_plain_supervisor_gets_only_his_own_people(self):
+        sql, params = self._build({'scope': 'targets', 'supervisor_id': 7,
+                                   'department_ids': [], 'head_all': False})
+        self.assertIn('r.supervisor_id = %(scr_supervisor)s', sql)
+        self.assertEqual(params['scr_supervisor'], 7)
+        # Никакого отдела: СВ не будят из-за чужих операторов.
+        self.assertNotIn('department_id', sql)
+        self.assertNotIn('scr_departments', params)
+
+    def test_head_without_subscription_gets_only_orphan_requests(self):
+        sql, params = self._build({'scope': 'targets', 'supervisor_id': 7,
+                                   'department_ids': [3], 'head_all': False})
+        self.assertIn('r.supervisor_id IS NULL', sql)
+        self.assertEqual(params['scr_departments'], [3])
+
+    def test_head_with_subscription_gets_the_whole_department(self):
+        sql, params = self._build({'scope': 'targets', 'supervisor_id': 7,
+                                   'department_ids': [3, 4], 'head_all': True})
+        self.assertIn('op.department_id = ANY(%(scr_departments)s)', sql)
+        self.assertNotIn('r.supervisor_id IS NULL', sql)
+        self.assertEqual(params['scr_departments'], [3, 4])
+
+    def test_conditions_are_joined_by_or(self):
+        """Глава отдела, который ещё и чей-то прямой СВ, обязан получать оба
+        потока, а не выбирать один."""
+        sql, _ = self._build({'scope': 'targets', 'supervisor_id': 7,
+                              'department_ids': [3], 'head_all': True})
+        self.assertIn(' OR ', sql)
+
+    def test_empty_targets_let_nobody_through(self):
+        sql, _ = self._build({'scope': 'targets', 'supervisor_id': None,
+                              'department_ids': [], 'head_all': True})
+        self.assertEqual(sql.strip(), 'AND FALSE')
 
 
 class FrontendWiringTests(unittest.TestCase):

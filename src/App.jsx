@@ -36,7 +36,7 @@ import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/sched
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSegmented } from './components/ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSegmented, IosToggle } from './components/ui/ios';
 // Только сам пикер: minutesToTime/timeToMinutes у модуля свои, а в App.jsx
 // функции с такими именами уже есть — импорт «звёздочкой» их бы перекрыл.
 import { IosTimePicker } from './components/ui/TimePicker';
@@ -14414,6 +14414,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [reviewRespondingId, setReviewRespondingId] = useState(null);
             const [reviewStatusFilter, setReviewStatusFilter] = useState('pending');
             const [reviewComments, setReviewComments] = useState({});
+            // Подписка главы отдела на уведомления о заявках его отдела.
+            // Прямому СВ уведомления приходят всегда, тумблера у него нет.
+            const [reviewCanWatch, setReviewCanWatch] = useState(false);
+            const [reviewWatching, setReviewWatching] = useState(false);
+            const [reviewWatchSaving, setReviewWatchSaving] = useState(false);
 
             const swapDraftColorPalette = useMemo(() => ([
                 {
@@ -23056,6 +23061,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setReviewRequests(Array.isArray(payload?.requests) ? payload.requests : []);
                     setReviewPendingCount(Number(payload?.pendingCount) || 0);
                     setReviewCanReview(Boolean(payload?.canReview));
+                    setReviewCanWatch(Boolean(payload?.canWatch));
+                    setReviewWatching(Boolean(payload?.watching));
                 } catch (error) {
                     if (!silent) setReviewError(error?.message || 'Не удалось загрузить запросы');
                     console.warn('Error loading shift change review queue:', error);
@@ -23123,6 +23130,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setReviewRespondingId(null);
                 }
             }, [reviewRespondingId, reviewComments, loadReviewRequests, fetchPlannerSchedulesByMonths, plannerPreloadMonthKeys]);
+
+            const toggleReviewWatch = useCallback(async (next) => {
+                if (reviewWatchSaving) return;
+                setReviewWatchSaving(true);
+                // Оптимистично: значение булево, ответ сервера с ним совпадёт.
+                setReviewWatching(next);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/shift_change/watch`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() },
+                        body: JSON.stringify({ enabled: next })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                    setReviewWatching(Boolean(data?.watching));
+                } catch (error) {
+                    setReviewWatching(!next);
+                    setReviewError(error?.message || 'Не удалось изменить подписку');
+                } finally {
+                    setReviewWatchSaving(false);
+                }
+            }, [reviewWatchSaving]);
 
             const reviewVisibleRequests = useMemo(() => (
                 reviewStatusFilter === 'pending'
@@ -33491,6 +33521,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </button>
                             </div>
                         </div>
+
+                        {/* Тумблер только у главы отдела: прямому СВ заявки его
+                            людей приходят всегда, и выключателя у них нет —
+                            иначе заявку можно было бы не заметить совсем. */}
+                        {reviewCanWatch && (
+                            <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
+                                <div className="min-w-0 text-[12.5px] leading-snug text-slate-600">
+                                    Уведомлять меня о заявках отдела
+                                    <span className="ml-1.5 inline-flex align-middle">
+                                        <IosHint
+                                            align="left"
+                                            text="Без подписки уведомления о заявке приходят только прямому супервайзеру оператора — это его человек и его решение. С подпиской они будут приходить и вам, по всему отделу. Заявки оператора, у которого супервайзера нет, приходят вам в любом случае: иначе о них не узнает никто. Сама очередь «Запросы» видна вам всегда, независимо от подписки."
+                                        />
+                                    </span>
+                                </div>
+                                <IosToggle
+                                    checked={reviewWatching}
+                                    onChange={toggleReviewWatch}
+                                    disabled={reviewWatchSaving}
+                                />
+                            </div>
+                        )}
 
                         {reviewError && (
                             <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">

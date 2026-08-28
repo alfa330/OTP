@@ -2283,36 +2283,56 @@ def _checkpoint_scope_for_requester(requester_id, requester):
     return {'scope': 'self', 'user_id': requester_id}
 
 
+def _shift_change_can_watch_department(requester_id, requester):
+    """Может ли человек подписаться на заявки отдела. Это ровно главы отделов."""
+    if _normalize_user_role(requester[3] if requester else None) == 'trainer':
+        return False
+    return bool(_headed_department_ids(requester_id))
+
+
 def _shift_change_scope_for_requester(requester_id, requester):
-    """Описание границы «чьи заявки на изменение смены видит этот человек».
+    """Кого БУДИТЬ по заявке на изменение смены.
 
-    Зеркалит _filter_operators_for_requester_scope — тот же периметр, по
-    которому раздел «Графики работы» решает, чьи смены человек вообще видит.
-    Описанием, а не SQL: условие нужно колоколу с именованными параметрами
-    (см. notifications.sources.shift_requests), а сам список очереди собирается
-    прогоном id через _filter_operators_for_requester_scope. Два рукописных
-    условия разъехались бы молча.
+    Это НЕ то же самое, что «кто видит очередь». Разобрать заявку вправе любой
+    управленец отдела — очередь и её счётчик в «Графиках работы» остаются
+    доступны всем им, и границу там считает _filter_operators_for_requester_scope.
+    А вот уведомление адресное:
 
-    Тренер здесь ОТДЕЛЬНО получает 'none', хотя графики он видит: решать по
-    заявкам ему нельзя (мутации идут через _resolve_management_requester), а
-    уведомление о том, чего не можешь сделать, — это ровно тот шум, ради
-    отсутствия которого раздел и делался.
+      прямой СВ оператора — всегда: это его человек и его решение;
+      глава отдела        — только если сам включил подписку;
+      глава отдела        — ещё и когда у оператора нет СВ вовсе, иначе о
+                            заявке не узнает никто;
+      администраторы      — никогда.
+
+    Раньше здесь стояло зеркало периметра видимости, и получалось, что каждый
+    глобальный админ получал уведомление о КАЖДОЙ заявке в компании, а СВ — о
+    заявках всего отдела, включая чужих операторов. Уведомление, которое нельзя
+    не получить и не по твоим людям, перестают читать целиком.
+
+    Тренер не получает ничего и здесь: решать по заявкам ему нельзя, а звать
+    его к тому, чего он не сделает, — чистый шум.
     """
     role = _normalize_user_role(requester[3] if requester else None)
-    if _is_global_admin_requester(role, requester_id):
-        return {'scope': 'all'}
-    headed_dept_ids = _headed_department_ids(requester_id)
-    if headed_dept_ids:
-        return {'scope': 'departments', 'department_ids': sorted(headed_dept_ids)}
     if role == 'trainer':
         return {'scope': 'none'}
-    if _is_supervisor_role(role):
-        department_id = _department_scope_id_for_requester(requester_id)
-        if department_id is None:
-            # Тот же фолбэк, что и в планировщике: у СВ без отдела границы нет.
-            return {'scope': 'all'}
-        return {'scope': 'departments', 'department_ids': [department_id]}
-    return {'scope': 'self', 'user_id': requester_id}
+
+    descriptor = {'scope': 'targets', 'supervisor_id': None,
+                  'department_ids': [], 'head_all': False}
+
+    # Прямой СВ: заявка носит снимок руководителя на момент подачи, по нему и
+    # адресуем. Роль тут не проверяем — важно быть СВ ЭТОГО оператора, а не
+    # иметь роль вообще.
+    descriptor['supervisor_id'] = int(requester_id)
+
+    headed_dept_ids = _headed_department_ids(requester_id)
+    if headed_dept_ids:
+        descriptor['department_ids'] = sorted(headed_dept_ids)
+        try:
+            descriptor['head_all'] = bool(db.get_shift_change_notify_optin(requester_id))
+        except Exception:
+            logging.exception('Не удалось прочитать подписку на заявки по сменам')
+            descriptor['head_all'] = False
+    return descriptor
 
 
 def _attach_checkpoints_to_evaluations(evaluations, requester_id, requester):
@@ -40306,12 +40326,45 @@ def review_shift_change_requests():
             or _is_supervisor_role(user_data[3])
             or _headed_department_id(requester_id) is not None
         )
+        # Подписка на уведомления. Тумблер показываем только тому, кому есть на
+        # что подписываться: прямому СВ уведомления приходят и так, а админу
+        # без отдела подписываться не на что.
+        payload['canWatch'] = _shift_change_can_watch_department(requester_id, user_data)
+        payload['watching'] = (
+            db.get_shift_change_notify_optin(requester_id) if payload['canWatch'] else False
+        )
         return jsonify(payload), 200
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logging.error(f"Error listing shift change requests for review: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/work_schedules/shift_change/watch', methods=['POST'])
+@require_api_key
+def set_shift_change_watch():
+    """Подписка главы отдела на уведомления о заявках: {enabled: true|false}.
+
+    Только глава отдела: прямому СВ уведомления приходят всегда и отключить их
+    нельзя — заявка его человека не должна остаться незамеченной.
+    """
+    try:
+        requester_id, user_data, auth_error = _resolve_work_schedule_viewer()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        if not _shift_change_can_watch_department(requester_id, user_data):
+            return jsonify({"error": "Forbidden"}), 403
+
+        data = request.get_json(silent=True) or {}
+        enabled = bool(data.get('enabled'))
+        return jsonify({
+            "watching": db.set_shift_change_notify_optin(requester_id, enabled)
+        }), 200
+    except Exception as e:
+        logging.error(f"Error switching shift change watch: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

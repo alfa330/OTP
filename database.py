@@ -3301,6 +3301,23 @@ class Database:
                         CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled'))
                 );
             """)
+            # Подписка главы отдела на уведомления о заявках по сменам.
+            #
+            # Уведомление о заявке уходит ПРЯМОМУ супервайзеру оператора всегда —
+            # это его люди и его решение. Глава отдела получает их только по
+            # своей воле: у отдела десятки операторов, и поток чужих заявок
+            # превратил бы колокол в ленту, на которую перестают смотреть.
+            #
+            # Строки заводятся только для тех, кто подписался: отсутствие строки
+            # и есть «не подписан». Обратной подписки (замолчать) у супервайзера
+            # нет намеренно — иначе заявку можно было бы не заметить совсем.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS shift_change_notify_optin (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             # Special statuses by period (vacation/sick leave/unpaid leave/dismissal)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operator_schedule_status_periods (
@@ -6065,14 +6082,29 @@ class Database:
                         END IF;
                     END IF;
                 ELSIF TG_TABLE_NAME = 'work_shift_change_requests' THEN
-                    -- Заявка на изменение смены: будим руководителя-снимок (у
-                    -- него заявка встаёт в очередь «Запросы») и самого автора
-                    -- (ему приходит решение). Периметр согласования шире одного
-                    -- СВ — заявку разберёт любой управленец отдела, — но тычок
-                    -- адресный: вычислять весь состав отдела в PL/pgSQL значило
-                    -- бы продублировать здесь _filter_operators_for_requester_scope.
-                    -- Остальные увидят заявку при обновлении по фокусу.
+                    -- Кого будим по заявке на изменение смены. Список узкий
+                    -- НАМЕРЕННО: разобрать заявку вправе любой управленец
+                    -- отдела, но уведомлять всех подряд — значит превратить
+                    -- колокол в ленту, на которую перестают смотреть.
+                    --
+                    --   автор            — ему приходит решение;
+                    --   прямой СВ        — это его человек и его решение;
+                    --   глава отдела     — только если сам подписался;
+                    --   глава отдела     — ещё и когда у оператора СВ нет вовсе,
+                    --                      иначе заявку не увидит никто.
+                    --
+                    -- Администраторы сюда не попадают: очередь с её счётчиком
+                    -- никуда не девается, а звать их по каждой смене нечем.
                     targets := ARRAY[NEW.operator_id, NEW.supervisor_id];
+                    targets := targets || ARRAY(
+                        SELECT d.head_user_id
+                        FROM departments d
+                        LEFT JOIN shift_change_notify_optin o
+                               ON o.user_id = d.head_user_id AND o.enabled
+                        WHERE d.id = NEW.department_id
+                          AND d.head_user_id IS NOT NULL
+                          AND (o.user_id IS NOT NULL OR NEW.supervisor_id IS NULL)
+                    );
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.supervisor_id];
                     END IF;
@@ -44425,6 +44457,38 @@ class Database:
                 (operator_id,)
             )
             return cursor.rowcount or 0
+
+    def get_shift_change_notify_optin(self, user_id):
+        """Подписан ли глава отдела на уведомления о заявках. Нет строки — нет подписки."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT enabled FROM shift_change_notify_optin WHERE user_id = %s",
+                (int(user_id),)
+            )
+            row = cursor.fetchone()
+            return bool(row[0]) if row else False
+
+    def set_shift_change_notify_optin(self, user_id, enabled):
+        """Включить/выключить подписку. Выключение удаляет строку, а не хранит
+        FALSE: «не подписан» — одно состояние, и двух его записей быть не должно."""
+        user_id = int(user_id)
+        with self._get_cursor() as cursor:
+            if enabled:
+                cursor.execute(
+                    """
+                    INSERT INTO shift_change_notify_optin (user_id, enabled)
+                    VALUES (%s, TRUE)
+                    ON CONFLICT (user_id) DO UPDATE
+                        SET enabled = TRUE, updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (user_id,)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM shift_change_notify_optin WHERE user_id = %s",
+                    (user_id,)
+                )
+            return bool(enabled)
 
     def get_shift_change_request_operator(self, request_id):
         """Чью смену просят изменить. Нужен роуту, чтобы проверить периметр

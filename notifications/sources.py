@@ -620,22 +620,38 @@ _SHIFT_REQUEST_DECISION_LABELS = {
 
 
 def _shift_request_scope_clause(descriptor, params):
-    """SQL-условие «чьи заявки видит руководитель» + параметры в params.
+    """SQL-условие «о чьих заявках будить этого руководителя» + параметры в params.
 
-    Описание границы приходит из bot_schedule2._shift_change_scope_for_requester —
-    там же, где оно посчитано для самого раздела. Здесь только перевод в SQL.
+    Описание границы приходит из bot_schedule2._shift_change_scope_for_requester.
+    Здесь только перевод в SQL — правило живёт в одном месте.
+
+    Условий два, и они складываются через OR: свои люди (я их прямой СВ) и
+    отдел, который я возглавляю. Второе включается либо подпиской, либо тем,
+    что у оператора вообще нет СВ, — иначе такая заявка осталась бы без адресата.
     """
     descriptor = descriptor or {}
-    scope = str(descriptor.get('scope') or 'none')
-    if scope == 'all':
-        return ''
-    if scope == 'departments':
-        ids = [int(value) for value in (descriptor.get('department_ids') or [])]
-        if not ids:
-            return ' AND FALSE'
+    if str(descriptor.get('scope') or 'none') != 'targets':
+        return ' AND FALSE'
+
+    parts = []
+    supervisor_id = descriptor.get('supervisor_id')
+    if supervisor_id is not None:
+        params['scr_supervisor'] = int(supervisor_id)
+        parts.append('r.supervisor_id = %(scr_supervisor)s')
+
+    ids = [int(value) for value in (descriptor.get('department_ids') or [])]
+    if ids:
         params['scr_departments'] = ids
-        return ' AND op.department_id = ANY(%(scr_departments)s)'
-    return ' AND FALSE'
+        head_condition = (
+            '' if descriptor.get('head_all') else ' AND r.supervisor_id IS NULL'
+        )
+        # Склейка, а не %-форматирование: в строке живут плейсхолдеры psycopg2
+        # вида %(scr_departments)s, и оператор % принял бы их за свои.
+        parts.append('(op.department_id = ANY(%(scr_departments)s)' + head_condition + ')')
+
+    if not parts:
+        return ' AND FALSE'
+    return ' AND (' + ' OR '.join(parts) + ')'
 
 
 def shift_requests(cursor, viewer, limit):
@@ -656,10 +672,14 @@ def shift_requests(cursor, viewer, limit):
     горящий срок.
     """
     scope = viewer.get('shift_requests') or {}
-    scope_kind = str(scope.get('scope') or 'none')
     params = {'user_id': viewer['user_id'], 'limit': limit}
 
-    if scope_kind in ('none', 'self'):
+    # Сторону выбираем по РОЛИ, а не по описанию границы: заявку подаёт только
+    # оператор, значит «своё решение» показывается ему, а очередь — всем
+    # остальным. Раньше это выводилось из формы дескриптора, и стоило границе
+    # руководителя стать пустой, как он молча проваливался на операторскую
+    # ветку и переставал видеть заявки вовсе.
+    if str(viewer.get('role') or '') == 'operator':
         cursor.execute(
             """
             SELECT r.id, r.status, r.request_kind, r.shift_date, r.reviewed_at,
