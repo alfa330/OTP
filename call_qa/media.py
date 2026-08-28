@@ -39,20 +39,25 @@ from psycopg2.extras import Json
 
 from . import config
 from . import llm
+from . import providers
 from .asr import soniox
 from .evaluation.fingerprint import content_hash
 
 # Версия промпта/разметки описания. Меняется вместе со смыслом результата —
 # входит в config_hash, поэтому старые описания остаются, но не используются.
-ANNOTATOR_VERSION = "wz-media-v1"
+ANNOTATOR_VERSION = "wz-media-v2"   # v2: видео читается, провайдер описания в config_hash
 
 _IMAGE_SCHEMA = {
     "type": "object",
     "properties": {
         "description": {"type": "string"},
         "visible_text": {"type": "string"},
+        # «video» добавлен вместе с чтением роликов: без него модель всё равно
+        # возвращала это слово (схема у Z.ai не enforced), то есть перечисление
+        # молча расходилось с реальностью.
         "kind": {"type": "string",
-                 "enum": ["document", "screenshot", "photo", "receipt", "other", "unreadable"]},
+                 "enum": ["document", "screenshot", "photo", "receipt", "video",
+                          "other", "unreadable"]},
     },
     "required": ["description", "visible_text", "kind"],
     "additionalProperties": False,
@@ -94,6 +99,34 @@ _DOCUMENT_SYSTEM = """Ты помощник, который описывает �
    kind='unreadable' и честно скажи об этом. Не додумывай содержание.
 """
 
+# Поля перечислены так же, как в промптах картинки и документа, и это не стиль.
+# У Claude форму ответа держала json_schema; Z.ai строгую схему не принимает, и
+# единственное, что удерживает контракт, — этот текст. Первая версия промпта была
+# написана прозой, и модель вернула связный рассказ вместо полей: расшифровка
+# сохранилась как «изображение без описания», молча и без ошибки.
+_VIDEO_SYSTEM = """Ты помощник, который описывает видео из рабочей переписки службы поддержки.
+
+Опиши ролик ФАКТИЧЕСКИ и коротко, по-русски. Твоя задача — заменить видео текстом
+так, чтобы проверяющий понял, что именно прислали, не открывая запись.
+Верни JSON с полями description, visible_text и kind.
+
+Правила:
+1. description — 1-4 предложения: что происходит в ролике от начала до конца.
+   Смотри его целиком, а не первый кадр: важное часто в середине и в конце.
+   Если видно повреждение, неисправность или место — скажи, что именно и где.
+2. visible_text — весь читаемый текст из кадров дословно (госномера, показания
+   приборов, номера заказов, суммы, даты, названия на вывесках). Если текста
+   нет — пустая строка. Оборви на ~1500 символах: ответ обязан помещаться
+   целиком, обрезанный ответ считается неудачей.
+3. kind — тип вложения.
+4. Не оценивай работу оператора, не давай советов, не делай выводов о качестве
+   обслуживания. Только содержание ролика.
+5. Речь в ролике ты не слышишь. Не выдумывай реплики и не пересказывай их —
+   пиши только то, что ВИДНО.
+6. Если ролик нечитаем (темнота, сильная тряска, пустые кадры) —
+   kind='unreadable' и честно скажи об этом. Не додумывай содержание.
+"""
+
 _MEDIA_UNAVAILABLE = "не удалось получить вложение"
 
 
@@ -106,18 +139,35 @@ def source_identity(*, content_uri: str, media_type: str) -> str:
                          "media_type": str(media_type or "")})
 
 
+def vision_provider() -> str:
+    """Кто читает вложения — выводится из имени модели, отдельного флага нет.
+
+    Раньше здесь стояла строка «anthropic», и она попадала в config_hash, то есть
+    в идентичность расшифровки. Со сменой модели строка обязана меняться вместе с
+    ней, иначе описания, сделанные разными провайдерами, склеились бы в кэше.
+    """
+    return providers.provider_for(config.CLAUDE_MODEL_VISION)
+
+
 def image_config() -> dict:
-    return {"annotator": ANNOTATOR_VERSION, "provider": "anthropic",
+    return {"annotator": ANNOTATOR_VERSION, "provider": vision_provider(),
             "model": config.CLAUDE_MODEL_VISION, "effort": config.CLAUDE_VISION_EFFORT,
             "max_tokens": config.VISION_MAX_TOKENS, "schema": _IMAGE_SCHEMA,
             "system": _IMAGE_SYSTEM, "thinking": "disabled"}
 
 
 def document_config() -> dict:
-    return {"annotator": ANNOTATOR_VERSION, "provider": "anthropic",
+    return {"annotator": ANNOTATOR_VERSION, "provider": vision_provider(),
             "model": config.CLAUDE_MODEL_VISION, "effort": config.CLAUDE_VISION_EFFORT,
             "max_tokens": config.DOCUMENT_MAX_TOKENS, "schema": _IMAGE_SCHEMA,
             "system": _DOCUMENT_SYSTEM, "thinking": "disabled"}
+
+
+def video_config() -> dict:
+    return {"annotator": ANNOTATOR_VERSION, "provider": vision_provider(),
+            "model": config.CLAUDE_MODEL_VISION, "effort": config.CLAUDE_VISION_EFFORT,
+            "max_tokens": config.VIDEO_MAX_TOKENS, "schema": _IMAGE_SCHEMA,
+            "system": _VIDEO_SYSTEM, "thinking": "disabled"}
 
 
 def audio_config() -> dict:
@@ -168,8 +218,16 @@ def _kind_of(media_type: str, content_uri: str | None = None) -> str:
 
 
 def annotatable(media_type: str, content_uri: str | None = None) -> bool:
-    """Расшифровываем только то, что реально можем прочитать."""
-    return _kind_of(media_type, content_uri) in ("image", "audio", "document")
+    """Расшифровываем только то, что реально можем прочитать.
+
+    Видео появилось в этом списке 28.08.2026 вместе с переходом на GLM-5.3-Flash:
+    Claude его не читал вовсе, и сообщение с роликом попадало в транскрипт эпизода
+    пустым — оценщик видел «[видео]» и молча считал, что там ничего нет.
+    """
+    kinds = ["image", "audio", "document"]
+    if providers.provider_for(config.CLAUDE_MODEL_VISION) == providers.ZAI:
+        kinds.append("video")
+    return _kind_of(media_type, content_uri) in kinds
 
 
 # ── хранилище ────────────────────────────────────────────────────────────────
@@ -226,7 +284,16 @@ def _annotation_cost(result: dict, *, batch: bool) -> float | None:
     usage = result.get("usage") or {}
     if not usage:
         return None
-    prefix = "CLAUDE_BATCH_" if batch else "CLAUDE_"
+    # Префикс тарифа — по фактическому провайдеру описания. Batch-ставки бывают
+    # только у Anthropic: у Z.ai пакетного режима для этой модели нет вовсе, и
+    # посчитать её вдвое дешевле значило бы занизить счёт.
+    provider = vision_provider()
+    if provider == providers.ZAI:
+        prefix = "ZAI_"
+    elif provider == providers.VERTEX:
+        prefix = "GEMINI_"
+    else:
+        prefix = "CLAUDE_BATCH_" if batch else "CLAUDE_"
     prices = {}
     for key, env_name in (("input_tokens", f"{prefix}INPUT_USD_PER_MTOK"),
                           ("output_tokens", f"{prefix}OUTPUT_USD_PER_MTOK")):
@@ -299,6 +366,12 @@ def _download(url: str, *, limit: int | None = None) -> tuple[bytes, str]:
         return b"".join(chunks), (r.headers.get("content-type") or "").split(";")[0].strip()
 
 
+# Z.ai документирует только jpg/png/jpeg и предел 5 МБ на картинку (совпадает с
+# нашим MEDIA_MAX_BYTES) при 6000×6000 пикселей. WebP и GIF в контракте не
+# заявлены, но проверены запросами и проходят — оставляем, потому что Wazzup их
+# присылает, а отказ до отправки гарантированно потерял бы вложение.
+# Токены картинки у GLM: round(W/28)×round(H/28)+2, то есть цену задаёт
+# разрешение, а не вес файла.
 _IMAGE_MEDIA_TYPES = {
     "image/jpeg": "image/jpeg", "image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg",
     "image/png": "image/png", "image/gif": "image/gif", "image/webp": "image/webp",
@@ -340,6 +413,11 @@ def _vision_thinking() -> dict | None:
     везде и лишь чуть дороже)."""
     model = str(config.CLAUDE_MODEL_VISION or "").lower()
     effort = str(config.CLAUDE_VISION_EFFORT or "").lower()
+    if providers.provider_for(model) != providers.ANTHROPIC:
+        # У Gemini это бюджет токенов, у GLM — уровень рассуждений, и словарь
+        # {'type':'disabled'} не значит ни того, ни другого. Пусть решает effort:
+        # у Z.ai он и есть low/high/max, а выключить рассуждение там нельзя вовсе.
+        return None
     if "fable" in model or "mythos" in model:
         return None
     if "opus-5" in model and effort in ("xhigh", "max"):
@@ -378,6 +456,43 @@ def document_request_body(pdf_b64: str) -> dict:
         thinking=_vision_thinking())
 
 
+def video_request_body(video_b64: str, media_type: str) -> dict:
+    """Тело запроса описания видео.
+
+    Отдельный тип блока не прихоть: у Z.ai видео идёт через `video_url`, а на
+    `image_url` отвечает 400. Перевод в форму провайдера — в call_qa/providers.py,
+    здесь остаётся тот же контракт content-блоков, что у картинок и документов.
+
+    Одно вложение — один запрос, и это не только про удобство кэша: Z.ai прямо
+    запрещает смешивать в одном запросе файл, видео и изображение.
+
+    Base64 для видео в документации не описан вовсе (там сказано «Video URL
+    address»), но проверен запросом 28.08.2026: data-URL принимается, ролик
+    прочитан покадрово.
+    """
+    return llm.build_body(
+        model=config.CLAUDE_MODEL_VISION, system=_VIDEO_SYSTEM,
+        user=[{"type": "video",
+               "source": {"type": "base64", "media_type": media_type, "data": video_b64}},
+              {"type": "text", "text": "Опиши это видео из рабочей переписки."}],
+        schema=_IMAGE_SCHEMA, max_tokens=config.VIDEO_MAX_TOKENS,
+        cache_system=False, effort=config.CLAUDE_VISION_EFFORT,
+        thinking=_vision_thinking())
+
+
+def annotation_is_empty(parsed: dict) -> bool:
+    """Ответ без содержания — это НЕУДАЧА, а не описание «ничего».
+
+    У Anthropic форму держала json_schema, и пустых полей быть не могло. Z.ai
+    строгую схему не принимает: там контракт держит только текст промпта, и
+    модель может ответить связной прозой мимо полей. Без этой проверки такой
+    ответ сохранялся бы в кэш строкой «изображение без описания» — навсегда и
+    без единой ошибки в логе.
+    """
+    p = parsed or {}
+    return not str(p.get("description") or "").strip() and not str(p.get("visible_text") or "").strip()
+
+
 def render_image_annotation(parsed: dict) -> str:
     """Структурный ответ модели → одна строка для транскрипта."""
     desc = str((parsed or {}).get("description") or "").strip()
@@ -407,6 +522,10 @@ def _annotate_image(item: dict) -> dict:
                 "error": f"ответ модели обрезан (max_tokens={config.VISION_MAX_TOKENS})",
                 "source_bytes": len(raw), "usage": meta.get("usage") or {},
                 "latency_ms": round((time.perf_counter() - started) * 1000)}
+    if annotation_is_empty(parsed):
+        return {"status": "failed", "error": "модель вернула ответ без описания",
+                "source_bytes": len(raw), "usage": meta.get("usage") or {},
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
     return {"status": "ready", "annotation": render_image_annotation(parsed),
             "source_bytes": len(raw), "usage": meta.get("usage") or {},
             "latency_ms": round((time.perf_counter() - started) * 1000)}
@@ -428,6 +547,10 @@ def _annotate_document(item: dict) -> dict:
     if str(meta.get("stop_reason") or "") == "max_tokens":
         return {"status": "failed",
                 "error": f"ответ модели обрезан (max_tokens={config.DOCUMENT_MAX_TOKENS})",
+                "source_bytes": len(raw), "usage": meta.get("usage") or {},
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+    if annotation_is_empty(parsed):
+        return {"status": "failed", "error": "модель вернула ответ без описания",
                 "source_bytes": len(raw), "usage": meta.get("usage") or {},
                 "latency_ms": round((time.perf_counter() - started) * 1000)}
     return {"status": "ready", "annotation": render_image_annotation(parsed),
@@ -461,12 +584,53 @@ def _annotate_audio(item: dict) -> dict:
             "latency_ms": round((time.perf_counter() - started) * 1000)}
 
 
+# Документация Z.ai называет три контейнера: mp4, mkv, mov. Остальные оставлены
+# в таблице намеренно: Wazzup присылает и webm, и 3gp, и отказать им заранее —
+# значит потерять ролик, который, возможно, прочитался бы. Если не прочитается,
+# это придёт понятной ошибкой провайдера и осядет в wz_media_annotations, а не
+# исчезнет молча, как исчезало ВСЁ видео до 28.08.2026.
+_VIDEO_MEDIA_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime",
+                      ".webm": "video/webm", ".mkv": "video/x-matroska",
+                      ".3gp": "video/3gpp", ".avi": "video/x-msvideo"}
+
+
+def _video_media_type(content_type: str, url: str) -> str:
+    mt = (content_type or "").split(";")[0].strip().lower()
+    if mt.startswith("video/"):
+        return mt
+    return _VIDEO_MEDIA_TYPES.get(_uri_extension(url), "video/mp4")
+
+
+def _annotate_video(item: dict) -> dict:
+    import base64
+    started = time.perf_counter()
+    raw, content_type = _download(item["content_uri"], limit=config.MEDIA_VIDEO_MAX_BYTES)
+    media_type = _video_media_type(content_type, item["content_uri"])
+    body = video_request_body(base64.standard_b64encode(raw).decode("ascii"), media_type)
+    parsed = llm.post_body(body, timeout=300.0, include_meta=True)
+    meta = parsed.pop("_llm_meta", None) or {}
+    if str(meta.get("stop_reason") or "") in ("max_tokens", "length"):
+        return {"status": "failed",
+                "error": f"ответ модели обрезан (max_tokens={config.VIDEO_MAX_TOKENS})",
+                "source_bytes": len(raw), "usage": meta.get("usage") or {},
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+    if annotation_is_empty(parsed):
+        return {"status": "failed", "error": "модель вернула ответ без описания",
+                "source_bytes": len(raw), "usage": meta.get("usage") or {},
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+    return {"status": "ready", "annotation": render_image_annotation(parsed),
+            "source_bytes": len(raw), "usage": meta.get("usage") or {},
+            "latency_ms": round((time.perf_counter() - started) * 1000)}
+
+
 def _annotate_one(item: dict) -> dict:
     try:
         if item["media_kind"] == "image":
             return _annotate_image(item)
         if item["media_kind"] == "document":
             return _annotate_document(item)
+        if item["media_kind"] == "video":
+            return _annotate_video(item)
         return _annotate_audio(item)
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else 0
@@ -490,13 +654,13 @@ def plan(messages: list[dict]) -> list[dict]:
             continue
         kind = _kind_of(media_type, uri)
         cfg = {"image": image_config, "document": document_config,
-               "audio": audio_config}[kind]()
+               "video": video_config, "audio": audio_config}[kind]()
         items.append({
             "message_id": str(m.get("message_id")),
             "channel_id": m.get("channel_id"), "chat_id": m.get("chat_id"),
             "media_kind": kind, "content_uri": uri,
             "source_hash": source_identity(content_uri=uri, media_type=media_type),
-            "provider": "soniox" if kind == "audio" else "anthropic",
+            "provider": "soniox" if kind == "audio" else vision_provider(),
             "model": config.SONIOX_MODEL if kind == "audio" else config.CLAUDE_MODEL_VISION,
             "config_hash": content_hash(cfg),
         })
@@ -602,9 +766,10 @@ def batch_media_requests(items: list[dict]) -> tuple[list[dict], dict]:
     """
     import base64
     requests_out, by_id = [], {}
+    prefixes = {"document": "doc", "video": "vid"}
     for idx, item in enumerate(items):
         kind = item["media_kind"]
-        custom_id = f"{'doc' if kind == 'document' else 'img'}-{idx}-{item['source_hash'][:16]}"
+        custom_id = f"{prefixes.get(kind, 'img')}-{idx}-{item['source_hash'][:16]}"
         try:
             if kind == "document":
                 raw, content_type = _download(item["content_uri"],
@@ -612,6 +777,10 @@ def batch_media_requests(items: list[dict]) -> tuple[list[dict], dict]:
                 if not raw.startswith(b"%PDF") and "pdf" not in (content_type or "").lower():
                     raise ValueError(f"файл не PDF ({content_type or '?'})")
                 media_type = "application/pdf"
+            elif kind == "video":
+                raw, content_type = _download(item["content_uri"],
+                                              limit=config.MEDIA_VIDEO_MAX_BYTES)
+                media_type = _video_media_type(content_type, item["content_uri"])
             else:
                 raw, content_type = _download(item["content_uri"])
                 media_type = _image_media_type(content_type, item["content_uri"])
@@ -627,8 +796,12 @@ def batch_media_requests(items: list[dict]) -> tuple[list[dict], dict]:
             by_id[custom_id] = item
             continue
         encoded = base64.standard_b64encode(raw).decode("ascii")
-        body = (document_request_body(encoded) if kind == "document"
-                else image_request_body(encoded, media_type))
+        if kind == "document":
+            body = document_request_body(encoded)
+        elif kind == "video":
+            body = video_request_body(encoded, media_type)
+        else:
+            body = image_request_body(encoded, media_type)
         item = dict(item, _source_bytes=len(raw))
         by_id[custom_id] = item
         requests_out.append({"custom_id": custom_id, "params": body})
@@ -692,10 +865,15 @@ def _read_batch_results(info: dict, batch_id: str, headers: dict,
                                   "usage": message.get("usage") or {}}
                     else:
                         parsed = llm.parse_message(message)
-                        stored = {"status": "ready",
-                                  "annotation": render_image_annotation(parsed),
-                                  "source_bytes": item.get("_source_bytes"),
-                                  "usage": message.get("usage") or {}}
+                        if annotation_is_empty(parsed):
+                            stored = {"status": "failed",
+                                      "error": "модель вернула ответ без описания",
+                                      "usage": message.get("usage") or {}}
+                        else:
+                            stored = {"status": "ready",
+                                      "annotation": render_image_annotation(parsed),
+                                      "source_bytes": item.get("_source_bytes"),
+                                      "usage": message.get("usage") or {}}
                 except Exception as exc:
                     stored = {"status": "failed",
                               "error": f"{type(exc).__name__}: {exc}"[:500]}
@@ -707,6 +885,71 @@ def _read_batch_results(info: dict, batch_id: str, headers: dict,
             out[item["message_id"]] = {"status": stored["status"],
                                        "annotation": stored.get("annotation"),
                                        "error": stored.get("error")}
+
+
+def _annotate_media_locally(items: list[dict], log) -> dict[str, dict]:
+    """Массовое описание вложений без Batch API — для провайдеров, у которых его нет.
+
+    У Z.ai пакетного режима для glm-5.3-flash нет вовсе (проверено: /files с
+    purpose=batch отвечает 400 со списком, где самая свежая модель glm-5.1), и
+    ждать его нечего. Скидки в 50 % здесь тоже нет — но описание картинки у GLM
+    стоит примерно в сто раз меньше, чем стоило у Claude, так что потеря скидки
+    не меняет порядок величины.
+
+    Форма результата совпадает с пакетной до последнего ключа: остальной конвейер
+    (кэш wz_media_annotations, манифест эпизода, транскрипт) не знает разницы.
+    """
+    out: dict[str, dict] = {}
+    requests_out, by_id = batch_media_requests(items)
+    with _store_session() as store:
+        for custom_id, item in by_id.items():
+            if item.get("_error"):
+                store(item, item["_error"])
+                out[item["message_id"]] = dict(item["_error"], annotation=None)
+    if not requests_out:
+        return out
+    workers = max(1, config.MEDIA_LOCAL_WORKERS)
+    log(f"wz media: пакетного API у провайдера нет — считаю сам: "
+        f"{len(requests_out)} вложений, модель {config.CLAUDE_MODEL_VISION}, потоков {workers}")
+
+    def one(request):
+        item = by_id[request["custom_id"]]
+        try:
+            parsed = llm.post_body(request["params"], timeout=config.MEDIA_LOCAL_TIMEOUT,
+                                   include_meta=True)
+            meta = parsed.pop("_llm_meta", None) or {}
+            if str(meta.get("stop_reason") or "") in ("max_tokens", "length"):
+                return item, {"status": "failed", "error": "ответ модели обрезан (max_tokens)",
+                              "usage": meta.get("usage") or {},
+                              "source_bytes": item.get("_source_bytes")}
+            if annotation_is_empty(parsed):
+                return item, {"status": "failed",
+                              "error": "модель вернула ответ без описания",
+                              "usage": meta.get("usage") or {},
+                              "source_bytes": item.get("_source_bytes")}
+            return item, {"status": "ready", "annotation": render_image_annotation(parsed),
+                          "source_bytes": item.get("_source_bytes"),
+                          "usage": meta.get("usage") or {},
+                          "latency_ms": meta.get("latency_ms")}
+        except Exception as exc:                                  # noqa: BLE001
+            return item, {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:500]}
+
+    done = 0
+    with _store_session() as store:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for item, stored in pool.map(one, requests_out):
+                try:
+                    store(item, stored)
+                except Exception:                                 # noqa: BLE001
+                    logging.exception("wz media: не удалось сохранить расшифровку %s",
+                                      item["message_id"])
+                out[item["message_id"]] = {"status": stored["status"],
+                                           "annotation": stored.get("annotation"),
+                                           "error": stored.get("error")}
+                done += 1
+                if done % 25 == 0:
+                    log(f"  описано {done} из {len(requests_out)}")
+    return out
 
 
 def annotate_media_batch(items: list[dict], *, poll_interval: int = 30,
@@ -726,6 +969,8 @@ def annotate_media_batch(items: list[dict], *, poll_interval: int = 30,
     batch_eval.media_batch_stage). Без них повтор после обрыва сети отправил бы
     те же картинки вторым батчем и заплатил дважды.
     """
+    if vision_provider() != providers.ANTHROPIC:
+        return _annotate_media_locally(items, log)
     out: dict[str, dict] = {}
     requests_out, by_id = batch_media_requests(items)
     with _store_session() as store:

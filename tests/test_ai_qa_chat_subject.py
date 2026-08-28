@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from call_qa import config, media, subjects
+from call_qa import config, media, providers, subjects
 from call_qa.evaluation import runtime_store
 from call_qa.review import queue as review_queue
 
@@ -205,7 +205,9 @@ class MediaAnnotationTests(unittest.TestCase):
         ]
         plan = media.plan(messages)
         self.assertEqual([item["message_id"] for item in plan], ["m1", "m2"])
-        self.assertEqual(plan[0]["provider"], "anthropic")
+        # Провайдер описания выводится из имени модели, а не зашит строкой: он
+        # входит в config_hash, то есть в идентичность расшифровки.
+        self.assertEqual(plan[0]["provider"], media.vision_provider())
         self.assertEqual(plan[0]["model"], config.CLAUDE_MODEL_VISION)
         self.assertEqual(plan[1]["provider"], "soniox")
 
@@ -214,9 +216,11 @@ class MediaAnnotationTests(unittest.TestCase):
         with mock.patch.object(config, "MEDIA_MAX_PER_EPISODE", 5):
             self.assertEqual(len(media.plan(messages)), 5)
 
-    def test_vision_request_is_cheap_and_structured(self):
-        body = media.image_request_body("ZmFrZQ==", "image/jpeg")
-        self.assertEqual(body["model"], config.CLAUDE_MODEL_VISION)
+    def test_vision_request_on_claude_keeps_its_block_shape(self):
+        """Путь Anthropic никуда не делся — возврат туда это одна переменная."""
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "claude-sonnet-5"):
+            body = media.image_request_body("ZmFrZQ==", "image/jpeg")
+        self.assertEqual(body["model"], "claude-sonnet-5")
         # описание картинки не нуждается в рассуждении: effort low + thinking off
         self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertEqual(body["output_config"]["effort"], config.CLAUDE_VISION_EFFORT)
@@ -226,6 +230,65 @@ class MediaAnnotationTests(unittest.TestCase):
         self.assertEqual(blocks[0]["source"]["media_type"], "image/jpeg")
         # короткий системный блок не достигает порога кэширования — не притворяемся
         self.assertNotIn("cache_control", body["system"][0])
+
+    def test_vision_request_on_glm_becomes_an_image_url_block(self):
+        """У Z.ai своя форма вложения, и ошибиться в ней тихо нельзя: строкой
+        вместо объекта она отвечает 400 «image_url format error»."""
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "glm-5.3-flash"):
+            body = media.image_request_body("ZmFrZQ==", "image/jpeg")
+        self.assertEqual(body["_provider"], providers.ZAI)
+        blocks = body["payload"]["messages"][1]["content"]
+        self.assertEqual(blocks[0]["type"], "image_url")
+        self.assertEqual(blocks[0]["image_url"], {"url": "data:image/jpeg;base64,ZmFrZQ=="})
+        self.assertEqual(blocks[1]["type"], "text")
+        # схему Z.ai не соблюдает — её место занимает json_object плюс промпт
+        self.assertEqual(body["payload"]["response_format"], {"type": "json_object"})
+        # «мышление» у GLM не выключается, уровень берётся из effort
+        self.assertEqual(body["payload"]["reasoning_effort"], config.CLAUDE_VISION_EFFORT)
+
+    def test_video_is_readable_only_where_the_model_can_see_it(self):
+        """Claude видео не читал вовсе, и сообщение с роликом попадало в транскрипт
+        пустым. GLM его читает — значит и периметр «что вообще расшифровываем»
+        зависит от модели, а не зашит списком."""
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "glm-5.3-flash"):
+            self.assertTrue(media.annotatable("video", "https://s/a.mp4"))
+            plan = media.plan([_msg("m1", mtype="video", uri="https://s/a.mp4")])
+            self.assertEqual(plan[0]["media_kind"], "video")
+            self.assertEqual(plan[0]["provider"], providers.ZAI)
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "claude-sonnet-5"):
+            self.assertFalse(media.annotatable("video", "https://s/a.mp4"))
+            self.assertEqual(media.plan([_msg("m1", mtype="video", uri="https://s/a.mp4")]), [])
+
+    def test_video_request_carries_its_own_prompt_and_limit(self):
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "glm-5.3-flash"):
+            body = media.video_request_body("QUJD", "video/mp4")
+        self.assertEqual(body["payload"]["max_tokens"], config.VIDEO_MAX_TOKENS)
+        system = body["payload"]["messages"][0]["content"]
+        # промпт обязан называть поля: схему Z.ai не соблюдает, и держит контракт
+        # только текст. Первая версия была написана прозой — модель вернула рассказ,
+        # а расшифровка сохранилась как «изображение без описания», молча.
+        for field in ("description", "visible_text", "kind"):
+            self.assertIn(field, system)
+
+    def test_answer_without_content_is_a_failure_not_an_annotation(self):
+        empty = {"description": "  ", "visible_text": "", "kind": "other"}
+        self.assertTrue(media.annotation_is_empty(empty))
+        self.assertFalse(media.annotation_is_empty({"description": "чек", "visible_text": ""}))
+        with mock.patch.object(media, "_download", return_value=(b"PNG-bytes", "image/png")),  \
+             mock.patch.object(media.llm, "post_body", return_value=dict(empty)):
+            result = media._annotate_image({"content_uri": "https://s/a.png"})
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("без описания", result["error"])
+
+    def test_bulk_media_goes_local_when_provider_has_no_batch(self):
+        """У Z.ai пакетного режима для этой модели нет вовсе — ночной прогон обязан
+        уйти на локальный путь, а не постучаться в Batch API Anthropic без ключа."""
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "glm-5.3-flash"),              mock.patch.object(media, "_annotate_media_locally",
+                               return_value={"m1": {"status": "ready"}}) as local,              mock.patch.object(media.llm, "_headers",
+                               side_effect=AssertionError("Anthropic не должен вызываться")):
+            out = media.annotate_media_batch([{"message_id": "m1"}], log=lambda *_: None)
+        self.assertEqual(out, {"m1": {"status": "ready"}})
+        self.assertEqual(local.call_count, 1)
 
     def test_thinking_is_omitted_for_models_that_reject_disabling_it(self):
         with mock.patch.object(config, "CLAUDE_MODEL_VISION", "claude-fable-5"):
@@ -386,21 +449,31 @@ class PdfDocumentTests(unittest.TestCase):
         plan = {item["message_id"]: item for item in media.plan(messages)}
         self.assertEqual(set(plan), {"m1", "m2", "m4"})
         self.assertEqual(plan["m1"]["media_kind"], "document")
-        self.assertEqual(plan["m1"]["provider"], "anthropic")
+        self.assertEqual(plan["m1"]["provider"], media.vision_provider())
         self.assertEqual(plan["m2"]["media_kind"], "image")
         self.assertEqual(plan["m4"]["provider"], "soniox")
         # у документа своя конфигурация → своя идентичность расшифровки
         self.assertNotEqual(plan["m1"]["config_hash"], plan["m2"]["config_hash"])
 
-    def test_document_request_uses_the_pdf_document_block(self):
-        body = media.document_request_body("JVBERi0=")
-        self.assertEqual(body["model"], config.CLAUDE_MODEL_VISION)
+    def test_document_request_on_claude_uses_the_pdf_document_block(self):
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "claude-sonnet-5"):
+            body = media.document_request_body("JVBERi0=")
+        self.assertEqual(body["model"], "claude-sonnet-5")
         self.assertEqual(body["max_tokens"], config.DOCUMENT_MAX_TOKENS)
         block = body["messages"][0]["content"][0]
         self.assertEqual(block["type"], "document")
         self.assertEqual(block["source"]["type"], "base64")
         self.assertEqual(block["source"]["media_type"], "application/pdf")
         self.assertEqual(body["output_config"]["format"]["type"], "json_schema")
+
+    def test_document_request_on_glm_becomes_a_file_url_block(self):
+        """PDF нельзя слать как картинку: на image_url Z.ai отвечает 400
+        «图片输入格式/解析错误». Для файлов свой тип блока."""
+        with mock.patch.object(config, "CLAUDE_MODEL_VISION", "glm-5.3-flash"):
+            body = media.document_request_body("JVBERi0=")
+        block = body["payload"]["messages"][1]["content"][0]
+        self.assertEqual(block["type"], "file_url")
+        self.assertEqual(block["file_url"], {"url": "data:application/pdf;base64,JVBERi0="})
 
     def test_non_pdf_masquerading_as_pdf_is_rejected_before_paying(self):
         """Расширение в ссылке может врать — проверяем сигнатуру файла."""

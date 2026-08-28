@@ -114,14 +114,6 @@ class BodyTests(unittest.TestCase):
         self.assertNotIn("_cache_ttl_s", body)
         self.assertNotIn("cache_control", json.dumps(body["payload"]))
 
-    def test_attachments_are_refused_loudly(self):
-        # media.py шлёт список content-блоков с картинками; у этого адаптера их формы
-        # нет, и молчаливое падение здесь стоило бы описания вложения.
-        with self.assertRaises(NotImplementedError):
-            llm.build_body(model="glm-5.3-flash", system="s",
-                           user=[{"type": "image"}], schema=SCHEMA)
-
-
 class UsageTests(unittest.TestCase):
     def test_reasoning_already_inside_completion_tokens(self):
         """Замер: completion_tokens 49, из них reasoning_tokens 27. Прибавить их к
@@ -220,6 +212,53 @@ class PostBodyTests(unittest.TestCase):
             parsed = llm.post_body(self._body())
         self.assertEqual(parsed["per_criterion"], [])
         self.assertEqual(client.post.call_count, 2)
+
+
+class MediaBlockTests(unittest.TestCase):
+    """Вложения. Форма каждого блока проверена запросами на живом API 28.08.2026;
+    ошибиться в ней тихо нельзя — Z.ai отвечает 400 с разными кодами на каждый
+    неверный вариант, и выглядит это как «модель не читает файлы»."""
+
+    def _blocks(self, user):
+        body = llm.build_body(model="glm-5.3-flash", system="s", user=user, schema=SCHEMA)
+        return body["payload"]["messages"][1]["content"]
+
+    def test_image_becomes_image_url_object(self):
+        blocks = self._blocks([
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "QUJD"}},
+            {"type": "text", "text": "опиши"}])
+        self.assertEqual(blocks[0], {"type": "image_url",
+                                     "image_url": {"url": "data:image/png;base64,QUJD"}})
+        self.assertEqual(blocks[1], {"type": "text", "text": "опиши"})
+
+    def test_pdf_becomes_file_url_not_image(self):
+        blocks = self._blocks([{"type": "document",
+                                "source": {"type": "base64",
+                                           "media_type": "application/pdf", "data": "QUJD"}}])
+        self.assertEqual(blocks[0]["type"], "file_url")
+        self.assertNotIn("image_url", blocks[0])
+
+    def test_video_becomes_video_url(self):
+        blocks = self._blocks([{"type": "video",
+                                "source": {"type": "base64", "media_type": "video/mp4",
+                                           "data": "QUJD"}}])
+        self.assertEqual(blocks[0], {"type": "video_url",
+                                     "video_url": {"url": "data:video/mp4;base64,QUJD"}})
+
+    def test_plain_text_user_is_left_alone(self):
+        body = llm.build_body(model="glm-5.3-flash", system="s", user="просто текст",
+                              schema=SCHEMA)
+        self.assertEqual(body["payload"]["messages"][1]["content"], "просто текст")
+
+    def test_unknown_block_is_refused_loudly(self):
+        with self.assertRaises(NotImplementedError):
+            self._blocks([{"type": "audio", "source": {"type": "base64", "data": "QUJD"}}])
+
+    def test_non_base64_source_is_refused_loudly(self):
+        with self.assertRaises(NotImplementedError):
+            self._blocks([{"type": "image", "source": {"type": "url",
+                                                       "url": "https://s/a.jpg"}}])
 
 
 class CostTests(unittest.TestCase):

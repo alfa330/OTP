@@ -446,24 +446,61 @@ def _zai_build_body(*, model, system, user, schema, max_tokens=8000, cache_syste
     `schema` в запрос НЕ уходит (см. факт 2 выше) — она уже описана в системном
     промпте оценщика. `cache_system` и `cache_ttl` игнорируются: кеш автоматический.
     `thinking` здесь означает уровень рассуждений, а не бюджет токенов, как у Vertex.
+
+    `user` — строка либо список content-блоков в форме Anthropic (её собирает
+    call_qa/media.py). Блоки переводятся в форму Z.ai; см. _zai_content.
     """
-    if not isinstance(user, str):
-        raise NotImplementedError(
-            "Z.ai-провайдер принимает только текстовое сообщение; "
-            "вложения чатов остаются на Claude (call_qa/media.py)")
     return {
         "_provider": ZAI,
         "model": model,
         "payload": {
             "model": model,
             "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
+                         {"role": "user", "content": _zai_content(user)}],
             "max_tokens": int(max_tokens),
             "temperature": config.ZAI_TEMPERATURE,
             "reasoning_effort": _zai_effort(thinking if thinking is not None else effort),
             "response_format": {"type": "json_object"},
         },
     }
+
+
+# Вложение в форме Anthropic → блок Z.ai. Проверено запросами 28.08.2026 на живом
+# API: картинка распознана за 5,5 с (444 токена), пятисекундное видео — за 6 с
+# (1 581 токен, модель перечислила все пять кадров), PDF — за 11 с.
+#
+# Три подводных камня, каждый стоил бы отладки:
+#   * `image_url` обязан быть ОБЪЕКТОМ `{"url": ...}`. Строкой вместо объекта Z.ai
+#     отвечает 400 «image_url format error» (код 1214).
+#   * PDF нельзя слать как `image_url` — это 400 «图片输入格式/解析错误». Для файлов
+#     свой тип блока, `file_url`.
+#   * Видео — третий тип, `video_url`; на `image_url` оно тоже не пройдёт.
+_ZAI_BLOCK = {"image": ("image_url", "image/jpeg"),
+              "document": ("file_url", "application/pdf"),
+              "video": ("video_url", "video/mp4")}
+
+
+def _zai_content(user):
+    """Содержимое сообщения: строка отдаётся как есть, список блоков переводится."""
+    if isinstance(user, str):
+        return user
+    out = []
+    for block in user:
+        kind = str((block or {}).get("type") or "")
+        if kind == "text":
+            out.append({"type": "text", "text": block.get("text") or ""})
+            continue
+        names = _ZAI_BLOCK.get(kind)
+        if names is None:
+            raise NotImplementedError(f"Z.ai-провайдер не знает блок «{kind}»")
+        field, default_mime = names
+        source = block.get("source") or {}
+        if source.get("type") != "base64":
+            raise NotImplementedError(
+                f"Z.ai-провайдер принимает вложения только как base64, а не «{source.get('type')}»")
+        mime = source.get("media_type") or default_mime
+        out.append({"type": field, field: {"url": f"data:{mime};base64,{source.get('data') or ''}"}})
+    return out
 
 
 _ZAI_EFFORTS = ("low", "high", "max")
