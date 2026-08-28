@@ -57,7 +57,10 @@ WITH wiki_ai_chunks AS (
                                   text, requires_ack)
 ),
 wiki_articles AS (
-    SELECT id::int, title::text, slug::text
+    -- historical — флаг «сведения не действуют» (wiki/schema.py). В заглушке он
+    -- постоянный: ветка про опечатки к свежести отношения не имеет, а колонку
+    -- запрос выбирает, и без неё заглушка разошлась бы с боевым SQL.
+    SELECT id::int, title::text, slug::text, false AS historical
       FROM (VALUES {articles}) AS t(id, title, slug)
 ),
 words AS ("""

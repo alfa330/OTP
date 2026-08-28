@@ -16,9 +16,11 @@
    OpenRouter однажды вернул строку «User Safety: safe» вместо текста.
 """
 
+import datetime
 import unittest
 
 from wiki.ai import answer as ai_answer
+from wiki.ai import currency
 from wiki.ai import providers as ai_providers
 
 
@@ -598,6 +600,136 @@ class HistoryTest(unittest.TestCase):
             ai_providers._ADAPTERS.clear()
             ai_providers._ADAPTERS.update(original)
         self.assertEqual('раньше', seen['history'][0]['text'])
+
+
+
+class StaleContextTest(unittest.TestCase):
+    """Актуальность в ответе: подпись фрагмента, оговорка и отбор источников.
+
+    Воспроизводится инцидент 27.08.2026: на вопрос «актуальные акции» помощник
+    выдал таблицу «Актуальные акции для водителей», и строкой в ней стояла акция
+    «Приведи друга» из статьи «Архивные акции TEZ» со сроком, истёкшим
+    шестнадцатью месяцами раньше. Разбор целиком — в шапке wiki/ai/currency.py.
+    """
+
+    TODAY = datetime.date(2026, 8, 28)
+
+    def archive(self, chunk_id=1):
+        """Кусок 6007 боевой базы, текстом как есть."""
+        return chunk(
+            chunk_id=chunk_id, article_id=731, title='Архивные акции TEZ',
+            heading='Акция "Приведи друга".',
+            text='Акция "Приведи друга".\n'
+                 'Водитель получает за него 10.000 тенге на баланс аккаунта.\n'
+                 'дата запуска: 01.03.2025г дата окончания: 30.04.2025г')
+
+    def live(self, chunk_id=1):
+        return chunk(
+            chunk_id=chunk_id, article_id=730,
+            title='Актуальные акции и спецпредложения для водителей Tez Taxi',
+            heading='Спецоффер для водителей (Туркестан)',
+            text='Выполнить 50 поездок за 14 дней. Размер бонуса: 10 000 тг.')
+
+    def test_today_is_given_to_the_model(self):
+        """Без сегодняшней даты правило про сроки было бы пустым.
+
+        В инциденте «дата окончания: 30.04.2025» была для модели просто числом
+        из справочника, а правило 8 велит переносить числа дословно. Сравнить
+        его оказалось не с чем.
+        """
+        prompt = ai_answer.build_user_prompt('вопрос', [chunk()], self.TODAY)
+        self.assertTrue(prompt.startswith('СЕГОДНЯ: 28.08.2026'))
+
+    def test_archive_fragment_is_labelled_for_the_model(self):
+        marked = currency.mark_chunks([self.archive()], self.TODAY)
+        prompt = ai_answer.build_user_prompt('актуальные акции', marked, self.TODAY)
+        self.assertIn('АРХИВ — сведения уже не действуют', prompt)
+        # Пометка стоит ПЕРЕД названием статьи: подпись читается первой, и
+        # решение «брать или не брать» модель принимает до содержимого.
+        self.assertLess(prompt.index('АРХИВ'), prompt.index('Архивные акции TEZ'))
+
+    def test_clean_fragment_has_no_label(self):
+        marked = currency.mark_chunks([self.live()], self.TODAY)
+        prompt = ai_answer.build_user_prompt('вопрос', marked, self.TODAY)
+        self.assertNotIn('⚠', prompt)
+
+    def test_prompt_has_the_currency_rule(self):
+        self.assertIn('АКТУАЛЬНОСТЬ', ai_answer.SYSTEM_PROMPT)
+        self.assertIn('сведения уже не действуют', ai_answer.SYSTEM_PROMPT)
+
+    def test_caveat_is_added_by_the_server(self):
+        """Оговорку ставит СЕРВЕР, а не модель, и это не перестраховка.
+
+        Правило про уточняющий вопрос модели игнорировали целиком — поэтому
+        неоднозначность считает код (см. пункт 3 шапки модуля). У правила про
+        архив цена ошибки та же: оператор пообещает водителю то, чего нет.
+        """
+        def fake(system, user, history=()):
+            return ('Акция «Приведи друга»: 10.000 тенге за 100 заказов.\n'
+                    'ИСТОЧНИКИ: [1]'), {'provider': 'test'}
+
+        result = ai_answer.compose('была ли акция приведи друга', [self.archive()],
+                                   fake, on_date=self.TODAY)
+        self.assertEqual('answer', result['kind'])
+        self.assertTrue(any('архивных материалов' in note
+                            for note in result['notes']))
+        self.assertTrue(result['sources'][0]['stale'])
+
+    def test_clean_answer_gets_no_caveat(self):
+        """Ложная тревога дороже молчания: её перестают читать вместе с настоящей."""
+        def fake(system, user, history=()):
+            return 'Бонус — 10 000 тг.\nИСТОЧНИКИ: [1]', {'provider': 'test'}
+
+        result = ai_answer.compose('спецоффер', [self.live()], fake,
+                                   on_date=self.TODAY)
+        self.assertEqual([], result['notes'])
+
+    def test_archive_is_not_attached_by_number_coincidence(self):
+        """Несвежий кусок идёт в источники, только если его назвала САМА модель.
+
+        Замер на боевых данных 28.08.2026: модель ответила по трём действующим
+        акциям и архив не тронула, но архивный кусок подшился в источники — в нём
+        «10.000 тенге» совпало с «10 000 тг» в ответе, — и под чистым ответом
+        встала оговорка про архив.
+        """
+        def fake(system, user, history=()):
+            return ('Спецоффер: 10 000 тг за 50 поездок за 14 дней.\n'
+                    'ИСТОЧНИКИ: [1]'), {'provider': 'test'}
+
+        result = ai_answer.compose('актуальные акции',
+                                   [self.live(1), self.archive(2)],
+                                   fake, on_date=self.TODAY)
+        self.assertEqual('answer', result['kind'])
+        self.assertEqual([], result['notes'])
+        self.assertEqual([730], [item['article_id'] for item in result['sources']])
+
+    def test_reformatted_date_is_not_an_invention(self):
+        """Статья пишет «28 июля 2025», модель — «28.07.2025». Это одна дата.
+
+        Замер на проде 28.08.2026: цифр 28072025 в тексте статьи нет (там 282025),
+        и ВЕСЬ верный ответ про акции превращался в «в доступных вам статьях
+        этого нет».
+        """
+        rows = [chunk(text='С 28 июля 2025 года бонусные программы приостановлены.')]
+        self.assertEqual([], ai_answer.ungrounded_numbers(
+            'Программы приостановлены с 28.07.2025.', rows, on_date=self.TODAY))
+
+    def test_todays_date_in_the_answer_is_grounded(self):
+        """Число, которое мы сами модели и сообщили, выдумкой быть не может.
+
+        Модель повторяет строку «СЕГОДНЯ:» из запроса — на вопросе про акции
+        парка Qazaq ответ начинался «на 28.08.2026 действуют следующие акции»
+        и отбрасывался целиком.
+        """
+        self.assertEqual([], ai_answer.ungrounded_numbers(
+            'На 28.08.2026 действуют следующие акции.', [self.live()],
+            on_date=self.TODAY))
+
+    def test_invented_number_is_still_caught(self):
+        """Послабление для дат не должно открыть дверь выдумке."""
+        self.assertEqual(['99 999'], ai_answer.ungrounded_numbers(
+            'Бонус 99 999 тг.', [self.live()], on_date=self.TODAY))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -304,6 +304,13 @@ def register(bp, wiki_route, db, log_ip):
                 # сама модель или сервер сопоставил его по пересечению с ответом.
                 'attributed': bool(source.get('attributed')),
                 'requires_ack': bool(source.get('requires_ack')),
+                # Свежесть источника: архив или истёкший срок. Витрина рисует по
+                # ней бейдж и оговорку — и рисует ИЗ ИСТОЧНИКОВ, а не из notes,
+                # чтобы при перезагрузке истории пометка не пропадала (там же,
+                # где приписка об ознакомлении, WikiAssistant.jsx).
+                'stale': bool(source.get('stale')),
+                'stale_note': source.get('stale_note') or '',
+                'stale_kind': source.get('stale_kind') or '',
             } for position, source in enumerate(result.get('sources') or [])],
             'provider': meta.get('provider'),
             'model': meta.get('model'),

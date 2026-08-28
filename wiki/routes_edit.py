@@ -327,6 +327,11 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             # сохранения. Ровно этой ложью про применённое решение когда-то
             # отличался статус (см. ниже).
             copy_protected=bool(data.get('copy_protected')),
+            # «Сведения не действуют» — по той же причине, что и защита от
+            # копирования: тумблер стоит в форме новой статьи, и приди он мимо
+            # INSERT'а, справка о прошлых акциях открылась бы помощнику как
+            # действующая — ровно инцидент 27.08.2026.
+            historical=bool(data.get('historical')),
             # Запасной раздел ищется только в пространствах автора: без этой
             # границы статья без раздела уехала бы в «Общий сотрудник» чужого
             # пространства (см. wiki_edit.default_section_id).
@@ -469,6 +474,20 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                     "code": "WIKI_FORBIDDEN", "required": "can_edit",
                 }), 403
             fields['copy_protected'] = bool(data['copy_protected'])
+
+        # «Сведения не действуют» — тоже решение того, кто ведёт статью, и права
+        # править достаточно. Пометка ничего не закрывает: статья остаётся в
+        # витрине, в поиске и в ответах помощника, у неё лишь появляется
+        # оговорка (wiki/ai/currency.py). Требовать под это администратора
+        # доступов значило бы, что автор не может честно подписать собственную
+        # справку о прошлом, не сходив к нему.
+        if 'historical' in data:
+            if not permissions.get('can_edit'):
+                return jsonify({
+                    "error": "Нет права править эту статью",
+                    "code": "WIKI_FORBIDDEN", "required": "can_edit",
+                }), 403
+            fields['historical'] = bool(data['historical'])
 
         changed = wiki_edit.update_article(
             cursor, article_id, fields, editor_id=ctx['user_id'],

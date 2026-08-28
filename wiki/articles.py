@@ -234,12 +234,13 @@ def article_rules_for_user(cursor, article_ids, subjects, user_id):
 # статью всегда (resolve_article_permissions), и без этого поля меню действий в
 # каталоге скрывало бы «Редактировать» у владельца его же статьи.
 _LIST_KEYS = ('id', 'slug', 'title', 'summary', 'article_type', 'status',
-              'visibility_mode', 'strict_mode', 'views', 'author_id', 'author_name',
+              'visibility_mode', 'strict_mode', 'historical', 'views',
+              'author_id', 'author_name',
               'owner_user_id', 'updated_at', 'published_at', 'section_ids', 'tags')
 
 _LIST_SQL = """
 SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
-       a.visibility_mode, a.strict_mode, a.views, a.author_id, u.name,
+       a.visibility_mode, a.strict_mode, a.historical, a.views, a.author_id, u.name,
        a.owner_user_id, a.updated_at, a.published_at,
        COALESCE((SELECT array_agg(s.section_id) FROM wiki_article_sections s
                   WHERE s.article_id = a.id), '{}') AS section_ids,
@@ -427,6 +428,7 @@ def catalog_counts(cursor, visible_ids):
 
 _ARTICLE_KEYS = ('id', 'slug', 'title', 'summary', 'content', 'article_type', 'status',
                  'visibility_mode', 'strict_mode', 'ai_opt_out', 'copy_protected',
+                 'historical',
                  'toc', 'views',
                  'author_id',
                  'author_name', 'owner_user_id', 'updated_by', 'updated_at',
@@ -440,6 +442,7 @@ def get_article(cursor, *, article_id=None, slug=None):
         """
         SELECT a.id, a.slug, a.title, a.summary, a.content, a.article_type, a.status,
                a.visibility_mode, a.strict_mode, a.ai_opt_out, a.copy_protected,
+               a.historical,
                a.toc, a.views,
                a.author_id, u.name,
                a.owner_user_id, a.updated_by, a.updated_at, a.created_at,

@@ -1350,6 +1350,22 @@ _AI_STATEMENTS = [
     # Отдельной колонкой, чтобы пометка в истории совпадала со свежим ответом.
     "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
     "attributed BOOLEAN NOT NULL DEFAULT FALSE;",
+    # СНИМОК СВЕЖЕСТИ источника на момент ответа: архивная статья или истёкший
+    # срок (wiki/ai/currency.py). Хранится, а не выводится при чтении, потому
+    # что «срок истёк» — свойство МОМЕНТА, и пересчёт задним числом пометил бы
+    # ответ, выданный при живой акции. У ответов до колонки остаётся FALSE:
+    # чего не помечали, того и не показываем.
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
+    "stale BOOLEAN NOT NULL DEFAULT FALSE;",
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
+    "stale_note VARCHAR(120) NOT NULL DEFAULT '';",
+    # Вид несвежести: 'historical' | 'expired'. Хранится ОТДЕЛЬНО от note, хотя
+    # выводится из него: витрина группирует оговорку по виду («архивные
+    # материалы» и «материалы с истёкшим сроком» — разные утверждения), и
+    # разбирать для этого русскую фразу значило бы завести правило, которое
+    # молча сломается от правки формулировки.
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
+    "stale_kind VARCHAR(16) NOT NULL DEFAULT '';",
     # Пространство, в котором задавали вопрос. Ответу оно не нужно — периметр
     # уже сужен на входе, — но нужно ОТЧЁТУ: «о чём спрашивают, а в вике нет»
     # адресуется владельцу конкретной базы знаний, и вопрос из «Тез» в отчёте
@@ -1599,6 +1615,27 @@ _ORG_STATEMENTS = [
     # конкретному документу, как и cross_department строкой выше.
     "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
     "copy_protected BOOLEAN NOT NULL DEFAULT FALSE;",
+
+    # ИСТОРИЧЕСКАЯ СТАТЬЯ: «читайте, но это уже не действует».
+    #
+    # Отдельный флаг, а не статус, и это разбор инцидента 27.08.2026. Выразить
+    # такое намерение было НЕЧЕМ, и автор «Архивных акций TEZ» поступил
+    # единственно возможным образом — опубликовал статью как обычную:
+    #   * 'archived' и 'expired' уносят статью из чтения (articles.py: не-
+    #     published видит только can_manage_structure), а справку о прошлых
+    #     акциях операторы читать обязаны;
+    #   * ai_opt_out выключает статью из помощника целиком, и на вопрос «а была
+    #     ли акция „Приведи друга“» вика теряет верный ответ.
+    # Флаг же оставляет статью и в витрине, и в поиске, и в ответах помощника —
+    # но каждый её фрагмент едет к модели и к оператору с пометкой (см.
+    # wiki/ai/currency.py).
+    #
+    # По умолчанию FALSE, как cross_department и copy_protected строкой выше:
+    # пометка — осознанное решение по конкретному документу. Забывчивость
+    # страхует разбор названия и сроков в currency.py, а не значение по
+    # умолчанию.
+    "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
+    "historical BOOLEAN NOT NULL DEFAULT FALSE;",
     "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
     "source_article_id INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL;",
     "CREATE INDEX IF NOT EXISTS idx_wiki_articles_source "

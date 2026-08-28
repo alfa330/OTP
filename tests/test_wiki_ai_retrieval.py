@@ -37,6 +37,12 @@ _TSV = ("setweight(to_tsvector('russian', translate(coalesce(heading_path, ''), 
         "setweight(to_tsvector('russian', translate(coalesce(text, ''), %s)), 'D')"
         % (_FOLD, _FOLD))
 
+# wiki_articles тоже подменяется, хотя строки берутся боевые. Причина —
+# развязка со СХЕМОЙ прода: запрос выбирает a.historical (флаг «сведения не
+# действуют»), и пока колонка не доехала до боевой базы, тест про РАНЖИРОВАНИЕ
+# падал бы с UndefinedColumn — то есть сообщал бы не о том, что проверяет.
+# Имя CTE внутри собственного тела не видно, поэтому FROM wiki_articles здесь
+# читает настоящую таблицу.
 _STUB = """
 WITH wiki_ai_chunks AS (
     SELECT id, article_id, chunk_idx, heading_path, text, requires_ack,
@@ -44,6 +50,9 @@ WITH wiki_ai_chunks AS (
       FROM unnest(%%(c_id)s::bigint[], %%(c_article)s::int[], %%(c_idx)s::int[],
                   %%(c_path)s::text[], %%(c_text)s::text[], %%(c_ack)s::boolean[])
            AS t(id, article_id, chunk_idx, heading_path, text, requires_ack)
+),
+wiki_articles AS (
+    SELECT id, title, slug, false AS historical FROM wiki_articles
 ),
 """ % _TSV
 

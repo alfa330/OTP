@@ -322,6 +322,14 @@ const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where }) 
                                 {STATUS_LABELS[article.status] || article.status}
                             </IosBadge>
                         )}
+                        {/* Бейдж показывается ВСЕГДА, а не под showStatus:
+                            «не действует» — свойство содержимого, а не стадии
+                            выпуска, и опубликованная справка о прошлом обязана
+                            отличаться от опубликованного действующего правила
+                            в общем списке. */}
+                        {article.historical && (
+                            <IosBadge tone="red">не действует</IosBadge>
+                        )}
                     </span>
                     {article.summary && (
                         <span className="mt-0.5 block line-clamp-2 text-[12px] leading-relaxed text-slate-500">

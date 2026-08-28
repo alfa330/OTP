@@ -38,6 +38,8 @@
 
 import re
 
+from . import currency
+
 # Порог, ниже которого кусок в контекст не кладём. Измерен: см. пункт 2 шапки.
 STRICT_FLOOR = 0.72
 
@@ -111,6 +113,22 @@ SYSTEM_PROMPT = """Ты — справочный помощник корпора
    округляй и не пересчитывай. Ссылка во фрагменте выглядит как «ярлык (адрес)» —
    если спрашивают, куда идти или где зарегистрироваться, дай сам адрес, а не
    пересказ «есть ссылка в статье».
+9. АКТУАЛЬНОСТЬ. У части фрагментов перед названием статьи стоит пометка
+   «АРХИВ — сведения уже не действуют» или «СРОК ИСТЁК такого-то числа». Такой
+   фрагмент — свидетельство о ПРОШЛОМ, и выдать его за действующее правило
+   нельзя: оператор передаст это водителю как обещание, которое никто не
+   выполнит.
+   * не смешивай помеченные фрагменты с непомеченными в одном списке или в
+     одной таблице как равные. Отвечай по непомеченным, а помеченное выноси
+     отдельно и ниже, с прямой оговоркой «уже не действует»;
+   * если по вопросу есть ТОЛЬКО помеченные фрагменты — так и скажи: «сейчас
+     такого нет, раньше действовало вот это», и дальше перескажи;
+   * спрашивают про действующее сейчас («актуальные», «сейчас», «действует») —
+     помеченное в ответ не бери вовсе, довольно одной строки, что архивное есть;
+   * спрашивают про прошлое («была ли», «раньше», «в прошлом году») — отвечай
+     по помеченному спокойно, это ровно то, о чём спросили.
+   Сегодняшнюю дату ищи в строке СЕГОДНЯ ниже. Срок из фрагмента, который её
+   старше, истёк, даже если пометки на фрагменте нет.
 
 ФОРМАТ ОТВЕТА
 Сначала сам ответ. Затем с новой строки ровно так:
@@ -355,7 +373,7 @@ def usable_chunks(chunks, floor=STRICT_FLOOR):
     return out
 
 
-def build_user_prompt(question, chunks):
+def build_user_prompt(question, chunks, on_date=None):
     """Пронумерованные фрагменты + вопрос. Номера — ключ к сверке цитат.
 
     Метка фрагмента отделена от тела строкой «ТЕКСТ:» намеренно. В первом варианте
@@ -363,21 +381,37 @@ def build_user_prompt(question, chunks):
     вопросе про самозанятого процитировала ЗАГОЛОВОК фрагмента: цитата не
     сверилась, и защита превратила верный ответ в отказ. Помощник, отрицающий то,
     что знает, дороже любой галлюцинации — он теряет доверие целиком.
+
+    СЕГОДНЯШНЯЯ ДАТА идёт в запрос, и без неё правило про сроки было бы пустым.
+    Модель не знает, какое сегодня число: в инциденте 27.08.2026 «дата окончания:
+    30.04.2025» была для неё просто числом из справочника, а правило 8 велит
+    переносить числа дословно. Сравнить его оказалось не с чем — и акция,
+    закончившаяся шестнадцатью месяцами раньше, уехала оператору строкой таблицы
+    «Актуальные акции для водителей».
+
+    Пометка о свежести стоит ПЕРЕД названием статьи, а не после текста: подпись
+    читается первой, и решение «брать или не брать» модель принимает до того,
+    как втянется в содержимое фрагмента.
     """
     blocks = []
     for number, chunk in enumerate(chunks, start=1):
         heading = chunk.get('heading_path') or ''
         title = chunk.get('title') or ''
+        note = chunk.get('stale_note') or ''
         label = f'Статья «{title}»'
         if heading:
             label += f', раздел «{heading}»'
+        if note:
+            label = f'⚠ {note}. {label}'
         blocks.append(f'[{number}] {label}\nТЕКСТ:\n{chunk["text"]}')
     context = '\n\n'.join(blocks) if blocks else '(подходящих фрагментов не найдено)'
     # Указание про язык идёт ПОСЛЕ вопроса: последняя строка запроса держится
     # лучше, чем правило в середине системного промпта, которое flash-lite
     # игнорировал на коротких вопросах.
     directive = _LANGUAGE_DIRECTIVE[detect_language(question)]
-    return f'ФРАГМЕНТЫ СТАТЕЙ:\n{context}\n\nВОПРОС: {question}\n\n{directive}'
+    today = (on_date or currency.today()).strftime('%d.%m.%Y')
+    return (f'СЕГОДНЯ: {today}\n\nФРАГМЕНТЫ СТАТЕЙ:\n{context}'
+            f'\n\nВОПРОС: {question}\n\n{directive}')
 
 
 def split_sources(text):
@@ -444,7 +478,7 @@ def _digits(text):
 _URL_IN_TEXT = re.compile(r'(?:https?://|mailto:)\S+', re.I)
 
 
-def ungrounded_numbers(answer, chunks, question=''):
+def ungrounded_numbers(answer, chunks, question='', on_date=None):
     """Числа из ответа, которых нет ни в одном переданном фрагменте.
 
     Это и есть машинная защита от выдумки — вместо сверки цитат, которая
@@ -460,7 +494,29 @@ def ungrounded_numbers(answer, chunks, question=''):
     перестают читать.
     """
     answer = _URL_IN_TEXT.sub(' ', str(answer or ''))
-    haystack = _digits(' '.join(chunk.get('text') or '' for chunk in chunks))
+    source_text = ' '.join(chunk.get('text') or '' for chunk in chunks)
+    # ДАТЫ СВЕРЯЮТСЯ КАЛЕНДАРНО, а не посимвольно. Одну и ту же дату статья и
+    # ответ пишут по-разному, и без приведения к общему виду проверка объявляет
+    # выдумкой то, что взято дословно. Замер на проде 28.08.2026: в статье
+    # «С 28 июля 2025 года все виды бонусных программ… приостанавливаются»,
+    # модель написала «приостановлены с 28.07.2025» — цифры 28072025 в тексте
+    # статьи не встречаются (там 282025), и ВЕСЬ верный ответ про акции
+    # превращался в «в доступных вам статьях этого нет».
+    #
+    # Раньше это молчало, потому что модели даты и не называли. Правило про
+    # актуальность их как раз и требует называть, поэтому проверка обязана
+    # понимать оба написания.
+    #
+    # СЕГОДНЯШНЯЯ ДАТА тоже обоснована, хотя её нет ни в одном фрагменте: она
+    # приходит модели строкой «СЕГОДНЯ:» из build_user_prompt, и модель её
+    # повторяет. Замер там же: на вопросе про акции парка Qazaq ответ начинался
+    # «на 28.08.2026 действуют следующие акции» — и отбрасывался целиком как
+    # выдуманный. Число, которое мы сами модели и сообщили, выдумкой быть не
+    # может.
+    haystack = ' '.join([_digits(source_text)]
+                        + [currency.compact(value)
+                           for value in currency.all_dates(source_text)]
+                        + [currency.compact(on_date or currency.today())])
     asked = _digits(question)
     bad = []
     for token in _NUMBER.findall(str(answer or '')):
@@ -496,12 +552,25 @@ def build_sources(cited, chunks, answer):
     Поэтому куски ранжируются по совпадению с ответом (числа весят втрое), а
     указание модели даёт лишь надбавку. Выбранный кусок, которого модель не
     называла, помечается attributed — в интерфейсе это бейдж «сопоставлено».
+
+    НЕСВЕЖИЙ кусок — исключение: он идёт в источники только если его назвала САМА
+    модель. Совпадения по числам для него мало, и вот почему. Проверка на боевых
+    данных 28.08.2026: на вопросе «актуальные акции» модель ответила по трём
+    действующим акциям и архив не тронула вовсе — но архивный кусок про «Приведи
+    друга» всё равно подшился в источники, потому что «10.000 тенге» в нём
+    совпало с «10 000 тг» в ответе. Оговорка «часть ответа взята из архивных
+    материалов» встала под ответом, в котором архива нет. Такое предупреждение
+    хуже отсутствующего: его перестают читать, и вместе с ним перестают читать
+    настоящее — ровно тот довод, по которому из ungrounded_numbers вырезали
+    цифры адресов.
     """
     ranked = sorted(
         ((_support_score(chunk, answer) + (2.0 if index in cited else 0.0), index)
          for index, chunk in enumerate(chunks, start=1)),
         key=lambda item: (-item[0], item[1]))
-    used = [index for score, index in ranked if score >= SUPPORT_FLOOR][:3]
+    used = [index for score, index in ranked
+            if score >= SUPPORT_FLOOR
+            and (index in cited or not chunks[index - 1].get('stale'))][:3]
     if not used and cited:
         used = [number for number in cited if 1 <= number <= len(chunks)][:1]
 
@@ -520,6 +589,13 @@ def build_sources(cited, chunks, answer):
             'slug': chunk.get('slug'),
             'heading_path': chunk.get('heading_path'),
             'requires_ack': bool(chunk.get('requires_ack')),
+            # Свежесть переносится в источник, а не считается тут заново: она уже
+            # посчитана один раз на куске (currency.mark_chunks), и второй расчёт
+            # означал бы, что в подписи фрагмента и в чипе под ответом могут
+            # оказаться разные ответы на один вопрос.
+            'stale': bool(chunk.get('stale')),
+            'stale_kind': chunk.get('stale_kind'),
+            'stale_note': chunk.get('stale_note') or '',
         })
     return sources
 
@@ -547,7 +623,41 @@ def ack_notice(sources):
     return [_ACK_NOTE.format(title=title) for title in titles]
 
 
-def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
+_STALE_NOTES = {
+    'historical': ('Часть ответа взята из архивных материалов — {titles}. '
+                   'Проверьте, действует ли это сейчас, прежде чем обещать '
+                   'водителю.'),
+    'expired': ('Часть ответа взята из материалов с истёкшим сроком — {titles}. '
+                'Проверьте даты, прежде чем обещать водителю.'),
+}
+
+
+def stale_notice(sources):
+    """Оговорка про архивный источник. Ставит СЕРВЕР, а не модель.
+
+    Дублирует правило 9 промпта намеренно, и это не перестраховка, а вывод из
+    истории раздела: правило 4 («задай уточняющий вопрос») модели игнорировали
+    целиком — ровно поэтому неоднозначность считает код (см. пункт 3 шапки). У
+    правила про архив цена ошибки та же: помощник назвал закончившуюся акцию
+    действующей, оператор пообещал её водителю. Приписка не зависит от того,
+    послушалась модель или нет, — она есть всегда, когда ответ опёрся на
+    архивный источник.
+
+    Оговорка идёт в notes, рядом с припиской об ознакомлении: это тот же жанр
+    «ответ дан, но есть условие», и своего места на экране для него не нужно.
+    """
+    shown = [source for source in sources if source.get('ok')]
+    notes = []
+    for kind, template in _STALE_NOTES.items():
+        titles = currency.stale_titles(shown, kind)
+        if titles:
+            notes.append(template.format(
+                titles=', '.join('«%s»' % title for title in titles)))
+    return notes
+
+
+def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True,
+            on_date=None):
     """Собрать ответ. generate_fn(system, user, history=…) -> (текст, метаданные).
 
     history — предыдущие реплики диалога. Без них уточняющий вопрос был тупиком:
@@ -560,8 +670,17 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
     реплика помощника САМА была уточняющим вопросом: иначе на короткий ответ
     оператора помощник переспрашивал снова, и разговор ходил по кругу.
 
+    on_date — «сегодня» для расчёта сроков. Параметр существует ради тестов:
+    ответ, зависящий от текущей даты, иначе нельзя проверить, не переписывая
+    его каждый год.
+
     Возвращает словарь с kind: 'answer' | 'no_answer' | 'clarify'.
     """
+    # Свежесть считается ОДИН раз и здесь, до всего остального: дальше метка
+    # нужна и подписи фрагмента, и источникам, и оговорке под ответом. Считать
+    # её в каждом из трёх мест значило бы завести три копии правила — ровно на
+    # таком раздвоении сломалась исходная вика (см. шапку wiki/perimeter.py).
+    chunks = currency.mark_chunks(chunks, on_date)
     usable = usable_chunks(chunks)
 
     if not usable:
@@ -585,7 +704,8 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
     # по-казахски. Промах стоил целой лишней генерации — замер на проде
     # 22.08.2026: от 0,6 до 2,5 секунды, а в голосовом разговоре это половина
     # всей паузы перед ответом.
-    prompt = build_user_prompt(question, usable) + '\n\n' + _LANGUAGE_DIRECTIVE[wanted]
+    prompt = (build_user_prompt(question, usable, on_date)
+              + '\n\n' + _LANGUAGE_DIRECTIVE[wanted])
     text, meta = generate_fn(SYSTEM_PROMPT, prompt, history=history)
     # Повтор остаётся страховкой: указание модель иногда всё равно игнорирует.
     # Если и он не помог — ответ отдаём как есть, потому что неудобно читать
@@ -606,7 +726,7 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
         return {'kind': 'no_answer', 'text': body or NO_ANSWER_TEXT,
                 'sources': [], 'notes': [], 'meta': meta}
 
-    invented = ungrounded_numbers(body, usable, question)
+    invented = ungrounded_numbers(body, usable, question, on_date)
     if invented:
         # Единственное, из-за чего ответ теперь придерживается: числа, которых нет
         # ни в одном переданном фрагменте. Прежнее правило («нет подтверждённых
@@ -618,5 +738,9 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
                              ungrounded=invented, raw_preview=body[:300])}
 
     sources = build_sources(cited, usable, body)
-    return {'kind': 'answer', 'text': body,
-            'sources': sources, 'notes': ack_notice(sources), 'meta': meta}
+    return {'kind': 'answer', 'text': body, 'sources': sources,
+            # Оговорка про архив идёт ПЕРВОЙ: приписка об ознакомлении говорит,
+            # что сделать потом, а эта — можно ли вообще на ответ опираться.
+            'notes': stale_notice(sources) + ack_notice(sources),
+            'meta': dict(meta, stale_sources=sum(1 for s in sources
+                                                 if s.get('stale')))}

@@ -153,6 +153,15 @@ export default function WikiEditor({
        нужно, и заводить её было бы вредно — два имени у одного признака это
        второе место, где можно ошибиться знаком. */
     const [copyProtected, setCopyProtected] = useState(!!article?.copy_protected);
+    /* «Сведения не действуют»: статья остаётся в вике и в ответах помощника, но
+       каждый её фрагмент едет к модели и к оператору с пометкой «архив». Тумблер
+       положительный, как и защита от копирования: включён — пометка стоит.
+
+       Отдельно от «Убрать в архив» намеренно. Архив ПРЯЧЕТ статью от рядового
+       читателя, а справку о прошлых акциях операторы читать обязаны — именно
+       поэтому «Архивные акции TEZ» и опубликовали как обычную статью, из-за
+       чего помощник 27.08.2026 выдал закончившуюся акцию как действующую. */
+    const [historical, setHistorical] = useState(!!article?.historical);
 
     /* Название общего раздела — для подсказки под выбором раздела. Слаг тот же,
        что знает сервер (wiki/edit.py: _FALLBACK_SECTION_SLUG); совпадение
@@ -301,6 +310,7 @@ export default function WikiEditor({
             section_ids: sectionIds.map(Number).filter(Boolean),
             ai_support: aiSupport,
             copy_protected: copyProtected,
+            historical,
             // Для журнала: сервер запишет действие в это пространство, даже
             // если раздел статье достался запасной.
             space_id: spaceId || undefined,
@@ -330,7 +340,7 @@ export default function WikiEditor({
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
     }, [editor, title, summary, articleType, sectionIds, aiSupport, copyProtected,
-        isNew, base, headers, article, showToast, onSaved]);
+        historical, isNew, base, headers, article, showToast, onSaved]);
 
     const importDocument = (file) => {
         if (!file) return;
@@ -576,6 +586,30 @@ export default function WikiEditor({
                         <IosToggle
                             checked={copyProtected}
                             onChange={(value) => { setCopyProtected(value); setDirty(true); }}
+                        />
+                    </div>
+
+                    {/* Оговорка под тумблером обязательна, как и у защиты от
+                        копирования, но говорит о другом: человек должен понять,
+                        что статья НЕ прячется. Иначе он потянется к «Убрать в
+                        архив» — и справку, которую операторы читают, никто
+                        больше не увидит. */}
+                    <div className="flex items-start justify-between gap-3 border-t border-slate-100 pt-3">
+                        <div className="min-w-0">
+                            <div className="text-[14px] font-medium text-slate-900">
+                                Сведения уже не действуют
+                            </div>
+                            <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+                                Для справок о прошлом: архивные акции, отменённые
+                                правила. Статья остаётся в вике и в ответах
+                                ИИ-помощника, но он больше не выдаст её за
+                                действующее — пометит «архив» и предупредит
+                                оператора. Спрятать статью — это «Убрать в архив».
+                            </p>
+                        </div>
+                        <IosToggle
+                            checked={historical}
+                            onChange={(value) => { setHistorical(value); setDirty(true); }}
                         />
                     </div>
                 </div>

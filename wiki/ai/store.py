@@ -48,13 +48,20 @@ VALUES (%(chat_id)s, %(seq)s, %(role)s, %(kind)s, %(text)s, %(provider)s,
 RETURNING id, created_at
 """
 
+# stale/stale_note ХРАНЯТСЯ, а не считаются при чтении истории. Причина в самой
+# природе признака: «архивная статья» вывелась бы из названия и потом, а «срок
+# истёк 30.04.2025» — свойство МОМЕНТА ОТВЕТА. Пересчитай его при открытии
+# старого чата — и ответ, данный при живой акции, задним числом получил бы
+# пометку, которой при выдаче не было. Снимок правдивее.
 _INSERT_SOURCE = """
 INSERT INTO wiki_ai_message_sources
        (message_id, ord, article_id, chunk_id, chunk_text_hash, title, slug,
-        heading_path, quote, quote_ok, requires_ack, attributed)
+        heading_path, quote, quote_ok, requires_ack, attributed,
+        stale, stale_note, stale_kind)
 VALUES (%(message_id)s, %(ord)s, %(article_id)s, %(chunk_id)s,
         %(chunk_text_hash)s, %(title)s, %(slug)s, %(heading_path)s, %(quote)s,
-        %(quote_ok)s, %(requires_ack)s, %(attributed)s)
+        %(quote_ok)s, %(requires_ack)s, %(attributed)s,
+        %(stale)s, %(stale_note)s, %(stale_kind)s)
 """
 
 _TOUCH_CHAT = """
@@ -78,7 +85,8 @@ SELECT id, seq, role, kind, text, provider, model, elapsed_ms, feedback, created
 _SOURCES = """
 SELECT s.message_id, s.ord, s.article_id, s.title, s.slug, s.heading_path,
        s.quote, s.quote_ok, s.requires_ack, s.attributed,
-       (s.article_id = ANY(%(visible)s)) AS available
+       (s.article_id = ANY(%(visible)s)) AS available,
+       s.stale, s.stale_note, s.stale_kind
   FROM wiki_ai_message_sources s
   JOIN wiki_ai_messages m ON m.id = s.message_id
  WHERE m.chat_id = %(chat_id)s
@@ -186,7 +194,10 @@ def append_message(cursor, chat_id, *, role, text, kind='answer', provider=None,
             'quote': source.get('quote') or '',
             'quote_ok': bool(source.get('ok')),
             'requires_ack': bool(source.get('requires_ack')),
-            'attributed': bool(source.get('attributed'))})
+            'attributed': bool(source.get('attributed')),
+            'stale': bool(source.get('stale')),
+            'stale_note': (source.get('stale_note') or '')[:120],
+            'stale_kind': (source.get('stale_kind') or '')[:16]})
     return {'id': message_id, 'seq': seq,
             'created_at': created_at.isoformat() if created_at else None}
 
@@ -222,7 +233,9 @@ def chat_messages(cursor, chat_id, *, visible_article_ids=()):
             # ответа, и снимок не должен становиться лазейкой.
             'quote': row[6] if available else '',
             'quote_ok': bool(row[7]), 'requires_ack': bool(row[8]),
-            'attributed': bool(row[9]), 'available': available})
+            'attributed': bool(row[9]), 'available': available,
+            'stale': bool(row[11]), 'stale_note': row[12] or '',
+            'stale_kind': row[13] or ''})
     return messages
 
 

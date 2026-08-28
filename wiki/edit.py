@@ -111,19 +111,19 @@ def _next_version(cursor, article_id):
 def create_article(cursor, *, slug, title, summary, content, article_type,
                    section_ids, tags, author_id, visibility_mode='inherit',
                    strict_mode=False, ai_opt_out=False, copy_protected=False,
-                   space_ids=None):
+                   historical=False, space_ids=None):
     clean = sanitize_html(content)
     cursor.execute(
         """
         INSERT INTO wiki_articles (slug, title, summary, content, content_plain,
                                    article_type, status, visibility_mode, strict_mode,
-                                   ai_opt_out, copy_protected,
+                                   ai_opt_out, copy_protected, historical,
                                    author_id, updated_by, owner_user_id)
-        VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (slug, title, summary, clean, to_plain_text(clean), article_type,
-         visibility_mode, strict_mode, ai_opt_out, copy_protected,
+         visibility_mode, strict_mode, ai_opt_out, copy_protected, historical,
          author_id, author_id, author_id),
     )
     article_id = cursor.fetchone()[0]
@@ -141,7 +141,7 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
 
 _UPDATABLE = ('title', 'summary', 'article_type', 'status',
               'visibility_mode', 'strict_mode', 'ai_opt_out', 'copy_protected',
-              'owner_user_id', 'review_due_at', 'cross_department')
+              'historical', 'owner_user_id', 'review_due_at', 'cross_department')
 
 
 def update_article(cursor, article_id, fields, *, editor_id, session_id, comment):

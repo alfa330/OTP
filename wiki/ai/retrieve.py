@@ -115,7 +115,7 @@ ranked AS (
      WHERE score > 0
 )
 SELECT r.id, r.article_id, a.title, a.slug, r.chunk_idx, r.heading_path,
-       r.text, r.requires_ack, r.score, r.strict_hit
+       r.text, r.requires_ack, r.score, r.strict_hit, a.historical
   FROM ranked r
   JOIN wiki_articles a ON a.id = r.article_id
  WHERE r.rank_in_article <= %(per_article)s
@@ -129,7 +129,7 @@ SELECT r.id, r.article_id, a.title, a.slug, r.chunk_idx, r.heading_path,
 # релевантная статья не может быть вытеснена запрещёнными соседями.
 _DENSE_CHUNKS_SQL = """
 SELECT c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
-       c.text, c.requires_ack,
+       c.text, c.requires_ack, a.historical,
        1 - (e.embedding <=> %(qvec)s::vector) AS similarity
   FROM wiki_ai_chunks c
   JOIN wiki_ai_embeddings e
@@ -249,13 +249,13 @@ scope AS (
     SELECT count(DISTINCT article_id) AS articles FROM near
 )
 SELECT c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
-       c.text, c.requires_ack, max(n.wsim) AS wsim
+       c.text, c.requires_ack, a.historical, max(n.wsim) AS wsim
   FROM near n
   JOIN wiki_ai_chunks c ON c.id = n.id
   JOIN wiki_articles a ON a.id = c.article_id
  WHERE (SELECT articles FROM scope) = 1
  GROUP BY c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
-          c.text, c.requires_ack
+          c.text, c.requires_ack, a.historical
  ORDER BY max(n.wsim) DESC, c.article_id, c.chunk_idx
  LIMIT %(limit)s
 """.format(fold_word=sql_fold('lower(raw)'),
@@ -286,7 +286,7 @@ def search_dense(cursor, *, article_ids, query_vector, limit=20,
                    'limit': int(limit), 'min_similarity': float(min_similarity)})
     cursor.execute(_DENSE_CHUNKS_SQL, params)
     columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx',
-               'heading_path', 'text', 'requires_ack', 'similarity')
+               'heading_path', 'text', 'requires_ack', 'historical', 'similarity')
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
@@ -323,7 +323,7 @@ def search_fuzzy(cursor, *, article_ids, query, limit=FUZZY_LIMIT,
         'limit': int(limit),
     })
     columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx',
-               'heading_path', 'text', 'requires_ack', 'fuzzy')
+               'heading_path', 'text', 'requires_ack', 'historical', 'fuzzy')
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
     for row in rows:
         row['fuzzy'] = float(row['fuzzy'])
@@ -504,5 +504,6 @@ def search_chunks(cursor, *, article_ids, query, limit=8, per_article=3):
         'per_article': int(per_article),
     })
     columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx',
-               'heading_path', 'text', 'requires_ack', 'score', 'strict_hit')
+               'heading_path', 'text', 'requires_ack', 'score', 'strict_hit',
+               'historical')
     return [dict(zip(columns, row)) for row in cursor.fetchall()]

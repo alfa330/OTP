@@ -80,6 +80,35 @@ const ackTitles = (sources) => {
     return seen;
 };
 
+/** Архивные источники ответа, без повторов. Как и ackTitles — ИЗ ИСТОЧНИКОВ.
+ *
+ * Оговорку сервер присылает и полем notes, но брать её оттуда нельзя: при
+ * перезагрузке истории notes нет, и предупреждение исчезало бы ровно у старых
+ * ответов — тех, где протухшее вероятнее всего. Пометка на источнике хранится
+ * в базе (wiki_ai_message_sources.stale), поэтому переживает перезагрузку. */
+const staleTitles = (sources, kind) => {
+    const seen = [];
+    (sources || []).forEach((source) => {
+        if (source.stale && source.available !== false
+                && (!kind || source.stale_kind === kind)) {
+            const title = source.title || '';
+            if (title && !seen.includes(title)) seen.push(title);
+        }
+    });
+    return seen;
+};
+
+/* Оговорки под ответом: архив и истёкший срок — РАЗНЫЕ утверждения, и сводить
+   их в одну фразу значит говорить неправду про половину случаев. Формулировки
+   те же, что у сервера (wiki/ai/answer.py: _STALE_NOTES): расходиться им нельзя,
+   иначе живой ответ и он же из истории читались бы по-разному. */
+const STALE_CAVEATS = [
+    ['historical', 'Часть ответа взята из архивных материалов',
+     'Проверьте, действует ли это сейчас, прежде чем обещать водителю.'],
+    ['expired', 'Часть ответа взята из материалов с истёкшим сроком',
+     'Проверьте даты, прежде чем обещать водителю.'],
+];
+
 /** Чип источника: название статьи, раздел и цитата под ним. */
 const SourceChip = ({ source, onOpen }) => {
     const unavailable = source.available === false;
@@ -88,6 +117,7 @@ const SourceChip = ({ source, onOpen }) => {
     // заголовка», и это врало: провал сверки подписывался как безобидная
     // особенность цитаты. Сверки цитат больше нет — их извлекает сервер.
     const attributed = source.attributed === true;
+    const stale = source.stale === true;
     return (
         <button
             type="button"
@@ -106,6 +136,15 @@ const SourceChip = ({ source, onOpen }) => {
                 </span>
                 {attributed && !unavailable && (
                     <IosBadge tone="slate" className="shrink-0">сопоставлено</IosBadge>
+                )}
+                {/* Бейдж свежести — рядом с названием, а не под цитатой: в
+                    инциденте 27.08.2026 слово «Архивные» в названии статьи на
+                    экране БЫЛО, но ничем не выделялось, и оператор прочёл его
+                    как часть обычного заголовка. */}
+                {stale && !unavailable && (
+                    <IosBadge tone="amber" className="shrink-0">
+                        {source.stale_note || 'архив'}
+                    </IosBadge>
                 )}
             </div>
             {source.heading_path && (
@@ -407,6 +446,30 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                                         ИЗ ИСТОЧНИКОВ, а не берётся из ответа сервера:
                                         при перезагрузке истории поля notes нет, и
                                         приписка исчезала бы только из старых ответов. */}
+                                    {/* Оговорка про архив идёт ПЕРЕД припиской об
+                                        ознакомлении: та говорит, что сделать
+                                        потом, а эта — можно ли вообще на ответ
+                                        опираться. Тон розовый, а не янтарный:
+                                        рядом с янтарной припиской об ознакомлении
+                                        одинаковые плашки слились бы в одну. */}
+                                    {STALE_CAVEATS.map(([kind, lead, tail]) => {
+                                        const titles = staleTitles(message.sources, kind);
+                                        if (!titles.length) return null;
+                                        return (
+                                            <div key={kind} className="px-4">
+                                                <div className="flex max-w-[78%] gap-2 rounded-xl bg-rose-50 px-3 py-2 text-[12px] text-rose-900 ring-1 ring-rose-200/70">
+                                                    <AlertCircle size={14} className="mt-[1px] shrink-0" />
+                                                    <span>
+                                                        {lead}
+                                                        {' — '}
+                                                        {titles.map((title) => `«${title}»`).join(', ')}.
+                                                        {' '}{tail}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+
                                     {ackTitles(message.sources).map((title) => (
                                         <div key={title} className="px-4">
                                             <div className="max-w-[78%] rounded-xl bg-amber-50 px-3 py-2 text-[12px] text-amber-900 ring-1 ring-amber-200/70">
