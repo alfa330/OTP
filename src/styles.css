@@ -247,6 +247,29 @@
     .notifications-scroll::-webkit-scrollbar-thumb:hover {
       background: rgba(100, 116, 139, 0.8);
     }
+
+    /* Тот же тонкий скролл, но общим классом — для узких колонок внутри
+       поповеров (часы/минуты в пикере времени). Ползунок по умолчанию в
+       WebKit шире самой колонки цифр и перетягивает на себя внимание в
+       элементе, где смотреть надо на числа. */
+    .thin-scroll {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+    }
+    .thin-scroll::-webkit-scrollbar {
+      width: 3px;
+      height: 3px;
+    }
+    .thin-scroll::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .thin-scroll::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.5);
+      border-radius: 9999px;
+    }
+    .thin-scroll::-webkit-scrollbar-thumb:hover {
+      background: rgba(100, 116, 139, 0.75);
+    }
     .sidebar button > svg:not(.sidebar-text) {
       flex: 0 0 18px;
       width: 18px;

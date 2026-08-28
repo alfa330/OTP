@@ -1219,6 +1219,75 @@ const DateRangePicker = ({ value, onChange, disabled = false, buttonClassName = 
     );
 };
 
+/* Таймлайн заявки по смене: что стоит в графике и что просят изменить.
+ *
+ * Нужен потому, что «09:00 — 18:00 → 09:00 — 15:00» человек читает числами, а
+ * решает глазами: видно ли, что кусок отрезается с конца, попадает ли доп. часть
+ * в уже занятое время, продолжает ли она смену впритык. Цифры на всё это
+ * отвечают только после вычитания в уме.
+ *
+ * Ось всегда начинается с 00:00 и тянется до конца самого позднего интервала:
+ * ночная смена 17:00–02:00 живёт в координатах 1020–1560, и обрезав ось сутками,
+ * мы отрезали бы ей хвост ровно там, где он и интересен.
+ *
+ * Цветом кодируем СМЫСЛ, а не сущность: серое — то, что было и остаётся, синее —
+ * итог, розовое — то, что уходит или конфликтует, зелёное — то, что добавляется.
+ * Нейтральный фон дорожки не красим вовсе.
+ */
+const ShiftChangeTimeline = ({ base = [], cut = [], add = [], addTone = 'emerald', conflict = false }) => {
+    const all = [...base, ...cut, ...add].filter(Boolean);
+    if (all.length === 0) return null;
+
+    const axisEnd = Math.max(1440, ...all.map((s) => s.end));
+    // До целого часа: ось, кончающаяся на 26:10, читается как ошибка вёрстки.
+    const end = Math.ceil(axisEnd / 60) * 60;
+    const pct = (value) => `${Math.max(0, Math.min(100, (value / end) * 100))}%`;
+    const bar = (s, className, key) => (
+        <div
+            key={key}
+            className={`absolute inset-y-0 rounded-[5px] ${className}`}
+            style={{ left: pct(s.start), width: pct(Math.max(0, s.end - s.start)) }}
+        />
+    );
+
+    // Подписи каждые 6 часов; на длинной оси (ночная смена) последняя метка
+    // может не попасть на круглые шесть — дорисовываем конец отдельно.
+    const ticks = [];
+    for (let m = 0; m <= end; m += 360) ticks.push(m);
+    if (ticks[ticks.length - 1] !== end) ticks.push(end);
+
+    return (
+        <div className="space-y-1">
+            <div className="relative h-7 overflow-hidden rounded-lg bg-slate-100">
+                {/* Часовые риски — под полосами, чтобы не резать их пополам. */}
+                {ticks.slice(1, -1).map((m) => (
+                    <div key={`tick-${m}`} className="absolute inset-y-0 w-px bg-white/70" style={{ left: pct(m) }} />
+                ))}
+                {base.map((s, i) => bar(s, 'bg-slate-300', `base-${i}`))}
+                {cut.map((s, i) => bar(s, 'bg-rose-300', `cut-${i}`))}
+                {add.map((s, i) => bar(
+                    s,
+                    conflict ? 'bg-rose-500' : (addTone === 'blue' ? 'bg-blue-500' : 'bg-emerald-500'),
+                    `add-${i}`
+                ))}
+            </div>
+            <div className="relative h-3">
+                {ticks.map((m, i) => (
+                    <span
+                        key={`lbl-${m}`}
+                        className={`absolute top-0 text-[10px] tabular-nums text-slate-400 ${
+                            i === 0 ? '' : i === ticks.length - 1 ? '-translate-x-full' : '-translate-x-1/2'
+                        }`}
+                        style={{ left: pct(m) }}
+                    >
+                        {String(Math.floor(m / 60)).padStart(2, '0')}
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+};
+
 // Баннер + аккуратная (iOS-style) модалка: оператор сам меняет свою ставку 1-го числа.
 // Открывается кнопкой баннера или событием 'open-self-rate-modal' (клик по ставке-маркеру).
 const RateSelfChangeCard = ({ user, currentRate, showToast, onChanged }) => {
@@ -22797,6 +22866,75 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setShiftChangeError('');
             }, [shiftChangeShiftsForDate]);
 
+            /* Смены выбранного дня в минутах от полуночи, с поднятыми за 1440
+               ночными хвостами — общая система координат для таймлайна и для
+               проверки пересечений. */
+            const shiftChangeDayIntervals = useMemo(() => (
+                (shiftChangeDayShifts || [])
+                    .map(seg => shiftChangeMinutes(seg?.start, seg?.end))
+                    .filter(Boolean)
+            ), [shiftChangeDayShifts, shiftChangeMinutes]);
+
+            /* Предлагаемый интервал в тех же координатах, или null. Для «доп.
+               части» это то, что просят добавить; для сокращения — то, что
+               останется от смены. */
+            const shiftChangeProposed = useMemo(() => {
+                const form = shiftChangeForm;
+                if (form?.kind === 'extra') {
+                    return form.start && form.end ? shiftChangeMinutes(form.start, form.end) : null;
+                }
+                const seg = shiftChangeSelectedSegment;
+                if (!seg || !form?.newStart || !form?.newEnd) return null;
+                const bounds = shiftChangeMinutes(form.newStart, form.newEnd);
+                if (!bounds) return null;
+                let { startMin, endMin } = bounds;
+                if (startMin < seg.startMin && startMin + 1440 <= seg.endMin) {
+                    startMin += 1440;
+                    endMin += 1440;
+                }
+                while (endMin <= startMin) endMin += 1440;
+                return { startMin, endMin };
+            }, [shiftChangeForm, shiftChangeSelectedSegment, shiftChangeMinutes]);
+
+            /* Доп. часть поверх существующей смены сервер не примет. Раньше это
+               выяснялось только после отправки — теперь видно сразу, и полоса
+               на таймлайне краснеет. */
+            const shiftChangeExtraConflict = useMemo(() => {
+                if (shiftChangeForm?.kind !== 'extra' || !shiftChangeProposed) return false;
+                const { startMin, endMin } = shiftChangeProposed;
+                return shiftChangeDayIntervals.some(seg => seg.startMin < endMin && startMin < seg.endMin);
+            }, [shiftChangeForm?.kind, shiftChangeProposed, shiftChangeDayIntervals]);
+
+            const shiftChangeTimeline = useMemo(() => {
+                const base = shiftChangeDayIntervals.map(s => ({ start: s.startMin, end: s.endMin }));
+                if (shiftChangeForm?.kind === 'extra') {
+                    return {
+                        base,
+                        cut: [],
+                        add: shiftChangeProposed
+                            ? [{ start: shiftChangeProposed.startMin, end: shiftChangeProposed.endMin }]
+                            : [],
+                        addTone: 'emerald',
+                        conflict: shiftChangeExtraConflict,
+                    };
+                }
+                const seg = shiftChangeSelectedSegment;
+                if (!seg || !shiftChangeProposed) return { base, cut: [], add: [], addTone: 'blue', conflict: false };
+                // Отрезаться может и начало, и конец — поэтому кусков до двух.
+                const cut = [
+                    { start: seg.startMin, end: shiftChangeProposed.startMin },
+                    { start: shiftChangeProposed.endMin, end: seg.endMin },
+                ].filter(s => s.end > s.start);
+                return {
+                    base,
+                    cut,
+                    add: [{ start: shiftChangeProposed.startMin, end: shiftChangeProposed.endMin }],
+                    addTone: 'blue',
+                    conflict: false,
+                };
+            }, [shiftChangeDayIntervals, shiftChangeForm?.kind, shiftChangeProposed,
+                shiftChangeSelectedSegment, shiftChangeExtraConflict]);
+
             /* Что именно не так с заполненной формой, или null. Одно место на
                подсказку под формой и на блокировку кнопки: два независимых
                условия разъехались бы, и кнопка гасла бы без объяснения. */
@@ -22808,6 +22946,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const bounds = shiftChangeMinutes(form.start, form.end);
                     if (!bounds) return 'Часть смены не может быть длиннее суток';
                     if (bounds.endMin <= bounds.startMin) return 'Конец должен быть позже начала';
+                    // Ту же проверку делает сервер — здесь она ради того, чтобы
+                    // человек увидел конфликт до отправки, а не после.
+                    if (shiftChangeExtraConflict) return 'В это время у вас уже есть смена';
                     return null;
                 }
                 if (shiftChangeDayShifts.length === 0) return 'В этот день смен нет';
@@ -22831,7 +22972,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return 'Границы смены не изменились';
                 }
                 return null;
-            }, [shiftChangeForm, shiftChangeMinutes, shiftChangeDayShifts, shiftChangeSelectedSegment]);
+            }, [shiftChangeForm, shiftChangeMinutes, shiftChangeDayShifts,
+                shiftChangeSelectedSegment, shiftChangeExtraConflict]);
 
             const submitShiftChangeRequest = useCallback(async () => {
                 if (shiftChangeFormProblem || shiftChangeSubmitting) return;
@@ -25244,6 +25386,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             onChange={(v) => setShiftChangeForm(prev => ({ ...prev, end: v }))}
                                                             ariaLabel="Конец дополнительной части"
                                                         />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Таймлайн дня: серым то, что стоит в графике, розовым
+                                                отрезаемое, цветным итог. Числа под ним — только
+                                                «было → станет», без повтора самих границ: они уже
+                                                стоят в полях выше. */}
+                                            {(shiftChangeTimeline.base.length > 0 || shiftChangeTimeline.add.length > 0) && (
+                                                <div className="space-y-2 rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/70">
+                                                    <ShiftChangeTimeline {...shiftChangeTimeline} />
+                                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums text-slate-500">
+                                                        {shiftChangeForm.kind === 'shorten' && shiftChangeSelectedSegment && (
+                                                            <span>
+                                                                Было <span className="font-semibold text-slate-700">
+                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
+                                                                </span>
+                                                            </span>
+                                                        )}
+                                                        {shiftChangeProposed && (
+                                                            <span>
+                                                                {shiftChangeForm.kind === 'extra' ? 'Добавится ' : 'Станет '}
+                                                                <span className={`font-semibold ${shiftChangeExtraConflict ? 'text-rose-600' : 'text-slate-700'}`}>
+                                                                    {formatMinutesOnly(shiftChangeProposed.endMin - shiftChangeProposed.startMin)}
+                                                                </span>
+                                                            </span>
+                                                        )}
+                                                        {/* Про склейку говорим прямо: иначе «доп. часть впритык»
+                                                            выглядит как вторая смена, а в графике станет одной. */}
+                                                        {shiftChangeForm.kind === 'extra' && !shiftChangeExtraConflict && shiftChangeProposed
+                                                            && shiftChangeDayIntervals.some(seg =>
+                                                                seg.endMin === shiftChangeProposed.startMin
+                                                                || seg.startMin === shiftChangeProposed.endMin) && (
+                                                            <span className="text-slate-400">— продлит смену, а не добавит вторую</span>
+                                                        )}
                                                     </div>
                                                 </div>
                                             )}

@@ -88,6 +88,33 @@ export const parseTimeInput = (raw) => {
     return h * 60 + m;
 };
 
+/* Маска ввода: двоеточие ставим сами, как только набор стал ОДНОЗНАЧНЫМ, — то
+   есть на четвёртой цифре подряд. «1300» превращается в «13:00» под пальцами, и
+   человеку не приходится держать в голове, разделит ли поле цифры само. Раньше
+   это откладывалось до blur, и в поле стояло «1300» — вид, которого в остальном
+   интерфейсе нет нигде.
+
+   Почему ИМЕННО на четвёртой, а не на второй. Три цифры без разделителя — это
+   Ч:ММ (см. parseTimeInput: одиночная группа читается как «9:30»). Маска,
+   вставляющая двоеточие после двух цифр, превратила бы «930» в «93:0» — набор,
+   который потом откатится как негодный, хотя человек набрал совершенно
+   нормальное время. Явно набранный разделитель не трогаем вовсе: «9:3» это
+   09:03, и дописывать туда нечего.
+
+   Каретку возвращаем по ЧИСЛУ ЦИФР слева от неё, а не по позиции: вставка
+   двоеточия сдвигает индексы, и «прыжок курсора» — ровно то, из-за чего
+   форматирование на лету обычно и не делают. */
+export const maskTimeInput = (raw, caret) => {
+    const cleaned = String(raw ?? '').replace(/[^\d:.\-\s]/g, '').slice(0, 5);
+    const hasSeparator = /[:.\-]/.test(cleaned);
+    const digits = cleaned.replace(/\D/g, '');
+    if (hasSeparator || digits.length < 4) return { text: cleaned, caret };
+    const text = `${digits.slice(0, 2)}:${digits.slice(2, 4)}`;
+    if (caret === null || caret === undefined) return { text, caret: text.length };
+    const digitsBefore = cleaned.slice(0, caret).replace(/\D/g, '').length;
+    return { text, caret: digitsBefore >= 2 ? digitsBefore + 1 : digitsBefore };
+};
+
 /* Приводим к шагу и границам. Округляем к БЛИЖАЙШЕМУ шагу, а не вниз: человек,
    набравший 09:33 при шаге 5, имел в виду 09:35 ровно с той же вероятностью,
    что и 09:30, но «вниз» всегда выглядит как потеря набранного. */
@@ -246,9 +273,17 @@ export function IosTimePicker({
        без разделителя — ДОГАДКА на полпути: «240» это и 02:40, и начало «2400».
        Догадку отдаём (иначе «930» не сохранится по клику мимо поля), но запоминаем,
        к чему возвращаться, если следующая цифра сделает набор негодным. */
-    const typed = (raw) => {
-        const text = raw.replace(/[^\d:.\-\s]/g, '').slice(0, 5);
+    const typed = (raw, caret) => {
+        const { text, caret: nextCaret } = maskTimeInput(raw, caret);
         setDraft(text);
+        if (nextCaret !== caret && inputRef.current) {
+            // После setDraft React перерисует поле — каретку ставим уже поверх
+            // нового значения, иначе она уедет в конец строки.
+            const el = inputRef.current;
+            requestAnimationFrame(() => {
+                if (el.ownerDocument.activeElement === el) el.setSelectionRange(nextCaret, nextCaret);
+            });
+        }
         if (!text.trim()) { if (allowEmpty) { guessedFromRef.current = null; emit(null); } return; }
         const exact = /^\d{1,2}\s*[:.\-]\s*\d{2}$/.test(text) || /^\d{4}$/.test(text);
         const guess = !exact && /^\d{3}$/.test(text);
@@ -359,7 +394,7 @@ export function IosTimePicker({
                         <div className="pb-1 text-center text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                             {col.label}
                         </div>
-                        <div ref={col.ref} className="max-h-[196px] space-y-0.5 overflow-y-auto overscroll-contain pr-0.5">
+                        <div ref={col.ref} className="thin-scroll max-h-[196px] space-y-0.5 overflow-y-auto overscroll-contain pr-0.5">
                             {col.items.map((item) => {
                                 const off = col.isOff(item);
                                 const on = col.isOn(item);
@@ -415,7 +450,7 @@ export function IosTimePicker({
                 disabled={disabled}
                 placeholder={placeholder}
                 value={draft}
-                onChange={(e) => typed(e.target.value)}
+                onChange={(e) => typed(e.target.value, e.target.selectionStart)}
                 onKeyDown={onKeyDown}
                 onFocus={(e) => { focusedRef.current = true; guessedFromRef.current = null; e.target.select(); }}
                 onBlur={() => { focusedRef.current = false; commit(); }}
