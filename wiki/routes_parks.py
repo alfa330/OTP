@@ -436,8 +436,15 @@ def register(bp, wiki_route, db, log_ip, gcs):
 
         queries.log_action(cursor, actor_id=ctx['user_id'], action='park.logo_upload',
                            entity_type='park', entity_id=None,
+                           # Имена с приставкой source_ — не украшение. В бакет
+                           # файл ложится уже пережатым в WebP (wiki/images.py),
+                           # то есть вес и тип в wiki_files ДРУГИЕ. Одно и то же
+                           # событие, описанное двумя разными числами без
+                           # пояснения, — это полчаса на вопрос «почему логотип
+                           # столько весит».
                            details={'space_id': space_id, 'file_id': str(file_id),
-                                    'size': len(data), 'content_type': content_type},
+                                    'source_size': len(data),
+                                    'source_content_type': content_type},
                            ip_address=log_ip())
         # file_id отдаём отдельно от адреса: форма кладёт в парк именно его, а
         # url ей нужен только чтобы показать картинку до сохранения.

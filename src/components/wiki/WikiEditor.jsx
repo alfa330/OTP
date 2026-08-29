@@ -6,7 +6,6 @@ import axios from 'axios';
 import { EditorContent, mergeAttributes, useEditor, useEditorState } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
-import Image from '@tiptap/extension-image';
 import Underline from '@tiptap/extension-underline';
 import TextAlign from '@tiptap/extension-text-align';
 import Highlight from '@tiptap/extension-highlight';
@@ -26,11 +25,13 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
 import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE, TRAINER_TYPE } from './articleTypes';
+import WikiImage from './WikiImageNode';
 import WikiTrainerNode from './trainers/TrainerNode';
 import { TRAINER_CARDS, defaultButtonLabel, findTrainer } from './trainers/registry';
 import SectionTreeSelect from './SectionTreeSelect';
 import ArticlePicker from './ArticlePicker';
 import { buildRelativeArticleLink, linkAttrsForSaving } from './articleLink';
+import useStableCallback from './useStableCallback';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
 
@@ -53,6 +54,24 @@ import WikiTableMenu from './WikiTableMenu';
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
 const HIGHLIGHT_COLORS = ['#fef3c7', '#dcfce7', '#dbeafe', '#fce7f3', '#e0e7ff'];
+
+/* Картинки из буфера обмена или из перетаскивания.
+ *
+ * Пустой список означает «это не про картинки, разбирайся сам» — и обычная
+ * вставка текста остаётся нетронутой.
+ *
+ * Отдельная оговорка про кусок документа. Копируя абзац с иллюстрацией из Word
+ * или из браузера, человек кладёт в буфер И текст, И файл картинки. Забрать
+ * оттуда только картинку значило бы потерять абзац, поэтому такой буфер целиком
+ * уходит редактору: признак — непустой text/plain. У снимка экрана его нет,
+ * поэтому «вставил скриншот» через это условие проходит.
+ */
+const imageFiles = (event) => {
+    const transfer = event.clipboardData || event.dataTransfer;
+    if (!transfer) return [];
+    if (event.clipboardData && String(transfer.getData('text/plain') || '').trim()) return [];
+    return Array.from(transfer.files || []).filter((file) => file.type?.startsWith('image/'));
+};
 
 const ToolButton = ({ active, disabled, title, onClick, children }) => (
     <button
@@ -218,7 +237,16 @@ export default function WikiEditor({
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
             Underline,
             WikiLink.configure({ openOnClick: false, autolink: true }),
-            Image.configure({ inline: false, allowBase64: true }),
+            /* Картинка со своим видом узла: размер и выравнивание. Стоковое
+               @tiptap/extension-image умеет только вставить <img> — см. шапку
+               WikiImageNode.jsx о том, почему не подошёл и встроенный resize.
+
+               allowBase64 остаётся: в статьях, перенесённых из старой вики,
+               картинки лежат строкой data:image/*, и без разрешения они
+               пропали бы из текста при первом же открытии редактора. Новые
+               так уже не появляются — вставленный скриншот уходит в бакет
+               (handlePaste ниже). */
+            WikiImage.configure({ inline: false, allowBase64: true }),
             TextAlign.configure({ types: ['heading', 'paragraph'] }),
             TextStyle,
             Color,
@@ -242,6 +270,24 @@ export default function WikiEditor({
             attributes: {
                 class: 'wiki-prose min-h-[320px] focus:outline-none',
             },
+            /* Скриншот из буфера и картинка, перетащенная в окно, уходят В
+               БАКЕТ, а не в текст статьи.
+
+               Без этих двух обработчиков TipTap кладёт вставленное
+               изображение прямо в разметку строкой data:image/* — она
+               разрешена (allowBase64) и её пропускает санитайзер. Статья от
+               одного скриншота толстеет на мегабайты, в поиск попадает
+               мусором, а главное — мимо хранилища проходит самый частый
+               способ добавить картинку: в старой вике на такие вставки
+               пришлось 81 % всего объёма контента. Заодно это единственный
+               путь, на котором картинка иначе не превратилась бы в WebP:
+               пережимает их сервер, при укладке в бакет (wiki/images.py). */
+            handlePaste: (_view, event) => insertImageFiles(imageFiles(event)),
+            handleDrop: (view, event) => insertImageFiles(
+                imageFiles(event),
+                // Картинка должна лечь ТУДА, КУДА её бросили, а не туда, где
+                // стоял курсор до перетаскивания.
+                view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos),
         },
     }, [article?.id]);
 
@@ -365,19 +411,43 @@ export default function WikiEditor({
             .finally(() => setImporting(false));
     };
 
-    const uploadImage = (file) => {
+    /* Загрузка картинки. Обёрнута в useStableCallback, потому что её зовут из
+       editorProps: тот объект собирается ОДИН раз, при создании редактора, и
+       обычная стрелка осталась бы там навсегда со ссылками на первый рендер —
+       на ещё не созданный editor в том числе. */
+    const uploadImage = useStableCallback((file, at) => {
         if (!file) return;
         const form = new FormData();
         form.append('file', file);
-        axios.post(`${base}/upload`, form, { headers })
+        return axios.post(`${base}/upload`, form, { headers })
             .then((r) => {
                 // Адрес постоянный (/api/wiki/file/<id>), подпись выдаётся при
                 // каждом запросе — картинки в статье не протухают.
-                editor.chain().focus().setImage({ src: r.data.url }).run();
+                const chain = editor.chain().focus();
+                if (typeof at === 'number') chain.setTextSelection(at);
+                chain.setImage({ src: r.data.url }).run();
                 setDirty(true);
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось загрузить картинку'), 'error'));
-    };
+    });
+
+    /* true — событие разобрано нами, ProseMirror пусть не вставляет ничего сам.
+       Пустой список — false, и обычная вставка текста работает как работала.
+
+       Файлы уходят ПО ОЧЕРЕДИ, а не пачкой, и причин две. Первая — сервер: на
+       каждую загрузку /upload занимает соединение из пула вики и пережимает
+       картинку в WebP, то есть десяток брошенных разом файлов это десяток
+       занятых соединений и десяток одновременных кодирований. Вторая — порядок:
+       позиция вставки считается один раз, по месту, куда бросили, и параллельные
+       вставки уложили бы картинки в обратном порядке. Поэтому место указывается
+       только первой, а каждая следующая встаёт за предыдущей. */
+    const insertImageFiles = useStableCallback((files, at) => {
+        if (!files.length) return false;
+        files.reduce(
+            (queue, file, index) => queue.then(() => uploadImage(file, index ? undefined : at)),
+            Promise.resolve());
+        return true;
+    });
 
     const setLink = () => {
         const previous = editor.getAttributes('link').href || '';

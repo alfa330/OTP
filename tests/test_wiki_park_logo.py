@@ -14,6 +14,7 @@
    остальных. Границей служит пространство самого справочника.
 """
 
+import base64
 import io
 import json
 import sys
@@ -30,6 +31,11 @@ try:
     from flask import Flask
 except ImportError:  # pragma: no cover
     Flask = None
+
+try:
+    from PIL import Image as PillowImage
+except ImportError:  # pragma: no cover — окружение без Pillow
+    PillowImage = None
 
 from wiki import articles as wiki_articles  # noqa: E402
 from wiki import parks as wiki_parks  # noqa: E402
@@ -218,9 +224,17 @@ class _Harness:
         app.config['TESTING'] = True
         return app.test_client(), cursor
 
-    @staticmethod
-    def png(size=64):
-        return {'file': (io.BytesIO(b'\x89PNG' + b'0' * size), 'logo.png', 'image/png')}
+    # НАСТОЯЩИЙ PNG (1x1), а не четыре байта подписи. Разница принципиальная:
+    # с 26.08.2026 загрузка переводит картинки в WebP (wiki/images.py), а
+    # нераспознанный файл проходит по запасному пути «положить как есть» — на
+    # подделке тест был бы зелёным, ничего при этом не проверяя.
+    PNG = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM'
+        'IQAAAABJRU5ErkJggg==')
+
+    @classmethod
+    def png(cls):
+        return {'file': (io.BytesIO(cls.PNG), 'logo.png', 'image/png')}
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
@@ -272,13 +286,28 @@ class LogoUploadRouteTest(_Harness, unittest.TestCase):
         self.assertEqual(body['file_id'], FILE_ID)
         self.assertEqual(body['url'], '/api/wiki/file/%s' % FILE_ID)
         self.blob.upload_from_string.assert_called_once()
-        self.assertEqual(self.blob.upload_from_string.call_args.kwargs['content_type'],
-                         'image/png')
         # Статьи у логотипа нет и не будет — видимость ему даёт справочник.
         insert = [call for call in cursor.execute.call_args_list
                   if 'INSERT INTO wiki_files' in ' '.join(str(call.args[0]).split())]
         self.assertEqual(len(insert), 1)
         self.assertIsNone(insert[0].args[1][0])
+
+    @unittest.skipIf(PillowImage is None, 'Pillow не установлен')
+    def test_logo_is_stored_as_webp(self):
+        """Логотип ложится в бакет тем же форматом, что и всё остальное.
+
+        Тип пишется в ДВА места: в сам блоб и в wiki_files. Роут /file/<id>
+        подставляет в подпись значение ИЗ БАЗЫ, поэтому разъехавшиеся значения
+        дали бы WebP-байты, отданные как image/png.
+        """
+        client, cursor = self.build()
+        response = client.post(self.URL, data=self.png(), content_type='multipart/form-data')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self.blob.upload_from_string.call_args.kwargs['content_type'],
+                         'image/webp')
+        insert = [call for call in cursor.execute.call_args_list
+                  if 'INSERT INTO wiki_files' in ' '.join(str(call.args[0]).split())]
+        self.assertIn('image/webp', insert[0].args[1])
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')

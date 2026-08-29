@@ -63,7 +63,13 @@ ALLOWED_ATTRIBUTES = {tag: set(_COMMON_ATTRS) for tag in ALLOWED_TAGS}
 # rel сознательно НЕ в списке: nh3 управляет им сам через link_rel и
 # отказывается работать, если атрибут разрешён явно.
 ALLOWED_ATTRIBUTES['a'] |= {'href', 'target'}
-ALLOWED_ATTRIBUTES['img'] |= {'src', 'alt', 'width', 'height', 'loading'}
+# data-width и data-align — размер и выравнивание картинки, их ставит узел
+# редактора (src/components/wiki/WikiImageNode.jsx). Тот же размер
+# продублирован в style, но атрибуты нужны отдельно: по ним редактор
+# восстанавливает состояние узла при следующем открытии статьи. Вырежи их —
+# и заданный автором размер сбросится, причём молча.
+ALLOWED_ATTRIBUTES['img'] |= {'src', 'alt', 'width', 'height', 'loading',
+                             'data-width', 'data-align'}
 ALLOWED_ATTRIBUTES['td'] |= {'colspan', 'rowspan', 'colwidth'}
 ALLOWED_ATTRIBUTES['th'] |= {'colspan', 'rowspan', 'colwidth'}
 ALLOWED_ATTRIBUTES['col'] |= {'span', 'width'}

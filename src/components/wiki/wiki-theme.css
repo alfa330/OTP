@@ -257,6 +257,165 @@
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
+/* Размер и выравнивание картинки.
+ *
+ * Ширина приезжает ИНЛАЙНОВЫМ style в процентах — её ставит узел редактора
+ * (WikiImageNode.jsx), у каждой картинки она своя, и правилам здесь делать
+ * нечего. Здесь — только то, чего инлайновый стиль дать не может.
+ *
+ * display: block — как раз такой случай. Свойства display НЕТ в белом списке
+ * серверного санитайзера (wiki/sanitize.py, ALLOWED_CSS) и не будет: пустить в
+ * тело статьи произвольный display значит разрешить спрятать кусок регламента
+ * от читателя. А без блочности не работает margin: auto, то есть не работает
+ * выравнивание. Отсюда правило: выровненная картинка — блок.
+ *
+ * Поля продублированы: те же margin-left/right стоят и в инлайновом стиле.
+ * Дубль страхует от одного конкретного случая — статьи, у которой стиль
+ * потеряли (старая редакция, чужой импорт, будущая правка белого списка): по
+ * уцелевшему data-align картинка встанет ровно там же, где стояла.
+ */
+/* И заданная ширина тоже делает картинку блоком. Без этого две картинки по
+   45 %, которым выравнивание не задавали, вставали бы в статье В ОДНУ СТРОКУ, а
+   в редакторе — друг под другом: узел там всегда отдельный блок. Автор видел бы
+   не то, что читатель. */
+.wiki-prose img[data-align],
+.wiki-prose img[data-width] { display: block; }
+.wiki-prose img[data-align='left'] { margin-left: 0; margin-right: auto; }
+.wiki-prose img[data-align='center'] { margin-left: auto; margin-right: auto; }
+.wiki-prose img[data-align='right'] { margin-left: auto; margin-right: 0; }
+
+/* ── Та же картинка в редакторе: обвязка с ручками ─────────────────────────
+   Обвязки нет в сохранённом HTML вовсе — она нужна только автору. Расстановку
+   поэтому делает она, а не поля картинки: в редакторе картинка всегда занимает
+   всю ширину своей обёртки, а двигается сама обёртка.
+
+   width: max-content у обёртки — чтобы нетронутая картинка стояла СВОИМ
+   размером. Процент, когда автор его задал, приходит инлайновым стилем и это
+   значение перебивает; max-width не даёт вылезти за колонку в обоих случаях. */
+.wiki-image-node {
+    position: relative;
+    margin: 1.5rem 0;
+}
+
+.wiki-image-node__inner {
+    position: relative;
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    padding: 0.25rem;
+    border: 1px dashed transparent;
+    border-radius: 16px;
+}
+
+.wiki-image-node[data-align='center'] .wiki-image-node__inner { margin-left: auto; margin-right: auto; }
+.wiki-image-node[data-align='right'] .wiki-image-node__inner { margin-left: auto; margin-right: 0; }
+
+/* Своих полей у картинки внутри обвязки быть не должно: вертикальный отступ
+   уже дала обёртка, а боковые сместили бы её относительно ручки. */
+.wiki-image-node__inner img {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 0;
+}
+
+.wiki-image-node.is-selected .wiki-image-node__inner {
+    border-color: var(--wiki-accent-line);
+    background: var(--wiki-accent-soft);
+}
+
+/* Панель показываем у выделенной или наведённой картинки: постоянная панель у
+   каждой превращает статью в череду пультов. */
+.wiki-image-node__tools {
+    position: absolute;
+    top: -2.25rem;
+    left: 0;
+    z-index: 5;
+    display: none;
+    align-items: center;
+    gap: 0.125rem;
+    /* Панель шире картинки — и это нормально: у значка в 10 % колонки ширины на
+       восемь кнопок нет и быть не может. Без max-content абсолютный блок
+       ужимается по своему родителю, и подпись «20 %» переносилась на две
+       строки прямо посреди панели. */
+    width: max-content;
+    white-space: nowrap;
+    padding: 0.25rem;
+    background: var(--wiki-surface);
+    border: 1px solid var(--wiki-line);
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+}
+
+.wiki-image-node.is-selected .wiki-image-node__tools,
+.wiki-image-node:hover .wiki-image-node__tools {
+    display: flex;
+}
+
+/* Картинка первым блоком статьи: над ней места нет, и панель уехала бы на
+   тулбар редактора. Тогда она встаёт ВНУТРЬ верхнего края картинки. Случай не
+   редкий — инструкция часто начинается со скриншота.
+
+   Отсчёт от .wiki-prose, а не :first-child у самого узла: узел ВСЕГДА лежит
+   единственным ребёнком технической обёртки .react-renderer, которую ставит
+   ReactNodeViewRenderer, — то есть :first-child у него истинно у каждой
+   картинки, и панель уехала бы внутрь у всех. */
+.wiki-prose > :first-child .wiki-image-node__tools {
+    top: 0.5rem;
+    left: 0.5rem;
+}
+
+.wiki-image-node__tools button,
+.wiki-image-node__grip {
+    display: grid;
+    place-items: center;
+    width: 1.625rem;
+    height: 1.625rem;
+    color: var(--wiki-ink-soft);
+    background: none;
+    border: 0;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.wiki-image-node__tools button:hover { background: var(--wiki-line-soft); }
+.wiki-image-node__tools button.is-on { color: var(--wiki-accent); background: var(--wiki-accent-soft); }
+.wiki-image-node__grip { cursor: grab; color: var(--wiki-ink-mute); }
+
+.wiki-image-node__size {
+    padding: 0 0.25rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--wiki-ink-mute);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Ручка ширины у правого края. Курсор col-resize и есть подсказка, что её
+   можно тянуть: подписывать это словами негде. */
+.wiki-image-node__resize {
+    position: absolute;
+    top: 50%;
+    right: -0.3125rem;
+    width: 0.625rem;
+    height: 2.25rem;
+    background: var(--wiki-accent);
+    border: 2px solid #fff;
+    border-radius: 999px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.18);
+    transform: translateY(-50%);
+    cursor: col-resize;
+    /* Без этого на тачскрине браузер через пару миллиметров решает, что палец
+       на ручке — это прокрутка, забирает жест себе и присылает pointercancel
+       вместо pointerup. Обрыв узел переживает (слушатели он снимает и по
+       pointercancel), но менять размер пальцем было бы нельзя. */
+    touch-action: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.wiki-image-node.is-selected .wiki-image-node__resize,
+.wiki-image-node:hover .wiki-image-node__resize { opacity: 1; }
+
 /* Таблицы. В контенте их много: 63 <table> и 1618 <td> на 46 статей.
  *
  * width: 100% отсюда УБРАН, и это главное. Растянутая на всю ширину таблица
