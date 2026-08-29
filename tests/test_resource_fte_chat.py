@@ -881,10 +881,40 @@ class ChatFrontendMetricsTests(unittest.TestCase):
         self.assertIn("details.filter((row) => isChatRate(row?.rate))", line)
         self.assertIn(".filter((item) => isChatRate(item?.rate))", line)
         self.assertIn("if (!cfg.rates) return null;", line)
-        self.assertNotIn("Вне ставок направления", line,
-                         "жёлтая сноска про чужие ставки убрана — возвращать её нельзя")
+        # Сноску запрещаем ТАМ, где она стояла и мешала, — на карточке витрины.
+        # Раньше запрет стоял на весь файл, и вместе со сноской он запрещал
+        # показать этих людей вообще где-либо. Из-за этого владелец не мог найти
+        # чатника со ставкой 0,5 в «Деталях расчёта»: строки нет — значит, и
+        # селектора ставки нет, и вернуть человека в расчёт неоткуда.
+        card = line[line.index("const OperatorSummaryCard = ("):line.index("const RATE_OVERRIDE_CHOICES")]
+        for banned in ("Вне ставок направления", "ставка не из направления"):
+            self.assertNotIn(banned, card,
+                             "жёлтая сноска про чужие ставки убрана — возвращать её на карточку нельзя")
+        self.assertNotIn("excludedCount", card, "счётчик снятой сноски не должен вернуться")
         line_region = line[line.index("const LINE_DIRECTION = {"):line.index("const DIRECTION_CONFIG = {")]
         self.assertIn("rates: null,", line_region)
+
+    def test_off_scale_operators_stay_reachable_for_the_rate_selector(self):
+        """Чатника со ставкой 0,5 надо ВИДЕТЬ, иначе ему нечем поставить ставку чата.
+
+        Ставку на период меняют селектором в строке «Деталей расчёта». Пока
+        отфильтрованных выбрасывали из списка целиком, строки не было — а значит, не
+        было и селектора: человек навсегда оставался вне расчёта и вне нормы
+        аукциона. Отдельный список это чинит, но в счётчики он входить НЕ должен:
+        карточка и окно обязаны остаться согласованными (страж выше).
+        """
+        line = _read(LINE_VIEW)
+        self.assertIn("const offScale = details.filter((row) => !isChatRate(row?.rate));", line,
+                      "отфильтрованных надо собрать отдельно, а не потерять")
+        self.assertIn("offScaleDetails: offScale,", line)
+        self.assertIn("periodOffScaleOperatorDetails: restrictedAvailability.offScaleDetails,", line,
+                      "окно должно получить их отдельным ключом, а не подмешанными в список")
+        # Счётчики по-прежнему считаются ТОЛЬКО по отобранным.
+        self.assertIn("const acc = kept.reduce(", line)
+        self.assertIn("totalCount: kept.length,", line)
+        # И видит их только тот, кто может ставку поменять: остальным объяснять нечего.
+        self.assertIn("{canEditRates && offScaleDetails.length ? (", line,
+                      "список «не в расчёте» открыт только тому, кто меняет ставку")
 
     def test_chat_never_calls_its_units_calls(self):
         """Единицы приходят из `cfg.unit`, а не переименовываются в разметке.

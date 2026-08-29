@@ -799,6 +799,72 @@ const OperatorAvailabilityDetailsModal = ({
     (currentPage - 1) * OPERATOR_DETAILS_PAGE_SIZE,
     currentPage * OPERATOR_DETAILS_PAGE_SIZE,
   );
+  // Люди со ставкой, которой в направлении нет (у чата это 0,5). Из расчёта они
+  // выброшены целиком, и витрина их не показывает — но пока строки не видно, и
+  // ставку человеку не поставить: селектор живёт в строке. Показываем отдельным
+  // списком тому, кто эту ставку и меняет.
+  const offScaleDetails = Array.isArray(forecast?.periodOffScaleOperatorDetails)
+    ? forecast.periodOffScaleOperatorDetails
+    : [];
+
+  const renderOperatorRow = (operator, { offScale = false } = {}) => (
+    <tr key={operator.operatorId} className={operator.included && !offScale ? 'bg-white' : 'bg-slate-50/70'}>
+      <td className="px-4 py-3">
+        <div className="font-semibold text-slate-900">{operator.name || `ID ${operator.operatorId}`}</div>
+        <div className="text-xs text-slate-500">
+          {[operator.directionName, operator.supervisorName].filter(Boolean).join(' · ') || '-'}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-right">
+        {canEditRates ? (
+          <div className="flex flex-col items-end gap-1">
+            <select
+              value={String(operator.rate ?? '')}
+              disabled={savingOperatorId === operator.operatorId}
+              onChange={(event) => onRateChange?.(operator, event.target.value)}
+              title="Ставка только для расчёта ресурсов и аукциона. В учёт часов и зарплату не идёт."
+              className={`h-8 rounded-lg border bg-white px-2 text-sm font-semibold tabular-nums text-slate-900 transition focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50 ${
+                operator.rateOverridden ? 'border-blue-400 ring-1 ring-blue-100' : 'border-slate-200'
+              }`}
+            >
+              {RATE_OVERRIDE_CHOICES.map((value) => (
+                <option key={value} value={String(value)}>{formatNumber(value, 2)}</option>
+              ))}
+            </select>
+            {operator.rateOverridden ? (
+              <button
+                type="button"
+                onClick={() => onRateChange?.(operator, '')}
+                className="text-[11px] font-medium text-blue-700 transition hover:text-blue-900"
+              >
+                вернуть {formatNumber(operator.baseRate, 2)}
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <span className="font-semibold text-slate-900">{formatNumber(operator.rate, 2)}</span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-right text-slate-700">
+        <b>{formatInt(operator.workingDays)}</b> / {formatInt(operator.totalDays)}
+      </td>
+      <td className="px-4 py-3">
+        <OperatorStatusChips statusDays={operator.statusDays} />
+      </td>
+      <td className="px-4 py-3 text-center">
+        <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold ring-1 ${
+          offScale
+            ? 'bg-amber-50 text-amber-800 ring-amber-200'
+            : (operator.included ? 'bg-emerald-50 text-emerald-700 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-slate-200')
+        }`}>
+          {offScale ? 'Вне ставок' : (operator.included ? 'Засчитан' : 'Не засчитан')}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-right font-semibold text-slate-900">
+        {offScale ? '-' : formatNumber(operator.fteContribution, 2)}
+      </td>
+    </tr>
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
@@ -930,58 +996,7 @@ const OperatorAvailabilityDetailsModal = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {visibleDetails.map((operator) => (
-                    <tr key={operator.operatorId} className={operator.included ? 'bg-white' : 'bg-slate-50/70'}>
-                      <td className="px-4 py-3">
-                        <div className="font-semibold text-slate-900">{operator.name || `ID ${operator.operatorId}`}</div>
-                        <div className="text-xs text-slate-500">
-                          {[operator.directionName, operator.supervisorName].filter(Boolean).join(' · ') || '-'}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {canEditRates ? (
-                          <div className="flex flex-col items-end gap-1">
-                            <select
-                              value={String(operator.rate ?? '')}
-                              disabled={savingOperatorId === operator.operatorId}
-                              onChange={(event) => onRateChange?.(operator, event.target.value)}
-                              title="Ставка только для расчёта ресурсов и аукциона. В учёт часов и зарплату не идёт."
-                              className={`h-8 rounded-lg border bg-white px-2 text-sm font-semibold tabular-nums text-slate-900 transition focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50 ${
-                                operator.rateOverridden ? 'border-blue-400 ring-1 ring-blue-100' : 'border-slate-200'
-                              }`}
-                            >
-                              {RATE_OVERRIDE_CHOICES.map((value) => (
-                                <option key={value} value={String(value)}>{formatNumber(value, 2)}</option>
-                              ))}
-                            </select>
-                            {operator.rateOverridden ? (
-                              <button
-                                type="button"
-                                onClick={() => onRateChange?.(operator, '')}
-                                className="text-[11px] font-medium text-blue-700 transition hover:text-blue-900"
-                              >
-                                вернуть {formatNumber(operator.baseRate, 2)}
-                              </button>
-                            ) : null}
-                          </div>
-                        ) : (
-                          <span className="font-semibold text-slate-900">{formatNumber(operator.rate, 2)}</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-700">
-                        <b>{formatInt(operator.workingDays)}</b> / {formatInt(operator.totalDays)}
-                      </td>
-                      <td className="px-4 py-3">
-                        <OperatorStatusChips statusDays={operator.statusDays} />
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`inline-flex rounded-md px-2 py-1 text-xs font-semibold ring-1 ${operator.included ? 'bg-emerald-50 text-emerald-700 ring-emerald-100' : 'bg-slate-100 text-slate-600 ring-slate-200'}`}>
-                          {operator.included ? 'Засчитан' : 'Не засчитан'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right font-semibold text-slate-900">{formatNumber(operator.fteContribution, 2)}</td>
-                    </tr>
-                  ))}
+                  {visibleDetails.map((operator) => renderOperatorRow(operator))}
                   {isLoading ? (
                     <tr>
                       <td className="px-4 py-8 text-center text-sm text-slate-500" colSpan={6}>
@@ -1026,6 +1041,38 @@ const OperatorAvailabilityDetailsModal = ({
               </div>
             ) : null}
           </section>
+
+          {canEditRates && offScaleDetails.length ? (
+            <section className="mt-4 overflow-hidden rounded-xl border border-amber-200 bg-white">
+              <div className="border-b border-amber-200 bg-amber-50 px-4 py-3">
+                <div className="text-sm font-semibold text-amber-900">
+                  Не в расчёте: ставка не из направления · {formatInt(offScaleDetails.length)} чел.
+                </div>
+                <p className="mt-1 text-xs text-amber-800">
+                  Такой ставки в направлении нет: человек не идёт ни в расчёт, ни в график,
+                  ни в норму аукциона, и в счётчиках выше его тоже нет. Поставьте ему ставку
+                  направления на этот период — и он вернётся в расчёт.
+                </p>
+              </div>
+              <div className="max-h-[260px] overflow-auto">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="sticky top-0 bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3 text-left font-semibold">Оператор</th>
+                      <th className="px-4 py-3 text-right font-semibold">Ставка</th>
+                      <th className="px-4 py-3 text-right font-semibold">Working</th>
+                      <th className="px-4 py-3 text-left font-semibold">Статусы</th>
+                      <th className="px-4 py-3 text-center font-semibold">Итог</th>
+                      <th className="px-4 py-3 text-right font-semibold">Вклад</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {offScaleDetails.map((operator) => renderOperatorRow(operator, { offScale: true }))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ) : null}
         </div>
       </div>
     </div>
@@ -3933,6 +3980,9 @@ const ResourceFteView = ({
       : [];
     if (!details.length) return null;
     const kept = details.filter((row) => isChatRate(row?.rate));
+    // Отброшенных не выбрасываем совсем: в счётчики они не идут, но админу их
+    // надо ВИДЕТЬ — иначе поставить им ставку направления неоткуда.
+    const offScale = details.filter((row) => !isChatRate(row?.rate));
     const acc = kept.reduce((sum, row) => {
       if (row?.included) {
         sum.count += 1;
@@ -3950,6 +4000,7 @@ const ResourceFteView = ({
       fte: Number(acc.fte.toFixed(4)),
       totalCount: kept.length,
       details: kept,
+      offScaleDetails: offScale,
       rates: (Array.isArray(operatorAvailabilityDetailsPayload?.periodAvailableOperatorRates)
         ? operatorAvailabilityDetailsPayload.periodAvailableOperatorRates
         : []).filter((item) => isChatRate(item?.rate)),
@@ -3989,6 +4040,7 @@ const ResourceFteView = ({
     return {
       ...merged,
       periodOperatorAvailabilityDetails: restrictedAvailability.details,
+      periodOffScaleOperatorDetails: restrictedAvailability.offScaleDetails,
       periodAvailableOperatorRates: restrictedAvailability.rates,
       periodOperatorCount,
       periodPartialOperatorCount,
