@@ -52,6 +52,56 @@ import {
 } from './shiftAuctionParticipants';
 import { collectMyAuctionDayClaims } from './shiftAuctionDayClaims';
 
+// Аукцион идёт на двух направлениях: линия (СЗоВ «Основа») и чат («Чат менеджер»).
+// Это два независимых прогона на одном разделе. У СВ и выше вверху есть тумблер,
+// оператор же видит ТОЛЬКО своё направление — его присылает сервер полем
+// `direction_mode` снапшота, и подменить его из браузера нельзя.
+const AUCTION_DIRECTION_LINE = 'line';
+const AUCTION_DIRECTION_CHAT = 'chat';
+const AUCTION_DIRECTIONS = [
+  { key: AUCTION_DIRECTION_LINE, label: 'Линия' },
+  { key: AUCTION_DIRECTION_CHAT, label: 'Чат' },
+];
+const AUCTION_DIRECTION_LABELS = {
+  [AUCTION_DIRECTION_LINE]: 'Линия',
+  [AUCTION_DIRECTION_CHAT]: 'Чат',
+};
+// Ключ выбора направления у управляющего: раздел переоткрывается там же, где закрыли.
+const AUCTION_DIRECTION_STORAGE_KEY = 'otp_shift_auction_direction_v1';
+
+const normalizeAuctionDirection = (value) => (
+  String(value || '').trim().toLowerCase() === AUCTION_DIRECTION_CHAT
+    ? AUCTION_DIRECTION_CHAT
+    : AUCTION_DIRECTION_LINE
+);
+
+const readStoredAuctionDirection = () => {
+  if (typeof window === 'undefined') return AUCTION_DIRECTION_LINE;
+  try {
+    return normalizeAuctionDirection(window.localStorage.getItem(AUCTION_DIRECTION_STORAGE_KEY));
+  } catch {
+    return AUCTION_DIRECTION_LINE;
+  }
+};
+
+const storeAuctionDirection = (value) => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(AUCTION_DIRECTION_STORAGE_KEY, normalizeAuctionDirection(value));
+  } catch {
+    /* приватный режим — выбор просто не переживёт перезагрузку */
+  }
+};
+
+// Недельный потолок часов по ставке. Совпадает с серверной нормой
+// (рабочие дни × 8 ч × ставка): 1,0 → 40 ч, 0,75 → 30 ч, 0,5 → 20 ч. Нужен только
+// для ПОДСКАЗКИ в окне выбора части смены — считает и запрещает всё равно сервер.
+const auctionWeeklyHoursForRate = (rate) => {
+  const value = Number(rate);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.round(value * 40 * 10) / 10;
+};
+
 // Стабильный ключ недавнего добора: (lot_id | plan_id | source_schedule_shift_id).
 const getPostClaimKey = (claim) => {
   if (!claim) return '';
@@ -666,17 +716,45 @@ const getAuctionLotClaimStartTime = (lot) => lot?.claim_start_time || lot?.post_
 
 const getAuctionLotClaimEndTime = (lot) => lot?.claim_end_time || lot?.post_claim_end_time || lot?.claimed_end_time || '';
 
+// Смена, взятая НЕ целиком. Два случая: пост-аукционный добор (post_auction_claimed)
+// и часть, взятая в ходе аукциона в чате (`partial_claim` у карточки «моей» смены).
+// В обоих окно лота шире взятого куска, и считать надо именно по куску.
+const isAuctionLotPartiallyClaimed = (lot) => Boolean(lot?.post_auction_claimed || lot?.partial_claim);
+
 const getAuctionLotEffectiveStartTime = (lot) => (
-  Boolean(lot?.post_auction_claimed) && getAuctionLotClaimStartTime(lot)
+  isAuctionLotPartiallyClaimed(lot) && getAuctionLotClaimStartTime(lot)
     ? getAuctionLotClaimStartTime(lot)
     : lot?.start_time
 );
 
 const getAuctionLotEffectiveEndTime = (lot) => (
-  Boolean(lot?.post_auction_claimed) && getAuctionLotClaimEndTime(lot)
+  isAuctionLotPartiallyClaimed(lot) && getAuctionLotClaimEndTime(lot)
     ? getAuctionLotClaimEndTime(lot)
     : lot?.end_time
 );
+
+// «Моя» смена из лота: либо лот целиком мой, либо в нём лежит мой кусок. Часть
+// возвращается карточкой с окном лота и границами куска — так её одинаково считают
+// и норма, и панель дня, и подписи.
+const getMyAuctionClaimEntry = (lot, userId) => {
+  if (!lot) return null;
+  const myId = Number(userId);
+  if (!Number.isFinite(myId)) return null;
+  const mySegment = (Array.isArray(lot.claim_segments) ? lot.claim_segments : [])
+    .find((seg) => seg && Number(seg.claimed_by) === myId);
+  if (mySegment) {
+    return {
+      ...lot,
+      status: 'claimed',
+      claimed_by: myId,
+      claim_start_time: mySegment.start_time,
+      claim_end_time: mySegment.end_time,
+      partial_claim: true,
+    };
+  }
+  if (lot.status === 'claimed' && Number(lot.claimed_by) === myId) return lot;
+  return null;
+};
 
 const formatAuctionLotEffectiveTimeRangeLabel = (lot) => (
   `${String(getAuctionLotEffectiveStartTime(lot) || '').slice(0, 5)}–${String(getAuctionLotEffectiveEndTime(lot) || '').slice(0, 5)}`
@@ -2844,6 +2922,9 @@ const isSelectionInsideAvailableSegments = (lot, selection, availableSegments = 
   return availableSegments.some((segment) => range[0] >= segment.start && range[1] <= segment.end);
 };
 
+// Одно окно на два случая: пост-аукционный добор и разбор смены по частям в самом
+// аукционе (чат). Механика выбора интервала общая, различаются только подписи и
+// подсказка про норму — поэтому они и вынесены в пропсы.
 const PostAuctionPartialClaimModal = ({
   lot,
   option,
@@ -2851,7 +2932,11 @@ const PostAuctionPartialClaimModal = ({
   onSelectionChange,
   onClose,
   onConfirm,
-  inProgress
+  inProgress,
+  title = 'Забрать дополнительную смену',
+  confirmLabel = 'Забрать',
+  inProgressLabel = 'Забираю...',
+  footnote = null
 }) => {
   if (!lot) return null;
 
@@ -2892,7 +2977,7 @@ const PostAuctionPartialClaimModal = ({
         <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-5 sm:py-4">
           <div className="min-w-0">
             <h3 id="post-claim-confirm-title" className="text-base font-semibold text-slate-950 sm:text-lg">
-              Забрать дополнительную смену
+              {title}
             </h3>
             <div className="mt-0.5 text-xs text-slate-500 sm:text-sm">
               {formatDateLabel(lot.shift_date)} · исходная смена {sourceLabel}
@@ -3012,11 +3097,13 @@ const PostAuctionPartialClaimModal = ({
             </div>
           </div>
 
-          <p className="mt-3 text-xs leading-5 text-slate-600">
-            {selectedIsPartial
-              ? 'Будет сохранена выбранная часть исходной смены. Если она стыкуется с вашей сменой, график объединится автоматически.'
-              : 'Будет сохранена вся дополнительная смена. Если она стыкуется с вашей сменой, график объединится автоматически.'}
-          </p>
+          {footnote || (
+            <p className="mt-3 text-xs leading-5 text-slate-600">
+              {selectedIsPartial
+                ? 'Будет сохранена выбранная часть исходной смены. Если она стыкуется с вашей сменой, график объединится автоматически.'
+                : 'Будет сохранена вся дополнительная смена. Если она стыкуется с вашей сменой, график объединится автоматически.'}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:px-5">
@@ -3034,7 +3121,7 @@ const PostAuctionPartialClaimModal = ({
             disabled={inProgress || !isValid}
             className="inline-flex h-9 items-center justify-center rounded-lg bg-orange-600 px-3 text-xs font-semibold text-white transition hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-orange-300 sm:text-sm"
           >
-            {inProgress ? 'Забираю...' : 'Забрать'}
+            {inProgress ? inProgressLabel : confirmLabel}
           </button>
         </div>
       </div>
@@ -3132,7 +3219,8 @@ const ShiftAuctionShiftsTable = ({
   apiRoot = '',
   buildHeaders = null,
   onActionComplete = null,
-  notify = null
+  notify = null,
+  direction = AUCTION_DIRECTION_LINE
 }) => {
   const workloadById = useMemo(() => {
     const map = new Map();
@@ -3279,7 +3367,8 @@ const ShiftAuctionShiftsTable = ({
   }, [apiRoot, buildHeaders]);
 
   const lotApiBody = (lot, extra = {}) => {
-    const body = { ...extra };
+    // Направление уезжает вместе с каждым действием: у сервера это два разных прогона.
+    const body = { direction, ...extra };
     if (Number.isFinite(Number(lot.id)) && !String(lot.id).startsWith('preview-')) {
       body.lot_id = Number(lot.id);
     } else {
@@ -3908,6 +3997,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [journalTotal, setJournalTotal] = useState(0);
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalError, setJournalError] = useState('');
+  // Направление аукциона. Управляющий выбирает тумблером (выбор переживает
+  // перезагрузку), оператору его назначает сервер снапшотом.
+  const [direction, setDirection] = useState(() => (
+    canMonitor ? readStoredAuctionDirection() : AUCTION_DIRECTION_LINE
+  ));
+  const [canSwitchDirection, setCanSwitchDirection] = useState(false);
+  // Чат берёт смену ЧАСТЯМИ прямо в аукционе: клик по свободной смене открывает
+  // тот же таймлайн, что и добор, но кладёт кусок в текущий прогон.
+  const [partialClaimLot, setPartialClaimLot] = useState(null);
+  const [partialClaimSelection, setPartialClaimSelection] = useState({ start_time: '', end_time: '' });
   const [postClaimConfirmLot, setPostClaimConfirmLot] = useState(null);
   const [postClaimSelection, setPostClaimSelection] = useState({ start_time: '', end_time: '' });
   const [postClaimingLotIds, setPostClaimingLotIds] = useState(() => new Set());
@@ -4013,6 +4112,39 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return typeof withAccessTokenHeader === 'function' ? withAccessTokenHeader(headers) : headers;
   }, [user?.id, withAccessTokenHeader]);
 
+  // Каждый запрос раздела обязан назвать направление: на сервере это два разных
+  // прогона на общих таблицах. У оператора сервер всё равно подставит его
+  // собственное, но у управляющего параметр — единственный способ узнать, какой
+  // именно аукцион он смотрит.
+  const withDirection = useCallback(
+    (extra = {}) => ({ ...extra, direction }),
+    [direction]
+  );
+
+  const handleSwitchDirection = useCallback((nextDirection) => {
+    const normalized = normalizeAuctionDirection(nextDirection);
+    if (normalized === direction) return;
+    // Прогоны независимы, поэтому переключение — это ПОЛНЫЙ сброс: иначе на экране
+    // чата на секунду оставались бы смены линии, а ETag и курсор событий отдали бы
+    // чужой снапшот как «не изменилось».
+    setDirection(normalized);
+    storeAuctionDirection(normalized);
+    snapshotEtagRef.current = '';
+    lastEventIdRef.current = 0;
+    lastLocallyPatchedEventIdRef.current = 0;
+    lastAppliedSnapshotEventIdRef.current = 0;
+    auctionDraftDirtyRef.current = false;
+    auctionDraftSavedAtRef.current = '';
+    serverTimeGroupsRef.current = [];
+    setLots([]);
+    setJournalEntries([]);
+    setJournalTotal(0);
+    setViewSchedulePlanId('');
+    setPeriodPreviewLots([]);
+    setIsLoading(true);
+  }, [direction]);
+
+
   const markAuctionDraftDirty = useCallback(() => {
     auctionDraftDirtyRef.current = true;
     auctionDraftRevisionRef.current += 1;
@@ -4048,14 +4180,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setDraftSchedulePlanId(value == null ? '' : String(value));
   }, [markAuctionDraftDirty]);
 
-  const postClaimLot = useCallback(async (lotId) => {
+  const postClaimLot = useCallback(async (lotId, selection = null) => {
+    const body = withDirection({ lot_id: lotId, action: 'claim' });
+    // Чат разбирает смену частями прямо в ходе аукциона — интервал едет сюда же.
+    if (selection?.start_time && selection?.end_time) {
+      body.claim_start_time = selection.start_time;
+      body.claim_end_time = selection.end_time;
+    }
     const response = await axios.post(
       `${apiRoot}/api/shift_auction/test_lots/claim`,
-      { lot_id: lotId, action: 'claim' },
+      body,
       { headers: buildHeaders() }
     );
     return { data: response?.data || {} };
-  }, [apiRoot, buildHeaders]);
+  }, [apiRoot, buildHeaders, withDirection]);
 
   const postAuctionClaimLotApi = useCallback(async (lotOrId, selection = {}) => {
     const lot = lotOrId && typeof lotOrId === 'object' ? lotOrId : null;
@@ -4063,8 +4201,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     const sourcePlanId = normalizeSchedulePlanId(lot?.source_schedule_plan_id);
     const numericLotId = Number(lot ? lot.id : lotOrId);
     const payload = sourceShiftId && sourcePlanId && !Number.isFinite(numericLotId)
-      ? { schedule_plan_id: sourcePlanId, source_schedule_shift_id: sourceShiftId }
-      : { lot_id: lot ? lot.id : lotOrId };
+      ? withDirection({ schedule_plan_id: sourcePlanId, source_schedule_shift_id: sourceShiftId })
+      : withDirection({ lot_id: lot ? lot.id : lotOrId });
     if (selection?.start_time && selection?.end_time) {
       payload.claim_start_time = selection.start_time;
       payload.claim_end_time = selection.end_time;
@@ -4075,7 +4213,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       { headers: buildHeaders() }
     );
     return { data: response?.data || {} };
-  }, [apiRoot, buildHeaders]);
+  }, [apiRoot, buildHeaders, withDirection]);
 
   const applySnapshot = useCallback((snapshot) => {
     const safe = snapshot || {};
@@ -4133,6 +4271,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       post_auction_active: Boolean(safe.post_auction_active)
     });
     setNotifyPostClaimEnabled(Boolean(safe.notify_post_claim_enabled));
+    // Направление приходит с сервера и здесь — ИСТИНА: у оператора оно выведено из
+    // его карточки, а не из тумблера, которого у него нет.
+    if (safe.direction_mode) setDirection(normalizeAuctionDirection(safe.direction_mode));
+    setCanSwitchDirection(Boolean(safe.can_switch_direction));
     serverTimeGroupsRef.current = Array.isArray(safe.time_groups) ? safe.time_groups : [];
     if (!isStaleRealtime) {
       setLots(Array.isArray(safe.lots) ? safe.lots : []);
@@ -4185,7 +4327,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setJournalError('');
     try {
       const response = await axios.get(`${apiRoot}/api/shift_auction/test_journal`, {
-        params: { page, per_page: journalPerPage },
+        params: withDirection({ page, per_page: journalPerPage }),
         headers: buildHeaders()
       });
       const data = response?.data || {};
@@ -4198,7 +4340,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setJournalLoading(false);
     }
-  }, [apiRoot, buildHeaders, journalPerPage, user?.id]);
+  }, [apiRoot, buildHeaders, journalPerPage, user?.id, withDirection]);
 
   // Groups belong to a week, so the form always shows the groups of the week it
   // is editing: re-derive them when the picked week changes and when a snapshot
@@ -4226,6 +4368,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const extraHeaders = snapshotEtagRef.current ? { 'If-None-Match': snapshotEtagRef.current } : {};
       const response = await axios.get(`${apiRoot}/api/shift_auction/test_snapshot`, {
+        params: withDirection(),
         headers: buildHeaders(extraHeaders),
         validateStatus: (status) => (status >= 200 && status < 300) || status === 304
       });
@@ -4244,7 +4387,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         window.setTimeout(() => fetchSnapshotRef.current?.({ silent: true }), 0);
       }
     }
-  }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id]);
+  }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id, withDirection]);
 
   const fetchPeriodPreview = useCallback(async (schedulePlanId, { signal } = {}) => {
     const normalizedPlanId = normalizeSchedulePlanId(schedulePlanId);
@@ -4260,7 +4403,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setPeriodPreviewPostAuctionActive(false);
     try {
       const response = await axios.get(`${apiRoot}/api/shift_auction/period_preview`, {
-        params: { schedule_plan_id: normalizedPlanId },
+        params: withDirection({ schedule_plan_id: normalizedPlanId }),
         headers: buildHeaders(),
         signal
       });
@@ -4285,7 +4428,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       if (!signal?.aborted) setPeriodPreviewLoading(false);
     }
-  }, [apiRoot, buildHeaders, user?.id]);
+  }, [apiRoot, buildHeaders, user?.id, withDirection]);
 
   useEffect(() => {
     if (!canMonitor) return;
@@ -4355,10 +4498,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, []);
 
+  // Первая загрузка и перезагрузка после смены направления. Ref, а не сам
+  // fetchSnapshot: он пересоздаётся на каждое изменение зависимостей, и эффект
+  // с ним в списке дёргал бы запрос кругами.
   useEffect(() => {
     fetchSnapshotRef.current?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [direction]);
 
   const canOpenStream = Boolean(apiRoot && user?.id && (canMonitor || settings.is_current_user_tester));
 
@@ -4421,7 +4567,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
       setConnectionState('connecting');
       try {
-        const response = await fetch(`${apiRoot}/api/shift_auction/test_events?after=${encodeURIComponent(lastEventIdRef.current || 0)}`, {
+        const response = await fetch(`${apiRoot}/api/shift_auction/test_events?after=${encodeURIComponent(lastEventIdRef.current || 0)}&direction=${encodeURIComponent(direction)}`, {
           headers: buildHeadersRef.current?.({ Accept: 'text/event-stream' }) || { Accept: 'text/event-stream' },
           signal: abortController.signal,
           credentials: 'include'
@@ -4505,7 +4651,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleVisibilityChange);
     };
-  }, [apiRoot, canOpenStream, user?.id]);
+    // Направление в зависимостях: смена тумблера обязана ПЕРЕОТКРЫТЬ поток, иначе
+    // экран чата продолжил бы слушать события линии.
+  }, [apiRoot, canOpenStream, direction, user?.id]);
 
   const operatorOptions = useMemo(
     () => normalizeShiftAuctionOperators(operators, settings.selected_operators),
@@ -4616,6 +4764,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     () => getAuctionWindowMinutes(draftStartsAt, draftEndsAt),
     [draftEndsAt, draftStartsAt]
   );
+
+  // Открыли раздел из планировщика чата — переключаемся на его аукцион до того,
+  // как применится неделя: иначе список периодов будет от линии, и неделя не найдётся.
+  const requestedDirection = initialPeriod?.direction || '';
+  useEffect(() => {
+    if (!requestedDirection || !canMonitor) return;
+    handleSwitchDirection(requestedDirection);
+  }, [canMonitor, handleSwitchDirection, requestedDirection]);
 
   const initialPeriodKey = `${initialPeriod?.dateFrom || initialPeriod?.date_from || ''}|${initialPeriod?.dateTo || initialPeriod?.date_to || ''}`;
   useEffect(() => {
@@ -4736,7 +4892,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [lotDates, visibleLots]);
 
   const myClaimedLots = useMemo(
-    () => monitoredLots.filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id)),
+    () => monitoredLots
+      .map((lot) => getMyAuctionClaimEntry(lot, user?.id))
+      .filter(Boolean),
     [monitoredLots, user?.id]
   );
   const myClaimedDateSet = useMemo(
@@ -4764,7 +4922,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const dayLots = monitoredLots.filter((lot) => lot.shift_date === date);
       const claimedLots = dayLots.filter((lot) => lot.status === 'claimed');
       const myClaimed = dayLots
-        .filter((lot) => lot.status === 'claimed' && Number(lot.claimed_by) === Number(user?.id))
+        .map((lot) => getMyAuctionClaimEntry(lot, user?.id))
+        .filter(Boolean)
         .sort((a, b) => (
           clockToMinutes(a.start_time) - clockToMinutes(b.start_time)
           || clockToMinutes(a.end_time) - clockToMinutes(b.end_time)
@@ -5190,6 +5349,36 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return map;
   }, [monitoredMyWorkShifts]);
 
+  // Разбор смены на части — правило ЧАТА. У линии смена берётся целиком, как и была.
+  const supportsPartialClaim = direction === AUCTION_DIRECTION_CHAT;
+  // Недельный потолок по ставке — только для подписи в окне выбора части.
+  const weeklyRateHoursLabel = useMemo(() => {
+    const hours = auctionWeeklyHoursForRate(userRate);
+    return hours === null ? '' : formatRate(hours);
+  }, [userRate]);
+
+  // Свободные части смен для текущего прогона: тот же расчёт, что у добора —
+  // из окна смены вычитаются уже занятые куски и собственные смены оператора.
+  const auctionPartialClaimOptionsByLotId = useMemo(() => {
+    const map = new Map();
+    if (!supportsPartialClaim || canMonitor || !canClaim) return map;
+    (monitoredLots || []).forEach((lot) => {
+      if (!lot || lot.status !== 'available') return;
+      // Часть можно взять только у смены из недельного плана: занятые куски
+      // хранятся парой (план, смена), а у добавленного вручную лота её нет.
+      if (!lot.source_schedule_plan_id || !lot.source_schedule_shift_id) return;
+      const lotId = getAuctionLotActionKey(lot);
+      if (!lotId) return;
+      const option = buildPostAuctionClaimOption(
+        lot,
+        [],
+        myClaimedLotsByDate.get(lot.shift_date) || []
+      );
+      if (option) map.set(lotId, option);
+    });
+    return map;
+  }, [canClaim, canMonitor, monitoredLots, myClaimedLotsByDate, supportsPartialClaim]);
+
   const postAuctionClaimOptionsByLotId = useMemo(() => {
     const map = new Map();
     if (!selectedViewPostAuctionActive || canMonitor) return map;
@@ -5522,6 +5711,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const response = await axios.put(
         `${apiRoot}/api/shift_auction/test_access`,
         {
+          direction,
           enabled: draftEnabled,
           launch_note: draftNote,
           starts_at: draftStartsAt || null,
@@ -5560,7 +5750,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsSaving(false);
     }
-  }, [apiRoot, buildHeaders, canManage, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, draftTimeGroupsForSave, timeGroupIssues, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
+  }, [apiRoot, buildHeaders, canManage, direction, draftEnabled, draftEndsAt, draftNote, draftRangeInvalid, draftSchedulePlanId, draftStartsAt, draftTimeGroupsForSave, timeGroupIssues, fetchSnapshot, notify, selectedDraftPeriod, selectedIds]);
 
   const handleRestartAuction = useCallback(async () => {
     if (!canManage || !apiRoot) return;
@@ -5582,7 +5772,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const response = await axios.post(
         `${apiRoot}/api/shift_auction/test_restart`,
-        { schedule_plan_id: selectedDraftPeriod.id },
+        withDirection({ schedule_plan_id: selectedDraftPeriod.id }),
         { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
       );
       applySnapshot(response?.data?.snapshot || {});
@@ -5592,7 +5782,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsRestarting(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, notify, selectedDraftPeriod]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, notify, selectedDraftPeriod, withDirection]);
 
   const handleAuctionControl = useCallback(async (action) => {
     if (!canManage || !apiRoot || isControllingAuction) return;
@@ -5609,7 +5799,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const response = await axios.post(
         `${apiRoot}/api/shift_auction/test_control`,
-        { action },
+        withDirection({ action }),
         { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
       );
       applySnapshot(response?.data?.snapshot || {});
@@ -5619,7 +5809,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsControllingAuction(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, isControllingAuction, notify]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isControllingAuction, notify, withDirection]);
 
   const handleToggleTopup = useCallback(async () => {
     if (!canManage || !apiRoot || isTogglingTopup) return;
@@ -5637,7 +5827,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const response = await axios({
         method: enable ? 'POST' : 'DELETE',
         url: `${apiRoot}/api/shift_auction/test_topup`,
-        headers: buildHeaders({ 'Content-Type': 'application/json' })
+        headers: buildHeaders({ 'Content-Type': 'application/json' }),
+        data: withDirection()
       });
       applySnapshot(response?.data?.snapshot || {});
       notify(enable ? 'Аукцион переведён в режим добора смен' : 'Режим добора отключён');
@@ -5646,7 +5837,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsTogglingTopup(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingTopup, notify, settings.topup_started_at]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingTopup, notify, settings.topup_started_at, withDirection]);
 
   const handleToggleRateLock = useCallback(async () => {
     if (!canManage || !apiRoot || isTogglingRateLock) return;
@@ -5656,7 +5847,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const response = await axios({
         method: enable ? 'POST' : 'DELETE',
         url: `${apiRoot}/api/shift_auction/test_rate_lock`,
-        headers: buildHeaders({ 'Content-Type': 'application/json' })
+        headers: buildHeaders({ 'Content-Type': 'application/json' }),
+        data: withDirection()
       });
       applySnapshot(response?.data?.snapshot || {});
       notify(enable
@@ -5667,7 +5859,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsTogglingRateLock(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingRateLock, notify, settings.rate_lock_enabled]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingRateLock, notify, settings.rate_lock_enabled, withDirection]);
 
   const handlePublishAuction = useCallback(async () => {
     if (!canManage || !apiRoot || isPublishingAuction) return;
@@ -5679,7 +5871,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const response = await axios.post(
         `${apiRoot}/api/shift_auction/test_publish`,
-        {},
+        withDirection(),
         { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
       );
       applySnapshot(response?.data?.snapshot || {});
@@ -5725,12 +5917,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const response = await axios.post(
         `${apiRoot}/api/shift_auction/admin/add_lot`,
-        {
+        withDirection({
           shift_date: addShiftTarget.date,
           start_time: start,
           end_time: end,
           rate_min: addShiftTarget.rate
-        },
+        }),
         { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
       );
       if (response?.data?.snapshot) {
@@ -5745,7 +5937,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsAddingShift(false);
     }
-  }, [addShiftTarget, addShiftStart, apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isAddingShift, notify]);
+  }, [addShiftTarget, addShiftStart, apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isAddingShift, notify, withDirection]);
 
   const handleSubmitSelfSchedule = useCallback(async () => {
     if (!selfScheduleDate || !apiRoot || isSelfScheduling) return;
@@ -5753,7 +5945,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const response = await axios.post(
         `${apiRoot}/api/shift_auction/self_schedule`,
-        { shift_date: selfScheduleDate, start_time: selfScheduleStart },
+        withDirection({ shift_date: selfScheduleDate, start_time: selfScheduleStart }),
         { headers: buildHeaders({ 'Content-Type': 'application/json' }) }
       );
       if (response?.data?.snapshot) {
@@ -5769,7 +5961,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsSelfScheduling(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isSelfScheduling, notify, selfScheduleDate, selfScheduleStart]);
+  }, [apiRoot, applySnapshot, buildHeaders, fetchSnapshot, isSelfScheduling, notify, selfScheduleDate, selfScheduleStart, withDirection]);
 
   const handleExportAuctionReport = useCallback(async () => {
     if (!canManage || !apiRoot || isExportingAuctionReport) return;
@@ -5778,6 +5970,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const response = await axios.get(
         `${apiRoot}/api/shift_auction/test_export_excel`,
         {
+          params: withDirection(),
           headers: buildHeaders(),
           responseType: 'blob'
         }
@@ -5815,9 +6008,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsExportingAuctionReport(false);
     }
-  }, [apiRoot, buildHeaders, canManage, isExportingAuctionReport, notify]);
+  }, [apiRoot, buildHeaders, canManage, isExportingAuctionReport, notify, withDirection]);
 
-  const handleClaimLot = useCallback(async (lotId) => {
+  const handleClaimLot = useCallback(async (lotId, selection = null) => {
     if (!canClaim || !apiRoot) return;
     const numericId = Number(lotId);
     if (!Number.isFinite(numericId)) return;
@@ -5832,6 +6025,22 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
     const prevLot = (lotsRef.current || []).find((l) => Number(l?.id) === numericId);
     if (!prevLot || prevLot.status !== 'available') return;
+
+    // В чате смену разбирают по частям: без явно выбранного интервала сначала
+    // открываем таймлайн, и только потом уходит запрос.
+    if (supportsPartialClaim && !selection) {
+      const option = auctionPartialClaimOptionsByLotId.get(lotKey);
+      if (option) {
+        const segment = option.recommendedSegment;
+        if (!segment) {
+          notifyClaimError('У этой смены не осталось свободного интервала');
+          return;
+        }
+        setPartialClaimSelection({ start_time: segment.start_time, end_time: segment.end_time });
+        setPartialClaimLot(prevLot);
+        return;
+      }
+    }
 
     pendingClaimLotIdsRef.current.add(lotKey);
     setClaimingLotIds((current) => {
@@ -5854,9 +6063,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     )));
 
     try {
-      const response = await enqueueAuctionMutation(() => postClaimLot(numericId));
+      const response = await enqueueAuctionMutation(() => postClaimLot(numericId, selection));
       const serverLot = response?.data?.lot;
-      if (serverLot && serverLot.id) {
+      // Частично взятая смена остаётся свободной для остальных: оптимистичную
+      // «мою» отметку в этом случае откатываем и ждём снапшот с сегментами.
+      if (serverLot?.lot_still_available) {
+        setPartialClaimLot(null);
+        setPartialClaimSelection({ start_time: '', end_time: '' });
+        await fetchSnapshot({ silent: true });
+      } else if (serverLot && serverLot.id) {
+        setPartialClaimLot(null);
+        setPartialClaimSelection({ start_time: '', end_time: '' });
         setLots((currentLots) => currentLots.map((l) => (
           Number(l.id) === Number(serverLot.id)
             ? { ...l, ...serverLot, _optimistic: false }
@@ -5888,7 +6105,69 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         return next;
       });
     }
-  }, [apiRoot, canClaim, claimBlockReasonByLotId, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, postClaimLot, user?.id]);
+  }, [
+    apiRoot,
+    auctionPartialClaimOptionsByLotId,
+    canClaim,
+    claimBlockReasonByLotId,
+    enqueueAuctionMutation,
+    fetchSnapshot,
+    notifyClaimError,
+    postClaimLot,
+    supportsPartialClaim,
+    user?.id
+  ]);
+
+  // «Добрать часы»: ближайший по времени свободный кусок, который оператору сейчас
+  // не запрещён. Кнопка нужна, чтобы добор не приходилось выискивать глазами по сетке.
+  const nextTopupCandidate = useMemo(() => {
+    if (!supportsPartialClaim || canMonitor || !canClaim) return null;
+    const candidates = [];
+    (monitoredLots || []).forEach((lot) => {
+      if (!lot || lot.status !== 'available') return;
+      const lotKey = getAuctionLotActionKey(lot);
+      if (!lotKey || claimBlockReasonByLotId.get(lotKey)) return;
+      const option = auctionPartialClaimOptionsByLotId.get(lotKey);
+      const segment = option?.recommendedSegment;
+      if (!segment) return;
+      candidates.push({ lot, segment, date: lot.shift_date || '', start: segment.start });
+    });
+    candidates.sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.start - b.start);
+    return candidates[0] || null;
+  }, [auctionPartialClaimOptionsByLotId, canClaim, canMonitor, claimBlockReasonByLotId, monitoredLots, supportsPartialClaim]);
+
+  const handleTopupMoreHours = useCallback(() => {
+    if (!nextTopupCandidate) {
+      notifyClaimError('Свободных смен, которые можно добрать, сейчас нет');
+      return;
+    }
+    const { lot, segment } = nextTopupCandidate;
+    setActiveDayDate(lot.shift_date || '');
+    setPartialClaimSelection({ start_time: segment.start_time, end_time: segment.end_time });
+    setPartialClaimLot(lot);
+  }, [nextTopupCandidate, notifyClaimError]);
+
+  const handleClosePartialClaim = useCallback(() => {
+    setPartialClaimLot(null);
+    setPartialClaimSelection({ start_time: '', end_time: '' });
+  }, []);
+
+  const handleConfirmPartialClaim = useCallback(async () => {
+    const lot = partialClaimLot;
+    if (!lot?.id) return;
+    const option = auctionPartialClaimOptionsByLotId.get(getAuctionLotActionKey(lot));
+    if (option && !isSelectionInsideAvailableSegments(lot, partialClaimSelection, option.availableSegments)) {
+      notifyClaimError('Выбранный интервал пересекается с занятым временем');
+      return;
+    }
+    await handleClaimLot(lot.id, partialClaimSelection);
+  }, [
+    auctionPartialClaimOptionsByLotId,
+    handleClaimLot,
+    notifyClaimError,
+    partialClaimLot,
+    partialClaimSelection
+  ]);
 
   const handleRequestPostAuctionClaim = useCallback((lot) => {
     if (!lot || !lot.id) return;
@@ -6016,6 +6295,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setMyClaimsError('');
     try {
       const response = await axios.get(`${apiRoot}/api/shift_auction/my_post_claims`, {
+        params: withDirection(),
         headers: buildHeaders()
       });
       setMyClaims(Array.isArray(response?.data?.claims) ? response.data.claims : []);
@@ -6025,7 +6305,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setMyClaimsLoading(false);
     }
-  }, [apiRoot, buildHeaders, user?.id]);
+  }, [apiRoot, buildHeaders, user?.id, withDirection]);
 
   const openMyClaims = useCallback(() => {
     setMyClaimsOpen(true);
@@ -6042,7 +6322,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         : { lot_id: claim.lot_id };
       await enqueueAuctionMutation(() => axios.post(
         `${apiRoot}/api/shift_auction/cancel_post_claim`,
-        payload,
+        withDirection(payload),
         { headers: buildHeaders() }
       ));
       notify('Смена отменена и снова доступна для других');
@@ -6069,7 +6349,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     isViewingActivePeriod,
     notify,
     notifyClaimError,
-    selectedViewSchedulePlanId
+    selectedViewSchedulePlanId,
+    withDirection
   ]);
 
   // Обратный отсчёт окна отмены тикает внутри MyPostClaimRow — раздел целиком
@@ -6121,7 +6402,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     try {
       const response = await enqueueAuctionMutation(() => axios.post(
         `${apiRoot}/api/shift_auction/test_lots/claim`,
-        { lot_id: numericId, action: 'release' },
+        withDirection({ lot_id: numericId, action: 'release' }),
         { headers: buildHeaders() }
       ));
       const serverLot = response?.data?.lot;
@@ -6158,7 +6439,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setReleasingLotId(null);
     }
-  }, [apiRoot, buildHeaders, canClaim, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, releaseConfirmLot]);
+  }, [apiRoot, buildHeaders, canClaim, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, releaseConfirmLot, withDirection]);
 
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;
@@ -6174,11 +6455,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
     setDayOffLoadingDate(date);
     try {
-      const requestConfig = { headers: buildHeaders(), data: { date } };
+      const requestConfig = { headers: buildHeaders(), data: withDirection({ date }) };
       if (selected) {
         await enqueueAuctionMutation(() => axios.delete(`${apiRoot}/api/shift_auction/test_day_off`, requestConfig));
       } else {
-        await enqueueAuctionMutation(() => axios.post(`${apiRoot}/api/shift_auction/test_day_off`, { date }, { headers: buildHeaders() }));
+        await enqueueAuctionMutation(() => axios.post(`${apiRoot}/api/shift_auction/test_day_off`, withDirection({ date }), { headers: buildHeaders() }));
       }
       await fetchSnapshot({ silent: true });
     } catch (error) {
@@ -6186,7 +6467,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setDayOffLoadingDate('');
     }
-  }, [apiRoot, buildHeaders, canChoose, enqueueAuctionMutation, fetchSnapshot, manualDayOffLimit, myBlockedDateMap, myDayOffs, notify, selectedManualDayOffCount]);
+  }, [apiRoot, buildHeaders, canChoose, enqueueAuctionMutation, fetchSnapshot, manualDayOffLimit, myBlockedDateMap, myDayOffs, notify, selectedManualDayOffCount, withDirection]);
 
   const renderStatusBar = () => {
     const showWorkload = !canMonitor && canUseAuction;
@@ -6279,6 +6560,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             <div className="min-w-0">
               <h1 className="text-xl font-semibold text-slate-950 sm:text-2xl">
                 Аукцион смен
+                {/* Направление называем в заголовке всегда — и оператору, у которого
+                    тумблера нет: иначе непонятно, чьи смены на экране. */}
+                <span className="ml-2 inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-slate-700 sm:text-xs">
+                  {AUCTION_DIRECTION_LABELS[direction]}
+                </span>
                 {isTopupActive ? (
                   <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-violet-800 sm:text-xs">
                     <Plus size={12} />
@@ -6313,6 +6599,32 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:pr-[280px]">
+            {canSwitchDirection ? (
+              <div
+                role="group"
+                aria-label="Направление аукциона"
+                className="inline-flex h-9 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5 sm:h-10"
+              >
+                {AUCTION_DIRECTIONS.map((item) => {
+                  const active = direction === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={() => handleSwitchDirection(item.key)}
+                      aria-pressed={active}
+                      className={`inline-flex h-8 min-w-[64px] items-center justify-center rounded-[7px] px-3 text-xs font-semibold transition sm:h-9 sm:text-sm ${
+                        active
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
             {canManage && typeof onOpenResourceGeneration === 'function' ? (
               <button
                 type="button"
@@ -6332,6 +6644,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <BookOpen size={16} />
               Инструкция
             </button>
+            {supportsPartialClaim && !canMonitor && canUseAuction && canClaim ? (
+              <button
+                type="button"
+                onClick={handleTopupMoreHours}
+                disabled={!nextTopupCandidate}
+                title={nextTopupCandidate
+                  ? `Ближайшая свободная часть: ${formatDateLabel(nextTopupCandidate.lot.shift_date)} ${nextTopupCandidate.segment.start_time}–${nextTopupCandidate.segment.end_time}`
+                  : 'Свободных смен, которые можно добрать, сейчас нет'}
+                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 shadow-sm transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60 sm:h-10 sm:flex-none sm:px-4 sm:text-sm"
+                aria-label="Добрать часы"
+              >
+                <Plus size={16} />
+                Добрать часы
+              </button>
+            ) : null}
             {!canMonitor && canUseAuction ? (
               <button
                 type="button"
@@ -6871,6 +7198,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             apiRoot={apiRoot}
             buildHeaders={buildHeaders}
             notify={notify}
+            direction={direction}
             onActionComplete={async () => {
               if (isViewingActivePeriod) {
                 await fetchSnapshot({ silent: true });
@@ -8230,6 +8558,40 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </div>
         </div>
+      ) : null}
+
+      {partialClaimLot ? (
+        <PostAuctionPartialClaimModal
+          lot={partialClaimLot}
+          option={auctionPartialClaimOptionsByLotId.get(getAuctionLotActionKey(partialClaimLot))}
+          selection={partialClaimSelection}
+          onSelectionChange={setPartialClaimSelection}
+          onClose={handleClosePartialClaim}
+          onConfirm={handleConfirmPartialClaim}
+          inProgress={claimingLotIds.has(getAuctionLotActionKey(partialClaimLot))}
+          title="Взять смену или её часть"
+          confirmLabel="Взять"
+          inProgressLabel="Беру..."
+          footnote={(
+            <p className="mt-3 text-xs leading-5 text-slate-600">
+              Можно взять смену целиком или только удобную часть — остальное останется
+              свободным для других. Всего за неделю по вашей ставке
+              {' '}
+              <b className="text-slate-900">
+                {weeklyRateHoursLabel ? `${weeklyRateHoursLabel} ч` : 'по норме'}
+              </b>
+              {myAuctionWorkload.normMinutes > 0 ? (
+                <>
+                  {' '}· уже набрано <b className="text-slate-900">{formatAuctionHours(myAuctionWorkload.claimedNetMinutes)} ч</b>
+                  , осталось <b className="text-slate-900">{formatAuctionHours(myAuctionWorkload.remainingMinutes)} ч</b>
+                </>
+              ) : null}
+              {isTopupActive
+                ? '. Идёт добор — часы можно брать сверх нормы.'
+                : '. Больше нормы взять нельзя, пока руководитель не включит добор.'}
+            </p>
+          )}
+        />
       ) : null}
 
       {postClaimConfirmLot ? (

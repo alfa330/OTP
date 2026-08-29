@@ -36,34 +36,88 @@ def _module_function_source(name):
 
 
 class ShiftAuctionParticipantScopeTests(unittest.TestCase):
-    def test_operational_row_predicate_requires_working_osnova(self):
+    def _operational_row_predicate(self):
         namespace = {
             "re": re,
             "SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS": "working",
             "SHIFT_AUCTION_DIRECTION_NAME": "Основа",
+            "SHIFT_AUCTION_MODE_LINE": "line",
+            "SHIFT_AUCTION_MODE_CHAT": "chat",
         }
         exec(_module_function_source("_normalize_shift_auction_scope_value"), namespace)
+        exec(_module_function_source("normalize_shift_auction_mode"), namespace)
         exec(_module_function_source("_is_shift_auction_operational_participant_row"), namespace)
-        predicate = namespace["_is_shift_auction_operational_participant_row"]
+        return namespace["_is_shift_auction_operational_participant_row"]
+
+    def test_operational_row_predicate_requires_working_osnova(self):
+        predicate = self._operational_row_predicate()
 
         self.assertTrue(predicate((1, "A", "operator", "working", 1, 70, " Основа ")))
         for status in ("bs", "unpaid_leave", "sick_leave", "annual_leave", "fired", ""):
             with self.subTest(status=status):
                 self.assertFalse(predicate((1, "A", "operator", status, 1, 70, "Основа")))
         self.assertFalse(predicate((1, "A", "operator", "working", 1, 73, "Основа ОП")))
+        # Направление по умолчанию — линия: чат-менеджер в её прогресс не попадает.
+        self.assertFalse(predicate((1, "A", "operator", "working", 1, 69, "Чат менеджер")))
+
+    def test_operational_row_predicate_switches_with_the_direction(self):
+        predicate = self._operational_row_predicate()
+
+        self.assertTrue(predicate((1, "A", "operator", "working", 1, 69, "Чат менеджер"), "chat"))
+        self.assertTrue(predicate((1, "A", "operator", "working", 1, 76, " ТП Чат "), "chat"))
+        # Линия в прогресс аукциона чата не заходит, и наоборот.
+        self.assertFalse(predicate((1, "A", "operator", "working", 1, 70, "Основа"), "chat"))
+        self.assertFalse(predicate((1, "A", "operator", "working", 1, 69, "Чат менеджер"), "line"))
+        # Нераспознанный режим обязан вести на линию, а не открывать чужой прогон.
+        self.assertTrue(predicate((1, "A", "operator", "working", 1, 70, "Основа"), "junk"))
+
+    def test_direction_scope_sql_keeps_the_department_boundary(self):
+        # Условие направления собрано в одном месте — проверяем сам генератор, а не
+        # каждую его копию по методам.
+        namespace = {
+            "re": re,
+            "SHIFT_AUCTION_DIRECTION_NAME": "Основа",
+            "SHIFT_AUCTION_DEPARTMENT_CODE": "szov",
+            "SHIFT_AUCTION_CHAT_DIRECTION_PATTERN": "%чат%",
+            "SHIFT_AUCTION_MODE_LINE": "line",
+            "SHIFT_AUCTION_MODE_CHAT": "chat",
+        }
+        exec(_module_function_source("_normalize_shift_auction_scope_value"), namespace)
+        exec(_module_function_source("normalize_shift_auction_mode"), namespace)
+        exec(_module_function_source("shift_auction_direction_scope_sql"), namespace)
+        build = namespace["shift_auction_direction_scope_sql"]
+
+        self.assertIn("SHIFT_AUCTION_DIRECTION_NAME = 'Основа'", DATABASE_SOURCE)
+
+        line_sql, line_params = build("line")
+        self.assertIn("BTRIM(COALESCE(d.name, '')) = %s", line_sql)
+        self.assertNotIn("LOWER(BTRIM(COALESCE(d.name, ''))) = %s", line_sql)
+        self.assertIn("LOWER(BTRIM(COALESCE(dep.code, ''))) = %s", line_sql)
+        self.assertEqual(line_params, ("Основа", "szov"))
+
+        chat_sql, chat_params = build("chat")
+        self.assertIn("BTRIM(COALESCE(d.name, '')) ILIKE %s", chat_sql)
+        # Граница отдела обязана остаться и у чата: «ТП чат» живёт в отделе Тез.
+        self.assertIn("LOWER(BTRIM(COALESCE(dep.code, ''))) = %s", chat_sql)
+        self.assertEqual(chat_params, ("%чат%", "szov"))
+
+        # Неизвестный режим — линия, а не отсутствие фильтра.
+        self.assertEqual(build("junk"), build("line"))
 
     def test_put_validates_exact_szov_osnova_but_keeps_temporary_statuses(self):
         source = _method_source("update_shift_auction_test_access")
 
-        self.assertIn("SHIFT_AUCTION_DIRECTION_NAME = 'Основа'", DATABASE_SOURCE)
-        self.assertNotIn("LOWER(BTRIM(COALESCE(d.name, ''))) = %s", source)
-        self.assertIn("BTRIM(COALESCE(d.name, '')) = %s", source)
+        self.assertIn("shift_auction_direction_scope_sql(mode)", source)
+        self.assertIn("{scope_sql}", source)
         self.assertIn("JOIN directions d ON d.id = u.direction_id", source)
         self.assertIn("JOIN departments dep ON dep.id = d.department_id", source)
-        self.assertIn("SHIFT_AUCTION_DIRECTION_NAME", source)
-        self.assertIn("SHIFT_AUCTION_DEPARTMENT_CODE", source)
         self.assertIn("COALESCE(u.status, '') NOT IN ('fired', 'dismissal')", source)
         self.assertNotIn("COALESCE(u.status, '') = 'working'", source)
+        # Состав одного направления не должен стирать состав второго.
+        self.assertIn(
+            "DELETE FROM shift_auction_test_participants WHERE COALESCE(direction_mode, 'line') = %s",
+            source,
+        )
 
     def test_snapshot_access_and_cache_apply_the_same_selectable_scope(self):
         for method_name in (
@@ -73,8 +127,9 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
         ):
             with self.subTest(method_name=method_name):
                 source = _method_source(method_name)
-                self.assertIn("SHIFT_AUCTION_DIRECTION_NAME", source)
-                self.assertIn("SHIFT_AUCTION_DEPARTMENT_CODE", source)
+                self.assertIn("shift_auction_direction_scope_sql(mode)", source)
+                self.assertIn("{scope_sql}", source)
+                self.assertIn("COALESCE(p.direction_mode, 'line') = %s", source)
                 self.assertIn("NOT IN ('fired', 'dismissal')", source)
         self.assertIn(
             "_get_shift_auction_participant_ids_tx",
@@ -119,8 +174,26 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
 
         historical_source = _method_source("post_auction_claim_saved_shift")
         self.assertIn("JOIN departments dep ON dep.id = d.department_id", historical_source)
-        self.assertIn("SHIFT_AUCTION_DIRECTION_NAME", historical_source)
-        self.assertIn("SHIFT_AUCTION_DEPARTMENT_CODE", historical_source)
+        self.assertIn("shift_auction_direction_scope_sql(mode)", historical_source)
+        self.assertIn("{scope_sql}", historical_source)
+
+    def test_operator_mutations_take_the_direction_from_the_person(self):
+        # Режим НЕ приходит с клиента: иначе подменённым параметром можно было бы
+        # действовать в чужом аукционе.
+        for method_name in (
+            "claim_shift_auction_test_lot",
+            "release_shift_auction_test_lot",
+            "post_auction_claim_lot",
+            "set_shift_auction_test_day_off",
+        ):
+            with self.subTest(method_name=method_name):
+                source = _method_source(method_name)
+                self.assertIn("_shift_auction_mode_for_operator_tx(cursor, operator_id)", source)
+                self.assertNotIn("direction_mode=SHIFT_AUCTION_MODE_LINE)", source.split("\n")[0])
+
+        # Пост-аукционный добор адресован опубликованной неделе — режим берётся с неё.
+        saved_shift_source = _method_source("post_auction_claim_saved_shift")
+        self.assertIn("_shift_auction_mode_for_plan_tx(cursor, schedule_plan_id)", saved_shift_source)
 
     def test_frontend_guards_dirty_selection_and_uses_operational_rows(self):
         source = FRONTEND_PATH.read_text(encoding="utf-8")

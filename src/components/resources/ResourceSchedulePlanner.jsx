@@ -290,6 +290,13 @@ const templateRatesFor = (apiPrefix) => (
     : LINE_TEMPLATE_RATES
 );
 
+// Аукцион смен идёт на двух направлениях, и планировщик обязан спрашивать СВОЁ:
+// иначе покрытие недели чата считалось бы по взятым сменам линии. Направление
+// выводим из apiPrefix тем же приёмом, что ключ хранилища и ставки выше.
+const auctionDirectionFor = (apiPrefix) => (
+  String(apiPrefix || '').includes('/chat') ? 'chat' : 'line'
+);
+
 const loadStoredTemplates = (apiPrefix) => {
   if (typeof window === 'undefined') return [];
   try {
@@ -1761,6 +1768,7 @@ const ResourceSchedulePlanner = ({
     setAuctionError('');
     try {
       const response = await axios.get(`${apiRoot}/api/shift_auction/test_snapshot`, {
+        params: { direction: auctionDirectionFor(apiPrefix) },
         headers: typeof buildHeaders === 'function' ? buildHeaders() : {}
       });
       const snapshot = response?.data?.snapshot || {};
@@ -1774,7 +1782,7 @@ const ResourceSchedulePlanner = ({
     } finally {
       setAuctionLoading(false);
     }
-  }, [apiRoot, buildHeaders, emit]);
+  }, [apiPrefix, apiRoot, buildHeaders, emit]);
 
   useEffect(() => {
     if (!enableShiftAuction) return;
@@ -2436,7 +2444,10 @@ const ResourceSchedulePlanner = ({
                 type="button"
                 onClick={() => onOpenShiftAuction({
                   dateFrom: selectedWeekStart || '',
-                  dateTo: selectedPeriodEnd || selectedWeekStart || ''
+                  dateTo: selectedPeriodEnd || selectedWeekStart || '',
+                  // Раздел открывается сразу на СВОЁМ направлении: из чата — на
+                  // чатовом аукционе, а не на линии с прошлого визита.
+                  direction: auctionDirectionFor(apiPrefix)
                 })}
                 className="inline-flex h-10 items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
               >

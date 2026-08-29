@@ -81,13 +81,95 @@ SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
 BELL_EVENTS_NOTIFY_CHANNEL = 'bell_events'
 SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS', 1.5, minimum=0)
 SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS', 2, minimum=0)
-SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE = {"key": None, "expires_at": 0.0, "value": None}
+# Кеши держим ПО НАПРАВЛЕНИЯМ: один слот на оба аукциона отдавал бы снимок линии
+# на запрос чата и наоборот. Слоты создаются лениво, поэтому словари не зависят от
+# порядка объявления констант ниже.
+SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE = {}
 SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK = threading.Lock()
-SHIFT_AUCTION_PARTICIPANT_CACHE = {"expires_at": 0.0, "ids": frozenset()}
+SHIFT_AUCTION_PARTICIPANT_CACHE = {}
 SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK = threading.Lock()
+
+
+def _shift_auction_snapshot_cache_slot(direction_mode):
+    return SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE.setdefault(
+        normalize_shift_auction_mode(direction_mode),
+        {"key": None, "expires_at": 0.0, "value": None},
+    )
+
+
+def _shift_auction_participant_cache_slot(direction_mode):
+    return SHIFT_AUCTION_PARTICIPANT_CACHE.setdefault(
+        normalize_shift_auction_mode(direction_mode),
+        {"expires_at": 0.0, "ids": frozenset()},
+    )
 SHIFT_AUCTION_DIRECTION_NAME = 'Основа'
 SHIFT_AUCTION_DEPARTMENT_CODE = 'szov'
 SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS = 'working'
+
+# Аукцион смен идёт на ДВУХ направлениях одного отдела СЗоВ: линия («Основа») и чат
+# («Чат менеджер»). Это два независимых прогона на общих таблицах — они разделены
+# колонкой direction_mode ровно так же, как планы графиков
+# (resource_saved_schedule_plans.direction_mode). У линии режим 'line' стоит по
+# умолчанию, поэтому существующий аукцион миграцией не тронут.
+SHIFT_AUCTION_MODE_LINE = 'line'
+SHIFT_AUCTION_MODE_CHAT = 'chat'
+SHIFT_AUCTION_MODES = (SHIFT_AUCTION_MODE_LINE, SHIFT_AUCTION_MODE_CHAT)
+# Тот же отбор направлений, что в resource_fte/chat.py, НО с границей отдела: в
+# компании есть ещё «ТП чат» отдела Тез, и без dep.code его люди уехали бы в
+# аукцион СЗоВ (см. direction-rename-detaches-operators — имена направлений дублируются).
+SHIFT_AUCTION_CHAT_DIRECTION_PATTERN = '%чат%'
+# Настройки каждого направления — своя строка бывшей singleton-таблицы
+# shift_auction_test_access. Строка линии остаётся первой, чат получает вторую.
+SHIFT_AUCTION_SETTINGS_ROW_ID = {
+    SHIFT_AUCTION_MODE_LINE: 1,
+    SHIFT_AUCTION_MODE_CHAT: 2,
+}
+
+
+def normalize_shift_auction_mode(value):
+    """Направление аукциона из чего угодно: неизвестное значение — линия.
+
+    Аукцион линии боевой, поэтому «не понял параметр» обязано означать именно его,
+    а не отказ: иначе опечатка в запросе увела бы оператора в пустой чат-аукцион.
+    """
+    mode = _normalize_shift_auction_scope_value(value)
+    return SHIFT_AUCTION_MODE_CHAT if mode == SHIFT_AUCTION_MODE_CHAT else SHIFT_AUCTION_MODE_LINE
+
+
+def shift_auction_settings_row_id(direction_mode):
+    return SHIFT_AUCTION_SETTINGS_ROW_ID[normalize_shift_auction_mode(direction_mode)]
+
+
+def shift_auction_direction_scope_sql(direction_mode, direction_alias='d', department_alias='dep'):
+    """Условие «человек принадлежит направлению этого аукциона» + его параметры.
+
+    Отдел один и тот же (СЗоВ), меняется только направление. Возвращаем пару
+    (SQL, params), чтобы ни один вызов не собирал условие строкой у себя.
+    """
+    mode = normalize_shift_auction_mode(direction_mode)
+    department_clause = f"LOWER(BTRIM(COALESCE({department_alias}.code, ''))) = %s"
+    if mode == SHIFT_AUCTION_MODE_CHAT:
+        return (
+            f"BTRIM(COALESCE({direction_alias}.name, '')) ILIKE %s AND {department_clause}",
+            (SHIFT_AUCTION_CHAT_DIRECTION_PATTERN, SHIFT_AUCTION_DEPARTMENT_CODE),
+        )
+    return (
+        f"BTRIM(COALESCE({direction_alias}.name, '')) = %s AND {department_clause}",
+        (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE),
+    )
+
+
+def shift_auction_mode_matches_direction(direction_name, department_code):
+    """Направление человека → режим аукциона, или None, если он вне аукциона вовсе."""
+    name = _normalize_shift_auction_scope_value(direction_name)
+    department = _normalize_shift_auction_scope_value(department_code)
+    if department != _normalize_shift_auction_scope_value(SHIFT_AUCTION_DEPARTMENT_CODE):
+        return None
+    if name == _normalize_shift_auction_scope_value(SHIFT_AUCTION_DIRECTION_NAME):
+        return SHIFT_AUCTION_MODE_LINE
+    if 'чат' in name:
+        return SHIFT_AUCTION_MODE_CHAT
+    return None
 
 # Отдел, чьи менеджеры считаются в обзвоне регионов (задача #159).
 FRONT_OFFICE_DEPARTMENT_CODE = 'front_office'
@@ -99,14 +181,20 @@ def _normalize_shift_auction_scope_value(value):
     return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
 
 
-def _is_shift_auction_operational_participant_row(row):
-    return bool(
-        row
-        and len(row) > 6
-        and _normalize_shift_auction_scope_value(row[3]) == SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS
-        and _normalize_shift_auction_scope_value(row[6])
-        == _normalize_shift_auction_scope_value(SHIFT_AUCTION_DIRECTION_NAME)
-    )
+def _is_shift_auction_operational_participant_row(row, direction_mode=SHIFT_AUCTION_MODE_LINE):
+    """Строка участника «в строю» для ЭТОГО направления аукциона.
+
+    Границу отдела проверяет запрос, который эти строки собрал (там есть dep.code),
+    здесь остаётся направление из row[6] и рабочий статус.
+    """
+    if not row or len(row) <= 6:
+        return False
+    if _normalize_shift_auction_scope_value(row[3]) != SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS:
+        return False
+    direction_name = _normalize_shift_auction_scope_value(row[6])
+    if normalize_shift_auction_mode(direction_mode) == SHIFT_AUCTION_MODE_CHAT:
+        return 'чат' in direction_name
+    return direction_name == _normalize_shift_auction_scope_value(SHIFT_AUCTION_DIRECTION_NAME)
 
 
 def _coerce_four_you_annotations(value):
@@ -207,15 +295,30 @@ def normalize_sip_identifier(value, field="SIP-номер"):
     return cleaned
 
 
-def _invalidate_shift_auction_runtime_caches(include_participants=False):
+def _invalidate_shift_auction_runtime_caches(include_participants=False, direction_mode=None):
+    """Сбросить кеши аукциона. Без direction_mode — оба направления сразу.
+
+    Точечный сброс нужен там, где направление известно: чат не должен ронять кеш
+    линии на каждый свой клик. Общий сброс остаётся для мест, которые меняют данные
+    сразу обоих прогонов (например, правки в карточках людей).
+    """
+    modes = (
+        SHIFT_AUCTION_MODES
+        if direction_mode is None
+        else (normalize_shift_auction_mode(direction_mode),)
+    )
     with SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK:
-        SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] = None
-        SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["expires_at"] = 0.0
-        SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"] = None
+        for mode in modes:
+            slot = _shift_auction_snapshot_cache_slot(mode)
+            slot["key"] = None
+            slot["expires_at"] = 0.0
+            slot["value"] = None
     if include_participants:
         with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
-            SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = 0.0
-            SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = frozenset()
+            for mode in modes:
+                slot = _shift_auction_participant_cache_slot(mode)
+                slot["expires_at"] = 0.0
+                slot["ids"] = frozenset()
 
 ROLE_ALIASES = {
     'supervisor': 'sv',
@@ -4696,11 +4799,30 @@ class Database:
             # Rate lock: when enabled, operators may claim only lots whose rate
             # group (derived from shift duration) matches their own users.rate.
             cursor.execute("ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS rate_lock_enabled BOOLEAN NOT NULL DEFAULT FALSE;")
+            # Аукцион перестал быть одним на компанию: линия и чат — два независимых
+            # прогона. Настройки каждого лежат своей строкой, поэтому singleton-CHECK
+            # (id = 1) снимается, а направление пишем явной колонкой — по ней, а не по
+            # номеру строки, фильтруют запросы.
+            cursor.execute("ALTER TABLE shift_auction_test_access DROP CONSTRAINT IF EXISTS shift_auction_test_access_singleton;")
+            cursor.execute(
+                "ALTER TABLE shift_auction_test_access ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(16) NOT NULL DEFAULT 'line';"
+            )
+            cursor.execute(
+                "UPDATE shift_auction_test_access SET direction_mode = %s WHERE id = %s AND direction_mode <> %s;",
+                (SHIFT_AUCTION_MODE_LINE, SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_LINE], SHIFT_AUCTION_MODE_LINE)
+            )
             cursor.execute("""
-                INSERT INTO shift_auction_test_access (id)
-                VALUES (1)
+                INSERT INTO shift_auction_test_access (id, direction_mode)
+                VALUES (%s, %s), (%s, %s)
                 ON CONFLICT (id) DO NOTHING;
-            """)
+            """, (
+                SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_LINE], SHIFT_AUCTION_MODE_LINE,
+                SHIFT_AUCTION_SETTINGS_ROW_ID[SHIFT_AUCTION_MODE_CHAT], SHIFT_AUCTION_MODE_CHAT,
+            ))
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_shift_auction_test_access_mode "
+                "ON shift_auction_test_access(direction_mode);"
+            )
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_participants (
                     operator_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -4711,6 +4833,12 @@ class Database:
             # Legacy early-access marker, replaced by shift_auction_time_groups.
             # Kept for the one-time migration only (see below).
             cursor.execute("ALTER TABLE shift_auction_test_participants ADD COLUMN IF NOT EXISTS early_access BOOLEAN NOT NULL DEFAULT FALSE;")
+            # Направление участника. Человек принадлежит ровно одному направлению, так что
+            # PK по operator_id менять не нужно — колонка нужна, чтобы сохранение состава
+            # ОДНОГО аукциона не стирало состав второго (там идёт DELETE всей таблицы).
+            cursor.execute(
+                "ALTER TABLE shift_auction_test_participants ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(16) NOT NULL DEFAULT 'line';"
+            )
             # Week time groups ("группы времени"): a group opens the auction for
             # its members earlier OR later than the main window. Bound to one
             # weekly plan on purpose — a group must not leak into other weeks.
@@ -4814,6 +4942,12 @@ class Database:
             # Shift an operator put on the calendar themselves ("свой график"):
             # created already claimed and marked apart in the grid.
             cursor.execute("ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS self_scheduled_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL;")
+            # Направление лота. Сид, перезапуск и снимок фильтруют по нему: без колонки
+            # чат увидел бы смены линии, а «Перезапустить» одного направления снесло бы
+            # лоты второго.
+            cursor.execute(
+                "ALTER TABLE shift_auction_test_lots ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(16) NOT NULL DEFAULT 'line';"
+            )
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_day_offs (
                     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -4822,6 +4956,9 @@ class Database:
                     PRIMARY KEY (operator_id, day_off_date)
                 );
             """)
+            cursor.execute(
+                "ALTER TABLE shift_auction_test_day_offs ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(16) NOT NULL DEFAULT 'line';"
+            )
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_test_events (
                     id SERIAL PRIMARY KEY,
@@ -4830,6 +4967,11 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Журнал и поток SSE тоже раздельные: событие чата не должно будить экран
+            # линии и наоборот.
+            cursor.execute(
+                "ALTER TABLE shift_auction_test_events ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(16) NOT NULL DEFAULT 'line';"
+            )
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS shift_auction_published_periods (
                     plan_id INTEGER PRIMARY KEY REFERENCES resource_saved_schedule_plans(id) ON DELETE CASCADE,
@@ -4854,6 +4996,14 @@ class Database:
             """)
             cursor.execute("ALTER TABLE shift_auction_historical_claims ADD COLUMN IF NOT EXISTS claimed_start_time TIME NULL;")
             cursor.execute("ALTER TABLE shift_auction_historical_claims ADD COLUMN IF NOT EXISTS claimed_end_time TIME NULL;")
+            # На каком этапе взята часть смены. Прежде таблица знала только пост-аукционный
+            # добор, поэтому дефолт 'post_auction' верен для всех существующих строк. Чат
+            # берёт части ПРЯМО В ХОДЕ аукциона — такие строки помечены 'auction' и не
+            # попадают в панель «Мои доп. смены» (у них своя кнопка «Вернуть»).
+            cursor.execute(
+                "ALTER TABLE shift_auction_historical_claims "
+                "ADD COLUMN IF NOT EXISTS claim_stage VARCHAR(16) NOT NULL DEFAULT 'post_auction';"
+            )
             # Allow several operators to each claim a DISJOINT part of the same shift
             # (partial добор of the leftover). The primary key therefore includes
             # claimed_by; overlap between two operators' ranges is rejected in code.
@@ -4996,6 +5146,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_shifts_plan_date ON resource_saved_schedule_shifts(plan_id, shift_date, start_time);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_participants_created ON shift_auction_test_participants(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_status_date ON shift_auction_test_lots(status, shift_date, start_time);
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_mode_date ON shift_auction_test_lots(direction_mode, shift_date, start_time);
+                CREATE INDEX IF NOT EXISTS idx_shift_auction_test_events_mode_id ON shift_auction_test_events(direction_mode, id);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_claimed_by ON shift_auction_test_lots(claimed_by);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_lots_source_schedule ON shift_auction_test_lots(source_schedule_plan_id, source_schedule_shift_id);
                 CREATE INDEX IF NOT EXISTS idx_shift_auction_test_day_offs_operator ON shift_auction_test_day_offs(operator_id, day_off_date);
@@ -9275,7 +9427,7 @@ class Database:
                 "date_to": end_date.strftime('%Y-%m-%d'),
                 "updated_by": updated_by,
                 "break_direction_name": direction_context.get("direction_name"),
-            })
+            }, direction_mode=mode)
 
         return {
             "schedule": self.get_resource_saved_schedule(plan_id=plan_id),
@@ -9363,21 +9515,29 @@ class Database:
             "operator_ids": [int(item) for item in (row[10] or []) if item is not None],
         }
 
-    def _get_shift_auction_time_groups_tx(self, cursor, plan_id=None, plan_only=False):
+    def _get_shift_auction_time_groups_tx(self, cursor, plan_id=None, plan_only=False,
+                                          direction_mode=SHIFT_AUCTION_MODE_LINE):
         """Time groups with their members.
 
         ``plan_only`` returns just the given week; otherwise the result covers the
         weeks a manager can still configure (current and future) plus the active
         one, which keeps the payload bounded as weeks accumulate.
+
+        Направление берём с ПЛАНА недели: у групп своей колонки нет и не нужно —
+        группа привязана к неделе, а неделя уже принадлежит линии или чату.
         """
+        mode = normalize_shift_auction_mode(direction_mode)
         if plan_only:
             if plan_id is None:
                 return []
             scope_sql = "g.plan_id = %s"
             params = (plan_id,)
         else:
-            scope_sql = "p.archived_at IS NULL AND (p.date_to >= CURRENT_DATE OR g.plan_id = %s)"
-            params = (plan_id,)
+            scope_sql = (
+                "COALESCE(p.direction_mode, 'line') = %s"
+                " AND p.archived_at IS NULL AND (p.date_to >= CURRENT_DATE OR g.plan_id = %s)"
+            )
+            params = (mode, plan_id)
         cursor.execute(f"""
             SELECT
                 g.id,
@@ -9490,7 +9650,7 @@ class Database:
             for row in (cursor.fetchall() or [])
         ]
 
-    def _cache_shift_auction_participant_ids(self, participant_rows):
+    def _cache_shift_auction_participant_ids(self, participant_rows, direction_mode=SHIFT_AUCTION_MODE_LINE):
         if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS <= 0:
             return
         ids = frozenset(
@@ -9499,21 +9659,24 @@ class Database:
             if row and row[0] is not None
         )
         with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
-            SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = ids
-            SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
+            slot = _shift_auction_participant_cache_slot(direction_mode)
+            slot["ids"] = ids
+            slot["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
 
-    def _get_shift_auction_participant_ids_tx(self, cursor):
-        cursor.execute("""
+    def _get_shift_auction_participant_ids_tx(self, cursor, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
+        cursor.execute(f"""
             SELECT p.operator_id
             FROM shift_auction_test_participants p
             JOIN users u ON u.id = p.operator_id
             JOIN directions d ON d.id = u.direction_id
             JOIN departments dep ON dep.id = d.department_id
-            WHERE BTRIM(COALESCE(d.name, '')) = %s
-              AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+            WHERE COALESCE(p.direction_mode, 'line') = %s
+              AND {scope_sql}
               AND LOWER(COALESCE(u.role, '')) = 'operator'
               AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-        """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
+        """, (mode, *scope_params))
         participant_ids = {
             int(row[0])
             for row in (cursor.fetchall() or [])
@@ -9521,21 +9684,24 @@ class Database:
         }
         return participant_ids
 
-    def _get_shift_auction_participant_ids_cached_tx(self, cursor):
+    def _get_shift_auction_participant_ids_cached_tx(self, cursor, direction_mode=SHIFT_AUCTION_MODE_LINE):
         now = time.time()
         if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS > 0:
             with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
-                if SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] > now:
-                    return set(SHIFT_AUCTION_PARTICIPANT_CACHE["ids"])
+                slot = _shift_auction_participant_cache_slot(direction_mode)
+                if slot["expires_at"] > now:
+                    return set(slot["ids"])
 
-        participant_ids = self._get_shift_auction_participant_ids_tx(cursor)
+        participant_ids = self._get_shift_auction_participant_ids_tx(cursor, direction_mode=direction_mode)
         if SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS > 0:
             with SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK:
-                SHIFT_AUCTION_PARTICIPANT_CACHE["ids"] = frozenset(participant_ids)
-                SHIFT_AUCTION_PARTICIPANT_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
+                slot = _shift_auction_participant_cache_slot(direction_mode)
+                slot["ids"] = frozenset(participant_ids)
+                slot["expires_at"] = time.time() + SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS
         return participant_ids
 
-    def _shift_auction_snapshot_common_cache_key(self, settings_row, include_admin_fields):
+    def _shift_auction_snapshot_common_cache_key(self, settings_row, include_admin_fields,
+                                                 direction_mode=SHIFT_AUCTION_MODE_LINE):
         if not settings_row:
             return None
         # settings_row tail layout: ... published_to_work_schedules_by_name,
@@ -9543,13 +9709,17 @@ class Database:
         # Probe the last position since the same row shape feeds multiple callers.
         last_event_id = settings_row[-1] if isinstance(settings_row, (list, tuple)) and len(settings_row) >= 14 else 0
         return (
+            normalize_shift_auction_mode(direction_mode),
             bool(include_admin_fields),
             int(last_event_id or 0),
             int(settings_row[6]) if settings_row[6] is not None else None
         )
 
-    def _build_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False):
-        cursor.execute("""
+    def _build_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False,
+                                                direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
+        cursor.execute(f"""
             SELECT
                 u.id,
                 u.name,
@@ -9566,14 +9736,14 @@ class Database:
             JOIN directions d ON d.id = u.direction_id
             JOIN departments dep ON dep.id = d.department_id
             LEFT JOIN users s ON s.id = u.supervisor_id
-            WHERE BTRIM(COALESCE(d.name, '')) = %s
-              AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+            WHERE COALESCE(p.direction_mode, 'line') = %s
+              AND {scope_sql}
               AND LOWER(COALESCE(u.role, '')) = 'operator'
               AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
             ORDER BY u.name
-        """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
+        """, (mode, *scope_params))
         participant_rows = cursor.fetchall() or []
-        self._cache_shift_auction_participant_ids(participant_rows)
+        self._cache_shift_auction_participant_ids(participant_rows, direction_mode=mode)
 
         cursor.execute("""
             SELECT
@@ -9604,7 +9774,11 @@ class Database:
                         'claimed_by', hc.claimed_by,
                         'claimed_by_name', cu.name,
                         'start_time', to_char(hc.claimed_start_time, 'HH24:MI'),
-                        'end_time', to_char(hc.claimed_end_time, 'HH24:MI')
+                        'end_time', to_char(hc.claimed_end_time, 'HH24:MI'),
+                        -- Стадия отличает часть, взятую В ХОДЕ аукциона (её можно
+                        -- вернуть кнопкой «Вернуть»), от пост-аукционного добора
+                        -- (он уже в графике, и возврат идёт через «Мои доп. смены»).
+                        'stage', COALESCE(hc.claim_stage, 'post_auction')
                     ) ORDER BY hc.claimed_start_time)
                     FROM shift_auction_historical_claims hc
                     LEFT JOIN users cu ON cu.id = hc.claimed_by
@@ -9621,23 +9795,25 @@ class Database:
             LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
             LEFT JOIN resource_saved_schedule_shifts source_shift ON source_shift.id = l.source_schedule_shift_id
             LEFT JOIN users added_user ON added_user.id = l.added_by
+            WHERE COALESCE(l.direction_mode, 'line') = %s
             ORDER BY l.shift_date, l.start_time, l.id
-        """)
+        """, (mode,))
         lot_rows = cursor.fetchall() or []
         lots = [self._serialize_shift_auction_lot_row(row) for row in lot_rows]
         lot_dates = sorted({row[1] for row in lot_rows if row and row[1]})
 
-        selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
-        available_periods = self._get_shift_auction_available_periods_tx(cursor)
+        selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6], direction_mode=mode)
+        available_periods = self._get_shift_auction_available_periods_tx(cursor, direction_mode=mode)
         # Groups of every configurable week: the manager's form needs them for the
         # week it is editing, and each viewer's own window is derived from the same
         # list — no per-operator query on top of the cached snapshot.
-        time_groups = self._get_shift_auction_time_groups_tx(cursor, settings_row[6])
+        time_groups = self._get_shift_auction_time_groups_tx(cursor, settings_row[6], direction_mode=mode)
         claim_journal_rows = []
         participant_workloads = []
         if include_admin_fields:
             participant_workloads = self._get_shift_auction_participant_workloads_tx(
                 cursor, participant_rows, lots, lot_dates,
+                direction_mode=mode,
                 self_schedule_operator_ids={
                     operator_id
                     for group in time_groups
@@ -9686,32 +9862,45 @@ class Database:
             "participant_workloads": participant_workloads
         }
 
-    def _get_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False):
-        cache_key = self._shift_auction_snapshot_common_cache_key(settings_row, include_admin_fields)
+    def _get_shift_auction_snapshot_common_tx(self, cursor, settings_row, include_admin_fields=False,
+                                              direction_mode=SHIFT_AUCTION_MODE_LINE):
+        cache_key = self._shift_auction_snapshot_common_cache_key(
+            settings_row, include_admin_fields, direction_mode=direction_mode
+        )
         if not cache_key or SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS <= 0:
-            return self._build_shift_auction_snapshot_common_tx(cursor, settings_row, include_admin_fields)
+            return self._build_shift_auction_snapshot_common_tx(
+                cursor, settings_row, include_admin_fields, direction_mode=direction_mode
+            )
 
         now = time.time()
         with SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK:
+            slot = _shift_auction_snapshot_cache_slot(direction_mode)
             if (
-                SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] == cache_key
-                and SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["expires_at"] > now
-                and SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"] is not None
+                slot["key"] == cache_key
+                and slot["expires_at"] > now
+                and slot["value"] is not None
             ):
-                return SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"]
+                return slot["value"]
 
-            value = self._build_shift_auction_snapshot_common_tx(cursor, settings_row, include_admin_fields)
-            SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] = cache_key
-            SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["value"] = value
-            SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["expires_at"] = time.time() + SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS
+            value = self._build_shift_auction_snapshot_common_tx(
+                cursor, settings_row, include_admin_fields, direction_mode=direction_mode
+            )
+            slot["key"] = cache_key
+            slot["value"] = value
+            slot["expires_at"] = time.time() + SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS
             return value
 
-    def _insert_shift_auction_test_event(self, cursor, event_type, payload):
+    def _insert_shift_auction_test_event(self, cursor, event_type, payload,
+                                         direction_mode=SHIFT_AUCTION_MODE_LINE):
         cursor.execute("""
-            INSERT INTO shift_auction_test_events (event_type, payload)
-            VALUES (%s, %s)
+            INSERT INTO shift_auction_test_events (event_type, payload, direction_mode)
+            VALUES (%s, %s, %s)
             RETURNING id, created_at
-        """, (str(event_type or '').strip()[:64], Json(payload or {})))
+        """, (
+            str(event_type or '').strip()[:64],
+            Json(payload or {}),
+            normalize_shift_auction_mode(direction_mode),
+        ))
         row = cursor.fetchone()
         event_id = row[0] if row else None
         if event_id is not None:
@@ -9744,7 +9933,8 @@ class Database:
             normalized_event_type = str(event_type or '').strip()
             if normalized_event_type in structural_events:
                 _invalidate_shift_auction_runtime_caches(
-                    include_participants=normalized_event_type in participant_invalidating_events
+                    include_participants=normalized_event_type in participant_invalidating_events,
+                    direction_mode=direction_mode,
                 )
         return {
             "id": event_id,
@@ -9821,7 +10011,8 @@ class Database:
 
     def _get_shift_auction_participant_workloads_tx(
         self, cursor, participant_rows, lots, lot_dates,
-        day_offs_by_operator=None, self_schedule_operator_ids=None
+        day_offs_by_operator=None, self_schedule_operator_ids=None,
+        direction_mode=SHIFT_AUCTION_MODE_LINE
     ):
         # Per-operator workload (norm vs claimed) computed in one pass.
         # Only the day-off / blocked-period counters need the DB; lot stats are
@@ -9830,7 +10021,7 @@ class Database:
         # auction settings, but must not create rows in operational progress.
         operational_participant_rows = [
             row for row in (participant_rows or [])
-            if _is_shift_auction_operational_participant_row(row)
+            if _is_shift_auction_operational_participant_row(row, direction_mode)
         ]
         if not operational_participant_rows:
             return []
@@ -9860,9 +10051,10 @@ class Database:
                 SELECT operator_id, day_off_date
                 FROM shift_auction_test_day_offs
                 WHERE operator_id = ANY(%s)
+                  AND COALESCE(direction_mode, 'line') = %s
                 ORDER BY operator_id, day_off_date
                 """,
-                (operator_ids,)
+                (operator_ids, normalize_shift_auction_mode(direction_mode))
             )
             for op_id, day_off_date in (cursor.fetchall() or []):
                 if op_id is None or day_off_date is None:
@@ -10021,14 +10213,81 @@ class Database:
             return reason or 'Увольнение'
         return str(status_code or '').strip() or 'Период'
 
-    def _get_shift_auction_lot_dates_tx(self, cursor):
+    def _get_shift_auction_lot_dates_tx(self, cursor, direction_mode=SHIFT_AUCTION_MODE_LINE):
         cursor.execute("""
             SELECT DISTINCT shift_date
             FROM shift_auction_test_lots
             WHERE shift_date IS NOT NULL
+              AND COALESCE(direction_mode, 'line') = %s
             ORDER BY shift_date
-        """)
+        """, (normalize_shift_auction_mode(direction_mode),))
         return [row[0] for row in (cursor.fetchall() or []) if row and row[0]]
+
+    # Части смен, взятые ПРЯМО В ХОДЕ аукциона, лежат в shift_auction_historical_claims
+    # со стадией 'auction' (у пост-аукционного добора стадия 'post_auction'). Лот при
+    # этом остаётся 'available', пока не разобран целиком, поэтому норму нельзя считать
+    # по одним только claimed-лотам — иначе чат-оператор набрал бы сверх ставки.
+    SHIFT_AUCTION_CLAIM_STAGE_AUCTION = 'auction'
+    SHIFT_AUCTION_CLAIM_STAGE_POST = 'post_auction'
+
+    def _get_shift_auction_operator_claimed_intervals_tx(self, cursor, operator_id,
+                                                         direction_mode=SHIFT_AUCTION_MODE_LINE):
+        """Всё, что оператор уже занял в ЭТОМ аукционе: целые лоты и взятые части смен.
+
+        Лот, у которого есть части, целиком не считается ни разу — иначе последний
+        забравший кусок получил бы в норму всю смену.
+        """
+        mode = normalize_shift_auction_mode(direction_mode)
+        cursor.execute("""
+            SELECT
+                to_char(l.shift_date, 'YYYY-MM-DD') AS shift_date,
+                to_char(COALESCE(l.post_claim_start_time, l.start_time), 'HH24:MI') AS start_time,
+                to_char(COALESCE(l.post_claim_end_time, l.end_time), 'HH24:MI') AS end_time,
+                l.breaks
+            FROM shift_auction_test_lots l
+            WHERE l.claimed_by = %s
+              AND l.status = 'claimed'
+              AND COALESCE(l.direction_mode, 'line') = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM shift_auction_historical_claims hc
+                  WHERE hc.plan_id = l.source_schedule_plan_id
+                    AND hc.source_schedule_shift_id = l.source_schedule_shift_id
+                    AND hc.claimed_start_time IS NOT NULL
+                    AND hc.claimed_end_time IS NOT NULL
+              )
+            UNION ALL
+            SELECT
+                to_char(sh.shift_date, 'YYYY-MM-DD') AS shift_date,
+                to_char(hc.claimed_start_time, 'HH24:MI') AS start_time,
+                to_char(hc.claimed_end_time, 'HH24:MI') AS end_time,
+                '[]'::jsonb AS breaks
+            FROM shift_auction_historical_claims hc
+            JOIN resource_saved_schedule_shifts sh
+              ON sh.id = hc.source_schedule_shift_id
+             AND sh.plan_id = hc.plan_id
+            WHERE hc.claimed_by = %s
+              AND hc.claimed_start_time IS NOT NULL
+              AND hc.claimed_end_time IS NOT NULL
+              -- Ограничение ТЕКУЩИМ прогоном и его направлением — через EXISTS, а не
+              -- JOIN: на одну исходную смену теоретически может приходиться больше
+              -- одного лота, и join удвоил бы часы в норме.
+              AND EXISTS (
+                  SELECT 1 FROM shift_auction_test_lots l2
+                  WHERE l2.source_schedule_plan_id = hc.plan_id
+                    AND l2.source_schedule_shift_id = hc.source_schedule_shift_id
+                    AND COALESCE(l2.direction_mode, 'line') = %s
+              )
+        """, (operator_id, mode, operator_id, mode))
+        rows = cursor.fetchall() or []
+        return [
+            {
+                "shift_date": row[0],
+                "start_time": row[1],
+                "end_time": row[2],
+                "breaks": row[3] if isinstance(row[3], list) else [],
+            }
+            for row in rows
+        ]
 
     def _serialize_shift_auction_period_row(self, row):
         if not row:
@@ -10047,7 +10306,7 @@ class Database:
             "can_restart": can_restart,
         }
 
-    def _get_shift_auction_period_row_tx(self, cursor, plan_id):
+    def _get_shift_auction_period_row_tx(self, cursor, plan_id, direction_mode=SHIFT_AUCTION_MODE_LINE):
         try:
             plan_id = int(plan_id or 0)
         except Exception:
@@ -10071,12 +10330,12 @@ class Database:
               AND p.archived_at IS NULL
               -- То же условие и по прямому номеру плана: через эту выборку идут проверка
               -- периода и все засевы лотов, поэтому она закрывает запись, а не только показ.
-              AND COALESCE(p.direction_mode, 'line') = 'line'
+              AND COALESCE(p.direction_mode, 'line') = %s
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
-        """, (plan_id,))
+        """, (plan_id, normalize_shift_auction_mode(direction_mode)))
         return cursor.fetchone()
 
-    def _get_shift_auction_available_periods_tx(self, cursor):
+    def _get_shift_auction_available_periods_tx(self, cursor, direction_mode=SHIFT_AUCTION_MODE_LINE):
         cursor.execute("""
             SELECT
                 p.id,
@@ -10091,21 +10350,20 @@ class Database:
               ON s.plan_id = p.id
              AND COALESCE(s.meta->>'excludeFromAuction', 'false') <> 'true'
             WHERE p.archived_at IS NULL
-              -- Аукцион смен — только для ЛИНИИ. У чата он будет свой (решение владельца
-              -- 28.08.2026), и его график после генерации никуда не отправляется. Планы
-              -- обоих направлений лежат в одной таблице, поэтому без этого условия
-              -- сохранённая неделя чата вставала в список периодов аукциона линии
-              -- неотличимой строкой — те же даты, тот же пустой заголовок.
-              AND COALESCE(p.direction_mode, 'line') = 'line'
+              -- Планы линии и чата лежат в ОДНОЙ таблице и на одну неделю выглядят
+              -- одинаково (те же даты, тот же пустой заголовок) — без фильтра по
+              -- направлению неделя чата встала бы в список периодов аукциона линии.
+              AND COALESCE(p.direction_mode, 'line') = %s
               AND p.date_to = p.date_from + 6
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
             HAVING COUNT(s.id) > 0
             ORDER BY p.date_from, p.updated_at DESC, p.id DESC
-        """)
+        """, (normalize_shift_auction_mode(direction_mode),))
         return [self._serialize_shift_auction_period_row(row) for row in (cursor.fetchall() or [])]
 
-    def _validate_shift_auction_period_tx(self, cursor, schedule_plan_id, require_restartable=False):
-        row = self._get_shift_auction_period_row_tx(cursor, schedule_plan_id)
+    def _validate_shift_auction_period_tx(self, cursor, schedule_plan_id, require_restartable=False,
+                                          direction_mode=SHIFT_AUCTION_MODE_LINE):
+        row = self._get_shift_auction_period_row_tx(cursor, schedule_plan_id, direction_mode=direction_mode)
         if not row:
             raise ValueError("AUCTION_PERIOD_NOT_FOUND")
         date_from = row[1]
@@ -10183,10 +10441,11 @@ class Database:
 
     def _get_shift_auction_operator_workload_tx(
         self, cursor, operator_id, operator_rate,
-        lot_dates=None, blocked_dates=None, claimed_rows=None
+        lot_dates=None, blocked_dates=None, claimed_rows=None,
+        direction_mode=SHIFT_AUCTION_MODE_LINE
     ):
         if lot_dates is None:
-            lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+            lot_dates = self._get_shift_auction_lot_dates_tx(cursor, direction_mode=direction_mode)
         period_days = len(lot_dates)
         if blocked_dates is None:
             blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(cursor, operator_id, lot_dates=lot_dates)
@@ -10194,13 +10453,12 @@ class Database:
         norm_minutes = int(round(workday_count * 8 * 60 * max(0.0, float(operator_rate or 0))))
 
         if claimed_rows is None:
-            cursor.execute("""
-                SELECT COALESCE(post_claim_start_time, start_time), COALESCE(post_claim_end_time, end_time), breaks
-                FROM shift_auction_test_lots
-                WHERE claimed_by = %s
-                  AND status = 'claimed'
-            """, (operator_id,))
-            claimed_rows = cursor.fetchall() or []
+            claimed_rows = [
+                (item["start_time"], item["end_time"], item["breaks"])
+                for item in self._get_shift_auction_operator_claimed_intervals_tx(
+                    cursor, operator_id, direction_mode=direction_mode
+                )
+            ]
         claimed_net_minutes = 0
         claimed_break_minutes = 0
         for start_time_value, end_time_value, breaks in claimed_rows:
@@ -10222,7 +10480,10 @@ class Database:
             "remaining_minutes": max(0, norm_minutes - int(claimed_net_minutes)),
         }
 
-    def get_shift_auction_test_access(self, current_user_id=None):
+    def get_shift_auction_test_access(self, current_user_id=None, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
+        scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
@@ -10238,6 +10499,7 @@ class Database:
                             SELECT source_schedule_plan_id
                             FROM shift_auction_test_lots
                             WHERE source_schedule_plan_id IS NOT NULL
+                              AND COALESCE(direction_mode, 'line') = s.direction_mode
                             ORDER BY id
                             LIMIT 1
                         )
@@ -10255,18 +10517,18 @@ class Database:
                 LEFT JOIN users u ON u.id = s.updated_by
                 LEFT JOIN users publisher ON publisher.id = s.published_to_work_schedules_by
                 LEFT JOIN users topup_user ON topup_user.id = s.topup_started_by
-                WHERE s.id = 1
-            """)
+                WHERE s.id = %s
+            """, (settings_id,))
             settings_row = cursor.fetchone()
             if not settings_row:
                 cursor.execute("""
-                    INSERT INTO shift_auction_test_access (id)
-                    VALUES (1)
+                    INSERT INTO shift_auction_test_access (id, direction_mode)
+                    VALUES (%s, %s)
                     ON CONFLICT (id) DO NOTHING
-                """)
+                """, (settings_id, mode))
                 settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None, None, None, None)
 
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     u.id,
                     u.name,
@@ -10283,18 +10545,21 @@ class Database:
                 JOIN directions d ON d.id = u.direction_id
                 JOIN departments dep ON dep.id = d.department_id
                 LEFT JOIN users s ON s.id = u.supervisor_id
-                WHERE BTRIM(COALESCE(d.name, '')) = %s
-                  AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+                WHERE COALESCE(p.direction_mode, 'line') = %s
+                  AND {scope_sql}
                   AND LOWER(COALESCE(u.role, '')) = 'operator'
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
                 ORDER BY u.name
-            """, (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE))
+            """, (mode, *scope_params))
             participant_rows = cursor.fetchall() or []
-            cursor.execute("SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
+            cursor.execute(
+                "SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = %s",
+                (settings_id,)
+            )
             rate_lock_row = cursor.fetchone()
             rate_lock_enabled = bool(rate_lock_row[0]) if rate_lock_row else False
-            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6])
-            time_groups = self._get_shift_auction_time_groups_tx(cursor, settings_row[6])
+            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[6], direction_mode=mode)
+            time_groups = self._get_shift_auction_time_groups_tx(cursor, settings_row[6], direction_mode=mode)
 
         selected_operator_ids = [int(row[0]) for row in participant_rows if row and row[0] is not None]
         current_id = None
@@ -10358,7 +10623,12 @@ class Database:
             return False
 
         with self._get_cursor() as cursor:
-            return operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor)
+            # Человек участвует ровно в одном направлении — спрашиваем оба, чтобы не
+            # читать его карточку ради ответа «да/нет».
+            return any(
+                operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor, direction_mode=mode)
+                for mode in SHIFT_AUCTION_MODES
+            )
 
     SHIFT_AUCTION_TIME_GROUP_LIMIT = 10
 
@@ -10493,7 +10763,11 @@ class Database:
         ends_at=None,
         schedule_plan_id=None,
         time_groups=None,
+        direction_mode=SHIFT_AUCTION_MODE_LINE,
     ):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
+        scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
         if starts_at and ends_at and ends_at <= starts_at:
             raise ValueError("AUCTION_END_BEFORE_START")
         normalized_groups = self._normalize_shift_auction_time_groups(time_groups, starts_at, ends_at)
@@ -10531,7 +10805,8 @@ class Database:
                 selected_period_row = self._validate_shift_auction_period_tx(
                     cursor,
                     schedule_plan_id,
-                    require_restartable=True
+                    require_restartable=True,
+                    direction_mode=mode
                 )
                 selected_plan_id = int(selected_period_row[0])
                 cursor.execute("""
@@ -10546,9 +10821,9 @@ class Database:
             cursor.execute("""
                 SELECT selected_schedule_plan_id, enabled, finished_at
                 FROM shift_auction_test_access
-                WHERE id = 1
+                WHERE id = %s
                 FOR UPDATE
-            """)
+            """, (settings_id,))
             current_settings_row = cursor.fetchone()
             current_selected_plan_id = current_settings_row[0] if current_settings_row else None
             current_enabled = bool(current_settings_row[1]) if current_settings_row and len(current_settings_row) > 1 else False
@@ -10556,7 +10831,7 @@ class Database:
 
             valid_ids = []
             if normalized_ids:
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT u.id
                     FROM users u
                     JOIN directions d ON d.id = u.direction_id
@@ -10564,12 +10839,10 @@ class Database:
                     WHERE u.id = ANY(%s)
                       AND LOWER(COALESCE(u.role, '')) = 'operator'
                       AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-                      AND BTRIM(COALESCE(d.name, '')) = %s
-                      AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+                      AND {scope_sql}
                 """, (
                     normalized_ids,
-                    SHIFT_AUCTION_DIRECTION_NAME,
-                    SHIFT_AUCTION_DEPARTMENT_CODE,
+                    *scope_params,
                 ))
                 valid_ids = [int(row[0]) for row in (cursor.fetchall() or [])]
 
@@ -10580,7 +10853,8 @@ class Database:
                         COUNT(*)::int AS total_lots,
                         COUNT(*) FILTER (WHERE source_schedule_plan_id = %s)::int AS selected_plan_lots
                     FROM shift_auction_test_lots
-                """, (selected_plan_id,))
+                    WHERE COALESCE(direction_mode, 'line') = %s
+                """, (selected_plan_id, mode))
                 lot_counts = cursor.fetchone() or (0, 0)
                 total_lots = int(lot_counts[0] or 0)
                 selected_plan_lots = int(lot_counts[1] or 0)
@@ -10618,7 +10892,7 @@ class Database:
                     topup_started_by = CASE WHEN %s THEN NULL ELSE topup_started_by END,
                     updated_by = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
+                WHERE id = %s
             """, (
                 bool(enabled),
                 str(launch_note or '').strip()[:1000],
@@ -10632,6 +10906,7 @@ class Database:
                 should_reset_topup,
                 should_reset_topup,
                 updated_by,
+                settings_id,
             ))
 
             if should_refresh_lots:
@@ -10640,15 +10915,32 @@ class Database:
                     WHERE event_type = 'lot_claimed'
                       AND NULLIF(payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
                 """, (selected_plan_id,))
-                cursor.execute("DELETE FROM shift_auction_test_day_offs")
-                cursor.execute("DELETE FROM shift_auction_test_lots")
+                # Части смен, взятые в ходе прошлого прогона, живут отдельной таблицей —
+                # без этой чистки они пережили бы пересев лотов и вычитались из нормы.
+                cursor.execute("""
+                    DELETE FROM shift_auction_historical_claims hc
+                    USING shift_auction_test_lots l
+                    WHERE l.source_schedule_plan_id = hc.plan_id
+                      AND l.source_schedule_shift_id = hc.source_schedule_shift_id
+                      AND COALESCE(l.direction_mode, 'line') = %s
+                      AND COALESCE(hc.claim_stage, 'post_auction') = %s
+                """, (mode, self.SHIFT_AUCTION_CLAIM_STAGE_AUCTION))
+                cursor.execute(
+                    "DELETE FROM shift_auction_test_day_offs WHERE COALESCE(direction_mode, 'line') = %s",
+                    (mode,)
+                )
+                cursor.execute(
+                    "DELETE FROM shift_auction_test_lots WHERE COALESCE(direction_mode, 'line') = %s",
+                    (mode,)
+                )
                 if saved_shift_rows:
                     execute_values(
                         cursor,
                         """
                         INSERT INTO shift_auction_test_lots (
                             shift_date, start_time, end_time, rate_min,
-                            breaks, source_schedule_plan_id, source_schedule_shift_id
+                            breaks, source_schedule_plan_id, source_schedule_shift_id,
+                            direction_mode
                         )
                         VALUES %s
                         """,
@@ -10661,20 +10953,26 @@ class Database:
                                 Json(row[5] if isinstance(row[5], list) else []),
                                 selected_plan_id,
                                 row[0],
+                                mode,
                             )
                             for row in saved_shift_rows
                         ],
                     )
 
-            cursor.execute("DELETE FROM shift_auction_test_participants")
+            cursor.execute(
+                "DELETE FROM shift_auction_test_participants WHERE COALESCE(direction_mode, 'line') = %s",
+                (mode,)
+            )
             if valid_ids:
-                rows = [(operator_id, updated_by) for operator_id in valid_ids]
+                rows = [(operator_id, updated_by, mode) for operator_id in valid_ids]
                 execute_values(
                     cursor,
                     """
-                    INSERT INTO shift_auction_test_participants (operator_id, added_by)
+                    INSERT INTO shift_auction_test_participants (operator_id, added_by, direction_mode)
                     VALUES %s
-                    ON CONFLICT (operator_id) DO NOTHING
+                    ON CONFLICT (operator_id) DO UPDATE
+                        SET added_by = EXCLUDED.added_by,
+                            direction_mode = EXCLUDED.direction_mode
                     """,
                     rows
                 )
@@ -10719,10 +11017,12 @@ class Database:
                 "date_to": selected_period_row[2].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[2] else None,
             })
 
-        _invalidate_shift_auction_runtime_caches(include_participants=True)
-        return self.get_shift_auction_test_access(current_user_id=updated_by)
+        _invalidate_shift_auction_runtime_caches(include_participants=True, direction_mode=mode)
+        return self.get_shift_auction_test_access(current_user_id=updated_by, direction_mode=mode)
 
-    def control_shift_auction_test(self, action, updated_by=None):
+    def control_shift_auction_test(self, action, updated_by=None, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         action_norm = str(action or '').strip().lower()
         if action_norm not in {'pause', 'resume', 'finish'}:
             raise ValueError("INVALID_AUCTION_CONTROL_ACTION")
@@ -10732,9 +11032,9 @@ class Database:
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
+                WHERE id = %s
                 FOR UPDATE
-            """)
+            """, (settings_id,))
             row = cursor.fetchone()
             if not row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -10761,12 +11061,12 @@ class Database:
                     SET paused_at = %s,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (now, updated_by))
+                    WHERE id = %s
+                """, (now, updated_by, settings_id))
                 event = self._insert_shift_auction_test_event(cursor, "auction_paused", {
                     "paused_at": now.isoformat(),
                     "updated_by": updated_by,
-                })
+                }, direction_mode=mode)
             elif action_norm == 'resume':
                 if current_status != 'paused' or paused_at is None:
                     raise ValueError("AUCTION_NOT_PAUSED")
@@ -10778,8 +11078,8 @@ class Database:
                         ends_at = %s,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (next_ends_at, updated_by))
+                    WHERE id = %s
+                """, (next_ends_at, updated_by, settings_id))
                 # Groups with their own end lose the same minutes to the pause as
                 # the main window, otherwise a pause would silently shorten them.
                 if selected_plan_id is not None:
@@ -10795,7 +11095,7 @@ class Database:
                     "paused_seconds": max(0, int(pause_delta.total_seconds())),
                     "ends_at": next_ends_at.isoformat() if next_ends_at else None,
                     "updated_by": updated_by,
-                })
+                }, direction_mode=mode)
             else:
                 if current_status in {'disabled', 'closed'}:
                     raise ValueError("AUCTION_ALREADY_CLOSED")
@@ -10807,22 +11107,25 @@ class Database:
                         topup_started_by = NULL,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (now, updated_by))
+                    WHERE id = %s
+                """, (now, updated_by, settings_id))
                 event = self._insert_shift_auction_test_event(cursor, "auction_finished", {
                     "finished_at": now.isoformat(),
                     "updated_by": updated_by,
-                })
+                }, direction_mode=mode)
 
         return {
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=updated_by,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             ),
         }
 
-    def set_shift_auction_test_topup(self, enabled, updated_by=None):
+    def set_shift_auction_test_topup(self, enabled, updated_by=None, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         # Toggle the "top-up" claim mode: when enabled, operators may claim
         # additional shifts that do not time-overlap with their existing claims
         # even if the total exceeds their norm. Only the admin can flip it.
@@ -10833,9 +11136,9 @@ class Database:
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at,
                        topup_started_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
+                WHERE id = %s
                 FOR UPDATE
-            """)
+            """, (settings_id,))
             row = cursor.fetchone()
             if not row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -10859,16 +11162,16 @@ class Database:
                         topup_started_by = %s,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
+                    WHERE id = %s
                     RETURNING topup_started_at
-                """, (now, updated_by, updated_by))
+                """, (now, updated_by, updated_by, settings_id))
                 started_at_row = cursor.fetchone()
                 topup_started_at = started_at_row[0] if started_at_row else now
                 event = self._insert_shift_auction_test_event(cursor, "auction_topup_started", {
                     "topup_started_at": topup_started_at.isoformat() if topup_started_at else None,
                     "plan_id": selected_schedule_plan_id,
                     "updated_by": updated_by,
-                })
+                }, direction_mode=mode)
             else:
                 if current_topup_started_at is None:
                     raise ValueError("TOPUP_NOT_ACTIVE")
@@ -10878,23 +11181,26 @@ class Database:
                         topup_started_by = NULL,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (updated_by,))
+                    WHERE id = %s
+                """, (updated_by, settings_id))
                 event = self._insert_shift_auction_test_event(cursor, "auction_topup_stopped", {
                     "stopped_at": now.isoformat(),
                     "plan_id": selected_schedule_plan_id,
                     "updated_by": updated_by,
-                })
+                }, direction_mode=mode)
 
         return {
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=updated_by,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             ),
         }
 
-    def set_shift_auction_test_rate_lock(self, enabled, updated_by=None):
+    def set_shift_auction_test_rate_lock(self, enabled, updated_by=None, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         # Toggle the "own rate only" claim mode: when enabled, operators may
         # claim only lots whose rate group matches their own rate. Unlike
         # top-up this is a standing setting, so it can be flipped at any time.
@@ -10904,9 +11210,9 @@ class Database:
             cursor.execute("""
                 SELECT COALESCE(rate_lock_enabled, FALSE), selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
+                WHERE id = %s
                 FOR UPDATE
-            """)
+            """, (settings_id,))
             row = cursor.fetchone()
             if not row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -10918,14 +11224,14 @@ class Database:
                     SET rate_lock_enabled = %s,
                         updated_by = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                """, (enable, updated_by))
+                    WHERE id = %s
+                """, (enable, updated_by, settings_id))
                 event = self._insert_shift_auction_test_event(cursor, "auction_rate_lock_updated", {
                     "enabled": enable,
                     "changed_at": now.isoformat(),
                     "plan_id": selected_schedule_plan_id,
                     "updated_by": updated_by,
-                })
+                }, direction_mode=mode)
             else:
                 event = None
 
@@ -10933,7 +11239,8 @@ class Database:
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=updated_by,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             ),
         }
 
@@ -11353,14 +11660,16 @@ class Database:
                 result.append(gap_lot)
         return result
 
-    def publish_shift_auction_test_to_work_schedules(self, updated_by=None):
+    def publish_shift_auction_test_to_work_schedules(self, updated_by=None, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
+                WHERE id = %s
                 FOR UPDATE
-            """)
+            """, (settings_id,))
             settings_row = cursor.fetchone()
             if not settings_row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -11375,21 +11684,54 @@ class Database:
             ) != "closed":
                 raise ValueError("AUCTION_NOT_CLOSED")
 
-            lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+            lot_dates = self._get_shift_auction_lot_dates_tx(cursor, direction_mode=mode)
             if not lot_dates:
                 raise ValueError("AUCTION_NO_LOTS")
 
-            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor))
+            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode))
             if not operator_ids:
                 raise ValueError("AUCTION_NO_PARTICIPANTS")
 
+            # В графики уезжают и целые лоты, и ЧАСТИ смен, взятые в ходе аукциона
+            # (чат): последние лежат в shift_auction_historical_claims, а сам лот при
+            # этом мог остаться 'available' — свободный кусок ещё ждёт хозяина.
             cursor.execute("""
                 SELECT claimed_by, shift_date, start_time, end_time
-                FROM shift_auction_test_lots
-                WHERE status = 'claimed'
-                  AND claimed_by = ANY(%s)
-                ORDER BY claimed_by, shift_date, claimed_at, id
-            """, (operator_ids,))
+                FROM (
+                    SELECT l.claimed_by, l.shift_date, l.start_time, l.end_time,
+                           l.claimed_at AS ordered_at, l.id AS ordered_id
+                    FROM shift_auction_test_lots l
+                    WHERE l.status = 'claimed'
+                      AND l.claimed_by = ANY(%s)
+                      AND COALESCE(l.direction_mode, 'line') = %s
+                      AND NOT EXISTS (
+                          SELECT 1 FROM shift_auction_historical_claims hc
+                          WHERE hc.plan_id = l.source_schedule_plan_id
+                            AND hc.source_schedule_shift_id = l.source_schedule_shift_id
+                            AND hc.claimed_start_time IS NOT NULL
+                            AND hc.claimed_end_time IS NOT NULL
+                      )
+                    UNION ALL
+                    SELECT hc.claimed_by, sh.shift_date, hc.claimed_start_time, hc.claimed_end_time,
+                           hc.claimed_at AS ordered_at, sh.id AS ordered_id
+                    FROM shift_auction_historical_claims hc
+                    JOIN resource_saved_schedule_shifts sh
+                      ON sh.id = hc.source_schedule_shift_id
+                     AND sh.plan_id = hc.plan_id
+                    WHERE hc.claimed_by = ANY(%s)
+                      AND hc.claimed_start_time IS NOT NULL
+                      AND hc.claimed_end_time IS NOT NULL
+                      -- EXISTS, а не JOIN: несколько лотов на одну смену продублировали
+                      -- бы взятый кусок и сохранили его в график дважды.
+                      AND EXISTS (
+                          SELECT 1 FROM shift_auction_test_lots l2
+                          WHERE l2.source_schedule_plan_id = hc.plan_id
+                            AND l2.source_schedule_shift_id = hc.source_schedule_shift_id
+                            AND COALESCE(l2.direction_mode, 'line') = %s
+                      )
+                ) claimed
+                ORDER BY claimed_by, shift_date, ordered_at, ordered_id
+            """, (operator_ids, mode, operator_ids, mode))
             claimed_by_operator_date = {}
             for claimed_by, shift_date_value, start_time_value, end_time_value in (cursor.fetchall() or []):
                 if claimed_by is None or shift_date_value is None:
@@ -11403,8 +11745,9 @@ class Database:
                 SELECT operator_id, day_off_date
                 FROM shift_auction_test_day_offs
                 WHERE operator_id = ANY(%s)
+                  AND COALESCE(direction_mode, 'line') = %s
                 ORDER BY operator_id, day_off_date
-            """, (operator_ids,))
+            """, (operator_ids, mode))
             day_off_dates = {
                 (int(operator_id), day_off_date)
                 for operator_id, day_off_date in (cursor.fetchall() or [])
@@ -11571,9 +11914,9 @@ class Database:
                     published_to_work_schedules_by = %s,
                     updated_by = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
+                WHERE id = %s
                 RETURNING published_to_work_schedules_at
-            """, (updated_by, updated_by))
+            """, (updated_by, updated_by, settings_id))
             published_at_row = cursor.fetchone()
             published_at = published_at_row[0] if published_at_row else None
 
@@ -11607,8 +11950,9 @@ class Database:
                       AND source_schedule_plan_id = %s
                       AND source_schedule_shift_id IS NOT NULL
                       AND claimed_by IS NOT NULL
+                      AND COALESCE(direction_mode, 'line') = %s
                     ON CONFLICT (plan_id, source_schedule_shift_id, claimed_by) DO NOTHING
-                """, (selected_schedule_plan_id,))
+                """, (selected_schedule_plan_id, mode))
 
             event = self._insert_shift_auction_test_event(cursor, "auction_published", {
                 **summary,
@@ -11617,18 +11961,19 @@ class Database:
                 "selected_schedule_plan_id": selected_schedule_plan_id,
                 "date_from": first_date.strftime('%Y-%m-%d') if first_date else None,
                 "date_to": last_date.strftime('%Y-%m-%d') if last_date else None,
-            })
+            }, direction_mode=mode)
 
         return {
             "summary": summary,
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=updated_by,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             ),
         }
 
-    def get_shift_auction_entries_for_simulation(self):
+    def get_shift_auction_entries_for_simulation(self, direction_mode=SHIFT_AUCTION_MODE_LINE):
         """
         Возвращает claimed лоты текущего аукциона в формате entries для Python-симуляции перерывов.
         Включает direction оператора из users → directions.
@@ -11637,8 +11982,9 @@ class Database:
         Отсортировано по operator_id, shift_date — детерминированный порядок,
         совпадающий с порядком обработки в publish_shift_auction_test_to_work_schedules.
         """
+        mode = normalize_shift_auction_mode(direction_mode)
         with self._get_cursor() as cursor:
-            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor))
+            operator_ids = sorted(self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode))
             if not operator_ids:
                 return []
 
@@ -11654,8 +12000,9 @@ class Database:
                 LEFT JOIN directions d ON d.id = u.direction_id
                 WHERE l.status = 'claimed'
                   AND l.claimed_by = ANY(%s)
+                  AND COALESCE(l.direction_mode, 'line') = %s
                 ORDER BY l.claimed_by, l.shift_date, l.claimed_at, l.id
-            """, (operator_ids,))
+            """, (operator_ids, mode))
 
             entry_map = {}
             for claimed_by, shift_date_value, start_time_value, end_time_value, direction_name in (cursor.fetchall() or []):
@@ -11678,18 +12025,20 @@ class Database:
 
             return [entry_map[k] for k in sorted(entry_map.keys())]
 
-    def get_shift_auction_test_export_data(self):
+    def get_shift_auction_test_export_data(self, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
-            """)
+                WHERE id = %s
+            """, (settings_id,))
             settings_row = cursor.fetchone()
             if not settings_row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
 
-            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[5])
+            selected_period_row = self._get_shift_auction_period_row_tx(cursor, settings_row[5], direction_mode=mode)
             selected_period = self._serialize_shift_auction_period_row(selected_period_row)
 
             cursor.execute("""
@@ -11725,8 +12074,9 @@ class Database:
                 LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
                 LEFT JOIN resource_saved_schedule_shifts source_shift ON source_shift.id = l.source_schedule_shift_id
                 LEFT JOIN users added_user ON added_user.id = l.added_by
+                WHERE COALESCE(l.direction_mode, 'line') = %s
                 ORDER BY l.shift_date, l.start_time, l.id
-            """)
+            """, (mode,))
             lot_rows = cursor.fetchall() or []
             if not lot_rows:
                 raise ValueError("AUCTION_NO_LOTS")
@@ -11738,10 +12088,12 @@ class Database:
                 WITH report_operators AS (
                     SELECT operator_id AS id
                     FROM shift_auction_test_participants
+                    WHERE COALESCE(direction_mode, 'line') = %s
                     UNION
                     SELECT claimed_by AS id
                     FROM shift_auction_test_lots
                     WHERE claimed_by IS NOT NULL
+                      AND COALESCE(direction_mode, 'line') = %s
                 )
                 SELECT
                     u.id,
@@ -11756,7 +12108,7 @@ class Database:
                 LEFT JOIN directions d ON d.id = u.direction_id
                 LEFT JOIN users s ON s.id = u.supervisor_id
                 ORDER BY LOWER(COALESCE(u.name, '')), u.id
-            """)
+            """, (mode, mode))
             operator_rows = cursor.fetchall() or []
             operators = [
                 {
@@ -11775,8 +12127,9 @@ class Database:
             cursor.execute("""
                 SELECT operator_id, day_off_date
                 FROM shift_auction_test_day_offs
+                WHERE COALESCE(direction_mode, 'line') = %s
                 ORDER BY operator_id, day_off_date
-            """)
+            """, (mode,))
             day_offs = [
                 {
                     "operator_id": int(row[0]),
@@ -11844,8 +12197,8 @@ class Database:
         end = self._format_shift_auction_excel_time(lot.get('end_time') or lot.get('end'))
         return f"{start}*{end}" if start or end else ""
 
-    def generate_shift_auction_test_excel_report(self):
-        report = self.get_shift_auction_test_export_data()
+    def generate_shift_auction_test_excel_report(self, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        report = self.get_shift_auction_test_export_data(direction_mode=direction_mode)
         selected_period = report.get('selected_period') or {}
         lot_dates = [
             self._parse_shift_auction_export_date(value)
@@ -12076,7 +12429,10 @@ class Database:
         output.seek(0)
         return output, start_date_obj, end_date_obj
 
-    def get_shift_auction_test_snapshot(self, current_user_id=None, include_admin_fields=False):
+    def get_shift_auction_test_snapshot(self, current_user_id=None, include_admin_fields=False,
+                                        direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         current_id = None
         try:
             current_id = int(current_user_id) if current_user_id is not None else None
@@ -12098,6 +12454,7 @@ class Database:
                             SELECT source_schedule_plan_id
                             FROM shift_auction_test_lots
                             WHERE source_schedule_plan_id IS NOT NULL
+                              AND COALESCE(direction_mode, 'line') = s.direction_mode
                             ORDER BY id
                             LIMIT 1
                         )
@@ -12111,26 +12468,31 @@ class Database:
                     s.topup_started_at,
                     s.topup_started_by,
                     topup_user.name AS topup_started_by_name,
-                    (SELECT COALESCE(MAX(id), 0) FROM shift_auction_test_events) AS last_event_id
+                    (
+                        SELECT COALESCE(MAX(id), 0)
+                        FROM shift_auction_test_events
+                        WHERE COALESCE(direction_mode, 'line') = s.direction_mode
+                    ) AS last_event_id
                 FROM shift_auction_test_access s
                 LEFT JOIN users u ON u.id = s.updated_by
                 LEFT JOIN users publisher ON publisher.id = s.published_to_work_schedules_by
                 LEFT JOIN users topup_user ON topup_user.id = s.topup_started_by
-                WHERE s.id = 1
-            """)
+                WHERE s.id = %s
+            """, (settings_id,))
             settings_row = cursor.fetchone()
             if not settings_row:
                 cursor.execute("""
-                    INSERT INTO shift_auction_test_access (id)
-                    VALUES (1)
+                    INSERT INTO shift_auction_test_access (id, direction_mode)
+                    VALUES (%s, %s)
                     ON CONFLICT (id) DO NOTHING
-                """)
+                """, (settings_id, mode))
                 settings_row = (False, '', None, None, None, None, None, None, None, None, None, None, None, None, None, None, 0)
 
             common_snapshot = self._get_shift_auction_snapshot_common_tx(
                 cursor,
                 settings_row,
-                include_admin_fields=include_admin_fields
+                include_admin_fields=include_admin_fields,
+                direction_mode=mode
             )
             participant_rows = common_snapshot["participant_rows"]
             lots = common_snapshot["lots"]
@@ -12146,8 +12508,9 @@ class Database:
                     SELECT day_off_date
                     FROM shift_auction_test_day_offs
                     WHERE operator_id = %s
+                      AND COALESCE(direction_mode, 'line') = %s
                     ORDER BY day_off_date
-                """, (current_id,))
+                """, (current_id, mode))
                 my_day_offs = [
                     row[0].strftime('%Y-%m-%d')
                     for row in (cursor.fetchall() or [])
@@ -12163,7 +12526,10 @@ class Database:
                 if current_id else []
             )
 
-            cursor.execute("SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = 1")
+            cursor.execute(
+                "SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = %s",
+                (settings_id,)
+            )
             rate_lock_row = cursor.fetchone()
             rate_lock_enabled = bool(rate_lock_row[0]) if rate_lock_row else False
 
@@ -12274,7 +12640,10 @@ class Database:
             "notify_post_claim_enabled": notify_post_claim_enabled,
         }
 
-    def get_shift_auction_period_preview(self, schedule_plan_id, current_user_id=None):
+    def get_shift_auction_period_preview(self, schedule_plan_id, current_user_id=None,
+                                         direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
         current_id = None
         try:
             current_id = int(current_user_id) if current_user_id is not None else None
@@ -12285,7 +12654,8 @@ class Database:
             period_row = self._validate_shift_auction_period_tx(
                 cursor,
                 schedule_plan_id,
-                require_restartable=False
+                require_restartable=False,
+                direction_mode=mode
             )
             plan_id = int(period_row[0])
             period_start = period_row[1]
@@ -12515,7 +12885,7 @@ class Database:
 
             participant_rows = []
             if operator_ids:
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT
                         u.id,
                         u.name,
@@ -12534,13 +12904,11 @@ class Database:
                     WHERE u.id = ANY(%s)
                       AND LOWER(COALESCE(u.role, '')) = 'operator'
                       AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-                      AND BTRIM(COALESCE(d.name, '')) = %s
-                      AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+                      AND {scope_sql}
                     ORDER BY u.name
                 """, (
                     operator_ids,
-                    SHIFT_AUCTION_DIRECTION_NAME,
-                    SHIFT_AUCTION_DEPARTMENT_CODE,
+                    *scope_params,
                 ))
                 participant_rows = cursor.fetchall() or []
 
@@ -12634,10 +13002,13 @@ class Database:
                 lots,
                 lot_dates,
                 day_offs_by_operator=day_offs_by_operator,
+                direction_mode=mode,
                 # The previewed week has its own groups — and its own allowances.
                 self_schedule_operator_ids={
                     operator_id
-                    for group in self._get_shift_auction_time_groups_tx(cursor, plan_id, plan_only=True)
+                    for group in self._get_shift_auction_time_groups_tx(
+                        cursor, plan_id, plan_only=True, direction_mode=mode
+                    )
                     if group.get("self_schedule_enabled")
                     for operator_id in (group.get("operator_ids") or [])
                 },
@@ -12665,6 +13036,43 @@ class Database:
             "post_auction_active": post_auction_active,
         }
 
+    def shift_auction_mode_for_operator(self, operator_id):
+        """Направление аукциона по карточке человека, либо None — он вне аукциона.
+
+        Оператор принадлежит ровно одному направлению, поэтому режим НЕ приходит с
+        клиента: подменив его в запросе, человек попал бы в чужой аукцион.
+        """
+        try:
+            operator_id = int(operator_id)
+        except Exception:
+            return None
+        if operator_id <= 0:
+            return None
+        with self._get_cursor() as cursor:
+            return self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+
+    def _shift_auction_mode_for_operator_tx(self, cursor, operator_id):
+        cursor.execute("""
+            SELECT BTRIM(COALESCE(d.name, '')), LOWER(BTRIM(COALESCE(dep.code, '')))
+            FROM users u
+            LEFT JOIN directions d ON d.id = u.direction_id
+            LEFT JOIN departments dep ON dep.id = d.department_id
+            WHERE u.id = %s
+        """, (operator_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return shift_auction_mode_matches_direction(row[0], row[1])
+
+    def _shift_auction_mode_for_plan_tx(self, cursor, plan_id):
+        """Направление аукциона по недельному плану — он и есть носитель режима."""
+        cursor.execute(
+            "SELECT COALESCE(direction_mode, 'line') FROM resource_saved_schedule_plans WHERE id = %s",
+            (plan_id,)
+        )
+        row = cursor.fetchone()
+        return normalize_shift_auction_mode(row[0] if row else None)
+
     def has_shift_auction_history_access(self, operator_id):
         try:
             operator_id = int(operator_id)
@@ -12673,7 +13081,12 @@ class Database:
         if operator_id <= 0:
             return False
         with self._get_cursor() as cursor:
-            if operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor):
+            # Участником человек может быть только в СВОЁМ направлении, но спрашивать
+            # оба дешевле, чем читать карточку: кеш участников уже прогрет обоими.
+            if any(
+                operator_id in self._get_shift_auction_participant_ids_cached_tx(cursor, direction_mode=mode)
+                for mode in SHIFT_AUCTION_MODES
+            ):
                 return True
             cursor.execute("""
                 SELECT 1
@@ -12692,11 +13105,12 @@ class Database:
         if operator_id <= 0 or plan_id <= 0:
             return False
         with self._get_cursor() as cursor:
+            mode = self._shift_auction_mode_for_plan_tx(cursor, plan_id)
             cursor.execute("""
                 SELECT selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
-            """)
+                WHERE id = %s
+            """, (shift_auction_settings_row_id(mode),))
             settings_row = cursor.fetchone()
             current_plan_id = None
             try:
@@ -12705,7 +13119,7 @@ class Database:
                 current_plan_id = None
             if (
                 current_plan_id == plan_id
-                and operator_id in self._get_shift_auction_participant_ids_tx(cursor)
+                and operator_id in self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode)
             ):
                 return True
             cursor.execute("""
@@ -12717,7 +13131,7 @@ class Database:
             """, (plan_id, operator_id))
             return cursor.fetchone() is not None
 
-    def get_shift_auction_lots_for_planner_date(self, target_date):
+    def get_shift_auction_lots_for_planner_date(self, target_date, direction_mode=SHIFT_AUCTION_MODE_LINE):
         """
         Возвращает «выбранные смены» (claimed лоты) для указанной даты, чтобы
         раздел «Графики работы → почасовая группировка → План» мог учитывать
@@ -12737,6 +13151,7 @@ class Database:
             except Exception:
                 return {"lots": [], "selected_operators": []}
 
+        mode = normalize_shift_auction_mode(direction_mode)
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
@@ -12759,8 +13174,9 @@ class Database:
                     ON s.id = l.source_schedule_shift_id
                 LEFT JOIN users added_user ON added_user.id = l.added_by
                 WHERE l.shift_date BETWEEN %s::date - INTERVAL '1 day' AND %s::date
+                  AND COALESCE(l.direction_mode, 'line') = %s
                 ORDER BY l.shift_date, l.start_time, l.end_time, l.id
-            """, (date_obj, date_obj))
+            """, (date_obj, date_obj, mode))
             active_rows = cursor.fetchall() or []
 
             lots = []
@@ -12796,7 +13212,8 @@ class Database:
                     FROM shift_auction_test_participants p
                     JOIN users u ON u.id = p.operator_id
                     LEFT JOIN directions d ON d.id = u.direction_id
-                """)
+                    WHERE COALESCE(p.direction_mode, 'line') = %s
+                """, (mode,))
                 participants = cursor.fetchall() or []
                 selected_operators = [
                     {
@@ -12809,11 +13226,13 @@ class Database:
                 return {"lots": lots, "selected_operators": selected_operators}
 
             cursor.execute("""
-                SELECT plan_id, participant_ids
-                FROM shift_auction_published_periods
-                WHERE date_from <= %s AND date_to >= %s
-                ORDER BY published_at DESC
-            """, (date_obj, date_obj))
+                SELECT pp.plan_id, pp.participant_ids
+                FROM shift_auction_published_periods pp
+                JOIN resource_saved_schedule_plans p ON p.id = pp.plan_id
+                WHERE pp.date_from <= %s AND pp.date_to >= %s
+                  AND COALESCE(p.direction_mode, 'line') = %s
+                ORDER BY pp.published_at DESC
+            """, (date_obj, date_obj, mode))
             historical_periods = cursor.fetchall() or []
             if not historical_periods:
                 return {"lots": [], "selected_operators": []}
@@ -12910,12 +13329,16 @@ class Database:
         )
         return cursor.fetchone() is not None
 
-    def restart_shift_auction_test(self, schedule_plan_id, updated_by=None):
+    def restart_shift_auction_test(self, schedule_plan_id, updated_by=None,
+                                   direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
+        settings_id = shift_auction_settings_row_id(mode)
         with self._get_cursor() as cursor:
             period_row = self._validate_shift_auction_period_tx(
                 cursor,
                 schedule_plan_id,
-                require_restartable=True
+                require_restartable=True,
+                direction_mode=mode
             )
             cursor.execute("""
                 SELECT id, shift_date, start_time, end_time, rate_min, breaks
@@ -12936,8 +13359,8 @@ class Database:
                     topup_started_by = NULL,
                     updated_by = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-            """, (int(period_row[0]), updated_by))
+                WHERE id = %s
+            """, (int(period_row[0]), updated_by, settings_id))
             cursor.execute("""
                 DELETE FROM shift_auction_test_events
                 WHERE event_type = 'lot_claimed'
@@ -12948,14 +13371,31 @@ class Database:
                 WHERE event_type IN ('day_off_selected', 'day_off_removed')
                   AND NULLIF(payload->>'date', '')::DATE BETWEEN %s AND %s
             """, (period_row[1], period_row[2]))
-            cursor.execute("DELETE FROM shift_auction_test_day_offs")
-            cursor.execute("DELETE FROM shift_auction_test_lots")
+            # Части смен прошлого прогона надо снять вместе с лотами — иначе они
+            # продолжили бы вычитаться из нормы уже в новом.
+            cursor.execute("""
+                DELETE FROM shift_auction_historical_claims hc
+                USING shift_auction_test_lots l
+                WHERE l.source_schedule_plan_id = hc.plan_id
+                  AND l.source_schedule_shift_id = hc.source_schedule_shift_id
+                  AND COALESCE(l.direction_mode, 'line') = %s
+                  AND COALESCE(hc.claim_stage, 'post_auction') = %s
+            """, (mode, self.SHIFT_AUCTION_CLAIM_STAGE_AUCTION))
+            cursor.execute(
+                "DELETE FROM shift_auction_test_day_offs WHERE COALESCE(direction_mode, 'line') = %s",
+                (mode,)
+            )
+            cursor.execute(
+                "DELETE FROM shift_auction_test_lots WHERE COALESCE(direction_mode, 'line') = %s",
+                (mode,)
+            )
             execute_values(
                 cursor,
                 """
                 INSERT INTO shift_auction_test_lots (
                     shift_date, start_time, end_time, rate_min,
-                    breaks, source_schedule_plan_id, source_schedule_shift_id
+                    breaks, source_schedule_plan_id, source_schedule_shift_id,
+                    direction_mode
                 )
                 VALUES %s
                 """,
@@ -12968,6 +13408,7 @@ class Database:
                         Json(row[5] if isinstance(row[5], list) else []),
                         int(period_row[0]),
                         row[0],
+                        mode,
                     )
                     for row in saved_shift_rows
                 ],
@@ -12979,18 +13420,21 @@ class Database:
                 "date_to": period_row[2].strftime('%Y-%m-%d'),
                 "topup_reset": True,
                 "updated_by": updated_by,
-            })
+            }, direction_mode=mode)
         return {
             "count": len(saved_shift_rows),
             "period": self._serialize_shift_auction_period_row(period_row),
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=updated_by,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             ),
         }
 
-    def seed_shift_auction_test_lots(self, updated_by=None, start_date=None):
+    def seed_shift_auction_test_lots(self, updated_by=None, start_date=None,
+                                     direction_mode=SHIFT_AUCTION_MODE_LINE):
+        mode = normalize_shift_auction_mode(direction_mode)
         base_date = start_date or (date.today() + timedelta(days=1))
         template_labels = [
             (1.0, ["7*16", "8*17", "9*18", "10*19", "11*20", "13*22", "15*00", "17*02"]),
@@ -13021,14 +13465,22 @@ class Database:
             for start_time, end_time, rate_min in templates:
                 rows.append((lot_date, start_time, end_time, rate_min))
 
+        rows = [(*row, mode) for row in rows]
+
         with self._get_cursor() as cursor:
-            cursor.execute("DELETE FROM shift_auction_test_day_offs")
-            cursor.execute("DELETE FROM shift_auction_test_lots")
+            cursor.execute(
+                "DELETE FROM shift_auction_test_day_offs WHERE COALESCE(direction_mode, 'line') = %s",
+                (mode,)
+            )
+            cursor.execute(
+                "DELETE FROM shift_auction_test_lots WHERE COALESCE(direction_mode, 'line') = %s",
+                (mode,)
+            )
             if rows:
                 execute_values(
                     cursor,
                     """
-                    INSERT INTO shift_auction_test_lots (shift_date, start_time, end_time, rate_min)
+                    INSERT INTO shift_auction_test_lots (shift_date, start_time, end_time, rate_min, direction_mode)
                     VALUES %s
                     """,
                     rows
@@ -13037,17 +13489,19 @@ class Database:
                 "count": len(rows),
                 "start_date": base_date.strftime('%Y-%m-%d'),
                 "updated_by": updated_by
-            })
+            }, direction_mode=mode)
         return {
             "count": len(rows),
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=updated_by,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             )
         }
 
-    def get_shift_auction_test_journal(self, page=1, per_page=50):
+    def get_shift_auction_test_journal(self, page=1, per_page=50, direction_mode=SHIFT_AUCTION_MODE_LINE):
+        settings_id = shift_auction_settings_row_id(direction_mode)
         # Paginated claim journal for the currently-selected auction period.
         # Returns rows ordered newest-first plus a total count for UI paging.
         try:
@@ -13061,8 +13515,8 @@ class Database:
         offset = (page - 1) * per_page
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT selected_schedule_plan_id FROM shift_auction_test_access WHERE id = 1
-            """)
+                SELECT selected_schedule_plan_id FROM shift_auction_test_access WHERE id = %s
+            """, (settings_id,))
             settings_row = cursor.fetchone()
             plan_id = settings_row[0] if settings_row else None
             if plan_id is None:
@@ -13145,37 +13599,60 @@ class Database:
             "has_more": (page * per_page) < total,
         }
 
-    def get_shift_auction_test_events_after(self, after_id=0, limit=100):
+    def get_shift_auction_test_events_after(self, after_id=0, limit=100, direction_mode=None):
+        """События потока после ``after_id``. ``direction_mode=None`` — оба направления.
+
+        Поток SSE читает ВСЕ события специально: курсор клиента должен переезжать и
+        через чужие события, иначе он застревал бы на них и перечитывал одно и то же.
+        Отсев по направлению делает уже сама выдача — см. api_shift_auction_test_events.
+        """
         try:
             after_id = int(after_id or 0)
         except Exception:
             after_id = 0
         limit = max(1, min(int(limit or 100), 500))
+        mode_filter = None if direction_mode is None else normalize_shift_auction_mode(direction_mode)
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT id, event_type, payload, created_at
+                SELECT id, event_type, payload, created_at, COALESCE(direction_mode, 'line')
                 FROM shift_auction_test_events
                 WHERE id > %s
+                  AND (%s::text IS NULL OR COALESCE(direction_mode, 'line') = %s)
                 ORDER BY id
                 LIMIT %s
-            """, (after_id, limit))
+            """, (after_id, mode_filter, mode_filter, limit))
             return [
                 {
                     "id": row[0],
                     "event_type": row[1],
                     "payload": row[2] or {},
-                    "created_at": row[3].isoformat() if row[3] else None
+                    "created_at": row[3].isoformat() if row[3] else None,
+                    "direction_mode": row[4] if len(row) > 4 else SHIFT_AUCTION_MODE_LINE,
                 }
                 for row in (cursor.fetchall() or [])
             ]
 
-    def claim_shift_auction_test_lot(self, operator_id, lot_id):
+    def claim_shift_auction_test_lot(self, operator_id, lot_id,
+                                     claim_start_time=None, claim_end_time=None):
+        """Взять смену аукциона — целиком или (в чате) выбранной частью.
+
+        Направление НЕ приходит с клиента: оно выводится из карточки оператора, иначе
+        подменённым параметром можно было бы забрать смену чужого аукциона.
+        """
         operator_id = int(operator_id)
         lot_id = int(lot_id)
         timings = {}
         lock_started_at = time.perf_counter()
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+            if mode is None:
+                raise ValueError("NOT_TEST_PARTICIPANT")
+            settings_id = shift_auction_settings_row_id(mode)
+            wants_partial = bool(claim_start_time) and bool(claim_end_time)
+            if wants_partial and mode != SHIFT_AUCTION_MODE_CHAT:
+                # Частями смену разбирает только чат: у линии лот берётся целиком.
+                raise ValueError("PARTIAL_SHIFT_NOT_ALLOWED")
             timings["lock"] = (time.perf_counter() - lock_started_at) * 1000
             started_at = time.perf_counter()
             cursor.execute("""
@@ -13209,8 +13686,8 @@ class Database:
                       AND m.operator_id = %s
                     LIMIT 1
                 ) tg ON TRUE
-                WHERE s.id = 1
-            """, (operator_id, operator_id, operator_id))
+                WHERE s.id = %s
+            """, (operator_id, operator_id, operator_id, settings_id))
             header = cursor.fetchone()
             timings["header"] = (time.perf_counter() - started_at) * 1000
             effective_start, effective_end = (
@@ -13221,7 +13698,7 @@ class Database:
                 raise ValueError("AUCTION_NOT_OPEN")
             if (
                 not header[5]
-                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode)
             ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
             if header[6] is None:
@@ -13237,13 +13714,22 @@ class Database:
                        source_schedule_plan_id, source_schedule_shift_id
                 FROM shift_auction_test_lots
                 WHERE id = %s
-            """, (lot_id,))
+                  AND COALESCE(direction_mode, 'line') = %s
+            """, (lot_id, mode))
             lot = cursor.fetchone()
             timings["lot"] = (time.perf_counter() - started_at) * 1000
             if not lot:
                 raise ValueError("LOT_NOT_FOUND")
             if lot[5] != 'available':
                 raise ValueError("LOT_ALREADY_CLAIMED")
+            source_plan_id = int(lot[9]) if lot[9] is not None else None
+            source_shift_id = int(lot[10]) if lot[10] is not None else None
+            if wants_partial and not (source_plan_id and source_shift_id):
+                # Часть можно взять только у смены из плана: занятые куски хранятся
+                # парой (план, смена), а у ручного лота её нет.
+                raise ValueError("PARTIAL_SHIFT_NOT_ALLOWED")
+            # Ставка сверяется по ЛОТУ целиком: длину куска сторожит недельная норма,
+            # а не группа лота — иначе 0,75 не смог бы взять часть длинной смены.
             if rate_lock_enabled:
                 lot_rate_bucket = self._shift_auction_lot_rate_bucket(lot[2], lot[3])
                 if abs(lot_rate_bucket - self._shift_auction_rate_bucket(operator_rate)) > 0.001:
@@ -13256,30 +13742,28 @@ class Database:
                     EXISTS(
                         SELECT 1 FROM shift_auction_test_day_offs
                         WHERE operator_id = %s AND day_off_date = %s
+                          AND COALESCE(direction_mode, 'line') = %s
                     ) AS has_day_off,
-                    EXISTS(
-                        SELECT 1 FROM shift_auction_test_lots
-                        WHERE claimed_by = %s AND shift_date = %s AND status = 'claimed'
-                    ) AS has_shift_on_date,
                     COALESCE((
                         SELECT array_agg(DISTINCT shift_date ORDER BY shift_date)
                         FROM shift_auction_test_lots
                         WHERE shift_date IS NOT NULL
-                    ), ARRAY[]::date[]) AS lot_dates,
-                    COALESCE((
-                        SELECT json_agg(json_build_object(
-                            'shift_date', to_char(shift_date, 'YYYY-MM-DD'),
-                            'start_time', to_char(start_time, 'HH24:MI'),
-                            'end_time', to_char(end_time, 'HH24:MI'),
-                            'breaks', breaks
-                        ))
-                        FROM shift_auction_test_lots
-                        WHERE claimed_by = %s AND status = 'claimed'
-                    ), '[]'::json) AS claimed_rows
-            """, (operator_id, lot_date, operator_id, lot_date, operator_id))
+                          AND COALESCE(direction_mode, 'line') = %s
+                    ), ARRAY[]::date[]) AS lot_dates
+            """, (operator_id, lot_date, mode, mode))
             checks = cursor.fetchone()
             timings["checks"] = (time.perf_counter() - started_at) * 1000
-            has_day_off, has_shift_on_date, lot_dates, claimed_rows_json = checks
+            has_day_off, lot_dates = checks
+            # Занятое оператором = целые лоты + взятые части смен. Раньше здесь читались
+            # только claimed-лоты, и частично разобранная смена (лот остаётся
+            # 'available') не попадала ни в проверку дня, ни в норму.
+            claimed_rows_json = self._get_shift_auction_operator_claimed_intervals_tx(
+                cursor, operator_id, direction_mode=mode
+            )
+            has_shift_on_date = any(
+                str(item.get('shift_date') or '') == (lot_date.strftime('%Y-%m-%d') if lot_date else '')
+                for item in claimed_rows_json
+            )
 
             started_at = time.perf_counter()
             blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(
@@ -13293,12 +13777,67 @@ class Database:
             if has_day_off:
                 raise ValueError("DAY_OFF_SELECTED")
 
+            # Уже занятые части ЭТОЙ смены (чат разбирает смену несколькими людьми).
+            existing_segments = []
+            if source_plan_id and source_shift_id:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, source_shift_id)
+                )
+                cursor.execute("""
+                    SELECT claimed_by, claimed_start_time, claimed_end_time
+                    FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                      AND claimed_start_time IS NOT NULL
+                      AND claimed_end_time IS NOT NULL
+                    FOR UPDATE
+                """, (source_plan_id, source_shift_id))
+                existing_segments = cursor.fetchall() or []
+            if any(row[0] is not None and int(row[0]) == operator_id for row in existing_segments):
+                raise ValueError("LOT_ALREADY_CLAIMED")
+
+            lot_start_min, lot_end_min = self._schedule_interval_minutes(lot[2], lot[3])
+            busy_ranges = []
+            for _, seg_start, seg_end in existing_segments:
+                seg_range = self._normalize_post_auction_claim_range(
+                    lot[2], lot[3], seg_start.strftime('%H:%M'), seg_end.strftime('%H:%M')
+                )
+                busy_ranges.append((seg_range["start_minute"], seg_range["end_minute"]))
+            free_gaps = [
+                gap for gap in self._subtract_ranges(lot_start_min, lot_end_min, busy_ranges)
+                if gap[1] - gap[0] > 0
+            ]
+
+            if existing_segments and not wants_partial:
+                # Клик по частично разобранной смене без явного интервала: берём
+                # единственный свободный кусок, иначе просим выбрать.
+                if len(free_gaps) != 1:
+                    raise ValueError("INVALID_PARTIAL_SHIFT_RANGE")
+                claim_start_time = _minutes_to_time(free_gaps[0][0] % (24 * 60)).strftime('%H:%M')
+                claim_end_time = _minutes_to_time(free_gaps[0][1] % (24 * 60)).strftime('%H:%M')
+                wants_partial = True
+
+            claim_range = self._normalize_post_auction_claim_range(
+                lot[2], lot[3],
+                claim_start_time=claim_start_time if wants_partial else None,
+                claim_end_time=claim_end_time if wants_partial else None,
+            )
+            candidate_start_min = claim_range["start_minute"]
+            candidate_end_min = claim_range["end_minute"]
+            is_partial_claim = bool(wants_partial and claim_range["is_partial"])
+            if is_partial_claim and not (source_plan_id and source_shift_id):
+                raise ValueError("PARTIAL_SHIFT_NOT_ALLOWED")
+            # Кусок обязан лечь в свободную часть смены целиком.
+            for busy_start, busy_end in busy_ranges:
+                if candidate_start_min < busy_end and busy_start < candidate_end_min:
+                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+
             if is_topup_mode:
                 # Top-up mode allows more than one shift per day as long as the
                 # candidate does not overlap with the operator's existing
                 # claims on the same date. The hard daily limit is replaced by
                 # a precise time-interval overlap check.
-                candidate_range = self._schedule_interval_minutes(lot[2], lot[3])
+                candidate_range = (candidate_start_min, candidate_end_min)
                 conflicts = False
                 for claimed in (claimed_rows_json or []):
                     if str(claimed.get('shift_date') or '') != lot_date_key:
@@ -13327,12 +13866,22 @@ class Database:
                 cursor, operator_id, operator_rate,
                 lot_dates=list(lot_dates or []),
                 blocked_dates=blocked_dates,
-                claimed_rows=claimed_rows
+                claimed_rows=claimed_rows,
+                direction_mode=mode
+            )
+            # Перерывы считаем только у тех, что попали в выбранный кусок.
+            lot_breaks = lot[8] if isinstance(lot[8], list) else []
+            candidate_breaks = (
+                [
+                    brk for brk in lot_breaks
+                    if self._break_overlaps_minute_range(brk, candidate_start_min, candidate_end_min)
+                ]
+                if is_partial_claim else lot_breaks
             )
             candidate_minutes = self._shift_auction_lot_minutes(
-                lot[2],
-                lot[3],
-                lot[8] if isinstance(lot[8], list) else []
+                claim_range["start_time"],
+                claim_range["end_time"],
+                candidate_breaks
             )
             # "Свой график" buys the group a fixed allowance over the norm — it is the
             # only ceiling such an operator has, so it applies to ordinary claims too.
@@ -13347,16 +13896,55 @@ class Database:
                 raise ValueError("SHIFT_NORM_EXCEEDED")
 
             cas_started_at = time.perf_counter()
-            cursor.execute("""
-                UPDATE shift_auction_test_lots
-                SET status = 'claimed',
-                    claimed_by = %s,
-                    claimed_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s AND status = 'available'
-                RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
-                          breaks, source_schedule_plan_id, source_schedule_shift_id
-            """, (operator_id, lot_id))
+            # Взятая часть живёт отдельной строкой, а лот закрывается только когда
+            # покрыта КАЖДАЯ его минута: пока остаётся свободный кусок, смена должна
+            # быть видна остальным как доступная.
+            remaining_after_claim = [
+                gap for gap in self._subtract_ranges(
+                    lot_start_min, lot_end_min, busy_ranges + [(candidate_start_min, candidate_end_min)]
+                )
+                if gap[1] - gap[0] >= self.POST_AUCTION_MIN_REMAINDER_MINUTES
+            ]
+            keeps_lot_open = bool(is_partial_claim and remaining_after_claim)
+            if is_partial_claim:
+                cursor.execute("""
+                    INSERT INTO shift_auction_historical_claims
+                        (plan_id, source_schedule_shift_id, claimed_by, claimed_at,
+                         claimed_start_time, claimed_end_time, claim_stage)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s)
+                    ON CONFLICT (plan_id, source_schedule_shift_id, claimed_by) DO NOTHING
+                """, (
+                    source_plan_id, source_shift_id, operator_id,
+                    claim_range["start_time"], claim_range["end_time"],
+                    self.SHIFT_AUCTION_CLAIM_STAGE_AUCTION,
+                ))
+
+            if keeps_lot_open:
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'available'
+                    RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
+                              breaks, source_schedule_plan_id, source_schedule_shift_id
+                """, (lot_id,))
+            else:
+                cursor.execute("""
+                    UPDATE shift_auction_test_lots
+                    SET status = 'claimed',
+                        claimed_by = %s,
+                        claimed_at = CURRENT_TIMESTAMP,
+                        post_claim_start_time = %s,
+                        post_claim_end_time = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'available'
+                    RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
+                              breaks, source_schedule_plan_id, source_schedule_shift_id
+                """, (
+                    operator_id,
+                    claim_range["start_time"] if is_partial_claim else None,
+                    claim_range["end_time"] if is_partial_claim else None,
+                    lot_id,
+                ))
             updated = cursor.fetchone()
             timings["cas_update"] = (time.perf_counter() - cas_started_at) * 1000
             if not updated:
@@ -13369,13 +13957,22 @@ class Database:
                 "end_time": updated[3].strftime('%H:%M') if updated[3] else None,
                 "rate_min": float(updated[4] or 0),
                 "status": updated[5],
-                "claimed_by": updated[6],
-                "claimed_at": updated[7].isoformat() if updated[7] else None,
+                # У частично взятой смены лот остаётся свободным, но событие всё равно
+                # обязано назвать, КТО взял кусок: иначе журнал и патч по SSE потеряют
+                # автора, а фронт нарисует «взяли, но никто».
+                "claimed_by": updated[6] if updated[6] is not None else operator_id,
+                "claimed_at": updated[7].isoformat() if updated[7] else datetime.now().isoformat(),
                 "breaks": updated[8] if isinstance(updated[8], list) else [],
                 "source_schedule_plan_id": updated[9],
                 "source_schedule_shift_id": updated[10],
+                "claim_start_time": claim_range["start_time"].strftime('%H:%M') if is_partial_claim else None,
+                "claim_end_time": claim_range["end_time"].strftime('%H:%M') if is_partial_claim else None,
+                "partial": bool(is_partial_claim),
+                "lot_still_available": bool(keeps_lot_open),
             }
-            event = self._insert_shift_auction_test_event(cursor, "lot_claimed", {"lot": lot_payload})
+            event = self._insert_shift_auction_test_event(
+                cursor, "lot_claimed", {"lot": lot_payload}, direction_mode=mode
+            )
             timings["event"] = (time.perf_counter() - event_started_at) * 1000
             timings["write"] = timings["cas_update"] + timings["event"]
         return {"lot": lot_payload, "event": event, "_timings": timings}
@@ -13385,6 +13982,10 @@ class Database:
         lot_id = int(lot_id)
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+            if mode is None:
+                raise ValueError("NOT_TEST_PARTICIPANT")
+            settings_id = shift_auction_settings_row_id(mode)
             cursor.execute("""
                 SELECT
                     s.enabled,
@@ -13404,8 +14005,8 @@ class Database:
                       AND m.operator_id = %s
                     LIMIT 1
                 ) tg ON TRUE
-                WHERE s.id = 1
-            """, (operator_id, operator_id))
+                WHERE s.id = %s
+            """, (operator_id, operator_id, settings_id))
             header = cursor.fetchone()
             effective_start, effective_end = (
                 self._shift_auction_effective_window(header[1], header[2], header[6], header[7])
@@ -13415,7 +14016,7 @@ class Database:
                 raise ValueError("AUCTION_NOT_OPEN")
             if (
                 not header[5]
-                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode)
             ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
 
@@ -13425,28 +14026,51 @@ class Database:
                        COALESCE(post_auction_claimed, FALSE), self_scheduled_by
                 FROM shift_auction_test_lots
                 WHERE id = %s
+                  AND COALESCE(direction_mode, 'line') = %s
                 FOR UPDATE
-            """, (lot_id,))
+            """, (lot_id, mode))
             lot = cursor.fetchone()
             if lot is None:
                 raise ValueError("LOT_NOT_FOUND")
-            if lot[5] != 'claimed':
-                raise ValueError("LOT_NOT_CLAIMED")
-            if lot[6] is None or int(lot[6]) != operator_id:
-                raise ValueError("LOT_NOT_OWNED")
             if bool(lot[11]):
                 raise ValueError("POST_AUCTION_LOT_NOT_RELEASABLE")
+
+            # Взятая ЧАСТЬ смены: лот мог остаться свободным, владелец записан строкой
+            # части. Такой возврат снимает только свой кусок и не трогает чужие.
+            released_segment = None
+            if lot[9] is not None and lot[10] is not None:
+                cursor.execute("""
+                    DELETE FROM shift_auction_historical_claims
+                    WHERE plan_id = %s AND source_schedule_shift_id = %s
+                      AND claimed_by = %s
+                      AND COALESCE(claim_stage, 'post_auction') = %s
+                    RETURNING claimed_start_time, claimed_end_time
+                """, (
+                    int(lot[9]), int(lot[10]), operator_id,
+                    self.SHIFT_AUCTION_CLAIM_STAGE_AUCTION,
+                ))
+                released_segment = cursor.fetchone()
+
+            if released_segment is None:
+                if lot[5] != 'claimed':
+                    raise ValueError("LOT_NOT_CLAIMED")
+                if lot[6] is None or int(lot[6]) != operator_id:
+                    raise ValueError("LOT_NOT_OWNED")
 
             # A self-scheduled shift is the operator's own creation, not a slot from
             # the plan: giving it up removes it instead of offering it to everybody.
             if lot[12] is not None and int(lot[12]) == operator_id:
-                return self._remove_self_scheduled_shift_tx(cursor, operator_id, lot)
+                return self._remove_self_scheduled_shift_tx(cursor, operator_id, lot, direction_mode=mode)
 
+            # Смена снова свободна целиком; если часть отдал один из нескольких —
+            # тоже снимаем закрепление, оставшиеся части живут своими строками.
             cursor.execute("""
                 UPDATE shift_auction_test_lots
                 SET status = 'available',
                     claimed_by = NULL,
                     claimed_at = NULL,
+                    post_claim_start_time = NULL,
+                    post_claim_end_time = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
                 RETURNING id, shift_date, start_time, end_time, rate_min, status, claimed_by, claimed_at,
@@ -13465,14 +14089,18 @@ class Database:
                 "breaks": updated[8] if isinstance(updated[8], list) else [],
                 "source_schedule_plan_id": updated[9],
                 "source_schedule_shift_id": updated[10],
+                "claim_start_time": released_segment[0].strftime('%H:%M') if released_segment and released_segment[0] else None,
+                "claim_end_time": released_segment[1].strftime('%H:%M') if released_segment and released_segment[1] else None,
+                "partial": bool(released_segment),
             }
             event = self._insert_shift_auction_test_event(cursor, "lot_released", {
                 "lot": lot_payload,
                 "operator_id": operator_id
-            })
+            }, direction_mode=mode)
         return {"lot": lot_payload, "event": event}
 
-    def _remove_self_scheduled_shift_tx(self, cursor, operator_id, lot):
+    def _remove_self_scheduled_shift_tx(self, cursor, operator_id, lot,
+                                        direction_mode=SHIFT_AUCTION_MODE_LINE):
         """Drop a shift the operator had put on the calendar themselves.
 
         The lot has no counterpart in the weekly plan, so nothing is left behind
@@ -13502,7 +14130,7 @@ class Database:
         event = self._insert_shift_auction_test_event(cursor, "self_scheduled_shift_removed", {
             "lot": lot_payload,
             "operator_id": operator_id,
-        })
+        }, direction_mode=direction_mode)
         return {"lot": lot_payload, "event": event, "removed": True}
 
     def self_schedule_shift_auction_shift(self, operator_id, shift_date, start_time):
@@ -13524,6 +14152,10 @@ class Database:
 
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+            if mode is None:
+                raise ValueError("NOT_TEST_PARTICIPANT")
+            settings_id = shift_auction_settings_row_id(mode)
             cursor.execute("""
                 SELECT
                     s.enabled,
@@ -13552,8 +14184,8 @@ class Database:
                       AND m.operator_id = %s
                     LIMIT 1
                 ) tg ON TRUE
-                WHERE s.id = 1
-            """, (operator_id, operator_id, operator_id))
+                WHERE s.id = %s
+            """, (operator_id, operator_id, operator_id, settings_id))
             header = cursor.fetchone()
             if not header:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -13564,7 +14196,7 @@ class Database:
                 raise ValueError("AUCTION_NOT_OPEN")
             if (
                 not header[6]
-                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode)
             ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
             if not header[10]:
@@ -13592,7 +14224,7 @@ class Database:
             if datetime.combine(date_obj, start_obj) <= datetime.now():
                 raise ValueError("SHIFT_ALREADY_STARTED")
 
-            lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+            lot_dates = self._get_shift_auction_lot_dates_tx(cursor, direction_mode=mode)
             if not lot_dates:
                 raise ValueError("AUCTION_NO_LOTS")
             if date_obj not in set(lot_dates):
@@ -13608,22 +14240,24 @@ class Database:
             cursor.execute("""
                 SELECT 1 FROM shift_auction_test_day_offs
                 WHERE operator_id = %s AND day_off_date = %s
-            """, (operator_id, date_obj))
+                  AND COALESCE(direction_mode, 'line') = %s
+            """, (operator_id, date_obj, mode))
             if cursor.fetchone():
                 raise ValueError("DAY_OFF_SELECTED")
 
-            cursor.execute("""
-                SELECT 1 FROM shift_auction_test_lots
-                WHERE claimed_by = %s AND status = 'claimed' AND shift_date = %s
-                LIMIT 1
-            """, (operator_id, date_obj))
-            if cursor.fetchone():
+            if any(
+                str(item.get('shift_date') or '') == date_key
+                for item in self._get_shift_auction_operator_claimed_intervals_tx(
+                    cursor, operator_id, direction_mode=mode
+                )
+            ):
                 raise ValueError("DAY_ALREADY_HAS_SHIFT")
 
             workload = self._get_shift_auction_operator_workload_tx(
                 cursor, operator_id, operator_rate,
                 lot_dates=lot_dates,
-                blocked_dates=blocked_dates
+                blocked_dates=blocked_dates,
+                direction_mode=mode
             )
             allowance = workload["norm_minutes"] + self.SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES
             if workload["norm_minutes"] > 0 and workload["claimed_net_minutes"] + shift_minutes > allowance + 1:
@@ -13658,14 +14292,14 @@ class Database:
                 INSERT INTO shift_auction_test_lots (
                     shift_date, start_time, end_time, rate_min, breaks,
                     source_schedule_plan_id, source_schedule_shift_id,
-                    status, claimed_by, claimed_at, self_scheduled_by
+                    status, claimed_by, claimed_at, self_scheduled_by, direction_mode
                 )
-                VALUES (%s, %s, %s, %s, '[]'::jsonb, %s, %s, 'claimed', %s, CURRENT_TIMESTAMP, %s)
+                VALUES (%s, %s, %s, %s, '[]'::jsonb, %s, %s, 'claimed', %s, CURRENT_TIMESTAMP, %s, %s)
                 RETURNING id, claimed_at
             """, (
                 date_obj, start_obj, end_obj, rate_bucket,
                 (plan_id if source_shift_id else None), source_shift_id,
-                operator_id, operator_id,
+                operator_id, operator_id, mode,
             ))
             new_row = cursor.fetchone()
 
@@ -13688,7 +14322,7 @@ class Database:
             event = self._insert_shift_auction_test_event(cursor, "shift_self_scheduled", {
                 "lot": lot_payload,
                 "operator_id": operator_id,
-            })
+            }, direction_mode=mode)
 
         return {
             "lot": lot_payload,
@@ -13708,6 +14342,10 @@ class Database:
         lot_id = int(lot_id)
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+            if mode is None:
+                raise ValueError("NOT_TEST_PARTICIPANT")
+            settings_id = shift_auction_settings_row_id(mode)
 
             cursor.execute("""
                 SELECT
@@ -13723,8 +14361,8 @@ class Database:
                         SELECT COALESCE(status, '') FROM users WHERE id = %s
                     ) AS operator_status
                 FROM shift_auction_test_access s
-                WHERE s.id = 1
-            """, (operator_id, operator_id, operator_id, operator_id))
+                WHERE s.id = %s
+            """, (operator_id, operator_id, operator_id, operator_id, settings_id))
             header = cursor.fetchone()
             if not header:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -13732,7 +14370,7 @@ class Database:
                 raise ValueError("POST_AUCTION_NOT_ACTIVE")
             if (
                 not header[1]
-                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor)
+                or operator_id not in self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode)
             ):
                 raise ValueError("NOT_TEST_PARTICIPANT")
             if header[3] != 'operator' or header[4] in ('fired', 'dismissal'):
@@ -13745,8 +14383,9 @@ class Database:
                        COALESCE(post_auction_claimed, FALSE)
                 FROM shift_auction_test_lots
                 WHERE id = %s
+                  AND COALESCE(direction_mode, 'line') = %s
                 FOR UPDATE
-            """, (lot_id,))
+            """, (lot_id, mode))
             lot = cursor.fetchone()
             if not lot:
                 raise ValueError("LOT_NOT_FOUND")
@@ -13962,7 +14601,7 @@ class Database:
                 "operator_id": operator_id,
                 "operator_name": operator_name,
                 "merged_with_existing": bool(merge_ids),
-            })
+            }, direction_mode=mode)
 
         return {
             "lot": lot_payload,
@@ -13986,6 +14625,11 @@ class Database:
 
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            # Направление берём с ПЛАНА: пост-аукционный добор идёт по опубликованной
+            # неделе, и именно она говорит, чей это аукцион.
+            mode = self._shift_auction_mode_for_plan_tx(cursor, schedule_plan_id)
+            settings_id = shift_auction_settings_row_id(mode)
+            scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
             cursor.execute(
                 "SELECT pg_advisory_xact_lock(%s, %s)",
                 (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, source_schedule_shift_id)
@@ -14005,8 +14649,8 @@ class Database:
             cursor.execute("""
                 SELECT selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
-            """)
+                WHERE id = %s
+            """, (settings_id,))
             settings_row = cursor.fetchone()
             current_plan_id = None
             try:
@@ -14014,11 +14658,11 @@ class Database:
             except Exception:
                 current_plan_id = None
             if current_plan_id == plan_id:
-                participant_ids.update(self._get_shift_auction_participant_ids_tx(cursor))
+                participant_ids.update(self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode))
             if operator_id not in participant_ids:
                 raise ValueError("NOT_TEST_PARTICIPANT")
 
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT u.name, u.role, COALESCE(u.status, ''), u.direction_id, d.name AS direction_name
                 FROM users u
                 JOIN directions d ON d.id = u.direction_id
@@ -14026,12 +14670,10 @@ class Database:
                 WHERE u.id = %s
                   AND LOWER(COALESCE(u.role, '')) = 'operator'
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
-                  AND BTRIM(COALESCE(d.name, '')) = %s
-                  AND LOWER(BTRIM(COALESCE(dep.code, ''))) = %s
+                  AND {scope_sql}
             """, (
                 operator_id,
-                SHIFT_AUCTION_DIRECTION_NAME,
-                SHIFT_AUCTION_DEPARTMENT_CODE,
+                *scope_params,
             ))
             operator_row = cursor.fetchone()
             if (
@@ -14223,7 +14865,7 @@ class Database:
                 "operator_name": operator_name,
                 "merged_with_existing": bool(merge_ids),
                 "historical_period_claim": True,
-            })
+            }, direction_mode=mode)
 
         return {
             "lot": lot_payload,
@@ -14267,12 +14909,16 @@ class Database:
             operator_id = None
             resolved_plan_id = plan_id_int
             resolved_shift_id = shift_id_int
+            # Направление берём с самого лота (или с его плана) — админ адресует смену,
+            # а не аукцион, и событие обязано уйти в журнал своего направления.
+            mode = SHIFT_AUCTION_MODE_LINE
 
             if lot_id_int:
                 cursor.execute("""
                     SELECT id, shift_date, start_time, end_time, claimed_by,
                            source_schedule_plan_id, source_schedule_shift_id, status,
-                           post_claim_start_time, post_claim_end_time
+                           post_claim_start_time, post_claim_end_time,
+                           COALESCE(direction_mode, 'line')
                     FROM shift_auction_test_lots
                     WHERE id = %s
                     FOR UPDATE
@@ -14280,6 +14926,7 @@ class Database:
                 lot = cursor.fetchone()
                 if not lot:
                     raise ValueError("LOT_NOT_FOUND")
+                mode = normalize_shift_auction_mode(lot[10])
                 if lot[7] != 'claimed' or lot[4] is None:
                     raise ValueError("LOT_NOT_CLAIMED")
                 shift_date = lot[1]
@@ -14338,6 +14985,7 @@ class Database:
             else:
                 if not (resolved_plan_id and resolved_shift_id):
                     raise ValueError("MISSING_TARGET")
+                mode = self._shift_auction_mode_for_plan_tx(cursor, resolved_plan_id)
                 cursor.execute(
                     "SELECT pg_advisory_xact_lock(%s, %s)",
                     (self.SHIFT_AUCTION_SAVED_SHIFT_LOCK_NAMESPACE, resolved_shift_id)
@@ -14429,7 +15077,9 @@ class Database:
                 "end_time": end_time.strftime('%H:%M') if hasattr(end_time, 'strftime') else None,
                 "admin_id": admin_id,
             }
-            event = self._insert_shift_auction_test_event(cursor, "lot_admin_unclaimed", event_payload)
+            event = self._insert_shift_auction_test_event(
+                cursor, "lot_admin_unclaimed", event_payload, direction_mode=mode
+            )
 
         return {
             "operator_id": operator_id,
@@ -14487,6 +15137,10 @@ class Database:
                  AND l.source_schedule_shift_id = hc.source_schedule_shift_id
                 WHERE hc.claimed_by = %s
                   AND hc.claimed_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour')
+                  -- Только пост-аукционные доборы: части смен, взятые В ХОДЕ аукциона
+                  -- (чат), возвращаются кнопкой «Вернуть» в самом аукционе, а здесь
+                  -- висели бы с уже истёкшим окном отмены.
+                  AND COALESCE(hc.claim_stage, 'post_auction') = 'post_auction'
                 ORDER BY hc.claimed_at DESC
                 LIMIT %s
             """, (cancel_window_minutes, operator_id, window_hours, limit))
@@ -14594,6 +15248,7 @@ class Database:
                     SELECT claimed_at, claimed_start_time, claimed_end_time
                     FROM shift_auction_historical_claims
                     WHERE plan_id = %s AND source_schedule_shift_id = %s AND claimed_by = %s
+                      AND COALESCE(claim_stage, 'post_auction') = 'post_auction'
                     FOR UPDATE
                 """, (resolved_plan_id, resolved_shift_id, operator_id))
                 claim_row = cursor.fetchone()
@@ -14723,7 +15378,10 @@ class Database:
                 "end_time": end_time.strftime('%H:%M') if hasattr(end_time, 'strftime') else None,
                 "self_cancelled": True,
             }
-            event = self._insert_shift_auction_test_event(cursor, "lot_post_auction_cancelled", event_payload)
+            event = self._insert_shift_auction_test_event(
+                cursor, "lot_post_auction_cancelled", event_payload,
+                direction_mode=self._shift_auction_mode_for_operator_tx(cursor, operator_id) or SHIFT_AUCTION_MODE_LINE
+            )
 
         return {
             "operator_id": operator_id,
@@ -14774,6 +15432,8 @@ class Database:
             if not op_row or normalize_role_value(op_row[1]) != 'operator' or str(op_row[2] or '').strip().lower() in ('fired', 'dismissal'):
                 raise ValueError("OPERATOR_NOT_FOUND")
             operator_name = op_row[0] or f"Operator #{operator_id_int}"
+            # Направление аукциона — по человеку, которому назначают смену.
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id_int) or SHIFT_AUCTION_MODE_LINE
 
             if lot_id_int:
                 cursor.execute("""
@@ -14937,7 +15597,9 @@ class Database:
                 "end_time": eff_end_time.strftime('%H:%M') if hasattr(eff_end_time, 'strftime') else None,
                 "admin_id": admin_id,
             }
-            event = self._insert_shift_auction_test_event(cursor, "lot_admin_claimed", event_payload)
+            event = self._insert_shift_auction_test_event(
+                cursor, "lot_admin_claimed", event_payload, direction_mode=mode
+            )
 
         return {
             **event_payload,
@@ -14945,7 +15607,8 @@ class Database:
             "event": event,
         }
 
-    def admin_add_shift_auction_lot(self, admin_id, shift_date, start_time, end_time, rate_min):
+    def admin_add_shift_auction_lot(self, admin_id, shift_date, start_time, end_time, rate_min,
+                                    direction_mode=SHIFT_AUCTION_MODE_LINE):
         """
         Супервайзер/админ добавляет дополнительную смену в текущий аукцион (кнопка «+»
         в сетке по группе ставки), в том числе после его закрытия. Ставка берётся из
@@ -14996,13 +15659,14 @@ class Database:
         if shift_start_dt <= datetime.now():
             raise ValueError("SHIFT_ALREADY_STARTED")
 
+        mode = normalize_shift_auction_mode(direction_mode)
         with self._get_cursor() as cursor:
             # Shifts may be added while the auction is being prepared, running, paused
             # or closed. A disabled auction has no active context to add them to.
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
-                FROM shift_auction_test_access WHERE id = 1
-            """)
+                FROM shift_auction_test_access WHERE id = %s
+            """, (shift_auction_settings_row_id(mode),))
             settings_row = cursor.fetchone()
             if not settings_row:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -15012,7 +15676,11 @@ class Database:
 
             # The "+" button only appears for dates already present in the grid, so the
             # new shift must land on one of the auction's existing lot dates.
-            cursor.execute("SELECT DISTINCT shift_date FROM shift_auction_test_lots")
+            cursor.execute(
+                "SELECT DISTINCT shift_date FROM shift_auction_test_lots "
+                "WHERE COALESCE(direction_mode, 'line') = %s",
+                (mode,)
+            )
             existing_dates = {row[0] for row in (cursor.fetchall() or []) if row and row[0]}
             if not existing_dates:
                 raise ValueError("AUCTION_NO_LOTS")
@@ -15060,12 +15728,12 @@ class Database:
                 INSERT INTO shift_auction_test_lots (
                     shift_date, start_time, end_time, rate_min, breaks,
                     source_schedule_plan_id, source_schedule_shift_id,
-                    status, added_by, added_at
+                    status, added_by, added_at, direction_mode
                 )
-                VALUES (%s, %s, %s, %s, '[]'::jsonb, %s, %s, 'available', %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, '[]'::jsonb, %s, %s, 'available', %s, CURRENT_TIMESTAMP, %s)
                 RETURNING id
             """, (date_obj, start_obj, end_obj, rate_value,
-                  (plan_id if source_shift_id else None), source_shift_id, admin_id_int))
+                  (plan_id if source_shift_id else None), source_shift_id, admin_id_int, mode))
             new_row = cursor.fetchone()
             new_lot_id = int(new_row[0]) if new_row else None
 
@@ -15080,14 +15748,17 @@ class Database:
                 "added_by": admin_id_int,
                 "added_by_name": admin_name,
             }
-            event = self._insert_shift_auction_test_event(cursor, "lot_added", event_payload)
+            event = self._insert_shift_auction_test_event(
+                cursor, "lot_added", event_payload, direction_mode=mode
+            )
 
         return {
             **event_payload,
             "event": event,
             "snapshot": self.get_shift_auction_test_snapshot(
                 current_user_id=admin_id_int,
-                include_admin_fields=True
+                include_admin_fields=True,
+                direction_mode=mode
             ),
         }
 
@@ -15139,11 +15810,14 @@ class Database:
 
         with self._get_cursor() as cursor:
             self._lock_shift_auction_operator_tx(cursor, operator_id)
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+            if mode is None:
+                raise ValueError("NOT_TEST_PARTICIPANT")
             cursor.execute("""
                 SELECT enabled, starts_at, ends_at, paused_at, finished_at, selected_schedule_plan_id
                 FROM shift_auction_test_access
-                WHERE id = 1
-            """)
+                WHERE id = %s
+            """, (shift_auction_settings_row_id(mode),))
             settings = cursor.fetchone()
             if not settings:
                 raise ValueError("AUCTION_NOT_AVAILABLE")
@@ -15161,37 +15835,41 @@ class Database:
             ) not in ("scheduled", "open"):
                 raise ValueError("AUCTION_NOT_AVAILABLE")
 
-            if operator_id not in self._get_shift_auction_participant_ids_tx(cursor):
+            if operator_id not in self._get_shift_auction_participant_ids_tx(cursor, direction_mode=mode):
                 raise ValueError("NOT_TEST_PARTICIPANT")
 
-            cursor.execute("SELECT 1 FROM shift_auction_test_lots WHERE shift_date = %s LIMIT 1", (day_value,))
+            cursor.execute(
+                "SELECT 1 FROM shift_auction_test_lots WHERE shift_date = %s "
+                "AND COALESCE(direction_mode, 'line') = %s LIMIT 1",
+                (day_value, mode)
+            )
             if not cursor.fetchone():
                 raise ValueError("LOT_NOT_FOUND")
 
-            lot_dates = self._get_shift_auction_lot_dates_tx(cursor)
+            lot_dates = self._get_shift_auction_lot_dates_tx(cursor, direction_mode=mode)
             blocked_date_map = self._get_shift_auction_operator_blocked_date_map_tx(cursor, operator_id, lot_dates=lot_dates)
             day_key = day_value.strftime('%Y-%m-%d') if day_value else ''
             if selected and day_key and day_key in blocked_date_map:
                 raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
 
             if selected:
-                cursor.execute("""
-                    SELECT 1
-                    FROM shift_auction_test_lots
-                    WHERE claimed_by = %s
-                      AND shift_date = %s
-                      AND status = 'claimed'
-                    LIMIT 1
-                """, (operator_id, day_value))
-                if cursor.fetchone():
+                # Часть смены тоже занимает день: она живёт своей строкой, а лот при
+                # этом мог остаться 'available'.
+                if any(
+                    str(item.get('shift_date') or '') == day_key
+                    for item in self._get_shift_auction_operator_claimed_intervals_tx(
+                        cursor, operator_id, direction_mode=mode
+                    )
+                ):
                     raise ValueError("DAY_HAS_CLAIMED_SHIFT")
 
                 cursor.execute("""
                     SELECT day_off_date
                     FROM shift_auction_test_day_offs
                     WHERE operator_id = %s
+                      AND COALESCE(direction_mode, 'line') = %s
                     ORDER BY day_off_date
-                """, (operator_id,))
+                """, (operator_id, mode))
                 selected_day_offs = [
                     row[0].strftime('%Y-%m-%d')
                     for row in (cursor.fetchall() or [])
@@ -15204,30 +15882,33 @@ class Database:
                 if count + blocked_quota_count >= day_off_quota and not already_selected:
                     raise ValueError("DAY_OFF_LIMIT")
                 cursor.execute("""
-                    INSERT INTO shift_auction_test_day_offs (operator_id, day_off_date)
-                    VALUES (%s, %s)
-                    ON CONFLICT (operator_id, day_off_date) DO NOTHING
-                """, (operator_id, day_value))
+                    INSERT INTO shift_auction_test_day_offs (operator_id, day_off_date, direction_mode)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (operator_id, day_off_date) DO UPDATE
+                        SET direction_mode = EXCLUDED.direction_mode
+                """, (operator_id, day_value, mode))
                 event_type = "day_off_selected"
             else:
                 cursor.execute("""
                     DELETE FROM shift_auction_test_day_offs
                     WHERE operator_id = %s AND day_off_date = %s
-                """, (operator_id, day_value))
+                      AND COALESCE(direction_mode, 'line') = %s
+                """, (operator_id, day_value, mode))
                 event_type = "day_off_removed"
 
             cursor.execute("""
                 SELECT day_off_date
                 FROM shift_auction_test_day_offs
                 WHERE operator_id = %s
+                  AND COALESCE(direction_mode, 'line') = %s
                 ORDER BY day_off_date
-            """, (operator_id,))
+            """, (operator_id, mode))
             my_day_offs = [row[0].strftime('%Y-%m-%d') for row in (cursor.fetchall() or [])]
             event = self._insert_shift_auction_test_event(cursor, event_type, {
                 "operator_id": operator_id,
                 "date": day_value.strftime('%Y-%m-%d'),
                 "my_day_offs": my_day_offs
-            })
+            }, direction_mode=mode)
         return {"my_day_offs": my_day_offs, "event": event}
 
     # ── Department CRUD ──────────────────────────────────────────────

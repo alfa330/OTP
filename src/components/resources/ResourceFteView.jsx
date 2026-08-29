@@ -1548,7 +1548,6 @@ const adaptChatDay = (day) => (day ? {
 
 const CHAT_BILLING_MODES = [
   { key: 'park', label: 'Таксопарки' },
-  { key: 'transport', label: 'Транспорт' },
   { key: 'operator', label: 'Чатники' },
   { key: 'detail', label: 'Детализация' },
 ];
@@ -1567,22 +1566,12 @@ const chatBillingReplyLabel = (item) => {
 // у линии AR — доля потерянных, у чата — доля отвеченных.
 const chatBillingShareClass = billingSlClass;
 
-const CHAT_BILLING_COLUMNS = [
-  { key: 'chats', label: 'Поступило' },
-  { key: 'answered', label: 'Обслужено' },
-  { key: 'no_reply', label: 'Потеряно' },
-  { key: 'first_reply', label: 'Ср. первый ответ' },
-  { key: 'ar', label: 'AR' },
-  { key: 'sl', label: 'SL' },
-];
-
 const chatBillingRowKey = (item, mode) => (mode === 'operator'
   ? String(item.operator || '')
-  : `${item.park || ''}|${item.transport || ''}`);
+  : String(item.park || ''));
 
 const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' }) => {
   const renderMetricsCells = (item) => {
-    const arRatio = safeRatio(item.answered, item.chats);
     const slRatio = safeRatio(item.answered_sl, item.chats);
     return (
       <>
@@ -1590,9 +1579,6 @@ const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'pa
         <td className="px-3 py-2.5 text-right text-emerald-700">{formatInt(item.answered)}</td>
         <td className="px-3 py-2.5 text-right text-rose-600">{formatInt(item.no_reply)}</td>
         <td className="px-3 py-2.5 text-right text-slate-700">{chatBillingReplyLabel(item)}</td>
-        <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(arRatio)}`}>
-          {arRatio === null ? '—' : formatPercent(arRatio, 1)}
-        </td>
         <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(slRatio)}`}>
           {slRatio === null ? '—' : formatPercent(slRatio, 1)}
         </td>
@@ -1602,7 +1588,7 @@ const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'pa
 
   const firstColumnLabel = mode === 'operator'
     ? 'Чатник'
-    : mode === 'transport' ? 'Транспорт' : 'Таксопарк';
+    : 'Таксопарк';
 
   return (
     <div className="overflow-x-auto">
@@ -1618,16 +1604,9 @@ const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'pa
         <tbody className="divide-y divide-slate-100">
           {rows.map((item) => (
             <tr key={chatBillingRowKey(item, mode)} className="transition hover:bg-slate-50/70">
-              {mode === 'transport' ? (
-                <td className="px-3 py-2.5">
-                  <div className="font-medium text-slate-900">{item.transport || 'Без транспорта'}</div>
-                  <div className="text-xs text-slate-400">{billingParkLabel(item.park)}</div>
-                </td>
-              ) : (
-                <td className="px-3 py-2.5 font-medium text-slate-900">
-                  {mode === 'operator' ? (item.operator || '—') : billingParkLabel(item.park)}
-                </td>
-              )}
+              <td className="px-3 py-2.5 font-medium text-slate-900">
+                {mode === 'operator' ? (item.operator || '—') : billingParkLabel(item.park)}
+              </td>
               {renderMetricsCells(item)}
             </tr>
           ))}
@@ -1657,7 +1636,7 @@ const ChatBillingDetailTable = ({ rows }) => (
         <tr>
           <th className="px-3 py-2.5 text-left font-semibold">Дата</th>
           <th className="px-3 py-2.5 text-left font-semibold">Таксопарк</th>
-          <th className="px-3 py-2.5 text-left font-semibold">Транспорт</th>
+          <th className="px-3 py-2.5 text-left font-semibold">Номер</th>
           <th className="px-3 py-2.5 text-left font-semibold">Клиент</th>
           <th className="px-3 py-2.5 text-left font-semibold">Чатник</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Время до первого ответа оператора">Первый ответ</th>
@@ -1669,7 +1648,7 @@ const ChatBillingDetailTable = ({ rows }) => (
           <tr key={item.id} className="transition hover:bg-slate-50/70">
             <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">{billingOccurredAtLabel(item.started_at)}</td>
             <td className="px-3 py-2.5 font-medium text-slate-900">{billingParkLabel(item.park)}</td>
-            <td className="px-3 py-2.5 text-slate-700">{item.transport || '—'}</td>
+            <td className="px-3 py-2.5 text-slate-700">{item.client_number || '—'}</td>
             <td className="px-3 py-2.5 text-slate-700">{item.client || '—'}</td>
             <td className="px-3 py-2.5 text-slate-700">{item.operator || '—'}</td>
             <td className="whitespace-nowrap px-3 py-2.5 text-right font-medium text-slate-900">
@@ -1695,7 +1674,10 @@ const CHAT_TELEPHONY_OFF = {
   hasLosses: false,
   hasUpload: false,
   hasOktellSync: false,
-  hasShiftAuction: false,
+  // Аукцион смен теперь двунаправленный: у чата свой прогон на том же разделе
+  // (переключатель «Линия / Чат» в его шапке). Планировщик чата открывает раздел
+  // сразу на чатовом направлении — см. auctionDirectionFor в ResourceSchedulePlanner.
+  hasShiftAuction: true,
   hasDirectionPicker: false,
   // Биллинг здесь — телефонный: очереди, время разговора, выгрузка по
   // эффективности операторов. Он у чата выключен, а свой, по обращениям,
@@ -1765,7 +1747,7 @@ const CHAT_DIRECTION = {
     idleText: 'Выберите период и окно времени, затем нажмите «Сформировать» — обращения придут из базы.',
     summaryTitle: (mode) => (mode === 'operator'
       ? 'Итоги за период по чатникам'
-      : mode === 'transport' ? 'Итоги за период по транспорту' : 'Итоги за период по таксопаркам'),
+      : 'Итоги за период по таксопаркам'),
     daySummary: (mode, day) => (mode === 'operator'
       ? `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. первый ответ ${chatBillingReplyLabel(day.totals)}`
       : `Поступило ${formatInt(day.totals?.chats)} · Обслужено ${formatInt(day.totals?.answered)} · Потеряно ${formatInt(day.totals?.no_reply)}`),
@@ -3175,7 +3157,6 @@ const ResourceFteView = ({
   const chatCapacityIsManual = settingsDraft?.capacity_manual !== null
     && settingsDraft?.capacity_manual !== undefined
     && settingsDraft?.capacity_manual !== '';
-  const chatOffScaleRates = overview?.forecast?.operator_capacity?.off_scale_rates || [];
   const chatSkippedBaseWeeks = overview?.forecast?.skipped_base_weeks || [];
   const chatBaseWeekStarts = overview?.forecast?.base_week_starts || [];
 
@@ -4263,14 +4244,6 @@ const ResourceFteView = ({
             Показатели
           </button>
         </div>
-
-        {isChat && chatOffScaleRates.length ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-            В чате только ставки 1 и 0,75. В направлении есть люди с другой ставкой —{' '}
-            {chatOffScaleRates.map((item) => `${formatNumber(item.rate, 2)}: ${formatInt(item.count)} чел.`).join(', ')}
-            {' '}— они не учтены в расчёте и не попадут в график. Похоже на расхождение в карточках.
-          </div>
-        ) : null}
 
         {activeDashboardView !== 'settings' && activeDashboardView !== 'next_week' && activeDashboardView !== 'schedule_planner' && activeDashboardView !== 'oktell_billing' && visibleMetricCount > 0 && (
           <div className={`grid gap-3 md:grid-cols-2 ${visibleMetricCount >= 5 ? 'xl:grid-cols-6' : visibleMetricCount >= 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-3'}`}>

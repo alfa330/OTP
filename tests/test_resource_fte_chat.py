@@ -767,9 +767,11 @@ class ChatFrontendMetricsTests(unittest.TestCase):
         )
         for guard in gated:
             self.assertIn(guard, line, f"показатель не закрыт признаком: {guard}")
+        # hasShiftAuction в этом списке больше нет: у чата появился СВОЙ прогон
+        # аукциона на том же разделе — см. test_chat_planner_asks_the_chat_auction…
         for flag in ("hasAht", "hasOccUr", "hasAnswerRate", "hasWorkloadMinutes",
                      "hasLosses", "hasUpload", "hasOktellSync", "hasBilling",
-                     "hasDirectionPicker", "hasShiftAuction"):
+                     "hasDirectionPicker"):
             self.assertIn(f"{flag}: false", _chat_config_region(line),
                           f"в конфигурации чата не выключен {flag}")
 
@@ -934,41 +936,71 @@ class ChatPlannerBoundaryTests(unittest.TestCase):
             "TEMPLATE_STORAGE_KEY", rest,
             "общий ключ шаблонов используется напрямую — чат подхватит смены линии")
 
-    def test_chat_does_not_touch_the_line_shift_auction(self):
-        """Аукцион у чата будет ОТДЕЛЬНЫЙ — здешний трогать нельзя.
+    def test_chat_planner_asks_the_chat_auction_not_the_line_one(self):
+        """У чата теперь СВОЙ прогон аукциона на том же разделе.
 
-        Решение владельца 28.08.2026: после генерации график чата никуда не
-        отправляется. Значит из чатового планировщика убраны и переключатель
-        источника «Аукцион», и кнопка перехода, и запрос снапшота.
+        Прежде аукциона у чата не было вовсе, и страж требовал его отсутствия. Теперь
+        опаснее другое: планировщик один на два направления, и без явного direction он
+        считал бы покрытие недели ЧАТА по сменам, взятым на ЛИНИИ.
         """
         planner = _read(PLANNER)
         self.assertIn("enableShiftAuction = true,", planner)
-        # Запрос к общему аукциону закрыт флагом.
-        fetch_guard = planner[planner.index("if (!enableShiftAuction) return;"):]
-        self.assertIn("coverageSource !== 'auction'", fetch_guard[:200])
-        # Переключатель источника и кнопка перехода — тоже.
-        self.assertIn("...(enableShiftAuction ? [['auction', 'Аукцион']] : [])", planner)
-        self.assertIn("enableShiftAuction && typeof onOpenShiftAuction === 'function'", planner)
+        self.assertIn("const auctionDirectionFor = (apiPrefix) =>", planner)
+
+        # Снимок аукциона обязан спрашиваться с направлением, выведенным из apiPrefix.
+        start = planner.index("const fetchAuctionLots")
+        chunk = planner[start:planner.index("}, [", start)]
+        self.assertIn("/api/shift_auction/test_snapshot", chunk)
+        self.assertIn("direction: auctionDirectionFor(apiPrefix)", chunk)
+        # Префикс — в зависимостях колбэка, иначе направление застрянет в замыкании.
+        deps = planner[planner.index("}, [", start):planner.index("]);", start) + 3]
+        self.assertIn("apiPrefix", deps)
+
+        # Переход в раздел тоже несёт направление — иначе из чата открывалась бы линия.
+        self.assertIn("direction: auctionDirectionFor(apiPrefix)", planner[planner.index("onOpenShiftAuction({"):])
 
         line = _read(LINE_VIEW)
         self.assertIn("enableShiftAuction={cfg.hasShiftAuction}", line)
         chat_region = _chat_config_region(line)
-        self.assertIn("hasShiftAuction: false", chat_region)
-        # И ни одного прямого обращения к аукциону из чатовой части.
-        self.assertNotIn("shift_auction", chat_region)
-        self.assertNotIn("shift_auction", _read(CHAT_VIEW))
+        self.assertIn("hasShiftAuction: true", chat_region)
+        # Прямых обращений к ручкам аукциона из чатовой части по-прежнему нет:
+        # всё идёт через планировщик и сам раздел.
+        self.assertNotIn("api/shift_auction", chat_region)
+        self.assertNotIn("api/shift_auction", _read(CHAT_VIEW))
+
+    def test_auction_section_pins_the_direction_for_operators(self):
+        """Тумблер направления — только у СВ и выше; оператору режим назначает сервер.
+
+        Если бы направление приходило с клиента без проверки, оператор чата подменой
+        параметра попал бы в аукцион линии и разобрал бы чужие смены.
+        """
+        backend = _read(BACKEND)
+        start = backend.index("def _resolve_shift_auction_direction")
+        chunk = backend[start:backend.index("def _requested_shift_auction_direction", start)]
+        self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)", chunk)
+        self.assertIn("normalize_shift_auction_mode(requested)", chunk)
+        self.assertIn("db.shift_auction_mode_for_operator(requester_id)", chunk)
+
+        view = _read(os.path.join(
+            REPO_ROOT, "src", "components", "resources", "ShiftAuctionView.jsx"))
+        # Тумблер закрыт признаком от сервера, а не ролью, посчитанной на клиенте.
+        self.assertIn("setCanSwitchDirection(Boolean(safe.can_switch_direction))", view)
+        self.assertIn("{canSwitchDirection ? (", view)
+        # Направление из снапшота — истина: оператор увидит своё, что бы ни лежало
+        # в localStorage.
+        self.assertIn("if (safe.direction_mode) setDirection(normalizeAuctionDirection(safe.direction_mode));", view)
 
 
 class ChatAuctionIsolationTests(unittest.TestCase):
-    """Аукцион смен — только у линии, и граница держится НА СЕРВЕРЕ, а не только в интерфейсе."""
+    """У линии и чата свои прогоны аукциона, и граница держится НА СЕРВЕРЕ."""
 
-    def test_auction_period_queries_exclude_chat_plans(self):
+    def test_auction_period_queries_are_scoped_to_one_direction(self):
         """Планы обоих направлений лежат в одной таблице.
 
         Без фильтра по direction_mode сохранённая неделя ЧАТА вставала в список периодов
         аукциона ЛИНИИ неотличимой строкой — те же даты, тот же пустой заголовок, — и
-        оператор разбирал бы чатовые смены. Прежний страж проверял только .jsx, то есть
-        направление «чат не ходит в аукцион», и эту — обратную — утечку не видел.
+        оператор разбирал бы чатовые смены. Теперь у чата свой аукцион, поэтому фильтр
+        не прибит к 'line', а идёт параметром: каждый прогон видит ТОЛЬКО свои недели.
         """
         db = _read(os.path.join(REPO_ROOT, "database.py"))
 
@@ -978,8 +1010,35 @@ class ChatAuctionIsolationTests(unittest.TestCase):
             chunk = db[start:db.index("def ", start + 10)]
             self.assertIn("resource_saved_schedule_plans", chunk,
                           f"{fn}: выборка периодов должна читать планы")
-            self.assertIn("COALESCE(p.direction_mode, 'line') = 'line'", chunk,
-                          f"{fn}: аукциону линии видны только планы линии")
+            self.assertIn("COALESCE(p.direction_mode, 'line') = %s", chunk,
+                          f"{fn}: аукциону видны только недели своего направления")
+            self.assertIn("direction_mode=SHIFT_AUCTION_MODE_LINE", chunk,
+                          f"{fn}: направление обязано быть параметром, а не константой")
+            self.assertNotIn("= 'line'\n", chunk,
+                             f"{fn}: жёстко прибитой линии здесь остаться не должно")
+
+    def test_auction_state_tables_are_split_by_direction(self):
+        """Два прогона живут на общих таблицах — их разделяет только direction_mode.
+
+        Пропуск колонки в любой из них означает, что сохранение/перезапуск одного
+        направления стирает состояние второго.
+        """
+        db = _read(os.path.join(REPO_ROOT, "database.py"))
+        for table in ("shift_auction_test_access",
+                      "shift_auction_test_participants",
+                      "shift_auction_test_lots",
+                      "shift_auction_test_day_offs",
+                      "shift_auction_test_events"):
+            with self.subTest(table=table):
+                self.assertIn(
+                    f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS direction_mode "
+                    "VARCHAR(16) NOT NULL DEFAULT 'line';",
+                    db,
+                    f"{table}: нет колонки направления — прогоны перемешаются")
+        # Singleton-ограничение снято: настройки чата живут второй строкой.
+        self.assertIn(
+            "DROP CONSTRAINT IF EXISTS shift_auction_test_access_singleton", db)
+        self.assertIn("uq_shift_auction_test_access_mode", db)
 
     def test_chat_saves_its_plan_under_its_own_direction(self):
         """Сохранение из чата обязано помечать план как чатовый — иначе фильтр выше бесполезен."""

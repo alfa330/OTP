@@ -39305,7 +39305,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const openShiftAuctionSection = useCallback((period = null) => {
                 const dateFrom = String(period?.dateFrom || period?.date_from || '').trim();
                 const dateTo = String(period?.dateTo || period?.date_to || '').trim();
-                setShiftAuctionInitialPeriod(dateFrom || dateTo ? { dateFrom, dateTo } : null);
+                // Направление приходит от того, кто открывает: планировщик чата ведёт
+                // на чатовый аукцион. Раздел применит его вместо запомненного выбора.
+                const directionRaw = String(period?.direction || '').trim().toLowerCase();
+                const direction = directionRaw === 'chat' ? 'chat' : (directionRaw === 'line' ? 'line' : '');
+                setShiftAuctionInitialPeriod(
+                    dateFrom || dateTo || direction ? { dateFrom, dateTo, direction } : null
+                );
                 navigateToView('shift_auction');
             }, [navigateToView]);
 

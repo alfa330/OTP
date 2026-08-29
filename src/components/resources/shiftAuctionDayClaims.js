@@ -5,9 +5,13 @@
  * считать своей сменой» неочевидное и его надо покрывать тестами:
  *
  *  - целиком взятая смена приходит как lot.status === 'claimed' + claimed_by;
- *  - взятая в доборе ЧАСТЬ смены не меняет lot.claimed_by вовсе — лот остаётся
+ *  - взятая ЧАСТЬ смены не меняет lot.claimed_by вовсе — лот остаётся
  *    'available' с пустым claimed_by, а доля оператора живёт только внутри
  *    lot.claim_segments (database.py: частичный добор пересобирает остаток);
+ *  - часть бывает двух стадий: 'auction' — взята прямо в ходе аукциона (так
+ *    разбирает смены чат, и её МОЖНО вернуть кнопкой «Вернуть») и
+ *    'post_auction' — добор после публикации, он уже в графике и возвращается
+ *    только через «Мои доп. смены» в течение 10 минут;
  *  - в предпросмотре опубликованной недели смену, закрытую двумя операторами,
  *    отдают с claimed_by только первого из них, зато сегменты полны.
  *
@@ -19,9 +23,15 @@
 // Синтетический лот для сегмента: помощники форматирования смотрят на
 // post_auction_claimed + claim_start_time/claim_end_time и посчитают по нему
 // фактический диапазон вместе с попавшими в него перерывами.
+const isAuctionStageSegment = (segment) => String(segment?.stage || 'post_auction') === 'auction';
+
 const buildSegmentClaimLot = (lot, segment) => ({
   ...lot,
-  post_auction_claimed: true,
+  // Пост-аукционный добор помечаем прежним флагом (на него смотрит вся разметка),
+  // а часть, взятую в ходе аукциона, — своим: она НЕ добор и рисуется без бейджа.
+  post_auction_claimed: !isAuctionStageSegment(segment),
+  partial_claim: true,
+  claim_stage: isAuctionStageSegment(segment) ? 'auction' : 'post_auction',
   claim_start_time: segment.start_time,
   claim_end_time: segment.end_time
 });
@@ -58,11 +68,16 @@ export const collectMyAuctionDayClaims = ({ lots, date, userId }) => {
     if (mySegments.length) {
       const releasable = isReleasableByOperator(lot, myId);
       mySegments.forEach((segment, index) => {
+        // Часть, взятую в ходе аукциона, вернуть МОЖНО: release снимает именно её
+        // строку и не трогает куски других операторов. Для пост-аукционного добора
+        // возврат по-прежнему закрыт — смена уже сохранена в график.
+        const auctionStage = isAuctionStageSegment(segment);
         rows.push({
           key: `${lot.id}-cs${index}`,
           claimLot: buildSegmentClaimLot(lot, segment),
-          // Вернуть можно только смену целиком: возврат части аукцион не умеет.
-          lot: releasable && mySegments.length === 1 ? lot : null
+          lot: auctionStage
+            ? lot
+            : (releasable && mySegments.length === 1 ? lot : null)
         });
       });
       return;

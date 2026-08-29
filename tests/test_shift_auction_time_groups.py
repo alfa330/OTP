@@ -303,7 +303,7 @@ class ShiftAuctionTimeGroupPersistenceTests(unittest.TestCase):
         self.assertIn('for member_id in group["operator_ids"]:', source)
         self.assertIn("normalized_ids.append(member_id)", source)
         self.assertIn("COALESCE(u.status, '') NOT IN ('fired', 'dismissal')", source)
-        self.assertIn("BTRIM(COALESCE(d.name, '')) = %s", source)
+        self.assertIn("{scope_sql}", source)
 
     def test_favored_columns_are_no_longer_read_or_written(self):
         for method_name in (
@@ -419,7 +419,7 @@ class ShiftAuctionSelfScheduleTests(unittest.TestCase):
         release_source = _method_source("release_shift_auction_test_lot")
         remove_source = _method_source("_remove_self_scheduled_shift_tx")
 
-        self.assertIn("_remove_self_scheduled_shift_tx(cursor, operator_id, lot)", release_source)
+        self.assertIn("_remove_self_scheduled_shift_tx(cursor, operator_id, lot,", release_source)
         self.assertIn("DELETE FROM shift_auction_test_lots WHERE id = %s", remove_source)
         self.assertIn("AND source = 'auction-self'", remove_source)
         self.assertIn('"self_scheduled_shift_removed"', remove_source)

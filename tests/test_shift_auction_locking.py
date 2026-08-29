@@ -141,8 +141,13 @@ class ShiftAuctionLockingTests(unittest.TestCase):
         self.assertIn("BETWEEN %s AND %s", source)
         self.assertIn("source_schedule_plan_id', '')::INTEGER = %s", source)
         self.assertNotIn("DELETE FROM shift_auction_published_periods", source)
-        self.assertNotIn("DELETE FROM shift_auction_historical_claims", source)
         self.assertNotIn("DELETE FROM work_shifts", source)
+        # Части смен ЭТОГО прогона снимаются вместе с лотами, иначе продолжили бы
+        # вычитаться из нормы. Опубликованные доборы прошлых недель — не трогаем:
+        # удаление обязано быть сужено стадией 'auction'.
+        self.assertIn("DELETE FROM shift_auction_historical_claims hc", source)
+        self.assertIn("COALESCE(hc.claim_stage, 'post_auction') = %s", source)
+        self.assertIn("self.SHIFT_AUCTION_CLAIM_STAGE_AUCTION", source)
 
     def test_new_auction_run_does_not_inherit_topup(self):
         update_source = ast.get_source_segment(

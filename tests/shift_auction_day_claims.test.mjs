@@ -127,6 +127,41 @@ test('добор показывается, но вернуть его в аук�
   assert.equal(rows[0].lot, null);
 });
 
+test('часть, взятую в ходе аукциона, вернуть можно — в отличие от добора', () => {
+  // Чат разбирает смену частями прямо в аукционе (stage: 'auction'). Такая часть
+  // ещё не в графике, release снимает именно её строку — значит «Вернуть» нужна.
+  // Пост-аукционный добор той же формы возвращать нельзя.
+  const segment = (stage) => lot({
+    claim_segments: [{ claimed_by: ME, start_time: '10:00', end_time: '16:00', stage }],
+  });
+
+  const auctionRows = collectMyAuctionDayClaims({ lots: [segment('auction')], date: DATE, userId: ME });
+  assert.equal(auctionRows.length, 1);
+  assert.equal(auctionRows[0].lot?.id, 1, 'часть из аукциона обязана быть возвращаемой');
+  assert.equal(auctionRows[0].claimLot.claim_start_time, '10:00');
+  assert.equal(auctionRows[0].claimLot.partial_claim, true);
+  // Бейджа «добор» у неё быть не должно — она взята в самом аукционе.
+  assert.equal(auctionRows[0].claimLot.post_auction_claimed, false);
+
+  const postRows = collectMyAuctionDayClaims({ lots: [segment('post_auction')], date: DATE, userId: ME });
+  assert.equal(postRows.length, 1);
+  assert.equal(postRows[0].lot, null, 'добор возвращать нельзя');
+  assert.equal(postRows[0].claimLot.post_auction_claimed, true);
+});
+
+test('сегмент без стадии считается добором — старые данные не станут возвращаемыми', () => {
+  // claim_stage добавлена позже самой таблицы: у строк, записанных до неё, поля нет.
+  const rows = collectMyAuctionDayClaims({
+    lots: [lot({ claim_segments: [{ claimed_by: ME, start_time: '10:00', end_time: '16:00' }] })],
+    date: DATE,
+    userId: ME,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].lot, null);
+  assert.equal(rows[0].claimLot.post_auction_claimed, true);
+});
+
 test('обычную смену вернуть можно', () => {
   const rows = collectMyAuctionDayClaims({
     lots: [lot({ status: 'claimed', claimed_by: ME, post_auction_claimed: false })],

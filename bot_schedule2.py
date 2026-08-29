@@ -64,6 +64,10 @@ from database import (
     resolve_it_ticket_profile,
     resolve_it_ticket_profile_strict,
     SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL,
+    SHIFT_AUCTION_MODE_LINE,
+    SHIFT_AUCTION_MODE_CHAT,
+    SHIFT_AUCTION_MODES,
+    normalize_shift_auction_mode,
     PROXY_STATUS_LABELS,
     normalize_proxy_status_value,
     normalize_role_value,
@@ -640,7 +644,7 @@ def _fetch_shift_auction_events_with_cursor(cursor, after_id, limit=SHIFT_AUCTIO
     """
     cursor.execute(
         """
-        SELECT id, event_type, payload, created_at
+        SELECT id, event_type, payload, created_at, COALESCE(direction_mode, 'line')
         FROM shift_auction_test_events
         WHERE id > %s
         ORDER BY id
@@ -654,6 +658,7 @@ def _fetch_shift_auction_events_with_cursor(cursor, after_id, limit=SHIFT_AUCTIO
             "event_type": row[1],
             "payload": row[2] or {},
             "created_at": row[3].isoformat() if row[3] else None,
+            "direction_mode": row[4] if len(row) > 4 else SHIFT_AUCTION_MODE_LINE,
         }
         for row in (cursor.fetchall() or [])
     ]
@@ -663,7 +668,7 @@ def _fetch_recent_shift_auction_events_with_cursor(cursor):
     """Warm a new process with the newest buffer window, not the full history."""
     cursor.execute(
         """
-        SELECT id, event_type, payload, created_at
+        SELECT id, event_type, payload, created_at, COALESCE(direction_mode, 'line')
         FROM shift_auction_test_events
         ORDER BY id DESC
         LIMIT %s
@@ -678,6 +683,7 @@ def _fetch_recent_shift_auction_events_with_cursor(cursor):
             "event_type": row[1],
             "payload": row[2] or {},
             "created_at": row[3].isoformat() if row[3] else None,
+            "direction_mode": row[4] if len(row) > 4 else SHIFT_AUCTION_MODE_LINE,
         }
         for row in rows
     ]
@@ -2449,6 +2455,32 @@ def _is_supervisor_role(role: str) -> bool:
 
 # Отдел, чьи супервайзеры управляют аукционом смен наравне с главой отдела.
 SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE = 'szov'
+
+
+def _resolve_shift_auction_direction(requester_id, requester_role, requested=None):
+    """Направление аукциона («линия» или «чат») для этого запроса.
+
+    У СВ и выше в разделе есть тумблер, поэтому им параметр направления разрешён.
+    У ОПЕРАТОРА направление жёстко своё — из карточки, что бы ни пришло в запросе:
+    иначе подменённым параметром можно было бы смотреть и разбирать чужой аукцион.
+    """
+    role = _normalize_user_role(requester_role)
+    if _is_admin_role(role) or _is_supervisor_role(role):
+        return normalize_shift_auction_mode(requested)
+    try:
+        own_mode = db.shift_auction_mode_for_operator(requester_id)
+    except Exception:
+        own_mode = None
+    return own_mode or SHIFT_AUCTION_MODE_LINE
+
+
+def _requested_shift_auction_direction(payload=None):
+    """Направление из запроса: тело (для POST/PUT) или строка запроса."""
+    if isinstance(payload, dict):
+        for key in ('direction', 'direction_mode'):
+            if payload.get(key) not in (None, ''):
+                return payload.get(key)
+    return request.args.get('direction') or request.args.get('direction_mode')
 
 
 def _is_shift_auction_manager(requester_id, requester_role) -> bool:
@@ -8633,13 +8665,22 @@ def api_shift_auction_test_access():
 
         requester_role = _normalize_user_role(requester[3])
         if request.method == 'GET':
-            payload = db.get_shift_auction_test_access(current_user_id=requester_id)
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, requester_role, _requested_shift_auction_direction()
+            )
+            payload = db.get_shift_auction_test_access(
+                current_user_id=requester_id, direction_mode=direction_mode
+            )
+            payload["direction_mode"] = direction_mode
             return jsonify({"status": "success", "test_access": payload}), 200
 
         if not _is_shift_auction_manager(requester_id, requester_role):
             return jsonify({"error": "Only admins and СЗоВ supervisors can manage shift auction test access"}), 403
 
         payload = request.get_json(silent=True) or {}
+        direction_mode = _resolve_shift_auction_direction(
+            requester_id, requester_role, _requested_shift_auction_direction(payload)
+        )
         updated = db.update_shift_auction_test_access(
             enabled=bool(payload.get('enabled')),
             operator_ids=payload.get('operator_ids') or payload.get('selected_operator_ids') or [],
@@ -8649,7 +8690,9 @@ def api_shift_auction_test_access():
             ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at')),
             schedule_plan_id=payload.get('schedule_plan_id') or payload.get('selected_schedule_plan_id'),
             time_groups=_parse_shift_auction_time_groups(payload.get('time_groups')),
+            direction_mode=direction_mode,
         )
+        updated["direction_mode"] = direction_mode
         return jsonify({"status": "success", "test_access": updated}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)
@@ -8744,6 +8787,7 @@ def _shift_auction_test_error_response(error):
         "LOT_NOT_OPEN_FOR_POST_CLAIM": ("Эту смену больше нельзя забрать", 409),
         "SHIFT_ALREADY_STARTED": ("Эта смена уже началась или прошла", 409),
         "INVALID_PARTIAL_SHIFT_RANGE": ("Некорректный интервал частичной смены", 400),
+        "PARTIAL_SHIFT_NOT_ALLOWED": ("Эту смену можно взять только целиком", 409),
         "PARTIAL_SHIFT_OUT_OF_RANGE": ("Выбранный интервал должен быть внутри исходной смены", 400),
         "LOT_INVALID": ("Смена недоступна", 409),
         "POST_AUCTION_LOT_NOT_RELEASABLE": ("Эту смену нельзя вернуть — она уже сохранена в графики", 409),
@@ -8775,10 +8819,18 @@ def api_shift_auction_test_snapshot():
         requester_role = _normalize_user_role(requester[3])
         is_admin_requester = _is_admin_role(requester_role)
         can_monitor_auction = is_admin_requester or _is_supervisor_role(requester_role)
+        direction_mode = _resolve_shift_auction_direction(
+            requester_id, requester_role, _requested_shift_auction_direction()
+        )
         snapshot = db.get_shift_auction_test_snapshot(
             current_user_id=requester_id,
-            include_admin_fields=can_monitor_auction
+            include_admin_fields=can_monitor_auction,
+            direction_mode=direction_mode
         )
+        snapshot["direction_mode"] = direction_mode
+        # Тумблер «Линия / Чат» рисуется только тем, кому разрешено переключаться:
+        # у оператора направление одно и приходит с сервера.
+        snapshot["can_switch_direction"] = bool(can_monitor_auction)
         has_period_history_access = False
         if not (can_monitor_auction or snapshot.get('is_current_user_tester')):
             has_period_history_access = db.has_shift_auction_history_access(requester_id)
@@ -8802,7 +8854,7 @@ def api_shift_auction_test_snapshot():
         snapshot_fingerprint = hashlib.sha1(
             json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
         ).hexdigest()
-        etag = f'W/"shift-auction-{requester_id}-{snapshot_fingerprint}"'
+        etag = f'W/"shift-auction-{requester_id}-{direction_mode}-{snapshot_fingerprint}"'
         if request.headers.get('If-None-Match', '') == etag:
             response = Response(status=304)
             response.headers['ETag'] = etag
@@ -8837,7 +8889,12 @@ def api_shift_auction_lots_for_date():
             target_date = datetime.strptime(date_arg, '%Y-%m-%d').date()
         except Exception:
             return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
-        payload = db.get_shift_auction_lots_for_planner_date(target_date)
+        payload = db.get_shift_auction_lots_for_planner_date(
+            target_date,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, requester_role, _requested_shift_auction_direction()
+            )
+        )
         return jsonify({"status": "success", **payload}), 200
     except Exception as error:
         logging.error(f"Shift auction lots_for_date API error: {error}", exc_info=True)
@@ -8927,6 +8984,9 @@ def api_shift_auction_admin_add_lot():
             start_time=payload.get('start_time'),
             end_time=payload.get('end_time'),
             rate_min=payload.get('rate_min'),
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, requester_role, _requested_shift_auction_direction(payload)
+            ),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -8955,6 +9015,9 @@ def api_shift_auction_period_preview():
         preview = db.get_shift_auction_period_preview(
             schedule_plan_id=schedule_plan_id,
             current_user_id=requester_id,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, requester_role, _requested_shift_auction_direction()
+            ),
         )
         return jsonify({"status": "success", "preview": preview}), 200
     except ValueError as error:
@@ -8980,7 +9043,14 @@ def api_shift_auction_test_lots_seed():
         payload = request.get_json(silent=True) or {}
         start_date_raw = str(payload.get('start_date') or '').strip()
         start_date = datetime.strptime(start_date_raw, "%Y-%m-%d").date() if start_date_raw else None
-        result = db.seed_shift_auction_test_lots(updated_by=requester_id, start_date=start_date)
+        result = db.seed_shift_auction_test_lots(
+            updated_by=requester_id,
+            start_date=start_date,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(payload)
+            ),
+        )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)
@@ -9006,6 +9076,10 @@ def api_shift_auction_test_restart():
         result = db.restart_shift_auction_test(
             schedule_plan_id=payload.get('schedule_plan_id') or payload.get('plan_id'),
             updated_by=requester_id,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(payload)
+            ),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -9032,6 +9106,10 @@ def api_shift_auction_test_control():
         result = db.control_shift_auction_test(
             action=payload.get('action'),
             updated_by=requester_id,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(payload)
+            ),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -9063,7 +9141,12 @@ def api_shift_auction_test_journal():
             per_page = int(request.args.get('per_page') or 50)
         except Exception:
             per_page = 50
-        result = db.get_shift_auction_test_journal(page=page, per_page=per_page)
+        result = db.get_shift_auction_test_journal(
+            page=page, per_page=per_page,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, requester_role, _requested_shift_auction_direction()
+            ),
+        )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)
@@ -9088,6 +9171,10 @@ def api_shift_auction_test_topup():
         result = db.set_shift_auction_test_topup(
             enabled=(request.method == 'POST'),
             updated_by=requester_id,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True))
+            ),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -9113,6 +9200,10 @@ def api_shift_auction_test_rate_lock():
         result = db.set_shift_auction_test_rate_lock(
             enabled=(request.method == 'POST'),
             updated_by=requester_id,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True))
+            ),
         )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -9136,8 +9227,17 @@ def api_shift_auction_test_export_excel():
         if not _is_shift_auction_manager(requester_id, requester[3]):
             return jsonify({"error": "Only admins and СЗоВ supervisors can export shift auction reports"}), 403
 
-        output, start_date_obj, end_date_obj = db.generate_shift_auction_test_excel_report()
-        filename = f"shift_auction_report_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
+        direction_mode = _resolve_shift_auction_direction(
+            requester_id, _normalize_user_role(requester[3]), _requested_shift_auction_direction()
+        )
+        output, start_date_obj, end_date_obj = db.generate_shift_auction_test_excel_report(
+            direction_mode=direction_mode
+        )
+        direction_slug = 'chat' if direction_mode == SHIFT_AUCTION_MODE_CHAT else 'line'
+        filename = (
+            f"shift_auction_report_{direction_slug}"
+            f"_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
+        )
         return send_file(
             output,
             as_attachment=True,
@@ -9165,7 +9265,13 @@ def api_shift_auction_test_publish():
         if not _is_shift_auction_manager(requester_id, requester[3]):
             return jsonify({"error": "Only admins and СЗоВ supervisors can publish shift auctions"}), 403
 
-        result = db.publish_shift_auction_test_to_work_schedules(updated_by=requester_id)
+        result = db.publish_shift_auction_test_to_work_schedules(
+            updated_by=requester_id,
+            direction_mode=_resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True))
+            ),
+        )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return _shift_auction_test_error_response(error)
@@ -9174,7 +9280,7 @@ def api_shift_auction_test_publish():
         return jsonify({"error": "Internal server error"}), 500
 
 
-def _shift_auction_test_lot_mutation_response(lot_id, action):
+def _shift_auction_test_lot_mutation_response(lot_id, action, claim_start_time=None, claim_end_time=None):
     try:
         requester_started_at = time.perf_counter()
         requester_id, requester, auth_error = _get_authenticated_requester()
@@ -9188,7 +9294,11 @@ def _shift_auction_test_lot_mutation_response(lot_id, action):
         if action == 'release':
             result = db.release_shift_auction_test_lot(requester_id, lot_id)
         else:
-            result = db.claim_shift_auction_test_lot(requester_id, lot_id)
+            result = db.claim_shift_auction_test_lot(
+                requester_id, lot_id,
+                claim_start_time=claim_start_time,
+                claim_end_time=claim_end_time,
+            )
         db_timings = result.pop("_timings", None) if isinstance(result, dict) else None
         _record_elapsed_server_timing("auction-mutation", mutation_started_at)
         if isinstance(db_timings, dict):
@@ -9410,7 +9520,13 @@ def api_shift_auction_test_lot_claim_stable():
     action = str(payload.get('action') or 'claim').strip().lower()
     if action not in ('claim', 'release'):
         return jsonify({"error": "Unsupported auction lot action"}), 400
-    return _shift_auction_test_lot_mutation_response(lot_id, action)
+    # Чат разбирает смену частями прямо в ходе аукциона: интервал приходит здесь.
+    return _shift_auction_test_lot_mutation_response(
+        lot_id,
+        action,
+        claim_start_time=payload.get('claim_start_time') or payload.get('selected_start_time'),
+        claim_end_time=payload.get('claim_end_time') or payload.get('selected_end_time'),
+    )
 
 
 @app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'DELETE', 'OPTIONS'])
@@ -9506,6 +9622,10 @@ def api_shift_auction_test_events():
     except Exception:
         last_event_id = 0
 
+    stream_direction = _resolve_shift_auction_direction(
+        requester_id, requester_role, _requested_shift_auction_direction()
+    )
+
     _ensure_shift_auction_event_listener_started()
 
     @stream_with_context
@@ -9526,8 +9646,12 @@ def api_shift_auction_test_events():
                     last_event_id = max(last_event_id, int(buffer_floor_id) - 1)
                     continue
             if events:
+                # Курсор двигаем по ВСЕМ событиям, а отдаём только свои: иначе поток
+                # застревал бы на чужом событии и перечитывал его без конца.
                 for event in events:
                     last_event_id = max(last_event_id, int(event.get('id') or 0))
+                    if normalize_shift_auction_mode(event.get('direction_mode')) != stream_direction:
+                        continue
                     yield f"id: {event['id']}\n"
                     yield f"event: {event['event_type']}\n"
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
