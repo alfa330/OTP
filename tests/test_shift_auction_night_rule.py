@@ -151,11 +151,13 @@ class NightRuleIsEnforcedEverywhereTests(unittest.TestCase):
     def test_topup_mode_does_not_bypass_the_night_rule(self):
         """В доборе снят лимит «одна смена в день», но не право на отдых.
 
-        Проверка обязана стоять ПОСЛЕ ветки is_topup_mode/else, иначе режим
-        добора обошёл бы её вместе с дневным лимитом.
+        Проверка обязана стоять ПОСЛЕ ветки «день не заперт»/else, иначе она
+        обошлась бы вместе с дневным лимитом. Ветка теперь общая у добора и чата
+        (29.08.2026: в чате можно добрать часы в том же дне) — правило отдыха
+        одинаково обязательно в обоих.
         """
         source = self._method("claim_shift_auction_test_lot")
-        topup = source.index("if is_topup_mode:")
+        topup = source.index("if allows_extra_shifts_per_day:")
         night = source.index("_shift_auction_adjacent_night_date")
         day_limit = source.index("DAY_ALREADY_HAS_SHIFT")
         self.assertGreater(night, day_limit,

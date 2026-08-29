@@ -11575,6 +11575,45 @@ class Database:
         return None
 
     @staticmethod
+    def _shift_auction_day_ordinal(shift_date):
+        """Дата смены как номер дня — чтобы считать время сквозным, а не внутри суток."""
+        try:
+            return datetime.strptime(str(shift_date)[:10], '%Y-%m-%d').date().toordinal()
+        except (TypeError, ValueError):
+            return None
+
+    def _shift_auction_claim_conflict(self, claimed_rows, shift_date, start_minute, end_minute):
+        """Уже взятая смена, которая перекрывается с кандидатом, иначе None.
+
+        Правило владельца для чата: в один день можно взять ЕЩЁ часы, если они не
+        накладываются на уже взятое (недельная норма при этом остаётся). Значит
+        вместо «одна смена в день» нужна точная проверка пересечения.
+
+        Считаем по СКВОЗНОМУ времени (номер дня × 1440 + минуты), а не внутри
+        одних суток: ночная смена 20:00–08:00 кончается уже в следующем дне, и
+        утренняя смена того дня наложилась бы на её хвост, оставаясь при этом
+        другой `shift_date` — посуточное сравнение такую пару пропускает.
+        Минуты кандидата приходят из окна ЛОТА и у ночной смены уже больше 1440.
+        """
+        candidate_day = self._shift_auction_day_ordinal(shift_date)
+        if candidate_day is None:
+            return None
+        candidate_start = candidate_day * 1440 + start_minute
+        candidate_end = candidate_day * 1440 + end_minute
+        for claimed in (claimed_rows or []):
+            other_day = self._shift_auction_day_ordinal(claimed.get('shift_date'))
+            if other_day is None:
+                continue
+            other_start_minute, other_end_minute = self._schedule_interval_minutes(
+                claimed.get('start_time'), claimed.get('end_time')
+            )
+            other_start = other_day * 1440 + other_start_minute
+            other_end = other_day * 1440 + other_end_minute
+            if candidate_start < other_end and other_start < candidate_end:
+                return claimed
+        return None
+
+    @staticmethod
     def _break_overlaps_minute_range(brk, range_start_min, range_end_min):
         """True if a break {start,end} (in minutes, night-wrap aware) overlaps a range."""
         if not isinstance(brk, dict):
@@ -13989,27 +14028,18 @@ class Database:
                 if candidate_start_min < busy_end and busy_start < candidate_end_min:
                     raise ValueError("SHIFT_OVERLAPS_EXISTING")
 
-            if is_topup_mode:
-                # Top-up mode allows more than one shift per day as long as the
-                # candidate does not overlap with the operator's existing
-                # claims on the same date. The hard daily limit is replaced by
-                # a precise time-interval overlap check.
-                candidate_range = (candidate_start_min, candidate_end_min)
-                conflicts = False
-                for claimed in (claimed_rows_json or []):
-                    if str(claimed.get('shift_date') or '') != lot_date_key:
-                        continue
-                    other_range = self._schedule_interval_minutes(
-                        claimed.get('start_time'),
-                        claimed.get('end_time')
-                    )
-                    if (
-                        candidate_range[0] < other_range[1]
-                        and other_range[0] < candidate_range[1]
-                    ):
-                        conflicts = True
-                        break
-                if conflicts:
+            # Лимит «одна смена в день» снимают два случая, и по разным причинам:
+            #  - режим добора — там сняты вообще все потолки, включая норму;
+            #  - ЧАТ (решение владельца 29.08.2026) — человек вправе добрать часы в
+            #    том же дне, лишь бы они не перекрывали уже взятое и не выводили за
+            #    недельную норму. Норма ниже по коду для чата продолжает работать.
+            # В обоих случаях жёсткий календарный лимит заменяется точной проверкой
+            # пересечения по времени.
+            allows_extra_shifts_per_day = is_topup_mode or mode == SHIFT_AUCTION_MODE_CHAT
+            if allows_extra_shifts_per_day:
+                if self._shift_auction_claim_conflict(
+                        claimed_rows_json, lot_date_key,
+                        candidate_start_min, candidate_end_min):
                     raise ValueError("SHIFT_OVERLAPS_EXISTING")
             else:
                 if has_shift_on_date:
@@ -14420,7 +14450,12 @@ class Database:
             own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
                 cursor, operator_id, direction_mode=mode
             )
-            if any(str(item.get('shift_date') or '') == date_key for item in own_claims):
+            # У чата день не запирается первой сменой: можно поставить ещё часы, если
+            # они не перекрывают уже взятое (потолок держит норма ниже по коду).
+            if mode == SHIFT_AUCTION_MODE_CHAT:
+                if self._shift_auction_claim_conflict(own_claims, date_key, start_min, end_min):
+                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+            elif any(str(item.get('shift_date') or '') == date_key for item in own_claims):
                 raise ValueError("DAY_ALREADY_HAS_SHIFT")
 
             # «Свой график» тоже не даёт поставить себе две ночи 20:00–08:00 подряд.

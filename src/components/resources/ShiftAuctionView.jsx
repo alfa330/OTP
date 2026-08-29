@@ -52,6 +52,7 @@ import {
 } from './shiftAuctionParticipants';
 import { collectMyAuctionDayClaims } from './shiftAuctionDayClaims';
 import { mergeRealtimeAuctionLot } from './shiftAuctionRealtimeLots';
+import { findAuctionClaimConflict } from './shiftAuctionClaimRules';
 
 // Аукцион идёт на двух направлениях: линия (СЗоВ «Основа») и чат («Чат менеджер»).
 // Это два независимых прогона на одном разделе. У СВ и выше вверху есть тумблер,
@@ -2873,9 +2874,12 @@ const buildPostAuctionClaimOption = (lot, workShifts = [], claimedLots = []) => 
   const busyRanges = [
     ...blockers
       .filter((item) => item && item.shift_date === lot.shift_date)
+      // Занято ровно то, что человек взял: у ЧАСТИ смены это её границы, а не окно
+      // лота. Иначе после 09:00–15:00 из 09:00–21:00 весь день выглядел бы занятым
+      // и добрать часы в этот день стало бы нечем.
       .map((item) => getClockRangeWithinSource(
-        item.start_time || item.start,
-        item.end_time || item.end,
+        getAuctionLotEffectiveStartTime(item) || item.start_time || item.start,
+        getAuctionLotEffectiveEndTime(item) || item.end_time || item.end,
         sourceRange
       ))
       .filter(Boolean)
@@ -5357,6 +5361,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   // 29.08.2026: «смена 20*08»); вечерние 19:30–02:00 и им подобные ночью не
   // считаются. Держим отдельным набором, чтобы серую подпись у соседней ночи
   // можно было показать до клика, а не ловить ошибкой с сервера.
+  // Фактически занятое время оператора: у взятой ЧАСТИ смены это её границы, а не
+  // окно лота — иначе после 09:00–15:00 из 09:00–21:00 человек считался бы занятым
+  // до девяти вечера и добрать часы в тот же день не смог бы.
+  const myClaimedIntervals = useMemo(
+    () => myClaimedLots
+      .map((lot) => ({
+        shift_date: lot?.shift_date,
+        start_time: getAuctionLotEffectiveStartTime(lot),
+        end_time: getAuctionLotEffectiveEndTime(lot)
+      }))
+      .filter((item) => item.shift_date && item.start_time && item.end_time),
+    [myClaimedLots]
+  );
+
   const myClaimedNightDates = useMemo(
     () => new Set(
       myClaimedLots
@@ -5431,18 +5449,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (canMonitor || (!isTester && !canEvaluatePostAuction)) return reasons;
     if (!isViewingActivePeriod && !canEvaluatePostAuction) return reasons;
     const postAuctionActive = Boolean(selectedViewPostAuctionActive);
-    const parseHM = (value) => {
-      if (!value || typeof value !== 'string') return null;
-      const [h, m] = value.split(':').map(Number);
-      if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
-      return h * 60 + m;
-    };
-    const normalizeRange = (startStr, endStr) => {
-      const s = parseHM(startStr);
-      const e = parseHM(endStr);
-      if (s === null || e === null) return null;
-      return [s, e > s ? e : e + 24 * 60];
-    };
     monitoredLots.forEach((lot) => {
       if (!lot) return;
       // In post-auction mode also process 'cancelled' lots (they can be claimed).
@@ -5484,27 +5490,31 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           return;
         }
       }
-      if (isTopupActive) {
-        // Top-up mode allows extra shifts on the same date as long as they don't
-        // overlap with an already-claimed shift. Skip norm checks.
-        const sameDateClaims = myClaimedLotsByDate.get(lot.shift_date) || [];
-        if (sameDateClaims.length) {
-          const candidateRange = normalizeRange(lot.start_time, lot.end_time);
-          if (candidateRange) {
-            const conflict = sameDateClaims.find((existing) => {
-              const range = normalizeRange(existing.start_time, existing.end_time);
-              if (!range) return false;
-              return candidateRange[0] < range[1] && range[0] < candidateRange[1];
-            });
-            if (conflict) {
-              reasons.set(lotId, `Пересекается с ${conflict.start_time}–${conflict.end_time}`);
-              return;
-            }
+      // День запирается первой сменой не всегда. Лимит снимают два случая:
+      //  - режим добора — там сняты и норма, и календарный лимит;
+      //  - ЧАТ (решение владельца 29.08.2026) — добрать часы в том же дне можно,
+      //    если они не перекрывают уже взятое; норма при этом остаётся, поэтому
+      //    ниже мы НЕ выходим и проверки потолка отрабатывают как обычно.
+      if (isTopupActive || supportsPartialClaim) {
+        // В чате смену берут частью, поэтому пересечение целого окна — ещё не
+        // отказ: отказ, когда свободного куска не осталось вовсе. Свободные куски
+        // уже посчитаны с вычетом взятого мной и коллегами.
+        const partialOption = supportsPartialClaim ? auctionPartialClaimOptionsByLotId.get(lotId) : null;
+        if (partialOption) {
+          if (!partialOption.canClaim) {
+            reasons.set(lotId, 'Нет свободного интервала без пересечения');
+            return;
+          }
+        } else {
+          const conflict = findAuctionClaimConflict(myClaimedIntervals, lot);
+          if (conflict) {
+            reasons.set(lotId, `Пересекается с ${conflict.start_time}–${conflict.end_time}`);
+            return;
           }
         }
-        return;
-      }
-      if (lot.shift_date && myClaimedDateSet.has(lot.shift_date)) {
+        // Добор сверх нормы на то и добор — потолок часов ему не считают.
+        if (isTopupActive) return;
+      } else if (lot.shift_date && myClaimedDateSet.has(lot.shift_date)) {
         reasons.set(lotId, 'На этот день уже выбрана смена');
         return;
       }
@@ -5516,15 +5526,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         reasons.set(lotId, selfScheduleAllowanceMinutes ? 'Лимит часов уже набран' : 'Норма уже набрана');
         return;
       }
+      // В чате смену берут частью, поэтому «целиком не влезает в норму» — не отказ:
+      // человек доберёт ровно столько часов, сколько осталось. Гасит такой лот
+      // только проверка выше, когда норма набрана совсем.
+      const canTakePart = supportsPartialClaim
+        && Boolean(auctionPartialClaimOptionsByLotId.get(lotId)?.canClaim);
       if (
-        myAuctionWorkload.normMinutes > 0
+        !canTakePart
+        && myAuctionWorkload.normMinutes > 0
         && myAuctionWorkload.claimedNetMinutes + netMinutes > ceilingMinutes + 1
       ) {
         reasons.set(lotId, `Превысит лимит на ${formatAuctionHours(myAuctionWorkload.claimedNetMinutes + netMinutes - ceilingMinutes)} ч`);
       }
     });
     return reasons;
-  }, [canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedLotsByDate, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, selfScheduleAllowanceMinutes, settings.has_period_history_access, settings.rate_lock_enabled, userRate]);
+  }, [auctionPartialClaimOptionsByLotId, canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedIntervals, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, selfScheduleAllowanceMinutes, settings.has_period_history_access, settings.rate_lock_enabled, supportsPartialClaim, userRate]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
