@@ -1103,11 +1103,17 @@ class ChatPlannerBoundaryTests(unittest.TestCase):
         view = _read(os.path.join(
             REPO_ROOT, "src", "components", "resources", "ShiftAuctionView.jsx"))
         # Тумблер закрыт признаком от сервера, а не ролью, посчитанной на клиенте.
-        self.assertIn("setCanSwitchDirection(Boolean(safe.can_switch_direction))", view)
+        self.assertIn("const canSwitch = Boolean(safe.can_switch_direction);", view)
+        self.assertIn("setCanSwitchDirection(canSwitch);", view)
         self.assertIn("{canSwitchDirection ? (", view)
-        # Направление из снапшота — истина: оператор увидит своё, что бы ни лежало
-        # в localStorage.
-        self.assertIn("if (safe.direction_mode) setDirection(normalizeAuctionDirection(safe.direction_mode));", view)
+        # Направление из снапшота — истина для ОПЕРАТОРА: он увидит своё, что бы ни
+        # лежало в localStorage. Управляющему снапшот направление не двигает — там
+        # им владеет тумблер, и запоздавший ответ перекидывал человека назад
+        # (см. tests/test_shift_auction_direction_toggle.py).
+        self.assertIn(
+            "if (safe.direction_mode && !canSwitch) setDirection(normalizeAuctionDirection(safe.direction_mode));",
+            view,
+        )
 
 
 class ChatAuctionIsolationTests(unittest.TestCase):
