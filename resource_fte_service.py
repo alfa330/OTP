@@ -777,6 +777,7 @@ def _period_operator_availability_tx(
                 o.direction_name,
                 o.supervisor_name,
                 o.rate,
+                o.base_rate,
                 o.current_status,
                 d.day,
                 CASE
@@ -811,6 +812,7 @@ def _period_operator_availability_tx(
             direction_name,
             supervisor_name,
             rate,
+            base_rate,
             current_status,
             COUNT(*)::INT AS total_days,
             COUNT(*) FILTER (WHERE effective_status = 'working')::INT AS working_days,
@@ -821,7 +823,7 @@ def _period_operator_availability_tx(
             COUNT(*) FILTER (WHERE effective_status = 'dismissal')::INT AS dismissal_days,
             COUNT(*) FILTER (WHERE effective_status = 'fired')::INT AS fired_days
         FROM operator_days
-        GROUP BY id, name, direction_name, supervisor_name, rate, current_status
+        GROUP BY id, name, direction_name, supervisor_name, rate, base_rate, current_status
         ORDER BY name, id
         """,
         params,

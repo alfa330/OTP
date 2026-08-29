@@ -119,6 +119,75 @@ class RateOverrideReachesCalcAndAuctionTests(unittest.TestCase):
         self.assertIn("SELECT date_from FROM resource_saved_schedule_plans WHERE id = %s", source)
 
 
+class AvailabilityQueryArityTests(unittest.TestCase):
+    """Число колонок SELECT обязано совпадать с числом имён в распаковке.
+
+    Реальная поломка 29.08.2026: колонку base_rate добавили в CTE `operators`, но
+    не протащили через `operator_days` в финальный SELECT — запрос вернул 14
+    значений на 15 имён, и раздел упал с «not enough values to unpack
+    (expected 15, got 14)». Ни один страж этого не ловил, потому что все они
+    читали ТЕКСТ, а арность — свойство запроса целиком.
+    """
+
+    @staticmethod
+    def _body():
+        src = _read(SERVICE)
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == "_period_operator_availability_tx"):
+                return ast.get_source_segment(src, node)
+        raise AssertionError("_period_operator_availability_tx не найдена")
+
+    @staticmethod
+    def _top_level_columns(select_text, first_token):
+        """Колонки верхнего уровня: запятые вне скобок (COUNT(...) не считаем)."""
+        depth = 0
+        count = 1
+        for ch in select_text[select_text.index(first_token):]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                count += 1
+        return count
+
+    @staticmethod
+    def _unpacked_names(body, loop_index):
+        chunk = body[loop_index:]
+        chunk = chunk[chunk.index("(") + 1:chunk.index(") = row")]
+        return [item.strip() for item in chunk.split(",") if item.strip()]
+
+    def test_details_branch_select_matches_its_unpacking(self):
+        body = self._body()
+        head = body.rindex("        SELECT\n            id,")
+        select_text = body[head:body.index("FROM operator_days", head)]
+        columns = self._top_level_columns(select_text, "id,")
+        names = self._unpacked_names(body, body.rindex("for row in cursor.fetchall():"))
+        self.assertEqual(columns, len(names),
+                         f"детальная ветка: колонок {columns}, имён {len(names)}")
+
+    def test_base_rate_is_carried_through_every_stage(self):
+        """CTE → operator_days → финальный SELECT → GROUP BY.
+
+        Пропуск любого звена и есть та самая поломка: в `operators` колонка была,
+        а до строки результата не доезжала.
+        """
+        body = self._body()
+        details = body[body.index("supervisor.name AS supervisor_name"):]
+        self.assertIn("COALESCE(u.rate, 1.0) AS base_rate", details, "нет в CTE operators")
+        self.assertIn("o.base_rate", details, "не протащена в operator_days")
+        self.assertIn("            base_rate,\n", details, "нет в финальном SELECT")
+        self.assertIn("rate, base_rate, current_status", details, "нет в GROUP BY")
+
+    def test_aggregate_branch_was_not_touched(self):
+        """У агрегатной ветки своя арность — base_rate ей не нужен."""
+        body = self._body()
+        aggregate = body[body.index("if not include_details:"):body.index("for row in cursor.fetchall():")]
+        self.assertNotIn("base_rate", aggregate,
+                         "в агрегатной ветке base_rate лишний — он сдвинет её распаковку")
+
+
 class RateOverrideMustNotReachMoneyTests(unittest.TestCase):
     """Отрицательные стражи. Они здесь главные."""
 
