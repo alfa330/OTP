@@ -3911,6 +3911,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const auctionMutationQueueRef = useRef(Promise.resolve());
   const monitorRefreshTimerRef = useRef(null);
   const snapshotRefreshPendingRef = useRef(false);
+  // Отложенный запрос помнит, был ли исходный «громким»: тихий не гасит
+  // «Загружаем…», и переключение направления зависало бы на этой заглушке.
+  const snapshotRefreshLoudRef = useRef(false);
+  // Номер поколения направления: растёт на каждое переключение тумблера. Ответ
+  // снапшота, выписанный до переключения, приезжает с чужим номером — его нельзя
+  // ни применять, ни запоминать по ETag.
+  const directionTokenRef = useRef(0);
+  const snapshotAbortRef = useRef(null);
   const fetchSnapshotRef = useRef(null);
   const auctionDraftDirtyRef = useRef(false);
   const auctionDraftRevisionRef = useRef(0);
@@ -4139,6 +4147,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // чужой снапшот как «не изменилось».
     setDirection(normalized);
     storeAuctionDirection(normalized);
+    // Новое поколение: всё, что уже в пути, теперь относится к прошлому
+    // направлению. Запрос обрываем и снимаем замок «снапшот в работе», иначе
+    // загрузка нового прогона встала бы в очередь за чужим ответом.
+    directionTokenRef.current += 1;
+    snapshotAbortRef.current?.abort?.();
+    snapshotAbortRef.current = null;
+    snapshotRequestRef.current = false;
+    snapshotRefreshPendingRef.current = false;
+    snapshotRefreshLoudRef.current = false;
     snapshotEtagRef.current = '';
     lastEventIdRef.current = 0;
     lastLocallyPatchedEventIdRef.current = 0;
@@ -4285,10 +4302,13 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       post_auction_active: Boolean(safe.post_auction_active)
     });
     setNotifyPostClaimEnabled(Boolean(safe.notify_post_claim_enabled));
-    // Направление приходит с сервера и здесь — ИСТИНА: у оператора оно выведено из
-    // его карточки, а не из тумблера, которого у него нет.
-    if (safe.direction_mode) setDirection(normalizeAuctionDirection(safe.direction_mode));
-    setCanSwitchDirection(Boolean(safe.can_switch_direction));
+    // У ОПЕРАТОРА направление назначает сервер: тумблера у него нет, оно выведено
+    // из карточки. А у управляющего направлением владеет тумблер, и снапшот его
+    // не двигает: ответ приходит асинхронно, и позволить ему выбирать значило бы
+    // время от времени перекидывать человека обратно на прошлый прогон.
+    const canSwitch = Boolean(safe.can_switch_direction);
+    if (safe.direction_mode && !canSwitch) setDirection(normalizeAuctionDirection(safe.direction_mode));
+    setCanSwitchDirection(canSwitch);
     serverTimeGroupsRef.current = Array.isArray(safe.time_groups) ? safe.time_groups : [];
     if (!isStaleRealtime) {
       setLots(Array.isArray(safe.lots) ? safe.lots : []);
@@ -4375,8 +4395,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       // Do not lose an event-triggered refresh just because another snapshot is
       // in flight. One trailing request is enough to converge to the newest state.
       snapshotRefreshPendingRef.current = true;
+      if (!silent) snapshotRefreshLoudRef.current = true;
       return;
     }
+    // Поколение направления на момент выписки запроса: по нему отличаем свой
+    // ответ от ответа прошлого направления.
+    const token = directionTokenRef.current;
+    const isCurrent = () => token === directionTokenRef.current;
+    const controller = new AbortController();
+    snapshotAbortRef.current = controller;
     snapshotRequestRef.current = true;
     if (!silent) setIsLoading(true);
     try {
@@ -4384,21 +4411,37 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       const response = await axios.get(`${apiRoot}/api/shift_auction/test_snapshot`, {
         params: withDirection(),
         headers: buildHeaders(extraHeaders),
+        signal: controller.signal,
         validateStatus: (status) => (status >= 200 && status < 300) || status === 304
       });
+      // Пока запрос шёл, тумблер могли перевести. Такой ответ описывает ДРУГОЙ
+      // прогон: применить его — значит показать чужие смены и перекинуть тумблер
+      // назад; запомнить его ETag — значит получить на следующий запрос «не
+      // изменилось» и остаться с чужими данными навсегда.
+      if (!isCurrent()) return;
       const etag = response?.headers?.etag || response?.headers?.ETag;
       if (etag) snapshotEtagRef.current = etag;
       if (response?.status !== 304) {
         applySnapshot(response?.data?.snapshot || {});
       }
     } catch (error) {
+      const aborted = error?.code === 'ERR_CANCELED' || error?.name === 'CanceledError' || error?.name === 'AbortError';
+      if (aborted || !isCurrent()) return;
       if (!silent) notify(error?.response?.data?.error || 'Не удалось загрузить аукцион смен', 'error');
     } finally {
-      snapshotRequestRef.current = false;
-      if (!silent) setIsLoading(false);
-      if (snapshotRefreshPendingRef.current) {
-        snapshotRefreshPendingRef.current = false;
-        window.setTimeout(() => fetchSnapshotRef.current?.({ silent: true }), 0);
+      // Замок и «Загружаем…» принадлежат ТЕКУЩЕМУ поколению: устаревший ответ,
+      // сняв их за новый запрос, впустил бы второй параллельный и погасил бы
+      // заглушку раньше времени.
+      if (isCurrent()) {
+        snapshotRequestRef.current = false;
+        snapshotAbortRef.current = null;
+        if (!silent) setIsLoading(false);
+        if (snapshotRefreshPendingRef.current) {
+          const wasLoud = snapshotRefreshLoudRef.current;
+          snapshotRefreshPendingRef.current = false;
+          snapshotRefreshLoudRef.current = false;
+          window.setTimeout(() => fetchSnapshotRef.current?.({ silent: !wasLoud }), 0);
+        }
       }
     }
   }, [apiRoot, applySnapshot, buildHeaders, notify, user?.id, withDirection]);

@@ -256,10 +256,14 @@ class ChatPartialClaimTests(unittest.TestCase):
 
 class ChatAuctionFrontendTests(unittest.TestCase):
     def test_toggle_is_server_gated_and_operators_are_pinned(self):
-        self.assertIn("setCanSwitchDirection(Boolean(safe.can_switch_direction))", VIEW_SOURCE)
+        self.assertIn("const canSwitch = Boolean(safe.can_switch_direction);", VIEW_SOURCE)
+        self.assertIn("setCanSwitchDirection(canSwitch);", VIEW_SOURCE)
         self.assertIn("{canSwitchDirection ? (", VIEW_SOURCE)
+        # Оператору направление назначает сервер. Управляющему — НЕТ: у него есть
+        # тумблер, и снапшот, приехавший после переключения, возвращал его на
+        # прошлый прогон (см. tests/test_shift_auction_direction_toggle.py).
         self.assertIn(
-            "if (safe.direction_mode) setDirection(normalizeAuctionDirection(safe.direction_mode));",
+            "if (safe.direction_mode && !canSwitch) setDirection(normalizeAuctionDirection(safe.direction_mode));",
             VIEW_SOURCE,
         )
 
