@@ -50,8 +50,13 @@ class ShiftAuctionDayDetailsTests(unittest.TestCase):
             "const canReleaseFromDayPanel = !canMonitor && canClaim;",
             FRONTEND_SOURCE,
         )
-        # В подтверждение уходит настоящий лот, а не синтетическая строка сегмента.
-        self.assertIn("openReleaseConfirm([row.lot])", FRONTEND_SOURCE)
+        # Раньше здесь стоял настоящий лот: пока частями разбирали только доборы,
+        # а их вернуть нельзя, синтетическая строка сегмента до возврата не
+        # доходила вовсе. В чате часть берут В ХОДЕ аукциона, и вернуть её можно —
+        # тогда окно подтверждения обязано показать МОЮ долю (09:00–15:00 из
+        # 09:00–21:00 — шесть часов, а не двенадцать), а handleReleaseLot по ней же
+        # снимает свой кусок из claim_segments. id у синтетической строки тот же.
+        self.assertIn("openReleaseConfirm([row.claimLot || row.lot])", FRONTEND_SOURCE)
 
     def test_own_claimed_shift_stays_distinguishable_in_the_grid(self):
         # Регресс 5be4368d: ветку «моя смена» вырезали, и все взятые лоты стали

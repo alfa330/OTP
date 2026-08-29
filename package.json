@@ -9,6 +9,7 @@
     "preview": "vite preview --config vite.config.mjs",
     "test:shift-auction": "node --test tests/shift_auction_participants.test.mjs",
     "test:shift-auction-day": "node --test tests/shift_auction_day_claims.test.mjs",
+    "test:shift-auction-realtime": "node --test tests/shift_auction_realtime_lots.test.mjs",
     "test:task-needs": "node --test tests/task_action_needs.test.mjs",
     "test:task-assignees": "node --test tests/task_assignees.test.mjs",
     "test:custom-select": "node --test tests/custom_select_render.test.mjs",

@@ -51,6 +51,7 @@ import {
   shouldHydrateShiftAuctionDraft,
 } from './shiftAuctionParticipants';
 import { collectMyAuctionDayClaims } from './shiftAuctionDayClaims';
+import { mergeRealtimeAuctionLot } from './shiftAuctionRealtimeLots';
 
 // Аукцион идёт на двух направлениях: линия (СЗоВ «Основа») и чат («Чат менеджер»).
 // Это два независимых прогона на одном разделе. У СВ и выше вверху есть тумблер,
@@ -220,31 +221,6 @@ const isSameRealtimeAuctionLot = (currentLot, incomingLot) => {
   const currentPlanId = normalizeSchedulePlanId(currentLot.source_schedule_plan_id);
   const incomingPlanId = normalizeSchedulePlanId(incomingLot.source_schedule_plan_id);
   return !currentPlanId || !incomingPlanId || currentPlanId === incomingPlanId;
-};
-
-const mergeRealtimeAuctionLot = (currentLot, incomingLot, eventType, payload) => {
-  const merged = { ...currentLot, ...incomingLot, _optimistic: false };
-  if (eventType !== 'lot_post_auction_claimed') return merged;
-
-  const startTime = incomingLot.claim_start_time || incomingLot.claimed_start_time;
-  const endTime = incomingLot.claim_end_time || incomingLot.claimed_end_time;
-  const claimedBy = payload?.operator_id ?? incomingLot.claimed_by;
-  if (!startTime || !endTime || claimedBy == null) return merged;
-
-  const segment = {
-    claimed_by: Number(claimedBy),
-    claimed_by_name: payload?.operator_name || incomingLot.claimed_by_name || '',
-    start_time: String(startTime).slice(0, 5),
-    end_time: String(endTime).slice(0, 5)
-  };
-  const existingSegments = Array.isArray(currentLot.claim_segments) ? currentLot.claim_segments : [];
-  const alreadyPresent = existingSegments.some((item) => (
-    Number(item?.claimed_by) === Number(segment.claimed_by)
-    && String(item?.start_time || '').slice(0, 5) === segment.start_time
-    && String(item?.end_time || '').slice(0, 5) === segment.end_time
-  ));
-  merged.claim_segments = alreadyPresent ? existingSegments : [...existingSegments, segment];
-  return merged;
 };
 
 const toDateInputValue = (value) => {
@@ -5063,6 +5039,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       return {
         key,
         lot,
+        // Окно возврата показываем по МОЕЙ доле, а не по всей смене: у чата
+        // 09:00–15:00 из 09:00–21:00 — это шесть часов, а не двенадцать.
+        claimLot,
         start: range ? range[0] : 0,
         timeLabel: formatAuctionLotEffectiveTimeRangeLabel(claimLot),
         netMinutes: getAuctionLotNetMinutes(claimLot),
@@ -6440,20 +6419,44 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // A self-scheduled shift is not handed back to the pool — it disappears.
     const isSelfScheduled = Boolean(prevLot?.self_scheduled);
 
+    // Возврат ЧАСТИ смены (так разбирает смены чат): моя доля живёт строкой в
+    // lot.claim_segments, а сам лот мог остаться 'available'. Ни ответ ручки, ни
+    // событие сегменты не приносят, поэтому свою долю убираем сами — иначе смена
+    // осталась бы «моей» в панели дня до следующего полного снапшота.
+    const releasedSegment = lot.partial_claim
+      ? {
+          start: String(getAuctionLotClaimStartTime(lot) || '').slice(0, 5),
+          end: String(getAuctionLotClaimEndTime(lot) || '').slice(0, 5)
+        }
+      : null;
+    const dropMyReleasedSegment = (target) => {
+      if (!releasedSegment?.start || !releasedSegment?.end) return target;
+      const segments = Array.isArray(target?.claim_segments) ? target.claim_segments : [];
+      if (!segments.length) return target;
+      return {
+        ...target,
+        claim_segments: segments.filter((segment) => !(
+          Number(segment?.claimed_by) === Number(user?.id)
+          && String(segment?.start_time || '').slice(0, 5) === releasedSegment.start
+          && String(segment?.end_time || '').slice(0, 5) === releasedSegment.end
+        ))
+      };
+    };
+
     setReleasingLotId(numericId);
     setLots((currentLots) => (
       isSelfScheduled
         ? currentLots.filter((l) => Number(l.id) !== numericId)
         : currentLots.map((l) => (
           Number(l.id) === numericId
-            ? {
+            ? dropMyReleasedSegment({
                 ...l,
                 status: 'available',
                 claimed_by: null,
                 claimed_at: null,
                 claimed_by_name: '',
                 _optimistic: true
-              }
+              })
             : l
         ))
     ));
@@ -6473,7 +6476,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       } else if (serverLot && serverLot.id) {
         setLots((currentLots) => currentLots.map((l) => (
           Number(l.id) === Number(serverLot.id)
-            ? { ...l, ...serverLot, _optimistic: false }
+            ? dropMyReleasedSegment({ ...l, ...serverLot, _optimistic: false })
             : l
         )));
       }
@@ -6500,7 +6503,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setReleasingLotId(null);
     }
-  }, [apiRoot, buildHeaders, canClaim, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, releaseConfirmLot, withDirection]);
+  }, [apiRoot, buildHeaders, canClaim, enqueueAuctionMutation, fetchSnapshot, notifyClaimError, releaseConfirmLot, user?.id, withDirection]);
 
   const toggleDayOff = useCallback(async (date) => {
     if (!canChoose || !apiRoot || !date) return;
@@ -7195,11 +7198,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   ) : myActiveDayClaimRows.length ? (
                     <ul key="my-day-claims" className="space-y-1.5">
                       {myActiveDayClaimRows.map((row) => {
+                        // По статусу лота «мою» смену определять нельзя: лот с
+                        // взятой ЧАСТЬЮ остаётся 'available' с пустым claimed_by,
+                        // пока в нём есть свободный кусок — иначе остальные его не
+                        // увидят. С проверкой status === 'claimed' у чата не
+                        // возвращалась ни одна часть. Возвращаемость решает
+                        // collectMyAuctionDayClaims: он отдаёт lot только тому,
+                        // что release действительно снимет.
                         const releasable = Boolean(
                           canReleaseFromDayPanel
                           && !row.partial
                           && row.lot
-                          && row.lot.status === 'claimed'
                           && Number.isFinite(Number(row.lot.id))
                         );
                         return (
@@ -7220,7 +7229,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                               {releasable ? (
                                 <button
                                   type="button"
-                                  onClick={() => openReleaseConfirm([row.lot])}
+                                  onClick={() => openReleaseConfirm([row.claimLot || row.lot])}
                                   className="shrink-0 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-[12px] font-semibold text-rose-600 transition hover:bg-rose-50 active:scale-95"
                                   title={row.lot?.self_scheduled ? 'Убрать свою смену' : 'Вернуть смену в аукцион'}
                                 >
@@ -8560,7 +8569,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 ? 'Какую смену убрать?'
                 : releaseConfirmLot.self_scheduled
                   ? 'Убрать свою смену?'
-                  : 'Хотите ли вы вернуть эту смену?'}
+                  : releaseConfirmLot.partial_claim
+                    ? 'Хотите ли вы вернуть свою часть смены?'
+                    : 'Хотите ли вы вернуть эту смену?'}
             </h3>
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
               <div className="text-sm font-semibold text-slate-900">{formatDateLabel(releaseConfirmLot.shift_date)}</div>
@@ -8595,7 +8606,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 ? 'Смена вашего графика просто исчезнет — другим операторам она не достанется. Поставить её заново можно тем же нажатием на день.'
                 : hasMultipleReleaseOptions
                   ? 'Выбранная смена снова станет доступной для других операторов. Остальные смены в этот день останутся у вас.'
-                  : 'Смена снова станет доступной для других операторов. Это действие нельзя отменить.'}
+                  : releaseConfirmLot.partial_claim
+                    ? 'Свободным станет только ваш кусок — части, взятые коллегами в этой смене, останутся у них. Это действие нельзя отменить.'
+                    : 'Смена снова станет доступной для других операторов. Это действие нельзя отменить.'}
             </p>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
@@ -8614,7 +8627,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               >
                 {releasingLotId !== null
                   ? (releaseConfirmLot.self_scheduled ? 'Убираю...' : 'Возвращаю...')
-                  : (releaseConfirmLot.self_scheduled ? 'Убрать смену' : 'Вернуть смену')}
+                  : releaseConfirmLot.self_scheduled
+                    ? 'Убрать смену'
+                    : releaseConfirmLot.partial_claim ? 'Вернуть часть' : 'Вернуть смену'}
               </button>
             </div>
           </div>
