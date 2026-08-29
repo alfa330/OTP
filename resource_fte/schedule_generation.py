@@ -106,6 +106,8 @@ SHIFT_PREVIEW_LOCAL_IMPROVEMENT_EPSILON = 0.001
 SHIFT_PREVIEW_DEFAULT_MIN_COVERAGE_PERCENT = 99.8
 SHIFT_PREVIEW_GREEDY_RATE_MIX_WEIGHT = 0.35
 SHIFT_PREVIEW_RATE_MIX_MAX_DEVIATION = 5.0
+# На сколько смен пробуем сократить недельный набор, ища меньший перелимит.
+SHIFT_PREVIEW_FIXED_MIX_TOTAL_STEPS = (4, 8, 12, 16, 20, 24)
 SHIFT_PREVIEW_GREEDY_STRATEGIES = (
     {
         "name": "precision",
@@ -438,10 +440,40 @@ def _shift_preview_rate_mix_target_counts(
     return result
 
 
+def _shift_preview_fits_weekly_capacity(
+    selected: List[Dict[str, Any]],
+    rate_capacity: Dict[str, Dict[str, Any]],
+) -> bool:
+    """Влезает ли набор в недельную ёмкость по каждой ставке.
+
+    Смен ставки не может быть больше, чем человеко-смен этой ставки: график,
+    который в неё не влезает, некому выдать. Проверка нужна отдельно от
+    пропорции — на неделе с малым штатом решатель ставил 83 смены при 65
+    слотах, и лишние 18 целиком уходили в перелимит.
+    """
+    usage = Counter(
+        _resource_rate_key((item.get("template") or {}).get("rate"))
+        for item in (selected or [])
+    )
+    for rate_key, count in usage.items():
+        capacity = int((rate_capacity.get(rate_key) or {}).get("weekly_shift_capacity") or 0)
+        if capacity > 0 and count > capacity:
+            return False
+    return True
+
+
 def _shift_preview_proportional_results(
     results: List[Dict[str, Any]],
     rate_capacity: Dict[str, Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    # Сначала отбрасываем то, что физически нельзя выдать людям. Этот отбор
+    # важнее пропорции: непропорциональный график хотя бы существует, а
+    # превышающий ёмкость — нет.
+    feasible = [
+        item for item in results
+        if _shift_preview_fits_weekly_capacity(item.get("selected") or [], rate_capacity)
+    ]
+    results = feasible or list(results)
     if sum(_shift_preview_rate_mix_counts(rate_capacity).values()) <= 0:
         return list(results)
     proportional = [
@@ -2006,12 +2038,24 @@ def _run_shift_preview_cp_sat_fixed_mix_refine_strategy(
         _resource_rate_key((item.get("template") or {}).get("rate"))
         for item in seed_selected
     )
+    # Недельный потолок по ставке. Его тут не было вовсе, и на неделе с малым
+    # штатом решатель ставил 83 смены при 65 доступных слотах — такой график
+    # некому выдать, а лишние 18 смен целиком уходили в перелимит. Ограничение
+    # физическое: смен ставки не может быть больше, чем человеко-смен этой ставки.
     effective_rate_counts = {
-        rate_key: max(0, int((target_rate_counts or seed_rate_counts).get(rate_key) or 0))
+        rate_key: max(0, min(
+            int((target_rate_counts or seed_rate_counts).get(rate_key) or 0),
+            int((rate_capacity.get(rate_key) or {}).get("weekly_shift_capacity") or 0),
+        ))
         for rate_key in by_rate
     }
+    # «Не больше», а не «ровно столько». Равенство заставляло решатель ставить
+    # заданное число смен даже там, где спрос уже закрыт: убрать лишнюю он не мог
+    # и мог лишь переставить её на другой час. Отсюда и брался перелимит.
+    # Опасности недобрать нет: ниже стоит жёсткий потолок суммарного дефицита, а
+    # цель минимизирует перелимит с весом 1000 против 1 у дефицита.
     for rate_key, indexes in by_rate.items():
-        model.Add(sum(selected_vars[index] for index in indexes) == effective_rate_counts.get(rate_key, 0))
+        model.Add(sum(selected_vars[index] for index in indexes) <= effective_rate_counts.get(rate_key, 0))
 
     for (_day_index, rate_key), indexes in by_day_rate.items():
         capacity = int((rate_capacity.get(rate_key) or {}).get("daily_shift_capacity") or 0)
@@ -2253,8 +2297,16 @@ def _select_shift_preview_strategy(
         min(len(item.get("selected") or []) for item in proportional_combined_results),
     }
     min_total = min(candidate_totals)
-    if min_total > 8:
-        candidate_totals.add(min_total - 8)
+    # Лестница вниз по числу смен. Ёмкость штата обычно БОЛЬШЕ спроса, и лишние
+    # смены превращаются в перелимит; убрать их можно только поставив меньше.
+    # Пропорцию ставок это не ломает: _shift_preview_rate_mix_target_counts
+    # раскладывает ЛЮБОЙ итог по тому же составу штата, поэтому меньше работают
+    # все ставки поровну, а не одна за счёт другой. Какой из вариантов взять,
+    # решает обычное ранжирование (сначала уложиться в дефицит, потом минимум
+    # перелимита) — лестница только даёт ему из чего выбирать.
+    for step in SHIFT_PREVIEW_FIXED_MIX_TOTAL_STEPS:
+        if min_total > step:
+            candidate_totals.add(min_total - step)
 
     fixed_mix_results = []
     for total_shifts in sorted(candidate_totals):
