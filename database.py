@@ -11524,6 +11524,56 @@ class Database:
     # How far above their norm a "свой график" group may go, in minutes (10 hours).
     SHIFT_AUCTION_SELF_SCHEDULE_EXTRA_MINUTES = 600
 
+    # Ночная смена — РОВНО 20:00–08:00 (решение владельца 29.08.2026: «смена 20*08»).
+    # Вечерние 19:30–02:00, 22:00–02:00 и прочие «за полночь» ночными не считаются:
+    # их владелец ночью не называл, и запрет на них закрыл бы половину графика.
+    SHIFT_AUCTION_NIGHT_START_HHMM = '20:00'
+    SHIFT_AUCTION_NIGHT_END_HHMM = '08:00'
+
+    @staticmethod
+    def _shift_auction_hhmm(value):
+        """'HH:MM' из time, datetime или строки — источники дают все три вида."""
+        if value is None:
+            return ''
+        if hasattr(value, 'strftime'):
+            return value.strftime('%H:%M')
+        return str(value)[:5]
+
+    @classmethod
+    def _is_shift_auction_night(cls, start_time, end_time):
+        return (cls._shift_auction_hhmm(start_time) == cls.SHIFT_AUCTION_NIGHT_START_HHMM
+                and cls._shift_auction_hhmm(end_time) == cls.SHIFT_AUCTION_NIGHT_END_HHMM)
+
+    @classmethod
+    def _shift_auction_adjacent_night_date(cls, claimed_rows, shift_date, start_time, end_time):
+        """Дата соседней ночи у того же оператора, иначе None.
+
+        Две ночи 20:00–08:00 подряд брать нельзя: первая кончается в 08:00, вторая
+        начинается в 20:00 ТОГО ЖЕ дня — двенадцать часов между сменами и двое
+        суток без нормального сна. Календарная проверка «день уже занят» этого не
+        ловит: у ночей разные даты начала, хвост первой лежит в дне второй.
+
+        Смотрим обе стороны — и «вчера была ночь», и «на завтра ночь уже взята»:
+        смены разбирают в произвольном порядке, и запрет обязан работать одинаково.
+        """
+        if not cls._is_shift_auction_night(start_time, end_time):
+            return None
+        try:
+            target = datetime.strptime(str(shift_date)[:10], '%Y-%m-%d').date()
+        except (TypeError, ValueError):
+            return None
+        neighbours = {target - timedelta(days=1), target + timedelta(days=1)}
+        for row in (claimed_rows or []):
+            if not cls._is_shift_auction_night(row.get('start_time'), row.get('end_time')):
+                continue
+            try:
+                other = datetime.strptime(str(row.get('shift_date') or '')[:10], '%Y-%m-%d').date()
+            except (TypeError, ValueError):
+                continue
+            if other in neighbours:
+                return other.isoformat()
+        return None
+
     @staticmethod
     def _break_overlaps_minute_range(brk, range_start_min, range_end_min):
         """True if a break {start,end} (in minutes, night-wrap aware) overlaps a range."""
@@ -13964,6 +14014,12 @@ class Database:
                 if has_shift_on_date:
                     raise ValueError("DAY_ALREADY_HAS_SHIFT")
 
+            # Две ночи 20:00–08:00 подряд — нельзя, и в режиме добора тоже: там
+            # снят лимит «одна смена в день», но не право на человеческий отдых.
+            if self._shift_auction_adjacent_night_date(
+                    claimed_rows_json, lot_date, lot[2], lot[3]):
+                raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
+
             claimed_rows = [
                 (row.get('start_time'), row.get('end_time'), row.get('breaks'))
                 for row in (claimed_rows_json or [])
@@ -14359,13 +14415,17 @@ class Database:
             if cursor.fetchone():
                 raise ValueError("DAY_OFF_SELECTED")
 
-            if any(
-                str(item.get('shift_date') or '') == date_key
-                for item in self._get_shift_auction_operator_claimed_intervals_tx(
-                    cursor, operator_id, direction_mode=mode
-                )
-            ):
+            own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
+                cursor, operator_id, direction_mode=mode
+            )
+            if any(str(item.get('shift_date') or '') == date_key for item in own_claims):
                 raise ValueError("DAY_ALREADY_HAS_SHIFT")
+
+            # «Свой график» тоже не даёт поставить себе две ночи 20:00–08:00 подряд.
+            if self._shift_auction_adjacent_night_date(
+                    own_claims, date_obj,
+                    start_obj.strftime('%H:%M'), end_obj.strftime('%H:%M')):
+                raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             workload = self._get_shift_auction_operator_workload_tx(
                 cursor, operator_id, operator_rate,
@@ -14551,6 +14611,27 @@ class Database:
 
             new_start_min = claim_range["start_minute"]
             new_end_min = claim_range["end_minute"]
+
+            # Что оператор уже держит в этом прогоне. Раньше добор сверялся ТОЛЬКО с
+            # частями той же исходной смены, а свои же ДРУГИЕ лоты того дня не смотрел
+            # вовсе: пересечение молча уходило в _resolve_post_auction_merged_shift_range
+            # и склеивалось. Так 06.09 у одного человека оказались разом 20:00–00:00 и
+            # 20:00–01:00 — два лота в аукционе, одна смена в графике, двойной счёт в норме.
+            own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
+                cursor, operator_id, direction_mode=mode
+            )
+            for claimed in own_claims:
+                if str(claimed.get('shift_date') or '') != lot_date_key:
+                    continue
+                other_start, other_end = self._schedule_interval_minutes(
+                    claimed.get('start_time'), claimed.get('end_time'))
+                if new_start_min < other_end and other_start < new_end_min:
+                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+
+            # Две ночи 20:00–08:00 подряд не даём и в доборе.
+            if self._shift_auction_adjacent_night_date(
+                    own_claims, shift_date, start_time, end_time):
+                raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             cursor.execute("""
                 SELECT id, start_time, end_time
@@ -14860,6 +14941,23 @@ class Database:
                 )
                 if req_start_min < ex_range["end_minute"] and ex_range["start_minute"] < req_end_min:
                     raise ValueError("LOT_ALREADY_CLAIMED")
+
+            # Проверки СВОИХ смен — до вставки: после неё откатывать пришлось бы
+            # исключением, а строка добора уже была бы в таблице.
+            own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
+                cursor, operator_id, direction_mode=mode
+            )
+            own_date_key = shift_date.strftime('%Y-%m-%d')
+            for claimed in own_claims:
+                if str(claimed.get('shift_date') or '') != own_date_key:
+                    continue
+                other_start, other_end = self._schedule_interval_minutes(
+                    claimed.get('start_time'), claimed.get('end_time'))
+                if req_start_min < other_end and other_start < req_end_min:
+                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+            if self._shift_auction_adjacent_night_date(
+                    own_claims, shift_date, start_time, end_time):
+                raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             cursor.execute("""
                 INSERT INTO shift_auction_historical_claims

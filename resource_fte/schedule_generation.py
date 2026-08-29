@@ -80,6 +80,10 @@ FREEFORM_RATE_TARGET_DURATIONS = {
 FREEFORM_NIGHT_SHIFT_START_MINUTE = 20 * 60
 FREEFORM_NIGHT_SHIFT_END_MINUTE = 32 * 60
 FREEFORM_NIGHT_SHIFT_LABEL = "20*08"
+# Сколько ночей 20*08 генератор ставит на один день. Больше одной не ставим:
+# двенадцатичасовая смена вторым человеком стоит дороже, чем доли чатника,
+# которые она под утро закрывает.
+MAX_NIGHT_SHIFTS_PER_DAY = 1
 FREEFORM_DEEP_NIGHT_START_MINUTE = 3 * 60
 FREEFORM_DEEP_NIGHT_END_MINUTE = 7 * 60
 FREEFORM_REGULAR_OVERNIGHT_MAX_END_MINUTE = 26 * 60
@@ -449,6 +453,14 @@ def _shift_preview_proportional_results(
     return proportional or list(results)
 
 
+def _is_night_shift_template(template: Dict[str, Any]) -> bool:
+    """Ночная смена — ровно 20:00→08:00 следующего дня (метка «20*08»)."""
+    return (
+        _to_int((template or {}).get("startMinute")) == FREEFORM_NIGHT_SHIFT_START_MINUTE
+        and _to_int((template or {}).get("endMinute")) == FREEFORM_NIGHT_SHIFT_END_MINUTE
+    )
+
+
 def _shift_preview_candidate_upper_bound(
     candidate: Dict[str, Any],
     rate_capacity: Dict[str, Dict[str, Any]],
@@ -465,7 +477,7 @@ def _shift_preview_candidate_upper_bound(
         return 0
     max_target = max([float(item or 0) for item in (target or [])] or [0.0])
     need_based_cap = max(1, int(math.ceil((max_target + 2.0) / min(positive_amounts))))
-    return max(
+    bound = max(
         0,
         min(
             max(0, _to_int(capacity.get("daily_shift_capacity"))),
@@ -473,6 +485,22 @@ def _shift_preview_candidate_upper_bound(
             need_based_cap,
         ),
     )
+    # Ночь 20*08 — не больше ОДНОЙ на день (решение владельца 29.08.2026).
+    #
+    # Почему без этого получалось две. Глубокую ночь 03:00–07:00 не покрывает ни
+    # один другой шаблон, а дефицит в эти часы штрафуется втрое с лишним дороже
+    # обычного (SHIFT_PREVIEW_DEEP_NIGHT_NEED_WEIGHT = 3.5 на
+    # SHIFT_PREVIEW_CP_SAT_DEFICIT_WEIGHT = 100 против OVER_WEIGHT = 5, то есть
+    # 70:1). У чата потребность в эти часы 1,2–1,8 чатника — стабильно выше
+    # единицы, и солверу выгоднее поставить вторую ДВЕНАДЦАТИЧАСОВУЮ смену, чем
+    # оставить непокрытыми доли человека под утро. На линии этого не видно: там
+    # ночной спрос и так укладывается в одного, и предел её графика не меняет.
+    #
+    # Остаток спроса выше одного человека сознательно уходит в дефицит: держать
+    # двоих всю ночь ради долей чатника под утро дороже, чем этот дефицит.
+    if bound > MAX_NIGHT_SHIFTS_PER_DAY and _is_night_shift_template(candidate.get("template")):
+        return MAX_NIGHT_SHIFTS_PER_DAY
+    return bound
 
 
 def _shift_preview_usage_by_rate(selected: List[Dict[str, Any]], day_count: int = 7) -> Dict[str, Dict[str, Any]]:
@@ -1413,6 +1441,12 @@ def _run_shift_preview_greedy_strategy(
     weekly_usage = usage_state["weekly_usage"]
     daily_usage = usage_state["daily_usage"]
     hourly_usage = usage_state["hourly_usage"]
+    # Ночи 20*08 по дням. Считаем и уже отобранное (initial_selected): жадный
+    # проход может продолжать чужой набор, и без этого предел обошёлся бы.
+    night_usage = defaultdict(int)
+    for item in (initial_selected or []):
+        if _is_night_shift_template(item.get("template")):
+            night_usage[int(item.get("dayIndex") or 0)] += 1
     total_weekly_capacity = sum(int(item.get("weekly_shift_capacity") or 0) for item in rate_capacity.values())
     used_weekly_capacity = sum(int(value or 0) for value in weekly_usage.values())
     remaining_weekly_capacity = max(0, total_weekly_capacity - used_weekly_capacity)
@@ -1464,6 +1498,14 @@ def _run_shift_preview_greedy_strategy(
             if weekly_usage[rate_key] >= int(capacity.get("weekly_shift_capacity") or 0):
                 continue
             if daily_usage[day_index][rate_key] >= int(capacity.get("daily_shift_capacity") or 0):
+                continue
+            # Не больше одной ночи 20*08 на день. У жадного отбора своих границ на
+            # шаблон нет — он смотрит только на ставку, — поэтому предел, стоящий в
+            # _shift_preview_candidate_upper_bound для CP-SAT, здесь надо повторить.
+            if (
+                _is_night_shift_template(candidate.get("template"))
+                and night_usage[day_index] >= MAX_NIGHT_SHIFTS_PER_DAY
+            ):
                 continue
             active_capacity = int(capacity.get("daily_shift_capacity") or 0)
             if active_capacity <= 0:
@@ -1533,6 +1575,8 @@ def _run_shift_preview_greedy_strategy(
         best_rate_key = best["rateKey"]
         weekly_usage[best_rate_key] += 1
         daily_usage[int(best["dayIndex"])][best_rate_key] += 1
+        if _is_night_shift_template(best.get("template")):
+            night_usage[int(best["dayIndex"])] += 1
         for index, amount in enumerate(best.get("presenceVector") or []):
             hourly_usage[best_rate_key][index] = round(
                 float(hourly_usage[best_rate_key][index] or 0) + float(amount or 0),
@@ -2105,6 +2149,27 @@ def _select_shift_preview_strategy(
     initial_selected: Optional[List[Dict[str, Any]]] = None,
     allow_cp_sat: bool = True,
 ) -> Dict[str, Any]:
+    # Ночь 20*08 — не больше одной на день, СЧИТАЯ уже отобранное. Проход под
+    # прирост идёт по тем же кандидатам поверх основного набора, и предел внутри
+    # одного прохода его не держит: базовый ставит ночь на день, догон ставит
+    # вторую. Убираем такие кандидаты из пула — тогда их не выберет ни жадный
+    # отбор, ни один из трёх CP-SAT-солверов, и правило не придётся повторять
+    # в каждом из них.
+    if initial_selected:
+        night_days = defaultdict(int)
+        for item in initial_selected:
+            if _is_night_shift_template(item.get("template")):
+                night_days[int(item.get("dayIndex") or 0)] += 1
+        if night_days:
+            candidates = [
+                candidate for candidate in candidates
+                if not (
+                    _is_night_shift_template(candidate.get("template"))
+                    and night_days.get(int(candidate.get("dayIndex") or 0), 0)
+                    >= MAX_NIGHT_SHIFTS_PER_DAY
+                )
+            ]
+
     cp_sat_result = None
     if allow_cp_sat and not initial_selected:
         cp_sat_result = _run_shift_preview_cp_sat_strategy(
@@ -2361,10 +2426,15 @@ def _build_schedule_preview_variant(
     incident_result = None
     if has_incident_uplift:
         incident_target = _shift_preview_delta_target(target, effective_target)
+        # Догон под прирост обязан ЗНАТЬ, что уже поставил основной проход:
+        # он идёт по тем же кандидатам и без этого ставил вторую ночь 20*08 на
+        # день, где первая уже стоит. Ограничения «сколько чего на день» живут в
+        # состоянии использования, а оно собирается из initial_selected.
         incident_result = _select_shift_preview_strategy(
             incident_target,
             candidates,
             rate_capacity,
+            initial_selected=base_selected,
         )
         incident_best = (incident_result.get("best") or {})
         incident_selected = [

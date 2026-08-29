@@ -815,6 +815,36 @@ const getAuctionLotBreakMinutes = (lot) => {
 
 const getAuctionLotNetMinutes = (lot) => Math.max(0, getAuctionLotDurationMinutes(lot) - getAuctionLotBreakMinutes(lot));
 
+// Ночная смена — ровно 20:00–08:00. Тот же набор, что у сервера
+// (Database.SHIFT_AUCTION_NIGHT_START_HHMM / _END_HHMM): две ночи подряд брать
+// нельзя, и витрина обязана красить лот серым по тому же правилу, иначе человек
+// увидит смену доступной и получит отказ уже кликом.
+const AUCTION_NIGHT_START_HHMM = '20:00';
+const AUCTION_NIGHT_END_HHMM = '08:00';
+
+const isAuctionNightShift = (startTime, endTime) => (
+  String(startTime || '').slice(0, 5) === AUCTION_NIGHT_START_HHMM
+  && String(endTime || '').slice(0, 5) === AUCTION_NIGHT_END_HHMM
+);
+
+// «2026-09-02» → «02.09»: подпись причины должна читаться, а не быть ISO-датой.
+const formatAuctionShortDate = (dateStr) => {
+  const parts = String(dateStr || '').slice(0, 10).split('-');
+  return parts.length === 3 ? `${parts[2]}.${parts[1]}` : String(dateStr || '');
+};
+
+// Соседний день по календарю: ±1 сутки от даты смены.
+const auctionAdjacentDates = (dateStr) => {
+  const parsed = new Date(`${String(dateStr || '').slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return [];
+  const shift = (days) => {
+    const next = new Date(parsed);
+    next.setDate(next.getDate() + days);
+    return next.toISOString().slice(0, 10);
+  };
+  return [shift(-1), shift(1)];
+};
+
 const getAuctionLotActionKey = (lotOrId) => {
   if (lotOrId && typeof lotOrId === 'object') {
     const raw = lotOrId.id ?? lotOrId.source_schedule_shift_id ?? '';
@@ -5344,6 +5374,20 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     return map;
   }, [myClaimedLots]);
 
+  // Даты уже взятых НОЧЕЙ. Ночь — ровно 20:00–08:00 (решение владельца
+  // 29.08.2026: «смена 20*08»); вечерние 19:30–02:00 и им подобные ночью не
+  // считаются. Держим отдельным набором, чтобы серую подпись у соседней ночи
+  // можно было показать до клика, а не ловить ошибкой с сервера.
+  const myClaimedNightDates = useMemo(
+    () => new Set(
+      myClaimedLots
+        .filter((lot) => isAuctionNightShift(lot?.start_time, lot?.end_time))
+        .map((lot) => lot?.shift_date)
+        .filter(Boolean)
+    ),
+    [myClaimedLots]
+  );
+
   const myWorkShiftsByDate = useMemo(() => {
     const map = new Map();
     (monitoredMyWorkShifts || []).forEach((shift) => {
@@ -5447,6 +5491,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         const myRateBucket = userRate <= 0.5 ? 0.5 : (userRate <= 0.75 ? 0.75 : 1);
         if (Math.abs(lotRate - myRateBucket) > 0.001) {
           reasons.set(lotId, `Смена ставки ${formatRate(lotRate)} — вам доступны только смены ставки ${formatRate(myRateBucket)}`);
+          return;
+        }
+      }
+      // Две ночи 20:00–08:00 подряд не даём — правило общее с сервером и
+      // действует ДО проверки режима добора: в доборе снят лимит «одна смена в
+      // день», но не право на отдых между ночами.
+      if (isAuctionNightShift(lot.start_time, lot.end_time)) {
+        const neighbourNight = auctionAdjacentDates(lot.shift_date)
+          .find((date) => myClaimedNightDates.has(date));
+        if (neighbourNight) {
+          reasons.set(lotId, `Ночь ${formatAuctionShortDate(neighbourNight)} уже ваша — две ночи подряд нельзя`);
           return;
         }
       }

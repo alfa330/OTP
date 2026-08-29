@@ -8998,6 +8998,7 @@ def _shift_auction_test_error_response(error):
         "DAY_ALREADY_HAS_SHIFT": ("На этот день уже выбрана смена", 409),
         "DAY_HAS_CLAIMED_SHIFT": ("На этот день уже выбрана смена", 409),
         "SHIFT_OVERLAPS_EXISTING": ("Эта смена пересекается по времени с уже взятой", 409),
+        "NIGHT_SHIFT_ALREADY_ADJACENT": ("Две ночные смены подряд брать нельзя — соседняя ночь уже ваша", 409),
         "TOPUP_NOT_ACTIVE": ("Режим добора ещё не включён", 409),
         "TOPUP_ALREADY_ACTIVE": ("Режим добора уже включён", 409),
         "DAY_OFF_LIMIT": ("Лимит выходных уже занят статусными периодами или выбранными выходными", 409),
