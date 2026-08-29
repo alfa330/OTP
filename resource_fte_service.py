@@ -565,7 +565,9 @@ def _period_operator_availability_tx(
                     -- Ставка «на период», а не из карточки: временная подмена
                     -- (operator_rate_overrides) действует в расчёте ресурсов и
                     -- аукционе, но НЕ в учёте часов и ЗП. Дата берётся из уже
-                    -- построенного period_days, чтобы не сдвигать порядок %s.
+                    -- построенного period_days, чтобы не сдвигать порядок
+                    -- параметров (знак процента в SQL-комментарии psycopg2
+                    -- всё равно считает плейсхолдером).
                     operator_effective_rate(u.id, (SELECT MIN(day) FROM period_days)) AS rate,
                     LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
                     COALESCE(h.has_dismissal_history, FALSE) AS has_dismissal_history,
