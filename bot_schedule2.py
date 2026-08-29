@@ -79,6 +79,7 @@ from database import (
 )
 from resource_fte_service import (
     build_resource_schedule_preview,
+    get_operator_rate_overrides,
     get_resource_day,
     get_resource_operator_availability_details,
     get_resource_overview,
@@ -87,6 +88,7 @@ from resource_fte_service import (
     import_resource_csv,
     import_resource_days,
     recalculate_resource_forecast,
+    set_operator_rate_override,
     update_resource_settings,
 )
 from resource_fte.chat import (
@@ -8075,6 +8077,64 @@ def api_resource_fte_day(report_date):
         return guard_response, guard_status
     try:
         return jsonify({"status": "success", "day": get_resource_day(db, report_date)}), 200
+    except Exception as error:
+        return _resource_fte_error_response(error)
+
+
+# Одна ручка на оба направления: подмена привязана к человеку и периоду, а не к
+# линии или чату, и вторая копия таблицы означала бы два разных ответа на один
+# вопрос «какая у него ставка». Но путь обязан существовать под обоими префиксами:
+# витрина ходит по cfg.apiPrefix, и жёсткий путь увёл бы чат в ручку линии
+# (страж test_chat_planner_points_at_chat_endpoints ловит именно это).
+@app.route('/api/resource_fte/rate_overrides', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/resource_fte/chat/rate_overrides', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_rate_overrides():
+    """Временная ставка оператора на период — только расчёт ресурсов и аукцион.
+
+    Читать может любой, кому открыт раздел; МЕНЯТЬ — только админ. Ставка отсюда
+    двигает недельную норму часов в аукционе и состав по ставкам в расчёте, то
+    есть это решение уровня руководителя, а не просмотр витрины.
+
+    В зарплату и учёт часов не попадает никогда: там своя помесячная
+    work_hours.rate, и она читается мимо этой таблицы.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    date_from = request.args.get('date_from') or (request.get_json(silent=True) or {}).get('date_from')
+    date_to = request.args.get('date_to') or (request.get_json(silent=True) or {}).get('date_to')
+
+    if request.method == 'GET':
+        try:
+            return jsonify({"status": "success",
+                            "overrides": get_operator_rate_overrides(db, date_from, date_to)}), 200
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        except Exception as error:
+            return _resource_fte_error_response(error)
+
+    requester = db.get_user(id=int(requester_id))
+    if normalize_role_value(requester[3]) not in {'super_admin', 'admin'}:
+        return jsonify({"error": "Менять ставку на период может только администратор"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = set_operator_rate_override(
+            db,
+            payload.get('operator_id'),
+            payload.get('rate'),
+            date_from,
+            date_to,
+            created_by=requester_id,
+            note=payload.get('note'),
+        )
+        return jsonify({"status": "success", "override": result}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     except Exception as error:
         return _resource_fte_error_response(error)
 

@@ -459,18 +459,23 @@ def _refresh_all_actual_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None
         _refresh_actual_fte_for_day_tx(cursor, report_date, settings)
 
 
-def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _current_operator_fte_tx(cursor, settings: Optional[Dict[str, Any]] = None,
+                             on_date=None) -> Dict[str, Any]:
+    # `on_date` — дата, на которую берётся ставка: временная подмена
+    # (operator_rate_overrides) действует окном, и штат «на период прогноза»
+    # может отличаться от штата «на сегодня». Без даты берём текущий день.
     selected_direction_ids = _coerce_int_list((settings or {}).get("selected_direction_ids"))
     direction_filter = "AND u.direction_id = ANY(%s)" if selected_direction_ids else ""
-    params = [selected_direction_ids] if selected_direction_ids else []
+    params = [on_date] + ([selected_direction_ids] if selected_direction_ids else [])
     cursor.execute(
         f"""
-        SELECT COALESCE(u.rate, 1.0), COUNT(*)
+        SELECT operator_effective_rate(u.id, COALESCE(%s::date, CURRENT_DATE)) AS rate,
+               COUNT(*)
         FROM users u
         WHERE u.role = 'operator'
           AND COALESCE(u.status, 'working') = 'working'
           {direction_filter}
-        GROUP BY COALESCE(u.rate, 1.0)
+        GROUP BY 1
         """,
         params,
     )
@@ -557,7 +562,11 @@ def _period_operator_availability_tx(
             operators AS (
                 SELECT
                     u.id,
-                    COALESCE(u.rate, 1.0) AS rate,
+                    -- Ставка «на период», а не из карточки: временная подмена
+                    -- (operator_rate_overrides) действует в расчёте ресурсов и
+                    -- аукционе, но НЕ в учёте часов и ЗП. Дата берётся из уже
+                    -- построенного period_days, чтобы не сдвигать порядок %s.
+                    operator_effective_rate(u.id, (SELECT MIN(day) FROM period_days)) AS rate,
                     LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
                     COALESCE(h.has_dismissal_history, FALSE) AS has_dismissal_history,
                     COALESCE(h.has_bs_history, FALSE) AS has_bs_history,
@@ -744,7 +753,11 @@ def _period_operator_availability_tx(
                 u.name,
                 direction.name AS direction_name,
                 supervisor.name AS supervisor_name,
-                COALESCE(u.rate, 1.0) AS rate,
+                -- См. комментарий в агрегатной ветке: ставка «на период».
+                operator_effective_rate(u.id, (SELECT MIN(day) FROM period_days)) AS rate,
+                -- Ставка из карточки рядом: витрина показывает её как исходную,
+                -- чтобы подмену было видно, а не приходилось угадывать.
+                COALESCE(u.rate, 1.0) AS base_rate,
                 LOWER(TRIM(COALESCE(u.status, 'working'))) AS current_status,
                 COALESCE(h.has_dismissal_history, FALSE) AS has_dismissal_history,
                 COALESCE(h.has_bs_history, FALSE) AS has_bs_history,
@@ -847,6 +860,7 @@ def _period_operator_availability_tx(
             direction_name,
             supervisor_name,
             rate_raw,
+            base_rate_raw,
             current_status,
             total_days_raw,
             working_days_raw,
@@ -892,6 +906,10 @@ def _period_operator_availability_tx(
             "directionName": direction_name,
             "supervisorName": supervisor_name,
             "rate": rate,
+            # Ставка из карточки и признак подмены: витрина рисует рядом со
+            # ставкой пометку, а селектор показывает, что сейчас выбрано.
+            "baseRate": _resource_rate_value(base_rate_raw),
+            "rateOverridden": abs(rate - _resource_rate_value(base_rate_raw)) > 1e-9,
             "currentStatus": current_status or "working",
             "totalDays": total_days,
             "workingDays": working_days,
@@ -1136,7 +1154,7 @@ def build_resource_schedule_preview(db, payload: Optional[Dict[str, Any]] = None
         cursor.execute("SELECT CURRENT_DATE")
         incident_anchor_date = cursor.fetchone()[0]
         profiles = _compute_period_forecast_profiles_tx(cursor, period_start, period_end, settings)
-        operator_capacity = _current_operator_fte_tx(cursor, settings)
+        operator_capacity = _current_operator_fte_tx(cursor, settings, on_date=period_start)
         current_fte = operator_capacity.get("current_operator_fte", 0.0)
         incident_uplift_profile = _compute_recent_incident_uplift_profile_tx(cursor, incident_anchor_date, settings)
         carry_in_shifts = _resource_work_shift_carry_in_tx(cursor, period_start, settings)
@@ -1370,7 +1388,7 @@ def get_resource_overview(
             forecast_date_to_value=forecast_date_to_value,
         )
         profiles = _compute_period_forecast_profiles_tx(cursor, forecast_period_start, forecast_period_end, settings)
-        operator_capacity = _current_operator_fte_tx(cursor, settings)
+        operator_capacity = _current_operator_fte_tx(cursor, settings, on_date=forecast_period_start)
         current_operator_fte = operator_capacity["current_operator_fte"]
         period_operator_availability = _period_operator_availability_tx(
             cursor,
@@ -1645,3 +1663,117 @@ def get_resource_day(db, report_date_value: str) -> Dict[str, Any]:
         },
         "hours": hours,
     }
+
+
+# ── Временная ставка оператора ────────────────────────────────────────────────
+# Решение владельца 29.08.2026: график на следующую неделю строится по ставкам,
+# которых в карточках людей ещё нет (кадровые поменяют их позже, обычным порядком).
+# Пока этого не произошло, ставку на период задают прямо в «Деталях расчёта».
+#
+# Действует РОВНО в двух местах — расчёт ресурсов и аукцион смен. В учёт часов,
+# norm_hours и зарплату не попадает никогда: там своя, помесячная work_hours.rate.
+# Подмена сама истекает по valid_to, отдельного «выключить» не требуется.
+
+def _parse_override_date(value, field):
+    parsed = _parse_report_date(value) if value else None
+    if parsed is None:
+        raise ValueError(f"Некорректная дата: {field}")
+    return parsed
+
+
+def get_operator_rate_overrides(db, date_from_value, date_to_value):
+    """Подмены, ПЕРЕСЕКАЮЩИЕСЯ с периодом. Витрина показывает их в «Деталях расчёта»."""
+    date_from = _parse_override_date(date_from_value, "date_from")
+    date_to = _parse_override_date(date_to_value, "date_to")
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    with db._get_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT o.operator_id, o.rate, o.valid_from, o.valid_to, o.note,
+                   o.created_by, author.name, o.updated_at, COALESCE(u.rate, 1.0)
+            FROM operator_rate_overrides o
+            JOIN users u ON u.id = o.operator_id
+            LEFT JOIN users author ON author.id = o.created_by
+            WHERE o.valid_from <= %s AND o.valid_to >= %s
+            ORDER BY o.valid_from, o.operator_id
+            """,
+            (date_to, date_from),
+        )
+        return [
+            {
+                "operatorId": int(row[0]),
+                "rate": _to_float(row[1]),
+                "validFrom": row[2].isoformat() if row[2] else None,
+                "validTo": row[3].isoformat() if row[3] else None,
+                "note": row[4] or "",
+                "createdBy": int(row[5]) if row[5] is not None else None,
+                "createdByName": row[6] or "",
+                "updatedAt": row[7].isoformat() if row[7] else None,
+                "baseRate": _to_float(row[8]),
+            }
+            for row in cursor.fetchall()
+        ]
+
+
+def set_operator_rate_override(db, operator_id, rate, date_from_value, date_to_value,
+                               created_by=None, note=None):
+    """Задать (или снять, если rate=None) подмену ставки на период.
+
+    Период приходит с витрины — это тот же отрезок, который открыт в разделе,
+    поэтому подмена и расчёт заведомо говорят про одни и те же дни.
+    """
+    try:
+        operator_id = int(operator_id)
+    except (TypeError, ValueError):
+        raise ValueError("operator_id должен быть числом")
+    date_from = _parse_override_date(date_from_value, "date_from")
+    date_to = _parse_override_date(date_to_value, "date_to")
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+
+    with db._get_cursor() as cursor:
+        cursor.execute(
+            "SELECT id, name, COALESCE(rate, 1.0), COALESCE(status, 'working') "
+            "FROM users WHERE id = %s", (operator_id,))
+        target = cursor.fetchone()
+        if not target:
+            raise ValueError("Оператор не найден")
+
+        if rate is None or rate == "":
+            # Снять подмену: строку удаляем, а не пишем в неё ставку из карточки —
+            # иначе последующая правка карточки молча разошлась бы с расчётом.
+            cursor.execute(
+                "DELETE FROM operator_rate_overrides "
+                "WHERE operator_id = %s AND valid_from = %s AND valid_to = %s",
+                (operator_id, date_from, date_to))
+            return {"operatorId": operator_id, "rate": None,
+                    "baseRate": _to_float(target[2]), "cleared": True}
+
+        rate_value = _to_float(rate)
+        if rate_value not in RESOURCE_RATE_VALUES:
+            allowed = ", ".join(str(item) for item in RESOURCE_RATE_VALUES)
+            raise ValueError(f"Ставка должна быть одной из: {allowed}")
+
+        cursor.execute(
+            """
+            INSERT INTO operator_rate_overrides
+                (operator_id, rate, valid_from, valid_to, note, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (operator_id, valid_from, valid_to) DO UPDATE
+               SET rate = EXCLUDED.rate,
+                   note = EXCLUDED.note,
+                   created_by = EXCLUDED.created_by,
+                   updated_at = CURRENT_TIMESTAMP
+            """,
+            (operator_id, rate_value, date_from, date_to, (note or None), created_by),
+        )
+        return {
+            "operatorId": operator_id,
+            "name": target[1],
+            "rate": rate_value,
+            "baseRate": _to_float(target[2]),
+            "validFrom": date_from.isoformat(),
+            "validTo": date_to.isoformat(),
+            "cleared": False,
+        }

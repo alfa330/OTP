@@ -1031,7 +1031,7 @@ def build_chat_forecast(db, week_start_value: Any = None,
         oldest = min(base_weeks)
         newest_end = max(base_weeks) + timedelta(days=6)
         hourly = _hourly_volume_tx(cursor, oldest, newest_end)
-        capacity_info = _chat_operator_capacity_tx(cursor)
+        capacity_info = _chat_operator_capacity_tx(cursor, period_start)
 
     # Ёмкости может не быть вовсе: ни одна цель по сервису не достижима. Объём чатов
     # при этом остаётся измеренным и считается как обычно, а всё, что делится на
@@ -1185,20 +1185,30 @@ def build_chat_forecast(db, week_start_value: Any = None,
     }
 
 
-def _chat_operator_capacity_tx(cursor) -> Dict[str, Any]:
-    """Текущий штат чат-направления по ставкам — аналог того, что линия берёт по своим."""
+def _chat_operator_capacity_tx(cursor, on_date: Optional[date] = None) -> Dict[str, Any]:
+    """Текущий штат чат-направления по ставкам — аналог того, что линия берёт по своим.
+
+    `on_date` — дата, на которую берётся ставка. Она важна: временная подмена
+    (operator_rate_overrides) действует окном, и штат «на следующую неделю» может
+    отличаться от штата «на сегодня». Без даты берём текущий день.
+
+    Ставка тут решает не только вес человека, но и попадёт ли он в расчёт вообще:
+    ниже стоит фильтр `rate not in CHAT_RATES`, и 0,5 уходит в off_scale целиком.
+    Поэтому подмена 0,50 → 0,75 добавляет человека в штат, а не четверть ставки.
+    """
     cursor.execute(
         """
-        SELECT COALESCE(u.rate, 1.0), COUNT(*)
+        SELECT operator_effective_rate(u.id, COALESCE(%s::date, CURRENT_DATE)) AS rate,
+               COUNT(*)
         FROM users u
         JOIN directions d ON d.id = u.direction_id
         WHERE u.role = 'operator'
           AND COALESCE(u.status, 'working') = 'working'
           AND d.name ILIKE %s
-        GROUP BY COALESCE(u.rate, 1.0)
+        GROUP BY 1
         ORDER BY 1 DESC
         """,
-        (CHAT_DIRECTION_NAME_PATTERN,),
+        (on_date, CHAT_DIRECTION_NAME_PATTERN,),
     )
     rows = cursor.fetchall() or []
     rate_capacity = []
@@ -1252,7 +1262,7 @@ def get_chat_schedule_inputs(db, period_start_value: Any) -> Dict[str, Any]:
     from resource_fte_service import _resource_work_shift_carry_in_tx
 
     with db._get_cursor() as cursor:
-        capacity_info = _chat_operator_capacity_tx(cursor)
+        capacity_info = _chat_operator_capacity_tx(cursor, period_start)
         direction_ids = _chat_direction_ids_tx(cursor)
         # Направление не нашлось (например, его переименовали) — переносить чужие
         # ночные смены нельзя: в график чата уехали бы люди всей компании.

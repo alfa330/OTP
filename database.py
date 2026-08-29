@@ -3437,6 +3437,67 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Временная ставка оператора на период — ТОЛЬКО для расчёта ресурсов и
+            # аукциона смен. Заводится решением владельца 29.08.2026: график на
+            # следующую неделю строится по ставкам, которых в карточках ещё нет
+            # (кадровые изменят их позже, обычным порядком).
+            #
+            # Почему отдельной таблицей, а не правкой users.rate: смена ставки в
+            # карточке (update_user, field == 'rate') замораживает прошлые месяцы в
+            # work_hours.rate прежним значением и якорит текущий месяц новым. Две
+            # правки «туда и обратно» за две недели оставили бы в помесячной ставке
+            # два следа, и вернуться к настоящей ставке уже нельзя было бы без
+            # ручной чистки work_hours. Здесь же подмена живёт своим слоем, сама
+            # истекает по valid_to и до денег не доходит вовсе.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS operator_rate_overrides (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    rate DECIMAL(3,2) NOT NULL CHECK (rate IN (1.00, 0.75, 0.50)),
+                    valid_from DATE NOT NULL,
+                    valid_to DATE NOT NULL,
+                    note TEXT NULL,
+                    created_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT operator_rate_overrides_window CHECK (valid_to >= valid_from)
+                );
+            """)
+            # Один оператор — одна подмена на один и тот же период: повторное
+            # сохранение обновляет строку, а не плодит вторую с другой ставкой.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_operator_rate_overrides_period
+                ON operator_rate_overrides(operator_id, valid_from, valid_to);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_operator_rate_overrides_window
+                ON operator_rate_overrides(valid_from, valid_to);
+            """)
+            # Ставка «на дату» одним выражением: мест чтения девять (расчёт
+            # ресурсов и аукцион), и повторять COALESCE-подзапрос в каждом — верный
+            # способ развести семантику. Функция STABLE, поэтому планировщик зовёт
+            # её один раз на строку.
+            #
+            # ВАЖНО: сюда НЕ должны ходить учёт часов и зарплата. Там своя ставка —
+            # помесячная work_hours.rate с переносом, а users.rate лишь запасной
+            # вариант. Если подменённое значение доедет до _freeze_month_to_snapshots_tx,
+            # оно станет в истории неотличимо от настоящей ставки.
+            cursor.execute("""
+                CREATE OR REPLACE FUNCTION operator_effective_rate(
+                    p_operator_id INTEGER, p_on_date DATE
+                ) RETURNS NUMERIC AS $$
+                    SELECT COALESCE(
+                        (SELECT o.rate
+                           FROM operator_rate_overrides o
+                          WHERE o.operator_id = p_operator_id
+                            AND p_on_date BETWEEN o.valid_from AND o.valid_to
+                          ORDER BY o.valid_from DESC, o.id DESC
+                          LIMIT 1),
+                        (SELECT u.rate FROM users u WHERE u.id = p_operator_id),
+                        1.0
+                    );
+                $$ LANGUAGE sql STABLE;
+            """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_shift_breaks_shift_id
                 ON shift_breaks(shift_id);
@@ -9719,13 +9780,18 @@ class Database:
                                                 direction_mode=SHIFT_AUCTION_MODE_LINE):
         mode = normalize_shift_auction_mode(direction_mode)
         scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
+        # Ставка участника — «на дату прогона», а не из карточки: временную подмену
+        # (operator_rate_overrides) обязаны видеть и норма часов, и режим «только
+        # своя ставка», и подпись в шапке. Иначе на соседних экранах у одного
+        # человека оказались бы две разные ставки.
+        rate_on_date = self._shift_auction_rate_on_date_tx(cursor, settings_row[6])
         cursor.execute(f"""
             SELECT
                 u.id,
                 u.name,
                 u.role,
                 u.status,
-                u.rate,
+                operator_effective_rate(u.id, COALESCE(%s::date, CURRENT_DATE)) AS rate,
                 u.direction_id,
                 d.name AS direction_name,
                 u.supervisor_id,
@@ -9741,7 +9807,7 @@ class Database:
               AND LOWER(COALESCE(u.role, '')) = 'operator'
               AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
             ORDER BY u.name
-        """, (mode, *scope_params))
+        """, (rate_on_date, mode, *scope_params))
         participant_rows = cursor.fetchall() or []
         self._cache_shift_auction_participant_ids(participant_rows, direction_mode=mode)
 
@@ -10306,6 +10372,28 @@ class Database:
             "can_restart": can_restart,
         }
 
+    def _shift_auction_rate_on_date_tx(self, cursor, plan_id):
+        """Дата, на которую аукцион берёт ставку оператора.
+
+        Это первый день периода выбранного плана: временная подмена ставки
+        (operator_rate_overrides) действует окном, и прогон должен целиком лежать
+        по одну его сторону. Иначе норма часов у человека менялась бы посреди
+        недели — в понедельник 30 ч, в четверг 20 ч.
+
+        Плана нет (аукцион ещё не привязан к периоду) — возвращаем None, и SQL
+        подставит CURRENT_DATE.
+        """
+        try:
+            plan_id = int(plan_id or 0)
+        except Exception:
+            plan_id = 0
+        if plan_id <= 0:
+            return None
+        cursor.execute(
+            "SELECT date_from FROM resource_saved_schedule_plans WHERE id = %s", (plan_id,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
     def _get_shift_auction_period_row_tx(self, cursor, plan_id, direction_mode=SHIFT_AUCTION_MODE_LINE):
         try:
             plan_id = int(plan_id or 0)
@@ -10534,7 +10622,17 @@ class Database:
                     u.name,
                     u.role,
                     u.status,
-                    u.rate,
+                    -- Та же ставка «на дату прогона», что видит оператор в аукционе.
+                    -- Иначе в настройках у человека 0,50, а у него самого 0,75 —
+                    -- ровно то расхождение между соседними экранами, из-за которого
+                    -- ставку и приходится объяснять.
+                    operator_effective_rate(u.id, COALESCE(
+                        (SELECT plan.date_from
+                           FROM shift_auction_test_access acc
+                           JOIN resource_saved_schedule_plans plan
+                             ON plan.id = acc.selected_schedule_plan_id
+                          WHERE acc.id = %s),
+                        CURRENT_DATE)) AS rate,
                     u.direction_id,
                     d.name AS direction_name,
                     u.supervisor_id,
@@ -10550,7 +10648,7 @@ class Database:
                   AND LOWER(COALESCE(u.role, '')) = 'operator'
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
                 ORDER BY u.name
-            """, (mode, *scope_params))
+            """, (settings_id, mode, *scope_params))
             participant_rows = cursor.fetchall() or []
             cursor.execute(
                 "SELECT COALESCE(rate_lock_enabled, FALSE) FROM shift_auction_test_access WHERE id = %s",
@@ -13664,11 +13762,19 @@ class Database:
                     s.finished_at,
                     EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
                     (
-                        SELECT COALESCE(rate, 1)
-                        FROM users
-                        WHERE id = %s
-                          AND LOWER(COALESCE(role, '')) = 'operator'
-                          AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
+                        -- Ставка «на дату прогона»: временная подмена
+                        -- (operator_rate_overrides) действует в аукционе, но не в
+                        -- учёте часов и ЗП. Дату берём из периода выбранного плана
+                        -- по корреляции с `s` — новых параметров не добавляется,
+                        -- а порядок %s в этом запросе трогать опасно.
+                        SELECT operator_effective_rate(u.id, COALESCE(
+                            (SELECT p.date_from FROM resource_saved_schedule_plans p
+                              WHERE p.id = s.selected_schedule_plan_id),
+                            CURRENT_DATE))
+                        FROM users u
+                        WHERE u.id = %s
+                          AND LOWER(COALESCE(u.role, '')) = 'operator'
+                          AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
                     ) AS operator_rate,
                     s.topup_started_at,
                     tg.starts_at AS group_starts_at,
@@ -14166,11 +14272,19 @@ class Database:
                     s.selected_schedule_plan_id,
                     EXISTS(SELECT 1 FROM shift_auction_test_participants WHERE operator_id = %s) AS is_participant,
                     (
-                        SELECT COALESCE(rate, 1)
-                        FROM users
-                        WHERE id = %s
-                          AND LOWER(COALESCE(role, '')) = 'operator'
-                          AND COALESCE(status, '') NOT IN ('fired', 'dismissal')
+                        -- Ставка «на дату прогона»: временная подмена
+                        -- (operator_rate_overrides) действует в аукционе, но не в
+                        -- учёте часов и ЗП. Дату берём из периода выбранного плана
+                        -- по корреляции с `s` — новых параметров не добавляется,
+                        -- а порядок %s в этом запросе трогать опасно.
+                        SELECT operator_effective_rate(u.id, COALESCE(
+                            (SELECT p.date_from FROM resource_saved_schedule_plans p
+                              WHERE p.id = s.selected_schedule_plan_id),
+                            CURRENT_DATE))
+                        FROM users u
+                        WHERE u.id = %s
+                          AND LOWER(COALESCE(u.role, '')) = 'operator'
+                          AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')
                     ) AS operator_rate,
                     tg.starts_at AS group_starts_at,
                     tg.ends_at AS group_ends_at,

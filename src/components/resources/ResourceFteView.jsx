@@ -762,7 +762,15 @@ const OperatorSummaryCard = ({
   );
 };
 
-const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast, isLoading = false, error = '' }) => {
+// Ставки, которые можно выбрать в «Деталях расчёта». Набор общий для обоих
+// направлений — 0,5 у чата в расчёт не идёт, но выбрать её надо уметь: именно
+// так человека со ставкой 0,5 возвращают в чат, поставив ему 0,75.
+const RATE_OVERRIDE_CHOICES = [1, 0.75, 0.5];
+
+const OperatorAvailabilityDetailsModal = ({
+  open, onClose, forecast, isLoading = false, error = '',
+  canEditRates = false, onRateChange, savingOperatorId = null,
+}) => {
   const details = Array.isArray(forecast?.periodOperatorAvailabilityDetails)
     ? forecast.periodOperatorAvailabilityDetails
     : [];
@@ -812,6 +820,13 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast, isLoading =
             ) : null}
             {error ? (
               <div className="mt-2 rounded-lg bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700">{error}</div>
+            ) : null}
+            {canEditRates ? (
+              <p className="mt-2 text-xs text-slate-500">
+                Ставку можно задать на этот период — она действует только в расчёте ресурсов
+                и в аукционе смен. В учёт часов и зарплату не попадает, и сама отпускает
+                за границей периода.
+              </p>
             ) : null}
           </div>
           <button
@@ -923,7 +938,36 @@ const OperatorAvailabilityDetailsModal = ({ open, onClose, forecast, isLoading =
                           {[operator.directionName, operator.supervisorName].filter(Boolean).join(' · ') || '-'}
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-right font-semibold text-slate-900">{formatNumber(operator.rate, 2)}</td>
+                      <td className="px-4 py-3 text-right">
+                        {canEditRates ? (
+                          <div className="flex flex-col items-end gap-1">
+                            <select
+                              value={String(operator.rate ?? '')}
+                              disabled={savingOperatorId === operator.operatorId}
+                              onChange={(event) => onRateChange?.(operator, event.target.value)}
+                              title="Ставка только для расчёта ресурсов и аукциона. В учёт часов и зарплату не идёт."
+                              className={`h-8 rounded-lg border bg-white px-2 text-sm font-semibold tabular-nums text-slate-900 transition focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50 ${
+                                operator.rateOverridden ? 'border-blue-400 ring-1 ring-blue-100' : 'border-slate-200'
+                              }`}
+                            >
+                              {RATE_OVERRIDE_CHOICES.map((value) => (
+                                <option key={value} value={String(value)}>{formatNumber(value, 2)}</option>
+                              ))}
+                            </select>
+                            {operator.rateOverridden ? (
+                              <button
+                                type="button"
+                                onClick={() => onRateChange?.(operator, '')}
+                                className="text-[11px] font-medium text-blue-700 transition hover:text-blue-900"
+                              >
+                                вернуть {formatNumber(operator.baseRate, 2)}
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <span className="font-semibold text-slate-900">{formatNumber(operator.rate, 2)}</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-right text-slate-700">
                         <b>{formatInt(operator.workingDays)}</b> / {formatInt(operator.totalDays)}
                       </td>
@@ -2797,6 +2841,7 @@ const ResourceFteView = ({
   const [chatsChartMode, setChatsChartMode] = useState('volume');
   const [isOperatorDetailsOpen, setIsOperatorDetailsOpen] = useState(false);
   const [operatorAvailabilityDetailsByKey, setOperatorAvailabilityDetailsByKey] = useState({});
+  const [savingRateOperatorId, setSavingRateOperatorId] = useState(null);
   const [isOperatorDetailsLoading, setIsOperatorDetailsLoading] = useState(false);
   const [operatorDetailsError, setOperatorDetailsError] = useState('');
   const userId = user?.id || '';
@@ -4011,6 +4056,41 @@ const ResourceFteView = ({
     fetchOperatorAvailabilityDetails();
   }, [fetchOperatorAvailabilityDetails]);
 
+  // Ставку на период меняет только админ: она двигает недельную норму часов в
+  // аукционе и состав по ставкам в расчёте. Роль проверяет и сервер — здесь мы
+  // лишь не показываем селектор тем, кому он всё равно ответит 403.
+  const canEditOperatorRates = ['admin', 'super_admin'].includes(String(user?.role || ''));
+
+  const handleOperatorRateChange = useCallback(async (operator, rawValue) => {
+    if (!apiRoot || !forecastPeriodStart || !forecastPeriodEnd) return;
+    const operatorId = Number(operator?.operatorId || 0);
+    if (!operatorId) return;
+    setSavingRateOperatorId(operatorId);
+    try {
+      await axios.post(`${apiRoot}${cfg.apiPrefix}/rate_overrides`, {
+        operator_id: operatorId,
+        // Пустая строка — «снять подмену»: сервер удалит строку, и человек
+        // вернётся к ставке из карточки.
+        rate: rawValue === '' ? null : Number(rawValue),
+        date_from: forecastPeriodStart,
+        date_to: forecastPeriodEnd,
+      }, { headers: buildHeaders() });
+      // Кеш доступности держит уже посчитанные ставки — без сброса окно
+      // показало бы прежнее число, и правка выглядела бы не применившейся.
+      setOperatorAvailabilityDetailsByKey({});
+      await fetchOperatorAvailabilityDetails();
+      await fetchOverview();
+      notify(rawValue === ''
+        ? `${operator?.name || 'Оператор'}: ставка вернулась к карточке`
+        : `${operator?.name || 'Оператор'}: ставка ${formatNumber(Number(rawValue), 2)} на период`, 'success');
+    } catch (requestError) {
+      notify(requestError?.response?.data?.error || 'Не удалось изменить ставку', 'error');
+    } finally {
+      setSavingRateOperatorId(null);
+    }
+  }, [apiRoot, buildHeaders, fetchOperatorAvailabilityDetails, fetchOverview,
+    forecastPeriodEnd, forecastPeriodStart, notify]);
+
   useEffect(() => {
     if (isOperatorDetailsOpen) fetchOperatorAvailabilityDetails();
   }, [fetchOperatorAvailabilityDetails, isOperatorDetailsOpen]);
@@ -4262,6 +4342,9 @@ const ResourceFteView = ({
         forecast={operatorDetailsForecast}
         isLoading={isOperatorDetailsLoading}
         error={operatorDetailsError}
+        canEditRates={canEditOperatorRates}
+        onRateChange={handleOperatorRateChange}
+        savingOperatorId={savingRateOperatorId}
       />
 
       <div className="space-y-6 p-4 md:p-6">
