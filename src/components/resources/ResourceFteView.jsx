@@ -686,8 +686,6 @@ const OperatorSummaryCard = ({
   onOpen,
   label = 'Операторы',
   fteWord = 'FTE',
-  excludedCount = 0,
-  excludedFte = 0,
 }) => {
   const requiredNumber = Number(requiredFte || 0);
   const requiredWithUpliftNumber = Number(requiredWithUplift ?? requiredFte ?? 0);
@@ -750,11 +748,12 @@ const OperatorSummaryCard = ({
         <span>Часть периода: {formatInt(partialCount)}</span>
         <span>Не работают: {formatInt(unavailableCount)}</span>
       </div>
-      {Number(excludedCount || 0) > 0 ? (
-        <div className="mt-2 text-xs text-amber-700 tabular-nums">
-          Вне ставок направления: {formatInt(excludedCount)} чел. ({formatSignedNumber(-Math.abs(Number(excludedFte || 0)), 2)})
-        </div>
-      ) : null}
+      {/* Здесь стояла жёлтая сноска про людей с чужой ставкой — снята по решению
+          владельца 29.08.2026. Она читалась как расхождение в карточках: рядом
+          «Сотрудники 20 / 20», а сноска говорила ещё про четверых. На деле это ставка
+          0,5, которой в чате не существует; эти люди не в расчёте и не в графике,
+          объяснять на витрине нечего. Теперь их нет и в «Деталях расчёта» — см.
+          restrictedAvailability и operatorDetailsForecast, — и числа сходятся молча. */}
       <div className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700">
         <Eye size={14} aria-hidden="true" />
         Детали расчета
@@ -1562,9 +1561,25 @@ const chatBillingReplyLabel = (item) => {
   return seconds === null ? '—' : formatDurationHms(seconds);
 };
 
-// Обе доли в чате «чем больше, тем лучше», поэтому и AR красится шкалой SL:
-// у линии AR — доля потерянных, у чата — доля отвеченных.
+// Единственная доля, которая у чата есть, — SL. AR («доля отвеченных») отсюда
+// убрана: решение владельца 29.08.2026 — «AR такого понятия на чатах нет, так как
+// все чаты тебе всё равно поступят». У линии AR меряет маршрутизацию: звонок может
+// не дойти до оператора и умереть в очереди. Обращение доходит ВСЕГДА и висит
+// открытым, пока не получит ответ, поэтому доля дошедших там тождественно равна
+// единице, а «доля отвеченных» — это не AR, а просто хвост неотвеченных, который
+// уже виден колонкой «Без ответа».
 const chatBillingShareClass = billingSlClass;
+
+// Колонки таблицы обязаны идти ровно в том же порядке, что ячейки
+// renderMetricsCells ниже: заголовки и тело собираются раздельно, и разъехавшийся
+// список молча сдвинет подписи. Колонки «AR» здесь нет — см. комментарий выше.
+const CHAT_BILLING_COLUMNS = [
+  { key: 'chats', label: 'Поступило' },
+  { key: 'answered', label: 'Обслужено' },
+  { key: 'no_reply', label: 'Без ответа' },
+  { key: 'first_reply', label: 'Ср. первый ответ' },
+  { key: 'sl', label: 'SL' },
+];
 
 const chatBillingRowKey = (item, mode) => (mode === 'operator'
   ? String(item.operator || '')
@@ -1744,17 +1759,25 @@ const CHAT_DIRECTION = {
     detailTitle: 'Детализация обращений',
     detailNote: 'Одна строка — одно обращение; «первый ответ» — время реакции оператора, «в цель» — попадание в порог.',
     emptyText: 'За выбранный период и окно времени обращений не нашлось.',
-    idleText: 'Выберите период и окно времени, затем нажмите «Сформировать» — обращения придут из базы.',
+    idleText: 'Отчёт соберётся сам. Чтобы сменить период или окно времени, задайте их сверху и нажмите «Сформировать».',
     summaryTitle: (mode) => (mode === 'operator'
       ? 'Итоги за период по чатникам'
       : 'Итоги за период по таксопаркам'),
     daySummary: (mode, day) => (mode === 'operator'
       ? `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. первый ответ ${chatBillingReplyLabel(day.totals)}`
-      : `Поступило ${formatInt(day.totals?.chats)} · Обслужено ${formatInt(day.totals?.answered)} · Потеряно ${formatInt(day.totals?.no_reply)}`),
-    modeHint: (mode, slSeconds) => (mode === 'detail'
-      ? 'Одна строка — одно обращение; на странице 25 строк'
-      : `SL — доля обращений, где первый ответ уложился в ≤ ${slSeconds} сек; AR — доля отвеченных`),
-    exportFileName: (mode, applied) => `chat_billing_${applied.from}_${applied.to}.xlsx`,
+      : `Поступило ${formatInt(day.totals?.chats)} · Обслужено ${formatInt(day.totals?.answered)} · Без ответа ${formatInt(day.totals?.no_reply)}`),
+    modeHint: (mode, slSeconds) => {
+      const sl = `SL — доля обращений, где первый ответ уложился в ≤ ${slSeconds} сек, от всех поступивших`;
+      if (mode === 'detail') return 'Одна строка — одно обращение; на странице 25 строк';
+      // «Поступило» в этом разрезе меньше, чем в «Таксопарках», и это не ошибка:
+      // ручка отбрасывает чаты без привязки к человеку (chat.py, WHERE … operator
+      // IS NOT NULL). Раньше расхождение висело на экране без единого слова.
+      if (mode === 'operator') return `${sl}. Считаются только обращения, привязанные к чатнику, поэтому «Поступило» здесь меньше, чем по таксопаркам`;
+      return sl;
+    },
+    // Разрез в имени файла: выгрузка теперь слушает mode, и три разных отчёта
+    // за один период не должны ложиться в папку под одним именем.
+    exportFileName: (mode, applied) => `chat_billing_${mode}_${applied.from}_${applied.to}.xlsx`,
   },
   ...CHAT_TELEPHONY_OFF,
   // Единственное исключение из набора выше: вкладка биллинга у чата своя — те же
@@ -1826,7 +1849,7 @@ const LINE_DIRECTION = {
     detailTitle: 'Детализация звонков',
     detailNote: 'IVR — не дошли до очереди; очередь — не дождались оператора; время разговора — только отвеченные звонки.',
     emptyText: 'Oktell не вернул входящих звонков за указанный период и окно времени.',
-    idleText: 'Выберите период и окно времени, затем нажмите «Сформировать» — данные придут напрямую из Oktell.',
+    idleText: 'Отчёт соберётся сам. Чтобы сменить период или окно времени, задайте их сверху и нажмите «Сформировать».',
     summaryTitle: (mode) => (mode === 'operator'
       ? 'Итоги за период по операторам'
       : mode === 'line' ? 'Итоги за период по номерам' : 'Итоги за период по таксопаркам'),
@@ -2462,15 +2485,20 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
           <tr>
             <th className="px-3 py-2.5 text-left font-semibold">Оператор</th>
             <th className="px-3 py-2.5 text-right font-semibold">Обслужено</th>
-            <th className="px-3 py-2.5 text-right font-semibold">АТТ</th>
-            <th className="px-3 py-2.5 text-right font-semibold">АНТ</th>
+            {/* Было «АТТ» и «АНТ» кириллицей — вторая ещё и искажала AHT: русская «Н»
+                выглядит как латинская «H», и сокращение читалось как несуществующее
+                слово. Рядом стоят латинские OCC и UTZ, так что кириллица тут просто
+                опечатка. Расшифровки повешены в title — без них четыре сокращения
+                подряд не читает никто, кроме их автора. */}
+            <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time — среднее время разговора">ATT</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Average Handling Time — разговор + удержание + постобработка">AHT</th>
             <th className="px-3 py-2.5 text-right font-semibold">Разговоры вх.</th>
             <th className="px-3 py-2.5 text-right font-semibold">Разговоры исх.</th>
             <th className="px-3 py-2.5 text-right font-semibold">Постобработка</th>
             <th className="px-3 py-2.5 text-right font-semibold">Ожидание</th>
             <th className="px-3 py-2.5 text-right font-semibold">Пауза</th>
-            <th className="px-3 py-2.5 text-right font-semibold">OCC</th>
-            <th className="px-3 py-2.5 text-right font-semibold">UTZ</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Occupancy — разговоры и обработка ко всему времени в системе">OCC</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Утилизация — время без пауз ко всему времени в системе">UTZ</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -3848,27 +3876,39 @@ const ResourceFteView = ({
   // ставки направления, включая 0,5, которой в чате нет. Из-за этого «Есть
   // сейчас» и «Доступно» показывали два разных числа про один штат.
   const availabilityBase = cfg.rates ? (operatorAvailabilityDetailsPayload || {}) : nextWeekForecast;
+  // Считаем по СПИСКУ людей, а не по готовой разбивке ставок: из него же потом
+  // живёт модальное окно, и общий источник — единственный способ не получить на
+  // карточке одно число, а в «Деталях расчёта» другое. Всё, что не 1 и не 0,75,
+  // отбрасывается здесь целиком: этих ставок в чате нет, они не в расчёте и не в
+  // графике, и объяснять их на витрине больше нечем — жёлтую сноску сняли.
   const restrictedAvailability = useMemo(() => {
     if (!cfg.rates) return null;
-    const rows = Array.isArray(operatorAvailabilityDetailsPayload?.periodAvailableOperatorRates)
-      ? operatorAvailabilityDetailsPayload.periodAvailableOperatorRates
+    const details = Array.isArray(operatorAvailabilityDetailsPayload?.periodOperatorAvailabilityDetails)
+      ? operatorAvailabilityDetailsPayload.periodOperatorAvailabilityDetails
       : [];
-    if (!rows.length) return null;
-    return rows.reduce((acc, row) => {
-      const rate = Number(row.rate || 0);
-      const count = Number(row.count || 0);
-      const fte = Number(row.fte ?? rate * count);
-      const totalCount = Number(row.total_count ?? count);
-      if (isChatRate(rate)) {
-        acc.fte += fte;
-        acc.count += count;
-        acc.totalCount += totalCount;
+    if (!details.length) return null;
+    const kept = details.filter((row) => isChatRate(row?.rate));
+    const acc = kept.reduce((sum, row) => {
+      if (row?.included) {
+        sum.count += 1;
+        sum.fte += Number(row.fteContribution ?? row.rate ?? 0);
+      } else if (Number(row?.workingDays || 0) > 0) {
+        // «Часть периода» — вышел не все дни, но выходил.
+        sum.partialCount += 1;
       } else {
-        acc.excludedFte += fte;
-        acc.excludedCount += count;
+        sum.unavailableCount += 1;
       }
-      return acc;
-    }, { fte: 0, count: 0, totalCount: 0, excludedFte: 0, excludedCount: 0 });
+      return sum;
+    }, { fte: 0, count: 0, partialCount: 0, unavailableCount: 0 });
+    return {
+      ...acc,
+      fte: Number(acc.fte.toFixed(4)),
+      totalCount: kept.length,
+      details: kept,
+      rates: (Array.isArray(operatorAvailabilityDetailsPayload?.periodAvailableOperatorRates)
+        ? operatorAvailabilityDetailsPayload.periodAvailableOperatorRates
+        : []).filter((item) => isChatRate(item?.rate)),
+    };
   }, [cfg.rates, operatorAvailabilityDetailsPayload]);
   const periodAvailableOperatorFte = restrictedAvailability
     ? restrictedAvailability.fte
@@ -3879,8 +3919,12 @@ const ResourceFteView = ({
   const periodOperatorCount = restrictedAvailability
     ? restrictedAvailability.totalCount
     : Number(availabilityBase.periodOperatorCount ?? periodAvailableOperatorCount);
-  const periodPartialOperatorCount = Number(availabilityBase.periodPartialOperatorCount ?? 0);
-  const periodUnavailableOperatorCount = Number(availabilityBase.periodUnavailableOperatorCount ?? 0);
+  const periodPartialOperatorCount = restrictedAvailability
+    ? restrictedAvailability.partialCount
+    : Number(availabilityBase.periodPartialOperatorCount ?? 0);
+  const periodUnavailableOperatorCount = restrictedAvailability
+    ? restrictedAvailability.unavailableCount
+    : Number(availabilityBase.periodUnavailableOperatorCount ?? 0);
   const periodAvailableOperatorFteGap = restrictedAvailability
     ? restrictedAvailability.fte - Number(nextWeekForecast.operatorsWithShrinkage || 0)
     : Number(
@@ -3892,16 +3936,18 @@ const ResourceFteView = ({
     const merged = operatorAvailabilityDetailsPayload
       ? { ...nextWeekForecast, ...operatorAvailabilityDetailsPayload }
       : nextWeekForecast;
-    if (!cfg.rates) return merged;
-    // Люди вне ставок направления помечаются незасчитанными — иначе сумма
-    // вкладов в модальном окне не сходилась бы с «Доступно» на карточке.
+    if (!cfg.rates || !restrictedAvailability) return merged;
+    // Раньше людей вне ставок направления лишь помечали незасчитанными: они
+    // оставались в списке и в разбивке по ставкам, и окно показывало 24 человека
+    // там, где карточка обещала 20. Теперь список и разбивка берутся из того же
+    // отфильтрованного набора, что и сама карточка, — сходится всё и без сносок.
     return {
       ...merged,
-      periodOperatorAvailabilityDetails: (Array.isArray(merged.periodOperatorAvailabilityDetails)
-        ? merged.periodOperatorAvailabilityDetails
-        : []).map((operator) => (
-        isChatRate(operator?.rate) ? operator : { ...operator, included: false, fteContribution: 0 }
-      )),
+      periodOperatorAvailabilityDetails: restrictedAvailability.details,
+      periodAvailableOperatorRates: restrictedAvailability.rates,
+      periodOperatorCount,
+      periodPartialOperatorCount,
+      periodUnavailableOperatorCount,
       periodAvailableOperatorFte,
       periodAvailableOperatorCount,
       periodAvailableOperatorFteGap,
@@ -3913,6 +3959,10 @@ const ResourceFteView = ({
     periodAvailableOperatorCount,
     periodAvailableOperatorFte,
     periodAvailableOperatorFteGap,
+    periodOperatorCount,
+    periodPartialOperatorCount,
+    periodUnavailableOperatorCount,
+    restrictedAvailability,
   ]);
 
   const fetchOperatorAvailabilityDetails = useCallback(async () => {
@@ -5275,7 +5325,7 @@ const ResourceFteView = ({
                   ) : billingMode === 'detail' ? (
                     <span>Одна строка — один звонок; на странице 25 звонков</span>
                   ) : (
-                    <span>SL — отвечено за ≤ {billingReport?.sl_threshold_seconds ?? 20} сек ожидания в очереди ко всем звонкам, попавшим в очередь</span>
+                    <span>SL — отвечено за ≤ {billingSlSeconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь</span>
                   )}
                   {billingRangeError ? <span className="font-semibold text-rose-600">{billingRangeError}</span> : null}
                 </div>
@@ -5302,23 +5352,25 @@ const ResourceFteView = ({
             ) && (
               <>
                 {billingMode !== 'detail' && (!cfg.hasBillingTalkTime ? (
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                  // Пять карточек, а не шесть: AR у чата нет (см. chatBillingShareClass).
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                     <StatCard icon={MessageSquare} label="Поступило" value={formatInt(billingTotals.chats)} hint="Обращения за период" tone="blue" />
                     <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.answered)} hint="Получили ответ оператора" tone="emerald" />
-                    <StatCard icon={ShieldAlert} label="Потеряно" value={formatInt(billingTotals.no_reply)} hint="Остались без ответа" tone="rose" />
+                    <StatCard
+                      icon={ShieldAlert}
+                      label="Без ответа"
+                      value={formatInt(billingTotals.no_reply)}
+                      // Не «Потеряно»: обращение никуда не девается, оно висит открытым,
+                      // пока клиент не получит ответ. Терять в чате нечего.
+                      hint="Ни одной реплики оператора"
+                      tone="rose"
+                    />
                     <StatCard
                       icon={Clock3}
                       label="Ср. первый ответ"
                       value={billingChatReplySeconds === null ? '—' : formatDurationHms(billingChatReplySeconds)}
-                      hint="Реакция на обращение"
+                      hint="По обращениям, где ответ был"
                       tone="slate"
-                    />
-                    <StatCard
-                      icon={Target}
-                      label="AR"
-                      value={billingChatArRatio === null ? '—' : formatPercent(billingChatArRatio, 1)}
-                      hint="Доля отвеченных обращений"
-                      tone={billingChatArRatio !== null && billingChatArRatio >= 0.9 ? 'emerald' : billingChatArRatio !== null && billingChatArRatio >= 0.75 ? 'amber' : 'rose'}
                     />
                     <StatCard
                       icon={TrendingUp}
@@ -5332,8 +5384,8 @@ const ResourceFteView = ({
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
                     <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.served)} hint="Входящие, отвеченные оператором" tone="emerald" />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_in_seconds)} hint={`Исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}`} tone="blue" />
-                    <StatCard icon={PhoneCall} label="АТТ" value={billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds)} hint="Ср. время разговора" tone="slate" />
-                    <StatCard icon={ListChecks} label="АНТ" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint="Разговор + удержание + постобработка" tone="slate" />
+                    <StatCard icon={PhoneCall} label="ATT" value={billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds)} hint="Ср. время разговора" tone="slate" />
+                    <StatCard icon={ListChecks} label="AHT" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint="Разговор + удержание + постобработка" tone="slate" />
                     <StatCard
                       icon={TrendingUp}
                       label="OCC"
@@ -5365,7 +5417,7 @@ const ResourceFteView = ({
                       icon={TrendingUp}
                       label="SL"
                       value={billingSlRatio === null ? '—' : formatPercent(billingSlRatio, 1)}
-                      hint={`Ответ за ≤ ${billingReport?.sl_threshold_seconds ?? 20} сек от поступивших`}
+                      hint={`Ответ за ≤ ${billingSlSeconds} сек от поступивших`}
                       tone={billingSlRatio !== null && billingSlRatio >= 0.8 ? 'emerald' : billingSlRatio !== null && billingSlRatio >= 0.6 ? 'amber' : 'rose'}
                     />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_seconds)} hint={`Общее время ${formatDurationHms(billingTotals.total_seconds)}`} tone="slate" />
@@ -5449,13 +5501,21 @@ const ResourceFteView = ({
                     <div className="space-y-3">
                       {billingDays.map((day) => {
                         const expanded = billingExpandedDays.has(day.date);
-                        const dayAr = billingMode === 'operator' ? null : cfg.hasBillingTalkTime
-                          ? safeRatio(day.totals?.lost, day.totals?.arrived)
-                          : safeRatio(day.totals?.answered, day.totals?.chats);
-                        const daySl = billingMode === 'operator' ? null : cfg.hasBillingTalkTime
+                        // Какие бейджи уместны в этом режиме и направлении:
+                        //   линия · «Операторы» → OCC;
+                        //   линия · остальное   → AR + SL;
+                        //   чат · любой режим   → только SL.
+                        // У чата нет ни AR (все обращения доходят), ни OCC — считать
+                        // занятость не из чего: времени разговора в чатовой модели нет,
+                        // и бейдж «OCC —» висел на каждом дне впустую.
+                        const showOccBadge = cfg.hasBillingTalkTime && billingMode === 'operator';
+                        const showArBadge = cfg.hasBillingTalkTime && billingMode !== 'operator';
+                        const showSlBadge = !cfg.hasBillingTalkTime || billingMode !== 'operator';
+                        const dayAr = showArBadge ? safeRatio(day.totals?.lost, day.totals?.arrived) : null;
+                        const daySl = !showSlBadge ? null : cfg.hasBillingTalkTime
                           ? safeRatio(day.totals?.served_sl, day.totals?.arrived)
                           : safeRatio(day.totals?.answered_sl, day.totals?.chats);
-                        const dayOcc = billingMode === 'operator' ? billingOperatorActivity(day.totals || {}).occ : null;
+                        const dayOcc = showOccBadge ? billingOperatorActivity(day.totals || {}).occ : null;
                         return (
                           <section key={day.date} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                             <button
@@ -5475,20 +5535,21 @@ const ResourceFteView = ({
                                 </div>
                               </div>
                               <div className="flex shrink-0 items-center gap-2">
-                                {billingMode === 'operator' ? (
+                                {showOccBadge ? (
                                   <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums text-slate-700 sm:inline">
                                     OCC {dayOcc === null ? '—' : formatPercent(dayOcc, 1)}
                                   </span>
-                                ) : (
-                                  <>
-                                    <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${cfg.billing.arClass(dayAr)}`}>
-                                      AR {dayAr === null ? '—' : formatPercent(dayAr, 1)}
-                                    </span>
-                                    <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingSlClass(daySl)}`}>
-                                      SL {daySl === null ? '—' : formatPercent(daySl, 1)}
-                                    </span>
-                                  </>
-                                )}
+                                ) : null}
+                                {showArBadge ? (
+                                  <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${cfg.billing.arClass(dayAr)}`}>
+                                    AR {dayAr === null ? '—' : formatPercent(dayAr, 1)}
+                                  </span>
+                                ) : null}
+                                {showSlBadge ? (
+                                  <span className={`hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold tabular-nums sm:inline ${billingSlClass(daySl)}`}>
+                                    SL {daySl === null ? '—' : formatPercent(daySl, 1)}
+                                  </span>
+                                ) : null}
                                 {expanded ? <ChevronUp size={17} className="text-slate-400" /> : <ChevronDown size={17} className="text-slate-400" />}
                               </div>
                             </button>
@@ -5992,8 +6053,6 @@ const ResourceFteView = ({
                         unavailableCount={periodUnavailableOperatorCount}
                         label={cfg.unit.operators}
                         fteWord={cfg.unit.fteWord}
-                        excludedCount={restrictedAvailability?.excludedCount || 0}
-                        excludedFte={restrictedAvailability?.excludedFte || 0}
                         onOpen={openOperatorDetails}
                       />
                     ) : null}

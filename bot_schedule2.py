@@ -90,8 +90,10 @@ from resource_fte_service import (
     update_resource_settings,
 )
 from resource_fte.chat import (
+    CHAT_BILLING_DETAIL_EXPORT_LIMIT,
     CHAT_BILLING_GROUP_BY,
     CHAT_BILLING_MAX_RANGE_DAYS,
+    CHAT_BILLING_PER_PAGE_LIMITS,
     CHAT_BILLING_SL_DEFAULT_SECONDS,
     CHAT_BILLING_SL_SECONDS_LIMITS,
     build_chat_forecast,
@@ -8190,10 +8192,22 @@ def _chat_billing_parse_request_args():
     if minute_to < minute_from:
         return None, jsonify({"error": "time_to должен быть не раньше time_from"}), 400
 
-    try:
-        sl_seconds = int(request.args.get('sl_seconds') or 60)
-    except (TypeError, ValueError):
-        return None, jsonify({"error": "sl_seconds должен быть целым числом"}), 400
+    # Порог «в цель» берём из настроек раздела, а не из литерала 60. Фронт
+    # sl_seconds не шлёт, и раньше биллинг всегда мерил по 60 сек, тогда как
+    # вкладка «Чаты» считала «в цель» по сохранённой цели первого ответа. Под
+    # одной и той же подписью на соседних вкладках стояли два разных числа.
+    requested_sl = request.args.get('sl_seconds')
+    if requested_sl in (None, ''):
+        try:
+            sl_seconds = int(get_chat_settings(db)['target_first_reply_seconds'])
+        except Exception:
+            logging.exception("Chat billing: не удалось прочитать цель первого ответа")
+            sl_seconds = CHAT_BILLING_SL_DEFAULT_SECONDS
+    else:
+        try:
+            sl_seconds = int(requested_sl)
+        except (TypeError, ValueError):
+            return None, jsonify({"error": "sl_seconds должен быть целым числом"}), 400
 
     return {
         **params,
@@ -8293,17 +8307,32 @@ def api_resource_fte_chat_billing_details():
     if params is None:
         return error_response, error_status
 
+    # Границу per_page держит модуль (CHAT_BILLING_PER_PAGE_LIMITS); здесь стояло
+    # своё «до 200», и запрошенное молча расходилось с полученным.
+    per_page_low, per_page_high = CHAT_BILLING_PER_PAGE_LIMITS
     try:
         page = max(1, int(request.args.get('page') or 1))
-        per_page = max(1, min(200, int(request.args.get('per_page') or 25)))
+        per_page = max(per_page_low, min(per_page_high, int(request.args.get('per_page') or 25)))
     except (TypeError, ValueError):
         return jsonify({"error": "page и per_page должны быть целыми числами"}), 400
+
+    # Снимок выборки. Витрина присылает его при каждом переходе по страницам,
+    # а ручка его не читала — и ночной синк Chat2Desk, дописывая свежие чаты
+    # между кликами, сдвигал уже просмотренные строки на следующую страницу.
+    raw_snapshot = request.args.get('snapshot_id')
+    snapshot_id = None
+    if raw_snapshot not in (None, ''):
+        try:
+            snapshot_id = int(raw_snapshot)
+        except (TypeError, ValueError):
+            return jsonify({"error": "snapshot_id должен быть целым числом"}), 400
 
     try:
         payload = get_chat_billing_details(
             db, params['start_day'], params['end_day'],
             minute_from=params['minute_from'], minute_to=params['minute_to'],
             sl_seconds=params['sl_seconds'], page=page, per_page=per_page,
+            snapshot_id=snapshot_id,
         )
         return jsonify({"status": "success",
                         **_chat_billing_response_meta(params),
@@ -8312,6 +8341,147 @@ def api_resource_fte_chat_billing_details():
         return jsonify({"error": str(error)}), 400
     except Exception as error:
         return _resource_fte_error_response(error)
+
+
+# Выгрузка биллинга чата. Показатели те же, что на экране, и в том же порядке —
+# файл должен читаться как снимок вкладки, иначе его нечем сверить.
+# «AR» здесь нет: у чата такого понятия не существует (все обращения доходят),
+# и «Потеряно» здесь тоже нет — есть «Без ответа».
+_CHAT_BILLING_EXPORT_PCT_FMT = '0.0%'
+
+_CHAT_BILLING_EXPORT_SUMMARY_COLUMNS = [
+    ('chats', 'Поступило', 12, None),
+    ('answered', 'Обслужено', 12, None),
+    ('no_reply', 'Без ответа', 12, None),
+    ('first_reply', 'Ср. первый ответ, с', 20, None),
+    ('sl', 'SL', 10, _CHAT_BILLING_EXPORT_PCT_FMT),
+]
+
+_CHAT_BILLING_EXPORT_DETAIL_COLUMNS = [
+    ('started_at', 'Дата и время', 20),
+    ('park', 'Таксопарк', 22),
+    ('client_number', 'Номер клиента', 16),
+    ('client', 'Клиент', 24),
+    ('operator', 'Чатник', 24),
+    ('first_reply_seconds', 'Первый ответ, с', 16),
+    ('answered_sl', 'В цель', 9),
+    ('incoming_messages', 'Сообщений от клиента', 21),
+    ('outgoing_messages', 'Сообщений от чатника', 21),
+]
+
+
+def _chat_billing_export_ratio(numerator, denominator):
+    try:
+        denominator = float(denominator or 0)
+        if denominator <= 0:
+            return None
+        return float(numerator or 0) / denominator
+    except Exception:
+        return None
+
+
+def _chat_billing_export_metrics(item):
+    """Пять значений строки в порядке _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS."""
+    item = item or {}
+    chats = item.get('chats') or 0
+    answered = item.get('answered') or 0
+    # Средний первый ответ делится на ОТВЕТИВШИХ, а не на все обращения: у чата
+    # без ответа времени реакции нет вовсе, и в среднее его класть нечем.
+    avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), answered)
+    return [
+        chats,
+        answered,
+        item.get('no_reply') or 0,
+        None if avg_first is None else round(avg_first, 1),
+        _chat_billing_export_ratio(item.get('answered_sl'), chats),
+    ]
+
+
+def _chat_billing_export_workbook(mode, params, report, rows):
+    """Книга под выбранный разрез: park/operator — итоги и дни, detail — строки."""
+    period_text = (
+        f"{params['start_day'].strftime('%d.%m.%Y')} — {params['end_day'].strftime('%d.%m.%Y')}, "
+        f"время {params['minute_from'] // 60:02d}:{params['minute_from'] % 60:02d}–"
+        f"{params['minute_to'] // 60:02d}:{params['minute_to'] % 60:02d}"
+    )
+    header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
+    header_font = Font(color='FFFFFF', bold=True)
+    bold_font = Font(bold=True)
+    workbook = Workbook()
+
+    def _head(ws, titles, widths, note):
+        ws.append([note])
+        ws.append([period_text])
+        ws.append([])
+        ws.append(titles)
+        for cell in ws[4]:
+            cell.fill = header_fill
+            cell.font = header_font
+        for index, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(index)].width = width
+
+    if mode == 'detail':
+        ws = workbook.active
+        ws.title = 'Обращения'
+        _head(ws,
+              [title for _, title, _ in _CHAT_BILLING_EXPORT_DETAIL_COLUMNS],
+              [width for _, _, width in _CHAT_BILLING_EXPORT_DETAIL_COLUMNS],
+              'Одна строка — одно обращение; «В цель» = 1, если первый ответ уложился в порог')
+        for row in rows or []:
+            ws.append([row.get(key) for key, _, _ in _CHAT_BILLING_EXPORT_DETAIL_COLUMNS])
+        if len(rows or []) >= CHAT_BILLING_DETAIL_EXPORT_LIMIT:
+            # Молча усечённый файл неотличим от полного — говорим об этом прямо.
+            ws.append([])
+            ws.append([f'Показаны первые {CHAT_BILLING_DETAIL_EXPORT_LIMIT} обращений '
+                       f'периода — выгрузка обрезана по потолку строк'])
+        return workbook
+
+    first_title = 'Чатник' if mode == 'operator' else 'Таксопарк'
+    rows_key = 'operators' if mode == 'operator' else 'parks'
+    row_label_key = 'operator' if mode == 'operator' else 'park'
+    titles = [first_title] + [title for _, title, _, _ in _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS]
+    widths = [28] + [width for _, _, width, _ in _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS]
+    note = (f"SL — доля обращений, где первый ответ уложился в ≤ {params['sl_seconds']} сек, "
+            f"от всех поступивших")
+
+    def _write(ws, item, label=None, bold=False):
+        values = ([label if label is not None else (item.get(row_label_key) or '—')]
+                  + _chat_billing_export_metrics(item))
+        ws.append(values)
+        for index, (_, _, _, fmt) in enumerate(
+                _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS, start=2):
+            if fmt:
+                ws.cell(row=ws.max_row, column=index).number_format = fmt
+        if bold:
+            for cell in ws[ws.max_row]:
+                cell.font = bold_font
+
+    ws = workbook.active
+    ws.title = 'Итого за период'
+    _head(ws, titles, widths, note)
+    for item in (report or {}).get(rows_key) or []:
+        _write(ws, item)
+    _write(ws, (report or {}).get('totals') or {}, label='Итого за период', bold=True)
+
+    ws_days = workbook.create_sheet('По дням')
+    _head(ws_days, ['Дата'] + titles, [12] + widths, note)
+    for day in (report or {}).get('days') or []:
+        day_label = day.get('date') or ''
+        for item in day.get(rows_key) or []:
+            ws_days.append([day_label,
+                            item.get(row_label_key) or '—',
+                            *_chat_billing_export_metrics(item)])
+            for index, (_, _, _, fmt) in enumerate(
+                    _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS, start=3):
+                if fmt:
+                    ws_days.cell(row=ws_days.max_row, column=index).number_format = fmt
+        ws_days.append([day_label, 'Итого за день', *_chat_billing_export_metrics(day.get('totals'))])
+        for index, (_, _, _, fmt) in enumerate(_CHAT_BILLING_EXPORT_SUMMARY_COLUMNS, start=3):
+            if fmt:
+                ws_days.cell(row=ws_days.max_row, column=index).number_format = fmt
+        for cell in ws_days[ws_days.max_row]:
+            cell.font = bold_font
+    return workbook
 
 
 @app.route('/api/resource_fte/chat/billing_export', methods=['GET', 'OPTIONS'])
@@ -8327,26 +8497,29 @@ def api_resource_fte_chat_billing_export():
     if params is None:
         return error_response, error_status
 
+    # Кнопка обещает «текущий разрез», поэтому выгрузка обязана слушать mode:
+    # раньше она при любом режиме отдавала построчную детализацию, и человек,
+    # смотревший на «Таксопарки», получал файл совсем другой формы.
+    mode = str(request.args.get('mode') or 'park').strip().lower()
+    if mode not in ('park', 'operator', 'detail'):
+        return jsonify({"error": "mode должен быть park, operator или detail"}), 400
+
     try:
-        rows = get_chat_billing_detail_export_rows(
-            db, params['start_day'], params['end_day'],
-            minute_from=params['minute_from'], minute_to=params['minute_to'],
-            sl_seconds=params['sl_seconds'],
-        )
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = 'Чаты'
-        headers = list(rows[0].keys()) if rows else [
-            'Дата', 'Час', 'Парк', 'Транспорт', 'Чатник', 'Первый ответ, с', 'В цель']
-        sheet.append(headers)
-        for cell in sheet[1]:
-            cell.font = Font(bold=True)
-        for row in rows:
-            sheet.append([row.get(key) for key in headers])
-        for index, header in enumerate(headers, start=1):
-            width = max(len(str(header)) + 2,
-                        *(len(str(row.get(header) or '')) + 2 for row in rows[:200]) or [12])
-            sheet.column_dimensions[get_column_letter(index)].width = min(40, width)
+        if mode == 'detail':
+            report = None
+            rows = get_chat_billing_detail_export_rows(
+                db, params['start_day'], params['end_day'],
+                minute_from=params['minute_from'], minute_to=params['minute_to'],
+                sl_seconds=params['sl_seconds'],
+            )
+        else:
+            rows = None
+            report = (get_chat_billing_operators if mode == 'operator' else get_chat_billing_report)(
+                db, params['start_day'], params['end_day'],
+                minute_from=params['minute_from'], minute_to=params['minute_to'],
+                sl_seconds=params['sl_seconds'],
+            )
+        workbook = _chat_billing_export_workbook(mode, params, report, rows)
         output = io.BytesIO()
         workbook.save(output)
         output.seek(0)
@@ -8357,7 +8530,7 @@ def api_resource_fte_chat_billing_export():
         return jsonify({"error": "Не удалось сформировать выгрузку биллинга чата"}), 500
 
     filename = (
-        "chat_billing_"
+        f"chat_billing_{mode}_"
         f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
     )
     return send_file(

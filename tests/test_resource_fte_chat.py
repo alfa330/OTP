@@ -432,6 +432,85 @@ class ChatSectionFrontendTests(unittest.TestCase):
                    "def get_chat_billing_details"):
             self.assertIn(fn, model, "расчёт биллинга чата удалять нельзя — он готов")
 
+    def test_chat_billing_table_declares_every_column_it_renders(self):
+        """Заголовки и ячейки таблицы биллинга чата собираются РАЗДЕЛЬНО.
+
+        Шапка идёт циклом по CHAT_BILLING_COLUMNS, тело — руками в renderMetricsCells.
+        Коммит 60f865a2 выкинул константу целиком (вместе с колонкой AR), а цикл по
+        ней оставил, и вкладка «Биллинг» у чата упала с ReferenceError в режимах
+        «Таксопарки» и «Чатники» — сборка такое не ловит, минификатор оставляет
+        необъявленное имя как есть. Сторожим и объявление, и совпадение длин.
+        """
+        source = _read(LINE_VIEW)
+        match = re.search(r"const CHAT_BILLING_COLUMNS = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match, "CHAT_BILLING_COLUMNS должна быть объявлена")
+        columns = re.findall(r"key: '([a-z_]+)'", match.group(1))
+        body = source[source.index("const ChatBillingTable = "):]
+        body = body[:body.index("const firstColumnLabel")]
+        self.assertEqual(len(columns), body.count("<td "),
+                         "число колонок в шапке разошлось с числом ячеек в строке")
+
+    def test_chat_has_no_answer_rate_anywhere(self):
+        """AR — телефонный показатель, у чата его нет.
+
+        Решение владельца 29.08.2026: «AR такого понятия на чатах нет, так как все
+        чаты тебе всё равно поступят». У линии AR меряет маршрутизацию — звонок
+        может умереть в очереди. Обращение доходит всегда и висит открытым, пока не
+        получит ответ, поэтому доля дошедших тождественно равна единице.
+        Сторожим исполняемый код чатовой области: в комментариях объяснять, почему
+        AR тут нет, можно и нужно.
+        """
+        chat_code = _executable(_chat_config_region(_read(LINE_VIEW)))
+        # По границам слова: «AR» сидит внутри CHART, и голая подстрока ловила
+        # CHAT_FORECAST_CHART_LEGEND_ITEMS вместо подписи показателя.
+        self.assertIsNone(re.search(r"\bAR\b", chat_code),
+                          "в подписях чата снова появился AR")
+        # «Потеряно» — тоже телефонное слово: в чате обращение не теряется.
+        self.assertNotIn("Потеряно", chat_code, "в чате обращения не «теряются»")
+
+    def test_chat_billing_threshold_comes_from_section_settings(self):
+        """Порог «в цель» в биллинге чата — сохранённая цель, а не литерал 60.
+
+        Витрина sl_seconds не шлёт, и раньше ручка подставляла 60 всегда, тогда как
+        вкладка «Чаты» считала «в цель» по target_first_reply_seconds. Под одной и
+        той же подписью на соседних вкладках стояли два разных числа.
+        """
+        backend = _read(BACKEND)
+        block = backend[backend.index("def _chat_billing_parse_request_args"):]
+        block = block[:block.index("def _chat_billing_response_meta")]
+        self.assertIn("get_chat_settings(db)['target_first_reply_seconds']", block)
+        self.assertNotIn("request.args.get('sl_seconds') or 60", block,
+                         "порог снова захардкожен литералом")
+
+    def test_chat_billing_export_follows_the_selected_mode(self):
+        """Кнопка обещает «текущий разрез» — выгрузка обязана слушать mode.
+
+        Раньше при любом режиме отдавалась построчная детализация, и человек,
+        смотревший на «Таксопарки», получал файл совсем другой формы. Заодно
+        сторожим русские заголовки: они собирались как list(rows[0].keys()), и в
+        файл уезжали сырые ключи словаря.
+        """
+        backend = _read(BACKEND)
+        block = backend[backend.index("def api_resource_fte_chat_billing_export"):]
+        block = block[:block.index("@app.route('/api/resource_fte/chat/day/")]
+        self.assertIn("mode not in ('park', 'operator', 'detail')", block)
+        self.assertIn("get_chat_billing_operators", block)
+        self.assertNotIn("list(rows[0].keys())", block,
+                         "заголовки Excel снова берутся из ключей словаря")
+
+    def test_chat_billing_details_route_keeps_the_snapshot(self):
+        """Снимок выборки должен доезжать до расчёта.
+
+        Витрина шлёт snapshot_id при каждом переходе по страницам, ручка его не
+        читала — и ночной синк Chat2Desk, дописывая свежие чаты между кликами,
+        сдвигал уже просмотренные строки на следующую страницу.
+        """
+        backend = _read(BACKEND)
+        block = backend[backend.index("def api_resource_fte_chat_billing_details"):]
+        block = block[:block.index("@app.route('/api/resource_fte/chat/billing_export'")]
+        self.assertIn("request.args.get('snapshot_id')", block)
+        self.assertIn("snapshot_id=snapshot_id", block)
+
     def test_saved_schedule_is_scoped_by_direction(self):
         """Планы линии и чата лежат в одной таблице — без фильтра они смешаются."""
         schema = _read(os.path.join(REPO_ROOT, "database.py"))
@@ -792,8 +871,18 @@ class ChatFrontendMetricsTests(unittest.TestCase):
         self.assertIn("rates: CHAT_RATE_VALUES,", chat_region)
         # Отбор идёт по объявленному набору, и только у направления со списком
         # ставок: у линии `rates: null`, и весь этот путь для неё выключен.
-        self.assertIn("isChatRate(rate)", line)
+        # Сверяем факт применения отбора, а не написание аргумента: раньше здесь
+        # стояла точная строка `isChatRate(rate)`, и переименование переменной
+        # роняло страж, ничего не сломав по существу.
+        # Отбор обязан применяться в ДВУХ местах: к списку людей (из него живёт и
+        # карточка, и окно «Детали расчёта») и к разбивке по ставкам. Если отфильтровать
+        # только одно, карточка снова разойдётся с окном — ровно та жалоба владельца,
+        # из-за которой убрали жёлтую сноску «Вне ставок направления».
+        self.assertIn("details.filter((row) => isChatRate(row?.rate))", line)
+        self.assertIn(".filter((item) => isChatRate(item?.rate))", line)
         self.assertIn("if (!cfg.rates) return null;", line)
+        self.assertNotIn("Вне ставок направления", line,
+                         "жёлтая сноска про чужие ставки убрана — возвращать её нельзя")
         line_region = line[line.index("const LINE_DIRECTION = {"):line.index("const DIRECTION_CONFIG = {")]
         self.assertIn("rates: null,", line_region)
 
