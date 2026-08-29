@@ -3318,7 +3318,7 @@ const ShiftAuctionShiftsTable = ({
   }, [lots]);
 
   const rows = useMemo(() => {
-    const sortedOperators = filterOperationalShiftAuctionOperators(operators).sort((a, b) => {
+    const sortedOperators = filterOperationalShiftAuctionOperators(operators, direction).sort((a, b) => {
       const dirCmp = String(a?.direction || '').localeCompare(String(b?.direction || ''), 'ru');
       if (dirCmp !== 0) return dirCmp;
       return String(a?.name || '').localeCompare(String(b?.name || ''), 'ru');
@@ -3329,7 +3329,7 @@ const ShiftAuctionShiftsTable = ({
         const workload = workloadById.get(opId) || {};
         return { operator: op, opId, workload };
       });
-  }, [operators, workloadById]);
+  }, [direction, operators, workloadById]);
 
   const getNormCellClass = (claimedMinutes, normMinutes) => {
     if (!normMinutes || normMinutes <= 0) return 'bg-slate-100 text-slate-500';
@@ -4141,6 +4141,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setJournalTotal(0);
     setViewSchedulePlanId('');
     setPeriodPreviewLots([]);
+    // Отмеченные участники — люди ДРУГОГО направления; оставить их значило бы
+    // показать чужой состав и отправить его на сохранение.
+    setSelectedIds(new Set());
+    setQuery('');
     setIsLoading(true);
   }, [direction]);
 
@@ -4655,9 +4659,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // экран чата продолжил бы слушать события линии.
   }, [apiRoot, canOpenStream, direction, user?.id]);
 
+  // Выбирать участников надо из людей СВОЕГО направления: в чат-аукционе — из
+  // чатников, а не из операторов линии (их сервер всё равно молча отбросит).
   const operatorOptions = useMemo(
-    () => normalizeShiftAuctionOperators(operators, settings.selected_operators),
-    [operators, settings.selected_operators]
+    () => normalizeShiftAuctionOperators(operators, settings.selected_operators, direction),
+    [direction, operators, settings.selected_operators]
   );
 
   const filteredOperators = useMemo(() => {
@@ -4737,10 +4743,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     );
     const liveParticipants = (Array.isArray(operators) ? operators : [])
       .filter((operator) => participantIds.has(normalizeOperatorId(operator?.id ?? operator?.operator_id)));
-    return normalizeShiftAuctionOperators(liveParticipants, monitoredOperators);
+    return normalizeShiftAuctionOperators(liveParticipants, monitoredOperators, direction);
   }, [monitoredOperators, operators]);
   const operationalMonitoredOperators = useMemo(
-    () => filterOperationalShiftAuctionOperators(resolvedMonitoredOperators),
+    () => filterOperationalShiftAuctionOperators(resolvedMonitoredOperators, direction),
     [resolvedMonitoredOperators]
   );
   const operationalMonitoredOperatorIds = useMemo(

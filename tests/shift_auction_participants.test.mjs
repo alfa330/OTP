@@ -109,3 +109,46 @@ test('snapshot hydrates only a clean draft and never crosses a pending save cuto
     snapshotUpdatedAt: '2026-07-30T12:00:00.123100',
   }), false);
 });
+
+test('в чат-аукционе выбирают из чатников, а не из операторов линии', () => {
+  // Список кандидатов один на оба направления (весь справочник сотрудников),
+  // поэтому без режима чат-аукцион показывал бы состав ЛИНИИ, а сервер потом
+  // молча отбрасывал выбранных — выбор выглядел бы сохранённым, но не работал.
+  const people = [
+    { id: 1, name: 'Линия', role: 'operator', status: 'working', direction: 'Основа' },
+    { id: 2, name: 'Чат', role: 'operator', status: 'working', direction: 'Чат менеджер' },
+    { id: 3, name: 'Чат Б/С', role: 'operator', status: 'bs', direction: ' чат менеджер ' },
+    { id: 4, name: 'ОП', role: 'operator', status: 'working', direction: 'Основа ОП' },
+    { id: 5, name: 'Уволен', role: 'operator', status: 'fired', direction: 'Чат менеджер' },
+  ];
+
+  const chat = normalizeShiftAuctionOperators(people, [], 'chat');
+  assert.deepEqual(chat.map((row) => row.id).sort(), [2, 3],
+    'в чате видны только чатники, включая временные статусы, но без уволенных');
+
+  const line = normalizeShiftAuctionOperators(people, [], 'line');
+  assert.deepEqual(line.map((row) => row.id), [1],
+    'на линии по-прежнему только «Основа» — «Основа ОП» не считается');
+
+  // Режим по умолчанию — линия: забытый аргумент не должен открывать чужой состав.
+  assert.deepEqual(normalizeShiftAuctionOperators(people).map((row) => row.id), [1]);
+  assert.deepEqual(normalizeShiftAuctionOperators(people, [], 'мусор').map((row) => row.id), [1]);
+});
+
+test('мониторинг и сетка смен считают своими тех же людей, что и селектор', () => {
+  const rows = [
+    { id: 1, direction: 'Основа', status: 'working' },
+    { id: 2, direction: 'Чат менеджер', status: 'working' },
+    { id: 3, direction: 'Чат менеджер', status: 'bs' },
+    { id: 4, direction: 'ТП чат', status: 'working' },
+  ];
+
+  assert.deepEqual(
+    filterOperationalShiftAuctionOperators(rows, 'chat').map((row) => row.id),
+    [2, 4],
+    'в строю у чата только работающие чатники');
+  assert.deepEqual(
+    filterOperationalShiftAuctionOperators(rows, 'line').map((row) => row.id),
+    [1]);
+  assert.deepEqual(filterOperationalShiftAuctionOperators(rows).map((row) => row.id), [1]);
+});

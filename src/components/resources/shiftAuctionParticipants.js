@@ -1,6 +1,11 @@
 import { normalizeRole } from '../../utils/roles.js';
 
 export const SHIFT_AUCTION_DIRECTION_NAME = 'основа';
+// У чата направление называется «Чат менеджер», но имена направлений в компании
+// дублируются, поэтому сверяем по вхождению — тем же шаблоном, что и сервер (%чат%).
+export const SHIFT_AUCTION_CHAT_DIRECTION_TOKEN = 'чат';
+export const SHIFT_AUCTION_MODE_LINE = 'line';
+export const SHIFT_AUCTION_MODE_CHAT = 'chat';
 
 const normalizeScopeText = (value) => (
   String(value || '')
@@ -14,9 +19,28 @@ export const normalizeShiftAuctionOperatorId = (value) => {
   return Number.isFinite(id) && id > 0 ? id : null;
 };
 
-export const isShiftAuctionDirection = (value) => (
-  normalizeScopeText(value) === SHIFT_AUCTION_DIRECTION_NAME
+export const normalizeShiftAuctionDirectionMode = (value) => (
+  normalizeScopeText(value) === SHIFT_AUCTION_MODE_CHAT
+    ? SHIFT_AUCTION_MODE_CHAT
+    : SHIFT_AUCTION_MODE_LINE
 );
+
+/**
+ * Принадлежит ли человек направлению ЭТОГО аукциона.
+ *
+ * Списки участников у линии и чата не пересекаются: в чат-аукционе выбирать надо
+ * из чатников, а не из операторов линии. Границу отдела здесь не проверить —
+ * в карточках, которые приходит на фронт, отдела нет; её держит сервер
+ * (shift_auction_direction_scope_sql: %чат% И dep.code = 'szov'), поэтому
+ * «ТП чат» отдела Тез сюда попасть может, а в аукцион — уже нет.
+ */
+export const isShiftAuctionDirection = (value, directionMode = SHIFT_AUCTION_MODE_LINE) => {
+  const name = normalizeScopeText(value);
+  if (normalizeShiftAuctionDirectionMode(directionMode) === SHIFT_AUCTION_MODE_CHAT) {
+    return name.includes(SHIFT_AUCTION_CHAT_DIRECTION_TOKEN);
+  }
+  return name === SHIFT_AUCTION_DIRECTION_NAME;
+};
 
 export const isDismissedShiftAuctionOperator = (value) => {
   const status = normalizeScopeText(value);
@@ -59,7 +83,11 @@ const mergeOperatorStatus = (previousStatus, nextStatus) => (
     : (previousStatus ?? nextStatus ?? '')
 );
 
-export const normalizeShiftAuctionOperators = (operators = [], selectedOperators = []) => {
+export const normalizeShiftAuctionOperators = (
+  operators = [],
+  selectedOperators = [],
+  directionMode = SHIFT_AUCTION_MODE_LINE,
+) => {
   const rows = new Map();
   const roleConflicts = new Set();
   // Snapshot and the App employee directory refresh independently. Display
@@ -108,18 +136,21 @@ export const normalizeShiftAuctionOperators = (operators = [], selectedOperators
   return Array.from(rows.values())
     // The selector intentionally keeps temporary non-working statuses such as
     // Б/С. Only dismissed employees are unavailable for future participation.
-    .filter((operator) => !operator.scope_conflict && isShiftAuctionDirection(operator.direction))
+    .filter((operator) => !operator.scope_conflict && isShiftAuctionDirection(operator.direction, directionMode))
     .filter((operator) => !isDismissedShiftAuctionOperator(operator.status))
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
 };
 
-export const filterOperationalShiftAuctionOperators = (operators = []) => (
+export const filterOperationalShiftAuctionOperators = (
+  operators = [],
+  directionMode = SHIFT_AUCTION_MODE_LINE,
+) => (
   (Array.isArray(operators) ? operators : [])
     .filter((operator) => (
       operator
       && operator.id != null
       && !operator.scope_conflict
-      && isShiftAuctionDirection(operator.direction ?? operator.direction_name)
+      && isShiftAuctionDirection(operator.direction ?? operator.direction_name, directionMode)
       && isActiveShiftAuctionOperator(operator)
     ))
 );

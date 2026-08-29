@@ -294,6 +294,35 @@ class ChatAuctionFrontendTests(unittest.TestCase):
         self.assertIn("supportsPartialClaim && !canMonitor && canUseAuction && canClaim", VIEW_SOURCE)
         self.assertIn("Добрать часы", VIEW_SOURCE)
 
+    def test_participant_picker_offers_only_the_direction_own_people(self):
+        """В чат-аукционе выбирают из ЧАТНИКОВ, а не из операторов линии.
+
+        Справочник сотрудников на фронте один на оба направления. Без передачи
+        направления селектор показывал бы состав линии, сервер молча отбрасывал бы
+        выбранных по своей границе — и выбор выглядел бы сохранённым, но не работал.
+        """
+        module = (ROOT / "src" / "components" / "resources" / "shiftAuctionParticipants.js").read_text(
+            encoding="utf-8")
+        self.assertIn("export const isShiftAuctionDirection = (value, directionMode", module)
+        self.assertIn("SHIFT_AUCTION_CHAT_DIRECTION_TOKEN", module)
+
+        # Направление доехало до всех трёх мест, где решается «свой ли это человек».
+        self.assertIn(
+            "normalizeShiftAuctionOperators(operators, settings.selected_operators, direction)",
+            VIEW_SOURCE)
+        self.assertIn(
+            "normalizeShiftAuctionOperators(liveParticipants, monitoredOperators, direction)",
+            VIEW_SOURCE)
+        self.assertIn(
+            "filterOperationalShiftAuctionOperators(resolvedMonitoredOperators, direction)",
+            VIEW_SOURCE)
+
+    def test_switching_direction_drops_the_previous_selection(self):
+        """Отмеченные — люди другого направления; оставить их = отправить чужой состав."""
+        start = VIEW_SOURCE.index("const handleSwitchDirection")
+        chunk = VIEW_SOURCE[start:VIEW_SOURCE.index("}, [direction]);", start)]
+        self.assertIn("setSelectedIds(new Set());", chunk)
+
     def test_partial_claims_count_as_my_shifts(self):
         """Часть смены не меняет lot.claimed_by — одного этого поля мало."""
         self.assertIn("const getMyAuctionClaimEntry = (lot, userId) =>", VIEW_SOURCE)
