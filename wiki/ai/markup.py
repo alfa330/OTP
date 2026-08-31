@@ -329,3 +329,206 @@ _HUMAN = {
     'card': 'карточек', 'steps': 'списков шагов', 'chips': 'списков чипов',
     'checks': 'списков с галочками',
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# КАРТИНКИ: РАЗМЕР И ВЫРАВНИВАНИЕ
+#
+# Второй набор «оформления», которым модель теперь распоряжается. Живёт здесь,
+# а не в authoring.py, по той же причине, что и наставление о блоках: словарь
+# оформления у статьи должен быть ОДИН, иначе он расходится по копиям.
+#
+# ЧТО БЫЛО ДО. Картинка вырезалась из статьи вместе с адресом и возвращалась
+# как <img src alt> — БЕЗ data-width и data-align. То есть автор ставил
+# скриншот на 60 % и прижимал вправо, просил ИИ «сократи», и картинка молча
+# возвращалась во всю ширину слева. Проверено прогоном на паре
+# protect_tables/restore_tables: из тега выживали ровно src и alt.
+#
+# ЕДИНИЦА — ПРОЦЕНТ от ширины колонки, диапазон 10–100. Это не наше решение,
+# а формат узла редактора (src/components/wiki/imageSize.js): статью читают и
+# с телефона, где колонка втрое уже, а у раздела вдобавок свой масштаб (zoom
+# на .wiki-scope), от которого пиксельные величины уезжают.
+#
+# СТИЛЬ СОБИРАЕТСЯ ЗДЕСЬ ЗАНОВО, а не переносится из тега. Свойства пишутся
+# по одному: сокращённое margin серверный санитайзер выбрасывает целиком — он
+# сверяет ИМЯ свойства с белым списком, а там только margin-left и
+# margin-right. Формула обязана совпадать с styleFor из imageSize.js, и за
+# этим следит отдельный тест: разойдись они — размер, выставленный ИИ, и
+# размер, выставленный человеком, дали бы разную вёрстку.
+# ─────────────────────────────────────────────────────────────────────────────
+
+IMAGE_MIN = 10
+IMAGE_MAX = 100
+IMAGE_ALIGNS = ('left', 'center', 'right')
+
+# Как выравнивание называется по-русски — и в маркере от модели, и в подсказке
+# для человека. Порядок важен: ищем вхождением, и «по центру» обязано
+# проверяться раньше «центр», иначе длинная форма никогда не сработает целиком.
+_ALIGN_WORDS = (
+    ('по центру', 'center'), ('center', 'center'), ('центру', 'center'),
+    ('центр', 'center'), ('посередине', 'center'),
+    ('слева', 'left'), ('влево', 'left'), ('left', 'left'),
+    ('справа', 'right'), ('вправо', 'right'), ('right', 'right'),
+)
+
+ALIGN_RU = {'left': 'слева', 'center': 'по центру', 'right': 'справа'}
+
+# Слова, которыми модель просит УБРАТЬ картинку. Отдельная команда нужна,
+# потому что просто выбросить маркер нельзя: потерянная картинка возвращается
+# в конец статьи отдельным разделом — правило «данные документа молча не
+# теряем» старше этой фичи и остаётся.
+# Только однозначные повеления. «Не нужна» и «без неё» отсюда убраны нарочно:
+# хвост маркера — свободный текст, и такая формулировка может оказаться в нём
+# как пояснение, а ценой ошибки будет ИСЧЕЗНУВШАЯ из статьи картинка.
+_REMOVE_WORDS = ('убрать', 'убери', 'удалить', 'удали', 'убрана', 'удалена')
+
+_IMAGE_SIZE_RE = re.compile(r'(\d{1,3})\s*%')
+_STYLE_WIDTH_RE = re.compile(r'(?:^|;)\s*width\s*:\s*([\d.]+)\s*%', re.I)
+
+
+def clamp_image_size(value):
+    """Ширина в процентах или None.
+
+    None — это «размер не задан», и оно НЕ равно 100 %. Подмени пустоту сотней,
+    и каждый мелкий значок растянулся бы на всю колонку, превратившись в мыло.
+    Та же оговорка стоит в clampSize из imageSize.js.
+    """
+    try:
+        number = float(str(value).strip().rstrip('%'))
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return int(min(IMAGE_MAX, max(IMAGE_MIN, round(number))))
+
+
+def image_align(value):
+    return value if value in IMAGE_ALIGNS else None
+
+
+def parse_image_controls(tail):
+    """Хвост маркера «[[КАРТИНКА-1 60% справа]]» → (ширина, выравнивание, убрать)."""
+    text = ' '.join(str(tail or '').lower().split())
+    if not text:
+        return None, None, False
+    remove = any(word in text for word in _REMOVE_WORDS)
+    found = _IMAGE_SIZE_RE.search(text)
+    size = clamp_image_size(found.group(1)) if found else None
+    align = None
+    for word, value in _ALIGN_WORDS:
+        if word in text:
+            align = value
+            break
+    return size, align, remove
+
+
+def image_style(size=None, align=None):
+    """Инлайновый стиль картинки — двойник styleFor из imageSize.js."""
+    parts = []
+    width = clamp_image_size(size)
+    if width:
+        parts.append('width: %d%%' % width)
+    if align == 'left':
+        parts.extend(['margin-left: 0', 'margin-right: auto'])
+    if align == 'center':
+        parts.extend(['margin-left: auto', 'margin-right: auto'])
+    if align == 'right':
+        parts.extend(['margin-left: auto', 'margin-right: 0'])
+    return '; '.join(parts)
+
+
+def _quote(value):
+    """Кавычки внутри значения атрибута сломали бы тег — убираем, как и раньше."""
+    return str(value or '').strip().replace('"', '')
+
+
+def image_tag(src, alt='', size=None, align=None):
+    """Собрать <img> с контролами. Размер живёт И в data-width, И в style.
+
+    Дублирование намеренное и взято у узла редактора: по data-width он
+    восстанавливает состояние при следующем открытии статьи, а style рисует
+    картинку читателю. Оставь одно — и либо размер не виден, либо не
+    редактируется.
+    """
+    size = clamp_image_size(size)
+    align = image_align(align)
+    out = ['<img src="%s"' % _quote(src)]
+    alt = _quote(alt)
+    if alt:
+        out.append(' alt="%s"' % alt)
+    if size:
+        out.append(' data-width="%d"' % size)
+    if align:
+        out.append(' data-align="%s"' % align)
+    style = image_style(size, align)
+    if style:
+        out.append(' style="%s"' % style)
+    out.append('>')
+    return ''.join(out)
+
+
+def read_image_controls(tag):
+    """Ширина и выравнивание уже стоящей картинки (узел bs4).
+
+    Ширина читается и из data-width, и из процента в style — ровно как в
+    sizeFromElement: атрибут может выпасть из белого списка санитайзера, и
+    тогда размер уцелеет в стиле, а не пропадёт молча.
+    """
+    size = clamp_image_size(tag.get('data-width'))
+    if not size:
+        found = _STYLE_WIDTH_RE.search(str(tag.get('style') or ''))
+        size = clamp_image_size(found.group(1)) if found else None
+    return size, image_align(str(tag.get('data-align') or '').strip() or None)
+
+
+def read_image(html):
+    """Разобрать сохранённый тег картинки → (src, alt, ширина, выравнивание)."""
+    from bs4 import BeautifulSoup
+    tag = BeautifulSoup(str(html or ''), 'html.parser').find('img')
+    if tag is None:
+        return '', '', None, None
+    size, align = read_image_controls(tag)
+    return (str(tag.get('src') or ''), str(tag.get('alt') or ''), size, align)
+
+
+def retag_image(html, size=None, align=None):
+    """Пересобрать картинку с новыми контролами.
+
+    Пустое значение означает «оставить как было»: маркер без хвоста не должен
+    сбрасывать размер, который выставил человек.
+    """
+    src, alt, current_size, current_align = read_image(html)
+    if not src:
+        return str(html or '')
+    return image_tag(src, alt,
+                     clamp_image_size(size) or current_size,
+                     image_align(align) or current_align)
+
+
+IMAGE_GUIDE = """
+КАРТИНКИ И ИХ РАЗМЕР
+Картинки вырезаны и заменены маркерами [[КАРТИНКА-1]]. Маркер — это сама
+картинка: перенеси его дословно, отдельным абзацем, туда, где он нужен по
+смыслу. Номера не меняй и не выдумывай.
+
+У картинки два контрола, и ты вправе ими пользоваться. Пиши их в самом
+маркере, после номера:
+[[КАРТИНКА-1 60%]]          ширина в процентах от колонки, от 10 до 100
+[[КАРТИНКА-1 по центру]]    выравнивание: слева, по центру, справа
+[[КАРТИНКА-1 45% справа]]   и то и другое
+[[КАРТИНКА-1]]              оставить как есть
+
+КАК ВЫБИРАТЬ РАЗМЕР
+Снимок экрана целиком — 100 % (и это же значение по умолчанию).
+Часть экрана, кнопка, значок, QR-код — 30–50 % и по центру: растянутый мелкий
+элемент превращается в мыло.
+Вертикальный снимок телефона — не шире 45 %, иначе он занимает экран целиком
+и текст статьи приходится искать под ним.
+Две картинки, которые читатель сравнивает между собой, — одинаковой ширины.
+Если у картинки размер УЖЕ задан, не трогай его без причины: его выставил
+человек, и [[КАРТИНКА-1]] без хвоста его сохраняет.
+
+УБРАТЬ КАРТИНКУ можно только по прямому указанию и только так:
+[[КАРТИНКА-1 убрать]]. Просто выбросить маркер нельзя — картинка вернётся в
+конец статьи отдельным разделом.
+"""

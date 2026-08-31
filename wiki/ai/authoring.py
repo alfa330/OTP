@@ -58,7 +58,11 @@ _TABLE_TOKEN_RE = re.compile(r'\[{1,2}\s*ТАБЛИЦА[\s-]*(\d+)\s*\]{1,2}', r
 # Без маркера скриншот инструкции исчезал бы молча: файл в бакете лежит и место
 # занимает, а в статье его нет.
 IMAGE_TOKEN = '[[КАРТИНКА-%d]]'
-_IMAGE_TOKEN_RE = re.compile(r'\[{1,2}\s*КАРТИНКА[\s-]*(\d+)\s*\]{1,2}', re.I)
+# Хвост после номера — контролы картинки: «[[КАРТИНКА-1 60% справа]]».
+# Раньше на его месте стояло \s*, то есть маркер с чем угодно внутри скобок
+# просто не находился и уезжал в статью текстом, а картинка — в конец под
+# заголовок «не размещённое по разделам».
+_IMAGE_TOKEN_RE = re.compile(r'\[{1,2}\s*КАРТИНКА[\s-]*(\d+)([^\]]*)\]{1,2}', re.I)
 
 # Теги, которые модели разрешено принести в теле статьи. Список узкий намеренно:
 # из него нельзя собрать ни оформительский мусор, ни вложенные контейнеры.
@@ -193,8 +197,14 @@ def protect_tables(html):
         if not src:
             image.decompose()
             continue
-        alt = str(image.get('alt') or '').strip().replace('"', '')
-        images.append('<img src="%s"%s>' % (src, (' alt="%s"' % alt) if alt else ''))
+        # Размер и выравнивание УЕЗЖАЮТ ВМЕСТЕ С КАРТИНКОЙ.
+        #
+        # До этого из тега выживали ровно src и alt, и любая правка статьи
+        # через ИИ сбрасывала оформление: автор поставил скриншот на 60 % и
+        # прижал вправо, попросил «сократи» — картинка вернулась во всю
+        # ширину слева. Молча: ни предупреждения, ни строки в изменениях.
+        size, align = markup.read_image_controls(image)
+        images.append(markup.image_tag(src, image.get('alt'), size, align))
         marker = soup.new_tag('p')
         marker.string = IMAGE_TOKEN % len(images)
         image.replace_with(marker)
@@ -401,10 +411,16 @@ def restore_tables(html, tables, images=()):
 
     def substitute_image(match):
         index = int(match.group(1))
-        if 1 <= index <= len(images):
-            used_images.add(index)
-            return images[index - 1]
-        return ''
+        if not 1 <= index <= len(images):
+            return ''        # номер, которого не было — маркер просто убираем
+        used_images.add(index)
+        size, align, remove = markup.parse_image_controls(match.group(2))
+        # «Убрать» — единственный способ избавиться от картинки, и он ЯВНЫЙ.
+        # Картинка при этом считается размещённой: иначе она вернулась бы в
+        # конец статьи, то есть указание «убери снимок» не выполнилось бы.
+        if remove:
+            return ''
+        return markup.retag_image(images[index - 1], size, align)
 
     text = _TABLE_TOKEN_RE.sub(substitute, text)
     text = _IMAGE_TOKEN_RE.sub(substitute_image, text)
@@ -423,6 +439,13 @@ def restore_tables(html, tables, images=()):
             if _EMPTY_TEXT.match(parent.get_text('', strip=False) or ''):
                 parent.decompose()
 
+    # Абзац, в котором стоял только маркер убранной картинки, остаётся пустым.
+    # canonicalize такие уже вычистил, но он отработал ДО подстановки, и эта
+    # дыра появилась после него.
+    for para in soup.find_all('p'):
+        if not para.find(('img', 'table', 'br')) and not para.get_text(strip=True):
+            para.decompose()
+
     lost = [i for i in range(1, len(tables) + 1) if i not in used]
     lost_images = [i for i in range(1, len(images) + 1) if i not in used_images]
     if lost or lost_images:
@@ -431,6 +454,53 @@ def restore_tables(html, tables, images=()):
         tail += ['<p>%s</p>' % images[index - 1] for index in lost_images]
         soup.append(BeautifulSoup(''.join(tail), 'html.parser'))
     return str(soup).strip(), lost
+
+
+def removed_images(html):
+    """Номера картинок, которые модель убрала ЯВНО, маркером «убрать».
+
+    Считается по ОТВЕТУ МОДЕЛИ, до подстановки: после неё маркера уже нет, а
+    отличить «убрал по указанию» от «потерял» будет нечем. Убранная картинка —
+    это не ошибка, но и не мелочь: файл остаётся в бакете, а из статьи
+    пропадает иллюстрация, поэтому автору об этом говорят.
+    """
+    out = []
+    for match in _IMAGE_TOKEN_RE.finditer(str(html or '')):
+        if markup.parse_image_controls(match.group(2))[2]:
+            out.append(int(match.group(1)))
+    return out
+
+
+def image_hints(images):
+    """Подсказка к маркерам картинок: номер, подпись и текущий размер.
+
+    Без текущего размера правило «не трогай то, что выставил человек» модели
+    не выполнить — она не видит ни тега, ни его атрибутов.
+    """
+    rows = []
+    for index, html in enumerate(images or (), start=1):
+        _src, alt, size, align = markup.read_image(html)
+        state = []
+        if size:
+            state.append('%d %%' % size)
+        if align:
+            state.append(markup.ALIGN_RU[align])
+        rows.append('%s — %s (%s)'
+                    % (IMAGE_TOKEN % index, alt.strip() or 'без подписи',
+                       ', '.join(state) if state else 'размер не задан'))
+    return '\n'.join(rows)
+
+
+def images_block(images):
+    """Наставление о картинках плюс список того, что есть в статье.
+
+    Подставляется в ЗАПРОС, а не в системный промпт: там оно доставалось бы и
+    ветке, где модель читает файл сама и никаких маркеров не существует, —
+    то есть учило бы синтаксису, которым нельзя воспользоваться.
+    """
+    if not images:
+        return ''
+    return markup.IMAGE_GUIDE.strip() + '\n\nКАРТИНКИ:\n' + image_hints(images)
 
 
 _TRUNCATED = ('max_tokens', 'maxtokens', 'length')
@@ -551,12 +621,9 @@ def build_user_prompt(*, filename, kind, body_html, tables, images=(), links=())
     if hints:
         parts.append('ТАБЛИЦЫ, ВЫРЕЗАННЫЕ ИЗ ДОКУМЕНТА (переносить маркерами '
                      'дословно, содержимое не пересказывать):\n' + hints)
-    if images:
-        parts.append('КАРТИНОК В ДОКУМЕНТЕ: %d. Их маркеры (%s) тоже перенеси '
-                     'дословно, каждый на своём месте по смыслу.'
-                     % (len(images),
-                        ', '.join(IMAGE_TOKEN % i
-                                  for i in range(1, len(images) + 1))))
+    block_images = images_block(images)
+    if block_images:
+        parts.append(block_images)
     block = links_block(links)
     if block:
         parts.append(block)

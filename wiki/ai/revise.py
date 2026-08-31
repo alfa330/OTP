@@ -42,9 +42,9 @@ from .answer import ungrounded_numbers
 from . import markup
 from . import tablepatch
 from .authoring import (MAX_OUTPUT_TOKENS, append_links, canonicalize,
-                        links_block, missing_links, protect_tables,
-                        restore_tables, structure_warnings, table_hints,
-                        truncation_warning)
+                        images_block, links_block, missing_links,
+                        protect_tables, removed_images, restore_tables,
+                        structure_warnings, table_hints, truncation_warning)
 from ..sanitize import sanitize_html, to_plain_text
 
 _CHANGES_RE = re.compile(r'^[ \t]*ИЗМЕНЕНИЯ[ \t]*:[ \t]*\r?\n?(.*?)(?=^[ \t]*(?:ВОПРОСЫ|СТАТЬЯ)[ \t]*:|\Z)',
@@ -78,7 +78,9 @@ h5 и глубже, обёртка ```html, пояснения вне трёх �
 1. Маркеры [[ТАБЛИЦА-N]] и [[КАРТИНКА-N]] переноси ДОСЛОВНО, каждый отдельным
    абзацем. Не пересказывай содержимое таблицы словами и не меняй номер. Данные
    внутри таблицы меняй ТОЛЬКО через блок «ПРАВКИ ТАБЛИЦ» — не приписывай рядом
-   вторую таблицу с новыми значениями и не дублируй строки текстом.
+   вторую таблицу с новыми значениями и не дублируй строки текстом. У маркера
+   картинки менять можно ХВОСТ — её размер и выравнивание (см. «КАРТИНКИ И ИХ
+   РАЗМЕР» в запросе); номер остаётся прежним.
 2. Не удаляй разделы и факты, которых документ не касается. Ты правишь статью, а
    не пишешь её заново.
 3. Числа, суммы, сроки, названия и ссылки — дословно из статьи или документа.
@@ -115,7 +117,10 @@ FILE_EXTRA = """
 """
 
 
-_MARKER_RE = re.compile(r'\[\[(ТАБЛИЦА|КАРТИНКА)-(\d+)\]\]', re.I)
+# Хвост в маркере картинки ([[КАРТИНКА-1 60% справа]]) — это её контролы.
+# Без него в шаблоне маркер с контролами не опознавался: в списке изменений
+# он утекал наружу как есть, а при сдвиге номеров оставался со старым.
+_MARKER_RE = re.compile(r'\[\[(ТАБЛИЦА|КАРТИНКА)-(\d+)([^\]]*)\]\]', re.I)
 
 
 def humanize(line):
@@ -208,8 +213,9 @@ def _prepare(current_html, document_html):
             def renumber(match):
                 kind, number = match.group(1).upper(), int(match.group(2))
                 base = shift if kind == 'ТАБЛИЦА' else image_shift
-                return '[[%s-%d]]' % (kind, number + base)
-            doc_body = re.sub(r'\[\[(ТАБЛИЦА|КАРТИНКА)-(\d+)\]\]', renumber, doc_body)
+                # Хвост переносится как есть: номер сдвигается, контролы нет.
+                return '[[%s-%d%s]]' % (kind, number + base, match.group(3))
+            doc_body = _MARKER_RE.sub(renumber, doc_body)
     return body, doc_body, tables + doc_tables, images + doc_images
 
 
@@ -237,6 +243,9 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
                                  'проверьте таблицы вручную'
                                  % '; '.join(rejected[:3]))
 
+    # Считаем ДО подстановки: после неё маркера уже нет, и отличить «убрал по
+    # указанию» от «потерял» будет нечем.
+    dropped = removed_images(body)
     body = canonicalize(body)
     body, lost = restore_tables(body, tables, images)
     clean = sanitize_html(body)
@@ -269,6 +278,13 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
             % (len(lost_links),
                ', '.join((item.get('label') or item['url'])[:40]
                          for item in lost_links[:3])))
+    if dropped:
+        # Не ошибка, но и не мелочь: из статьи пропала иллюстрация, а файл
+        # остался в бакете. Убрать картинку модель может только по прямому
+        # указанию, и автор должен видеть, что указание сработало.
+        warnings.append('ИИ убрал %s (%s) — так и было задумано?'
+                        % ('картинку' if len(dropped) == 1 else 'картинки',
+                           ', '.join('№%d' % number for number in dropped)))
     if not changes:
         warnings.append('ИИ не перечислил изменения — сверьте текст сами')
 
@@ -293,6 +309,9 @@ def update_from_document(*, current_title, current_html, document_html='',
     if grid:
         header += ('\n\nСОДЕРЖИМОЕ ТАБЛИЦ СТАТЬИ (править только через '
                    '«ПРАВКИ ТАБЛИЦ»):\n' + grid)
+    pictures = images_block(images)
+    if pictures:
+        header += '\n\n' + pictures
 
     # Ссылки нового документа. Для PDF это единственный способ их получить:
     # адрес там в аннотации, а не в тексте (см. importer.pdf_links).
@@ -334,6 +353,9 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
     if grid:
         prompt += ('\n\nСОДЕРЖИМОЕ ТАБЛИЦ (править только через «ПРАВКИ ТАБЛИЦ»):\n'
                    + grid)
+    pictures = images_block(images)
+    if pictures:
+        prompt += '\n\n' + pictures
     prompt += '\n\nУКАЗАНИЕ РЕДАКТОРА:\n' + instruction
 
     text, meta = generate_fn(EDIT_PROMPT, prompt, max_tokens=MAX_OUTPUT_TOKENS)

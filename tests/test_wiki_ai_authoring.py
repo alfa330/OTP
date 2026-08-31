@@ -182,11 +182,33 @@ class ImageProtectionTest(unittest.TestCase):
         self.assertIn('не размещённое по разделам', restored)
 
     def test_prompt_mentions_image_markers(self):
+        """Запрос называет маркер и перечисляет картинки поимённо.
+
+        Строка «КАРТИНОК В ДОКУМЕНТЕ: N» заменена наставлением с перечнем
+        (31.08.2026): счётчик отвечал только на вопрос «сколько», а модели
+        нужно знать, ЧТО за каждым номером и какой у него сейчас размер —
+        иначе правило «не трогай то, что выставил человек» ей не выполнить.
+        """
+        prompt = authoring.build_user_prompt(
+            filename='a.docx', kind='Word', body_html='<p>[[КАРТИНКА-1]]</p>',
+            tables=[], images=['<img src="/api/wiki/file/abc" alt="Экран">'])
+        self.assertIn('[[КАРТИНКА-1]]', prompt)
+        self.assertIn('КАРТИНКИ:', prompt)
+        self.assertIn('Экран (размер не задан)', prompt)
+
+    def test_prompt_teaches_the_image_controls(self):
+        """Размер и выравнивание — контролы картинки, и модель ими управляет."""
         prompt = authoring.build_user_prompt(
             filename='a.docx', kind='Word', body_html='<p>[[КАРТИНКА-1]]</p>',
             tables=[], images=['<img src="/api/wiki/file/abc">'])
-        self.assertIn('[[КАРТИНКА-1]]', prompt)
-        self.assertIn('КАРТИНОК В ДОКУМЕНТЕ: 1', prompt)
+        self.assertIn('[[КАРТИНКА-1 45% справа]]', prompt)
+
+    def test_prompt_without_images_says_nothing_about_them(self):
+        """Наставление о маркерах бессмысленно там, где картинок нет."""
+        prompt = authoring.build_user_prompt(
+            filename='a.docx', kind='Word', body_html='<p>Текст</p>',
+            tables=[], images=[])
+        self.assertNotIn('КАРТИНК', prompt)
 
 
 class CanonTest(unittest.TestCase):

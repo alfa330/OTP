@@ -588,3 +588,217 @@ class LeadAndTitleTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# КАРТИНКИ: РАЗМЕР И ВЫРАВНИВАНИЕ
+# ─────────────────────────────────────────────────────────────────────────────
+IMAGE_SIZE_JS = (WIKI_SRC / 'imageSize.js').read_text(encoding='utf-8')
+
+# Картинка ровно в том виде, в каком её пишет узел редактора: размер и в
+# data-width, и в style. Дублирование намеренное — по атрибуту редактор
+# восстанавливает состояние узла, стилем картинка рисуется читателю.
+SIZED_IMAGE = ('<img src="/api/wiki/file/screen.webp" alt="Экран съёмки" '
+               'data-width="60" data-align="right" '
+               'style="width: 60%; margin-left: auto; margin-right: 0">')
+
+
+class ImageControlsSurviveTest(unittest.TestCase):
+    """Размер, выставленный ЧЕЛОВЕКОМ, не должен сбрасываться правкой через ИИ.
+
+    Так и было до 31.08.2026: protect_tables вырезал из тега ровно src и alt,
+    и автор, поставивший скриншот на 60 % и прижавший вправо, после любого
+    «сократи» получал его во всю ширину слева. Молча — ни предупреждения, ни
+    строки в списке изменений.
+    """
+
+    def test_size_and_align_survive_the_round_trip(self):
+        body, tables, images = authoring.protect_tables('<p>До</p>%s<p>После</p>'
+                                                        % SIZED_IMAGE)
+        self.assertIn('data-width="60"', images[0])
+        self.assertIn('data-align="right"', images[0])
+        out, _lost = authoring.restore_tables(body, tables, images)
+        self.assertIn('data-width="60"', out)
+        self.assertIn('data-align="right"', out)
+        self.assertIn('margin-right: 0', out)
+
+    def test_marker_without_a_tail_changes_nothing(self):
+        """«Оставить как есть» обязано быть значением по умолчанию.
+
+        Иначе модель, которая просто перенесла маркер, каждый раз сбрасывала бы
+        чужие настройки — и отличить это от намеренной правки было бы нельзя.
+        """
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables('<p>[[КАРТИНКА-1]]</p>', tables, images)
+        self.assertIn('data-width="60"', out)
+        self.assertIn('data-align="right"', out)
+
+    def test_model_can_set_size_and_align(self):
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables(
+            '<p>[[КАРТИНКА-1 35% по центру]]</p>', tables, images)
+        self.assertIn('data-width="35"', out)
+        self.assertIn('data-align="center"', out)
+        self.assertIn('margin-left: auto; margin-right: auto', out)
+
+    def test_size_only_keeps_the_previous_align(self):
+        """Контролы независимы: задал ширину — выравнивание осталось прежним."""
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables('<p>[[КАРТИНКА-1 40%]]</p>', tables, images)
+        self.assertIn('data-width="40"', out)
+        self.assertIn('data-align="right"', out)
+
+    def test_impossible_size_is_clamped(self):
+        """Ширина 300 % или 2 % — это не размер, а поломка вёрстки."""
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        big, _ = authoring.restore_tables('<p>[[КАРТИНКА-1 300%]]</p>', tables, images)
+        small, _ = authoring.restore_tables('<p>[[КАРТИНКА-1 2%]]</p>', tables, images)
+        self.assertIn('data-width="100"', big)
+        self.assertIn('data-width="10"', small)
+
+    def test_marker_with_a_tail_is_still_found(self):
+        """Раньше шаблон маркера кончался на \\s*, и маркер с хвостом не находился.
+
+        Последствие было не косметическое: маркер уезжал в статью текстом
+        «[[КАРТИНКА-1 60%]]», а сама картинка — в конец, под заголовок «не
+        размещённое по разделам».
+        """
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables('<p>[[КАРТИНКА-1 60% справа]]</p>',
+                                              tables, images)
+        self.assertNotIn('КАРТИНКА', out)
+        self.assertNotIn('не размещённое', out)
+
+
+class ImageRemovalTest(unittest.TestCase):
+    """Убрать картинку можно, но только ЯВНО и с предупреждением.
+
+    Правило «потерянная картинка возвращается в конец статьи» старше этой
+    правки и остаётся: файл уже лежит в бакете, и молча выброшенная ссылка
+    оставляет статью без иллюстрации, а хранилище — с мусором. Поэтому у
+    удаления есть своя команда, а не «просто не переноси маркер».
+    """
+
+    def test_explicit_removal_works(self):
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables(
+            '<p>[[КАРТИНКА-1 убрать]]</p><p>Текст</p>', tables, images)
+        self.assertNotIn('<img', out)
+        self.assertNotIn('не размещённое', out)
+        self.assertIn('Текст', out)
+
+    def test_removal_does_not_leave_an_empty_paragraph(self):
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables(
+            '<p>[[КАРТИНКА-1 убрать]]</p><p>Текст</p>', tables, images)
+        self.assertEqual('<p>Текст</p>', out)
+
+    def test_dropped_marker_still_returns_the_image(self):
+        """Молча потерять картинку по-прежнему нельзя."""
+        _body, tables, images = authoring.protect_tables(SIZED_IMAGE)
+        out, _lost = authoring.restore_tables('<p>Текст</p>', tables, images)
+        self.assertIn('<img', out)
+        self.assertIn('не размещённое', out)
+
+    def test_removal_is_reported_to_the_author(self):
+        numbers = authoring.removed_images('<p>[[КАРТИНКА-2 убрать]]</p>'
+                                           '<p>[[КАРТИНКА-1]]</p>')
+        self.assertEqual([2], numbers)
+
+
+class ImageStyleParityTest(unittest.TestCase):
+    """Формула стиля продублирована в Python и в JS — они обязаны совпадать.
+
+    Один и тот же размер выставляют двое: человек ручкой в редакторе
+    (styleFor из imageSize.js) и ИИ маркером (image_style здесь). Разойдись
+    формулы — одинаковые на вид настройки давали бы разную вёрстку, и понять,
+    отчего картинка «прыгает», было бы нельзя.
+    """
+
+    def test_margins_match_the_editor(self):
+        for align, expected in (
+                ('left', 'margin-left: 0; margin-right: auto'),
+                ('center', 'margin-left: auto; margin-right: auto'),
+                ('right', 'margin-left: auto; margin-right: 0')):
+            self.assertEqual('width: 35%; ' + expected,
+                             markup.image_style(35, align))
+            # Тот же набор полей стоит и в JS — сверяем по исходнику.
+            self.assertIn(expected.replace('; ', "', '"), IMAGE_SIZE_JS)
+
+    def test_limits_match_the_editor(self):
+        self.assertIn('export const MIN_SIZE = %d;' % markup.IMAGE_MIN, IMAGE_SIZE_JS)
+        self.assertIn('export const MAX_SIZE = %d;' % markup.IMAGE_MAX, IMAGE_SIZE_JS)
+
+    def test_shorthand_margin_is_never_used(self):
+        """Сокращённое margin санитайзер выбрасывает ЦЕЛИКОМ.
+
+        Он сверяет ИМЯ свойства с белым списком, а там только margin-left и
+        margin-right. Напиши формула «margin: 0 auto» — выравнивание молча
+        пропало бы при сохранении.
+        """
+        from wiki.sanitize import ALLOWED_CSS
+        self.assertNotIn('margin', ALLOWED_CSS)
+        self.assertIn('margin-left', ALLOWED_CSS)
+        for align in markup.IMAGE_ALIGNS:
+            style = markup.image_style(50, align)
+            self.assertNotIn('margin:', style)
+
+    def test_tag_survives_the_sanitizer(self):
+        try:
+            import nh3  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest('nh3 не установлен')
+        out = sanitize_html(markup.image_tag('/api/wiki/file/x.webp', 'Экран', 35, 'center'))
+        self.assertIn('data-width="35"', out)
+        self.assertIn('data-align="center"', out)
+        self.assertIn('width: 35%', out)
+        self.assertIn('margin-left: auto', out)
+
+
+class ImageGuideTest(unittest.TestCase):
+    def test_guide_reaches_the_request_only_when_there_are_images(self):
+        """Наставление уезжает в ЗАПРОС, а не в системный промпт.
+
+        В системном оно доставалось бы и ветке, где модель читает файл сама и
+        никаких маркеров не существует, — то есть учило бы синтаксису, которым
+        нельзя воспользоваться.
+        """
+        self.assertEqual('', authoring.images_block([]))
+        block = authoring.images_block([SIZED_IMAGE])
+        self.assertIn('КАРТИНКИ И ИХ РАЗМЕР', block)
+        self.assertNotIn('КАРТИНКИ И ИХ РАЗМЕР', authoring.SYSTEM_PROMPT)
+
+    def test_hint_shows_the_current_state(self):
+        """Без текущего размера правило «не трогай чужое» не выполнить.
+
+        Модель не видит ни тега, ни его атрибутов — только маркер.
+        """
+        hint = authoring.image_hints([SIZED_IMAGE,
+                                      '<img src="/a.webp" alt="QR-код">'])
+        self.assertIn('Экран съёмки (60 %, справа)', hint)
+        self.assertIn('QR-код (размер не задан)', hint)
+
+    def test_guide_names_both_controls_and_the_removal(self):
+        for needle in ('60%', 'по центру', 'справа', 'слева', 'убрать'):
+            self.assertIn(needle, markup.IMAGE_GUIDE)
+
+    def test_guide_says_not_to_touch_what_a_human_set(self):
+        self.assertIn('его выставил', markup.IMAGE_GUIDE)
+
+
+class ImageRenumberTest(unittest.TestCase):
+    """Сдвиг номеров при обновлении документом не должен терять контролы."""
+
+    def test_tail_survives_renumbering(self):
+        from wiki.ai import revise
+        shifted = revise._MARKER_RE.sub(
+            lambda m: '[[%s-%d%s]]' % (m.group(1).upper(), int(m.group(2)) + 2,
+                                       m.group(3)),
+            '[[КАРТИНКА-1 40% справа]]')
+        self.assertEqual('[[КАРТИНКА-3 40% справа]]', shifted)
+
+    def test_marker_with_a_tail_is_humanized(self):
+        """Маркер не должен утекать в список изменений как код."""
+        from wiki.ai import revise
+        self.assertEqual('добавлена картинка 2 в раздел',
+                         revise.humanize('добавлена [[КАРТИНКА-2 40% справа]] в раздел'))
