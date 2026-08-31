@@ -57,6 +57,13 @@ _WIKI_DATA_ATTRS = {
     # Без этих атрибутов кнопка сохранилась бы как безымянный div — статья
     # открывалась бы без тренажёра, и молча.
     'data-wiki-trainer', 'data-label', 'data-width', 'data-align',
+    # Оформительские блоки статьи: вводка, плашка, сетка карточек, карточка.
+    # Вид блока целиком держится на этих атрибутах — вся геометрия живёт в
+    # wiki-blocks.css, потому что в ALLOWED_CSS ниже нет ни display, ни grid,
+    # ни border-radius, ни border-left, и инлайновым стилем такой блок не
+    # нарисовать в принципе. Вырежи отсюда хоть одно имя — и статья сохранится
+    # безымянным div'ом: без фона, без колонок, без номеров. Молча.
+    'data-wiki-block', 'data-tone', 'data-cols', 'data-numbered',
 }
 
 ALLOWED_ATTRIBUTES = {tag: set(_COMMON_ATTRS) for tag in ALLOWED_TAGS}
@@ -73,6 +80,13 @@ ALLOWED_ATTRIBUTES['img'] |= {'src', 'alt', 'width', 'height', 'loading',
 ALLOWED_ATTRIBUTES['td'] |= {'colspan', 'rowspan', 'colwidth'}
 ALLOWED_ATTRIBUTES['th'] |= {'colspan', 'rowspan', 'colwidth'}
 ALLOWED_ATTRIBUTES['col'] |= {'span', 'width'}
+# Вид списка: «шаги» с пунктиром между номерами, «чипы», «галочки». Атрибут
+# висит на самом списке, а не на обёртке, потому что список остаётся списком —
+# и для поиска, и для читалки с экрана, и для кнопки «нумерованный список» в
+# редакторе. _WIKI_DATA_ATTRS сюда не раздаётся (он про div/span/details),
+# поэтому имя добавляется отдельно.
+ALLOWED_ATTRIBUTES['ul'] |= {'data-variant'}
+ALLOWED_ATTRIBUTES['ol'] |= {'data-variant'}
 ALLOWED_ATTRIBUTES['details'] |= {'open'} | _WIKI_DATA_ATTRS
 ALLOWED_ATTRIBUTES['summary'] |= _WIKI_DATA_ATTRS
 ALLOWED_ATTRIBUTES['div'] |= _WIKI_DATA_ATTRS

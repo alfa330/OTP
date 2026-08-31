@@ -39,6 +39,7 @@ import re
 from bs4 import BeautifulSoup
 
 from .answer import ungrounded_numbers
+from . import markup
 from . import tablepatch
 from .authoring import (MAX_OUTPUT_TOKENS, append_links, canonicalize,
                         links_block, missing_links, protect_tables,
@@ -65,8 +66,13 @@ _FORMAT_BLOCK = """
 затем ПОЛНЫЙ HTML статьи целиком, а не фрагмент
 
 РАЗМЕТКА — только эти теги: h1 (раздел), h2, h3, p, ul/ol с li, strong,
-blockquote, table с thead/tbody/th/td, a href. Запрещено: style, class, div,
-span, картинки, h4 и глубже, обёртка ```html, пояснения вне трёх частей.
+blockquote, table с thead/tbody/th/td, a href — плюс оформительские блоки,
+описанные ниже. Запрещено: style, class, span, произвольный <div>, картинки,
+h5 и глубже, обёртка ```html, пояснения вне трёх частей.
+
+ОФОРМЛЕНИЕ, КОТОРОЕ УЖЕ ЕСТЬ В СТАТЬЕ, ПЕРЕНОСИ КАК ЕСТЬ. Блок, который ты
+развернул в обычные абзацы, для читателя выглядит как пропавший блок — а
+указание его трогать не просило.
 
 ЖЁСТКИЕ ПРАВИЛА
 1. Маркеры [[ТАБЛИЦА-N]] и [[КАРТИНКА-N]] переноси ДОСЛОВНО, каждый отдельным
@@ -83,7 +89,7 @@ span, картинки, h4 и глубже, обёртка ```html, поясне
 6. Про исчезнувшую строку таблицы спрашивай ТОЛЬКО через «Т1 -СТРОКА N», а не
    ещё и в «ВОПРОСЫ»: один и тот же вопрос дважды заставляет искать между ними
    разницу, которой нет.
-""" + tablepatch.PATCH_RULES
+""" + tablepatch.PATCH_RULES + markup.MARKUP_GUIDE
 
 UPDATE_PROMPT = """Ты — редактор корпоративной вики таксопарка. Тебе дают ТЕКУЩУЮ статью и НОВЫЙ документ по той же теме. Твоя работа — обновить статью.
 
@@ -177,7 +183,10 @@ def parse_reply(text):
     body = raw[match.end():] if match else raw
     if not match:
         # Конверта нет — берём с первого тега, иначе в статью уедет служебный текст.
-        first = re.search(r'<(h1|h2|h3|p|ul|ol|table|blockquote)\b', body, re.I)
+        # div в списке ОБЯЗАТЕЛЕН: статья может начинаться с вводки или плашки,
+        # и без него срез пришёлся бы на <p> ВНУТРИ блока — с потерянным
+        # открывающим тегом и висящим </div> в конце.
+        first = re.search(r'<(div|h1|h2|h3|p|ul|ol|table|blockquote)\b', body, re.I)
         body = body[first.start():] if first else ''
     return changes, questions, body.strip()
 

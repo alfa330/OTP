@@ -42,6 +42,7 @@ import re
 
 from bs4 import BeautifulSoup
 
+from . import markup
 from .answer import ungrounded_numbers
 from ..sanitize import sanitize_html, to_plain_text
 
@@ -62,17 +63,33 @@ _IMAGE_TOKEN_RE = re.compile(r'\[{1,2}\s*КАРТИНКА[\s-]*(\d+)\s*\]{1,2}',
 # Теги, которые модели разрешено принести в теле статьи. Список узкий намеренно:
 # из него нельзя собрать ни оформительский мусор, ни вложенные контейнеры.
 _ALLOWED = {
-    'p', 'h1', 'h2', 'h3', 'strong', 'b', 'em', 'i', 'u', 's', 'mark', 'code',
+    'p', 'h1', 'h2', 'h3', 'h4', 'strong', 'b', 'em', 'i', 'u', 's', 'mark', 'code',
     'pre', 'blockquote', 'ul', 'ol', 'li', 'a', 'br', 'hr',
     'table', 'thead', 'tbody', 'tr', 'th', 'td', 'caption',
+    # div — ТОЛЬКО как оформительский блок. Голый <div> (в том числе
+    # MsoNormal из Word) по-прежнему разворачивается: условие ниже, в
+    # canonicalize, а не здесь — в множестве вид блока не выразить.
+    'div',
 }
-# Заголовки глубже третьего уровня: см. про h4 в шапке.
+# Заголовки глубже третьего уровня: см. про h4 в шапке. ВНУТРИ оформительского
+# блока h4 остаётся собой — это заголовок плашки или карточки, и понижать его
+# некуда: h3 внутри плашки уехал бы в оглавление статьи наравне с разделами.
 _DEMOTE = {'h4': 'h3', 'h5': 'h3', 'h6': 'h3'}
-# Атрибуты, выживающие у модельной разметки. Ни style, ни class.
+# Атрибуты, выживающие у модельной разметки. Ни style, ни class — только
+# известные data-* оформительских блоков (wiki/ai/markup.py), по которым их
+# узнают санитайзер, витрина и схема редактора.
 _KEEP_ATTRS = {'a': ('href', 'title'), 'th': ('colspan', 'rowspan'),
-               'td': ('colspan', 'rowspan')}
+               'td': ('colspan', 'rowspan'),
+               'div': markup.BLOCK_ATTRS,
+               'ul': markup.LIST_ATTRS, 'ol': markup.LIST_ATTRS}
 
-MAX_OUTPUT_TOKENS = 8000        # статья длиннее ответа в чате; медиана 2871 знак
+# Статья длиннее ответа в чате; медиана 2871 знак. Потолок поднят с 8000 вместе
+# с оформительскими блоками: их разметка добавляет к тем же словам примерно
+# десятую часть объёма, и статья, которая раньше умещалась впритык, начала бы
+# обрываться. Обрыв приходит с кодом 200 и виден только по truncation_warning,
+# то есть выглядит как «ИИ почему-то не дописал». Потолок — это предел, а не
+# расход: неиспользованные токены не оплачиваются.
+MAX_OUTPUT_TOKENS = 9000
 
 SYSTEM_PROMPT = """Ты — редактор корпоративной вики таксопарка. Ты превращаешь загруженный документ в статью вики.
 
@@ -94,8 +111,10 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
 <strong> важное, <blockquote> предупреждение
 <table><thead><tr><th>…</th></tr></thead><tbody><tr><td>…</td></tr></tbody></table>
 <a href="…"> ссылка
+плюс оформительские блоки — они описаны ниже отдельно.
 
-ЗАПРЕЩЕНО: style, class, font, div, span, картинки, h4 и глубже, теги <html> и
+ЗАПРЕЩЕНО: style, class, font, span, произвольный <div> (разрешён только тот,
+что описан в «ОФОРМИТЕЛЬСКИХ БЛОКАХ»), картинки, h5 и глубже, теги <html> и
 <body>, обёртка ```html, любые пояснения до или после ответа.
 
 ЖЁСТКИЕ ПРАВИЛА
@@ -111,7 +130,10 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
 4. Язык статьи — язык документа.
 5. Пустых абзацев, повторов заголовков и фраз вроде «в этом документе
    описывается» быть не должно.
-"""
+6. Оформление НЕ заменяет разделы: у статьи всё равно должны быть заголовки
+   <h1>. Статья из одних плашек нечитаема так же, как статья без единого
+   выделения.
+""" + markup.MARKUP_GUIDE
 
 # Отдельная инструкция для файла, который модель читает сама (PDF, скан, фото).
 FILE_PROMPT_EXTRA = """
@@ -143,7 +165,10 @@ def _envelope(text):
         body = raw[match.end():]
     else:
         # Конверта нет — берём всё, что похоже на HTML, начиная с первого тега.
-        first = re.search(r'<(h1|h2|h3|p|ul|ol|table|blockquote)\b', body, re.I)
+        # div в списке ОБЯЗАТЕЛЕН: статья может начинаться с вводки или плашки,
+        # и без него срез пришёлся бы на <p> ВНУТРИ блока — оставив в теле
+        # висящий </div> и потеряв открывающий тег вместе с оформлением.
+        first = re.search(r'<(div|h1|h2|h3|p|ul|ol|table|blockquote)\b', body, re.I)
         if first:
             body = body[first.start():]
     return title[:200], summary[:400], body.strip()
@@ -267,10 +292,24 @@ def canonicalize(html):
         else:
             tag.decompose()
 
+    # Оформительские блоки чинятся ДО общей чистки: она снимает атрибуты, а
+    # ремонт как раз по ним и опознаёт блок. Заодно здесь h1-h3 внутри блока
+    # опускаются до h4 — то есть к моменту понижения заголовков ниже уже
+    # известно, какие h4 «настоящие», а какие принесены моделью от лени.
+    markup.normalize(soup)
+
     for tag in soup.find_all(True):
-        if tag.name in _DEMOTE:
+        inside_block = tag.find_parent(markup.is_block) is not None
+        # h4 внутри блока — это его заголовок, и понижать его нельзя (см.
+        # _DEMOTE). Снаружи блока правило прежнее: глубже h3 в статье не бывает.
+        if tag.name in _DEMOTE and not (inside_block and tag.name == 'h4'):
             tag.name = _DEMOTE[tag.name]
         if tag.name not in _ALLOWED:
+            tag.unwrap()
+            continue
+        # Голый <div> — это контейнер из Word или из чужой вёрстки, а не блок.
+        # Разворачиваем: содержимое остаётся, лишний слой уходит.
+        if tag.name == 'div' and not markup.is_block(tag):
             tag.unwrap()
             continue
         keep = _KEEP_ATTRS.get(tag.name, ())
@@ -278,7 +317,7 @@ def canonicalize(html):
 
     # Пустые абзацы и заголовки. Их приносит и Word, и модель, а в статье они
     # выглядят разрывом вёрстки.
-    for tag in soup.find_all(('p', 'h1', 'h2', 'h3', 'li', 'blockquote')):
+    for tag in soup.find_all(('p', 'h1', 'h2', 'h3', 'h4', 'li', 'blockquote')):
         if not tag.find(('table', 'br')) and _EMPTY_TEXT.match(tag.get_text('', strip=False) or ''):
             tag.decompose()
 
@@ -286,6 +325,9 @@ def canonicalize(html):
         normalize_table(table)
 
     _lift_headings(soup)
+    # Второй проход по блокам: чистка выше могла вынуть из блока последний
+    # абзац, а пустая плашка — это разрыв вёрстки на пустом месте.
+    markup.normalize(soup)
     return str(soup).strip()
 
 
@@ -319,6 +361,12 @@ def drop_leading_title(html, title):
         return html
     soup = BeautifulSoup(str(html or ''), 'html.parser')
     for tag in soup.find_all(True, recursive=False):
+        # Вводка стоит ПЕРЕД первым заголовком — это её место по определению.
+        # Не пропусти мы её, статья, начинающаяся с вводки, теряла бы защиту от
+        # повтора названия: цикл упирался бы в div и выходил, так и не дойдя до
+        # заголовка.
+        if markup.is_block(tag, 'lead'):
+            continue
         if tag.name not in ('h1', 'h2', 'h3'):
             break
         if _squash(tag.get_text(' ', strip=True)) == _squash(title):
@@ -443,6 +491,14 @@ def structure_warnings(*, source_html, source_text, result_html, lost_tables):
                             % (result_len, len(source_text)))
     if not result_soup.find(('h1', 'h2', 'h3')):
         warnings.append('В статье нет ни одного заголовка — разделите её на разделы')
+
+    # Оформление. Два вопроса, ответа на которые автор сам не получит: не
+    # пропали ли блоки, которые в статье УЖЕ были (это важно при правке, где
+    # source_html — текущая статья), и не наставила ли модель плашек сверх
+    # всякой меры. При сборке из документа блоков «до» нет, и первая проверка
+    # молчит сама собой.
+    warnings.extend(markup.warnings(before_html=source_html or '',
+                                    after_html=result_html or ''))
     return warnings
 
 

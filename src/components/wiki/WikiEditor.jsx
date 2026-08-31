@@ -14,13 +14,14 @@ import Highlight from '@tiptap/extension-highlight';
 import { Color, TextStyle } from '@tiptap/extension-text-style';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
 import {
-    AlignCenter, AlignLeft, AlignRight, Bold, Code, FileSymlink, Heading1, Heading2, Heading3,
-    Gamepad2, Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
+    AlignCenter, AlignLeft, AlignRight, Blocks, Bold, Code, FileSymlink, Heading1, Heading2,
+    Heading3, Gamepad2, Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
     Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
     Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
 import {
-    iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge, IosToggle,
+    iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge, IosHint,
+    IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
@@ -34,6 +35,12 @@ import { buildRelativeArticleLink, linkAttrsForSaving } from './articleLink';
 import useStableCallback from './useStableCallback';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
+import WikiBlockMenu from './WikiBlockMenu';
+import { BLOCK_MENU, WikiBlock, WikiListVariant } from './WikiBlockNode';
+// Стили оформительских блоков. Импорт нужен и здесь, и в WikiArticle.jsx:
+// редактор — отдельный ленивый чанк, и без своего импорта он получил бы блоки
+// без вида, то есть автор правил бы не то, что увидит читатель.
+import './wiki-blocks.css';
 
 /* Редактор статьи на TipTap.
  *
@@ -54,6 +61,16 @@ import WikiTableMenu from './WikiTableMenu';
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
 const HIGHLIGHT_COLORS = ['#fef3c7', '#dcfce7', '#dbeafe', '#fce7f3', '#e0e7ff'];
+
+/* Подсказка у меню блоков. Отвечает не на вопрос «какие бывают» — это и так
+   видно в списке, — а на вопрос «когда какой», потому что статью портят не
+   отсутствующие блоки, а блоки не к месту. */
+const BLOCK_HINT = 'Вводка — первый абзац: о чём статья и кому нужна. '
+    + 'Плашка — то, что нельзя пропустить (тон выбирается в панели у самого блока). '
+    + 'Шаги — действия строго по порядку. Карточки — равнозначные куски рядом. '
+    + 'Чипы — перечень коротких значений. Галочки — что входит или уже сделано. '
+    + 'Правило одно: блок ставится там, где экономит читателю время. '
+    + 'Три плашки подряд не выделяют ничего.';
 
 /* Картинки из буфера обмена или из перетаскивания.
  *
@@ -162,6 +179,9 @@ export default function WikiEditor({
        нажатие по тому же пункту не считалось бы изменением, и вставить одну и ту
        же кнопку дважды стало бы нельзя. */
     const [trainerPick, setTrainerPick] = useState('');
+    // Выбор блока держим пустым по той же причине, что и выбор тренажёра:
+    // селектор здесь — команда «вставить», а не поле со значением.
+    const [blockPick, setBlockPick] = useState('');
     // Поддержка ИИ по умолчанию ВКЛЮЧЕНА: в базе рубильник называется ai_opt_out
     // и по умолчанию false, то есть новая статья и так участвует в ответах
     // помощника. Показать её выключенной значило бы соврать про текущее
@@ -260,6 +280,21 @@ export default function WikiEditor({
                схеме уже вставленная кнопка при открытии редактора превратилась
                бы в пустой абзац — то есть молча пропала бы из текста. */
             WikiTrainerNode,
+            /* Оформительские блоки: вводка, плашка, сетка карточек. Как и
+               кнопка тренажёра, подключены ВСЕГДА и без условий — узел в схеме
+               нужен не для того, чтобы блок вставить, а для того, чтобы уже
+               стоящий в статье блок пережил открытие редактора. Нет узла —
+               TipTap разбирает <div> в обычные абзацы, getHTML() отдаёт их же,
+               и сохранение стирает оформление молча, безо всякого сообщения.
+               Ровно это уже случилось в разделе с раскрывающимися блоками
+               <details>: они разрешены обоими санитайзерами, но узла у них
+               нет, и редактор их ломает до сих пор. */
+            WikiBlock,
+            /* Вид списка («шаги», «чипы», «галочки») — атрибут на самом
+               <ol>/<ul>, а не отдельный узел: список обязан остаться списком
+               для поиска, для выгрузки и для кнопки «нумерованный список» в
+               этой же панели. */
+            WikiListVariant,
         ],
         // Тот же разворот адресов, что и при чтении: иначе в редакторе картинки
         // уже загруженной статьи стоят битыми (см. fileUrls.js). Обратно они
@@ -509,6 +544,27 @@ export default function WikiEditor({
         });
         setDirty(true);
         setTrainerPick('');
+    };
+
+    /* Вставка оформительского блока.
+     *
+     * Две разные операции под одним пунктом меню — и это не небрежность.
+     * Вводка, плашка и сетка карточек ВСТАВЛЯЮТСЯ шаблоном: их не из чего
+     * сделать, они появляются пустыми и заполняются автором. Шаги, чипы и
+     * галочки, наоборот, ПРЕВРАЩАЮТ уже написанное: выделил три абзаца,
+     * выбрал «Шаги» — получил три шага с номерами. Вставлять их шаблоном
+     * значило бы заставить человека набирать текст заново рядом с тем,
+     * который у него уже есть.
+     *
+     * Повторный выбор того же пункта для списков снимает вид обратно — иначе
+     * превратить шаги назад в обычный список можно было бы только удалением. */
+    const insertBlock = (key) => {
+        const item = BLOCK_MENU.find((entry) => entry.key === key);
+        if (!item || !editor) return;
+        if (item.action === 'variant') editor.commands.toggleListVariant(item.value);
+        else editor.commands.insertWikiBlock(item.key);
+        setDirty(true);
+        setBlockPick('');
     };
 
     if (!editor) {
@@ -848,6 +904,38 @@ export default function WikiEditor({
                             ))}
                         </span>
 
+                        {/* Оформительские блоки — одним селектором-командой, а
+                            не шестью кнопками: панель здесь один ряд с
+                            переносом (flex-wrap), и шесть значков утащили бы
+                            её на вторую строку у всех, включая тех, кто блоки
+                            не ставит никогда.
+
+                            Подсказка «i» рядом объясняет, ЧТО КОГДА ставить.
+                            Без неё меню отвечает только на вопрос «какие
+                            бывают», а статью портит не отсутствие блоков, а
+                            блоки не к месту: плашка на каждый абзац перестаёт
+                            что-либо выделять. */}
+                        <Divider />
+                        <span className="flex items-center gap-1.5 px-1">
+                            <Blocks size={14} className="text-slate-400" />
+                            <CustomSelect
+                                variant="ios"
+                                className="w-[185px]"
+                                value={blockPick}
+                                onChange={insertBlock}
+                                options={BLOCK_MENU.map((item) => ({
+                                    value: item.key,
+                                    label: item.label,
+                                    groupLabel: item.action === 'insert'
+                                        ? 'Вставить' : 'Оформить выделенное',
+                                }))}
+                                placeholder="Блок…"
+                                ariaLabel="Вставить оформительский блок"
+                            />
+                            <IosHint align="right" label="Какой блок когда ставить"
+                                     text={BLOCK_HINT} />
+                        </span>
+
                         {/* Выбор тренажёра — в конце того же ряда, где жирный и
                             курсив: вставка кнопки для автора статьи-тренажёра
                             такое же обычное действие, как вставка картинки.
@@ -882,6 +970,13 @@ export default function WikiEditor({
                             которой стоит курсор. Живёт рядом с EditorContent,
                             потому что позиционируется от родителя редактора. */}
                         <WikiTableMenu editor={editor} />
+                        {/* Панель оформительского блока — там же и по той же
+                            причине: команды («тон», «столбцы», «нумеровать»)
+                            имеют смысл только внутри блока, и в постоянном
+                            тулбаре стояли бы погашенными. Двух панелей разом
+                            не бывает: у блока с таблицей внутри всплывает
+                            панель таблицы — так решено в её shouldShow. */}
+                        <WikiBlockMenu editor={editor} />
                     </div>
                 </div>
             </section>

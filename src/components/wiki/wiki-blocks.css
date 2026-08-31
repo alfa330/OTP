@@ -1,0 +1,504 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   ОФОРМИТЕЛЬСКИЕ БЛОКИ СТАТЬИ.
+
+   Зачем. До них у автора статьи было ровно четыре способа выделить мысль:
+   жирный, цитата, список и таблица. Инструкция на два экрана из них
+   собирается в сплошную серую простыню — читатель не видит, где шаг, где
+   предупреждение, а где просто пояснение. Блоки дают этой разнице ФОРМУ:
+   шаг выглядит шагом, запрет — запретом, перечень коротких значений —
+   строкой чипов, а не столбцом из двадцати пунктов на пол-экрана.
+
+   ЧТО ЭТО В РАЗМЕТКЕ. Никаких классов — только data-атрибуты:
+
+     <div data-wiki-block="lead">…</div>              вводка под названием
+     <div data-wiki-block="note" data-tone="warn">…</div>   плашка
+     <div data-wiki-block="cards" data-cols="2" data-numbered="true">
+       <div data-wiki-block="card" data-tone="ok"><h4>…</h4><p>…</p></div>
+     </div>                                            сетка карточек
+     <ol data-variant="steps">…</ol>                   шаги с пунктиром
+     <ul data-variant="chips">…</ul>                   чипы
+     <ul data-variant="checks">…</ul>                  список с галочками
+
+   ПОЧЕМУ data-, а не class. Серверный санитайзер (wiki/sanitize.py) чистит
+   атрибут class отдельным фильтром — из него выбрасываются служебные классы
+   вёрстки, и правило легко расширить так, что оформление статей осыпется
+   молча. data-атрибуты проходят по явному белому списку: пока имя в списке,
+   оно доедет до читателя целиком, а не наполовину.
+
+   ГДЕ ЭТО ЖИВЁТ. Файл подключают ОБА места, где тело статьи попадает на
+   экран: витрина (WikiArticle) и редактор (WikiEditor) — в редакторе у
+   области ввода тот же класс .wiki-prose, поэтому автор правит статью
+   ровно в том виде, в каком её увидит читатель.
+
+   ЦВЕТА. Палитра раздела (--wiki-*), а не жёлто-чёрная из образца: раздел
+   светлый, акцент индиговый, и второй фирменный цвет посреди статьи читался
+   бы как чужая вставка. Тон блока задаёт тройка локальных переменных
+   --tone-bg / --tone-line / --tone-ink — так добавление тона стоит четырёх
+   строк, а не переписывания всех правил.
+
+   ЗНАЧКИ — маской по SVG, а не символом Юникода. Проверено на стрелках
+   сортировки в другом разделе: ⚠ и ✓ в Chrome на macOS рисуются ЦВЕТНЫМ
+   эмодзи, то есть игнорируют цвет тона и выбиваются из вёрстки. Маска
+   красится background-color, поэтому значок всегда в цвете своего тона.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* ── Тона ─────────────────────────────────────────────────────────────────
+   Один набор на все блоки: плашка красит им фон и рамку, карточка — только
+   левую грань. Значение по умолчанию — info, поэтому блок без data-tone
+   выглядит нейтрально-акцентным, а не бесцветным. */
+.wiki-prose [data-wiki-block],
+.wiki-prose [data-wiki-block][data-tone='info'] {
+    --tone-bg: var(--wiki-accent-soft);
+    --tone-line: var(--wiki-accent-line);
+    --tone-ink: #4338ca;
+    --tone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4M12 8h.01'/%3E%3C/svg%3E");
+}
+
+.wiki-prose [data-wiki-block][data-tone='ok'] {
+    --tone-bg: #ecfdf5;
+    --tone-line: #a7f3d0;
+    --tone-ink: #047857;
+    --tone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m8.5 12.5 2.5 2.5 4.5-5'/%3E%3C/svg%3E");
+}
+
+.wiki-prose [data-wiki-block][data-tone='warn'] {
+    --tone-bg: #fffbeb;
+    --tone-line: #fde68a;
+    --tone-ink: #b45309;
+    --tone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
+}
+
+.wiki-prose [data-wiki-block][data-tone='danger'] {
+    --tone-bg: #fef2f2;
+    --tone-line: #fecaca;
+    --tone-ink: #b91c1c;
+    --tone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m15 9-6 6M9 9l6 6'/%3E%3C/svg%3E");
+}
+
+.wiki-prose [data-wiki-block][data-tone='tip'] {
+    --tone-bg: #f5f3ff;
+    --tone-line: #ddd6fe;
+    --tone-ink: #6d28d9;
+    --tone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 14c.2-1 .7-1.7 1.5-2.4A5.5 5.5 0 1 0 7.5 11.6c.8.7 1.3 1.4 1.5 2.4'/%3E%3Cpath d='M9 18h6'/%3E%3Cpath d='M10 21.5h4'/%3E%3C/svg%3E");
+}
+
+/* Тёмный тон — «например»: разбор случая, который иначе теряется среди
+   абзацев. Держим его РЕДКИМ: тёмный прямоугольник посреди светлой статьи
+   притягивает взгляд сильнее заголовка, и два таких блока подряд спорят
+   друг с другом за внимание. Правило про «не чаще одного на раздел» живёт
+   в наставлении для ИИ (wiki/ai/markup.py) и в подсказке редактора. */
+.wiki-prose [data-wiki-block][data-tone='dark'] {
+    --tone-bg: #0f172a;
+    --tone-line: #1e293b;
+    --tone-ink: #a5b4fc;
+    --tone-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 10l5 5-5 5'/%3E%3Cpath d='M4 4v7a4 4 0 0 0 4 4h12'/%3E%3C/svg%3E");
+}
+
+/* ── Вводка ───────────────────────────────────────────────────────────────
+   Первый абзац статьи, набранный крупнее остального: о чём текст и кому он
+   нужен. Рамки нет — только акцентная грань слева, иначе вводка спорит с
+   первым заголовком, который стоит сразу под ней. */
+.wiki-prose [data-wiki-block='lead'] {
+    margin: 0 0 1.5rem;
+    padding: 0.875rem 1.25rem;
+    border-left: 3px solid var(--wiki-accent);
+    border-radius: 0 12px 12px 0;
+    background: linear-gradient(90deg, var(--wiki-accent-soft), transparent 85%);
+    color: var(--wiki-ink);
+    font-size: 1.0625rem;
+    line-height: 1.65;
+}
+
+.wiki-prose [data-wiki-block='lead'] > :first-child { margin-top: 0; }
+.wiki-prose [data-wiki-block='lead'] > :last-child { margin-bottom: 0; }
+
+/* ── Плашка ───────────────────────────────────────────────────────────────
+   Одна мысль, которую нельзя пропустить: условие, запрет, итог, пример.
+
+   Значок абсолютным позиционированием, а не первой колонкой grid: внутри
+   плашки может лежать что угодно — заголовок, абзацы, список, таблица, — и
+   при grid каждый из них стал бы отдельной ячейкой сетки. Отступом слева
+   место под значок держится независимо от содержимого. */
+.wiki-prose [data-wiki-block='note'] {
+    position: relative;
+    margin: 1.25rem 0;
+    padding: 0.875rem 1.125rem 0.875rem 2.875rem;
+    border: 1px solid var(--tone-line);
+    border-radius: 14px;
+    background: var(--tone-bg);
+    color: var(--wiki-ink-soft);
+}
+
+.wiki-prose [data-wiki-block='note']::before {
+    content: '';
+    position: absolute;
+    left: 1rem;
+    top: 1.0625rem;
+    width: 1.125rem;
+    height: 1.125rem;
+    background-color: var(--tone-ink);
+    -webkit-mask: var(--tone-icon) center / contain no-repeat;
+    mask: var(--tone-icon) center / contain no-repeat;
+}
+
+/* Заголовок плашки — им же красится и значок, поэтому строка и картинка
+   читаются как одно целое. Отступы съедены: h4 в статье отбит сверху на
+   1rem, а внутри плашки этот отступ выглядел бы дырой под рамкой. */
+.wiki-prose [data-wiki-block='note'] h4 {
+    margin: 0 0 0.25rem;
+    font-size: 0.9375rem;
+    font-weight: 650;
+    color: var(--tone-ink);
+}
+
+.wiki-prose [data-wiki-block='note'] > :first-child { margin-top: 0; }
+.wiki-prose [data-wiki-block='note'] > :last-child { margin-bottom: 0; }
+
+/* Абзацы внутри блока стоят теснее, чем в статье.
+   Общий отступ 0.75rem рассчитан на длинный текст с воздухом между мыслями;
+   внутри плашки он даёт дыру между заголовком и первой строкой шире самой
+   строки — плашка перестаёт читаться как одно целое. */
+.wiki-prose :is([data-wiki-block='note'], [data-wiki-block='card'], [data-wiki-block='lead']) p {
+    margin: 0.375rem 0;
+    line-height: 1.6;
+}
+
+/* Тёмная плашка: на #0f172a обычный цвет абзаца нечитаем, ссылки и жирное
+   тоже надо перекрасить — иначе индиговая ссылка тонет в тёмном фоне. */
+.wiki-prose [data-wiki-block='note'][data-tone='dark'] {
+    color: #cbd5e1;
+    border-color: #1e293b;
+}
+
+.wiki-prose [data-wiki-block='note'][data-tone='dark'] :is(strong, b) { color: #ffffff; }
+.wiki-prose [data-wiki-block='note'][data-tone='dark'] :is(code, mark) {
+    background: rgba(148, 163, 184, 0.18);
+    border-color: transparent;
+    color: #e2e8f0;
+}
+
+.wiki-prose [data-wiki-block='note'][data-tone='dark'] a {
+    color: #c7d2fe;
+    text-decoration-color: rgba(199, 210, 254, 0.45);
+}
+
+/* ── Шаги ─────────────────────────────────────────────────────────────────
+   Нумерованный список, у которого номера — кружки, а между ними пунктир.
+   Пунктир, а не сплошная линия: сплошная читается как «непрерывный процесс»
+   и в статье конкурирует с левой гранью цитат и карточек, а пунктир
+   однозначно означает «дальше следующий шаг».
+
+   Кружок закрывает собой начало линии, поэтому штрихи видны ровно в
+   промежутке между двумя номерами — то, что и нужно. У последнего шага
+   линия делается прозрачной (а не убирается): убери её совсем, и пункт
+   съедет на два пикселя влево относительно остальных. */
+.wiki-prose ol[data-variant='steps'] {
+    margin: 1.25rem 0;
+    padding-left: 0;
+    list-style: none;
+    counter-reset: wiki-step;
+}
+
+.wiki-prose ol[data-variant='steps'] > li {
+    counter-increment: wiki-step;
+    position: relative;
+    margin: 0 0 0 15px;
+    padding: 0 0 1.375rem 1.875rem;
+    /* Цвет линии — акцентный, а не серый из --wiki-line.
+       Замер на собранной странице: серым (#e2e8f0) пунктир между кружками не
+       читался вовсе — на белом фоне видно было только сами номера, то есть
+       ровно то же, что у обычного нумерованного списка. Акцентная линия
+       связывает номера в цепочку и остаётся тише текста. */
+    border-left: 2px dashed var(--wiki-accent-line);
+    min-height: 1.75rem;
+}
+
+.wiki-prose ol[data-variant='steps'] > li:last-child {
+    border-left-color: transparent;
+    padding-bottom: 0;
+}
+
+.wiki-prose ol[data-variant='steps'] > li::before {
+    content: counter(wiki-step);
+    position: absolute;
+    left: -15px;
+    top: -2px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--wiki-accent);
+    color: #ffffff;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+/* Абзацы внутри шага не отбиваются сверху: первый должен встать вровень с
+   номером, иначе цифра висит над текстом. TipTap кладёт содержимое пункта
+   именно в <p>, поэтому без этого правила съезжает КАЖДЫЙ шаг. */
+.wiki-prose ol[data-variant='steps'] > li > :first-child { margin-top: 0; }
+.wiki-prose ol[data-variant='steps'] > li > :last-child { margin-bottom: 0; }
+
+/* Заголовок шага — когда у шага есть название и пояснение под ним. */
+.wiki-prose ol[data-variant='steps'] > li h4 {
+    margin: 0 0 0.125rem;
+    font-size: 0.9375rem;
+    font-weight: 650;
+}
+
+/* ── Чипы ─────────────────────────────────────────────────────────────────
+   Перечень коротких значений: города, тарифы, статусы. Двадцать названий
+   обычным списком — это столбец на пол-экрана, который никто не читает
+   целиком; строкой чипов те же двадцать занимают три строки и просматриваются
+   взглядом. Длинному тексту здесь не место, и наставление для ИИ это
+   оговаривает отдельно. */
+.wiki-prose ul[data-variant='chips'] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1rem 0;
+    padding-left: 0;
+    list-style: none;
+}
+
+.wiki-prose ul[data-variant='chips'] > li {
+    margin: 0;
+    padding: 0.3125rem 0.75rem;
+    border: 1px solid var(--wiki-line);
+    border-radius: 999px;
+    background: var(--wiki-surface-alt);
+    color: var(--wiki-ink);
+    font-size: 0.8125rem;
+    line-height: 1.4;
+}
+
+.wiki-prose ul[data-variant='chips'] > li > p { margin: 0; }
+
+/* ── Список с галочками ───────────────────────────────────────────────────
+   «Что входит», «что уже сделано». От обычного маркированного списка
+   отличается только знаком — смысл в том, что пункты РАВНОЗНАЧНЫ и каждый
+   уже выполнен, тогда как точка ничего про пункт не сообщает. */
+.wiki-prose ul[data-variant='checks'] {
+    margin: 1rem 0;
+    padding-left: 0;
+    list-style: none;
+}
+
+.wiki-prose ul[data-variant='checks'] > li {
+    position: relative;
+    margin: 0.375rem 0;
+    padding-left: 1.75rem;
+}
+
+.wiki-prose ul[data-variant='checks'] > li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.4375rem;
+    width: 1.0625rem;
+    height: 1.0625rem;
+    background-color: #059669;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m8.5 12.5 2.5 2.5 4.5-5'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m8.5 12.5 2.5 2.5 4.5-5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.wiki-prose ul[data-variant='checks'] > li > :first-child { margin-top: 0; }
+.wiki-prose ul[data-variant='checks'] > li > :last-child { margin-bottom: 0; }
+
+/* ── Карточки ─────────────────────────────────────────────────────────────
+   Сетка равнозначных кусков: два способа сделать одно и то же, четыре
+   условия тарифа, три роли. Главное здесь — РАВНОЗНАЧНОСТЬ: если куски
+   идут по порядку и один следует из другого, это шаги, а не карточки.
+
+   minmax(0, 1fr), а не 1fr: колонка сетки по умолчанию не уже своего
+   содержимого, и одна длинная ссылка или широкая таблица внутри карточки
+   растянула бы столбец, выдавив соседний за край статьи. */
+.wiki-prose [data-wiki-block='cards'] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.875rem;
+    margin: 1.25rem 0;
+    counter-reset: wiki-card;
+}
+
+/* Не карточка внутри сетки. Так бывает после «разобрать карточку» и после
+   правки чужой статьи: в ячейке остаётся голый абзац. Растягиваем его на всю
+   строку — иначе он встаёт узкой колонкой рядом с карточками и читается как
+   сломанная вёрстка, хотя текст цел. */
+.wiki-prose [data-wiki-block='cards'] > :not([data-wiki-block='card']) {
+    grid-column: 1 / -1;
+}
+
+.wiki-prose [data-wiki-block='cards'][data-cols='1'] { grid-template-columns: minmax(0, 1fr); }
+.wiki-prose [data-wiki-block='cards'][data-cols='3'] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.wiki-prose [data-wiki-block='card'] {
+    padding: 0.9375rem 1.125rem;
+    border: 1px solid var(--wiki-line);
+    border-radius: 14px;
+    background: var(--wiki-surface);
+    color: var(--wiki-ink-soft);
+    font-size: 0.9375rem;
+}
+
+/* Тон карточки — цветная левая грань и лёгкая заливка. Полноценная заливка
+   как у плашки здесь не годится: карточек в сетке от двух до шести, и шесть
+   цветных прямоугольников подряд превращают раздел в мозаику. */
+.wiki-prose [data-wiki-block='card'][data-tone] {
+    border-left: 3px solid var(--tone-line);
+}
+
+.wiki-prose [data-wiki-block='card']:is([data-tone='ok'], [data-tone='warn'], [data-tone='danger'], [data-tone='tip']) {
+    border-left-color: var(--tone-ink);
+    background: var(--tone-bg);
+    border-color: var(--tone-line);
+    border-left-width: 3px;
+}
+
+.wiki-prose [data-wiki-block='card'] h4 {
+    margin: 0 0 0.25rem;
+    font-size: 0.9375rem;
+    font-weight: 650;
+    color: var(--wiki-ink);
+}
+
+.wiki-prose [data-wiki-block='card'] > :first-child { margin-top: 0; }
+.wiki-prose [data-wiki-block='card'] > :last-child { margin-bottom: 0; }
+.wiki-prose [data-wiki-block='card'] :is(ul, ol) { padding-left: 1.125rem; }
+
+/* Таблица внутри карточки. Общее правило раздела даёт таблице
+   width: max-content (wiki-theme.css) — так широкая таблица не сжимается в
+   нечитаемую гармошку. В колонке сетки это же правило раздувает саму колонку
+   и выдавливает соседнюю за край статьи: колонка grid по умолчанию не уже
+   своего содержимого. Внутри карточки таблица обязана считаться с шириной
+   колонки, а не наоборот. */
+.wiki-prose [data-wiki-block='card'] table {
+    width: 100%;
+    min-width: 0;
+}
+
+.wiki-prose [data-wiki-block='card'] img { margin: 0.75rem 0; }
+
+/* Нумерация карточек. Счётчик, а не написанные руками цифры: вставили
+   карточку в середину — и весь ряд перенумеровался сам. Иначе «шаг 3»
+   оказывается четвёртым, и заметить это можно только глазами. */
+.wiki-prose [data-wiki-block='cards'][data-numbered='true'] > [data-wiki-block='card']::before {
+    counter-increment: wiki-card;
+    content: counter(wiki-card);
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    margin-bottom: 0.5rem;
+    border-radius: 50%;
+    /* Тот же цвет, что у номера шага. Два разных кружка с цифрой в одной
+       статье читаются как два разных механизма, хотя это одно и то же —
+       порядковый знак. */
+    background: var(--wiki-accent);
+    color: #ffffff;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+/* ── Разделитель ──────────────────────────────────────────────────────────
+   <hr> в статье до сих пор рисовался браузерным умолчанием — толстой
+   двойной канавкой поперёк текста. Здесь это тонкая линия с воздухом
+   вокруг: граница между крупными частями статьи, а не декоративный шов. */
+.wiki-prose hr {
+    height: 1px;
+    margin: 2rem 0;
+    border: 0;
+    background: var(--wiki-line);
+}
+
+/* ── Узкий экран ──────────────────────────────────────────────────────────
+   Сетка карточек схлопывается в один столбец: две колонки по 150 px не
+   читаются, а три — тем более. Порог тот же, на котором в разделе уже
+   перестраивается остальная вёрстка (см. wiki-theme.css). */
+@media (max-width: 720px) {
+    .wiki-prose [data-wiki-block='cards'],
+    .wiki-prose [data-wiki-block='cards'][data-cols='3'] {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .wiki-prose [data-wiki-block='note'] {
+        padding-left: 2.5rem;
+    }
+
+    .wiki-prose [data-wiki-block='lead'] {
+        font-size: 1rem;
+    }
+}
+
+/* ── Печать ───────────────────────────────────────────────────────────────
+   Браузер по умолчанию НЕ печатает фоновые заливки: тёмная плашка «пример»
+   на бумаге стала бы белым текстом по белому, то есть исчезла бы вместе с
+   разобранным случаем. Поэтому на печати все тона сводятся к светлым, а
+   разницу между ними несёт рамка и цвет заголовка — они печатаются всегда.
+
+   break-inside: карточка и плашка, разорванные между листами, читаются как
+   две разные мысли; шаг, у которого номер остался на одной странице, а текст
+   уехал на другую, не читается вовсе. */
+@media print {
+    .wiki-prose [data-wiki-block='note'][data-tone='dark'] {
+        background: #ffffff;
+        color: #0f172a;
+        border-color: #94a3b8;
+    }
+
+    .wiki-prose [data-wiki-block='note'][data-tone='dark'] :is(strong, b, a) { color: #0f172a; }
+
+    .wiki-prose [data-wiki-block='note'],
+    .wiki-prose [data-wiki-block='card'],
+    .wiki-prose [data-wiki-block='lead'],
+    .wiki-prose ol[data-variant='steps'] > li {
+        break-inside: avoid;
+    }
+
+    /* Номера шагов и карточек — белым по цветному кругу. Круг фоном не
+       печатается, и цифра пропала бы. На бумаге рисуем её чернилами. */
+    .wiki-prose ol[data-variant='steps'] > li::before,
+    .wiki-prose [data-wiki-block='cards'][data-numbered='true'] > [data-wiki-block='card']::before {
+        background: transparent;
+        color: #0f172a;
+        border: 1.5px solid #0f172a;
+    }
+}
+
+/* ── Блоки в редакторе ────────────────────────────────────────────────────
+   У области ввода тот же класс .wiki-prose, поэтому всё выше работает и при
+   правке — автор видит статью такой, какой её увидит читатель. Добавить надо
+   ровно две вещи, которых у читателя нет.
+
+   Первая — рамка выделения. Блок выделяется целиком, когда по нему щёлкнули
+   мимо текста; без обводки это выглядит как «ничего не произошло».
+
+   Вторая — заметная граница у блока, который в готовой статье границы не
+   имеет. Вводка нарисована одной левой гранью, и в редакторе непонятно, где
+   она кончается: набранный следом абзац может оказаться и внутри неё, и
+   снаружи. Пунктирный контур виден ТОЛЬКО при правке.
+   ──────────────────────────────────────────────────────────────────────── */
+.ProseMirror [data-wiki-block].ProseMirror-selectednode {
+    outline: 2px solid var(--wiki-accent);
+    outline-offset: 2px;
+}
+
+.ProseMirror [data-wiki-block='lead'],
+.ProseMirror [data-wiki-block='cards'] {
+    outline: 1px dashed var(--wiki-line);
+    outline-offset: 3px;
+}
+
+/* Пустой блок в редакторе не должен схлопываться в полоску: у карточки, из
+   которой стёрли текст, высота падает до высоты одной строки, и ухватить её
+   мышью становится нечем. */
+.ProseMirror [data-wiki-block='card'],
+.ProseMirror [data-wiki-block='note'],
+.ProseMirror [data-wiki-block='lead'] {
+    min-height: 2.75rem;
+}

@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, Check, FileUp, HelpCircle, Loader2, RefreshCw, Search,
-    Sparkles, Wand2,
+    AlertTriangle, Check, FileUp, HelpCircle, LayoutTemplate, Loader2, RefreshCw,
+    Search, Sparkles, Wand2,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnSecondary, IosBadge, IosHint, IosToggle,
@@ -54,6 +54,20 @@ const FORMATS_HINT = 'Word, Excel, CSV, PDF, текст, фото или ска�
 const UPDATE_HINT = 'Загрузите новую версию документа — помощник сверит её со статьёй '
     + 'построчно: изменившееся заменит, новое добавит, а про исчезнувшее спросит, а не '
     + 'удалит молча. Список изменений покажет отдельно.';
+
+/* Указание для кнопки «Оформить блоками».
+ *
+ * Пишется здесь, а не подставляется человеком, потому что формулировка решает
+ * исход. «Сделай красиво» модель понимает как «перепиши», и статья возвращается
+ * с чужими словами; поэтому запрет на правку текста стоит первым и повторён
+ * дважды. Что именно ставить и когда — модель уже знает из наставления в
+ * промпте (wiki/ai/markup.py), и дублировать его здесь незачем. */
+const FORMAT_INSTRUCTION = 'Оформи статью блоками, НЕ МЕНЯЯ ни одного слова текста: '
+    + 'переставлять абзацы, сокращать, переписывать и дописывать запрещено. '
+    + 'Оберни первый абзац во вводку, выдели плашками то, что нельзя пропустить, '
+    + 'преврати перечни действий по порядку в шаги, равнозначные куски рядом — '
+    + 'в карточки, перечни коротких значений — в чипы. Там, где блок не даёт '
+    + 'читателю выигрыша, оставь обычный абзац.';
 
 const EDIT_HINT = 'Напишите словами, что поправить: «сократи вдвое», «добавь раздел '
     + 'про доставку», «оформи условия таблицей». Помощник меняет только то, о чём '
@@ -179,13 +193,17 @@ export default function WikiAiDraft({
             .finally(() => setBusy(null));
     };
 
-    const applyInstruction = () => {
+    const applyInstruction = (canned = null) => {
         const snapshot = getSnapshot?.() || {};
-        setBusy('edit');
+        const task = typeof canned === 'string' ? canned : instruction;
+        if (task.trim().length < 3) return;
+        // Два ключа занятости на одно действие: иначе кружок крутится сразу на
+        // обеих кнопках, и непонятно, что именно сейчас делается.
+        setBusy(canned ? 'format' : 'edit');
         setResult(null);
         axios.post(`${base}/articles/ai/edit`, {
             content: snapshot.content || '', title: snapshot.title || '',
-            instruction, article_id: excludeId, ai_support: enabled,
+            instruction: task, article_id: excludeId, ai_support: enabled,
             space_id: spaceId || undefined,
         }, { headers })
             .then((r) => {
@@ -303,11 +321,28 @@ export default function WikiAiDraft({
                             }}
                         />
                         <IosHint text={EDIT_HINT} label="Как формулировать правку" align="right" />
+                        {/* Самая частая правка оформления — отдельной кнопкой.
+                            Набирать её словами каждый раз бессмысленно: текст
+                            указания всегда один и тот же, а от формулировки
+                            зависит результат — «сделай красиво» и «расставь
+                            блоки, не трогая текст» дают разные статьи. */}
+                        <button
+                            type="button"
+                            className={iosBtnSecondary}
+                            disabled={locked}
+                            title="Расставить вводку, плашки, шаги и карточки, не меняя текст"
+                            onClick={() => applyInstruction(FORMAT_INSTRUCTION)}
+                        >
+                            {busy === 'format'
+                                ? <Loader2 size={14} className="animate-spin" />
+                                : <LayoutTemplate size={14} />}
+                            Оформить блоками
+                        </button>
                         <button
                             type="button"
                             className={iosBtnSecondary}
                             disabled={locked || instruction.trim().length < 3}
-                            onClick={applyInstruction}
+                            onClick={() => applyInstruction()}
                         >
                             {busy === 'edit'
                                 ? <Loader2 size={14} className="animate-spin" />
