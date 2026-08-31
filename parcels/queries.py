@@ -93,12 +93,19 @@ def load_access_context(cursor, user_id):
 # `no_office` отсекаем по той же причине: «Жанаозен онлайн» — это запись о том,
 # что офиса в городе НЕТ. Положить в него посылку физически некуда.
 
+# `space_id` — с 24.08.2026 справочник принадлежит ПРОСТРАНСТВУ вики
+# (wiki.schema._scope_directories_to_space), и без этого условия в списке офисов
+# формы стоял «Tez Taxi» в Туркестане: точка пространства «Тез», на которую
+# фронт-офис Таксопарков посылку не принимает. Пространства берём у отделов
+# раздела (section_space_ids), а не у смотрящего: справочник у раздела один и
+# тот же для фронт-офиса, СЗоВ и глобального админа без отдела.
 _OFFICES_SQL = """
     SELECT o.id, o.city, o.name, o.address, o.address_note, o.phone
       FROM wiki_offices o
      WHERE o.status = 'active'
        AND o.kind = 'park'
        AND o.no_office = FALSE
+       AND o.space_id = ANY(%(spaces)s)
        AND COALESCE(NULLIF(TRIM(o.city), ''), '') <> ''
        AND {extra}
      ORDER BY o.city, o.position, o.name
@@ -116,30 +123,53 @@ def _office_row(row):
     }
 
 
-def _offices(cursor, extra='TRUE', params=None):
-    cursor.execute(_OFFICES_SQL.format(extra=extra), params or {})
+def section_space_ids(cursor):
+    """Пространства вики, справочником офисов которых пользуется раздел.
+
+    Отделы раздела заданы жёстко (access.SECTION_DEPARTMENT_CODES), так что список
+    не зависит от того, кто смотрит: посылку принимает фронт-офис, а ищет её СЗоВ,
+    и офис у них один и тот же. Кешировать нельзя — границу правит конструктор
+    пространств, и раздел обязан узнать об этом сразу.
+    """
+    from wiki import structure as wiki_structure
+
+    return wiki_structure.space_ids_for_departments(cursor, access.SECTION_DEPARTMENT_CODES)
+
+
+def _offices(cursor, extra='TRUE', params=None, *, space_ids):
+    """Пустой space_ids — пустой ответ, а не «все»: отделу раздела не выдано ни
+    одного пространства вики, и подставлять вместо границы «все» значит вернуть
+    ту же утечку под другим именем. Форма на пустой справочник отвечает понятно
+    («нет офисов в справочнике — заведите офис в разделе «Вики»»), так что
+    молчаливо неверного ответа отсюда не выйдет."""
+    space_ids = [int(x) for x in (space_ids or [])]
+    if not space_ids:
+        return []
+    params = dict(params or {})
+    params['spaces'] = space_ids
+    cursor.execute(_OFFICES_SQL.format(extra=extra), params)
     return [_office_row(row) for row in cursor.fetchall()]
 
 
-def list_offices(cursor):
+def list_offices(cursor, *, space_ids):
     """Города и офисы для выпадающих списков формы.
 
     Отдаём плоским списком с городом в каждой записи: сгруппировать его во фронте
     дешевле, чем держать здесь вторую форму тех же данных.
     """
-    return _offices(cursor)
+    return _offices(cursor, space_ids=space_ids)
 
 
-def read_office(cursor, office_id):
+def read_office(cursor, office_id, *, space_ids):
     """Один офис — чтобы снять с него имя и адрес в карточку посылки."""
-    found = _offices(cursor, 'o.id = %(id)s', {'id': int(office_id)})
+    found = _offices(cursor, 'o.id = %(id)s', {'id': int(office_id)}, space_ids=space_ids)
     return found[0] if found else None
 
 
-def offices_in_city(cursor, city):
+def offices_in_city(cursor, city, *, space_ids):
     """Офисы города. По ним же решается, спрашивать офис или подставить сам."""
     return _offices(cursor, 'LOWER(TRIM(o.city)) = LOWER(TRIM(%(city)s))',
-                    {'city': str(city or '')})
+                    {'city': str(city or '')}, space_ids=space_ids)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

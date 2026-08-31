@@ -43,13 +43,18 @@ def chat_row(chat_id, title, used_by_queue=None):
     return (chat_id, title, 'supergroup', None, used_by_queue)
 
 
+# Пространство вики, которому выдан отдел раздела («Таксопарки» на проде).
+SPACE = 11
+
+
 class FakeCursor:
     """Курсор, который отдаёт заготовленные строки и запоминает запросы."""
 
-    def __init__(self, queues=(), routes=(), chats=()):
+    def __init__(self, queues=(), routes=(), chats=(), spaces=((SPACE,),)):
         self._queues = list(queues)
         self._routes = list(routes)
         self._chats = list(chats)
+        self.spaces = list(spaces)
         self._result = []
         self.executed = []
 
@@ -57,7 +62,11 @@ class FakeCursor:
         self.executed.append((' '.join(sql.split()), params))
         # Реестр чатов проверяем ПЕРВЫМ: внутри него есть подзапрос к
         # crm_queues, и порядок наоборот отдал бы на него очереди.
-        if 'it_ticket_channels' in sql:
+        if 'wiki_space_departments' in sql:
+            # Пространства раздела: справочники парков и офисов принадлежат
+            # пространству вики, и раздел спрашивает своё по коду отдела.
+            self._result = list(self.spaces)
+        elif 'it_ticket_channels' in sql:
             self._result = self._chats
         elif 'FROM crm_topic_routes' in sql:
             self._result = self._routes
@@ -399,7 +408,8 @@ class CatalogAddressTest(unittest.TestCase):
         patches = [
             mock.patch.object(queries, 'load_access_context',
                               lambda cursor, user_id: self.ctx),
-            mock.patch.object(queries, 'taxi_parks', lambda cursor: []),
+            mock.patch.object(queries, 'taxi_parks',
+                              lambda cursor, *, space_ids: []),
         ]
         for item in patches:
             item.start()
@@ -549,7 +559,8 @@ class OfficeSnapshotIsTheServersTest(unittest.TestCase):
                               lambda cursor, ticket_id, viewer_id=None: {'id': ticket_id}),
             mock.patch.object(queries, 'today', lambda cursor: date(2026, 8, 27)),
             mock.patch.object(queries, 'city_offices',
-                              lambda cursor, city, day: list(self.offices)),
+                              lambda cursor, city, day, *, space_ids:
+                                  list(self.offices) if space_ids else []),
             mock.patch.object(service, 'deliver_ticket',
                               lambda db, ticket_id, attachment=None: (True, None)),
         ]
@@ -587,6 +598,36 @@ class OfficeSnapshotIsTheServersTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn('Закрыт', response.get_json()['error'])
         self.assertFalse(self.created)
+
+    def test_the_lookup_reads_only_the_space_of_the_section(self):
+        """Справочник офисов принадлежит пространству вики с 24.08.2026, и до
+        31.08.2026 раздел читал его целиком: в Атырау, Кокшетау и Туркестане
+        рядом с нашим офисом стояла точка «Tez Taxi» пространства «Тез».
+        Пространство раздел спрашивает сам — у отдела, которому он выдан."""
+        asked = []
+        with mock.patch.object(queries, 'city_offices',
+                               lambda cursor, city, day, *, space_ids:
+                                   asked.append(list(space_ids)) or list(self.offices)):
+            client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)
+            response = client.post('/api/crm/scenarios/office_status/lookup',
+                                   json={'answers': {'office_city': 'Астана'}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(asked, [[SPACE]])
+
+    def test_without_a_space_the_check_stays_silent_instead_of_closing(self):
+        """Отделу раздела не выдано ни одного пространства — справочника у
+        раздела нет. Пустой список офисов здесь НЕЛЬЗЯ считать ответом «офиса в
+        городе нет»: по нему office_verdict закрыл бы обращение и велел
+        оператору ответить водителю по таблице, которой тот не читал."""
+        cursor = FakeCursor(ALL_QUEUES, (), ALL_CHATS, spaces=())
+        client = build_client(cursor, self.ctx)
+        response = client.post('/api/crm/scenarios/office_status/lookup',
+                               json={'answers': {'office_city': 'Астана'}})
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertFalse(data['snapshot']['available'])
+        self.assertEqual(data['verdict']['outcome'], sc.PASS)
+        self.assertIsNone(data['verdict']['message'])
 
     def test_lookup_answers_with_the_offices_and_the_verdict(self):
         client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)

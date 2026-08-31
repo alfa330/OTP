@@ -90,14 +90,19 @@ def existing_parcel(**overrides):
 class _Base(unittest.TestCase):
     def setUp(self):
         self.crm_calls = []
+        self.spaces_asked = []
 
-        def fake_offices(_cursor, city):
+        def fake_offices(_cursor, city, *, space_ids):
+            # Пространство доезжает до справочника — без него в списке офисов
+            # формы стоял бы «Tez Taxi» из чужой вики.
+            self.spaces_asked.append(list(space_ids))
             return list(OFFICES.get(str(city or '').strip().lower(), []))
 
         def fake_fetch(account_id, **_kwargs):
             self.crm_calls.append(account_id)
             return dict(CRM_ANSWER, account_id=account_id)
 
+        self._swap(queries, 'section_space_ids', lambda _cursor: [11])
         self._swap(queries, 'offices_in_city', fake_offices)
         self._swap(drivers, 'fetch_driver', fake_fetch)
 

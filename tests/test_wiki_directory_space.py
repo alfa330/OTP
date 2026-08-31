@@ -23,7 +23,9 @@
 """
 
 import ast
+import functools
 import inspect
+import re
 import sys
 import unittest
 from contextlib import contextmanager
@@ -41,6 +43,7 @@ except ImportError:  # pragma: no cover
 
 from wiki import offices as wiki_offices  # noqa: E402
 from wiki import parks as wiki_parks  # noqa: E402
+from wiki import structure as wiki_structure  # noqa: E402
 from wiki import queries  # noqa: E402
 from wiki.routes import build_wiki_blueprint  # noqa: E402
 
@@ -446,6 +449,177 @@ class DirectoryRouteSpaceTest(_SpaceHarness, unittest.TestCase):
         response = client.post('/api/wiki/offices',
                                json={'name': 'Офис', 'space_id': 11})
         self.assertEqual(response.status_code, 404)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Справочник читают и ЧУЖИЕ разделы
+#
+# Страж выше обходит два модуля вики, и этого оказалось мало. 31.08.2026
+# владелец нашёл в мастере раздела «Обращения» офис «Tez Taxi»: раздел читает
+# wiki_offices и wiki_taxi_parks ПРЯМЫМ SQL, мимо wiki/offices.py и
+# wiki/parks.py, — то есть мимо места, где страж стоял. Так же читает
+# справочник офисов раздел «Посылки».
+#
+# Поэтому второй страж обходит РЕПОЗИТОРИЙ, а не список модулей: следующий
+# раздел, которому понадобится справочник компании, напишет такой же SELECT, и
+# поймать его должен тест, а не память ревьюера.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Чтение таблицы, а не упоминание её имени: у DDL в parcels/schema.py стоит
+# REFERENCES wiki_offices(id) — это внешний ключ, а не выборка, и границы
+# пространства он не требует.
+_READ_RE = re.compile(r'\b(?:FROM|JOIN|UPDATE|INTO)\s+(%s)\b'
+                      % '|'.join(SCOPED_TABLES), re.IGNORECASE)
+
+# Граница — это УСЛОВИЕ по space_id, а не слово «space_id» где-нибудь в тексте
+# запроса. Проверять вхождением значило бы принимать за границу и комментарий
+# внутри SQL, и колонку в SELECT: страж, который так легко успокоить,
+# успокоится сам собой при первой же правке.
+_SCOPE_RE = re.compile(r'\bspace_id\s*(?:=|<>|!=|\bIN\b|\bNOT\s+IN\b)', re.IGNORECASE)
+
+# Каталоги, которые страж не обходит, и почему.
+_SWEEP_SKIP_DIRS = {
+    'venv', 'node_modules', 'dist', '__pycache__', '.git', 'assets', 'public',
+    'wiki',    # свой страж выше, и он строже: там нужен ещё и keyword-only параметр
+    'tests',   # тесты нарочно собирают запросы без границы, чтобы проверить отказ
+}
+
+
+def _sql_strings(path):
+    """Строки-константы файла, кроме докстрок.
+
+    Докстроки исключены по той же причине, что и в _scoped_functions: имя
+    таблицы попадает туда постоянно — объяснением, откуда взялись данные, или
+    ссылкой на соседний модуль. SQL в докстроке не живёт.
+    """
+    tree = ast.parse(Path(path).read_text(encoding='utf-8'), str(path))
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            text = ast.get_docstring(node, clean=False)
+            if text:
+                docstrings.add(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value not in docstrings:
+                yield node.lineno, node.value
+        # f-строка запроса собирается из кусков, и таблица с условием могут
+        # лежать в разных. Склеиваем весь литерал: подставляемое выражение
+        # заменяем пробелом — что в нём, страж всё равно не знает, а склеенные
+        # без него слова дали бы ложное «FROM wiki_officesчто-то».
+        elif isinstance(node, ast.JoinedStr):
+            parts = [piece.value if isinstance(piece, ast.Constant)
+                     and isinstance(piece.value, str) else ' '
+                     for piece in node.values]
+            yield node.lineno, ''.join(parts)
+
+
+@functools.lru_cache(maxsize=1)
+def _repository_sql_reads():
+    """[(файл, строка, sql)] — все чтения справочников вне пакета wiki.
+
+    Кеш на один вызов: обход разбирает весь репозиторий (bot_schedule2.py — 56
+    тысяч строк), и повторять его для каждого теста набора незачем.
+    """
+    found = []
+    for path in sorted(ROOT.rglob('*.py')):
+        relative = path.relative_to(ROOT)
+        if any(part in _SWEEP_SKIP_DIRS or part.startswith('.') for part in relative.parts):
+            continue
+        for lineno, value in _sql_strings(path):
+            if _READ_RE.search(value):
+                found.append((relative.as_posix(), lineno, ' '.join(value.split())))
+    return tuple(found)
+
+
+# Функции разделов, у которых пространство — обязательный аргумент.
+_MUST_PASS_SPACES = ('taxi_parks', 'city_offices',
+                     'list_offices', 'offices_in_city', 'read_office')
+
+
+class ConsumerDirectorySweepTest(unittest.TestCase):
+    """Кто угодно вне вики, читающий справочник, обязан спросить пространство."""
+
+    def test_every_outside_read_mentions_space(self):
+        unscoped = ['%s:%d — %s' % (path, lineno, sql[:90])
+                    for path, lineno, sql in _repository_sql_reads()
+                    if not _SCOPE_RE.search(sql)]
+        self.assertEqual(unscoped, [], 'чтение справочника без пространства:\n' +
+                         '\n'.join(unscoped))
+
+    def test_a_mention_of_space_is_not_a_boundary(self):
+        """Слово в комментарии или колонка в SELECT границей не являются."""
+        self.assertIsNone(_SCOPE_RE.search(
+            'SELECT o.id, o.space_id -- пространство FROM wiki_offices o'))
+        self.assertTrue(_SCOPE_RE.search('WHERE o.space_id = ANY(%(spaces)s)'))
+        self.assertTrue(_SCOPE_RE.search('WHERE o.space_id IN (11, 12)'))
+
+    def test_the_sweep_actually_finds_the_known_readers(self):
+        """Страж, переставший что-либо находить, тест не роняет — и молча
+        перестаёт сторожить. Поэтому проверяем и сам обход: оба известных
+        читателя обязаны в него попадать."""
+        files = {path for path, _, _ in _repository_sql_reads()}
+        self.assertIn('crm/queries.py', files)
+        self.assertIn('parcels/queries.py', files)
+
+    def test_every_call_of_a_scoped_reader_passes_the_space(self):
+        """Забытый аргумент упал бы TypeError'ом в проде, а не в CI.
+
+        parcels/routes.py зовёт offices_in_city из _validate — то есть в момент,
+        когда менеджер сохраняет карточку посылки. Поймать это на сборке дешевле,
+        чем тем же TypeError'ом у человека в форме.
+        """
+        bad = []
+        for package in (ROOT / 'crm', ROOT / 'parcels'):
+            for file in sorted(package.rglob('*.py')):
+                tree = ast.parse(file.read_text(encoding='utf-8'), str(file))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    name = getattr(node.func, 'attr', None) or getattr(node.func, 'id', None)
+                    if name not in _MUST_PASS_SPACES:
+                        continue
+                    if not any(word.arg == 'space_ids' for word in node.keywords):
+                        bad.append('%s:%d — %s()'
+                                   % (file.relative_to(ROOT).as_posix(), node.lineno, name))
+        self.assertEqual(bad, [], 'вызов справочника без space_ids:\n' + '\n'.join(bad))
+
+    def test_ddl_reference_is_not_mistaken_for_a_read(self):
+        """REFERENCES wiki_offices(id) — внешний ключ карточки посылки. Требовать
+        от него пространство значило бы просить границу у колонки."""
+        self.assertIsNone(_READ_RE.search(
+            'office_id INTEGER REFERENCES wiki_offices(id) ON DELETE SET NULL'))
+
+
+class SectionSpaceSourceTest(unittest.TestCase):
+    """Откуда чужой раздел берёт пространство — и что делает, не найдя его."""
+
+    def test_departments_of_the_section_resolve_to_spaces(self):
+        cursor = _RecordingCursor([(SPACE,)])
+        self.assertEqual(
+            wiki_structure.space_ids_for_departments(cursor, ['SZoV', ' szov ']),
+            [SPACE])
+        sql, params = cursor.calls[0]
+        self.assertIn('wiki_space_departments', sql)
+        self.assertIn("sp.status = 'active'", sql)
+        # Код отдела приводится к нижнему регистру по обе стороны сравнения, и
+        # дубли схлопываются: иначе 'szov' и 'SZoV' дали бы два одинаковых
+        # условия, а пространство — дважды.
+        self.assertEqual(params, (['szov'],))
+
+    def test_no_departments_means_no_spaces(self):
+        """Пустой список отделов не должен превращаться в «все пространства»."""
+        cursor = _RecordingCursor([(SPACE,)])
+        self.assertEqual(wiki_structure.space_ids_for_departments(cursor, []), [])
+        self.assertEqual(cursor.calls, [])
+
+    def test_space_without_departments_is_not_ours(self):
+        """«Пусто = видно всем» здесь НЕ действует: запрос требует строку в
+        wiki_space_departments, а не её отсутствие. Иначе первое же
+        полунастроенное пространство снова вылило бы офисы в чужой раздел."""
+        source = inspect.getsource(wiki_structure.space_ids_for_departments)
+        self.assertNotIn('NOT EXISTS', source)
 
 
 if __name__ == '__main__':

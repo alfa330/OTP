@@ -413,7 +413,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         manage = access.can_manage_queues(ctx)
         with db._get_cursor() as cursor:
             context = queries.routing_context(cursor)
-            parks = queries.taxi_parks(cursor)
+            parks = queries.taxi_parks(cursor, space_ids=queries.section_space_ids(cursor))
         for item in catalog:
             _decorate_route(item, context, manage=manage)
 
@@ -564,12 +564,21 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 # Города нет — спрашивать справочник не о чем. Это не «офис
                 # закрыт»: недоступный снимок никого не блокирует.
                 return {'available': False, 'city': city, 'offices': []}
+            spaces = queries.section_space_ids(cursor)
+            if not spaces:
+                # Отделу раздела не выдано ни одного пространства вики — значит
+                # справочника у раздела нет вовсе. Это НЕ «офиса в городе нет»:
+                # по пустому списку office_verdict закрыл бы обращение и велел
+                # оператору ответить водителю по таблице, которой он не читал.
+                # Недоступный снимок никого не блокирует — так же ведёт себя
+                # проверка при незаполненном городе.
+                return {'available': False, 'city': city, 'offices': []}
             day = queries.today(cursor)
             return {
                 'available': True,
                 'city': city,
                 'day': day.isoformat(),
-                'offices': queries.city_offices(cursor, city, day),
+                'offices': queries.city_offices(cursor, city, day, space_ids=spaces),
             }
         return {'available': False}
 

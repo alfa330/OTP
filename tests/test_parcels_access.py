@@ -17,7 +17,7 @@
 import unittest
 from pathlib import Path
 
-from parcels import access, schema
+from parcels import access, queries, schema
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JSX = ROOT / 'src' / 'App.jsx'
@@ -247,6 +247,52 @@ class FrontendAccessTests(unittest.TestCase):
     def test_both_departments_are_named_in_the_predicate(self):
         self.assertIn("PARCELS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov']",
                       self.source)
+
+
+class _RecordingCursor:
+    def __init__(self, rows=()):
+        self.calls = []
+        self.rows = list(rows)
+
+    def execute(self, sql, params=None):
+        self.calls.append((' '.join(str(sql).split()), params))
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class DirectorySpaceTests(unittest.TestCase):
+    """Справочник офисов принадлежит ПРОСТРАНСТВУ вики (24.08.2026).
+
+    Форма «Посылки» читает его прямым SQL, и без границы в списке городов стоял
+    «Tez Taxi» в Туркестане — точка пространства «Тез», на которую фронт-офис
+    Таксопарков посылку не принимает.
+    """
+
+    def test_both_departments_of_the_section_are_asked(self):
+        """Именно ОБА: посылку принимает фронт-офис, а ищет её СЗоВ, и офис у
+        них один. Спросив один код, раздел показал бы разным людям разное."""
+        cursor = _RecordingCursor([(11,)])
+        self.assertEqual(queries.section_space_ids(cursor), [11])
+        sql, params = cursor.calls[0]
+        self.assertIn('wiki_space_departments', sql)
+        self.assertEqual(params, (sorted(access.SECTION_DEPARTMENT_CODES),))
+
+    def test_the_office_query_carries_the_space(self):
+        cursor = _RecordingCursor()
+        queries.list_offices(cursor, space_ids=[11])
+        sql, params = cursor.calls[0]
+        self.assertIn('o.space_id = ANY(%(spaces)s)', sql)
+        self.assertEqual(params['spaces'], [11])
+
+    def test_without_a_space_the_directory_is_empty_not_global(self):
+        """Пусто ≠ «все»: подставить вместо границы весь справочник значит
+        вернуть ту же утечку под другим именем. Форма на пустой список отвечает
+        понятным «нет офисов в справочнике — заведите офис в разделе «Вики»»."""
+        cursor = _RecordingCursor()
+        self.assertEqual(queries.list_offices(cursor, space_ids=[]), [])
+        self.assertEqual(queries.offices_in_city(cursor, 'Туркестан', space_ids=[]), [])
+        self.assertEqual(cursor.calls, [])
 
 
 if __name__ == '__main__':

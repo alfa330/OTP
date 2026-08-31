@@ -152,7 +152,8 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
         сервером — правило одно, данные одни.
         """
         with db._get_cursor() as cursor:
-            offices = queries.list_offices(cursor)
+            offices = queries.list_offices(
+                cursor, space_ids=queries.section_space_ids(cursor))
         cities = {}
         for office in offices:
             cities.setdefault(office['city'], []).append(office)
@@ -399,7 +400,8 @@ def _validate(cursor, data, existing=None):
         if not city:
             return None, ('Выберите город', 'CITY_REQUIRED')
 
-        available = queries.offices_in_city(cursor, city)
+        available = queries.offices_in_city(
+            cursor, city, space_ids=queries.section_space_ids(cursor))
         if not available:
             return None, (
                 'В городе «%s» нет офисов в справочнике — заведите офис в разделе «Вики»' % city,

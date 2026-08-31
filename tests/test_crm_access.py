@@ -12,6 +12,7 @@ queries.visibility_sql фильтрует список в базе. Фильтр
 import re
 import io
 import unittest
+from datetime import date
 from pathlib import Path
 
 from crm import access, queries, schema
@@ -335,13 +336,51 @@ class SchemaContractTest(unittest.TestCase):
         """Второй список парков означал бы, что оператор выбирает из одного
         набора, а справочник компании живёт другим."""
         cursor = RecordingCursor()
-        queries.taxi_parks(cursor)
+        queries.taxi_parks(cursor, space_ids=[11])
         sql = ' '.join(cursor.queries[0].split())
         self.assertIn('FROM wiki_taxi_parks', sql)
         self.assertIn("p.status = 'active'", sql)
         # В обращении хранится НАЗВАНИЕ парка: обращение остаётся читаемым, даже
         # если парк потом переименуют или уберут из справочника.
         self.assertIn('SELECT p.name', sql)
+        # ...но только из СВОЕГО пространства вики: справочник принадлежит
+        # пространству с 24.08.2026, и без этого условия в списке стоял бы
+        # чужой парк — так «Тез» попал в мастер обращения.
+        self.assertIn('p.space_id = ANY(%(spaces)s)', sql)
+        self.assertEqual(cursor.params['spaces'], [11])
+
+    def test_parks_without_a_space_are_not_all_parks(self):
+        """Отделу раздела не выдано ни одного пространства — значит и парков у
+        него нет. Подставить вместо границы «все» значит вернуть утечку."""
+        cursor = RecordingCursor()
+        self.assertEqual(queries.taxi_parks(cursor, space_ids=[]), [])
+        self.assertEqual(cursor.queries, [])
+
+    def test_offices_of_the_city_stay_inside_the_space(self):
+        """31.08.2026 владелец нашёл в мастере офис «Tez Taxi»: в Атырау,
+        Кокшетау и Туркестане у пространства «Тез» заведены свои точки, и
+        выборка по одному городу тащила их вместе с нашими."""
+        cursor = RecordingCursor()
+        queries.city_offices(cursor, 'Атырау', date(2026, 8, 31), space_ids=[11])
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('FROM wiki_offices', sql)
+        self.assertIn('o.space_id = ANY(%(spaces)s)', sql)
+        self.assertEqual(cursor.params['spaces'], [11])
+
+    def test_offices_without_a_space_are_not_all_offices(self):
+        cursor = RecordingCursor()
+        self.assertEqual(
+            queries.city_offices(cursor, 'Атырау', date(2026, 8, 31), space_ids=[]), [])
+        self.assertEqual(cursor.queries, [])
+
+    def test_section_asks_the_wiki_by_the_code_of_its_own_department(self):
+        """Пространство выводится из отдела РАЗДЕЛА, а не смотрящего: раздел
+        пускает и глобального админа, у которого отдела нет вовсе."""
+        cursor = RecordingCursor([(11,)])
+        self.assertEqual(queries.section_space_ids(cursor), [11])
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('wiki_space_departments', sql)
+        self.assertEqual(cursor.params, ([access.SECTION_DEPARTMENT_CODE],))
 
     def test_reply_link_column_is_migrated(self):
         """Столбец добавлен ALTER'ом: на боевой базе таблица уже существует, и
@@ -633,10 +672,13 @@ class RecordingCursor:
     оператором — без базы и без сети.
     """
 
-    def __init__(self):
+    def __init__(self, rows=()):
         self.queries = []
         self.params = None
         self.rowcount = 0
+        # Заготовленные строки нужны там, где ответ базы участвует в следующем
+        # шаге (пространства раздела). По умолчанию пусто — как и было.
+        self.rows = list(rows)
 
     def execute(self, sql, params=None):
         self.queries.append(sql)
@@ -651,10 +693,10 @@ class RecordingCursor:
             sql % tuple("'x'" for _ in params)
 
     def fetchall(self):
-        return []
+        return list(self.rows)
 
     def fetchone(self):
-        return tuple([1] + [None] * 40)
+        return self.rows[0] if self.rows else tuple([1] + [None] * 40)
 
 
 class ListContractTest(unittest.TestCase):
@@ -820,7 +862,7 @@ class SqlComposesTest(unittest.TestCase):
         queries.list_queues(cursor, include_inactive=True, expose_chat_id=True)
         queries.delivery_payload(cursor, 1)
         queries.bot_chats(cursor)
-        queries.taxi_parks(cursor)
+        queries.taxi_parks(cursor, space_ids=[11])
         queries.find_ticket_by_tg_message(cursor, -1001, 2)
         queries.find_message_attachment(cursor, 1, 2)
         queries.message_of_ticket(cursor, 1, 2)
