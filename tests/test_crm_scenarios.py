@@ -771,20 +771,57 @@ class OfficeStatusTest(unittest.TestCase):
 
     KEY = 'office_status'
 
-    def test_asks_the_city_the_office_and_the_drivers_words(self):
+    def test_asks_the_city_the_office_the_phone_and_the_drivers_words(self):
         """§3.3 перечисляет три поля, и третье — фиксированный вопрос.
 
         Спрашивать его у оператора нечего: ответ всегда один и тот же. Он стоит
         заголовком сообщения в группу — там, где его и читают.
 
-        Зато спрашиваем то, чего в §3.3 нет, — что именно сказал водитель
-        (просьба владельца 27.08.2026): подставленная фраза одинакова у всех
-        обращений, а регион разбирается как раз по подробностям.
+        Зато спрашиваем два вопроса, которых в §3.3 нет. Что именно сказал
+        водитель (просьба владельца 27.08.2026): подставленная фраза одинакова у
+        всех обращений, а регион разбирается как раз по подробностям. И номер
+        водителя/курьера (просьба владельца 28.08.2026) — обращение заводится
+        ради расхождения, и закрыть его регион может, только позвонив тому, кто
+        стоит у офиса.
         """
         keys = [s['key'] for s in sc.get(self.KEY)['steps']]
-        self.assertEqual(keys, ['office_city', 'office', 'driver_claim'])
+        self.assertEqual(keys, ['office_city', 'office', 'driver_phone', 'driver_claim'])
         self.assertEqual(sc.get(self.KEY)['group_title'],
                          'Уточнение — работает офис или нет?')
+
+    def test_the_phone_is_required_and_reaches_the_group(self):
+        """Просьба владельца 28.08.2026: «чтобы эта инфа тоже отправлялась».
+
+        Поэтому обязательный и в блоке данных: необязательное поле операторы
+        пропускали бы, и менеджер снова остался бы без способа связи. Своего
+        экрана номер не заводит — у тематики он один.
+        """
+        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'driver_phone')
+        self.assertFalse(step.get('optional'))
+        self.assertEqual(step['group'], 'Офис')
+        self.assertEqual(sc.all_groups(sc.get(self.KEY)), ['Офис'])
+
+        answers = full(self.KEY)
+        answers.pop('driver_phone')
+        result = verdict(self.KEY, answers, has_attachment=False)
+        self.assertEqual(result['outcome'], sc.INCOMPLETE)
+        self.assertIn('driver_phone', result['missing'])
+
+        self.assertIn('driver_phone', sc.BODY_DATA)
+        blocks = sc.body_blocks(self.KEY, full(self.KEY, driver_phone='+7 777 000 00 00'))
+        data = next(b for b in blocks if b['kind'] == sc.BLOCK_DATA)
+        self.assertEqual([row['label'] for row in data['rows']],
+                         ['Город', 'Адрес офиса', 'Телефон водителя/курьера'])
+        self.assertIn('+7 777 000 00 00', [row['value'] for row in data['rows']])
+
+    def test_the_phone_is_asked_after_the_office(self):
+        """При закрытом офисе обращение не отправляется вовсе.
+
+        Спроси номер раньше — оператор набирал бы данные для сообщения, которого
+        не будет, и узнавал бы об этом после.
+        """
+        keys = [s['key'] for s in sc.get(self.KEY)['steps']]
+        self.assertLess(keys.index('office'), keys.index('driver_phone'))
 
     def test_the_comment_is_optional(self):
         """Оператор пишет его во время разговора — держать его на поле, когда

@@ -581,7 +581,8 @@ class OfficeSnapshotIsTheServersTest(unittest.TestCase):
         })
 
     def test_open_office_is_sent_and_keeps_the_servers_snapshot(self):
-        response = self.post({'office_city': 'Астана', 'office': '7'})
+        response = self.post({'office_city': 'Астана', 'office': '7',
+                              'driver_phone': '+7 777 000 00 00'})
         self.assertEqual(response.status_code, 201, response.get_json())
         snapshot = self.created['answers'][sc.OFFICES_ANSWER_KEY]
         self.assertEqual(snapshot['offices'], [OPEN_OFFICE])
@@ -591,6 +592,7 @@ class OfficeSnapshotIsTheServersTest(unittest.TestCase):
         self.offices = [CLOSED_OFFICE]
         response = self.post({
             'office_city': 'Астана', 'office': '7',
+            'driver_phone': '+7 777 000 00 00',
             # Клиент утверждает, что офис открыт. Справочник говорит обратное.
             sc.OFFICES_ANSWER_KEY: {'available': True, 'city': 'Астана',
                                            'offices': [OPEN_OFFICE]},
@@ -628,6 +630,19 @@ class OfficeSnapshotIsTheServersTest(unittest.TestCase):
         self.assertFalse(data['snapshot']['available'])
         self.assertEqual(data['verdict']['outcome'], sc.PASS)
         self.assertIsNone(data['verdict']['message'])
+
+    def test_the_ticket_is_findable_by_the_drivers_phone(self):
+        """Телефон водителя тематики называют по-разному, а поиск один.
+
+        В «Уточнении посылки» это номер аккаунта, здесь — личный номер, по
+        которому регион перезвонит. Обращение обязано находиться по нему в
+        разделе, иначе второй звонок того же водителя оператор не свяжет с
+        первым.
+        """
+        response = self.post({'office_city': 'Астана', 'office': '7',
+                              'driver_phone': '+7 777 000 00 00'})
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self.created['client_phone'], '+7 777 000 00 00')
 
     def test_lookup_answers_with_the_offices_and_the_verdict(self):
         client = build_client(FakeCursor(ALL_QUEUES, (), ALL_CHATS), self.ctx)

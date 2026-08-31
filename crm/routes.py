@@ -729,8 +729,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 # полей обращение находилось бы только по своему номеру.
                 client_name=(str(scenarios._value(answers, 'driver_name') or '').strip()
                              or None),
-                client_phone=(str(scenarios._value(answers, 'contact_number') or '').strip()
-                              or None),
+                client_phone=_answer_text(answers, 'contact_number', 'driver_phone'),
                 created_by=ctx['user_id'], created_by_name=ctx['name'],
                 department_id=ctx.get('department_id'),
                 due_at=service.compute_due_at(queue.get('sla_minutes')),
@@ -759,6 +758,20 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "delivered": sent,
             "delivery_error": None if sent else send_error,
         }), 201
+
+    def _answer_text(answers, *keys):
+        """Первый непустой ответ из перечисленных ключей. None — ни одного.
+
+        Телефон водителя тематики называют по-разному: в «Уточнении посылки» это
+        номер аккаунта, в «Статусе работы офиса» — личный номер, по которому
+        регион перезвонит. Обращение ищут по телефону, и второе правило поиска
+        ради второго названия заводить незачем.
+        """
+        for key in keys:
+            value = str(scenarios._value(answers, key) or '').strip()
+            if value:
+                return value
+        return None
 
     def _sapar_snapshot(answers):
         """Снимок Sapar по ответам мастера. None — спрашивать не по чему."""
