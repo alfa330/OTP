@@ -1616,6 +1616,32 @@ const canAccessSzovWallboardForUser = (userLike) => {
             === SZOV_WALLBOARD_DEPARTMENT_CODE;
 };
 
+// Раздел «Ограничитель «Перезвона»» — правило, выкидывающее оператора из Oktell,
+// если он засиделся в статусе «Перезвон». Круг тот же, что у табло СЗоВ: админы,
+// глава СЗоВ и СВ этого же отдела (решение владельца 31.08.2026 — СВ надо видеть,
+// у кого агент не стоит и кого выкидывало). Предикат при этом СВОЙ, а не
+// переиспользованный: сузят однажды табло — ограничитель молча потеряет тех же
+// людей, и связь эту никто не заметит. Правку круг не даёт: настройки и версию
+// агента гасит флаг can_manage с бэкенда, где can_view_section шире
+// can_manage_settings (oktell_guard/access.py).
+const OKTELL_GUARD_DEPARTMENT_CODE = 'szov';
+
+const isOktellGuardDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).includes(OKTELL_GUARD_DEPARTMENT_CODE)
+);
+
+const canAccessOktellGuardForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ.
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isOktellGuardDepartmentHead(userLike)) return true;
+    return isSupervisorRole(role)
+        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+            === OKTELL_GUARD_DEPARTMENT_CODE;
+};
+
 // Раздел «Провайдер ЭДО» — выгрузка провайдеров водителей из диспетчерских Fleet.
 // Доступ уже, чем у табло: глобальные админы и глава СЗоВ, БЕЗ супервайзеров. Причина
 // не в иерархии, а в содержимом: раздел отдаёт файл с ФИО и телефонами десятков тысяч
@@ -37267,10 +37293,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.
             const canDownloadIcorePhone = isAdminLikeRole
                 || ICORE_PHONE_DEPARTMENT_IDS.has(Number(user?.department_id ?? user?.departmentId));
-            // «Ограничитель Перезвона»: глава СЗоВ и глобальные админы (решение
-            // владельца). Глава чужого отдела не проходит — назначение главой
-            // заменяет базовую роль и режет периметр отделом, ровно как у табло СЗоВ.
-            const canAccessOktellGuard = canAccessSzovWallboardForUser(user);
+            // «Ограничитель Перезвона»: глобальные админы, глава СЗоВ и СВ СЗоВ.
+            // Глава чужого отдела не проходит — назначение главой заменяет базовую
+            // роль и режет периметр отделом, ровно как у табло СЗоВ. СВ раздел
+            // ЧИТАЕТ, но не правит: правку гасит can_manage с бэкенда.
+            const canAccessOktellGuard = canAccessOktellGuardForUser(user);
             // «Провайдер ЭДО»: админы и глава СЗоВ (см. canAccessFleetEdmForUser).
             const canAccessFleetEdm = canAccessFleetEdmForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
@@ -40175,6 +40202,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection) &&
                     (requestedViewFromUrl !== 'fleet_edm' || canAccessFleetEdm) &&
+                    // Без этой строки раздел не открывался по адресу вообще ни у
+                    // кого, включая главу СЗоВ: Ctrl-клик по пункту меню — штатный
+                    // путь, он ведёт на ?view=oktell_guard, и новая вкладка молча
+                    // уезжала в раздел по умолчанию.
+                    (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
@@ -40185,7 +40217,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessTouchesSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTouchesSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -49071,7 +49103,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {/* Ограничитель «Перезвона»: глава СЗоВ и глобальные админы */}
+                        {/* Ограничитель «Перезвона»: админы, глава СЗоВ и СВ СЗоВ */}
                         {( view === "oktell_guard" && canAccessOktellGuard && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <OktellGuardView

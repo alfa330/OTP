@@ -1,4 +1,9 @@
-"""Права раздела «Ограничитель Перезвона»: глава СЗоВ и глобальные админы."""
+"""Права раздела «Ограничитель Перезвона».
+
+Читают: глобальные админы, глава СЗоВ и СВ СЗоВ. Правят: только первые двое.
+Расхождение просмотра и правки — решение владельца 31.08.2026, до него обе
+функции совпадали, и тесты ниже это совпадение закрепляли.
+"""
 
 from oktell_guard import access
 
@@ -24,8 +29,22 @@ def test_head_of_another_department_does_not():
     assert access.can_view_section(user(role="admin", is_department_head=True, department_code="op")) is False
 
 
-def test_supervisor_and_operator_do_not():
-    assert access.can_view_section(user(role="sv")) is False
+def test_szov_supervisor_sees_section():
+    """Решение владельца 31.08.2026. Обе формы роли обязательны: CHECK на
+    users.role разрешает и 'sv', и 'supervisor', а normalize_role их не сводит —
+    на одном литерале часть супервайзеров осталась бы за 403, и отличить это от
+    «право не выдали» по симптому было бы нельзя."""
+    assert access.can_view_section(user(role="sv")) is True
+    assert access.can_view_section(user(role="supervisor")) is True
+
+
+def test_supervisor_of_another_department_does_not():
+    """Раздел про один отдел, и граница у СВ такая же строгая, как у главы."""
+    assert access.can_view_section(user(role="sv", department_code="op")) is False
+    assert access.can_view_section(user(role="supervisor", department_code="front")) is False
+
+
+def test_operator_and_trainer_do_not():
     assert access.can_view_section(user(role="operator")) is False
     assert access.can_view_section(user(role="trainer")) is False
     assert access.can_view_section(None) is False
@@ -46,9 +65,24 @@ def test_scope_is_always_szov():
     assert access.visible_department_code(user(role="admin", department_code="")) == "szov"
     assert access.visible_department_code(user(role="super_admin", department_code="")) == "szov"
     assert access.visible_department_code(user(role="admin", is_department_head=True)) == "szov"
+    # У СВ периметр тот же: раздел показывает весь отдел, а не его группы.
+    assert access.visible_department_code(user(role="sv")) == "szov"
     assert access.visible_department_code(user(role="operator")) == ""
 
 
-def test_manage_matches_view_for_now():
-    for candidate in (user(role="admin", department_code=""), user(role="sv"), user(role="operator")):
-        assert access.can_manage_settings(candidate) == access.can_view_section(candidate)
+def test_supervisor_reads_but_does_not_manage():
+    """Главное в правке: у СВ просмотр без правки. Общий порог, режим обкатки и
+    версия exe действуют на весь отдел сразу — это не уровень супервайзера."""
+    supervisor = user(role="sv")
+    assert access.can_view_section(supervisor) is True
+    assert access.can_manage_settings(supervisor) is False
+
+
+def test_manage_stays_with_the_head_and_global_admins():
+    for candidate in (user(role="admin", department_code=""),
+                      user(role="super_admin", department_code=""),
+                      user(role="admin", is_department_head=True, department_code="szov")):
+        assert access.can_manage_settings(candidate) is True
+    for candidate in (user(role="sv"), user(role="supervisor"), user(role="operator"),
+                      user(role="admin", is_department_head=True, department_code="op")):
+        assert access.can_manage_settings(candidate) is False

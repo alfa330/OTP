@@ -405,12 +405,19 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                                             checked ? 'bg-blue-50/60' : 'hover:bg-slate-50'
                                         }`}
                                     >
-                                        <input
-                                            type="checkbox"
-                                            checked={checked}
-                                            onChange={() => toggleRow(row.id)}
-                                            className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                        />
+                                        {/* Галочки — только тем, кто может править:
+                                            единственное действие над выбранными это
+                                            массовая правка порогов, и она под canManage.
+                                            Иначе СВ выделял бы людей и упирался в
+                                            «Выбрано: 3» без единой кнопки. */}
+                                        {canManage && (
+                                            <input
+                                                type="checkbox"
+                                                checked={checked}
+                                                onChange={() => toggleRow(row.id)}
+                                                className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                            />
+                                        )}
                                         <div className="min-w-0 flex-1">
                                             <div className="truncate text-[14px] font-medium text-slate-900">{row.name}</div>
                                             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-slate-500">
@@ -449,6 +456,15 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             {/* ── Общие ── */}
             {tab === 'common' && settings && (
                 <div className="space-y-4">
+                    {/* Заблокированное поле без объяснения читается как поломка.
+                        СВ раздел открыт на просмотр — так и говорим, прямо над
+                        погашенными тумблерами. */}
+                    {!canManage && (
+                        <div className={`${iosCard} px-3.5 py-2.5 text-[12.5px] leading-relaxed text-slate-600`}>
+                            Раздел открыт вам на просмотр. Порог, режим обкатки и версию программы
+                            меняют глава отдела и администраторы — они действуют сразу на весь отдел.
+                        </div>
+                    )}
                     <IosSection title="Правило">
                         <label className="flex items-center justify-between gap-3">
                             <span className="flex items-center gap-2 text-[13.5px] text-slate-700">
