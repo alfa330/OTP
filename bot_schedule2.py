@@ -440,6 +440,12 @@ group_late_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='group-la
 # приложения. Одно место, а не три, потому что раздел и так пускает по одной
 # выгрузке за раз — темп запросов к Fleet мы не имеем права удваивать.
 fleet_edm_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fleet-edm')
+# «Лиды OLX» держат свой пул на девять мест — по одному на кабинет. Опрос идёт
+# дважды в минуту, и кабинеты обязаны идти ПАРАЛЛЕЛЬНО: последовательный обход
+# упирается в самый медленный кабинет, а ТЗ задачи #223 требует довозить лид в
+# amoCRM за минуту. В общем пуле из четырёх мест такой опрос занимал бы всё
+# приложение через раз.
+olx_amo_pool = ThreadPoolExecutor(max_workers=9, thread_name_prefix='olx-amo')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -37828,6 +37834,144 @@ async def amo_leads_sync_job():
         logging.error("amoCRM: плановая выгрузка лидов не удалась: %s", exc, exc_info=True)
 
 
+# ── Робот «Лиды OLX» (задача #223) ───────────────────────────────────────────
+# Переносит отклики из чатов девяти кабинетов OLX в amoCRM. ТЗ требует опрос не
+# реже раза в 30 секунд и доставку лида за минуту, поэтому джоба идёт дважды в
+# минуту, а кабинеты внутри неё опрашиваются параллельно на своём пуле.
+
+async def olx_amo_poll_job():
+    """Опрос чатов OLX — дважды в минуту.
+
+    Кабинеты раздаются по olx_amo_pool ЗДЕСЬ, а не внутри service.poll_all.
+    Причина в устройстве пулов: poll_all блокируется на результатах, и запусти
+    мы её в том же пуле, координатор занял бы место и ждал освобождения тех,
+    что занял сам. Общий executor_pool бота тоже не годится — в нём четыре
+    места на всё приложение, и держать одно из них по полминуты дважды в
+    минуту значило бы подвешивать остальные разделы.
+    """
+    try:
+        from olx_amo import cabinets as olx_amo_cabinets
+        from olx_amo import service as olx_amo_service
+    except Exception:
+        logging.exception("Лиды OLX: модуль не импортировался, опрос пропущен")
+        return
+
+    targets = [cab for cab in olx_amo_cabinets.CABINETS if cab.is_configured()]
+    if not targets:
+        return
+
+    loop = asyncio.get_event_loop()
+    outcomes = await asyncio.gather(*[
+        loop.run_in_executor(olx_amo_pool, olx_amo_service.poll_cabinet, db, cab)
+        for cab in targets
+    ], return_exceptions=True)
+
+    results = []
+    for cab, outcome in zip(targets, outcomes):
+        if isinstance(outcome, BaseException):
+            logging.error("Лиды OLX: кабинет %s сорвался: %s", cab.code, outcome,
+                          exc_info=outcome)
+            continue
+        results.append(outcome)
+
+    leads = sum(r.leads_created for r in results)
+    replies = sum(r.replies_sent for r in results)
+    errors = sum(r.errors for r in results)
+    # В лог пишем ТОЛЬКО когда что-то произошло: джоба будит себя 2880 раз в
+    # сутки, и строка «обращений нет» превратила бы лог в шум, в котором не
+    # видно настоящих ошибок.
+    if leads or replies or errors:
+        logging.info("Лиды OLX: сделок %s, автоответов %s, ошибок %s",
+                     leads, replies, errors)
+
+
+async def olx_amo_retry_job():
+    """Повтор обращений, упавших по дороге в amoCRM — раз в 5 минут.
+
+    ТЗ: при ошибке обращение возвращается в очередь, а не теряется. Очередь —
+    это строки журнала с result='error'; отдельный проход нужен, потому что
+    опрос их больше не увидит: чат уже помечен разобранным.
+    """
+    try:
+        from olx_amo import service as olx_amo_service
+    except Exception:
+        logging.exception("Лиды OLX: модуль не импортировался, повтор пропущен")
+        return
+
+    try:
+        summary = await asyncio.get_event_loop().run_in_executor(
+            olx_amo_pool, lambda: olx_amo_service.retry_failed(db))
+    except Exception as exc:
+        logging.error("Лиды OLX: повтор не удался: %s", exc, exc_info=True)
+        return
+    if summary.get('retried'):
+        logging.info("Лиды OLX: повторно отправлено %s из %s",
+                     summary.get('recovered'), summary.get('retried'))
+
+
+async def olx_amo_alerts_job():
+    """Уведомления ответственным о простое, потере доступа и ошибках — раз в 5 минут.
+
+    Раздел 7 ТЗ: сообщать о простое дольше 15 минут, о потере авторизации в
+    кабинете, об ошибке передачи в amoCRM и о подозрительной тишине.
+
+    Адресаты выбираются в самом разделе из групп, куда добавлен бот, — так же,
+    как в «Обращениях» и «Боте опозданий». Переменной окружения тут нет
+    намеренно: список меняется живыми людьми чаще, чем выкатывается релиз.
+
+    Сообщение уходит ТОЛЬКО когда состояние сменилось. Слать одно и то же каждые
+    пять минут, пока держится проблема, нельзя: через час такие сообщения
+    перестают читать, и настоящая авария теряется среди повторов. Восстановление
+    сообщается тоже — иначе человек не узнает, что можно выдохнуть.
+    """
+    try:
+        from olx_amo import queries as olx_amo_queries
+        from olx_amo import service as olx_amo_service
+    except Exception:
+        logging.exception("Лиды OLX: модуль не импортировался, уведомления пропущены")
+        return
+
+    loop = asyncio.get_event_loop()
+
+    def _recipients():
+        with db._get_cursor() as cursor:
+            return olx_amo_queries.list_alert_chats(cursor)
+
+    try:
+        chats = await loop.run_in_executor(olx_amo_pool, _recipients)
+    except Exception as exc:
+        logging.error("Лиды OLX: не удалось прочитать адресатов: %s", exc, exc_info=True)
+        return
+    if not chats:
+        # Некому слать — и собирать поводы незачем: сбор ходит в базу и в
+        # состояние кабинетов, а результат было бы просто некуда деть.
+        return
+
+    try:
+        messages = await loop.run_in_executor(
+            olx_amo_pool, lambda: olx_amo_service.collect_alerts(db))
+    except Exception as exc:
+        logging.error("Лиды OLX: не удалось собрать уведомления: %s", exc, exc_info=True)
+        return
+
+    for text in messages or []:
+        for chat in chats:
+            chat_id = chat.get('chat_id')
+            try:
+                await bot.send_message(chat_id, text, parse_mode='HTML')
+                await loop.run_in_executor(
+                    olx_amo_pool, _mark_olx_alert_sent, chat_id)
+            except Exception as exc:
+                logging.error("Лиды OLX: чат %s не получил уведомление: %s", chat_id, exc)
+
+
+def _mark_olx_alert_sent(chat_id):
+    from olx_amo import queries as olx_amo_queries
+
+    with db._get_cursor() as cursor:
+        olx_amo_queries.mark_alert_sent(cursor, chat_id)
+
+
 AMO_LEADS_BROADCAST_TIMES = (os.getenv('AMO_LEADS_BROADCAST_TIMES') or '00:00,12:00').strip()
 
 
@@ -54470,6 +54614,25 @@ except Exception:
     logging.exception("Раздел «Посылки»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Лиды OLX» (робот переноса откликов из чатов OLX в amoCRM) ────────
+# Задача #223. Раздел показывает журнал обращений, сводку за день и состояние
+# девяти кабинетов; сам перенос делает фоновая джоба olx_amo_poll_job ниже.
+# QR-подтверждения здесь нет намеренно: в журнале телефон кандидата, но раздел
+# и так открыт только админам и главам «Маркетинга»/«ОП» (olx_amo/access.py).
+try:
+    from olx_amo.routes import build_olx_amo_blueprint  # noqa: E402
+
+    app.register_blueprint(build_olx_amo_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раздел «Лиды OLX»: Blueprint подключён на /api/olx_amo")
+except Exception:
+    logging.exception("Раздел «Лиды OLX»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Ограничитель Перезвона» (агент на машине оператора) ──────────────
 # GCS-клиент передаётся аргументом: раздел раздаёт exe агента подписанной
 # ссылкой, а не через наш инстанс — после выпуска версии обновляются все машины
@@ -57132,6 +57295,61 @@ if __name__ == '__main__':
         logging.warning(
             "⏰ Лиды amoCRM выключены: не заданы AMO_ACCESS_TOKEN "
             "или AMO_CRM_LOGIN / AMO_CRM_PASSWORD")
+
+    # ── Робот «Лиды OLX» (задача #223) ───────────────────────────────────
+    # Дважды в минуту: ТЗ требует опрашивать чаты не реже раза в 30 секунд и
+    # довозить лид в amoCRM за минуту. Накопительная выгрузка раз в час
+    # требованию не соответствует — это записано в постановке отдельным пунктом.
+    #
+    # max_instances=1 и coalesce=True здесь обязательны: если обход девяти
+    # кабинетов не уложился в полминуты, второй запуск читал бы те же чаты
+    # параллельно с первым и удваивал бы сделки — от гонки спасает уникальный
+    # индекс дедупликации, но доводить до него незачем.
+    #
+    # Джоба заводится, даже когда ни один кабинет не настроен: она сама
+    # проставляет отметку опроса и состояние кабинетов, а раздел показывает
+    # «ждём доступы OLX» вместо пустоты без объяснения.
+    try:
+        from olx_amo import service as _olx_amo_service
+
+        scheduler.add_job(
+            olx_amo_poll_job,
+            CronTrigger(second='0,30', timezone=ZoneInfo('Asia/Almaty')),
+            id='olx_amo_poll',
+            # Пропущенный запуск догонять почти нечем: следующий через 30 секунд
+            # прочитает те же непрочитанные чаты. Поэтому окно опоздания узкое.
+            misfire_grace_time=20,
+            max_instances=1,
+            coalesce=True
+        )
+        scheduler.add_job(
+            olx_amo_retry_job,
+            CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
+            id='olx_amo_retry',
+            misfire_grace_time=120,
+            max_instances=1,
+            coalesce=True
+        )
+        # Уведомления ответственным (раздел 7 ТЗ). Проверка каждые 5 минут, но
+        # сообщение уходит только на СМЕНЕ состояния — см. саму джобу.
+        scheduler.add_job(
+            olx_amo_alerts_job,
+            CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
+            id='olx_amo_alerts',
+            misfire_grace_time=120,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info(
+            "⏰ Лиды OLX: уведомления раз в 5 минут; чаты выбираются в разделе")
+        if _olx_amo_service.is_enabled():
+            logging.info("⏰ Лиды OLX: опрос чатов каждые 30 секунд, повтор ошибок раз в 5 минут")
+        else:
+            logging.warning(
+                "⏰ Лиды OLX: опрос заведён, но ни один кабинет не настроен — "
+                "нужны OLX_CLIENT_ID_N/OLX_CLIENT_SECRET_N и согласие владельцев кабинетов")
+    except Exception:
+        logging.exception("Лиды OLX: планировщик НЕ подключён")
 
     # Обзвон фронт-офиса: отчёт за прошедшие сутки утром (задача #159).
     # Данные тянем только если кто-то подписан — см. саму джобу.

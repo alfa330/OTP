@@ -168,6 +168,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
+const OlxLeadsView = lazyWithRetry(() => import('./components/olx/OlxLeadsView'));
 const TouchesView = lazyWithRetry(() => import('./components/cdr/TouchesView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
 const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
@@ -335,6 +336,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     fleet_edm: 'EDM provider',
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
+    olx_leads: 'OLX leads',
     touches: 'Sales touches',
     profile: 'Profile',
     qr_access: 'QR access',
@@ -1548,6 +1550,29 @@ const canAccessAiQaForUser = (userLike) => (
     isOpSalesSupervisorForAiQa(userLike) ||
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
+
+/* «Лиды OLX» — что сделал робот переноса откликов из чатов OLX в amoCRM
+   (задача #223). Аудитория узкая и очевидная: работу, которую забрал робот,
+   делал маркетолог руками, а заведённые сделки разбирает отдел продаж.
+   Отсюда два отдела и никакого «любому главе отдела»: фронт-офисам, бухгалтерии
+   и ТЭЗ журнал чужих кабинетов не нужен. Та же граница на бэкенде —
+   SECTION_HEAD_DEPARTMENT_CODES в olx_amo/access.py. */
+const OLX_LEADS_HEAD_DEPARTMENT_CODES = new Set(['op', 'marketing']);
+
+const isOlxLeadsDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => OLX_LEADS_HEAD_DEPARTMENT_CODES.has(code))
+);
+
+const canAccessOlxLeadsForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'trainer') return false;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: назначение
+    // главой заменяет роль и режет периметр своим отделом (те же правила, что
+    // у «Посылок» и «Оценок ИИ»).
+    if ((role === 'super_admin' || role === 'admin') && !isDepartmentHead(userLike)) return true;
+    return isOlxLeadsDepartmentHead(userLike);
+};
 
 // Раздел «Чаты ChatApp» — переписка ТП и ОП ТЭЗ. Доступ: админы, глава отдела
 // ТЭЗ и СВ этого же отдела. СВ и главу режем по отделу намеренно (граница
@@ -37274,6 +37299,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
+            const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
             // «Касания»: глобальные админы, глава отдела продаж и СВ ОП.
             const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
@@ -45394,6 +45420,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
                 // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
                 if (view === 'parcels' && canAccessParcelsSection) return;
+                // «Лиды OLX» — журнал робота переноса откликов в amoCRM. Свой
+                // предикат по той же причине: раздел общий для «Маркетинга» и
+                // ОП, и в allowlist каждого его пришлось бы вписывать отдельно.
+                if (view === 'olx_leads' && canAccessOlxLeadsSection) return;
                 // «Касания» — свой предикат, не allowlist отдела: раздел про
                 // отдел продаж, но открыт и админам, которые в ОП не состоят.
                 if (view === 'touches' && canAccessTouchesSection) return;
@@ -45402,7 +45432,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessTouchesSection, canAccessSipSettings, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettings, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -46760,6 +46790,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
+                                    {/* «Лиды OLX» — журнал робота, который переносит
+                                        отклики из чатов девяти кабинетов OLX в amoCRM
+                                        (задача #223). Пункт объявлен ОДИН раз здесь, в
+                                        общей части меню, как «Вики», «Обращения» и
+                                        «Посылки»: аудитория разнородная (глобальные
+                                        админы, глава «Маркетинга», глава ОП), и по
+                                        ролевым ветвям его легко забыть в одной из них. */}
+                                    {canAccessOlxLeadsSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'olx_leads')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'olx_leads' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-right-left"></FaIcon>
+                                            <span className="sidebar-text">Лиды OLX</span>
+                                        </button>
+                                    </li>
+                                    )}
+
                                     {/* «Касания» — звонки отдела продаж из CDR АТС.
                                         Пункт объявлен ОДИН раз здесь, в общей части
                                         меню, как «Вики», «Обращения» и «Посылки»:
@@ -47350,6 +47400,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
+                        {view === "olx_leads" && canAccessOlxLeadsSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <OlxLeadsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
                         {view === "touches" && canAccessTouchesSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <TouchesView
