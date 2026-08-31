@@ -25351,8 +25351,55 @@ class Database:
             )
             return [str(row[0]).lower() for row in cur.fetchall() if row and row[0]]
 
-    def mark_oktell_call_end_parties_checked(self, external_ids):
-        """Prevent unresolved legacy UUIDs from starving later backfill pages."""
+    def get_unknown_binotel_call_end_party_months(self, limit=6):
+        """Месяцы, где сторона завершения не известна у Binotel-звонков ТЭЗ.
+
+        Binotel-звонки узнаём по ЧИСЛОВОМУ external_id (это generalCallID), в отличие
+        от UUID-conn_id Oktell — см. get_unknown_oktell_call_external_ids. Бэкфилл для
+        них идёт МЕСЯЦАМИ, а не курсором по id: кабинет Binotel отдаёт журнал звонков
+        периодом, поэтому один экспорт закрывает сразу все неизвестные звонки месяца.
+        Сначала месяцы, которые дольше всех не проверяли."""
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                SELECT month
+                FROM imported_calls
+                WHERE call_end_party = 'unknown'
+                  AND external_id ~ '^[0-9]+$'
+                  AND month IS NOT NULL
+                  AND (
+                      call_end_party_checked_at IS NULL
+                      OR call_end_party_checked_at < CURRENT_TIMESTAMP - INTERVAL '7 days'
+                  )
+                GROUP BY month
+                ORDER BY MIN(call_end_party_checked_at) NULLS FIRST, month DESC
+                LIMIT %s
+                """,
+                (max(1, min(int(limit or 6), 60)),)
+            )
+            return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+
+    def get_unknown_binotel_call_external_ids_for_month(self, month, limit=20000):
+        """generalCallID звонков месяца, у которых сторона завершения не известна."""
+        with self._get_cursor() as cur:
+            cur.execute(
+                """
+                SELECT external_id
+                FROM imported_calls
+                WHERE call_end_party = 'unknown'
+                  AND external_id ~ '^[0-9]+$'
+                  AND month = %s
+                GROUP BY external_id
+                ORDER BY external_id
+                LIMIT %s
+                """,
+                (str(month), max(1, min(int(limit or 20000), 100000)))
+            )
+            return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+
+    def mark_imported_call_end_parties_checked(self, external_ids):
+        """Отмечает попытку доуточнения, чтобы неразрешимые звонки не заслоняли
+        остальные в следующих проходах бэкфилла (общее для Oktell и Binotel)."""
         values = [
             (str(external_id).strip().lower(),)
             for external_id in (external_ids or [])
@@ -25374,6 +25421,10 @@ class Database:
                 page_size=len(values)
             )
             return max(int(cur.rowcount or 0), 0)
+
+    def mark_oktell_call_end_parties_checked(self, external_ids):
+        """Prevent unresolved legacy UUIDs from starving later backfill pages."""
+        return self.mark_imported_call_end_parties_checked(external_ids)
 
     def update_imported_call_end_parties(self, party_by_external_id):
         """Persist exact provider results and refresh linked evaluation snapshots."""

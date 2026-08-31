@@ -24172,6 +24172,10 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
     if len(candidates) > TEZ_BINOTEL_SAMPLE_CAP:
         candidates = candidates[:TEZ_BINOTEL_SAMPLE_CAP]
 
+    # Сторона завершения разговора: публичный API её не отдаёт, берём из кабинета.
+    # Период тут не больше 7 дней, так что это два быстрых запроса.
+    end_parties = _binotel_panel_call_end_parties(date_from, date_to)
+
     created_list = []
     for c in candidates:
         if len(created_list) >= count:
@@ -24189,12 +24193,13 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
                 continue
         if not month:
             continue
+        party = end_parties.get(gid) or c.get('call_end_party') or 'unknown'
         new_id = db.import_single_random_call(
             operator_id=operator_id, operator_name=operator_name,
             external_id=gid, month=month, datetime_raw=dt_raw,
             phone=c['external_number'], duration_sec=c['billsec'],
             notes=f"random:{requester_id}:binotel",
-            call_end_party=c.get('call_end_party') or 'unknown',
+            call_end_party=party,
         )
         existing.add(gid)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
         if new_id:
@@ -24208,7 +24213,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
                 "phone": c['external_number'],
                 "duration_sec": c['billsec'],
                 "direction": "in" if c['call_type'] == tez_binotel_calls.CALL_TYPE_INCOMING else "out",
-                "call_end_party": c.get('call_end_party') or 'unknown',
+                "call_end_party": party,
                 "audio_pending": True,
             })
 
@@ -25505,6 +25510,15 @@ def _start_binotel_distribution_job(department_id, month, importer_id):
                 department_id=department_id,
                 progress=lambda **kw: _call_distribution_job_update(department_id, **kw),
             )
+            if result.get('status') == 'success':
+                # Доуточняем сторону завершения у звонков, лежащих в пуле с прошлых
+                # прогонов (до появления источника она у всех была 'unknown').
+                try:
+                    _call_distribution_job_update(department_id, stage='Кто завершил звонок')
+                    result['call_end_party_backfill'] = backfill_binotel_call_end_parties()
+                except Exception:
+                    logging.exception("Binotel call-end-party backfill failed (manual)")
+                    result['call_end_party_backfill'] = {'status': 'failed', 'updated': 0}
             _call_distribution_job_update(
                 department_id,
                 status=result.get('status') or 'success',
@@ -38737,6 +38751,58 @@ def backfill_oktell_call_end_parties(batch_size=500, max_batches=8):
     }
 
 
+def backfill_binotel_call_end_parties(max_months=6, batch_size=20000):
+    """Доуточняет сторону завершения у звонков ТЭЗ (числовой external_id Binotel).
+
+    Зеркало backfill_oktell_call_end_parties для второй телефонии, но идёт МЕСЯЦАМИ,
+    а не курсором по id: кабинет Binotel отдаёт журнал звонков периодом, поэтому два
+    запроса закрывают сразу все неизвестные звонки месяца — дробить на страницы
+    незачем. Звонки, которых в кабинете нет или у которых стороны нет и там
+    (несостоявшиеся CANCEL/BUSY), помечаем проверенными, чтобы они не заслоняли
+    остальные в следующих проходах.
+    """
+    import tez_status_sync
+    cfg = tez_status_sync.get_config()
+    if not cfg.get('login') or not cfg.get('password'):
+        return {'status': 'skipped', 'reason': 'missing_credentials', 'updated': 0}
+
+    max_months = max(1, min(int(max_months or 1), 24))
+    batch_size = max(1, min(int(batch_size or 20000), 100000))
+    months = db.get_unknown_binotel_call_end_party_months(limit=max_months) or []
+    checked = 0
+    updated = 0
+    per_month = []
+
+    for mstr in months:
+        external_ids = db.get_unknown_binotel_call_external_ids_for_month(
+            mstr, limit=batch_size)
+        if not external_ids:
+            continue
+        days = _binotel_eval_month_days(mstr)
+        if not days:
+            continue
+        checked += len(external_ids)
+        parties = _binotel_panel_call_end_parties(days[0], days[-1])
+        wanted = set(external_ids)
+        exact = {call_id: party for call_id, party in parties.items() if call_id in wanted}
+        month_updated = db.update_imported_call_end_parties(exact) if exact else 0
+        db.mark_imported_call_end_parties_checked(external_ids)
+        updated += month_updated
+        per_month.append({'month': mstr, 'checked': len(external_ids), 'updated': month_updated})
+        logging.info(
+            "Binotel call-end-party backfill month=%s checked=%s updated=%s",
+            mstr, len(external_ids), month_updated,
+        )
+
+    return {
+        'status': 'success',
+        'checked': checked,
+        'updated': updated,
+        'months': months,
+        'per_month': per_month,
+    }
+
+
 def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES):
     # Операторы с подходящими записанными звонками за период (исходящие+входящие) + сколько
     # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
@@ -38972,6 +39038,38 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
 BINOTEL_EVAL_SYNC_LOCK = threading.Lock()
 
 
+def _binotel_panel_call_end_parties(date_from, date_to):
+    """{generalCallID: 'operator'|'client'|'system'} из КАБИНЕТА Binotel за период.
+
+    Зачем отдельный источник: публичный Binotel API 4.0 сторону завершения разговора
+    не отдаёт — поле whoHungUp в ответе есть, но пустое во всех методах раздела STATS
+    (проверено 31.08.2026 на 3 700+ звонках, включая поштучный call-details), а в
+    документации его нет вовсе. Кабинет то же поле заполняет: 'internalNumber' —
+    положил сотрудник, 'externalNumber' — положил клиент; наш нормализатор эти
+    значения уже понимает (tez_binotel_calls.normalize_call_end_party).
+
+    Это внутренняя ручка панели, живущая на парольной сессии, поэтому любой сбой
+    (сеть, смена вёрстки, отвалившийся логин) гасим и возвращаем пустой словарь:
+    наполнение пула оценок важнее плашки «кто положил трубку».
+    """
+    import tez_binotel_calls
+    import tez_status_sync
+    try:
+        raw = tez_status_sync.fetch_call_end_parties(date_from, date_to)
+    except Exception:
+        logging.exception(
+            "binotel: сторона завершения из кабинета не получена (%s..%s)",
+            date_from, date_to,
+        )
+        return {}
+    parties = {}
+    for call_id, value in (raw or {}).items():
+        party = tez_binotel_calls.normalize_call_end_party(value)
+        if party != 'unknown':
+            parties[str(call_id)] = party
+    return parties
+
+
 def _binotel_eval_month_days(month_str):
     """Дни месяца для сканирования: с 1-го числа по сегодня включительно.
     Будущие дни не запрашиваем — это заведомо пустой ответ и лишняя секунда лимита."""
@@ -39071,6 +39169,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
         grand_added = 0
         grand_ops = 0
         grand_audio_pending = 0
+        grand_end_parties = 0
         for mstr in months:
             # 1) кому и сколько добирать. Считаем ДО обращения к Binotel: если норма
             # у всех закрыта (обычный случай ночного прогона), месяц не стоит
@@ -39124,11 +39223,18 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
                         continue
                     buckets.setdefault(op_id, []).append(call)
 
-            # 3) случайный отбор до нормы (уже лежащие в пуле звонки не дублируем)
+            # 3) сторона завершения разговора: публичный API её не отдаёт, добираем из
+            # кабинета — два запроса на месяц независимо от числа звонков и операторов
+            # (см. _binotel_panel_call_end_parties).
+            _report(stage='Кто завершил звонок')
+            end_parties = _binotel_panel_call_end_parties(days[0], days[-1]) if days else {}
+
+            # 4) случайный отбор до нормы (уже лежащие в пуле звонки не дублируем)
             _report(stage='Записываем звонки в пул')
             existing = db.get_imported_call_keys_for_month(mstr)
             created = []
             month_added = 0
+            month_end_parties = 0
             ready_operators = 0
             for op_id, need in need_by_op.items():
                 bucket = buckets.get(op_id) or []
@@ -39149,6 +39255,10 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
                     if _binotel_eval_call_month(datetime_raw) != mstr:
                         continue
                     already.add(general_call_id)
+                    # Кабинет знает сторону завершения, публичный API — нет; на всякий
+                    # случай оставляем фолбэк на значение из API (вдруг начнёт отдавать).
+                    party = (end_parties.get(general_call_id)
+                             or call.get('call_end_party') or 'unknown')
                     new_id = db.import_single_random_call(
                         operator_id=op_id,
                         operator_name=name_by_op.get(op_id) or '',
@@ -39158,11 +39268,13 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
                         phone=call.get('external_number'),
                         duration_sec=int(call.get('billsec') or 0),
                         notes=f"distribution:{importer_id or 'auto'}:binotel",
-                        call_end_party=call.get('call_end_party') or 'unknown',
+                        call_end_party=party,
                     )
                     if new_id:
                         created.append((new_id, general_call_id))
                         taken += 1
+                        if party != 'unknown':
+                            month_end_parties += 1
                 if taken:
                     month_added += taken
                     ready_operators += 1
@@ -39178,6 +39290,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
             grand_added += month_added
             grand_ops += ready_operators
             grand_audio_pending += len(created)
+            grand_end_parties += month_end_parties
             per_month.append({
                 'month': mstr,
                 'operators': ready_operators,
@@ -39185,10 +39298,12 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
                 'audio_pending': len(created),
                 'days_scanned': len(days) - days_failed,
                 'days_failed': days_failed,
+                'end_parties_known': month_end_parties,
             })
             logging.info(
-                "Binotel eval distribution month=%s operators=%s added=%s days_failed=%s",
-                mstr, ready_operators, month_added, days_failed,
+                "Binotel eval distribution month=%s operators=%s added=%s days_failed=%s "
+                "end_parties_known=%s",
+                mstr, ready_operators, month_added, days_failed, month_end_parties,
             )
 
         return {
@@ -39199,6 +39314,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
             'operators': grand_ops,
             'added': grand_added,
             'audio_pending': grand_audio_pending,
+            'end_parties_known': grand_end_parties,
             'per_month': per_month,
             'min_duration_sec': min_d,
             'max_duration_sec': max_d,
@@ -56803,6 +56919,21 @@ if __name__ == '__main__':
             logging.info("Post-status TEZ eval distribution: %s", (dist or {}).get('status'))
         except Exception:
             logging.exception("Post-status TEZ eval distribution failed")
+        # Сторона завершения разговора у звонков, попавших в пул раньше: источник
+        # (кабинет Binotel) появился позже, чем сами звонки, — догоняем месяцами.
+        try:
+            loop = asyncio.get_event_loop()
+            backfill = await loop.run_in_executor(
+                executor_pool,
+                lambda: backfill_binotel_call_end_parties(),
+            )
+            logging.info(
+                "Post-status TEZ call-end-party backfill: status=%s updated=%s",
+                (backfill or {}).get('status'),
+                (backfill or {}).get('updated'),
+            )
+        except Exception:
+            logging.exception("Post-status TEZ call-end-party backfill failed")
 
     async def tez_op_productivity_sync_job():
         # Отдельный от panel-status job сбор дневной аналитики звонков ОП через

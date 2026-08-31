@@ -1,8 +1,13 @@
 import ast
+import contextlib
 import copy
 import importlib.util
+import logging
 import re
+import sys
+import types
 import unittest
+from datetime import date as dt_date
 from functools import lru_cache
 from pathlib import Path
 from tests import source_cache
@@ -429,6 +434,262 @@ class CallEndPartyFrontendContractTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
+
+
+STATUS_SYNC_PATH = ROOT / "tez_status_sync.py"
+
+tez_status_sync = _load_module_from_path(
+    "_call_end_party_tez_status_sync",
+    STATUS_SYNC_PATH,
+)
+
+
+class _FakeResponse:
+    def __init__(self, text):
+        self.content = text.encode("utf-8-sig")
+
+    def raise_for_status(self):
+        return None
+
+
+class _FakeSession:
+    """Отдаёт заранее заданный CSV на каждый GET и запоминает запрошенные URL."""
+
+    def __init__(self, csv_by_direction):
+        self.csv_by_direction = csv_by_direction
+        self.urls = []
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        self.urls.append(url)
+        for direction, text in self.csv_by_direction.items():
+            if f"callType={direction}" in url:
+                return _FakeResponse(text)
+        return _FakeResponse("")
+
+    def post(self, *args, **kwargs):  # pragma: no cover - логин в тесте не нужен
+        raise AssertionError("выгрузка не должна логиниться повторно")
+
+
+@contextlib.contextmanager
+def _stubbed_binotel_modules(fetcher):
+    """Подменяет tez_status_sync/tez_binotel_calls, которые bot_schedule2 импортирует
+    внутри функций: тест не должен ни ходить в сеть, ни читать .env."""
+    stub = types.ModuleType("tez_status_sync")
+    stub.fetch_call_end_parties = fetcher
+    stub.get_config = lambda *a, **kw: {"login": "l", "password": "p"}
+    saved = {
+        name: sys.modules.get(name)
+        for name in ("tez_status_sync", "tez_binotel_calls")
+    }
+    sys.modules["tez_status_sync"] = stub
+    sys.modules["tez_binotel_calls"] = tez_binotel_calls
+    try:
+        yield stub
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+class BinotelPanelEndPartySourceTests(unittest.TestCase):
+    """Сторона завершения у ТЭЗ приходит из КАБИНЕТА Binotel, а не из API 4.0.
+
+    Публичный API отдаёт whoHungUp пустым во всех методах раздела STATS, поэтому
+    единственный источник — журнал звонков кабинета (module=cdrs)."""
+
+    CSV_HEADER = (
+        "general call id;date;pbx number;customer number;employee name;"
+        "waitsec;billsec;disposition;recording status;who hung up"
+    )
+
+    def _csv(self, rows):
+        return "\n".join([self.CSV_HEADER] + rows)
+
+    def test_cdrs_date_is_normalized_to_panel_format(self):
+        # Таймлайн статусов принимает DD.MM.YYYY, журнал звонков — DD-MM-YYYY.
+        for value in ("28-08-2026", "28.08.2026", "2026-08-28", dt_date(2026, 8, 28)):
+            with self.subTest(value=value):
+                self.assertEqual(tez_status_sync._cdrs_date(value), "28-08-2026")
+        with self.assertRaises(ValueError):
+            tez_status_sync._cdrs_date("не дата")
+
+    def test_export_covers_both_directions_because_module_returns_one_at_a_time(self):
+        client = tez_status_sync.BinotelClient.__new__(tez_status_sync.BinotelClient)
+        client.base_url = "https://my.binotel.kz"
+        client._logged_in = True
+        client.session = _FakeSession({
+            "internal": self._csv([
+                "6821525186;23:06 28-08-2026;=\"7700\";=\"7776\";Оператор;4;143;ANSWER;uploaded;externalNumber",
+                "6821521748;22:59 28-08-2026;=\"7700\";=\"7702\";Оператор;4;184;CANCEL;;",
+            ]),
+            "external": self._csv([
+                "6821495439;22:38 28-08-2026;=\"7700\";=\"7771\";Оператор;13;50;ANSWER;uploaded;internalNumber",
+            ]),
+        })
+
+        parties = client.fetch_call_end_parties("2026-08-28", "2026-08-28")
+
+        self.assertEqual(parties, {
+            "6821525186": "externalNumber",
+            "6821521748": "",
+            "6821495439": "internalNumber",
+        })
+        self.assertEqual(len(client.session.urls), 2)
+        for direction in ("internal", "external"):
+            self.assertTrue(
+                any(f"callType={direction}" in url for url in client.session.urls),
+                f"направление {direction} не запрошено",
+            )
+        for url in client.session.urls:
+            self.assertIn("startDate=28-08-2026", url)
+            self.assertIn("stopDate=28-08-2026", url)
+
+    def test_panel_values_map_onto_journal_enum(self):
+        raw = {
+            "1": "externalNumber",
+            "2": "internalNumber",
+            "3": "",
+            "4": "какая-то новая строка",
+        }
+        with _stubbed_binotel_modules(lambda *a, **kw: raw):
+            resolve = _load_bot_function(
+                "_binotel_panel_call_end_parties", {"logging": logging}
+            )
+            parties = resolve("2026-08-01", "2026-08-31")
+
+        # Пустое и неизвестное значение не выдаём за факт — они выпадают.
+        self.assertEqual(parties, {"1": "client", "2": "operator"})
+
+    def test_panel_failure_never_breaks_the_pool(self):
+        def boom(*args, **kwargs):
+            raise RuntimeError("кабинет недоступен")
+
+        with _stubbed_binotel_modules(boom):
+            resolve = _load_bot_function(
+                "_binotel_panel_call_end_parties", {"logging": logging}
+            )
+            self.assertEqual(resolve("2026-08-01", "2026-08-31"), {})
+
+    def test_distribution_and_random_call_prefer_the_panel_value(self):
+        distribution = _function_source(BOT_PATH, "sync_binotel_evaluation_calls")
+        self.assertIn("_binotel_panel_call_end_parties(days[0], days[-1])", distribution)
+        self.assertIn("end_parties.get(general_call_id)", distribution)
+        # Фолбэк на значение из API сохраняем: вдруг Binotel начнёт его заполнять.
+        self.assertIn("or call.get('call_end_party') or 'unknown'", distribution)
+
+        random_call = _function_source(BOT_PATH, "_binotel_random_call")
+        self.assertIn("_binotel_panel_call_end_parties(date_from, date_to)", random_call)
+        self.assertIn("end_parties.get(gid) or c.get('call_end_party') or 'unknown'", random_call)
+        self.assertNotIn("call_end_party=c.get('call_end_party') or 'unknown'", random_call)
+
+
+class BinotelCallEndPartyBackfillTests(unittest.TestCase):
+    def test_backfill_selects_numeric_ids_by_month(self):
+        months = _function_source(
+            DATABASE_PATH,
+            "get_unknown_binotel_call_end_party_months",
+            class_name="Database",
+        )
+        # Числовой external_id = generalCallID Binotel; UUID — это conn_id Oktell.
+        self.assertIn("external_id ~ '^[0-9]+$'", months)
+        self.assertIn("call_end_party = 'unknown'", months)
+        self.assertIn("INTERVAL '7 days'", months)
+        self.assertIn("NULLS FIRST", months)
+
+        ids = _function_source(
+            DATABASE_PATH,
+            "get_unknown_binotel_call_external_ids_for_month",
+            class_name="Database",
+        )
+        self.assertIn("external_id ~ '^[0-9]+$'", ids)
+        self.assertIn("month = %s", ids)
+
+        # Общая отметка «проверено» переиспользуется обеими телефониями.
+        oktell_mark = _function_source(
+            DATABASE_PATH,
+            "mark_oktell_call_end_parties_checked",
+            class_name="Database",
+        )
+        self.assertIn("self.mark_imported_call_end_parties_checked(external_ids)", oktell_mark)
+
+    def test_backfill_updates_month_and_marks_everything_checked(self):
+        class FakeDatabase:
+            def __init__(self):
+                self.updates = []
+                self.checked = []
+
+            def get_unknown_binotel_call_end_party_months(self, limit=6):
+                return ["2026-08"]
+
+            def get_unknown_binotel_call_external_ids_for_month(self, month, limit=20000):
+                # 777 в кабинете есть, но стороны нет; 999 в кабинете отсутствует.
+                return ["111", "222", "777", "999"]
+
+            def update_imported_call_end_parties(self, party_by_external_id):
+                self.updates.append(dict(party_by_external_id))
+                return len(party_by_external_id)
+
+            def mark_imported_call_end_parties_checked(self, external_ids):
+                self.checked.extend(external_ids)
+                return len(external_ids)
+
+        fake_db = FakeDatabase()
+        panel = {"111": "client", "222": "operator", "555": "client"}
+
+        with _stubbed_binotel_modules(lambda *a, **kw: {}):
+            backfill = _load_bot_function(
+                "backfill_binotel_call_end_parties",
+                {
+                    "db": fake_db,
+                    "logging": logging,
+                    "_binotel_eval_month_days": lambda month: [
+                        dt_date(2026, 8, 1), dt_date(2026, 8, 31)
+                    ],
+                    "_binotel_panel_call_end_parties": lambda a, b: panel,
+                },
+            )
+            result = backfill()
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["checked"], 4)
+        self.assertEqual(result["updated"], 2)
+        # Чужие звонки кабинета в наш пул не просачиваются.
+        self.assertEqual(fake_db.updates, [{"111": "client", "222": "operator"}])
+        # Неразрешимые помечены проверенными — иначе они заслонят остальные.
+        self.assertEqual(fake_db.checked, ["111", "222", "777", "999"])
+
+    def test_backfill_skips_without_panel_credentials(self):
+        stub = types.ModuleType("tez_status_sync")
+        stub.get_config = lambda *a, **kw: {"login": "", "password": ""}
+        saved = sys.modules.get("tez_status_sync")
+        sys.modules["tez_status_sync"] = stub
+        try:
+            backfill = _load_bot_function(
+                "backfill_binotel_call_end_parties", {"logging": logging}
+            )
+            result = backfill()
+        finally:
+            if saved is None:
+                sys.modules.pop("tez_status_sync", None)
+            else:
+                sys.modules["tez_status_sync"] = saved
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "missing_credentials")
+        self.assertEqual(result["updated"], 0)
+
+    def test_backfill_is_wired_into_nightly_and_manual_runs(self):
+        source = _source(BOT_PATH)
+        # Ночной прогон: сразу после добора пула ТЭЗ.
+        self.assertIn("lambda: backfill_binotel_call_end_parties(),", source)
+        # Ручной запуск «Деления звонков» для ТЭЗ.
+        self.assertIn(
+            "result['call_end_party_backfill'] = backfill_binotel_call_end_parties()",
+            source,
+        )
 
 
 if __name__ == "__main__":

@@ -19,6 +19,10 @@ CSV в формате выгрузки TEZ:
   - коды статусов: 0=active, 1=work in crm, 3=break in work, 4=inactive;
   - время: unix → Asia/Almaty (UTC+5), формат «HH:MM DD-MM-YYYY».
 
+Вторая задача модуля (он владеет сессией панели): отдавать сторону завершения
+разговора — «кто положил трубку». Публичный Binotel API 4.0 её не отдаёт, кабинет
+отдаёт; подробности и ссылки — у констант CDRS_* ниже и в fetch_call_end_parties.
+
 ENV (.env.codex.local или окружение):
     BINOTEL_URL=https://my.binotel.kz
     BINOTEL_LOGIN=<email админа панели>
@@ -34,6 +38,8 @@ ENV (.env.codex.local или окружение):
 """
 
 import argparse
+import csv
+import io
 import logging
 import os
 from datetime import datetime, timedelta
@@ -58,6 +64,25 @@ PRESENCE_STATE_CODE_TO_STATUS = {
 CSV_HEADER = "internal number;employee name;started at;stopped at;seconds in status;status"
 TIMELINE_MODULE_PATH = "/main/?module=analyticsEmployeesOnTimeline&mbav=1"
 HTTP_TIMEOUT = 40
+
+# Журнал звонков кабинета — единственный источник, где Binotel отдаёт сторону
+# завершения разговора («кто положил трубку»). Публичный API 4.0 её НЕ отдаёт: поле
+# whoHungUp в ответе есть, но пустое во всех методах раздела STATS (проверено 31.08.2026
+# на 3 700+ звонках в list-of-calls-for-period, incoming/outgoing-calls-for-period,
+# list-of-calls-per-day, all-incoming/outgoing-calls-since, list-of-calls-by-internal-
+# number-for-period, recent-calls-by-internal-number и поштучном call-details), а в
+# документации developers.binotel.ua этого поля нет вовсе. Кабинет то же поле заполняет
+# значениями 'internalNumber' (положил сотрудник) и 'externalNumber' (положил клиент).
+# Берём CSV-экспортом: он отдаёт весь период одним запросом, тогда как JSON-ручка того
+# же модуля листается постранично через POST lastCdrID.
+CDRS_EXPORT_MODULE_PATH = "/main/?module=cdrs&action=export2csv&mbav=1"
+CDRS_CSV_CALL_ID_COLUMN = "general call id"
+CDRS_CSV_END_PARTY_COLUMN = "who hung up"
+# Модуль отдаёт ОДНО направление за запрос, и по умолчанию только входящие, поэтому
+# исходящие приходится запрашивать вторым запросом (без этого терялось ~80% звонков).
+CDRS_CALL_DIRECTIONS = ("internal", "external")
+# Экспорт месяца сервер собирает десятки секунд — общего HTTP_TIMEOUT здесь не хватает.
+CDRS_EXPORT_TIMEOUT = 300
 
 
 def _parse_env_file(path):
@@ -101,6 +126,23 @@ def _tzinfo(tz_name):
     # Фоллбэк: Asia/Almaty без перехода на летнее время — фиксированный UTC+5.
     from datetime import timezone
     return timezone(timedelta(hours=5))
+
+
+def _cdrs_date(value):
+    """Дата в формате журнала звонков кабинета — DD-MM-YYYY.
+
+    Таймлайн статусов принимает DD.MM.YYYY, а модуль cdrs — DD-MM-YYYY, поэтому
+    приводим здесь и не заставляем вызывающего помнить про разные разделители.
+    Принимаем date/datetime и строки в трёх привычных проекту форматах."""
+    if hasattr(value, "strftime"):
+        return value.strftime("%d-%m-%Y")
+    text = str(value or "").strip()
+    for fmt in ("%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%d-%m-%Y")
+        except ValueError:
+            continue
+    raise ValueError(f"Не разобрал дату для журнала звонков Binotel: {value!r}")
 
 
 class BinotelClient:
@@ -156,6 +198,44 @@ class BinotelClient:
                 "Binotel timeline status=%r", payload.get("status")
             )
         return payload
+
+    def fetch_call_end_parties(self, start, stop):
+        """{generalCallID: whoHungUp} за период — по обоим направлениям звонков.
+
+        Значения отдаём как есть ('internalNumber' / 'externalNumber' / ''), без
+        нормализации: её делает вызывающая сторона тем же резолвером, что и для
+        публичного API (tez_binotel_calls.normalize_call_end_party). Пустое значение
+        сохраняем — по нему видно, что звонок в кабинете есть, но стороны у него нет
+        (несостоявшиеся CANCEL/BUSY, где разговора не было)."""
+        if not self._logged_in:
+            self.authenticate()
+        start_date = _cdrs_date(start)
+        stop_date = _cdrs_date(stop)
+        parties = {}
+        for direction in CDRS_CALL_DIRECTIONS:
+            url = (
+                f"{self.base_url}{CDRS_EXPORT_MODULE_PATH}"
+                f"&callType={direction}&startDate={start_date}&stopDate={stop_date}"
+            )
+            resp = self.session.get(
+                url,
+                timeout=CDRS_EXPORT_TIMEOUT,
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            resp.raise_for_status()
+            # BOM в начале файла: читаем через utf-8-sig, иначе первый заголовок
+            # приезжает с невидимым префиксом и колонка не находится.
+            text = resp.content.decode("utf-8-sig", "replace")
+            for row in csv.DictReader(io.StringIO(text), delimiter=";"):
+                call_id = str(row.get(CDRS_CSV_CALL_ID_COLUMN) or "").strip()
+                if not call_id:
+                    continue
+                value = str(row.get(CDRS_CSV_END_PARTY_COLUMN) or "").strip()
+                # Заполненное значение приоритетнее пустого: звонок приходит только в
+                # одном направлении, но подстраховываемся от дублей между выгрузками.
+                if value or call_id not in parties:
+                    parties[call_id] = value
+        return parties
 
 
 def build_tez_status_csv(timeline_payload, tz_name=DEFAULT_TZ):
@@ -221,6 +301,22 @@ def fetch_status_csv(start=None, stop=None, config=None):
     client = BinotelClient(cfg["base_url"], cfg["login"], cfg["password"]).authenticate()
     payload = client.fetch_timeline(start, stop)
     return build_tez_status_csv(payload, cfg["tz"]), (start, stop)
+
+
+def fetch_call_end_parties(start, stop, config=None):
+    """Сторона завершения разговора из кабинета Binotel за период [start … stop].
+
+    Возвращает {generalCallID: 'internalNumber'|'externalNumber'|''}. Без логина в
+    панель источника нет — тогда отдаём пустой словарь, а не падаем: сторона
+    завершения звонка не должна ломать наполнение пула оценок."""
+    cfg = config or get_config()
+    if not cfg.get("login") or not cfg.get("password"):
+        logging.getLogger(__name__).warning(
+            "Binotel: BINOTEL_LOGIN/PASSWORD не заданы — сторона завершения недоступна"
+        )
+        return {}
+    client = BinotelClient(cfg["base_url"], cfg["login"], cfg["password"]).authenticate()
+    return client.fetch_call_end_parties(start, stop)
 
 
 def run_sync(importer, start=None, stop=None, config=None, logger=None):
