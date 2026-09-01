@@ -27471,7 +27471,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div
                                         key={d}
                                         className="text-center text-sm font-medium border rounded p-1 bg-white border-slate-300 cursor-pointer hover:border-slate-500 hover:shadow-sm"
-                                        style={viewMode === 'day' ? {flex:1} : {minWidth: cellMinWidth, flex: '0 0 auto'}}
+                                        style={viewMode === 'day' ? {flex:1} : {minWidth: cellMinWidth, width: cellMinWidth, flex: '0 0 auto'}}
                                     >
                                         {viewMode === 'day' ? (
                                         d
@@ -27879,11 +27879,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     emphasisClass = ' ring-1 ring-blue-200 shadow-sm shadow-blue-100/70';
                                                 }
                                             }
+                                            // Ширина колонки дня задана жёстко (width, а не только minWidth): у flex-элемента
+                                            // с flex:'0 0 auto' база равна max-content, поэтому длинное название статуса
+                                            // («Ежегодный отпуск») раздувало ячейку и уводило весь ряд из-под шапки дней.
                                             return (
                                             <div
                                                 key={d}
                                                 className={`group ${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
-                                                style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
+                                                style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, width: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                                 onContextMenu={(viewMode !== 'day' && cellHistorySummary)
                                                     // В режиме дня правая кнопка занята выделением офлайн-активности,
@@ -28332,8 +28335,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ) : (
                                                 <div className="flex flex-col text-sm overflow-hidden h-full">
                                                     {cellScheduleStatus ? (
-                                                        <div className="flex items-center justify-center h-full px-1">
-                                                            <div className={`text-xs font-semibold text-center leading-tight ${cellScheduleStatusTone?.text || 'text-slate-700'}`}>
+                                                        <div className="flex items-center justify-center h-full px-1 min-w-0">
+                                                            {/* Ряд дней наследует white-space: nowrap, поэтому название статуса
+                                                                возвращаем в перенос по словам и подрезаем по двум строкам:
+                                                                в ячейку 110×56 укладываются все статусы, а более длинный текст
+                                                                читается в подсказке, а не ломает таблицу. */}
+                                                            <div
+                                                                className={`w-full text-xs font-semibold text-center leading-tight whitespace-normal break-words line-clamp-2 ${cellScheduleStatusTone?.text || 'text-slate-700'}`}
+                                                                data-schedule-tooltip={cellScheduleStatus.label || 'Статус'}
+                                                            >
                                                                 {cellScheduleStatus.label || 'Статус'}
                                                             </div>
                                                         </div>
