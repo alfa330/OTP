@@ -60,6 +60,12 @@ const plural = (n, one, few, many) => {
     return many;
 };
 
+/* Вердикты, при которых находка — действительно та же статья. «рядом» сюда не
+   входит: это находка от 0,82 по вектору (wiki/ai/similar.py), и на живой
+   проверке она дала «Регламент обработки заявок в amoCRM» для статьи «Не
+   приходят заказы». Красить и уговаривать по такому сигналу нельзя. */
+const STRONG_VERDICTS = ['похоже', 'дубль'];
+
 const HINT = 'Адрес статьи вида https://pro.yandex.com/kz-ru/almaty/knowledge-base/'
     + 'taxi/tariffs/intercity. Забираем текст целиком, включая свёрнутые блоки, '
     + 'которых в самой странице не видно, и переносим картинки к нам в WebP.';
@@ -272,7 +278,12 @@ export default function WikiYandexImport({
     };
 
     const stats = preview ? compose(preview.content) : null;
-    const duplicates = preview?.duplicates?.items || [];
+    /* Сильные первыми: «рядом» — это находка от 0,82 по вектору, то есть чаще
+       всего просто соседняя тема. Ставить её первой значит показывать пальцем
+       не туда. */
+    const duplicates = [...(preview?.duplicates?.items || [])].sort(
+        (a, b) => STRONG_VERDICTS.indexOf(b.verdict) - STRONG_VERDICTS.indexOf(a.verdict));
+    const strongDuplicate = duplicates.some((d) => STRONG_VERDICTS.includes(d.verdict));
 
     return (
         <IosModal
@@ -382,31 +393,46 @@ export default function WikiYandexImport({
                             </ul>
                         )}
 
-                        {/* Найденный дубль — чаще всего не повод отказаться от
-                            переноса, а повод СВЯЗАТЬ уже написанную статью с
-                            источником: так поставлена задача про «Межгород» —
-                            статья в вике есть, следить надо за Яндексом. Без
-                            этой кнопки единственным выходом была бы вторая
-                            статья с тем же текстом. */}
+                        {/* Похожие статьи — СПРАВКА, а не требование.
+                            Первая же живая проверка показала, чем опасен
+                            уговаривающий тон: на статью «Не приходят заказы»
+                            поиск дал «Регламент обработки заявок в amoCRM» с
+                            самым слабым вердиктом «рядом», а подпись звала
+                            связать её «вместо переноса». Человек читает это как
+                            «создавать нельзя» — хотя создать новую статью тут и
+                            есть правильное действие.
+
+                            Поэтому: красным — только настоящий дубль, всё
+                            остальное серым; связать можно, но главная кнопка
+                            внизу остаётся «Создать статью». */}
                         {duplicates.length > 0 && (
-                            <div className="rounded-xl bg-rose-50 px-3 py-2">
-                                <span className="text-[11.5px] font-medium text-rose-700">
-                                    Похожее у нас уже есть — можно связать с источником
-                                    вместо переноса
+                            <div className={`rounded-xl px-3 py-2 ${
+                                strongDuplicate ? 'bg-rose-50' : 'bg-slate-50'}`}>
+                                <span className={`text-[11.5px] font-medium ${
+                                    strongDuplicate ? 'text-rose-700' : 'text-slate-600'}`}>
+                                    {strongDuplicate
+                                        ? 'Такая статья у нас уже есть'
+                                        : 'Похожее у нас есть — но, возможно, это про другое'}
+                                </span>
+                                <span className="mt-0.5 block text-[11px] leading-relaxed text-slate-500">
+                                    Свяжите с источником, если это ТА ЖЕ статья. Если про
+                                    другое — просто создайте новую, кнопка внизу.
                                 </span>
                                 <ul className="mt-1 space-y-1">
                                     {duplicates.slice(0, 3).map((d) => (
                                         <li key={d.article_id}
-                                            className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-rose-700">
+                                            className={`flex flex-wrap items-center gap-1.5 text-[11.5px] ${
+                                                STRONG_VERDICTS.includes(d.verdict)
+                                                    ? 'text-rose-700' : 'text-slate-600'}`}>
                                             <Copy size={11} className="shrink-0" />
                                             <button
                                                 type="button"
-                                                className="truncate text-left underline decoration-rose-300"
+                                                className="truncate text-left underline decoration-slate-300"
                                                 onClick={() => onOpenArticle?.(d.slug)}
                                             >
                                                 {d.title}
                                             </button>
-                                            <span className="shrink-0 text-rose-400">
+                                            <span className="shrink-0 text-slate-400">
                                                 {d.verdict}
                                             </span>
                                             <button

@@ -1293,6 +1293,38 @@ class FrontendTest(unittest.TestCase):
         for glyph in ('‹', '›', '←', '→', '◀', '▶'):
             self.assertNotIn(glyph, block, 'стрелка набрана знаком: %s' % glyph)
 
+    def test_weak_similarity_does_not_push_to_link(self):
+        """«рядом» — находка от 0,82 по вектору, а не «та же статья».
+
+        На живой проверке статья «Не приходят заказы» получила в похожие
+        «Регламент обработки заявок в amoCRM», а подпись звала связать его
+        «вместо переноса». Человек читает это как «создавать нельзя» — хотя
+        создать новую статью тут и есть правильное действие.
+        """
+        self.assertIn('STRONG_VERDICTS', self.dialog)
+        block = self.dialog[self.dialog.index('const STRONG_VERDICTS'):]
+        self.assertNotIn("'рядом'", block[:200],
+                         'слабый вердикт снова считается настоящим дублём')
+        # Смотрим ВИДИМЫЙ текст, а не объяснение: в комментарии выше фраза
+        # названа по имени как раз затем, чтобы её не вернули обратно.
+        visible = re.sub(r'/\*[\s\S]*?\*/', '', self.dialog)
+        self.assertNotIn('вместо переноса', visible,
+                         'подпись снова уговаривает связать вместо создания')
+        self.assertIn('просто создайте новую', self.dialog,
+                      'человеку не сказано, что создать новую — это нормально')
+
+    def test_creating_a_new_article_is_never_blocked_by_similarity(self):
+        """Кнопка «Создать статью» гаснет ТОЛЬКО когда создавать нечего.
+
+        Похожие статьи — справка; они не смеют закрывать создание.
+        """
+        create = self.dialog[self.dialog.index('className={iosBtnPrimary}'):]
+        guard = create[:400]
+        self.assertIn('!!preview.linked_article_id', guard)
+        self.assertIn('!!preview.imported', guard)
+        self.assertNotIn('duplicates', guard,
+                         'похожие статьи блокируют создание новой')
+
     def test_relink_is_reachable_after_unlink(self):
         """Отписались — и вернуть слежение было НЕОТКУДА.
 
