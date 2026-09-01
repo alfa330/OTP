@@ -818,6 +818,62 @@ class BoundaryTest(unittest.TestCase):
                         'страница качается уже под открытым курсором')
 
 
+class FrontendTest(unittest.TestCase):
+    """Интерфейсные решения в этом проекте сторожит pytest, читая .jsx текстом."""
+
+    def setUp(self):
+        src = ROOT / 'src' / 'components' / 'wiki'
+        self.dialog = (src / 'WikiYandexImport.jsx').read_text(encoding='utf-8')
+        self.view = (src / 'WikiView.jsx').read_text(encoding='utf-8')
+        self.queue = (src / 'WikiMigration.jsx').read_text(encoding='utf-8')
+
+    def test_dialog_talks_to_all_four_doors(self):
+        for door in ('/yandex/preview', '/yandex/import', '/yandex`', '/sync'):
+            self.assertIn(door, self.dialog, door)
+
+    def test_import_is_gated_exactly_like_a_new_article(self):
+        """Способность та же, и гостевое пространство исключено так же.
+
+        Кнопка, которая всегда отвечает «нет права», — мёртвая кнопка; этот
+        довод уже записан у «Новой статьи», и второй гейт обязан ему следовать.
+        """
+        button = self.view[self.view.index('setYandexImport({})') - 900:
+                           self.view.index('setYandexImport({})')]
+        self.assertIn('capabilities.can_create', button)
+        self.assertIn('!activeSpace?.guest_only', button)
+
+    def test_dialog_lives_at_the_section_level(self):
+        """Открывается из шапки — значит обязан работать с любой вкладки."""
+        self.assertIn('<WikiYandexImport', self.view)
+        self.assertLess(self.view.index('<WikiSpaceModal'),
+                        self.view.index('<WikiYandexImport'))
+
+    def test_source_label_is_not_hardcoded_in_the_queue(self):
+        """Появился второй источник — подпись «старая вики» перестала быть верной."""
+        self.assertIn('SOURCE_LABELS', self.queue)
+        self.assertNotRegex(self.queue, r'>\s*\n?\s*старая вики\s*\n',
+                            'подпись источника снова зашита строкой')
+
+    def test_source_labels_match_the_server(self):
+        server = set(wiki_migration.SOURCE_LABELS)
+        found = re.search(r'const SOURCE_LABELS = \{(.*?)\};', self.queue, re.S)
+        self.assertIsNotNone(found, 'во фронте нет словаря подписей источников')
+        front = set(re.findall(r'^\s*([a-z_]+):', found.group(1), re.M))
+        self.assertEqual(front, server,
+                         'коды источников во фронте и на сервере разошлись')
+
+    def test_the_dialog_says_the_article_arrives_as_a_draft(self):
+        """Обещание «ничего не публикуется само» должно стоять там, где нажимают."""
+        self.assertIn('ЧЕРНОВИКОМ', self.dialog)
+
+    def test_overwrite_button_appears_only_on_conflict(self):
+        """Единственное действие, затирающее работу человека, — не по умолчанию."""
+        self.assertIn("item.last_status === 'conflict'", self.dialog)
+        self.assertLess(self.dialog.index("item.last_status === 'conflict'"),
+                        self.dialog.index('onClick={onForce}'),
+                        'кнопка «Переписать» стоит вне проверки на конфликт')
+
+
 class SchedulerTest(unittest.TestCase):
     """Ночная сверка: без неё «обновляется автоматически» остаётся обещанием."""
 

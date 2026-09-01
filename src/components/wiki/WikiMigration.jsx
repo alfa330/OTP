@@ -46,6 +46,15 @@ const VERDICTS = {
     nearby: { tone: 'slate', label: 'рядом с существующей', icon: Copy },
 };
 
+/* Подписи источников. Ключи — коды из wiki/migration.py (SOURCE_*), подписи
+   только здесь. До появления второго источника подпись «старая вики» была
+   зашита в строку, и статья из базы знаний Яндекс Про подписалась бы ею же —
+   молча и неверно. */
+const SOURCE_LABELS = {
+    wikijs: 'старая вики',
+    yandex_pro: 'Яндекс Про',
+};
+
 const STATUS_LABELS = {
     draft: 'Черновик', on_approval: 'На согласовании', published: 'Опубликована',
     requires_verification: 'Требует проверки', archived: 'В архиве', expired: 'Устарела',
@@ -133,10 +142,20 @@ const Row = ({ item, busy, locked, onOpen, onApprove, onDiscard }) => {
                     )}
 
                     <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-slate-400">
-                        <span className="tabular-nums">
-                            старая вики
-                            {item.source_id != null ? ` #${item.source_id}` : ''}
-                        </span>
+                        {/* У Яндекс Про source_slug — это адрес страницы, и он
+                            здесь полезнее номера: по нему видно, что именно
+                            перенесли, и можно сверить с источником глазами. */}
+                        {String(item.source_slug || '').startsWith('http') ? (
+                            <a href={item.source_slug} target="_blank" rel="noopener noreferrer"
+                               className="inline-flex items-center gap-1 text-indigo-500">
+                                {SOURCE_LABELS[item.source] || item.source}
+                            </a>
+                        ) : (
+                            <span className="tabular-nums">
+                                {SOURCE_LABELS[item.source] || item.source || 'внешний источник'}
+                                {item.source_id != null ? ` #${item.source_id}` : ''}
+                            </span>
+                        )}
                         <span className="tabular-nums">{fmtSize(item.size)}</span>
                         {item.sections && <span>{item.sections}</span>}
                         {/* Про неполноту проверки говорим прямо: «похожего не

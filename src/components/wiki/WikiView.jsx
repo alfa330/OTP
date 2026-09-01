@@ -20,6 +20,7 @@ import WikiTrainers from './WikiTrainers';
 import WikiGuests from './WikiGuests';
 import WikiGuestBanner from './WikiGuestBanner';
 import WikiMigration from './WikiMigration';
+import WikiYandexImport from './WikiYandexImport';
 import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
@@ -319,6 +320,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         return Number.isFinite(saved) && saved > 0 ? saved : null;
     });
     const [spaceModal, setSpaceModal] = useState(null);   // {mode:'create'|'edit'}
+    /* Импорт из базы знаний Яндекс Про. Просьбой, а не флагом: диалог живёт на
+       уровне раздела и открывается из шапки любой вкладки. */
+    const [yandexImport, setYandexImport] = useState(null);
     /* Отделы для конструктора. Тянем их ОДИН раз на раздел, а не при каждом
        открытии окна: список отделов компании меняется раз в квартал. */
     const [departments, setDepartments] = useState([]);
@@ -728,6 +732,26 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                 className={iosBtnPrimary}
                             >
                                 <Plus size={15} /> Новая статья
+                            </button>
+                        )}
+
+                        {/* Импорт из базы знаний Яндекс Про — вторичной кнопкой
+                            рядом: главное действие шапки одно, и это «Новая
+                            статья». Гейт тот же, что у неё: импорт создаёт
+                            статьи, и в гостевом пространстве отказал бы сервер.
+                            Показываем и в половине «Перенос»: приехавшее оттуда
+                            живёт в её очереди, и следующую страницу человек
+                            переносит с того же экрана. */}
+                        {capabilities.can_create && !activeSpace?.guest_only
+                            && (tab === 'library'
+                                || (tab === 'catalog'
+                                    && (catalogMode === 'catalog' || catalogMode === 'migration'))) && (
+                            <button
+                                type="button"
+                                onClick={() => setYandexImport({})}
+                                className={iosBtnSecondary}
+                            >
+                                <ArrowDownToLine size={15} /> Из Яндекс Про
                             </button>
                         )}
                     </div>
@@ -1175,6 +1199,32 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                        чтобы в нём работать, а не чтобы найти в списке. */
                     if (id) setSpaceId(id);
                     refresh();
+                }}
+            />
+
+            {/* Импорт из базы знаний Яндекс Про. Тоже на уровне раздела, и по
+                той же причине, что конструктор пространства: открывается из
+                шапки и обязан работать с любой вкладки. */}
+            <WikiYandexImport
+                open={!!yandexImport}
+                base={base}
+                headers={headers}
+                structure={scopedStructure}
+                showToast={showToast}
+                onClose={() => setYandexImport(null)}
+                onOpenArticle={(slug) => {
+                    setYandexImport(null);
+                    setTab('library');
+                    setSearchTarget({ slug, from: returnDoor('catalog', 'migration') });
+                }}
+                /* После переноса ведём человека в очередь «Перенос»: статья
+                   приехала черновиком, и решение по ней — там. */
+                onDone={(body) => {
+                    loadCatalog?.();
+                    if (body?.created) {
+                        setTab('catalog');
+                        setCatalogMode('migration');
+                    }
                 }}
             />
         </div>
