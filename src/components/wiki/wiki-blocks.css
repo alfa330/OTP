@@ -623,3 +623,155 @@
 .ProseMirror [data-wiki-block='lead'] {
     min-height: 2.75rem;
 }
+
+/* ── Галерея ──────────────────────────────────────────────────────────────
+   Несколько кадров ОДНОГО действия, которые читатель листает на месте.
+
+   Зачем отдельный блок, а не четыре картинки подряд. Источник инструкций —
+   база знаний Яндекс Про — показывает «шаг 1» и «шаг 2» одного действия
+   каруселью. Разложенные столбиком, те же два кадра читаются как два разных
+   места в приложении, и инструкция врёт: экранов на самом деле один, просто
+   показан дважды. Плюс четыре скриншота телефона подряд — это три экрана
+   прокрутки мимо текста.
+
+   ЛИСТАНИЕ ДЕЛАЕТ CSS, А НЕ СКРИПТ. Полоса с overflow-x и scroll-snap даёт
+   настоящий свайп пальцем на телефоне, инерцию и остановку ровно на кадре —
+   бесплатно и без единой строки JS. Скрипт витрины (WikiArticle.jsx) добавляет
+   поверх только стрелки, точки и подпись: то, чего у CSS нет. Отними скрипт —
+   галерея останется рабочей полосой, которую можно листать пальцем. Отними
+   CSS — и стрелки будут двигать то, что и так лежит столбиком.
+
+   В РЕДАКТОРЕ ЭТО ТА ЖЕ ПОЛОСА. Автор видит кадры рядом и может убрать любой;
+   стрелок и точек там нет намеренно — они управляют чтением, а не правкой.
+   ──────────────────────────────────────────────────────────────────────── */
+.wiki-prose [data-wiki-block='gallery'] {
+    display: flex;
+    gap: 0.75rem;
+    margin: 1.5rem 0;
+    padding: 0.75rem;
+    border-radius: 16px;
+    background: var(--wiki-surface-alt);
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    /* Полосу прокрутки прячем: под галереей есть точки, и они говорят то же
+       самое, но понятнее — сколько всего кадров и который открыт. */
+    scrollbar-width: none;
+}
+
+.wiki-prose [data-wiki-block='gallery']::-webkit-scrollbar { display: none; }
+
+/* Кадр внутри галереи — ЛЮБОЙ прямой потомок, а не только <img>. Причина не
+   в запасе: правка статьи через ИИ возвращает картинки обёрнутыми в абзац
+   (маркер [[КАРТИНКА-N]] защищается вместе с абзацем, см. revise.py), и
+   правило, привязанное к img, оставило бы полосу с абзацами во всю ширину.
+   Витрина такую обёртку снимает (WikiArticle.jsx), но между правкой и
+   следующим сохранением статья живёт именно в таком виде. */
+.wiki-prose [data-wiki-block='gallery'] > * {
+    flex: 0 0 auto;
+    margin: 0;
+    scroll-snap-align: center;
+}
+
+/* Ширину и выравнивание, которые обычная картинка носит в data-width, здесь
+   задаёт САМА галерея: кадры одного действия обязаны быть одного размера,
+   иначе листание выглядит как дёрганье. Поэтому у правила и стоит !important —
+   инлайновый style с процентом остаётся в разметке (он нужен вне галереи и при
+   вытаскивании кадра наружу), но внутри полосы не действует. */
+.wiki-prose [data-wiki-block='gallery'] img {
+    display: block;
+    width: auto !important;
+    max-width: 100%;
+    max-height: 26rem;
+    margin: 0 auto !important;
+    border-radius: 12px;
+}
+
+/* Обёртка, стрелки, точки и подпись — их создаёт витрина при чтении. В базе
+   этого нет: тело статьи обязано оставаться разметкой, которую можно
+   отредактировать руками. */
+.wiki-prose .wiki-gallery {
+    position: relative;
+    margin: 1.5rem 0;
+}
+
+.wiki-prose .wiki-gallery [data-wiki-block='gallery'] { margin: 0; }
+
+.wiki-prose .wiki-gallery__arrow {
+    position: absolute;
+    top: 50%;
+    display: grid;
+    place-items: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    margin-top: -1.25rem;
+    border: 1px solid var(--wiki-line);
+    border-radius: 999px;
+    background: var(--wiki-surface);
+    color: var(--wiki-ink-soft);
+    font-size: 1.125rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.wiki-prose .wiki-gallery__arrow:hover {
+    background: var(--wiki-accent-soft);
+    color: var(--wiki-accent);
+}
+
+/* Стрелка, которой некуда листать, гасится, а не исчезает: пропадающая кнопка
+   сдвигает соседнюю, и палец попадает не туда. */
+.wiki-prose .wiki-gallery__arrow[disabled] {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.wiki-prose .wiki-gallery__arrow--prev { left: -0.75rem; }
+.wiki-prose .wiki-gallery__arrow--next { right: -0.75rem; }
+
+.wiki-prose .wiki-gallery__caption {
+    margin: 0.625rem 0 0;
+    color: var(--wiki-ink-soft);
+    font-size: 0.9375rem;
+    line-height: 1.45;
+    text-align: center;
+}
+
+.wiki-prose .wiki-gallery__dots {
+    display: flex;
+    gap: 0.375rem;
+    justify-content: center;
+    margin-top: 0.5rem;
+}
+
+.wiki-prose .wiki-gallery__dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: var(--wiki-line);
+    cursor: pointer;
+}
+
+.wiki-prose .wiki-gallery__dot[aria-current='true'] { background: var(--wiki-accent); }
+
+/* На узком экране стрелки некуда вынести за край — убираем их вовсе: там
+   листают пальцем, и две кнопки поверх кадра только закрывают инструкцию. */
+@media (max-width: 640px) {
+    .wiki-prose .wiki-gallery__arrow { display: none; }
+}
+
+/* Подсказка внутри пустой галереи (текст-рыба из шаблона вставки). Внутри
+   полосы обычный абзац растянулся бы на всю её ширину и читался бы как
+   подпись к несуществующему кадру — приводим его к тому, чем он и является:
+   пунктирная рамка на месте будущего кадра. */
+.wiki-prose [data-wiki-block='gallery'] > p {
+    max-width: 22rem;
+    padding: 2rem 1.25rem;
+    border: 1px dashed var(--wiki-line);
+    border-radius: 12px;
+    color: var(--wiki-ink-mute);
+    font-size: 0.9375rem;
+    text-align: center;
+}

@@ -468,6 +468,134 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         });
     }, [safeHtml, bodyReady]);
 
+    /* ГАЛЕРЕЯ: стрелки, точки и подпись — при чтении, а не в теле статьи.
+     *
+     * Само листание делает CSS: полоса с overflow-x и scroll-snap даёт
+     * настоящий свайп пальцем, инерцию и остановку ровно на кадре. Здесь
+     * добавляется только то, чего у CSS нет: две стрелки для мыши, точки
+     * «который кадр из скольких» и подпись под открытым кадром.
+     *
+     * Почему обвязка НЕ хранится в статье. Кнопку санитайзер не пропустит (и
+     * правильно), а если собрать её из div'ов, она уедет в базу, в поисковый
+     * индекс и в историю версий — и любой, кто откроет статью в редакторе,
+     * увидит вместо галереи россыпь пустых блоков. Тело статьи обязано
+     * остаться разметкой, которую можно править руками: полоса картинок.
+     *
+     * Подпись берётся из alt, а не из соседнего абзаца: абзац пришлось бы
+     * привязывать к кадру порядком следования, и первая же правка в редакторе
+     * (переставили картинки) развела бы подписи с кадрами молча.
+     */
+    useEffect(() => {
+        if (!safeHtml || !bodyRef.current) return undefined;
+        const undo = [];
+        bodyRef.current.querySelectorAll('[data-wiki-block="gallery"]').forEach((strip) => {
+            if (strip.parentElement?.classList.contains('wiki-gallery')) return;
+            /* Кадр, обёрнутый в абзац, разворачиваем. Так галерея приходит
+               после правки через ИИ: маркер картинки защищается вместе с
+               абзацем (wiki/ai/revise.py), и обратно картинка возвращается
+               внутрь <p>. Абзац с текстом не трогаем — это подсказка из
+               шаблона вставки, у неё свой вид. */
+            strip.querySelectorAll('p').forEach((para) => {
+                const inner = para.querySelector('img');
+                if (inner && !para.textContent.trim()) para.replaceWith(inner);
+            });
+            const slides = Array.from(strip.querySelectorAll('img'));
+            /* Одному кадру карусель не нужна: стрелки, которым некуда листать,
+               и одна-единственная точка — это шум, а не управление. */
+            if (slides.length < 2) return;
+
+            const box = document.createElement('div');
+            box.className = 'wiki-gallery';
+            strip.replaceWith(box);
+            box.appendChild(strip);
+
+            const caption = document.createElement('p');
+            caption.className = 'wiki-gallery__caption';
+            box.appendChild(caption);
+
+            const dots = document.createElement('div');
+            dots.className = 'wiki-gallery__dots';
+            box.appendChild(dots);
+
+            const arrow = (side, label) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = `wiki-gallery__arrow wiki-gallery__arrow--${side}`;
+                button.setAttribute('aria-label', label);
+                /* Шеврон рисуем SVG, а не знаком: у стрелок из юникода часть
+                   систем подставляет цветной эмодзи-глиф — раздел на этом уже
+                   обжигался на сортировке таблиц. */
+                button.innerHTML = side === 'prev'
+                    ? '<svg width="9" height="15" viewBox="0 0 9 15" fill="none" aria-hidden="true">'
+                      + '<path d="M7.5 1.5 2 7.5l5.5 6" stroke="currentColor" stroke-width="1.8"'
+                      + ' stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                    : '<svg width="9" height="15" viewBox="0 0 9 15" fill="none" aria-hidden="true">'
+                      + '<path d="M1.5 1.5 7 7.5l-5.5 6" stroke="currentColor" stroke-width="1.8"'
+                      + ' stroke-linecap="round" stroke-linejoin="round"/></svg>';
+                box.appendChild(button);
+                return button;
+            };
+            const prev = arrow('prev', 'Предыдущий кадр');
+            const next = arrow('next', 'Следующий кадр');
+
+            const dotNodes = slides.map((slide, index) => {
+                const dot = document.createElement('button');
+                dot.type = 'button';
+                dot.className = 'wiki-gallery__dot';
+                dot.setAttribute('aria-label', `Кадр ${index + 1} из ${slides.length}`);
+                dot.addEventListener('click', () => goTo(index));
+                dots.appendChild(dot);
+                return dot;
+            });
+
+            /* Открытый кадр — тот, чья середина ближе к середине полосы.
+               Считать по scrollLeft нельзя: кадры разной ширины, и «сколько
+               прокрутили» не отвечает на вопрос «что сейчас видно». */
+            const current = () => {
+                const middle = strip.scrollLeft + strip.clientWidth / 2;
+                let best = 0;
+                let bestGap = Infinity;
+                slides.forEach((slide, index) => {
+                    const gap = Math.abs(slide.offsetLeft + slide.offsetWidth / 2 - middle);
+                    if (gap < bestGap) { bestGap = gap; best = index; }
+                });
+                return best;
+            };
+
+            function goTo(index) {
+                const slide = slides[Math.max(0, Math.min(slides.length - 1, index))];
+                if (!slide) return;
+                strip.scrollTo({
+                    left: slide.offsetLeft - (strip.clientWidth - slide.offsetWidth) / 2,
+                    behavior: 'smooth',
+                });
+            }
+
+            const sync = () => {
+                const index = current();
+                dotNodes.forEach((dot, at) => dot.setAttribute(
+                    'aria-current', at === index ? 'true' : 'false'));
+                caption.textContent = slides[index]?.getAttribute('alt') || '';
+                prev.disabled = index === 0;
+                next.disabled = index === slides.length - 1;
+            };
+
+            const onPrev = () => goTo(current() - 1);
+            const onNext = () => goTo(current() + 1);
+            prev.addEventListener('click', onPrev);
+            next.addEventListener('click', onNext);
+            strip.addEventListener('scroll', sync, { passive: true });
+            sync();
+
+            undo.push(() => {
+                prev.removeEventListener('click', onPrev);
+                next.removeEventListener('click', onNext);
+                strip.removeEventListener('scroll', sync);
+            });
+        });
+        return () => undo.forEach((fn) => fn());
+    }, [safeHtml, bodyReady]);
+
     /* Пометка внутренних ссылок — ПРИ ЧТЕНИИ, а не в сохранённом тексте.
      *
      * Соблазн хранить класс прямо в теле статьи большой, но класс на <a>

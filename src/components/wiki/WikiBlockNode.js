@@ -76,6 +76,18 @@ export const INSERT_BLOCKS = [
             + '</div><p></p>',
     },
     {
+        key: 'gallery',
+        label: 'Галерея',
+        hint: 'несколько кадров одного действия: читатель листает их на месте',
+        /* Текст-рыба, а не пустой блок: галерея наполняется картинками, а
+           пустая полоса выглядит поломкой вёрстки — первое, что с ней сделает
+           автор, это удалит, решив, что кнопка не сработала. Подсказку он
+           заменит кадрами, перетащив их внутрь. */
+        template: '<div data-wiki-block="gallery">'
+            + '<p>Перетащите сюда 2–3 кадра одного действия.</p>'
+            + '</div><p></p>',
+    },
+    {
         key: 'stats',
         label: 'Показатели',
         hint: 'крупные числа рядом: сроки, суммы, доли, пороги',
@@ -104,7 +116,14 @@ export const GRID_ITEMS = {
    «data-tone=purple» не нарисовал бы ничего (в CSS такого набора нет), но
    пережил бы санитайзер и остался в теле статьи навсегда — мусором, который
    потом никто не решится вычистить, не зная, чей он. */
-export const BLOCK_KINDS = ['lead', 'note', 'cards', 'card', 'stats', 'stat'];
+export const BLOCK_KINDS = ['lead', 'note', 'cards', 'card', 'stats', 'stat',
+    /* Галерея — единственный блок, который заводит не человек, а импортёр
+       (wiki/yandex_pro.py): у источника несколько кадров одного действия
+       лежат каруселью. В меню вставки её нет намеренно — пустая галерея
+       без картинок выглядит поломкой вёрстки. Листание живёт на витрине
+       (WikiArticle.jsx), в редакторе это обычная полоса картинок, из
+       которой любую можно убрать. */
+    'gallery'];
 export const BLOCK_COLS = ['1', '2', '3'];
 
 /* Значение из закрытого перечня — или запасное.
@@ -358,7 +377,7 @@ export const WikiListVariant = Extension.create({
  * почему, не читая исходник, нельзя. Список сторожит tests/wiki_blocks.test.mjs.
  */
 const MENU_ORDER = ['lead', 'note', 'steps', 'cards', 'stats', 'chips',
-                    'checks', 'crosses'];
+                    'checks', 'crosses', 'gallery'];
 
 export const BLOCK_MENU = MENU_ORDER.map((key) => {
     const kind = INSERT_BLOCKS.find((item) => item.key === key);

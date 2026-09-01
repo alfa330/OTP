@@ -77,6 +77,9 @@ ASTANA = {'id': 10, 'code': 'nur-sultan', 'name': 'Астана', 'region_id': 1
 
 IMG_PORTRAIT = 'https://storage.yandexcloud.net/yandexpro-prod/a/phone.png'
 IMG_WIDE = 'https://storage.yandexcloud.net/yandexpro-prod/a/desktop.jpg'
+# Два кадра ОДНОГО действия — у источника они лежат в одной карусели.
+IMG_SLIDE_1 = 'https://storage.yandexcloud.net/yandexpro-prod/a/step1.jpeg'
+IMG_SLIDE_2 = 'https://storage.yandexcloud.net/yandexpro-prod/a/step2.jpeg'
 
 
 def component(kind, values, children=None):
@@ -141,9 +144,17 @@ def full_components():
         component('YTextArea', {'text': TEXT_FULL, 'is_hide': False}),
         # Ловушка: этот компонент целиком лежит внутри предыдущего.
         component('YTextArea', {'text': TEXT_TAIL, 'is_hide': False}),
+        # Одиночный кадр: карусель ему не нужна, зато нужен размер по кадру.
         component('ImageSlider', {'dataList': [
             {'url': IMG_PORTRAIT, 'name': 'Откройте раздел «Межгород»', 'image_id': 1},
+        ]}),
+        component('ImageSlider', {'dataList': [
             {'url': IMG_WIDE, 'name': '', 'image_id': 2},
+        ]}),
+        # Карусель источника: два кадра одного действия.
+        component('ImageSlider', {'dataList': [
+            {'url': IMG_SLIDE_1, 'name': 'Шаг 1: откройте раздел', 'image_id': 3},
+            {'url': IMG_SLIDE_2, 'name': 'Шаг 2: подтвердите заказ', 'image_id': 4},
         ]}),
         # Продолжение перечня после картинки — с нумерации 2.
         component('YTextArea', {'text': '<ol start="2"><li><p>Выбрать самому</p></li></ol>'}),
@@ -178,7 +189,8 @@ def parsed_page(components=None, **kwargs):
 
 
 def image_map(parsed, *, portrait=(499, 1080), wide=(1280, 720)):
-    sizes = {IMG_PORTRAIT: portrait, IMG_WIDE: wide}
+    sizes = {IMG_PORTRAIT: portrait, IMG_WIDE: wide,
+             IMG_SLIDE_1: portrait, IMG_SLIDE_2: portrait}
     out = {}
     for index, item in enumerate(parsed['images'], start=1):
         width, height = sizes.get(item['url'], (0, 0))
@@ -335,11 +347,69 @@ class ParseTest(unittest.TestCase):
     def test_portrait_screenshot_is_narrow_and_wide_one_is_full(self):
         """Скриншот телефона 499x1080 во всю колонку занимает три экрана."""
         images = re.findall(r'<img[^>]*>', self.content)
-        self.assertEqual(len(images), 2, images)
+        self.assertEqual(len(images), 4, images)
         self.assertIn('data-width="%d"' % yandex_pro.PORTRAIT_WIDTH, images[0])
         self.assertIn('data-align="center"', images[0])
         self.assertIn('width: %d%%' % yandex_pro.PORTRAIT_WIDTH, images[0])
         self.assertIn('data-width="%d"' % yandex_pro.WIDE_WIDTH, images[1])
+
+    # ── Требование 9: карусель источника остаётся каруселью ─────────────
+    def test_slider_becomes_one_gallery_block(self):
+        """Два кадра одного действия у источника лежат в карусели.
+
+        Разложенные столбиком, они читаются как два РАЗНЫХ места в приложении,
+        и инструкция начинает врать: экран один, просто показан дважды.
+        """
+        self.assertEqual(self.content.count('data-wiki-block="gallery"'), 1,
+                         self.content)
+        gallery = re.search(r'<div data-wiki-block="gallery">(.*?)</div>',
+                            self.content, re.S).group(1)
+        self.assertEqual(gallery.count('<img'), 2, gallery)
+        self.assertIn('alt="Шаг 1: откройте раздел"', gallery)
+        self.assertIn('alt="Шаг 2: подтвердите заказ"', gallery)
+
+    def test_gallery_frames_carry_no_size_of_their_own(self):
+        """Размер внутри галереи держит она сама: кадры обязаны быть равны.
+
+        Разный размер соседних кадров превращает листание в дёрганье.
+        """
+        gallery = re.search(r'<div data-wiki-block="gallery">(.*?)</div>',
+                            self.content, re.S).group(1)
+        self.assertNotIn('data-width', gallery)
+        self.assertNotIn('style=', gallery)
+
+    def test_a_single_frame_slider_is_not_a_carousel(self):
+        """Стрелки, которым некуда листать, — шум, а не управление."""
+        one = parsed_page([component('ImageSlider', {'dataList': [
+            {'url': IMG_PORTRAIT, 'name': 'Один кадр'}]})])
+        content, _ = yandex_pro.build_content(one, image_map(one))
+        self.assertNotIn('data-wiki-block="gallery"', content)
+        self.assertIn('<img', content)
+
+    def test_gallery_survives_an_ai_edit(self):
+        """Незарегистрированный вид блока УНИЧТОЖАЕТ картинки внутри бесследно.
+
+        canonicalize зовётся при каждой правке статьи через помощника, и
+        картинки в нём защищены маркерами. Блок, которого нет в BLOCK_KINDS,
+        разворачивается — а маркеры внутри к тому моменту уже текст, то есть
+        обратно картинки встают, но БЕЗ галереи, столбиком.
+        """
+        from wiki.ai import authoring as ai_authoring
+        from wiki.ai import revise as ai_revise
+        protected, tables, images = ai_revise.protect_tables(self.content)
+        back = ai_revise.restore_tables(ai_authoring.canonicalize(protected),
+                                        tables, images)
+        body = back if isinstance(back, str) else back[0]
+        self.assertIn('data-wiki-block="gallery"', body)
+        self.assertEqual(body.count('data-wiki-block="gallery"'), 1)
+
+    def test_frames_are_not_wrapped_in_a_paragraph(self):
+        """Узел картинки подключён как inline: false — обёртка из абзаца распадётся.
+
+        Проверено по статье, собранной человеком в редакторе: там <img> стоит
+        на верхнем уровне, а не внутри <p>.
+        """
+        self.assertNotIn('<p><img', self.content)
 
     def test_caption_becomes_alt_and_a_visible_line(self):
         self.assertIn('alt="Откройте раздел «Межгород»"', self.content)
@@ -349,7 +419,9 @@ class ParseTest(unittest.TestCase):
         """Кадр, который не удалось уложить, из тела ИСЧЕЗАЕТ, а не остаётся чужой ссылкой."""
         content, warnings = yandex_pro.build_content(self.parsed, {})
         self.assertNotIn('<img', content)
-        self.assertTrue(any('Не перенесено картинок: 2' == w for w in warnings), warnings)
+        self.assertNotIn('data-wiki-block="gallery"', content,
+                         'осталась пустая галерея без кадров')
+        self.assertTrue(any('Не перенесено картинок: 4' == w for w in warnings), warnings)
 
     def test_shorthand_margin_is_never_used(self):
         """Сокращённое margin санитайзер вырезает целиком — центрирование пропало бы."""
@@ -920,6 +992,43 @@ class FrontendTest(unittest.TestCase):
         front = set(re.findall(r'^\s*([a-z_]+):', found.group(1), re.M))
         self.assertEqual(front, server,
                          'коды источников во фронте и на сервере разошлись')
+
+    def test_gallery_is_alive_on_the_showcase(self):
+        """Стрелки, точки и подпись навешиваются при чтении, а не лежат в статье.
+
+        Собери обвязку из div'ов в теле — и она уедет в базу, в поисковый
+        индекс и в историю версий, а автор увидит в редакторе россыпь пустых
+        блоков вместо галереи.
+        """
+        article = (ROOT / 'src' / 'components' / 'wiki'
+                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
+        self.assertIn('[data-wiki-block="gallery"]', article)
+        self.assertIn('wiki-gallery__dot', article)
+        self.assertIn('wiki-gallery__caption', article)
+
+    def test_swipe_comes_from_css_not_from_a_script(self):
+        """Настоящий свайп пальцем даёт scroll-snap, а не обработчик touch."""
+        css = (ROOT / 'src' / 'components' / 'wiki'
+               / 'wiki-blocks.css').read_text(encoding='utf-8')
+        self.assertIn('scroll-snap-type: x mandatory', css)
+        self.assertIn("[data-wiki-block='gallery']", css)
+        article = (ROOT / 'src' / 'components' / 'wiki'
+                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
+        self.assertNotIn('touchstart', article,
+                         'свайп написан руками там, где его умеет CSS')
+
+    def test_arrows_are_drawn_not_typed(self):
+        """Стрелка из юникода в части систем рисуется цветным эмодзи-глифом.
+
+        Раздел на этом уже обжигался на стрелках сортировки в таблицах.
+        """
+        article = (ROOT / 'src' / 'components' / 'wiki'
+                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
+        block = article[article.index('wiki-gallery__arrow'):]
+        block = block[:block.index('wiki-gallery__dot')]
+        self.assertIn('<svg', block)
+        for glyph in ('‹', '›', '←', '→', '◀', '▶'):
+            self.assertNotIn(glyph, block, 'стрелка набрана знаком: %s' % glyph)
 
     def test_every_badge_tone_exists_in_the_kit(self):
         """Незнакомый тон бейдж молча подменяет на серый.

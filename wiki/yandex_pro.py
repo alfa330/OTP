@@ -255,13 +255,23 @@ def _walk(components, audience, out, warnings, depth=0):
         if kind == 'YTextArea':
             out.append({'kind': 'text', 'html': values.get('text') or '', 'depth': depth})
         elif kind == 'ImageSlider':
+            # Слайдер источника остаётся ОДНИМ блоком, а не рассыпается на
+            # картинки подряд: на сайте это карусель со стрелками и точками, и
+            # два кадра там — «шаг 1» и «шаг 2» одного действия. Разложенные
+            # столбиком, они читаются как два разных места в приложении.
+            slides = []
             for item in values.get('dataList') or []:
                 url = str((item or {}).get('url') or '').strip()
                 if not url:
                     continue
-                out.append({'kind': 'image', 'url': url,
-                            'caption': str(item.get('name') or '').strip(),
-                            'depth': depth})
+                slides.append({'url': url,
+                               'caption': str(item.get('name') or '').strip()})
+            if len(slides) == 1:
+                # Одному кадру карусель не нужна: стрелки, которым некуда
+                # листать, — это шум.
+                out.append({'kind': 'image', 'depth': depth, **slides[0]})
+            elif slides:
+                out.append({'kind': 'gallery', 'items': slides, 'depth': depth})
         elif kind == 'AccordionStart':
             title = str(values.get('title') or '').strip()
             if title:
@@ -333,6 +343,19 @@ def _dedupe_texts(blocks, warnings):
     return kept
 
 
+def _slides_of(block):
+    """Кадры блока: у картинки один, у галереи все, у остального ни одного.
+
+    Нужна затем, что кадр теперь живёт в двух видах блока сразу, и перечислять
+    их порознь в каждом обходе — верный способ однажды забыть галерею.
+    """
+    if block['kind'] == 'image':
+        return [{'url': block['url'], 'caption': block.get('caption') or ''}]
+    if block['kind'] == 'gallery':
+        return list(block['items'])
+    return []
+
+
 def parse_article(page, url=None):
     """Страница источника -> описание статьи. Тела статьи здесь ещё нет.
 
@@ -356,16 +379,27 @@ def parse_article(page, url=None):
                            warnings)
     images, seen = [], set()
     for block in blocks:
-        if block['kind'] != 'image' or block['url'] in seen:
-            continue
-        seen.add(block['url'])
-        images.append({'url': block['url'], 'caption': block['caption']})
+        for item in _slides_of(block):
+            if item['url'] in seen:
+                continue
+            seen.add(item['url'])
+            images.append({'url': item['url'], 'caption': item['caption']})
     if len(images) > MAX_IMAGES:
         warnings.append('Картинок на странице больше %d — взяты первые %d'
                         % (MAX_IMAGES, MAX_IMAGES))
         keep = {item['url'] for item in images[:MAX_IMAGES]}
-        blocks = [block for block in blocks
-                  if block['kind'] != 'image' or block['url'] in keep]
+        trimmed = []
+        for block in blocks:
+            if block['kind'] == 'image':
+                if block['url'] in keep:
+                    trimmed.append(block)
+            elif block['kind'] == 'gallery':
+                left = [item for item in block['items'] if item['url'] in keep]
+                if left:
+                    trimmed.append(dict(block, items=left))
+            else:
+                trimmed.append(block)
+        blocks = trimmed
         images = images[:MAX_IMAGES]
 
     entity_id = payload.get('entity_id')
@@ -400,8 +434,10 @@ def fingerprint(parsed):
         kind = block['kind']
         if kind == 'text':
             parcels.append('t:' + _fold(block['html']))
-        elif kind == 'image':
-            parcels.append('i:%s|%s' % (block['url'], _fold(block.get('caption') or '')))
+        elif kind in ('image', 'gallery'):
+            parcels.append('i:' + '|'.join(
+                '%s~%s' % (item['url'], _fold(item['caption']))
+                for item in _slides_of(block)))
         elif kind == 'heading':
             parcels.append('h:' + _fold(block['text']))
         elif kind == 'table':
@@ -559,11 +595,43 @@ def build_content(parsed, image_map=None, *, source_link=True):
                 lost += 1
                 continue
             size, align = image_layout(stored.get('width'), stored.get('height'))
-            parts.append('<p>%s</p>' % wiki_markup.image_tag(
+            # Картинка кладётся ОТДЕЛЬНЫМ блоком, а не внутрь <p>. Узел
+            # редактора подключён как inline: false (WikiEditor.jsx), то есть
+            # картинка у него блок; обёртка из абзаца при первом же «открыл и
+            # сохранил» распалась бы, оставив пустой <p> посреди статьи.
+            # Проверено по статье, которую человек собрал руками: там <img>
+            # стоит на верхнем уровне.
+            parts.append(wiki_markup.image_tag(
                 stored['url'], alt=block.get('caption') or '', size=size, align=align))
             if block.get('caption'):
                 parts.append('<p style="text-align: center"><em>%s</em></p>'
                              % _escape(block['caption']))
+        elif kind == 'gallery':
+            # Карусель источника: кадры одного действия, которые читатель
+            # листает на месте. Ширину и выравнивание НЕ задаём — внутри
+            # галереи их держит wiki-blocks.css, а подпись каждого кадра живёт
+            # в alt (витрина показывает её под открытым кадром).
+            slides = [item for item in block['items']
+                      if (image_map.get(item['url']) or {}).get('url')]
+            lost += len(block['items']) - len(slides)
+            if not slides:
+                continue
+            if len(slides) == 1:
+                # Кадры не доехали, остался один — карусель из одного кадра это
+                # стрелки, которым некуда листать.
+                stored = image_map[slides[0]['url']]
+                size, align = image_layout(stored.get('width'), stored.get('height'))
+                parts.append(wiki_markup.image_tag(
+                    stored['url'], alt=slides[0]['caption'], size=size, align=align))
+                if slides[0]['caption']:
+                    parts.append('<p style="text-align: center"><em>%s</em></p>'
+                                 % _escape(slides[0]['caption']))
+                continue
+            frames = ''.join(
+                wiki_markup.image_tag(image_map[item['url']]['url'],
+                                      alt=item['caption'])
+                for item in slides)
+            parts.append('<div data-wiki-block="gallery">%s</div>' % frames)
         elif kind == 'table':
             html, trimmed = _table_html(block['head'], block['body'], parsed.get('url'))
             parts.append(html)

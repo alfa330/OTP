@@ -107,9 +107,9 @@ test('меню знает все блоки и различает вставку
   // схеме, в санитайзере, в стилях и в наставлении для ИИ, статья с ним
   // открывается правильно, но поставить его руками автор не может.
   assert.deepEqual(BLOCK_MENU.map((item) => item.key),
-    ['lead', 'note', 'steps', 'cards', 'stats', 'chips', 'checks', 'crosses']);
+    ['lead', 'note', 'steps', 'cards', 'stats', 'chips', 'checks', 'crosses', 'gallery']);
   const byAction = (action) => BLOCK_MENU.filter((i) => i.action === action).map((i) => i.key);
-  assert.deepEqual(byAction('insert'), ['lead', 'note', 'cards', 'stats']);
+  assert.deepEqual(byAction('insert'), ['lead', 'note', 'cards', 'stats', 'gallery']);
   assert.deepEqual(byAction('variant'), ['steps', 'chips', 'checks', 'crosses']);
 
   // Ни один вид блока не должен остаться без пункта меню.
