@@ -707,8 +707,12 @@ class ZaiProviderTest(unittest.TestCase):
         block = self.sent[-1]['payload']['messages'][-1]['content'][0]
         self.assertEqual('image_url', block['type'])
 
-    def test_editor_chain_picks_the_model_strong_at_both(self):
-        """Первым — модель, берущая ОБЕ мерки сразу.
+    def test_editor_chain_head_is_the_owners_call(self):
+        """Первое звено выбирает владелец, и сейчас это 3-flash-preview.
+
+        ВРЕМЕННО: 01.09.2026 он попросил вернуть preview, пока идёт замер порога.
+        Числа ниже при этом в силе — на документах ~8 тыс. знаков preview
+        переносит половину, и редактор увидит предупреждение о сжатии.
 
         16 прогонов 01.09.2026, два настоящих документа, один и тот же промпт:
 
@@ -720,23 +724,23 @@ class ZaiProviderTest(unittest.TestCase):
 
         3.5-flash единственный переносит документ целиком и при этом дважды из
         четырёх прогонов дотянулся до тех же ШЕСТИ видов блоков, что и
-        gemini-3-flash-preview. Предшественники не годились каждый по своему:
-        3-flash-preview пересказывал (0,58 в среднем), GLM брал два вида блоков
-        из девяти, и владелец забраковал его глазами.
+        gemini-3-flash-preview; GLM брал два вида блоков из девяти, и владелец
+        забраковал его глазами. Открытый вопрос: preview выдаёт 4 247-5 116
+        знаков независимо от размера входа, то есть на документе меньше ~4 500
+        знаков сжимать ему нечего. Замер порога идёт.
         """
-        self.assertEqual(('vertex', 'gemini-3.5-flash'),
+        self.assertEqual(('vertex', 'gemini-3-flash-preview'),
                          ai_providers.editor_chain()[0])
 
     def test_editor_fallbacks_go_across_vendors(self):
-        """Второе звено — ближайшая замена, третье — другой поставщик.
+        """Второе звено — замена по качеству, третье — другой поставщик.
 
-        gemini-3.6-flash по переносу ровнее, по оформлению беднее (всегда 4 вида)
-        и на 12 % дешевле — годная замена при отказе. GLM третьим: он
-        единственный не от Google, и при недоступности Vertex целиком статья всё
-        же соберётся, пусть и бедно.
+        3.5-flash вторым: он переносит документ целиком там, где preview
+        пересказывает. GLM третьим — единственный не от Google, страхует
+        недоступность Vertex целиком.
         """
-        self.assertEqual([('vertex', 'gemini-3.5-flash'),
-                          ('vertex', 'gemini-3.6-flash'),
+        self.assertEqual([('vertex', 'gemini-3-flash-preview'),
+                          ('vertex', 'gemini-3.5-flash'),
                           ('zai', 'glm-5.3-flash')],
                          list(ai_providers.editor_chain()))
 
@@ -785,7 +789,7 @@ class ZaiProviderTest(unittest.TestCase):
         finally:
             ai_providers._ADAPTERS.clear()
             ai_providers._ADAPTERS.update(original)
-        self.assertEqual(['gemini-3.5-flash'], seen)
+        self.assertEqual(['gemini-3-flash-preview'], seen)
 
     def test_zai_reads_files_too(self):
         """У PDF и картинок резерва не было вовсе: цепочка файла — vertex+gemini,
