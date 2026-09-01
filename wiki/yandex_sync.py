@@ -44,6 +44,8 @@ wiki/importer.py). Поэтому ночной обход (sync_all) устро�
 
 import logging
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import edit as wiki_edit
 from . import migration as wiki_migration
@@ -125,6 +127,17 @@ STATUS_OK = 'ok'
 STATUS_CHANGED = 'changed'
 STATUS_CONFLICT = 'conflict'
 STATUS_ERROR = 'error'
+
+# Пауза перед повторной попыткой прочитать страницу. Секунды хватает: это не
+# перегрузка сервера, а его защита от частых обращений.
+RETRY_PAUSE = 1.5
+
+# Кадров, качаемых ОДНОВРЕМЕННО. Замер на живой странице «Как пользоваться
+# Яндекс Про» (7 кадров): по одному — 54,8 секунды на запрос, и человек видит
+# ошибку раньше, чем результат. Четыре потока укладывают ту же страницу в
+# несколько секунд. Больше четырёх не берём: это чужой хост, и превращать
+# предпросмотр в обстрел CDN незачем.
+IMAGE_WORKERS = 4
 
 # Страниц за один ночной обход. Больше — это уже не сверка, а обход базы
 # знаний целиком: у каждой страницы свой запрос наружу, и растягивать его на
@@ -481,27 +494,64 @@ def _store_image(cursor, gcs, *, source_url, data, content_type, uploaded_by,
     return {'url': url, 'width': row[0], 'height': row[1]}
 
 
+def fetch_images(urls, fetch_image_fn=None):
+    """Скачать кадры ОДНОВРЕМЕННО: {адрес: (байты, тип)} и {адрес: причина}.
+
+    Последовательное скачивание — главная причина, по которой предпросмотр
+    выглядел как ошибка: страница на семь кадров занимала 54,8 секунды, и
+    человек успевал получить обрыв соединения вместо результата.
+
+    Потоки здесь безопасны: наружу ходит только requests, ни базы, ни flask.g
+    в этой функции нет (на flask.g в потоках раздел уже обжигался).
+    """
+    fetch = fetch_image_fn or fetch_image
+    blobs, failed = {}, {}
+    todo = [url for url in dict.fromkeys(urls)]
+    if not todo:
+        return blobs, failed
+    workers = min(IMAGE_WORKERS, len(todo))
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix='yandex-img') as pool:
+        futures = {pool.submit(fetch, url): url for url in todo}
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                blobs[url] = future.result()
+            except SyncError as error:
+                failed[url] = str(error)
+            except Exception as error:                     # noqa: BLE001
+                logger.exception('Яндекс Про: кадр %s не скачался', url)
+                failed[url] = str(error)[:120]
+    return blobs, failed
+
+
 def _image_map(cursor, gcs, parsed, *, uploaded_by, article_id=None, blobs=None,
                warnings=None, fetch_image_fn=None):
     """Карта «адрес в источнике -> наш адрес» для всех картинок страницы.
 
     blobs — уже скачанные байты {адрес: (данные, тип)}; ночной обход качает их
-    БЕЗ открытого курсора и передаёт сюда. Пусто — качаем сами (ручная дверь).
+    БЕЗ открытого курсора и передаёт сюда. Чего не передали — качаем сами, и
+    сразу все вместе (см. fetch_images): по одному это десятки секунд на запрос.
     """
     warnings = warnings if warnings is not None else []
-    urls = [item['url'] for item in parsed.get('images') or []]
-    mapping = dict(known_images(cursor, urls))
-    fetch = fetch_image_fn or fetch_image
+    items = parsed.get('images') or []
+    mapping = dict(known_images(cursor, [item['url'] for item in items]))
+    ready = dict(blobs or {})
+    missing = [item['url'] for item in items
+               if item['url'] not in mapping and item['url'] not in ready]
+    fetched, failed = fetch_images(missing, fetch_image_fn)
+    ready.update(fetched)
     hint = yandex_pro.parse_url(parsed.get('url')) or {}
-    for index, item in enumerate(parsed.get('images') or [], start=1):
+    for index, item in enumerate(items, start=1):
         source_url = item['url']
         if source_url in mapping:
             continue
+        if source_url not in ready:
+            warnings.append('Картинка %d не перенесена: %s'
+                            % (index, failed.get(source_url, 'кадр не скачался')))
+            continue
         try:
-            if blobs and source_url in blobs:
-                data, kind = blobs[source_url]
-            else:
-                data, kind = fetch(source_url)
+            data, kind = ready[source_url]
             mapping[source_url] = _store_image(
                 cursor, gcs, source_url=source_url, data=data, content_type=kind,
                 uploaded_by=uploaded_by, article_id=article_id,
@@ -541,18 +591,36 @@ def format_with_ai(title, content, *, generate_fn=None):
 
 # ── Разбор страницы ──────────────────────────────────────────────────────────
 
-def read_source(url, *, fetch_page_fn=None):
-    """Адрес -> разобранная страница. Ошибки — человеческим текстом."""
+def read_source(url, *, fetch_page_fn=None, retry=True):
+    """Адрес -> разобранная страница. Ошибки — человеческим текстом.
+
+    ОДНА ПОВТОРНАЯ ПОПЫТКА при странице без состояния. Замер: при частых
+    обращениях Яндекс отдаёт другую страницу — без __NEXT_DATA__, то есть
+    формально успешный ответ, из которого нечего брать. Отличить это от
+    «адрес не тот» по ответу нельзя, а разница для человека огромная: во
+    втором случае надо править ссылку, в первом — просто повторить. Поэтому
+    повторяем сами, один раз, и только для этой ошибки.
+    """
     parts = yandex_pro.parse_url(url)
     if not parts:
         raise SyncError(
             'Это не адрес статьи базы знаний Яндекс Про. Нужна ссылка вида '
             'https://pro.yandex.com/kz-ru/almaty/knowledge-base/taxi/tariffs/intercity')
-    page = (fetch_page_fn or fetch_page)(parts['url'])
+    fetch = fetch_page_fn or fetch_page
+    page = fetch(parts['url'])
     try:
         return yandex_pro.parse_article(page, parts['url'])
     except yandex_pro.SourceError as error:
-        raise SyncError(str(error))
+        if not retry or '__NEXT_DATA__' not in str(error):
+            raise SyncError(str(error))
+    time.sleep(RETRY_PAUSE)
+    try:
+        return yandex_pro.parse_article(fetch(parts['url']), parts['url'])
+    except yandex_pro.SourceError:
+        raise SyncError(
+            'Яндекс ответил страницей без содержимого — обычно так он '
+            'отвечает на частые обращения. Повторите через минуту; если '
+            'повторится, проверьте, что ссылка открывается в браузере.')
 
 
 def preview(cursor, gcs, *, url, uploaded_by, fetch_page_fn=None,
@@ -910,13 +978,6 @@ def _prefetch_images(parsed, fetch_image_fn=None):
     соединение всю сеть. Обмен сознательный — лишние байты против занятого
     соединения; на статье это единицы кадров.
     """
-    fetch = fetch_image_fn or fetch_image
-    blobs = {}
-    for item in parsed.get('images') or []:
-        try:
-            blobs[item['url']] = fetch(item['url'])
-        except SyncError:
-            continue
-        except Exception:                                  # noqa: BLE001
-            logger.exception('Яндекс Про: кадр %s не скачался', item['url'])
+    blobs, _failed = fetch_images(
+        [item['url'] for item in parsed.get('images') or []], fetch_image_fn)
     return blobs

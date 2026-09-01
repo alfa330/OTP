@@ -806,6 +806,67 @@ class SyncTest(unittest.TestCase):
                 cursor, article_id=715, url=PAGE_URL, linked_by=42,
                 fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
 
+    # ── Скорость и живучесть предпросмотра ──────────────────────────────
+    def test_frames_are_fetched_together_not_one_by_one(self):
+        """Замер на живой странице «Как пользоваться Яндекс Про» (7 кадров):
+        по одному — 54,8 секунды на запрос, и человек видит ошибку раньше, чем
+        результат. Это и была жалоба «вставил ссылку — вышла ошибка».
+        """
+        order = []
+
+        def slow(url):
+            order.append(('старт', url))
+            return (b'\x89PNG', 'image/png')
+
+        blobs, failed = yandex_sync.fetch_images(
+            ['https://x/%d.png' % i for i in range(6)], slow)
+        self.assertEqual(len(blobs), 6)
+        self.assertEqual(failed, {})
+        self.assertGreaterEqual(yandex_sync.IMAGE_WORKERS, 2,
+                                'кадры снова качаются по одному')
+        module = (ROOT / 'wiki' / 'yandex_sync.py').read_text(encoding='utf-8')
+        self.assertIn('ThreadPoolExecutor', module)
+
+    def test_a_failed_frame_does_not_lose_the_others(self):
+        def flaky(url):
+            if url.endswith('2.png'):
+                raise yandex_sync.SyncError('кадр не скачался')
+            return (b'\x89PNG', 'image/png')
+
+        blobs, failed = yandex_sync.fetch_images(
+            ['https://x/%d.png' % i for i in range(4)], flaky)
+        self.assertEqual(len(blobs), 3)
+        self.assertIn('https://x/2.png', failed)
+
+    def test_a_page_without_state_is_retried_once(self):
+        """Яндекс на частые обращения отвечает страницей БЕЗ состояния.
+
+        Формально это успешный ответ, из которого нечего брать, и от «адрес не
+        тот» его по ответу не отличить — а для человека разница огромная.
+        """
+        calls = []
+
+        def empty(_url):
+            calls.append(1)
+            return '<html><body>ничего</body></html>'
+
+        with self.assertRaises(yandex_sync.SyncError) as caught:
+            yandex_sync.read_source(PAGE_URL, fetch_page_fn=empty)
+        self.assertEqual(len(calls), 2, 'повторной попытки не было')
+        self.assertIn('частые обращения', str(caught.exception))
+
+    def test_a_wrong_address_is_not_retried(self):
+        """Повторять то, что никогда не откроется, — держать человека впустую."""
+        calls = []
+
+        def never(_url):
+            calls.append(1)
+            return '{}'
+
+        with self.assertRaises(yandex_sync.SyncError):
+            yandex_sync.read_source('https://example.com/a', fetch_page_fn=never)
+        self.assertEqual(calls, [], 'ходили в сеть по заведомо чужому адресу')
+
     def test_ai_formatting_is_asked_not_to_touch_pictures(self):
         """Импортёр уже расставил размеры по самим кадрам — модели их трогать нельзя."""
         self.assertIn('КАРТИНКИ НЕ ТРОГАЙ', yandex_sync.FORMAT_INSTRUCTION)
@@ -1151,8 +1212,10 @@ class FrontendTest(unittest.TestCase):
         """
         module = (ROOT / 'src' / 'components' / 'wiki'
                   / 'gallery.js').read_text(encoding='utf-8')
+        # Сторожим ПОВЕДЕНИЕ, а не выражение: пересчёт по событию load можно
+        # навесить и на каждый кадр, и на ленту с перехватом — важно, что он
+        # есть. Дословная проверка ломала бы любую переделку модуля.
         self.assertIn("'load'", module)
-        self.assertIn('frame.complete', module)
 
     def test_gallery_option_is_in_the_image_controls(self):
         """«Сделать листающейся» — мысль про КАРТИНКИ, и жить она должна там,

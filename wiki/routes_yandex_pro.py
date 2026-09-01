@@ -65,8 +65,22 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
     def _body():
         return request.get_json(silent=True) or {}
 
-    def _fail(error, status=400):
-        """Ошибка источника — это не сбой сервера, а сообщение человеку."""
+    def _fail(cursor, ctx, action, error, *, status=400, details=None):
+        """Ошибка источника — это не сбой сервера, а сообщение человеку.
+
+        И она ОБЯЗАТЕЛЬНО попадает в журнал. Первая же жалоба «вставил ссылку,
+        вышла ошибка» оказалась неразрешимой именно поэтому: успех журналился,
+        отказ — нет, и узнать, какой адрес не открылся и почему, было
+        неоткуда. Причину пишем рядом с адресом.
+        """
+        try:
+            queries.log_action(cursor, actor_id=ctx['user_id'], action=action,
+                               entity_type='article', entity_id=None,
+                               details=dict(details or {}, error=str(error)[:300]),
+                               ip_address=log_ip())
+        except Exception:                                  # noqa: BLE001
+            # Журнал не смеет мешать ответу: человеку нужна причина, а не 500.
+            pass
         return jsonify({"error": str(error), "code": "WIKI_YANDEX_SOURCE"}), status
 
     def _reindex(cursor, article_id):
@@ -93,7 +107,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
                 cursor, gcs or {}, url=url, uploaded_by=ctx['user_id'],
                 ai_format=_flag(data.get('ai_format')))
         except yandex_sync.SyncError as error:
-            return _fail(error)
+            return _fail(cursor, ctx, 'article.yandex_preview', error,
+                         details={'url': url})
 
         # Вердикт дубля показываем сразу: чаще всего страница источника — это
         # не новая статья, а обновление существующей, и узнать об этом лучше
@@ -142,7 +157,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
         try:
             source = yandex_sync.read_source(url)
         except yandex_sync.SyncError as error:
-            return _fail(error)
+            return _fail(cursor, ctx, 'article.yandex_import', error,
+                         details={'url': url})
         found = wiki_migration.duplicate_probe(
             cursor, ctx, title=source['title'],
             content=yandex_pro.summary_of(source),
@@ -158,7 +174,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
                 ai_format=_flag(data.get('ai_format')),
                 dedup=verdict)
         except yandex_sync.SyncError as error:
-            return _fail(error)
+            return _fail(cursor, ctx, 'article.yandex_import', error,
+                         details={'url': url})
 
         if not result.get('created'):
             # Повторная попытка для того же адреса. 200, а не 409: для человека
@@ -228,7 +245,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
                 auto_sync=_flag(data.get('auto_sync'), True),
                 ai_format=_flag(data.get('ai_format')))
         except yandex_sync.SyncError as error:
-            return _fail(error)
+            return _fail(cursor, ctx, 'article.yandex_link', error,
+                         details={'url': url, 'article_id': article_id})
         queries.log_action(cursor, actor_id=ctx['user_id'],
                            action='article.yandex_link',
                            entity_type='article', entity_id=article_id,
@@ -252,7 +270,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
                 cursor, gcs or {}, article_id=article_id, editor_id=ctx['user_id'],
                 force=force, reindex=_reindex)
         except yandex_sync.SyncError as error:
-            return _fail(error)
+            return _fail(cursor, ctx, 'article.yandex_sync', error,
+                         details={'article_id': article_id, 'force': force})
         queries.log_action(cursor, actor_id=ctx['user_id'],
                            action='article.yandex_sync',
                            entity_type='article', entity_id=article_id,
