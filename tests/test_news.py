@@ -23,6 +23,16 @@ def _read(*parts):
         return handle.read()
 
 
+def _jsx_code_only(source):
+    """JSX без блочных комментариев.
+
+    Нужен тестам «этого в окне быть не должно»: объяснение, ПОЧЕМУ подписи
+    больше нет, стоит прямо там же комментарием — и поиск по строке находит
+    ровно его.
+    """
+    return re.sub(r'/\*[\s\S]*?\*/', '', source)
+
+
 def _code_only(source):
     """Исходник без комментариев и docstring'ов.
 
@@ -436,6 +446,37 @@ class NewsFrontendTests(unittest.TestCase):
         backdrop = backdrop[:backdrop.index('>')]
         self.assertNotIn('onMouseDown', backdrop)
         self.assertNotIn('onClick', backdrop)
+
+    def test_the_window_shows_the_news_and_nothing_about_its_author(self):
+        """Сотруднику показывают объявление, а не карточку автора.
+
+        Решение владельца 01.09.2026: подпись «кто и когда опубликовал» и
+        строка с замком «окно нельзя закрыть» из окна убраны. Замок объяснял
+        словами то, что и так показано устройством окна, а автор с датой
+        отвлекали от текста. И то и другое осталось у редактора — в списке и
+        в журнале, где по ним действительно работают.
+        """
+        source = _jsx_code_only(_read(self.MODAL))
+        for gone in ('author_name', 'author_role', 'author_department',
+                     'published_at', 'initialsOf', 'Окно нельзя закрыть'):
+            self.assertNotIn(gone, source, gone)
+        # Шапка и заголовок остаются.
+        self.assertIn('Новость дня', source)
+        self.assertIn('обязательно к прочтению', source)
+        self.assertIn('news-of-day-title', source)
+
+    def test_the_hot_query_stopped_collecting_what_nobody_shows(self):
+        """Два LEFT JOIN на запросе, который дёргает каждый вошедший.
+
+        Убрав автора из окна, надо было убрать его и из выдачи — иначе
+        соединения с users и departments остались бы платой ни за что.
+        """
+        source = _read('news', 'queries.py')
+        pending = source[source.index('def pending_for_user('):]
+        pending = pending[:pending.index('def mark_shown(')]
+        self.assertNotIn('LEFT JOIN users', pending)
+        self.assertNotIn('LEFT JOIN departments', pending)
+        self.assertNotIn('author_name', pending)
 
     def test_window_opens_no_second_sse_channel(self):
         """Слотов на портал ровно BELL_STREAM_LIMIT, каждый — нить waitress.

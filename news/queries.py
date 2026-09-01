@@ -199,16 +199,18 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects):
     """
     params = news_access.audience_params(subjects, user_id, otp_role)
     params.update(_role_params())
+    # Автора, его должность, отдел и время выпуска окно больше НЕ показывает
+    # (решение владельца 01.09.2026), поэтому их здесь и не собираем: это два
+    # LEFT JOIN на запросе, который дёргает каждый вошедший в портал и каждая
+    # открытая вкладка на каждый тычок канала. Автор и время остались там, где
+    # по ним работают, — в списке и журнале редактора.
     sql = ("""
         SELECT p.id, p.title, p.body, p.is_mandatory, p.confirm_delay_seconds,
-               p.published_at, u.name AS author_name, u.role AS author_role,
-               d.name AS author_department, r.shown_at,
+               r.shown_at,
                GREATEST(0, p.confirm_delay_seconds
                         - EXTRACT(EPOCH FROM (@NOW@ - COALESCE(r.shown_at, @NOW@)))
                )::int AS remaining_seconds
           FROM news_posts p
-          LEFT JOIN users u ON u.id = p.author_id
-          LEFT JOIN departments d ON d.id = p.author_department_id
           LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
          WHERE p.status = 'published'
            AND (p.expires_at IS NULL OR p.expires_at > @NOW@)
@@ -233,16 +235,12 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects):
         'body': row[2],
         'is_mandatory': bool(row[3]),
         'confirm_delay_seconds': int(row[4] or 0),
-        'published_at': row[5].isoformat() if row[5] else None,
-        'author_name': row[6],
-        'author_role': row[7],
-        'author_department': row[8],
-        'shown_at': row[9].isoformat() if row[9] else None,
+        'shown_at': row[5].isoformat() if row[5] else None,
         # Сколько секунд серверу ещё рано принимать подтверждение. Клиент
         # заводит свой таймер от этого числа: считать «сколько прошло» он не
         # может — время на машине сотрудника своё, а поля хранятся наивными в
         # Алматы (см. notifications/sources.py: _seconds_until).
-        'remaining_seconds': int(row[10] or 0),
+        'remaining_seconds': int(row[6] or 0),
     } for row in cursor.fetchall()]
 
 

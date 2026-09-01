@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Bell, Check, Loader2, Lock, X } from 'lucide-react';
+import { Bell, Check, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
-import { initialsOf, publishedLabel, roleTitle, subscribeNewsPoke } from './newsShared';
+import { subscribeNewsPoke } from './newsShared';
 import './news-modal.css';
 
 /* Окно «Новость дня».
@@ -170,9 +170,6 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     if (!current) return null;
 
     const ready = remaining <= 0;
-    const authorRole = roleTitle(current.author_role);
-    const meta = [publishedLabel(current.published_at), current.author_department]
-        .filter(Boolean).join(' · ');
 
     return (
         <div
@@ -202,43 +199,28 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                     )}
                 </div>
 
+                {/* Кто и когда опубликовал — сотруднику не показываем
+                    (решение владельца 01.09.2026). Он читает объявление, а не
+                    карточку автора; подпись с должностью и временем здесь была
+                    ровно тем шумом, который отвлекает от текста. Автор и время
+                    остаются там, где по ним работают, — в списке и журнале у
+                    редактора. */}
                 <div className="px-5 pt-3.5">
                     <h2 id="news-of-day-title" className="text-[18px] font-semibold leading-snug text-slate-900">
                         {current.title}
                     </h2>
-                    <div className="mt-3 flex items-center gap-2.5">
-                        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-indigo-50 text-[12px] font-medium text-indigo-700">
-                            {initialsOf(current.author_name)}
-                        </span>
-                        <div className="min-w-0">
-                            <p className="truncate text-[13px] text-slate-900">
-                                {current.author_name || 'Автор не указан'}
-                                {authorRole ? ` · ${authorRole}` : ''}
-                            </p>
-                            {meta && <p className="truncate text-[12px] text-slate-400">{meta}</p>}
-                        </div>
-                    </div>
                 </div>
 
                 <div className="mt-3.5 flex-1 overflow-y-auto overscroll-contain border-t border-slate-100 px-5 py-4">
                     <div className="news-body" dangerouslySetInnerHTML={{ __html: current.body || '' }} />
                 </div>
 
-                {/* На телефоне кнопка во всю ширину и НАД подписью: при
-                    flex-wrap она уезжала на вторую строку к левому краю и
-                    читалась как второстепенная — при том что она единственная
-                    в окне. flex-col-reverse ставит её первой по вертикали,
-                    оставляя подпись там же, где она стоит на широком экране. */}
-                <div className="flex flex-col-reverse gap-2 border-t border-slate-100 px-5 py-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-                    {/* Подпись про «нельзя закрыть» — только у обязательной и
-                        только пока это правда: у необязательной есть крестик,
-                        и замок рядом с ним читался бы как обман. */}
-                    {current.is_mandatory ? (
-                        <span className="inline-flex items-center gap-1.5 text-[12px] text-slate-400 max-sm:justify-center">
-                            <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-                            Окно нельзя закрыть или свернуть
-                        </span>
-                    ) : <span />}
+                {/* Подписи «Окно нельзя закрыть или свернуть» здесь нет
+                    (решение владельца 01.09.2026): человек это и так видит —
+                    крестика нет, Esc не работает, фон не нажимается. Объяснять
+                    словами то, что показано устройством окна, значит добавлять
+                    строку, которую читают один раз и больше никогда. */}
+                <div className="flex justify-end border-t border-slate-100 px-5 py-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))]">
                     <div className="flex items-center gap-2 max-sm:w-full max-sm:flex-col-reverse max-sm:items-stretch">
                         {error && <span className="text-[12px] text-rose-600 max-sm:text-center">{error}</span>}
                         <button
