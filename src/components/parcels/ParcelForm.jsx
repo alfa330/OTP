@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Check, Loader2, Plus, Search, X } from 'lucide-react';
 import {
@@ -9,6 +9,8 @@ import IosDatePicker from '../ui/DatePicker';
 import {
     KIND_META, PARCEL_KINDS, extractAccountId, fmtPhone, officeChoiceFor, todayISO,
 } from './parcelMeta';
+import { PHOTO_MAX_COUNT, countIssue, preparePhoto, sortPhotos } from './parcelPhoto';
+import { PhotoPicker } from './ParcelPhotos';
 
 /*
  * Форма посылки — заведение и правка.
@@ -91,12 +93,50 @@ const Field = ({ label, hint, children, required = false }) => (
 
 const ParcelForm = ({
     open, onClose, apiBaseUrl, headers, offices, defaultCity = '', parcel = null, onSaved, showToast,
+    photos = [], photosEnabled = false,
 }) => {
     const editing = Boolean(parcel);
     const [draft, setDraft] = useState(() => emptyDraft(defaultCity));
     const [extras, setExtras] = useState([]);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
+
+    /* Фотографии применяются на «Сохранить» — и добавленные, и снятые.
+     *
+     * Так, а не «грузим сразу при выборе», по двум причинам. Первая: пока
+     * карточки нет, привязывать снимок не к чему, а «ничьи» файлы — это сироты
+     * в бакете, вопрос «кому их видно» и уборщик, которого в проекте нет ни у
+     * одного раздела (в вике за двухфазную загрузку заплачено ровно этим).
+     * Вторая: рядом стоит кнопка «Отмена». Если снятие применялось бы сразу,
+     * на одном экране «Отмена» откатывала бы текст и НЕ откатывала бы
+     * фотографию — а она удаляется вместе с файлом, то есть насовсем. Промах
+     * по крестику на телефоне — обычное дело.
+     *
+     * Цена названа честно: сохранение с тремя снимками занимает секунды, и всё
+     * это время на кнопке стоит «Загружаю фото 2 из 3».
+     */
+    const [queue, setQueue] = useState([]);       // новые снимки: {key, blob, name, previewUrl}
+    const [removals, setRemovals] = useState([]); // id уже сохранённых, помеченных к снятию
+    const [savedId, setSavedId] = useState(null); // карточка уже создана — второй раз не заводим
+    const [photoStep, setPhotoStep] = useState('');
+    const [preparing, setPreparing] = useState(false);
+
+    /* Выданные createObjectURL — отзывать их в эффекте сброса нельзя: он
+       начинается с `if (!open) return`, то есть при закрытии формы не
+       выполняется вовсе, а к следующему открытию в замыкании лежит прошлая
+       очередь. Поэтому список живёт в ref и чистится в cleanup. */
+    const previewUrls = useRef([]);
+
+    const releasePreviews = useCallback((urls) => {
+        (urls || []).forEach((url) => {
+            try { URL.revokeObjectURL(url); } catch { /* браузер уже всё отдал */ }
+        });
+    }, []);
+
+    useEffect(() => () => {
+        releasePreviews(previewUrls.current);
+        previewUrls.current = [];
+    }, [releasePreviews]);
 
     // Найденный водитель. `null` — ещё не искали; объект — CRM ответила.
     const [driver, setDriver] = useState(null);
@@ -128,9 +168,83 @@ const ParcelForm = ({
         }
         setError('');
         setDriverError('');
-    }, [open, parcel, defaultCity]);
+        // Сброс фотографий — в ОБЕИХ ветках: компонент смонтирован всегда, его
+        // прячет только `if (!open) return null` внутри модалки. Без сброса
+        // очередь из прошлой формы всплыла бы в следующей открытой.
+        releasePreviews(previewUrls.current);
+        previewUrls.current = [];
+        setQueue([]);
+        setRemovals([]);
+        setSavedId(null);
+        setPhotoStep('');
+    }, [open, parcel, defaultCity, releasePreviews]);
 
     const set = useCallback((patch) => setDraft((prev) => ({ ...prev, ...patch })), []);
+
+    // Уже сохранённые снимки за вычетом помеченных к снятию — то, что человек
+    // видит на экране прямо сейчас.
+    const kept = useMemo(
+        () => sortPhotos(photos).filter((photo) => !removals.includes(photo.id)),
+        [photos, removals],
+    );
+
+    const addFiles = useCallback(async (files) => {
+        const incoming = [...(files || [])];
+        if (!incoming.length) return;
+
+        // Счёт места — ОДИН раз на всю пачку и ДО цикла. Проверка внутри цикла
+        // по длине очереди не сработала бы: счётчик из замыкания рендера не
+        // растёт по ходу пачки, и двадцать брошенных файлов прошли бы все
+        // двадцать.
+        const already = kept.length + queue.length;
+        const limit = countIssue(already, incoming.length);
+        if (limit) showToast?.(limit, 'error');
+        const free = Math.max(0, PHOTO_MAX_COUNT - already);
+        if (!free) return;
+
+        setPreparing(true);
+        try {
+            const prepared = [];
+            for (const file of incoming.slice(0, free)) {
+                // eslint-disable-next-line no-await-in-loop
+                const ready = await preparePhoto(file);
+                if (!ready.ok) {
+                    showToast?.(`${file.name || 'Файл'}: ${ready.issue}`, 'error');
+                    continue;
+                }
+                const previewUrl = URL.createObjectURL(ready.blob);
+                previewUrls.current.push(previewUrl);
+                prepared.push({
+                    key: `${file.name || 'photo'}:${file.size}:${prepared.length}:${file.lastModified || ''}`,
+                    blob: ready.blob,
+                    name: ready.name,
+                    previewUrl,
+                });
+            }
+            if (prepared.length) setQueue((prev) => [...prev, ...prepared]);
+        } finally {
+            setPreparing(false);
+        }
+    }, [kept.length, queue.length, showToast]);
+
+    const detach = useCallback((tile) => {
+        if (tile.photoId) {
+            // Уже сохранённое: только помечаем. Снимется на «Сохранить».
+            setRemovals((prev) => (prev.includes(tile.photoId) ? prev : [...prev, tile.photoId]));
+            return;
+        }
+        setQueue((prev) => prev.filter((item) => item.key !== tile.key));
+        if (tile.src) {
+            previewUrls.current = previewUrls.current.filter((url) => url !== tile.src);
+            releasePreviews([tile.src]);
+        }
+    }, [releasePreviews]);
+
+    // Плитки в одном списке: сначала уже сохранённые, потом ждущие отправки.
+    const tiles = useMemo(() => [
+        ...kept.map((photo) => ({ key: `saved:${photo.id}`, photoId: photo.id, src: photo.thumb_url })),
+        ...queue.map((item) => ({ key: item.key, src: item.previewUrl })),
+    ], [kept, queue]);
 
     const cityOptions = useMemo(() => {
         const seen = new Map();
@@ -228,18 +342,63 @@ const ParcelForm = ({
             comment: draft.comment.trim(),
         };
         try {
-            const response = editing
-                ? await axios.patch(`${apiBaseUrl}/api/parcels/${parcel.id}`, body, { headers: headers() })
+            // savedId — защита от второй карточки: если фото не долили и
+            // человек нажал «Сохранить» повторно, идём PATCH'ем в уже
+            // созданную запись, а не заводим её заново.
+            const existingId = parcel?.id || savedId;
+            const response = existingId
+                ? await axios.patch(`${apiBaseUrl}/api/parcels/${existingId}`, body, { headers: headers() })
                 : await axios.post(`${apiBaseUrl}/api/parcels`, body, { headers: headers() });
+            const item = response.data?.item || null;
+            const targetId = existingId || item?.id;
+            if (!existingId && targetId) setSavedId(targetId);
+
+            // Снятие — до загрузки: место в лимите освобождается раньше, чем
+            // его занимают новые снимки.
+            for (const photoId of removals) {
+                try {
+                    // eslint-disable-next-line no-await-in-loop
+                    await axios.delete(`${apiBaseUrl}/api/parcels/${targetId}/photos/${photoId}`,
+                                       { headers: headers() });
+                } catch (dropError) {
+                    // 404 — снимок уже сняли: это успех, а не сбой. Иначе форму
+                    // нельзя было бы сохранить до перезагрузки страницы.
+                    if (dropError?.response?.status !== 404) throw dropError;
+                }
+            }
+            setRemovals([]);
+
+            for (let index = 0; index < queue.length; index += 1) {
+                const tile = queue[index];
+                setPhotoStep(`Загружаю фото ${index + 1} из ${queue.length}`);
+                const form = new FormData();
+                // Content-Type руками НЕ ставим: его вместе с boundary
+                // проставляет браузер, иначе request.files на сервере пуст, а
+                // выглядит это как «файл не выбран».
+                form.append('file', tile.blob, tile.name);
+                // eslint-disable-next-line no-await-in-loop
+                await axios.post(`${apiBaseUrl}/api/parcels/${targetId}/photos`, form,
+                                 { headers: headers() });
+                // Уехавшее убираем из очереди сразу: повторное «Сохранить»
+                // после осечки не должно загрузить его второй раз.
+                setQueue((prev) => prev.filter((entry) => entry.key !== tile.key));
+            }
+            setPhotoStep('');
+
             showToast?.(editing ? 'Карточка обновлена' : 'Посылка добавлена в реестр', 'success');
-            onSaved?.(response.data?.item || null);
+            // onSaved зовём ОДИН раз и в самом конце: он перезапрашивает список
+            // и фильтры, и два вызова на одно сохранение стоили бы четырёх
+            // лишних запросов.
+            onSaved?.(item);
             onClose?.();
         } catch (requestError) {
+            setPhotoStep('');
             setError(requestError?.response?.data?.error || 'Не удалось сохранить посылку');
         } finally {
             setSaving(false);
         }
-    }, [apiBaseUrl, canSave, draft, editing, headers, nameOverride, onClose, onSaved, parcel, saving, showToast]);
+    }, [apiBaseUrl, canSave, draft, editing, headers, nameOverride, onClose, onSaved, parcel,
+        queue, removals, savedId, saving, showToast]);
 
     const restExtras = EXTRA_FIELDS.filter((field) => !extras.includes(field.key));
 
@@ -256,7 +415,7 @@ const ParcelForm = ({
                     <button type="button" className={iosBtnSecondary} onClick={onClose}>Отмена</button>
                     <button type="button" className={iosBtnPrimary} disabled={!canSave || saving} onClick={save}>
                         {saving ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}
-                        Сохранить
+                        {photoStep || 'Сохранить'}
                     </button>
                 </>
             )}
@@ -398,6 +557,30 @@ const ParcelForm = ({
                             onChange={(event) => set({ description: event.target.value })}
                         />
                     </Field>
+
+                    {/* Фотография вещи — такой же ответ на вопрос «что это»,
+                        как описание, поэтому она стоит здесь, а не отдельной
+                        секцией: четвёртый заголовок ради одной коробки был бы
+                        шумом. Обёртка — не <label>: внутри лежит скрытый
+                        <input type="file">, и щелчок по любой точке блока
+                        открывал бы системный выбор файла. */}
+                    {photosEnabled && (
+                        <div className="block space-y-1.5">
+                            <span className="flex items-baseline gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                Фото
+                                <span className="font-normal normal-case tracking-normal text-slate-400">
+                                    необязательно
+                                </span>
+                            </span>
+                            <PhotoPicker
+                                tiles={tiles}
+                                active={open}
+                                disabled={saving || preparing}
+                                onAdd={addFiles}
+                                onRemove={detach}
+                            />
+                        </div>
+                    )}
 
                     {EXTRA_FIELDS.filter((field) => extras.includes(field.key)).map((field) => (
                         <Field key={field.key} label={field.label} hint={field.hint}>

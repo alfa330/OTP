@@ -47833,6 +47833,18 @@ def _wiki_bucket_name():
     )
 
 
+def _parcels_bucket_name():
+    """Бакет раздела «Посылки» (фотографии вещи). Каскад env тот же, что у вики:
+    свой -> общий tasks -> общий. Своя переменная нужна на случай, когда снимки
+    реестра захотят развести по сроку хранения отдельно от файлов вики; пока она
+    не задана, всё работает через общий бакет без единой настройки."""
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_PARCELS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
 def _lms_signed_url(bucket_name, blob_path, expires_minutes=120, response_disposition=None, response_type=None):
     bucket_name = str(bucket_name or '').strip()
     blob_path = str(blob_path or '').strip()
@@ -54764,6 +54776,16 @@ try:
         resolve_requester=_resolve_requester,
         sensitive_access_granted=_sensitive_access_granted_for_user,
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        # Фотографии вещи (просьба владельца 01.09.2026). Отдаются подписанной
+        # ссылкой прямо из GCS, а не через свой прокси-роут: прокси стоил бы
+        # трёх заходов в пул на КАЖДУЮ миниатюру (курсор декоратора, своё
+        # соединение QR-гейта, курсор обработчика), то есть тридцати на одно
+        # открытие карточки с десятью снимками при MAX_CONN = 40.
+        #
+        # signed_url и delete в словарь не кладём намеренно: подписывает и
+        # удаляет parcels/photos.py — ему нужен один клиент на запрос и свой
+        # кэш подписей, а _lms_signed_url строит клиент на каждую ссылку.
+        gcs={'bucket_name': _parcels_bucket_name, 'client': get_gcs_client},
     ))
     logging.info("Раздел «Посылки»: Blueprint подключён на /api/parcels")
 except Exception:

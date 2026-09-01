@@ -438,5 +438,9 @@ export const describeEvent = (event) => {
         return `Изменено: ${changes.map((change) => change.label).join(', ')}`;
     }
     if (event?.kind === 'driver_synced') return 'Данные водителя обновлены из CRM';
+    // Фотографии — тоже событие карточки: снимок удаляется вместе с файлом, и
+    // «кто его снял» через месяц спрашивают так же, как «кто передал посылку».
+    if (event?.kind === 'photo_added') return 'Добавлена фотография';
+    if (event?.kind === 'photo_removed') return 'Фотография удалена';
     return 'Изменение карточки';
 };

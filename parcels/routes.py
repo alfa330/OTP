@@ -24,7 +24,7 @@ from functools import wraps
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, drivers, queries, report, schema
+from . import access, drivers, photos, queries, report, schema
 
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -44,7 +44,7 @@ _MAX_BACKDATE_DAYS = 366
 
 def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             resolve_requester, sensitive_access_granted,
-                            excel_text_warning=None):
+                            excel_text_warning=None, gcs=None):
     """Собирает Blueprint раздела.
 
     sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ сессия
@@ -58,7 +58,14 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
     значение по умолчанию есть: без него книга соберётся, просто с зелёным
     уголком «Число сохранено как текст» на каждом телефоне, и ронять из-за
     косметики весь раздел незачем.
+
+    gcs — {'bucket_name': () -> str, 'client': () -> Client} для фотографий вещи.
+    Значение по умолчанию есть по той же причине, что у excel_text_warning, и
+    ещё по одной: гарнитура гейт-тестов собирает блюпринт без него и требует от
+    /ping кода 200. Обязательный аргумент покрасил бы три существующих теста,
+    причём падать стал бы гейт QR — и искать причину пошли бы не туда.
     """
+    gcs = gcs or {}
     bp = Blueprint('parcels', __name__, url_prefix='/api/parcels')
 
     def parcels_route(rule, methods=('GET',), write=False):
@@ -131,6 +138,37 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
     def _actor(ctx):
         return {'user_id': ctx['user_id'], 'name': ctx.get('name')}
 
+    # Защёлка «таблица фотографий развёрнута». Работает только в одну сторону:
+    # False перепроверяется каждый раз (таблица может доехать следующим
+    # деплоем), True запоминается навсегда (таблицы не исчезают). Кеширование
+    # False залипло бы на первом же курсоре — в том числе на курсоре-двойнике
+    # из тестов.
+    _photos_table = {'ready': False}
+
+    def _photos_ready(cursor):
+        if not _photos_table['ready']:
+            _photos_table['ready'] = schema.photos_ready(cursor)
+        return _photos_table['ready']
+
+    def _bucket():
+        getter = gcs.get('bucket_name')
+        return (getter() or '').strip() if callable(getter) else ''
+
+    def _uploaded_file():
+        """Файл из multipart: (файл, размер) либо (None, None).
+
+        Своя функция, а не _payload(): на multipart request.get_json() отдаёт
+        пустой словарь. Размер меряем перемоткой потока — глобального
+        MAX_CONTENT_LENGTH в приложении нет, потолок только наш.
+        """
+        item = request.files.get('file')
+        if item is None:
+            return None, None
+        item.stream.seek(0, 2)
+        size = item.stream.tell()
+        item.stream.seek(0)
+        return item, size
+
     # ── Диагностика и сводка ─────────────────────────────────────────────
     @parcels_route('/ping')
     def parcels_ping(ctx):
@@ -149,6 +187,12 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
             }
             if ready:
                 payload['counters'] = queries.status_counters(cursor)
+                # Прикрепление фотографий рисуется по этому флагу. Оба условия
+                # нужны: без бакета загрузка всегда ответит 503, без таблицы —
+                # 409, и предлагать человеку кнопку, которая гарантированно
+                # откажет, хуже, чем её не показать. Курсор уже открыт, цена —
+                # один to_regclass.
+                payload['photos_ready'] = bool(_bucket()) and schema.photos_ready(cursor)
         return jsonify(payload)
 
     # ── Справочники ──────────────────────────────────────────────────────
@@ -281,12 +325,23 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     @parcels_route('/<int:parcel_id>')
     def parcels_read(parcel_id, ctx):
+        """Карточка целиком: сама запись, лента и фотографии одним ответом.
+
+        Фотографии едут ключом ВЕРХНЕГО уровня, рядом с `events`, а не внутри
+        `item`. Положенные внутрь, они подтолкнули бы следующего дописать имя в
+        _PARCEL_FIELDS — а это `p.photos` в SELECT и 500 на списке, чтении,
+        выгрузке и внутри update_parcel. `item` остаётся байт в байт прежним.
+        """
         with db._get_cursor() as cursor:
             item = queries.read_parcel(cursor, parcel_id)
             if not item:
                 return jsonify({"error": "Посылка не найдена"}), 404
             events = queries.list_events(cursor, parcel_id)
-        return jsonify({"item": item, "events": events})
+            rows = queries.list_photos(cursor, parcel_id) if _photos_ready(cursor) else []
+        # Подпись ставится ПОСЛЕ выхода из блока: она строит клиент хранилища, а
+        # держать на этом слот пула незачем.
+        return jsonify({"item": item, "events": events,
+                        "photos": photos.sign_urls(gcs, rows)})
 
     @parcels_route('', methods=('POST',), write=True)
     def parcels_create(ctx):
@@ -308,8 +363,16 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     "code": "PARCELS_FORBIDDEN",
                 }), 403
             with db._get_cursor() as cursor:
+                # Адреса файлов снимаем ДО удаления: строки унесёт каскад, а
+                # delete_parcel про них не знает и наружу не отдаёт.
+                refs = queries.photo_blob_refs(cursor, parcel_id) if _photos_ready(cursor) else []
                 if not queries.delete_parcel(cursor, parcel_id):
                     return jsonify({"error": "Посылка не найдена"}), 404
+            # Блобы — ПОСЛЕ коммита и молча. В обратном порядке откат оставил бы
+            # живую карточку с уже стёртыми файлами, а исключение здесь вернуло
+            # бы 500 на успешно удалённой записи: фронт не убрал бы строку, а
+            # повторная попытка дала бы 404.
+            photos.drop_blobs(gcs, refs)
             return jsonify({"status": "deleted"})
 
         data = _payload()
@@ -339,6 +402,116 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 return jsonify({"error": "Посылка не найдена"}), 404
             events = queries.list_events(cursor, parcel_id)
         return jsonify({"item": item, "events": events})
+
+    # ── Фотографии вещи ──────────────────────────────────────────────────
+    #
+    # Право то же, что у правки карточки (write=True), а не у её удаления:
+    # снимок — поле записи, а не сама запись. Прикрепил не тот кадр — это
+    # опечатка, а опечатки в разделе исправляют, а не эскалируют на админа;
+    # история при этом остаётся, в ленте появляется «Фотография удалена» с
+    # автором и временем.
+    #
+    # abort() и werkzeug-исключения здесь ЗАПРЕЩЕНЫ: except Exception в
+    # parcels_route превратил бы 400 и 413 во «Внутреннюю ошибку раздела».
+
+    @parcels_route('/<int:parcel_id>/photos', methods=('POST',), write=True)
+    def parcels_photo_add(parcel_id, ctx):
+        """Приложить фотографию. Один файл на запрос.
+
+        По одному, а не пачкой: очередь грузится последовательно, и осечка на
+        третьем снимке не уносит два уже уехавших.
+        """
+        if not _bucket():
+            return jsonify({"error": "Хранилище фотографий не настроено",
+                            "code": "PARCEL_PHOTO_STORAGE_OFF"}), 503
+
+        # Заголовку верить нельзя, но и читать сорок мегабайт в память воркера,
+        # чтобы потом отказать, тоже. `or 0` обязателен: при chunked заголовка
+        # нет вовсе, и None > int дал бы TypeError, то есть 500 вместо 413.
+        if (request.content_length or 0) > photos.MAX_BYTES:
+            return jsonify({"error": 'Файл больше %d МБ' % (photos.MAX_BYTES // (1024 * 1024)),
+                            "code": "PARCEL_PHOTO_TOO_LARGE"}), 413
+
+        item, size = _uploaded_file()
+        if item is None:
+            return jsonify({"error": "Файл не выбран",
+                            "code": "PARCEL_PHOTO_REJECTED"}), 400
+        issue = photos.photo_issue(filename=item.filename, content_type=item.mimetype,
+                                   size=size or 0)
+        if issue:
+            return jsonify({"error": issue, "code": "PARCEL_PHOTO_REJECTED"}), 400
+
+        # Пережатие — ДО открытия курсора: кадр на двенадцать мегапикселей
+        # занимает сотни миллисекунд, и держать на них слот пула нельзя.
+        try:
+            prepared = photos.prepare(item.read(), filename=item.filename,
+                                      content_type=item.mimetype)
+        except photos.PhotoError as refusal:
+            return jsonify({"error": refusal.message, "code": refusal.code}), refusal.status
+
+        # Заливка — тоже вне курсора, и по той же причине, только тело файла
+        # тяжелее пережатия на порядки.
+        try:
+            bucket, blob_path, thumb_path = photos.upload(gcs, prepared)
+        except photos.PhotoError as refusal:
+            return jsonify({"error": refusal.message, "code": refusal.code}), refusal.status
+        except Exception:
+            # Наружу — общая фраза: текст ошибки хранилища несёт полный адрес
+            # объекта, а декоратор отдаёт detail в теле ответа.
+            logging.exception('parcels: фотография не уехала в бакет')
+            return jsonify({"error": "Не удалось сохранить фотографию",
+                            "code": "PARCEL_PHOTO_UPLOAD_FAILED"}), 502
+
+        refs = [(bucket, blob_path)] + ([(bucket, thumb_path)] if thumb_path else [])
+        try:
+            with db._get_cursor() as cursor:
+                if not _photos_ready(cursor):
+                    photos.drop_blobs(gcs, refs)
+                    return jsonify({"error": "Фотографии ещё разворачиваются",
+                                    "code": "PARCEL_PHOTOS_NOT_READY"}), 409
+                taken = queries.lock_parcel_photos(cursor, parcel_id)
+                if taken is None:
+                    photos.drop_blobs(gcs, refs)
+                    return jsonify({"error": "Посылка не найдена"}), 404
+                if taken >= photos.MAX_PER_PARCEL:
+                    photos.drop_blobs(gcs, refs)
+                    return jsonify({
+                        "error": 'Больше %d фотографий к одной посылке не прикрепить'
+                                 % photos.MAX_PER_PARCEL,
+                        "code": "PARCEL_PHOTO_LIMIT"}), 409
+                queries.insert_photo(cursor, parcel_id, prepared=prepared, bucket=bucket,
+                                     blob_path=blob_path, thumb_blob_path=thumb_path,
+                                     sort_order=taken, actor=_actor(ctx))
+                rows = queries.list_photos(cursor, parcel_id)
+                events = queries.list_events(cursor, parcel_id)
+        except Exception:
+            # Файл уже в бакете, а записать его не вышло — убираем за собой.
+            # Сборщика сирот в проекте нет ни у одного раздела.
+            photos.drop_blobs(gcs, refs)
+            raise
+        return jsonify({"photos": photos.sign_urls(gcs, rows), "events": events}), 201
+
+    @parcels_route('/<int:parcel_id>/photos/<uuid:photo_id>', methods=('DELETE',), write=True)
+    def parcels_photo_drop(parcel_id, photo_id, ctx):
+        """Снять фотографию.
+
+        Конвертер <uuid:…> отсеивает мусор ещё в маршрутизации: без него
+        «abc» дошло бы до psycopg2 и вернулось 500 вместо 404.
+        """
+        with db._get_cursor() as cursor:
+            if not _photos_ready(cursor):
+                return jsonify({"error": "Фотография не найдена",
+                                "code": "PARCEL_PHOTO_NOT_FOUND"}), 404
+            refs = queries.delete_photo(cursor, parcel_id, str(photo_id), actor=_actor(ctx))
+            if not refs:
+                return jsonify({"error": "Фотография не найдена",
+                                "code": "PARCEL_PHOTO_NOT_FOUND"}), 404
+            rows = queries.list_photos(cursor, parcel_id)
+            events = queries.list_events(cursor, parcel_id)
+        # Блобы — после коммита: иначе откат оставил бы живую строку с уже
+        # стёртым файлом, то есть битую плитку в карточке.
+        photos.drop_blobs(gcs, refs)
+        return jsonify({"photos": photos.sign_urls(gcs, rows), "events": events})
 
     return bp
 

@@ -495,3 +495,54 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
         </>
     );
 };
+
+
+/* Просмотр картинки во весь экран.
+ *
+ * Общий примитив, а не третья приватная копия: свои просмотрщики уже живут в
+ * ChatThread («Обоснованность оценок») и в main.jsx «Журнала оценок», оба без
+ * export и один вообще в чужом бандле без Tailwind. Четвёртая копия разошлась
+ * бы с остальными на первой же правке.
+ *
+ * ПОРТАЛ ОБЯЗАТЕЛЕН, и не ради удобства. Корень IosModal несёт backdrop-blur,
+ * а непустой backdrop-filter делает элемент containing block для потомков с
+ * position: fixed и заводит свой контекст наложения. Отрисованный внутри
+ * карточки просмотрщик отсчитывался бы от этого div'а, и никакой z-index не
+ * поднял бы его над слоем модалки. Сейчас это замаскировано тем, что размеры
+ * совпадают, — сломается при первой же правке модалки.
+ *
+ * ESCAPE ЛОВИМ В ФАЗЕ ЗАХВАТА И ГАСИМ ДАЛЬШЕ. Иначе одно нажатие закрыло бы и
+ * просмотр, и карточку под ним: обработчик модалки висит на том же window.
+ */
+export const IosLightbox = ({ url, alt = '', onClose }) => {
+    React.useEffect(() => {
+        if (!url) return undefined;
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            event.stopImmediatePropagation();
+            onClose?.();
+        };
+        window.addEventListener('keydown', onKey, true);
+        return () => window.removeEventListener('keydown', onKey, true);
+    }, [onClose, url]);
+
+    if (!url || typeof document === 'undefined') return null;
+    return createPortal(
+        <div
+            className="fixed inset-0 z-[300] flex cursor-zoom-out items-center justify-center bg-slate-900/85 p-4"
+            style={{ fontFamily: APPLE_FONT }}
+            onClick={onClose}
+            role="presentation"
+        >
+            <img
+                src={url}
+                alt={alt}
+                /* Щелчок по самой картинке не закрывает: её разглядывают,
+                   а промах по ней — обычное дело на телефоне. */
+                onClick={(event) => event.stopPropagation()}
+                className="max-h-[86vh] w-auto max-w-[94vw] cursor-default rounded-2xl object-contain shadow-2xl"
+            />
+        </div>,
+        document.body,
+    );
+};

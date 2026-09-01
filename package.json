@@ -68,6 +68,7 @@
     "test:survey-draft": "node --test tests/survey_builder_draft.test.mjs",
     "test:trainer": "node --test tests/trainer_format.test.mjs tests/trainer_speech.test.mjs tests/trainer_clock.test.mjs tests/trainer_speak.test.mjs",
     "test:parcels": "node --test tests/parcel_meta.test.mjs",
+    "test:parcel-photo": "node --test tests/parcel_photo.test.mjs",
     "test:cdr-touches": "node --test tests/cdr_touch_meta.test.mjs"
   },
   "dependencies": {

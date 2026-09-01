@@ -54,7 +54,8 @@ PARCEL_KINDS = ('parcel', 'document', 'other')
 # изменён: В офисе → В офисе» было бы неправдой. CHECK на этот столбец не
 # ставим намеренно: новый вид события не должен требовать миграции живой базы,
 # а неизвестный вид лента показывает нейтральной строкой.
-EVENT_KINDS = ('created', 'status', 'comment', 'edited', 'driver_synced')
+EVENT_KINDS = ('created', 'status', 'comment', 'edited', 'driver_synced',
+               'photo_added', 'photo_removed')
 
 
 _STATEMENTS = [
@@ -146,6 +147,67 @@ _STATEMENTS = [
     )
     """ % _NOW,
 
+    # ──────────────────────────────────────────────────────────────────────
+    # ФОТОГРАФИИ ВЕЩИ
+    #
+    # Своя таблица, а не `wiki_files`, и причин пять, из них три — прямые
+    # поломки. Роут вики `/file/<id>` стоит за своим гейтом: отделу, которому
+    # вика не выдана, он отвечает отказом ДО тела обработчика, и фронт-офис со
+    # СЗоВ не увидели бы фотографию собственной посылки. Снимку посылки неоткуда
+    # взять `article_id`, поэтому он попал бы в ветку «файл виден только
+    # загрузившему» — оператор на другом конце получил бы 404. Обратной стороной
+    # тот же `id` служит ключом доступа в справочнике парков: любой файл без
+    # статьи можно выставить логотипом парка, то есть раздать фотографию чужой
+    # посылки всему пространству вики. Плюс `wiki_files` связана внешними
+    # ключами с логотипами и баннерами, а путь в бакете там зашит на `wiki/` и
+    # на дату UTC.
+    #
+    # `parcel_id NOT NULL` — фотография всегда вложение СОХРАНЁННОЙ карточки.
+    # Пока карточки нет, снимок ждёт в браузере и уезжает сразу после ответа на
+    # POST. Поэтому здесь не бывает ни висячих строк, ни «ничьих» файлов, ни
+    # уборщика черновиков — всего того, чем оплачена двухфазная загрузка вики.
+    #
+    # ON DELETE CASCADE — как у `parcel_events`. Каскад уносит строки, но не
+    # блобы: их снимает роут удаления, ПОСЛЕ коммита (parcels/routes.py).
+    #
+    # id UUID, а не SERIAL: идентификатор уходит в ответ и в адрес снятия, и
+    # соседние значения не должны угадываться. Та же функция gen_random_uuid(),
+    # что у `wiki_files`, — значит на этой базе она есть.
+    # ──────────────────────────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS parcel_photos (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        parcel_id        INTEGER NOT NULL REFERENCES parcels(id) ON DELETE CASCADE,
+
+        -- Где лежит файл. Наружу эти две колонки не отдаются никогда: фронт
+        -- получает подписанный адрес, а путь в бакете служил бы подсказкой.
+        bucket           VARCHAR(255) NOT NULL,
+        blob_path        TEXT NOT NULL,
+        -- Миниатюра для плитки. NULL — законное состояние: кадр меньше 480
+        -- пикселей не уменьшают, и плитка тогда показывает полный кадр.
+        thumb_blob_path  TEXT,
+
+        content_type     VARCHAR(100) NOT NULL DEFAULT 'image/webp',
+        -- Размеры и вес — ПОСЛЕ пережатия. Веса оригинала не храним: он в
+        -- бакет не попадает, и сверять по нему нечего.
+        file_size        BIGINT NOT NULL DEFAULT 0,
+        width            INTEGER,
+        height           INTEGER,
+        thumb_width      INTEGER,
+        thumb_height     INTEGER,
+
+        original_name    VARCHAR(255),
+        -- Порядок показа. Нужен потому, что двух снимков, загруженных в одну
+        -- секунду, хватило бы, чтобы сортировка по created_at стала случайной,
+        -- а сетка плиток перетасовывалась при каждом открытии карточки.
+        sort_order       INTEGER NOT NULL DEFAULT 0,
+
+        uploaded_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        uploaded_by_name VARCHAR(200),
+        created_at       TIMESTAMP NOT NULL DEFAULT %s
+    )
+    """ % _NOW,
+
     # ── Индексы списка и фильтров (Город → Офис → Дата → Менеджер) ────────
     "CREATE INDEX IF NOT EXISTS idx_parcels_status ON parcels(status)",
     "CREATE INDEX IF NOT EXISTS idx_parcels_city ON parcels(city)",
@@ -189,6 +251,11 @@ _STATEMENTS = [
     """,
 
     "CREATE INDEX IF NOT EXISTS idx_parcel_events_parcel ON parcel_events(parcel_id, id)",
+
+    # Порядок показа берётся отсюда целиком: и отбор по карточке, и сортировка.
+    # Без `id` в хвосте два снимка с одинаковым sort_order шли бы в произвольном
+    # порядке, и сетка перетасовывалась бы между открытиями.
+    "CREATE INDEX IF NOT EXISTS idx_parcel_photos_parcel ON parcel_photos(parcel_id, sort_order, id)",
 ]
 
 
@@ -257,7 +324,27 @@ def init_parcels_schema(cursor):
 
 
 def schema_is_ready(cursor):
-    """Развёрнута ли схема. Отличает «раздел ещё не поднялся» от «реестр пуст»."""
+    """Развёрнута ли схема. Отличает «раздел ещё не поднялся» от «реестр пуст».
+
+    Спрашивает ТОЛЬКО `parcels` и ничего больше. Дописать сюда проверку
+    фотографий значило бы спрятать работающий реестр из-за необязательной
+    таблицы: разворот идёт под общим SAVEPOINT, и осечка на новой таблице
+    оставила бы раздел закрытым целиком.
+    """
     cursor.execute("SELECT to_regclass('public.parcels') IS NOT NULL")
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def photos_ready(cursor):
+    """Развёрнута ли таблица фотографий.
+
+    Отдельный вопрос, а не часть schema_is_ready (см. её докстринг). Спрашивают
+    его во ВСЕХ местах, где трогается новая таблица, — чтение карточки,
+    удаление карточки, оба роута фотографий и /ping. Иначе на базе, где разворот
+    споткнулся, `UndefinedTable` превратился бы в 500 при открытии карточки, то
+    есть необязательная возможность положила бы работающий раздел.
+    """
+    cursor.execute("SELECT to_regclass('public.parcel_photos') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])

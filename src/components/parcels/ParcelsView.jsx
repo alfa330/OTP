@@ -204,6 +204,19 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [editing, setEditing] = useState(null);
     const [opened, setOpened] = useState(null);
     const [openedEvents, setOpenedEvents] = useState([]);
+    // Фотографии открытой карточки. null — ещё не приехали (карточка уже
+    // нарисована на данных строки списка), [] — приехали и их нет.
+    const [openedPhotos, setOpenedPhotos] = useState(null);
+    // Снимки правимой карточки: форма открывается только ИЗ карточки, где
+    // список уже загружен, поэтому отдельного запроса за ними не нужно.
+    const [editingPhotos, setEditingPhotos] = useState([]);
+    const [photosEnabled, setPhotosEnabled] = useState(false);
+    /* Какой карточке мы уже перезапрашивали адреса фотографий.
+       Без этого ограничителя битая ссылка встаёт в бесконечный цикл: <img>
+       зовёт onError -> перезапрос -> новое состояние -> перерисовка -> тот же
+       onError. То есть ровно в том случае, ради которого обработчик и писался,
+       он бы завалил сервер запросами. */
+    const photoRetry = useRef(null);
 
     const canEdit = Boolean(capabilities?.can_edit);
     const canDelete = Boolean(capabilities?.can_delete);
@@ -222,6 +235,10 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 if (cancelled) return;
                 setCapabilities(response.data?.capabilities || null);
                 setSchemaReady(response.data?.schema_ready !== false);
+                // Строго === true: прикрепление не рисуется, пока сервер не
+                // подтвердил и таблицу, и бакет. Кнопка, которая гарантированно
+                // ответит отказом, хуже отсутствующей.
+                setPhotosEnabled(response.data?.photos_ready === true);
             })
             .catch(() => { if (!cancelled) setCapabilities(null); });
         return () => { cancelled = true; };
@@ -355,13 +372,17 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const openParcel = useCallback(async (parcel) => {
         setOpened(parcel);
         setOpenedEvents([]);
+        setOpenedPhotos(null);
         try {
             const response = await axios.get(`${apiBaseUrl}/api/parcels/${parcel.id}`,
                 { headers: headers() });
             setOpened(response.data?.item || parcel);
             setOpenedEvents(response.data?.events || []);
+            setOpenedPhotos(response.data?.photos || []);
         } catch {
-            /* Карточка уже открыта на данных из списка — историю просто не покажем. */
+            /* Карточка уже открыта на данных из списка — историю и фотографии
+               просто не покажем. */
+            setOpenedPhotos([]);
         }
     }, [apiBaseUrl, headers]);
 
@@ -939,22 +960,46 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 offices={offices}
                 defaultCity={capabilities?.default_city || ''}
                 parcel={editing}
+                photos={editingPhotos}
+                photosEnabled={photosEnabled}
                 onSaved={applySaved}
                 showToast={showToast}
             />
 
             <ParcelCard
                 open={Boolean(opened)}
-                onClose={() => { setOpened(null); setOpenedEvents([]); }}
+                onClose={() => {
+                    setOpened(null);
+                    setOpenedEvents([]);
+                    setOpenedPhotos(null);
+                    // Закрыли карточку — даём следующему открытию одну попытку.
+                    photoRetry.current = null;
+                }}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
                 parcel={opened}
                 events={openedEvents}
+                photos={openedPhotos}
                 canEdit={canEdit}
                 canDelete={canDelete}
-                onEdit={(parcel) => { setOpened(null); setEditing(parcel); setFormOpen(true); }}
+                onEdit={(parcel) => {
+                    // Снимки переносим в форму ДО закрытия карточки: после
+                    // setOpened(null) брать их будет уже неоткуда.
+                    setEditingPhotos(openedPhotos || []);
+                    setOpened(null);
+                    setEditing(parcel);
+                    setFormOpen(true);
+                }}
                 onChanged={(saved, events) => { applySaved(saved); setOpenedEvents(events || []); }}
                 onDeleted={applyDeleted}
+                /* Подпись адреса живёт час, а вкладка у стойки — весь день.
+                   Не показалась картинка — один раз перезапрашиваем карточку
+                   за свежими адресами, иначе к обеду плитки почернели бы. */
+                onStalePhotos={() => {
+                    if (!opened || photoRetry.current === opened.id) return;
+                    photoRetry.current = opened.id;
+                    openParcel(opened);
+                }}
                 showToast={showToast}
             />
         </div>

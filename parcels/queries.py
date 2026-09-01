@@ -640,3 +640,144 @@ def list_events(cursor, parcel_id):
         'payload': row[4] or {},
         'created_at': _iso(row[5]),
     } for row in cursor.fetchall()]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Фотографии вещи
+#
+# Ни одно из этих имён НЕ добавляется в _PARCEL_FIELDS, _INSERT_FIELDS,
+# _EDITABLE_FIELDS и _DIFF_LABELS. Фотографии — отдельная таблица и отдельный
+# ключ ответа; вписанные в список колонок карточки, они дали бы `p.photos` в
+# SELECT, то есть 500 на списке, чтении, выгрузке и внутри update_parcel —
+# ровно ту аварию с позиционной раскладкой, что уронила прод 25.08.2026.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PHOTO_FIELDS = (
+    'id', 'bucket', 'blob_path', 'thumb_blob_path', 'content_type', 'file_size',
+    'width', 'height', 'thumb_width', 'thumb_height', 'original_name',
+    'sort_order', 'uploaded_by', 'uploaded_by_name', 'created_at',
+)
+
+# SELECT и разбор строки собираются из одного списка — по тому же уроку, что и
+# у карточки: позиционная раскладка на пятнадцати колонках не случайность, а
+# ошибка, которая ждёт своего часа.
+_PHOTO_COLUMNS = ', '.join(_PHOTO_FIELDS)
+
+
+def _photo_row(row):
+    out = dict(zip(_PHOTO_FIELDS, row))
+    out['id'] = str(out['id'])
+    out['created_at'] = _iso(out['created_at'])
+    return out
+
+
+def list_photos(cursor, parcel_id):
+    """Фотографии карточки в порядке показа. Без подписи — её ставит photos.sign_urls."""
+    cursor.execute(
+        'SELECT %s FROM parcel_photos WHERE parcel_id = %%s ORDER BY sort_order, id'
+        % _PHOTO_COLUMNS,
+        (int(parcel_id),),
+    )
+    return [_photo_row(row) for row in cursor.fetchall()]
+
+
+def lock_parcel_photos(cursor, parcel_id):
+    """Блокирует карточку и отдаёт число уже привязанных снимков. None — карточки нет.
+
+    Одним движением решаются три задачи: есть ли родитель, каким будет
+    sort_order и не выберут ли лимит две вкладки разом. Последнее без
+    блокировки НЕ работает: на READ COMMITTED счётчик не видит незакоммиченных
+    вставок соседней транзакции, и обе вкладки при девяти снимках увидели бы
+    девять, а в базе оказалось бы одиннадцать.
+    """
+    cursor.execute('SELECT 1 FROM parcels WHERE id = %s FOR UPDATE', (int(parcel_id),))
+    if not cursor.fetchone():
+        return None
+    cursor.execute('SELECT COUNT(*) FROM parcel_photos WHERE parcel_id = %s',
+                   (int(parcel_id),))
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def insert_photo(cursor, parcel_id, *, prepared, bucket, blob_path, thumb_blob_path,
+                 sort_order, actor):
+    """Строка о снимке и событие истории — ОДНИМ курсором, то есть одной транзакцией.
+
+    payload события — только идентификатор снимка. Лента отдаётся всем
+    читателям раздела (list_events), и путям в бакете там не место.
+    """
+    cursor.execute(
+        """
+        INSERT INTO parcel_photos (parcel_id, bucket, blob_path, thumb_blob_path,
+                                   content_type, file_size, width, height,
+                                   thumb_width, thumb_height, original_name,
+                                   sort_order, uploaded_by, uploaded_by_name)
+        VALUES (%(parcel_id)s, %(bucket)s, %(blob_path)s, %(thumb_blob_path)s,
+                %(content_type)s, %(file_size)s, %(width)s, %(height)s,
+                %(thumb_width)s, %(thumb_height)s, %(original_name)s,
+                %(sort_order)s, %(uploaded_by)s, %(uploaded_by_name)s)
+        RETURNING id
+        """,
+        {
+            'parcel_id': int(parcel_id),
+            'bucket': bucket,
+            'blob_path': blob_path,
+            'thumb_blob_path': thumb_blob_path,
+            'content_type': prepared.get('content_type'),
+            'file_size': prepared.get('file_size') or 0,
+            'width': prepared.get('width'),
+            'height': prepared.get('height'),
+            'thumb_width': prepared.get('thumb_width'),
+            'thumb_height': prepared.get('thumb_height'),
+            'original_name': prepared.get('original_name'),
+            'sort_order': int(sort_order or 0),
+            'uploaded_by': actor.get('user_id'),
+            'uploaded_by_name': actor.get('name'),
+        },
+    )
+    photo_id = str(cursor.fetchone()[0])
+    _log_event(cursor, parcel_id, 'photo_added', actor, {'photo_id': photo_id})
+    return photo_id
+
+
+def delete_photo(cursor, parcel_id, photo_id, *, actor):
+    """Снимает фотографию. Возвращает пары (бакет, путь) к удалению — или None.
+
+    Условие по ОБОИМ ключам обязательно. Без parcel_id идентификатор снимка сам
+    стал бы ключом доступа: правкой своей карточки можно было бы стереть
+    фотографию из чужой.
+    """
+    cursor.execute(
+        """
+        DELETE FROM parcel_photos
+              WHERE id = %s AND parcel_id = %s
+          RETURNING bucket, blob_path, thumb_blob_path
+        """,
+        (str(photo_id), int(parcel_id)),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    _log_event(cursor, parcel_id, 'photo_removed', actor, {'photo_id': str(photo_id)})
+    refs = [(row[0], row[1])]
+    if row[2]:
+        refs.append((row[0], row[2]))
+    return refs
+
+
+def photo_blob_refs(cursor, parcel_id):
+    """Все файлы карточки: снять ДО удаления, стереть ПОСЛЕ коммита.
+
+    delete_parcel про них не знает и наружу их не отдаёт, а строки унесёт
+    каскад — значит собрать адреса можно только заранее.
+    """
+    cursor.execute(
+        'SELECT bucket, blob_path, thumb_blob_path FROM parcel_photos WHERE parcel_id = %s',
+        (int(parcel_id),),
+    )
+    refs = []
+    for bucket, blob_path, thumb_path in cursor.fetchall():
+        refs.append((bucket, blob_path))
+        if thumb_path:
+            refs.append((bucket, thumb_path))
+    return refs

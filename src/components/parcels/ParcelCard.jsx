@@ -1,14 +1,16 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Check, ExternalLink, Loader2, Pencil, Trash2 } from 'lucide-react';
 import {
-    iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosModal,
+    iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosLightbox, IosModal,
 } from '../ui/ios';
 import {
     PARCEL_STATUSES, daysInOffice, describeEvent, driverAccountUrl, fmtDate, fmtDateTime,
     fmtPhone, kindMeta, linkLabel, pluralDays, rowTone, safeLink, statusMeta, tonePill,
     toneRow, toneText,
 } from './parcelMeta';
+import { sortPhotos } from './parcelPhoto';
+import { PhotoStrip } from './ParcelPhotos';
 
 /*
  * Карточка посылки: всё о записи + история изменений + смена статуса.
@@ -64,11 +66,19 @@ const Row = ({ label, children }) => {
 };
 
 const ParcelCard = ({
-    open, onClose, apiBaseUrl, headers, parcel, events, canEdit, canDelete,
-    onEdit, onChanged, onDeleted, showToast,
+    open, onClose, apiBaseUrl, headers, parcel, events, photos, canEdit, canDelete,
+    onEdit, onChanged, onDeleted, onStalePhotos, showToast,
 }) => {
     const [busy, setBusy] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
+    // Объявлено ЗДЕСЬ, выше `if (!parcel) return null`: хук ниже этой строки
+    // при закрытии карточки дал бы «Rendered fewer hooks than expected».
+    const [zoom, setZoom] = useState(null);
+
+    /* Карточка смонтирована всегда — её прячет `if (!parcel) return null`, а
+       состояние при этом переживает закрытие. Без сброса просмотрщик,
+       оставшийся открытым, всплыл бы поверх СЛЕДУЮЩЕЙ открытой карточки. */
+    useEffect(() => { if (!open) setZoom(null); }, [open]);
 
     const lying = useMemo(() => daysInOffice(parcel), [parcel]);
     /* Оттенок берём тем же правилом, что реестр: нажал янтарную строку —
@@ -212,6 +222,25 @@ const ParcelCard = ({
                         )}
                     </p>
                 </section>
+
+                {/* Фотографии стоят сразу под сводкой, и это не случайность:
+                    у читателя (СЗоВ) секции «Что с посылкой» нет вовсе, так что
+                    снимок оказывается первым, что он видит, открыв карточку, —
+                    ровно как просил владелец. У менеджера он стоит прямо перед
+                    действием, и при потолке в три плитки действие с экрана не
+                    уезжает. Через Row галерею рисовать нельзя: Row прячет
+                    пустое значение, а <div> никогда не falsy — пустой список
+                    дал бы видимую строку «Фотографии» с пустотой справа. */}
+                {photos?.length ? (
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Фотографии</div>
+                        <PhotoStrip
+                            photos={sortPhotos(photos)}
+                            onOpen={(url) => setZoom(url || null)}
+                            onStale={onStalePhotos}
+                        />
+                    </section>
+                ) : null}
 
                 {/* Смена статуса — СПИСОК с подписями, а не сегментный контрол.
                     В сегментах помещались только «Получателю | Отправителю»: два
@@ -366,6 +395,10 @@ const ParcelCard = ({
                 </section>
             </div>
 
+            {/* Просмотр во весь экран уходит в портал на document.body:
+                backdrop-blur модалки делает её containing block для fixed, и
+                внутри неё никакой z-index просмотрщик бы не поднял. */}
+            <IosLightbox url={zoom} alt="Фотография посылки" onClose={() => setZoom(null)} />
         </IosModal>
     );
 };

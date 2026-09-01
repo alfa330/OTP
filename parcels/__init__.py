@@ -19,6 +19,7 @@ access.py). Оба отдела открывают раздел ТОЛЬКО п�
     schema.py   DDL таблиц parcels/parcel_events, идемпотентный
     access.py   чистая логика прав — не импортирует ни базу, ни Flask
     drivers.py  клиент CRM yataxi + разбор ссылки на аккаунт водителя
+    photos.py   фотографии вещи: проверка файла, WebP, миниатюра, бакет
     queries.py  SQL поверх готового курсора
     report.py   сборка выгрузки в xlsx (задача #257)
     routes.py   Blueprint /api/parcels — только разбор запроса и коды ответов
@@ -29,4 +30,4 @@ access.py). Оба отдела открывают раздел ТОЛЬКО п�
 первым, как это уже было со статьёй «Адреса офисов».
 """
 
-__all__ = ['schema', 'access', 'drivers', 'queries', 'report']
+__all__ = ['schema', 'access', 'drivers', 'photos', 'queries', 'report']

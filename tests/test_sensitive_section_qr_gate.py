@@ -282,6 +282,11 @@ class WikiQrGateTest(WikiGateHarness, unittest.TestCase):
         self.assertEqual(gate.calls, [])
 
 
+# Любой существующий UUID: до базы эти запросы не доходят, но конвертер
+# маршрута <uuid:…> обязан их пропустить, иначе гейт проверялся бы на 404.
+PHOTO_ID = '11111111-2222-4333-8444-555555555555'
+
+
 @unittest.skipIf(Flask is None, 'flask не установлен')
 class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
     def test_operator_without_confirmation_is_stopped_everywhere(self):
@@ -299,6 +304,11 @@ class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
                             ('post', '/api/parcels'),
                             ('post', '/api/parcels/driver-lookup'),
                             ('post', '/api/parcels/1/status'),
+                            # Фотографии вещи: гарнитура собирает блюпринт БЕЗ
+                            # хранилища, и это часть проверки — отказ обязан
+                            # прийти раньше любого обращения к бакету.
+                            ('post', '/api/parcels/1/photos'),
+                            ('delete', '/api/parcels/1/photos/' + PHOTO_ID),
                             ('patch', '/api/parcels/1')):
             response = getattr(client, method)(url, json={})
             self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
@@ -353,6 +363,8 @@ class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
                             ('post', '/api/parcels/driver-lookup'),
                             ('post', '/api/parcels/1/status'),
                             ('patch', '/api/parcels/1'),
+                            ('post', '/api/parcels/1/photos'),
+                            ('delete', '/api/parcels/1/photos/' + PHOTO_ID),
                             ('delete', '/api/parcels/1')):
             response = getattr(client, method)(url, json={})
             self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
