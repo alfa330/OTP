@@ -27463,8 +27463,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="flex-1 bg-white rounded shadow-sm p-2 w-full flex flex-col min-h-0 overflow-hidden">
                         <div className="table-scroll overflow-auto w-full flex-1 min-h-0" style={{ position: 'relative' }}>
                             <div style={{ minWidth: 'max-content', width: '100%' }}>
-                            <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-[50] bg-white">
-                                <div className="w-64 sticky left-0 top-0 z-50 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
+                            {/* Слои планировщика держим НИЖЕ сайдбара (у него z-50): шапка дней
+                                вместе с линейкой часов раньше стояла на z-[50] и, будучи позже
+                                сайдбара в разметке, накрывала его выпадающие плашки. */}
+                            <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-30 bg-white">
+                                <div className="w-64 sticky left-0 top-0 z-10 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
                                 <div className="flex-1" style={{ overflow: 'visible' }}>
                                 <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                     {visibleRange.map(d => (
@@ -27520,7 +27523,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             {filteredOperators.map(op => (
                                 <div key={op.id} className="flex items-center border-b"> 
-                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-40 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                <div className={`w-64 ${plannerStatusSpecialDayViewEnabled ? 'h-[6.25rem]' : 'h-[4.5rem]'} pr-2 sticky left-0 z-20 bg-white border-r`} style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
                                     <div className="font-medium">{op.name || '—'}</div>
                                     <div className="flex items-center justify-between mt-1">
                                         <div className="text-xs text-slate-500">{op.direction || '—'}</div>
@@ -27882,10 +27885,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             // Ширина колонки дня задана жёстко (width, а не только minWidth): у flex-элемента
                                             // с flex:'0 0 auto' база равна max-content, поэтому длинное название статуса
                                             // («Ежегодный отпуск») раздувало ячейку и уводило весь ряд из-под шапки дней.
+                                            // isolate — своя область наложения: маркеры дня и полосы таймлайна внутри
+                                            // ячейки больше не всплывают над закреплённой шапкой и колонкой ФИО.
                                             return (
                                             <div
                                                 key={d}
-                                                className={`group ${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
+                                                className={`group ${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative isolate` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, width: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
                                                 onContextMenu={(viewMode !== 'day' && cellHistorySummary)
