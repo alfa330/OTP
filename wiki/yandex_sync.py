@@ -252,31 +252,71 @@ def page_of_article(cursor, article_id):
 
 
 def page_of_url(cursor, url):
-    """Уже подписана ли какая-то статья на этот адрес.
+    """Уже подписана ли ЖИВАЯ статья на этот адрес.
 
     Это и есть защита от дубля: ключ — канонический адрес, а не название и не
     слаг. Слаг в приёмнике мог оказаться занят (тогда статья легла бы под
     «-2»), а название источник вправе переименовать.
+
+    Архивная статья адрес НЕ держит — по той же причине, что и в
+    already_imported: архив означает «это больше не она», и занятый навсегда
+    адрес был бы тупиком.
     """
-    cursor.execute('SELECT %s FROM wiki_yandex_pages WHERE url = %%s'
-                   % ', '.join(_PAGE_COLUMNS), (url,))
+    cursor.execute(
+        'SELECT p.%s FROM wiki_yandex_pages p '
+        '  JOIN wiki_articles a ON a.id = p.article_id '
+        " WHERE p.url = %%s AND a.status <> 'archived'"
+        % ', p.'.join(_PAGE_COLUMNS), (url,))
     return _page_row(cursor.fetchone())
 
 
+def _release_archived_claim(cursor, entity_id, keep_article_id):
+    """Освободить номер страницы, занятый АРХИВНОЙ статьёй.
+
+    Уникальный индекс uq_wiki_article_imports_source не знает про архив: пока
+    у убранной копии в провенансе стоит source_id, вторая статья на ту же
+    страницу не запишется вовсе — INSERT падёт на нарушении уникальности, и
+    человек увидит 500 там, где сделал всё правильно (убрал лишнюю копию в
+    архив и связал нужную).
+
+    Сам факт «приехало из Яндекс Про» у архивной копии остаётся — обнуляется
+    только номер: он ключ, а не сведение.
+    """
+    if entity_id is None:
+        return
+    cursor.execute(
+        """
+        UPDATE wiki_article_imports i SET source_id = NULL
+         WHERE i.source = %(source)s AND i.source_id = %(entity)s
+           AND i.article_id <> %(keep)s
+           AND EXISTS (SELECT 1 FROM wiki_articles a
+                        WHERE a.id = i.article_id AND a.status = 'archived')
+        """,
+        {'source': SOURCE, 'entity': int(entity_id), 'keep': keep_article_id},
+    )
+
+
 def already_imported(cursor, entity_id):
-    """Переносили ли эту страницу когда-нибудь. {article_id, slug, title} или None.
+    """Переносили ли эту страницу в ЖИВУЮ статью. {article_id, slug, title} или None.
 
     Спрашивается у ПРОВЕНАНСА (wiki_article_imports), а не у связи: связь
-    снимается кнопкой «Отписать», а провенанс живёт с статьёй всегда. Именно он
-    и отвечает на вопрос «мы это уже переносили?» после отписки — без него
-    отписка означала бы возможность завести вторую статью из той же страницы.
+    снимается кнопкой, а провенанс живёт со статьёй всегда. Именно он и
+    отвечает на вопрос «мы это уже переносили?» после отписки — без него
+    отписка означала бы возможность завести вторую статью из той же страницы
+    (проверено на живой статье «Межгород»: так и вышло).
+
+    АРХИВНАЯ СТАТЬЯ НЕ СЧИТАЕТСЯ. Архив в вике и означает «это больше не она»:
+    неудачную копию убирают в архив и переносят страницу заново или связывают
+    с другой статьёй. Учитывай архивные — и страница оказалась бы занята
+    навсегда, а выйти из этого было бы неоткуда: ровно та ловушка, из которой
+    эта проверка и появилась.
     """
     if entity_id is None:
         return None
     cursor.execute(
         'SELECT i.article_id, a.slug, a.title FROM wiki_article_imports i '
         '  JOIN wiki_articles a ON a.id = i.article_id '
-        ' WHERE i.source = %s AND i.source_id = %s',
+        " WHERE i.source = %s AND i.source_id = %s AND a.status <> 'archived'",
         (SOURCE, int(entity_id)),
     )
     row = cursor.fetchone()
@@ -625,6 +665,7 @@ def import_page(cursor, gcs, *, url, section_ids, author_id, space_ids=None,
     # приехало извне или мы сами писали?» задают спустя месяцы, и ответ должен
     # лежать в одном месте на все источники. Заодно статья попадает в очередь
     # «Перенос» и ждёт решения человека.
+    _release_archived_claim(cursor, parsed.get('entity_id'), article_id)
     wiki_migration.record(
         cursor, article_id=article_id, source=SOURCE,
         source_id=parsed.get('entity_id'), source_slug=parsed['url'],
@@ -655,9 +696,26 @@ def link_article(cursor, *, article_id, url, linked_by, auto_sync=True,
     taken = page_of_url(cursor, parsed['url'])
     if taken and taken['article_id'] != article_id:
         raise SyncError('На эту страницу источника уже подписана другая статья')
+    known = already_imported(cursor, parsed.get('entity_id'))
+    if known and known['article_id'] != article_id:
+        raise SyncError('Эта страница уже перенесена в статью «%s»' % known['title'])
     _remember_page(cursor, article_id=article_id, parsed=parsed,
                    content_hash=None, linked_by=linked_by, auto_sync=auto_sync,
                    ai_format=ai_format, status=STATUS_OK)
+    # Провенанс пишем и здесь, а не только при импорте. Без этого связанная
+    # руками статья оставалась НЕИЗВЕСТНОЙ: строка связи снимается кнопкой
+    # «Отписать», а больше о странице ничто не помнило — и повторный импорт
+    # заводил вторую копию. Проверено на живой статье «Межгород»: после отписки
+    # импорт создал статью-двойник.
+    _release_archived_claim(cursor, parsed.get('entity_id'), article_id)
+    wiki_migration.record(
+        cursor, article_id=article_id, source=SOURCE,
+        source_id=parsed.get('entity_id'), source_slug=parsed['url'],
+        source_title=parsed['title'], source_status='published',
+        imported_by=linked_by,
+        # Решение по такой строке принимать не надо: статья уже живёт в вике,
+        # её писал человек, и в очередь модерации переноса ей не место.
+        reviewed='kept', reviewed_by=linked_by)
     return {'article_id': article_id, 'url': parsed['url'],
             'title': parsed['title'], 'entity_id': parsed.get('entity_id'),
             'fingerprint': parsed['fingerprint']}
@@ -779,9 +837,10 @@ def sync_article(cursor, gcs, *, article_id, editor_id=None, force=False,
 def due_pages(cursor, *, limit=SYNC_BATCH):
     """Что сверять этой ночью: подписанные на автообновление, давние первыми."""
     cursor.execute(
-        'SELECT article_id, url FROM wiki_yandex_pages '
-        ' WHERE auto_sync '
-        ' ORDER BY last_checked_at NULLS FIRST, article_id '
+        'SELECT p.article_id, p.url FROM wiki_yandex_pages p '
+        '  JOIN wiki_articles a ON a.id = p.article_id '
+        "  WHERE p.auto_sync AND a.status <> 'archived' "
+        ' ORDER BY p.last_checked_at NULLS FIRST, p.article_id '
         ' LIMIT %s', (int(limit),))
     return [{'article_id': row[0], 'url': row[1]} for row in cursor.fetchall()]
 

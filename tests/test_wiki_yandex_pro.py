@@ -673,7 +673,7 @@ class SyncTest(unittest.TestCase):
         Связка обязана только начать сверку. Перепиши она текст сразу — и
         кнопка «Связать» уничтожала бы статью, которую писали руками.
         """
-        cursor = self._cursor(**{'FROM wiki_yandex_pages WHERE url': None})
+        cursor = self._cursor(**{'WHERE p.url': None})
         result = yandex_sync.link_article(
             cursor, article_id=715, url=PAGE_URL, linked_by=42,
             fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
@@ -702,7 +702,7 @@ class SyncTest(unittest.TestCase):
         что ключ идемпотентности жил только в снятой строке связи.
         """
         cursor = self._cursor(**{
-            'FROM wiki_yandex_pages WHERE url': None,
+            'WHERE p.url': None,
             'FROM wiki_article_imports i': (715, 'tarif-mezhgorod', 'Тариф «Межгород»'),
         })
         result = yandex_sync.import_page(
@@ -718,7 +718,7 @@ class SyncTest(unittest.TestCase):
     def test_preview_says_the_page_was_imported_before(self):
         """Иначе выйти из состояния «перенесено, но отписано» неоткуда."""
         cursor = self._cursor(**{
-            'FROM wiki_yandex_pages WHERE url': None,
+            'WHERE p.url': None,
             'FROM wiki_article_imports i': (715, 'tarif-mezhgorod', 'Тариф «Межгород»'),
         })
         result = yandex_sync.preview(
@@ -728,9 +728,78 @@ class SyncTest(unittest.TestCase):
         self.assertIsNone(result['linked_article_id'])
         self.assertEqual((result['imported'] or {}).get('article_id'), 715)
 
+    def test_linking_remembers_the_page_in_the_provenance(self):
+        """Иначе связанная руками статья остаётся НЕИЗВЕСТНОЙ после отписки.
+
+        Строку связи снимают кнопкой, и если о странице больше ничто не
+        помнит, повторный импорт заводит вторую копию. Ровно это и случилось
+        на живой статье «Межгород».
+        """
+        recorded = []
+        original = wiki_migration.record
+        wiki_migration.record = lambda _c, **kw: recorded.append(kw)
+        self.addCleanup(setattr, wiki_migration, 'record', original)
+        cursor = self._cursor(**{'WHERE p.url': None,
+                                 'FROM wiki_article_imports i': None})
+        yandex_sync.link_article(
+            cursor, article_id=715, url=PAGE_URL, linked_by=42,
+            fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
+        self.assertEqual(len(recorded), 1, 'провенанс не записан')
+        self.assertEqual(recorded[0]['source'], wiki_migration.SOURCE_YANDEX_PRO)
+        self.assertEqual(recorded[0]['source_id'], 2693)
+        self.assertEqual(recorded[0]['source_slug'], PAGE_URL)
+        # Статью писал человек, она уже живёт в вике — решать по ней нечего.
+        self.assertEqual(recorded[0]['reviewed'], 'kept')
+
+    def test_linking_is_refused_when_another_article_owns_the_page(self):
+        """Две статьи на одну страницу — это и есть тот самый дубль."""
+        cursor = self._cursor(**{
+            'WHERE p.url': None,
+            'FROM wiki_article_imports i': (999, 'other', 'Другая статья'),
+        })
+        with self.assertRaises(yandex_sync.SyncError):
+            yandex_sync.link_article(
+                cursor, article_id=715, url=PAGE_URL, linked_by=42,
+                fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
+
+    def test_an_archived_article_does_not_hold_the_page(self):
+        """Архив в вике и означает «это больше не она».
+
+        Считай архивные — и страница оказалась бы занята навсегда: убрал
+        неудачную копию, а связать нужную статью уже нельзя, и выйти из этого
+        неоткуда. Ровно эту ловушку создал бы страж «уже переносили», если
+        не различать живую статью и убранную.
+        """
+        cursor = FakeCursor({'FROM wiki_article_imports i': None})
+        self.assertIsNone(yandex_sync.already_imported(cursor, 2693))
+        sql = ' '.join(cursor.sql_of('FROM wiki_article_imports i'))
+        self.assertIn("a.status <> 'archived'", sql,
+                      'провенанс архивной статьи всё ещё держит страницу')
+
+    def test_the_archived_claim_is_released_before_recording(self):
+        """Уникальный индекс про архив не знает — иначе будет 500 на правильном действии.
+
+        `uq_wiki_article_imports_source` уникален по (source, source_id), и
+        пока у убранной копии номер страницы на месте, вторая статья не
+        запишется вовсе: INSERT падёт на нарушении уникальности там, где
+        человек всё сделал верно — убрал лишнюю копию и связал нужную.
+        """
+        cursor = self._cursor(**{'WHERE p.url': None,
+                                 'FROM wiki_article_imports i': None})
+        original = wiki_migration.record
+        wiki_migration.record = lambda _c, **kw: None
+        self.addCleanup(setattr, wiki_migration, 'record', original)
+        yandex_sync.link_article(
+            cursor, article_id=715, url=PAGE_URL, linked_by=42,
+            fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
+        released = cursor.sql_of('UPDATE wiki_article_imports i SET source_id = NULL')
+        self.assertTrue(released, 'номер архивной копии не освобождается')
+        self.assertIn("a.status = 'archived'", released[0],
+                      'освобождаем номер не только у архивных')
+
     def test_two_articles_cannot_watch_the_same_page(self):
         """Иначе ночная сверка писала бы обеим один текст — тот самый дубль."""
-        cursor = self._cursor(**{'FROM wiki_yandex_pages WHERE url':
+        cursor = self._cursor(**{'WHERE p.url':
                                  page_row(article_id=999)})
         with self.assertRaises(yandex_sync.SyncError):
             yandex_sync.link_article(
@@ -781,7 +850,7 @@ class RouteTest(unittest.TestCase):
         cursor = FakeCursor({'FROM wiki_yandex_pages WHERE article_id': self.page_answer,
                              'FROM wiki_yandex_images': [],
                              'SELECT width, height FROM wiki_files': (499, 1080),
-                             'FROM wiki_yandex_pages WHERE url': None,
+                             'WHERE p.url': None,
                              'SELECT slug FROM wiki_articles': ('yandex-intercity',)})
         self.cursor = cursor
         db = MagicMock()
@@ -880,7 +949,7 @@ class RouteTest(unittest.TestCase):
                          'импорт выпустил статью — этого не должно быть НИКОГДА')
 
     def test_second_import_of_the_same_page_returns_the_same_article(self):
-        self.cursor.answers['FROM wiki_yandex_pages WHERE url'] = self.page_answer
+        self.cursor.answers['WHERE p.url'] = self.page_answer
         answer = self.client.post('/api/wiki/yandex/import',
                                   json={'url': PAGE_URL, 'section_ids': [8]})
         self.assertEqual(answer.status_code, 200)
@@ -907,7 +976,7 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(answer.status_code, 403)
 
     def test_linking_an_existing_article_creates_nothing(self):
-        self.cursor.answers['FROM wiki_yandex_pages WHERE url'] = None
+        self.cursor.answers['WHERE p.url'] = None
         answer = self.client.post('/api/wiki/yandex/715/link', json={'url': PAGE_URL})
         self.assertEqual(answer.status_code, 201, answer.get_json())
         self.assertEqual(self.created, [], 'связка создала вторую статью')
@@ -1096,16 +1165,20 @@ class FrontendTest(unittest.TestCase):
         self.assertIn('flex: 0 0 100%', slide[:300],
                       'слайд не занимает всю ширину ленты')
 
-    def test_unlink_button_is_labelled(self):
-        """Одна иконка рядом со «Сверить» уже привела к случайной отписке.
+    def test_row_toggles_sync_instead_of_losing_the_link(self):
+        """Кнопка в строке выключает СВЕРКУ, а не удаляет связь.
 
-        В первый день работы связь со статьёй «Межгород» сняли неумышленно:
-        понять, что вторая кнопка выключает слежение за источником, было
-        неоткуда. Заметно это становится только когда источник изменится, а
-        никто об этом не узнает.
+        Пока она удаляла связь, статья пропадала из списка и вернуть её было
+        неоткуда, а повторный импорт той же страницы заводил вторую копию —
+        проверено на живой статье «Межгород». Терять статью одним нажатием
+        нельзя, поэтому забыть источник совсем умеет только API.
         """
-        block = self.dialog[self.dialog.index('onClick={onUnlink}'):]
-        self.assertIn('Отписать', block[:400], 'кнопка отписки снова без подписи')
+        self.assertNotIn('axios.delete', self.dialog,
+                         'интерфейс снова удаляет связь одним нажатием')
+        self.assertIn('Не сверять', self.dialog)
+        self.assertIn('onToggleSync', self.dialog)
+        block = self.dialog[self.dialog.index('onClick={onToggleSync}'):]
+        self.assertIn('item.auto_sync', block[:600])
 
     def test_every_badge_tone_exists_in_the_kit(self):
         """Незнакомый тон бейдж молча подменяет на серый.

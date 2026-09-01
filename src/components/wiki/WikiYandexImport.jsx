@@ -76,7 +76,7 @@ const compose = (html) => {
     };
 };
 
-const LinkedRow = ({ item, busy, onSync, onForce, onUnlink }) => {
+const LinkedRow = ({ item, busy, onSync, onForce, onToggleSync }) => {
     const view = STATUS_VIEW[item.last_status] || STATUS_VIEW.ok;
     return (
         <li className="flex flex-wrap items-start gap-2 rounded-xl bg-slate-50 px-3 py-2">
@@ -123,17 +123,22 @@ const LinkedRow = ({ item, busy, onSync, onForce, onUnlink }) => {
                                 Переписать
                             </button>
                         )}
-                        {/* С подписью, а не одной иконкой. В первый же день
-                            работы связь со статьёй «Межгород» сняли случайно:
-                            иконка стояла рядом со «Сверить», и понять, что
-                            вторая кнопка выключает слежение за источником,
-                            было неоткуда. Действие обратимое, но узнаётся об
-                            этом только после того, как источник изменится и
-                            никто об этом не узнает. */}
+                        {/* ТУМБЛЕР, а не отвязка. Раньше кнопка удаляла связь
+                            совсем: статья пропадала из этого списка, и вернуть
+                            её было неоткуда — а повторный импорт той же
+                            страницы заводил вторую копию. Теперь выключается
+                            только сверка, строка остаётся на месте, и включить
+                            обратно можно тем же нажатием. Забыть источник
+                            совсем умеет API (DELETE), но в интерфейсе такого
+                            действия нет: терять статью одним нажатием нельзя. */}
                         <button type="button" className={`${iosBtnGhost} text-[11.5px]`}
-                                onClick={onUnlink}
-                                title="Больше не сверять эту статью с источником">
-                            <Link2Off size={13} /> Отписать
+                                onClick={onToggleSync}
+                                title={item.auto_sync
+                                    ? 'Перестать сверять эту статью с источником'
+                                    : 'Снова сверять эту статью с источником'}>
+                            {item.auto_sync
+                                ? <><Link2Off size={13} /> Не сверять</>
+                                : <><Link2 size={13} /> Сверять</>}
                         </button>
                     </>
                 )}
@@ -252,14 +257,17 @@ export default function WikiYandexImport({
             .finally(() => setRowBusy(null));
     };
 
-    const unlinkRow = (item) => {
+    const toggleSyncRow = (item) => {
+        const on = !item.auto_sync;
         setRowBusy(item.article_id);
-        axios.delete(`${base}/yandex/${item.article_id}`, { headers })
+        axios.patch(`${base}/yandex/${item.article_id}`, { auto_sync: on }, { headers })
             .then(() => {
-                toast(`«${item.title}» больше не сверяется с источником`, 'success');
+                toast(on
+                    ? `«${item.title}» снова сверяется с источником`
+                    : `«${item.title}» больше не сверяется — связь сохранена`, 'success');
                 loadLinked();
             })
-            .catch((e) => toast(errText(e, 'Не удалось отписать'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось переключить сверку'), 'error'))
             .finally(() => setRowBusy(null));
     };
 
@@ -513,7 +521,7 @@ export default function WikiYandexImport({
                                     busy={rowBusy === item.article_id}
                                     onSync={() => syncRow(item, false)}
                                     onForce={() => syncRow(item, true)}
-                                    onUnlink={() => unlinkRow(item)}
+                                    onToggleSync={() => toggleSyncRow(item)}
                                 />
                             ))}
                         </ul>
