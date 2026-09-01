@@ -653,6 +653,11 @@
     background: var(--wiki-surface-alt);
     overflow-x: auto;
     scroll-snap-type: x mandatory;
+    scroll-padding: 0.75rem;
+    /* Без этого свайп на КРАЙНЕМ кадре уходит браузеру, и вместо листания
+       читатель уезжает по истории назад — из статьи целиком. На телефоне это
+       главный способ листать, то есть ошибка встречалась бы у каждого. */
+    overscroll-behavior-x: contain;
     /* Полосу прокрутки прячем: под галереей есть точки, и они говорят то же
        самое, но понятнее — сколько всего кадров и который открыт. */
     scrollbar-width: none;
@@ -758,8 +763,24 @@
 
 /* На узком экране стрелки некуда вынести за край — убираем их вовсе: там
    листают пальцем, и две кнопки поверх кадра только закрывают инструкцию. */
-@media (max-width: 640px) {
+@media (max-width: 720px) {
     .wiki-prose .wiki-gallery__arrow { display: none; }
+}
+
+/* На бумаге листать нечем: разворачиваем ленту в столбец, иначе на печать
+   уходит один кадр из четырёх, и инструкция теряет половину шагов молча. */
+@media print {
+    .wiki-prose [data-wiki-block='gallery'] {
+        display: block;
+        overflow: visible;
+        background: transparent;
+        padding: 0;
+        break-inside: avoid;
+    }
+
+    .wiki-prose [data-wiki-block='gallery'] > * { margin: 0 0 0.75rem; }
+    .wiki-prose .wiki-gallery__arrow,
+    .wiki-prose .wiki-gallery__dots { display: none; }
 }
 
 /* Подсказка внутри пустой галереи (текст-рыба из шаблона вставки). Внутри
