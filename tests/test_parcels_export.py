@@ -283,6 +283,28 @@ class NumbersMatchTheScreenTests(unittest.TestCase):
             self.assertIn("%s: { label: '%s' }" % (code, label), source,
                           'подпись типа %s разошлась' % code)
 
+    def test_status_words_are_the_same_on_every_sheet(self):
+        """Одно слово на всю книгу, а не копия на каждом листе.
+
+        01.09.2026 в прод уехала шапка «ОТДАЛИ ОТПРАВИТЕЛЮ» на листе «По
+        офисам», пока лист «Посылки» и раздел говорили «Вернули отправителю»:
+        подписи были выписаны в OFFICE_COLUMNS руками, третьей копией, и
+        заметить расхождение можно было только открыв файл. Сторож смотрит
+        КАЖДЫЙ лист, а не только тот, где подписи проверялись раньше.
+        """
+        workbook, _ = build([parcel(id=1, status='in_office'),
+                             parcel(id=2, status='given_to_recipient'),
+                             parcel(id=3, status='given_to_sender')])
+        office_header = header(workbook['По офисам'])
+        for code, label in report.STATUS_LABELS.items():
+            self.assertIn(label, office_header,
+                          'на листе «По офисам» слово для %s разошлось' % code)
+
+        # И в самой таблице стоят те же слова, что в шапке сводки.
+        parcels_sheet = workbook['Посылки']
+        seen = {cell(parcels_sheet, row, 'Статус').value for row in (2, 3, 4)}
+        self.assertEqual(seen, set(report.STATUS_LABELS.values()))
+
     def test_office_summary_is_counted_from_the_very_same_rows(self):
         """Сводка, не сходящаяся с данными под ней, хуже её отсутствия."""
         workbook, _ = build([

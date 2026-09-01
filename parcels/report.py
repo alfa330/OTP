@@ -471,14 +471,21 @@ def _fill_context(sheet, counters, generated_at, generated_by, filters_note,
         sheet.append([left, right])
 
 
+# Сводка по офисам. Подписи статусов НЕ выписаны здесь руками, а собраны из
+# STATUS_LABELS: третья копия тех же слов уже разошлась однажды (01.09.2026 в
+# прод уехало «ОТДАЛИ ОТПРАВИТЕЛЮ» вместо «Вернули отправителю»), и заметить это
+# можно было только открыв файл. Теперь разойтись нечему — слово одно на книгу.
+# Порядок статусов — из схемы, тот же, что у сегментов раздела.
+OFFICE_STATUS_COLUMNS = ('in_office', 'given_to_recipient', 'given_to_sender')
+
 OFFICE_COLUMNS = (
     ('Город', 18),
     ('Офис', 28),
     ('Всего', 10),
-    ('В офисе', 10),
+    (status_label('in_office'), 10),
     ('Залежались', 12),
-    ('Передали получателю', 20),
-    ('ОТДАЛИ ОТПРАВИТЕЛЮ', 20),
+    (status_label('given_to_recipient'), 20),
+    (status_label('given_to_sender'), 20),
 )
 
 
