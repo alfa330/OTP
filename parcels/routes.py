@@ -359,7 +359,7 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
         if request.method == 'DELETE':
             if not access.can_delete(ctx):
                 return jsonify({
-                    "error": "Удалять записи может только администратор",
+                    "error": "Удалять записи может руководитель отдела или администратор",
                     "code": "PARCELS_FORBIDDEN",
                 }), 403
             with db._get_cursor() as cursor:

@@ -97,13 +97,40 @@ class WriteBoundaryTests(unittest.TestCase):
             self.assertFalse(access.can_edit(szov),
                              'СЗоВ в роли %s не должен править реестр' % role)
 
-    def test_only_global_admin_deletes(self):
+    def test_only_the_head_and_the_admin_delete(self):
+        """Просьба владельца 01.09.2026: «это может делать только рук отдела и Админ».
+
+        На проде это ДОБАВИЛО право, а не убрало: менеджеров региона (24 человека,
+        роль operator) удаление не касалось и раньше, а единственный глава
+        фронт-офисов проваливался мимо обоих условий — назначение главой заменяет
+        базовую роль admin, и is_global_admin переставал его признавать.
+        """
         self.assertTrue(access.can_delete(ctx(role='super_admin', department_code=None)))
         self.assertTrue(access.can_delete(ctx(role='admin', department_code=None)))
-        self.assertFalse(access.can_delete(ctx(department_code='front_office')))
-        self.assertFalse(access.can_delete(
+        self.assertTrue(access.can_delete(
             ctx(role='admin', department_code='front_office', headed=[909],
                 headed_codes=['front_office'])))
+
+    def test_a_regional_manager_never_deletes(self):
+        """Ошибочную запись менеджер исправляет, а не стирает: удаление уносит
+        историю, по которой отвечают «куда делась коробка»."""
+        for role in ('operator', 'sv', 'supervisor', 'trainee'):
+            manager = ctx(role=role, department_code='front_office', city='Тараз')
+            self.assertTrue(access.can_edit(manager), role)
+            self.assertFalse(access.can_delete(manager),
+                             'менеджер региона в роли %s не удаляет записи' % role)
+
+    def test_the_head_of_szov_does_not_delete_what_he_cannot_edit(self):
+        """Право стереть запись вместе с историей у того, кому нельзя исправить
+        в ней опечатку, — не «строже», а бессмысленно."""
+        head = ctx(role='admin', department_code='szov', headed=[404],
+                   headed_codes=['szov'])
+        self.assertFalse(access.can_edit(head))
+        self.assertFalse(access.can_delete(head))
+
+    def test_the_reader_never_deletes(self):
+        for role in ('operator', 'sv', 'supervisor'):
+            self.assertFalse(access.can_delete(ctx(role=role, department_code='szov')), role)
 
 
 class SensitiveQrTests(unittest.TestCase):
