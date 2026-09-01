@@ -7837,7 +7837,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
 
                                                 {lowRatingPanelOpen && (
-                                                    <div key={`lr-verdict-${selectedLowRatingReview.id}`} className={`grid max-h-[42vh] gap-3 overflow-y-auto border-t border-slate-100 bg-slate-50/60 px-4 py-3 lg:grid-cols-2 ${
+                                                    <div key={`lr-verdict-${selectedLowRatingReview.id}`} className={`grid max-h-[52vh] gap-3 overflow-y-auto border-t border-slate-100 bg-slate-50/60 px-4 py-3 lg:grid-cols-2 ${
                                                         selectedLowRatingReview.can_finalize ? 'xl:grid-cols-3' : ''
                                                     }`}>
                                                         <div className="flex flex-col rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
@@ -7872,7 +7872,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 })}
                                                             </div>
                                                             <textarea
-                                                                className="min-h-[68px] w-full flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
+                                                                className="min-h-[138px] w-full flex-1 resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus:ring-4 focus:ring-slate-100"
                                                                 value={lowRatingReviewDraft.comment || ''}
                                                                 onChange={(e) => setLowRatingReviewDraft(prev => ({ ...prev, comment: e.target.value }))}
                                                                 placeholder="Комментарий к проверке"
@@ -7972,7 +7972,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     })}
                                                                 </div>
                                                                 <textarea
-                                                                    className="min-h-[68px] w-full flex-1 resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-[13px] leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-4 focus:ring-cyan-100"
+                                                                    className="min-h-[138px] w-full flex-1 resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-[13px] leading-5 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-4 focus:ring-cyan-100"
                                                                     value={lowRatingFinalDraft.comment || ''}
                                                                     onChange={(e) => setLowRatingFinalDraft(prev => ({ ...prev, comment: e.target.value }))}
                                                                     placeholder="Комментарий к итоговому решению"
