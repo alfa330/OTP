@@ -298,12 +298,19 @@ def mark_canned_reply_sent(cursor, cabinet_code, thread_id):
 
     ТЗ запрещает слать заготовленное сообщение одному кандидату дважды в рамках
     одного обращения, поэтому отметка живёт на чате, а не в журнале.
+
+    Это ВСТАВКА с обновлением, а не просто UPDATE. Строки чата в этот момент
+    может ещё не быть: закладка по чату пишется в конце разбора, а автоответ
+    уходит в середине. UPDATE по несуществующей строке молча трогает ноль строк,
+    отметка не сохраняется — и на следующем опросе кандидат получает то же
+    сообщение снова.
     """
     cursor.execute(
         """
-        UPDATE olx_threads
+        INSERT INTO olx_threads (cabinet_code, thread_id, canned_reply_sent_at)
+        VALUES (%(cabinet_code)s, %(thread_id)s, {now})
+        ON CONFLICT (cabinet_code, thread_id) DO UPDATE
            SET canned_reply_sent_at = {now}, updated_at = {now}
-         WHERE cabinet_code = %(cabinet_code)s AND thread_id = %(thread_id)s
         """.format(now=_NOW),
         {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
     )
@@ -356,6 +363,16 @@ def write_journal(cursor, cabinet_code, result, **fields):
             """,
             payload,
         )
+        # Строку забираем ЗДЕСЬ, до RELEASE SAVEPOINT.
+        #
+        # Курсор psycopg2 держит результат ПОСЛЕДНЕГО запроса. `RELEASE
+        # SAVEPOINT` — тоже запрос, и он затирает выдачу INSERT ... RETURNING:
+        # следующий fetchone() падает с «no results to fetch». На проде это
+        # выглядело безобидно — «ошибка записи в журнал», — но откатывало всю
+        # транзакцию вместе с отметкой «автоответ уже отправлен», и кандидат
+        # получал заготовленное сообщение заново каждые полминуты. 172 копии
+        # одному человеку, 01.09.2026.
+        written = _one(cursor)
     except Exception as exc:
         # Откатываем ТОЧКУ, а не транзакцию: в ней уже лежит состояние чата.
         # Сделать это надо в любом случае — после ошибки транзакция иначе
@@ -370,7 +387,7 @@ def write_journal(cursor, cabinet_code, result, **fields):
             raise
         return None
     cursor.execute("RELEASE SAVEPOINT olx_journal_write")
-    return _one(cursor)
+    return written
 
 
 def find_recent_lead(cursor, cabinet_code, phone_normalized, day=None):

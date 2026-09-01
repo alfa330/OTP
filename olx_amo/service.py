@@ -237,6 +237,22 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
             # ТЗ прямо запрещает слать заготовленное сообщение дважды в рамках
             # одного обращения. Молча пропускаем — это не ошибка.
             return
+        # Отметку ставим ДО отправки и отдельной транзакцией.
+        #
+        # Порядок здесь важнее, чем кажется. Отметь мы чат после отправки и в
+        # одной транзакции с записью в журнал — любой сбой этой транзакции
+        # откатывал бы отметку, и кандидат получал бы то же сообщение снова
+        # каждые полминуты. Именно так и вышло 01.09.2026: 172 копии одному
+        # человеку.
+        #
+        # Цена обратного порядка — не отправленный автоответ, если отправка
+        # упадёт сразу после отметки. Это осознанный выбор: ТЗ отдельным пунктом
+        # запрещает повторную отправку, а не отправленное видно в журнале
+        # строкой `error`, и человек может ответить сам. Молчание поправимо,
+        # разосланный спам — нет.
+        with db._get_cursor() as cursor:
+            queries.mark_canned_reply_sent(cursor, cabinet.code, thread_id)
+
         try:
             writers.olx.send_message(thread_id, cabinet.canned_reply)
         except OlxError as exc:
@@ -247,9 +263,9 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                     message_id=message_id, message_at=sent_at, message_excerpt=excerpt,
                     error_text='не удалось отправить заготовленный ответ: %s' % (exc,))
             return
+
         counters.replies_sent += 1
         with db._get_cursor() as cursor:
-            queries.mark_canned_reply_sent(cursor, cabinet.code, thread_id)
             queries.write_journal(
                 cursor, cabinet.code, 'canned_reply', thread_id=thread_id,
                 message_id=message_id, message_at=sent_at, message_excerpt=excerpt,

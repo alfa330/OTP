@@ -293,6 +293,88 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(1, self.db.max_open)
 
 
+class JournalWriteTests(unittest.TestCase):
+    """Запись в журнал на курсоре, который ведёт себя как настоящий psycopg2.
+
+    Прод-инцидент 01.09.2026. Курсор psycopg2 держит результат ПОСЛЕДНЕГО
+    запроса, а `RELEASE SAVEPOINT` — тоже запрос: он затирал выдачу
+    `INSERT ... RETURNING`, и следующий `fetchone()` падал с «no results to
+    fetch». Снаружи это выглядело как «ошибка записи в журнал», но откатывало
+    транзакцию вместе с отметкой «автоответ уже отправлен» — и кандидат получал
+    заготовленное сообщение заново каждые полминуты. 172 копии одному человеку.
+
+    Заглушка ниже повторяет ровно это поведение: запрос без выдачи обнуляет
+    результат, а fetch по пустому результату бросает ту же ошибку.
+    """
+
+    class Cursor(object):
+        """Курсор, обнуляющий результат на каждом запросе без RETURNING."""
+
+        def __init__(self):
+            self.statements = []
+            self._rows = None
+            self.description = None
+
+        def execute(self, sql, params=None):
+            self.statements.append(' '.join(str(sql).split())[:60])
+            if 'RETURNING' in str(sql).upper():
+                self.description = [('id',), ('cabinet_code',), ('result',)]
+                self._rows = [(1, (params or {}).get('cabinet_code'),
+                               (params or {}).get('result'))]
+            else:
+                # Как в psycopg2: запрос без выдачи оставляет курсор пустым.
+                self.description = None
+                self._rows = None
+
+        def fetchone(self):
+            if self._rows is None:
+                raise RuntimeError('no results to fetch')
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            if self._rows is None:
+                raise RuntimeError('no results to fetch')
+            return list(self._rows)
+
+    def test_written_row_survives_the_savepoint_release(self):
+        from olx_amo import queries as real_queries
+
+        cursor = self.Cursor()
+        row = real_queries.write_journal(
+            cursor, 'itaxi', 'canned_reply', thread_id='77', message_id='5')
+
+        self.assertIsNotNone(row, 'строка журнала обязана вернуться')
+        self.assertEqual('canned_reply', row['result'])
+        # И порядок должен быть именно такой: вставка → чтение → release.
+        self.assertIn('RELEASE SAVEPOINT olx_journal_write', cursor.statements[-1])
+
+    def test_canned_reply_is_marked_before_it_is_sent(self):
+        """Отметка после отправки откатывалась вместе с транзакцией.
+
+        Цена обратного порядка — не отправленный автоответ при сбое отправки;
+        это осознанный выбор: ТЗ запрещает повторную отправку, а молчание видно
+        в журнале и поправимо человеком.
+        """
+        source = (ROOT / 'olx_amo' / 'service.py').read_text(encoding='utf-8')
+        branch = source[source.index('# ── ветка 3'):]
+        branch = branch[:branch.index('needs_manual = phone is None')]
+        mark = branch.index('mark_canned_reply_sent')
+        send = branch.index('send_message')
+        self.assertLess(mark, send, 'отметка обязана стоять ДО отправки')
+
+    def test_mark_creates_the_thread_row_if_it_is_not_there_yet(self):
+        """Закладка по чату пишется в конце разбора, а автоответ уходит раньше.
+
+        UPDATE по несуществующей строке молча трогает ноль строк — отметка не
+        сохранялась бы, и на следующем опросе ушла бы вторая копия.
+        """
+        source = (ROOT / 'olx_amo' / 'queries.py').read_text(encoding='utf-8')
+        block = source[source.index('def mark_canned_reply_sent('):]
+        block = block[:block.index('\ndef ')]
+        self.assertIn('INSERT INTO olx_threads', block)
+        self.assertIn('ON CONFLICT (cabinet_code, thread_id) DO UPDATE', block)
+
+
 class BookmarkTests(unittest.TestCase):
     """Что робот считает «ещё не разобранным». Ошибка здесь стоит дороже всего.
 
