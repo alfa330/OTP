@@ -5,20 +5,49 @@
 попытки на модель, четыре кейса: точный факт, перефразировка, казахский, отказ).
 Каждая исключённая модель исключена по конкретной причине.
 
-ПОРЯДОК (первым — самый точный, дальше бесплатный резерв):
-  1. vertex:gemini-3-flash-preview       1,6-4,1 с. ЕДИНСТВЕННАЯ ПЛАТНАЯ, включена
-     владельцем: качество ответа важнее секунды задержки. Считает тот же проект
-     Google Cloud, что уже платит за бакеты и эмбеддинги, — постоплатой.
-  2. groq:llama-3.3-70b-versatile        0,5-1,1 с. Потолок МИНУТНЫЙ: 12 000
-     токенов/мин на всю организацию, то есть ~5 вопросов в минуту.
+ПОРЯДОК (первым — самый точный, за ним платный резерв, дальше бесплатный):
+  1. vertex:gemini-3-flash-preview       1,6-4,1 с. Считает тот же проект Google
+     Cloud, что уже платит за бакеты и эмбеддинги, — постоплатой.
+  2. zai:glm-5.3-flash                   1,3-2,8 с в чате, 55 с на сборке статьи.
+     ВТОРАЯ ПЛАТНАЯ, добавлена 01.09.2026 после разбора отказа (см. ниже).
   3. gemini:gemini-3.5-flash-lite        1,0-2,0 с, «мышления» нет вовсе.
-  4. gemini:gemini-2.5-flash             1,1-3,6 с, мышление гасится и это работает.
-  5. cloudflare:llama-3.3-70b-fp8-fast   1,8-9,6 с. Потолок СУТОЧНЫЙ: 10 000
+  4. cloudflare:llama-3.3-70b-fp8-fast   1,8-9,6 с. Потолок СУТОЧНЫЙ: 10 000
      нейронов/день, замерено 75-100 нейронов на вопрос → ~100-130 вопросов.
-  6. cloudflare:mistral-small-3.1-24b    2,8-9,7 с, дешевле по нейронам.
-Бесплатные остаются резервом и покрывают друг друга по типу лимита: Groq держит
-минутный всплеск, Cloudflare добавляет суточный объём. Вернуться к бесплатной
-цепочке — переменной WIKI_AI_CHAIN, код менять не нужно.
+  5. cloudflare:mistral-small-3.1-24b    2,8-9,7 с, дешевле по нейронам.
+  6. groq:openai/gpt-oss-20b             последний резерв ЧАТА, и только чата:
+     потолок Groq 8 000 токенов/мин на организацию, а сборка статьи бронирует
+     9 000 токенов вывода — она отваливается арифметикой, HTTP 413 «Limit 8000,
+     Requested 9073», ещё до всякой нагрузки.
+Вернуться к прежней бесплатной цепочке — переменной WIKI_AI_CHAIN, код менять не
+нужно. Она же аварийный переключатель: WIKI_AI_CHAIN='zai:glm-5.3-flash'.
+
+ПОЧЕМУ ВТОРЫМ СТОИТ ПЛАТНЫЙ (разбор отказа 01.09.2026). В редактор загрузили
+документ Word на 23 КБ и получили 503 «все провайдеры цепочки отказали». Прогон
+всех адаптеров боевыми ключами по очереди на настоящем документе показал, что
+резерва у вики не было ВООБЩЕ — отказало каждое звено, и каждое по своей причине:
+  vertex:gemini-3-flash-preview   HTTP 429 «Resource exhausted. Please try again
+                                  later» — тот самый сбой. Он ПЛАВАЮЩИЙ: через
+                                  час тот же запрос прошёл за 1-3 с. Именно
+                                  поэтому дело не в Vertex, а в отсутствии
+                                  резерва: секундная просадка у первого звена
+                                  роняла всю кнопку;
+  groq:llama-3.3-70b-versatile    HTTP 404, модель снята вендором (в /v1/models
+                                  Groq её больше нет) — УБРАНА из цепочки;
+  gemini:gemini-3.5-flash-lite    HTTP 429 «prepayment credits are depleted»,
+                                  на ключе AI Studio кончилась предоплата;
+  gemini:gemini-2.5-flash         HTTP 404 «no longer available to new users»,
+                                  зовёт на gemini-3.6-flash — а она исключена
+                                  ниже по замерам. УБРАНА из цепочки;
+  cloudflare:*                    ключей CLOUDFLARE_* на боевом сервисе нет
+                                  вовсе, available_chain() выбрасывает оба звена
+                                  ещё до попытки; локально они на документе
+                                  отваливаются по таймауту (408 за 120 с);
+  groq:openai/gpt-oss-20b         HTTP 413 по потолку TPM, см. выше.
+То есть бесплатный резерв, набранный замерами 10.08.2026, за три недели истёк
+целиком, и вика жила на одном Vertex. Резерв обязан быть ПЛАТНЫМ: бесплатные
+модели снимают и обнуляют без предупреждения, а узнаём мы об этом от редактора,
+у которого упала кнопка. GLM на том же документе — 55,3 с, статья разобрана, все
+маркеры таблиц на месте, около $0,002 за статью.
 
 ИСКЛЮЧЕНЫ:
   * openrouter/free (авторутер) — на русский вопрос ответил исковерканным
@@ -40,6 +69,7 @@ OpenRouter доступен, но по умолчанию ВЫКЛЮЧЕН: ед
 
 import functools
 import json
+import logging
 import os
 import re
 import time
@@ -57,9 +87,12 @@ _DEFAULT_CHAIN = (
     # до бесполезности — на том же вопросе про новичков ответила «нет информации»,
     # хотя информация есть. Дороже втрое и хуже.
     ('vertex', 'gemini-3-flash-preview'),
-    ('groq', 'llama-3.3-70b-versatile'),
+    # ВТОРАЯ ПЛАТНАЯ и единственный настоящий резерв: см. «ПОЧЕМУ ВТОРЫМ СТОИТ
+    # ПЛАТНЫЙ» в шапке. Из всей цепочки только она вывозит сборку статьи —
+    # документ 45 КБ, 9 000 токенов вывода, 55,3 с, finish='stop'. Ключ на проде
+    # уже есть: тем же ZAI_API_KEY считаются «Оценки ИИ».
+    ('zai', 'glm-5.3-flash'),
     ('gemini', 'gemini-3.5-flash-lite'),
-    ('gemini', 'gemini-2.5-flash'),
     ('cloudflare', '@cf/meta/llama-3.3-70b-instruct-fp8-fast'),
     ('cloudflare', '@cf/mistralai/mistral-small-3.1-24b-instruct'),
     ('groq', 'openai/gpt-oss-20b'),
@@ -85,6 +118,25 @@ class ProviderError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+
+
+def _exhausted(what, attempts):
+    """Цепочка кончилась: записать причины В ЛОГ и вернуть ошибку для человека.
+
+    Логирование здесь не «на всякий случай». 01.09.2026 редактор получил 503 на
+    документе Word, и разобрать инцидент было НЕЧЕМ: log_action вызывается только
+    после успеха, обработчик ловит ProviderError и превращает её в 503, а в этом
+    модуле не было ни одной строки логирования — в логах Render по всем приметам
+    отказа ноль совпадений. Причина у каждого звена своя (404 снятой модели, 429
+    кончившейся предоплаты, 413 по потолку токенов), и без записи её видит только
+    тот, кто повторит запрос руками.
+
+    В лог уходит ВЕСЬ перечень попыток, в сообщение человеку — обрезанный: его
+    роут отдаёт полем detail, а там своя граница в 300 знаков.
+    """
+    full = json.dumps(attempts, ensure_ascii=False)
+    logging.warning('wiki ИИ: %s — %s', what, full)
+    return ProviderError('%s: %s' % (what, full[:500]))
 
 
 def normalize_answer(text):
@@ -131,6 +183,7 @@ def available_chain():
         # Vertex ходит сервисным аккаунтом — тем же, что подписывает ссылки на
         # файлы вики и считает эмбеддинги. Отдельного ключа у него нет.
         'vertex': bool(os.getenv('GOOGLE_APPLICATION_CREDENTIALS_CONTENT')),
+        'zai': bool(os.getenv('ZAI_API_KEY')),
     }
     return tuple((p, m) for p, m in _chain() if keys.get(p))
 
@@ -190,10 +243,18 @@ def _messages(system, user, history):
 
 
 def _openai_shape(url, key, model, system, user, extra_headers=None, history=(),
-                  max_tokens=None, timeout=None):
+                  max_tokens=None, timeout=None, extra_payload=None):
+    """Общая форма для всех OpenAI-совместимых: Groq, OpenRouter, Z.ai.
+
+    extra_payload нужен ровно одному провайдеру — Z.ai требует reasoning_effort
+    (см. _call_zai). Отдельная копия этой функции под него разошлась бы с
+    оригиналом на первой правке: здесь и разбор choices, и «пустой ответ без
+    choices», и подъём HTTP-ошибки в ProviderError.
+    """
     payload = {'model': model, 'temperature': 0.1,
                'max_tokens': max_tokens or MAX_TOKENS,
                'messages': _messages(system, user, history)}
+    payload.update(extra_payload or {})
     headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
     headers.update(extra_headers or {})
     body, elapsed = _post(url, payload, headers, timeout=timeout)
@@ -396,9 +457,85 @@ def _call_vertex(model, system, user, history=(), max_tokens=None, timeout=None)
                       'thoughts_tokens': usage.get('thoughtsTokenCount')}}
 
 
+# ── Z.ai (GLM): резерв, который в отличие от прочих ТЯНЕТ сборку статьи ──────
+#
+# Второй в цепочке. Форма запроса OpenAI-совместимая, поэтому своего HTTP-пути у
+# него нет — только _openai_shape с одним добавленным полем. Отличий от прочих
+# ровно три, и все три обязательные (замеры 01.09.2026 на настоящем SYSTEM_PROMPT
+# вики, документ 45 КБ, max_tokens=9000):
+#
+# 1. «Мышление» ОТКЛЮЧИТЬ НЕЛЬЗЯ, и поле надо посылать ВСЕГДА.
+#    thinking={'type':'disabled'} и reasoning_effort='medium' → HTTP 400, код 1210
+#    «This model always engages in thinking and cannot be disabled; please use
+#    low, high, or max». Ступеней ровно три. Не поставить поле — это НЕ
+#    нейтральный выбор: включается умолчание вендора, и тот же запрос идёт 23,0 с
+#    с 846 токенами мышления вместо 8,3 с и нуля.
+#    Умолчание здесь low, а не 'high' из ZAI_REASONING_EFFORT «Оценок ИИ»:
+#    переиспользовать ту переменную значило бы отдать вике настройку ночного
+#    прогона звонков. На документе 45 КБ high даёт полную статью (28 205 знаков,
+#    93,4 с), но съедает 8 174 токена вывода из 9 000 — следующий документ уедет
+#    в обрыв. low — 55,3 с и 5 415 токенов, статья сжата в прозе (сработал порог
+#    structure_warnings «текста заметно меньше»), но все 292 числа документа на
+#    месте и все таблицы вернулись. Сжатие названо предупреждением и видно
+#    редактору, а обрыв молча теряет хвост вместе с таблицами — поэтому low.
+# 2. response_format НЕ ставим. Вика ждёт не JSON, а конверт «НАЗВАНИЕ: / КРАТКО:
+#    / СТАТЬЯ:» (SYSTEM_PROMPT и _envelope в wiki/ai/authoring.py). Проверено:
+#    json_object вендор просто игнорирует — ответ всё равно приходит конвертом.
+#    Поле, которое ничего не гарантирует, в запросе шум. В «Оценках ИИ» оно
+#    остаётся: там от модели действительно ждут JSON.
+# 3. Свой срок ожидания, и он зависит от объёма задачи. Общая минута
+#    WIKI_AI_TIMEOUT убивает сборку статьи (55-196 с), а держать пять минут в
+#    чате нельзя — там ответ приходит за 1,3-2,8 с. Порог по max_tokens: сборка
+#    просит 9 000 (authoring.MAX_OUTPUT_TOKENS), чат — 2 500.
+#
+# Контекст модели документу не помеха: живьём принято 389 793 входных токена
+# одним запросом. Ограничитель другой — потолок ВЫВОДА в 9 000 токенов.
+# Цена: около $0,002 за статью, кеш системного промпта включается сам и бесплатен.
+ZAI_URL = os.getenv('ZAI_URL', 'https://api.z.ai/api/paas/v4/chat/completions')
+ZAI_EFFORT = (os.getenv('WIKI_AI_ZAI_EFFORT') or 'low').strip().lower()
+ZAI_TIMEOUT = float(os.getenv('WIKI_AI_ZAI_TIMEOUT', '300'))
+_ZAI_EFFORTS = ('low', 'high', 'max')
+
+
+def _zai_effort():
+    return ZAI_EFFORT if ZAI_EFFORT in _ZAI_EFFORTS else 'low'
+
+
+def _zai_floor(max_tokens):
+    """Нижняя граница ожидания: минута — чату, пять минут — сборке статьи."""
+    return ZAI_TIMEOUT if (max_tokens or MAX_TOKENS) > MAX_TOKENS else TIMEOUT
+
+
+def _zai_usage(usage):
+    """usage Z.ai → имена, которые уже читают routes_ai и truncation_warning.
+
+    Токены мышления уже входят в completion_tokens, поэтому прибавлять их
+    отдельно нельзя — счёт удвоится.
+    """
+    return {'prompt_tokens': usage.get('prompt_tokens'),
+            'completion_tokens': usage.get('completion_tokens'),
+            'thoughts_tokens': (usage.get('completion_tokens_details') or {})
+            .get('reasoning_tokens'),
+            'cached_tokens': (usage.get('prompt_tokens_details') or {})
+            .get('cached_tokens')}
+
+
+def _call_zai(model, system, user, history=(), max_tokens=None, timeout=None):
+    result = _openai_shape(
+        ZAI_URL, os.environ['ZAI_API_KEY'].strip(), model, system, user,
+        history=history, max_tokens=max_tokens,
+        # Переданный срок — это ПОТОЛОК вызывающего, но не ниже нашего порога:
+        # наставник тренажёра просит 12 с и получит их, а сборка статьи не должна
+        # умереть на общей минуте.
+        timeout=max(float(timeout or 0), _zai_floor(max_tokens)),
+        extra_payload={'reasoning_effort': _zai_effort()})
+    result['usage'] = _zai_usage(result['usage'])
+    return result
+
+
 _ADAPTERS = {'groq': _call_groq, 'gemini': _call_gemini,
              'cloudflare': _call_cloudflare, 'openrouter': _call_openrouter,
-             'vertex': _call_vertex}
+             'vertex': _call_vertex, 'zai': _call_zai}
 
 
 # ── Документ целиком: файл уходит в модель как есть ─────────────────────────
@@ -410,13 +547,13 @@ _ADAPTERS = {'groq': _call_groq, 'gemini': _call_gemini,
 # видит саму сетку — это единственный способ сдержать обещание «всегда корректно
 # понимает структуру документа».
 #
-# Из цепочки здесь годятся только vertex и gemini: Groq и Cloudflare принимают
-# лишь текст, и подсунуть им файл значит получить 400 на каждой попытке.
+# Из цепочки здесь годятся vertex, gemini и zai: Groq и Cloudflare принимают лишь
+# текст, и подсунуть им файл значит получить 400 на каждой попытке.
 _FILE_MIME = {
     'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic',
     'image/heif',
 }
-_FILE_CAPABLE = ('vertex', 'gemini')
+_FILE_CAPABLE = ('vertex', 'gemini', 'zai')
 
 
 def file_capable_chain(chain=None):
@@ -486,7 +623,38 @@ def _call_gemini_file(model, system, user, *, blob, mime, max_tokens=None, timeo
     return _read_gemini_body(body, elapsed)
 
 
-_FILE_ADAPTERS = {'vertex': _call_vertex_file, 'gemini': _call_gemini_file}
+# PDF нельзя слать блоком image_url — Z.ai отвечает 400 «ошибка формата/разбора
+# изображения». У файлов свой блок, у картинок свой; вместе они покрывают весь
+# _VISION_MIME роута импорта (pdf, png, jpg, jpeg, webp).
+_ZAI_FILE_FIELD = {'application/pdf': 'file_url'}
+
+
+def _call_zai_file(model, system, user, *, blob, mime, max_tokens=None, timeout=None):
+    """Файл в Z.ai. Замеры 01.09.2026: PDF 8,7 с, PNG/JPEG/WEBP 5,3-8,9 с.
+
+    Таблицу со страницы модель собирает сама и числа переносит дословно —
+    проверено на тарифной таблице с тремя суммами. Цена страницы PDF считается
+    не размером файла, а разметкой: ~7 600 входных токенов на страницу.
+
+    image/heic и image/heif из _FILE_MIME НЕ проверены — их нечем было собрать.
+    Роут импорта их и не принимает, но если понадобятся, надо мерить отдельно.
+    """
+    import base64
+
+    field = _ZAI_FILE_FIELD.get(mime, 'image_url')
+    result = _openai_shape(
+        ZAI_URL, os.environ['ZAI_API_KEY'].strip(), model, system,
+        [{'type': field, field: {'url': 'data:%s;base64,%s'
+                                 % (mime, base64.b64encode(blob).decode('ascii'))}},
+         {'type': 'text', 'text': user}],
+        max_tokens=max_tokens, timeout=max(float(timeout or 0), _zai_floor(max_tokens)),
+        extra_payload={'reasoning_effort': _zai_effort()})
+    result['usage'] = _zai_usage(result['usage'])
+    return result
+
+
+_FILE_ADAPTERS = {'vertex': _call_vertex_file, 'gemini': _call_gemini_file,
+                  'zai': _call_zai_file}
 
 
 def generate_document(system, user, *, blob, mime, chain=None, max_tokens=None):
@@ -504,7 +672,8 @@ def generate_document(system, user, *, blob, mime, chain=None, max_tokens=None):
     chain = file_capable_chain(chain)
     if not chain:
         raise ProviderError('нет провайдера, умеющего читать файл '
-                            '(нужен Vertex или ключ Gemini)', retryable=False)
+                            '(нужен Vertex, ключ Z.ai или ключ Gemini)',
+                            retryable=False)
 
     attempts = []
     for provider, model in chain:
@@ -529,8 +698,7 @@ def generate_document(system, user, *, blob, mime, chain=None, max_tokens=None):
                       'usage': result.get('usage') or {},
                       'finish': result.get('finish'), 'attempts': attempts}
 
-    raise ProviderError('файл не прочитал ни один провайдер: '
-                        + json.dumps(attempts, ensure_ascii=False)[:500])
+    raise _exhausted('файл не прочитал ни один провайдер', attempts)
 
 
 def generate(system, user, *, chain=None, history=(), max_tokens=None, timeout=None):
@@ -542,8 +710,9 @@ def generate(system, user, *, chain=None, history=(), max_tokens=None, timeout=N
     """
     chain = tuple(chain) if chain else available_chain()
     if not chain:
-        raise ProviderError('не настроен ни один провайдер ИИ '
-                            '(GROQ_API_KEY / GEMINI_API_KEY / CLOUDFLARE_*)',
+        raise ProviderError('не настроен ни один провайдер ИИ (ZAI_API_KEY / '
+                            'GOOGLE_APPLICATION_CREDENTIALS_CONTENT / '
+                            'GEMINI_API_KEY / GROQ_API_KEY / CLOUDFLARE_*)',
                             retryable=False)
 
     attempts = []
@@ -577,5 +746,4 @@ def generate(system, user, *, chain=None, history=(), max_tokens=None, timeout=N
                       'finish': result.get('finish'),
                       'attempts': attempts}
 
-    raise ProviderError('все провайдеры цепочки отказали: '
-                        + json.dumps(attempts, ensure_ascii=False)[:500])
+    raise _exhausted('все провайдеры цепочки отказали', attempts)

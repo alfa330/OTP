@@ -17,7 +17,9 @@
 """
 
 import datetime
+import os
 import unittest
+from unittest import mock
 
 from wiki.ai import answer as ai_answer
 from wiki.ai import currency
@@ -535,6 +537,181 @@ class ProvidersTest(unittest.TestCase):
         for banned in ('qwen', 'gemma', 'openrouter/free', 'nemotron-nano',
                        'gemini-3.6-flash'):
             self.assertNotIn(banned, chain)
+
+    def test_retired_models_do_not_come_back(self):
+        """Модели, снятые вендорами, обратно в цепочку не возвращаем.
+
+        Прогон боевыми ключами 01.09.2026: groq:llama-3.3-70b-versatile отвечает
+        404 «does not exist or you do not have access to it» (в /v1/models Groq
+        её больше нет), gemini:gemini-2.5-flash — 404 «no longer available to new
+        users». Обе стояли в цепочке резервом и молча съедали по попытке, пока
+        редактор ждал ответа.
+        """
+        chain = ' '.join(f'{p}:{m}' for p, m in ai_providers._DEFAULT_CHAIN)
+        self.assertNotIn('llama-3.3-70b-versatile', chain)
+        self.assertNotIn('gemini-2.5-flash', chain)
+
+    def test_chain_exhaustion_is_logged_in_full(self):
+        """Отказ цепочки обязан попасть в лог, и целиком.
+
+        01.09.2026 редактор получил 503 на документе Word, а разобрать инцидент
+        было нечем: log_action пишется только после успеха, обработчик превращает
+        ProviderError в 503, и в логах Render по всем приметам отказа было ноль
+        строк. Человеку сообщение режется (роут отдаёт detail[:300]), в лог
+        уходит весь перечень попыток — иначе причина последнего звена теряется.
+        """
+        def failing(model, system, user, history=(), max_tokens=None):
+            raise ai_providers.ProviderError('HTTP 429: Resource exhausted')
+
+        original = dict(ai_providers._ADAPTERS)
+        ai_providers._ADAPTERS['z'] = failing
+        try:
+            with self.assertLogs('root', level='WARNING') as caught:
+                with self.assertRaises(ai_providers.ProviderError):
+                    ai_providers.generate('sys', 'user', chain=(('z', 'm'),))
+        finally:
+            ai_providers._ADAPTERS.clear()
+            ai_providers._ADAPTERS.update(original)
+
+        written = '\n'.join(caught.output)
+        self.assertIn('все провайдеры цепочки отказали', written)
+        self.assertIn('Resource exhausted', written)
+
+
+class ZaiProviderTest(unittest.TestCase):
+    """GLM вторым в цепочке: платный резерв вместо истёкшего бесплатного.
+
+    Почему вообще: 01.09.2026 сборка статьи из документа Word отказала целиком —
+    Vertex отдал 429, а весь бесплатный резерв за три недели умер сам (404 снятых
+    моделей, 429 кончившейся предоплаты, 413 по потолку токенов Groq, отсутствие
+    ключей Cloudflare на проде). Разбор целиком — в шапке wiki/ai/providers.py.
+
+    Сеть тут не нужна: подменяется _post, проверяется ровно то, что уходит в
+    запрос. Каждое утверждение ниже — замер того дня, а не осторожность.
+    """
+
+    def setUp(self):
+        self.sent = []
+
+        def fake_post(url, payload, headers, params=None, timeout=None):
+            self.sent.append({'url': url, 'payload': payload, 'timeout': timeout})
+            return ({'choices': [{'message': {'content': 'НАЗВАНИЕ: Т\nОтвет'},
+                                  'finish_reason': 'stop'}],
+                     'usage': {'prompt_tokens': 9107, 'completion_tokens': 5415,
+                               'completion_tokens_details': {'reasoning_tokens': 0},
+                               'prompt_tokens_details': {'cached_tokens': 1664}}},
+                    0.5)
+
+        self._real_post = ai_providers._post
+        ai_providers._post = fake_post
+        self._env = os.environ.get('ZAI_API_KEY')
+        os.environ['ZAI_API_KEY'] = 'тест'
+
+    def tearDown(self):
+        ai_providers._post = self._real_post
+        if self._env is None:
+            os.environ.pop('ZAI_API_KEY', None)
+        else:
+            os.environ['ZAI_API_KEY'] = self._env
+
+    def test_zai_is_second_in_chain_right_after_vertex(self):
+        """Резерв обязан быть ПЛАТНЫМ и стоять сразу за Vertex.
+
+        Бесплатные модели снимают и обнуляют без предупреждения, и узнаём мы об
+        этом от редактора, у которого упала кнопка. Из всей цепочки сборку статьи
+        (документ 45 КБ, 9 000 токенов вывода) вывозит только GLM — 55,3 с.
+        """
+        self.assertEqual(('vertex', 'gemini-3-flash-preview'),
+                         ai_providers._DEFAULT_CHAIN[0])
+        self.assertEqual(('zai', 'glm-5.3-flash'), ai_providers._DEFAULT_CHAIN[1])
+
+    def test_available_chain_follows_the_key(self):
+        """Новых секретов на прод завозить не нужно: ZAI_API_KEY там уже есть."""
+        self.assertIn(('zai', 'glm-5.3-flash'), ai_providers.available_chain())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('ZAI_API_KEY', None)
+            self.assertNotIn('zai', [p for p, _ in ai_providers.available_chain()])
+
+    def test_reasoning_effort_is_always_sent_and_low_by_default(self):
+        """«Мышление» у GLM не отключается, и не поставить поле — НЕ нейтрально.
+
+        Замер: без поля включается умолчание вендора — 23,0 с и 846 токенов
+        мышления против 8,3 с и нуля на 'low'. thinking={'type':'disabled'} и
+        reasoning_effort='medium' отвергаются с HTTP 400, код 1210: ступеней
+        ровно три.
+        """
+        ai_providers._call_zai('glm-5.3-flash', 'sys', 'user')
+        ai_providers._call_zai('glm-5.3-flash', 'sys', 'user', max_tokens=9000)
+        for sent in self.sent:
+            self.assertEqual('low', sent['payload']['reasoning_effort'])
+
+    def test_request_carries_nothing_extra(self):
+        """response_format и thinking в запросе вики — шум.
+
+        Вика ждёт не JSON, а конверт «НАЗВАНИЕ: / КРАТКО: / СТАТЬЯ:» (его
+        разбирает authoring._envelope), а json_object вендор всё равно
+        игнорирует: проверено, ответ приходит конвертом в обоих случаях.
+        """
+        ai_providers._call_zai('glm-5.3-flash', 'sys', 'user', max_tokens=9000)
+        self.assertEqual(
+            ['max_tokens', 'messages', 'model', 'reasoning_effort', 'temperature'],
+            sorted(self.sent[0]['payload']))
+
+    def test_effort_does_not_leak_into_other_openai_providers(self):
+        """extra_payload добавлен в общую _openai_shape — чужие запросы не трогает.
+
+        Иначе reasoning_effort уехал бы в Groq и OpenRouter, где такого поля нет.
+        """
+        os.environ.setdefault('GROQ_API_KEY', 'тест')
+        ai_providers._call_groq('openai/gpt-oss-20b', 'sys', 'user')
+        self.assertNotIn('reasoning_effort', self.sent[0]['payload'])
+
+    def test_timeout_is_a_floor_and_depends_on_the_task(self):
+        """Общая минута убивает сборку статьи, а пять минут в чате держать нельзя.
+
+        Замеры GLM: чат 1,3-2,8 с; сборка статьи 55,3 с на 45 КБ и 196,5 с на
+        90 КБ. Порог берётся по max_tokens: сборка просит 9 000
+        (authoring.MAX_OUTPUT_TOKENS), чат — 2 500. Срок вызывающего при этом
+        уважается: наставник тренажёра просит 12 с и не должен получить 300.
+        """
+        ai_providers._call_zai('glm-5.3-flash', 'sys', 'user')
+        self.assertEqual(ai_providers.TIMEOUT, self.sent[-1]['timeout'])
+        ai_providers._call_zai('glm-5.3-flash', 'sys', 'user', max_tokens=9000)
+        self.assertEqual(ai_providers.ZAI_TIMEOUT, self.sent[-1]['timeout'])
+        ai_providers._call_zai('glm-5.3-flash', 'sys', 'user', max_tokens=9000,
+                               timeout=400)
+        self.assertEqual(400.0, self.sent[-1]['timeout'])
+
+    def test_usage_is_unpacked_without_double_counting(self):
+        """Токены мышления УЖЕ входят в completion_tokens — прибавлять нельзя.
+
+        Иначе расход в журнале чатов удвоится: routes_ai пишет output_tokens
+        прямо из этого поля.
+        """
+        result = ai_providers._call_zai('glm-5.3-flash', 'sys', 'user')
+        self.assertEqual({'prompt_tokens': 9107, 'completion_tokens': 5415,
+                          'thoughts_tokens': 0, 'cached_tokens': 1664},
+                         result['usage'])
+
+    def test_pdf_goes_as_a_file_block_and_pictures_as_image(self):
+        """PDF в image_url не проходит — Z.ai отвечает 400 об ошибке разбора."""
+        ai_providers._call_zai_file('glm-5.3-flash', 'sys', 'user',
+                                    blob=b'%PDF', mime='application/pdf')
+        block = self.sent[-1]['payload']['messages'][-1]['content'][0]
+        self.assertEqual('file_url', block['type'])
+        self.assertTrue(block['file_url']['url'].startswith('data:application/pdf;base64,'))
+
+        ai_providers._call_zai_file('glm-5.3-flash', 'sys', 'user',
+                                    blob=b'\x89PNG', mime='image/png')
+        block = self.sent[-1]['payload']['messages'][-1]['content'][0]
+        self.assertEqual('image_url', block['type'])
+
+    def test_zai_reads_files_too(self):
+        """У PDF и картинок резерва не было вовсе: цепочка файла — vertex+gemini,
+        а на проде это Vertex плюс две мёртвые записи Gemini."""
+        self.assertIn('zai', ai_providers._FILE_CAPABLE)
+        self.assertIn(('zai', 'glm-5.3-flash'),
+                      ai_providers.file_capable_chain(ai_providers._DEFAULT_CHAIN))
 
 
 
