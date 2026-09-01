@@ -263,6 +263,26 @@ def page_of_url(cursor, url):
     return _page_row(cursor.fetchone())
 
 
+def already_imported(cursor, entity_id):
+    """Переносили ли эту страницу когда-нибудь. {article_id, slug, title} или None.
+
+    Спрашивается у ПРОВЕНАНСА (wiki_article_imports), а не у связи: связь
+    снимается кнопкой «Отписать», а провенанс живёт с статьёй всегда. Именно он
+    и отвечает на вопрос «мы это уже переносили?» после отписки — без него
+    отписка означала бы возможность завести вторую статью из той же страницы.
+    """
+    if entity_id is None:
+        return None
+    cursor.execute(
+        'SELECT i.article_id, a.slug, a.title FROM wiki_article_imports i '
+        '  JOIN wiki_articles a ON a.id = i.article_id '
+        ' WHERE i.source = %s AND i.source_id = %s',
+        (SOURCE, int(entity_id)),
+    )
+    row = cursor.fetchone()
+    return {'article_id': row[0], 'slug': row[1], 'title': row[2]} if row else None
+
+
 def linked_pages(cursor, *, article_ids=None):
     """Связи с источником для показа в интерфейсе.
 
@@ -516,6 +536,10 @@ def preview(cursor, gcs, *, url, uploaded_by, fetch_page_fn=None,
                                               generate_fn=generate_fn)
         warnings += ai_warnings
     existing = page_of_url(cursor, parsed['url'])
+    # Отдельно от связи: страницу могли перенести и потом отписать. Тогда
+    # создавать нечего — надо предложить связать существующую статью, и
+    # человек должен увидеть это ДО кнопки «Создать статью».
+    imported = already_imported(cursor, parsed.get('entity_id'))
     return {
         'source': {
             'url': parsed['url'], 'title': parsed['title'],
@@ -530,6 +554,7 @@ def preview(cursor, gcs, *, url, uploaded_by, fetch_page_fn=None,
         'images': len(mapping),
         'warnings': warnings,
         'linked_article_id': (existing or {}).get('article_id'),
+        'imported': imported,
     }
 
 
@@ -561,6 +586,19 @@ def import_page(cursor, gcs, *, url, section_ids, author_id, space_ids=None,
                 'created': False, 'status': 'already_linked',
                 'warnings': ['Эта страница источника уже перенесена — '
                              'статья обновляется из неё сверкой']}
+
+    # Связь могли снять кнопкой «Отписать», и тогда строки в wiki_yandex_pages
+    # нет — а статья есть. Провенанс её помнит: он живёт в
+    # wiki_article_imports и отписку переживает. Без этой проверки отписка
+    # ЛОМАЛА главное обещание механизма: повторный импорт той же страницы
+    # заводил вторую статью с тем же текстом.
+    imported = already_imported(cursor, parsed.get('entity_id'))
+    if imported:
+        return {'article_id': imported['article_id'], 'slug': imported['slug'],
+                'created': False, 'status': 'already_imported',
+                'warnings': ['Эта страница уже переносилась в статью «%s». '
+                             'Свяжите её с источником, чтобы снова получать '
+                             'обновления.' % imported['title']]}
 
     warnings = []
     mapping = _image_map(cursor, gcs, parsed, uploaded_by=author_id,

@@ -499,10 +499,23 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 const inner = para.querySelector('img');
                 if (inner && !para.textContent.trim()) para.replaceWith(inner);
             });
-            const slides = Array.from(strip.querySelectorAll('img'));
+            const frames = Array.from(strip.querySelectorAll('img'));
             /* Одному кадру карусель не нужна: стрелки, которым некуда листать,
                и одна-единственная точка — это шум, а не управление. */
-            if (slides.length < 2) return;
+            if (frames.length < 2) return;
+
+            /* Каждый кадр — в обёртку на всю ширину ленты. Без неё кадры стоят
+               своим размером, и два вертикальных скриншота телефона просто
+               влезают в колонку РЯДОМ: листать нечего, а стрелки двигают то,
+               что и так целиком видно. Растянуть сам <img> нельзя — flex-basis
+               у картинки растягивает КАРТИНКУ, и скриншот расплывается. */
+            const slides = frames.map((frame) => {
+                const slide = document.createElement('div');
+                slide.className = 'wiki-gallery__slide';
+                frame.replaceWith(slide);
+                slide.appendChild(frame);
+                return slide;
+            });
 
             const box = document.createElement('div');
             box.className = 'wiki-gallery';
@@ -575,7 +588,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 const index = current();
                 dotNodes.forEach((dot, at) => dot.setAttribute(
                     'aria-current', at === index ? 'true' : 'false'));
-                caption.textContent = slides[index]?.getAttribute('alt') || '';
+                /* Подпись берём у КАДРА, а не у обёртки: alt живёт на картинке,
+                   обёртку поставила витрина и она пустая. */
+                caption.textContent = frames[index]?.getAttribute('alt') || '';
                 prev.disabled = index === 0;
                 next.disabled = index === slides.length - 1;
             };

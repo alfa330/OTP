@@ -693,6 +693,41 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(result['status'], yandex_sync.STATUS_CONFLICT)
         self.assertEqual(self.updates, [])
 
+    # ── Отписка не должна открывать дорогу второй статье ────────────────
+    def test_after_unlink_the_page_is_still_remembered(self):
+        """Связь снимают кнопкой «Отписать» — провенанс её переживает.
+
+        Без этой проверки отписка ломала главное обещание механизма: повторный
+        импорт той же страницы заводил ВТОРУЮ статью с тем же текстом, потому
+        что ключ идемпотентности жил только в снятой строке связи.
+        """
+        cursor = self._cursor(**{
+            'FROM wiki_yandex_pages WHERE url': None,
+            'FROM wiki_article_imports i': (715, 'tarif-mezhgorod', 'Тариф «Межгород»'),
+        })
+        result = yandex_sync.import_page(
+            cursor, {}, url=PAGE_URL, section_ids=[8], author_id=42,
+            fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False),
+            fetch_image_fn=lambda _u: (b'\x89PNG', 'image/png'))
+        self.assertFalse(result['created'], 'после отписки завели вторую статью')
+        self.assertEqual(result['article_id'], 715)
+        self.assertEqual(result['status'], 'already_imported')
+        self.assertTrue(any('уже переносилась' in w for w in result['warnings']),
+                        result['warnings'])
+
+    def test_preview_says_the_page_was_imported_before(self):
+        """Иначе выйти из состояния «перенесено, но отписано» неоткуда."""
+        cursor = self._cursor(**{
+            'FROM wiki_yandex_pages WHERE url': None,
+            'FROM wiki_article_imports i': (715, 'tarif-mezhgorod', 'Тариф «Межгород»'),
+        })
+        result = yandex_sync.preview(
+            cursor, {}, url=PAGE_URL, uploaded_by=42,
+            fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False),
+            fetch_image_fn=lambda _u: (b'\x89PNG', 'image/png'))
+        self.assertIsNone(result['linked_article_id'])
+        self.assertEqual((result['imported'] or {}).get('article_id'), 715)
+
     def test_two_articles_cannot_watch_the_same_page(self):
         """Иначе ночная сверка писала бы обеим один текст — тот самый дубль."""
         cursor = self._cursor(**{'FROM wiki_yandex_pages WHERE url':
@@ -1029,6 +1064,37 @@ class FrontendTest(unittest.TestCase):
         self.assertIn('<svg', block)
         for glyph in ('‹', '›', '←', '→', '◀', '▶'):
             self.assertNotIn(glyph, block, 'стрелка набрана знаком: %s' % glyph)
+
+    def test_relink_is_reachable_after_unlink(self):
+        """Отписались — и вернуть слежение было НЕОТКУДА.
+
+        Единственная кнопка звалась «Создать статью» и завела бы вторую копию.
+        Предложение связать обязано стоять в предпросмотре, а «Создать» —
+        гаснуть, когда создавать нечего.
+        """
+        self.assertIn('Связать снова', self.dialog)
+        self.assertIn('preview.imported', self.dialog)
+        create = self.dialog[self.dialog.index('className={iosBtnPrimary}'):]
+        self.assertIn('!!preview.imported', create[:400],
+                      '«Создать статью» не гаснет у уже перенесённой страницы')
+
+    def test_gallery_shows_one_frame_at_a_time(self):
+        """Кадры своего размера просто влезали в колонку РЯДОМ — листать нечего.
+
+        Два вертикальных скриншота телефона на высоте ленты дают меньше 200
+        пикселей ширины каждый, и оба видны сразу. Кадр обязан занимать всю
+        ширину ленты, а растянуть сам <img> нельзя — flex-basis у картинки
+        растягивает КАРТИНКУ.
+        """
+        article = (ROOT / 'src' / 'components' / 'wiki'
+                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
+        css = (ROOT / 'src' / 'components' / 'wiki'
+               / 'wiki-blocks.css').read_text(encoding='utf-8')
+        self.assertIn('wiki-gallery__slide', article, 'витрина не оборачивает кадры')
+        self.assertIn('.wiki-prose .wiki-gallery__slide', css)
+        slide = css[css.index('.wiki-prose .wiki-gallery__slide'):]
+        self.assertIn('flex: 0 0 100%', slide[:300],
+                      'слайд не занимает всю ширину ленты')
 
     def test_unlink_button_is_labelled(self):
         """Одна иконка рядом со «Сверить» уже привела к случайной отписке.

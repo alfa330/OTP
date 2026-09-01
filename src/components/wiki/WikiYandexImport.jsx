@@ -278,10 +278,15 @@ export default function WikiYandexImport({
                     <button type="button" className={iosBtnSecondary} onClick={onClose}>
                         Закрыть
                     </button>
+                    {/* Создавать нечего, если страница уже связана или уже
+                        переносилась: кнопка в этом состоянии либо вернёт ту же
+                        статью, либо (до появления проверки провенанса) заводила
+                        вторую копию. Гасим её и оставляем «Связать снова». */}
                     <button
                         type="button"
                         className={iosBtnPrimary}
-                        disabled={!preview || busy !== null}
+                        disabled={!preview || busy !== null
+                            || !!preview.linked_article_id || !!preview.imported}
                         onClick={create}
                     >
                         {busy === 'import'
@@ -418,6 +423,34 @@ export default function WikiYandexImport({
                                 Эта страница уже перенесена — статья обновляется сверкой,
                                 вторая не создастся.
                             </p>
+                        )}
+
+                        {/* Страницу перенесли, а потом отписали. Раньше выйти из
+                            этого состояния было НЕОТКУДА: единственная кнопка
+                            звалась «Создать статью» и завела бы вторую копию.
+                            Поэтому предложение связать стоит здесь — рядом с
+                            названием, до всех замечаний. */}
+                        {!preview.linked_article_id && preview.imported && (
+                            <div className="flex flex-wrap items-center gap-2 rounded-xl
+                                            bg-amber-50 px-3 py-2">
+                                <span className="min-w-0 flex-1 text-[11.5px]
+                                                 leading-relaxed text-amber-800">
+                                    Эта страница уже переносилась в статью
+                                    «{preview.imported.title}», но сейчас с источником
+                                    не связана — обновления не приходят.
+                                </span>
+                                <button
+                                    type="button"
+                                    className={`${iosBtnSecondary} shrink-0 text-[12px]`}
+                                    disabled={busy !== null}
+                                    onClick={() => linkExisting(preview.imported)}
+                                >
+                                    {busy === `link-${preview.imported.article_id}`
+                                        ? <Loader2 size={13} className="animate-spin" />
+                                        : <Link2 size={13} />}
+                                    Связать снова
+                                </button>
+                            </div>
                         )}
                     </div>
                 )}
