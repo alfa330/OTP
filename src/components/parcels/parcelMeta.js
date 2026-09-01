@@ -76,6 +76,19 @@ export const STATE_FILTERS = [
 // N дней» обязаны срабатывать одновременно.
 export const STALE_AFTER_DAYS = 30;
 
+/* ── Выгрузка ────────────────────────────────────────────────────────────────
+ *
+ * Потолок периода — тот же, что на сервере (`EXPORT_MAX_DAYS` в
+ * parcels/report.py), их сверяет тест. Здесь он нужен, чтобы «Подтвердить»
+ * гасло ДО запроса, а не после ожидания: гасить кнопку — удобство, а границей
+ * служит сервер.
+ *
+ * Совпадение с STALE_AFTER_DAYS случайно: один про «сколько лежит», второй про
+ * «сколько дней за раз выгружаем», и меняться они будут порознь. */
+export const EXPORT_MAX_DAYS = 30;
+// Сами функции периода живут ниже, рядом с `dateParts` — разбор даты у раздела
+// один, и второй копии ему не нужно.
+
 export const statusMeta = (code) => STATUS_META[code]
     || { label: code || '—', action: code || '—', hint: '' };
 export const kindMeta = (code) => KIND_META[code] || { label: code || '—' };
@@ -322,6 +335,48 @@ export const daysInOffice = (parcel, today = todayISO()) => {
 export const isStale = (parcel, today = todayISO()) => {
     const days = daysInOffice(parcel, today);
     return days !== null && days >= STALE_AFTER_DAYS;
+};
+
+/* ── Период выгрузки ─────────────────────────────────────────────────────── */
+
+/* Сутки периода, обе границы включительно: «с 1 по 1» — это одни сутки, а не
+   ноль. Сервер считает так же (`_export_period` в parcels/routes.py). Ноль
+   означает «период не выбран» — на нём «Подтвердить» гаснет. */
+export const rangeDays = (from, to) => {
+    const a = dateParts(from);
+    const b = dateParts(to);
+    if (!a || !b) return 0;
+    return Math.round(Math.abs(b.stamp - a.stamp) / 86400000) + 1;
+};
+
+/* Начало окна максимальной длины, заканчивающегося сегодня. Считаем в UTC от
+   разобранной даты, а не `new Date()` минус дни: перевод часов и часовой пояс
+   браузера иначе дают сдвиг на сутки. */
+export const shiftDaysBack = (iso, days) => {
+    const parts = dateParts(iso);
+    if (!parts) return iso;
+    const moved = new Date(parts.stamp - days * 86400000);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${moved.getUTCFullYear()}-${p(moved.getUTCMonth() + 1)}-${p(moved.getUTCDate())}`;
+};
+
+/* Имя файла выгрузки. Собирается ЗДЕСЬ, а не читается из Content-Disposition:
+   заголовок до фронта не доходит — в Access-Control-Expose-Headers его нет.
+   Двойник — `report_filename` в parcels/report.py, их сверяет тест. */
+export const exportFileName = (from, to) => {
+    const ru = (iso) => {
+        const parts = dateParts(iso);
+        if (!parts) return '';
+        const p = (n) => String(n).padStart(2, '0');
+        return `${p(parts.day)}.${p(parts.month)}.${parts.year}`;
+    };
+    const left = ru(from);
+    const right = ru(to);
+    // Три ветки — дословно как в `report_filename`: расхождение здесь никто бы
+    // не заметил, файл просто лёг бы в загрузки под другим именем.
+    if (!left && !right) return 'Посылки.xlsx';
+    if (left === right) return `Посылки ${left}.xlsx`;
+    return `Посылки ${left} — ${right}.xlsx`;
 };
 
 const RU_MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн',

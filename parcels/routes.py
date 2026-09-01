@@ -229,15 +229,27 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
     # ничем не отличается от «посмотреть». Границей служит вход в раздел, тот
     # же, что у списка: и отдел, и QR-подтверждение сессии проверены выше.
     #
-    # Отбор берётся из тех же параметров, что у списка, и разбирается тем же
-    # `_filters_from_args`: в файл не попадает ничего, чего человек не видит на
-    # экране. `limit`/`offset` игнорируются намеренно — выгружается весь отбор,
-    # а не открытая страница.
+    # Остальной отбор берётся из тех же параметров, что у списка, и разбирается
+    # тем же `_filters_from_args`: в файл не попадает ничего, чего человек не
+    # видит на экране. `limit`/`offset` игнорируются намеренно — выгружается
+    # весь период, а не открытая страница.
+    #
+    # ПЕРИОД ОБЯЗАТЕЛЕН и не длиннее EXPORT_MAX_DAYS суток. Проверка здесь, а не
+    # только в пикере: гасить кнопку в интерфейсе — удобство, а границей она
+    # быть не может, ручку зовут и напрямую.
     @parcels_route('/export')
     def parcels_export(ctx):
         filters, error = _filters_from_args(request.args)
         if error:
             return error
+
+        period, error = _export_period(request.args)
+        if error:
+            return error
+        # Период ЗАМЕЩАЕТ даты экранного фильтра, а не складывается с ними:
+        # человек только что выбрал его руками в пикере, и два источника одной
+        # рамки дали бы файл уже выбранного периода без всякого объяснения.
+        filters = dict(filters, date_from=period[0], date_to=period[1])
 
         with db._get_cursor() as cursor:
             if not schema.schema_is_ready(cursor):
@@ -247,10 +259,12 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 }), 409
             items, total = queries.parcels_for_export(
                 cursor, limit=report.EXPORT_LIMIT, **filters)
-            note = _filters_note(cursor, filters)
+            note = _filters_note(cursor, filters, with_dates=False)
 
         workbook, written = report.build_workbook(
             items,
+            period_from=period[0],
+            period_to=period[1],
             generated_by=ctx.get('name') or '',
             filters_note=note,
             total=total,
@@ -260,10 +274,10 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
             truncated=total > len(items),
             text_warning_patch=excel_text_warning,
         )
-        logging.info('Посылки: выгрузка %d строк из %d, собрал %s',
-                     written, total, ctx.get('name'))
+        logging.info('Посылки: выгрузка %d строк из %d за %s..%s, собрал %s',
+                     written, total, period[0], period[1], ctx.get('name'))
         return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,
-                         download_name=report.report_filename())
+                         download_name=report.report_filename(*period))
 
     @parcels_route('/<int:parcel_id>')
     def parcels_read(parcel_id, ctx):
@@ -374,11 +388,46 @@ def _filters_from_args(args):
     }, None
 
 
+def _export_period(args):
+    """Период выгрузки из запроса. Возвращает ((начало, конец), ответ-ошибка).
+
+    Правила ровно те, что показывает пикер, — и здесь они настоящие, а не
+    подсказка: кнопку в интерфейсе можно обойти, ручку зовут напрямую.
+
+    Перевёрнутый период не отвергаем, а разворачиваем: «с 30-го по 1-е» — это
+    описка, а не попытка сломать выгрузку, и отказ на ней был бы придиркой (так
+    же поступает выгрузка табло СЗоВ).
+    """
+    date_from = _date_or_none(args.get('date_from'))
+    date_to = _date_or_none(args.get('date_to'))
+    if not date_from or not date_to:
+        return None, (jsonify({
+            "error": "Выберите период выгрузки — не длиннее %d суток"
+                     % report.EXPORT_MAX_DAYS,
+            "code": "PARCELS_PERIOD_REQUIRED",
+        }), 400)
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    # Обе границы включительно: «с 1 по 1» — это одни сутки, а не ноль.
+    days = (date_to - date_from).days + 1
+    if days > report.EXPORT_MAX_DAYS:
+        return None, (jsonify({
+            # Называем ЗАПРОШЕННУЮ длину, а не только потолок: «слишком длинно»
+            # без числа заставляет человека считать самому (так же отвечает
+            # выгрузка «Касаний»). «Суток», а не «дней»: число подставляется, и
+            # «больше 30 дней» звучало бы не по-русски.
+            "error": "Период %d суток — это слишком много за раз. Максимум %d: "
+                     "выберите период короче." % (days, report.EXPORT_MAX_DAYS),
+            "code": "PARCELS_PERIOD_TOO_LONG",
+        }), 400)
+    return (date_from, date_to), None
+
+
 def _ru_day(value):
     return value.strftime('%d.%m.%Y') if value else ''
 
 
-def _filters_note(cursor, filters):
+def _filters_note(cursor, filters, with_dates=True):
     """Отбор словами — для листа «Контекст».
 
     Через неделю по файлу «Посылки.xlsx» иначе не восстановить, весь это реестр
@@ -408,8 +457,13 @@ def _filters_note(cursor, filters):
         except Exception:
             logging.exception('parcels: не удалось назвать менеджера для листа «Контекст»')
         parts.append('менеджер: %s' % (name or '№%s' % filters['manager_id']))
+    # Выгрузка даты сюда НЕ кладёт (`with_dates=False`): период у неё выбран
+    # пикером и стоит на «Контексте» отдельной строкой «Период по дате приёма».
+    # Повторить его тут значило бы написать одно и то же дважды на одном экране.
     date_from, date_to = filters.get('date_from'), filters.get('date_to')
-    if date_from and date_to:
+    if not with_dates:
+        pass
+    elif date_from and date_to:
         parts.append('принята с %s по %s' % (_ru_day(date_from), _ru_day(date_to)))
     elif date_from:
         parts.append('принята с %s' % _ru_day(date_from))

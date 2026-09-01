@@ -54,6 +54,12 @@ VIEW_PATH = ROOT / 'src' / 'components' / 'parcels' / 'ParcelsView.jsx'
 META_PATH = ROOT / 'src' / 'components' / 'parcels' / 'parcelMeta.js'
 TODAY = date(2026, 8, 31)
 
+# Период выгрузки обязателен, поэтому у тестов он один на всех — ровно потолок в
+# 30 суток, чтобы заодно было видно, что граница включительная и проходит.
+PERIOD_FROM = date(2026, 8, 2)
+PERIOD_TO = date(2026, 8, 31)
+PERIOD_QUERY = 'date_from=2026-08-02&date_to=2026-08-31'
+
 
 def parcel(**overrides):
     """Карточка в том же виде, в каком её отдаёт слой запросов.
@@ -93,6 +99,8 @@ def parcel(**overrides):
 
 def build(rows, **kwargs):
     kwargs.setdefault('today', TODAY)
+    kwargs.setdefault('period_from', PERIOD_FROM)
+    kwargs.setdefault('period_to', PERIOD_TO)
     stream, written = report.build_workbook(rows, **kwargs)
     stream.seek(0)
     return load_workbook(stream), written
@@ -189,7 +197,7 @@ class ColumnContractTests(unittest.TestCase):
         lines = {row[0].value: (row[1].value if len(row) > 1 else None)
                  for row in workbook['Контекст'].iter_rows()}
         self.assertEqual(lines['Собрал'], 'Тест ов')
-        self.assertNotIn('\x0b', lines['Отобрано'])
+        self.assertNotIn('\x0b', lines['Отобрано дополнительно'])
         # Числа на «Контексте» обязаны остаться числами.
         self.assertIsInstance(lines['Строк в файле'], int)
 
@@ -253,6 +261,24 @@ class NumbersMatchTheScreenTests(unittest.TestCase):
         sheet = workbook['Посылки']
         self.assertEqual(cell(sheet, 2, 'Залежалась').value, 'нет')
         self.assertEqual(cell(sheet, 3, 'Залежалась').value, 'да')
+
+    def test_export_cap_matches_the_frontend_constant(self):
+        """Разъедься потолки — «Подтвердить» осталось бы живым на периоде,
+        который сервер отвергнет: человек ждал бы файл и получил отказ."""
+        source = META_PATH.read_text(encoding='utf-8-sig')
+        found = re.search(r'EXPORT_MAX_DAYS\s*=\s*(\d+)', source)
+        self.assertIsNotNone(found, 'EXPORT_MAX_DAYS пропал из parcelMeta.js')
+        self.assertEqual(int(found.group(1)), report.EXPORT_MAX_DAYS)
+
+    def test_period_length_is_counted_the_same_on_both_sides(self):
+        """Обе границы включительно: «с 1 по 1» — одни сутки, а не ноль.
+        Забытое «+1» на одной стороне даёт расхождение ровно в сутки."""
+        source = META_PATH.read_text(encoding='utf-8-sig')
+        self.assertIn('export const rangeDays', source)
+        self.assertIn('86400000) + 1', source, 'фронт перестал считать включительно')
+        routes = (ROOT / 'parcels' / 'routes.py').read_text(encoding='utf-8')
+        self.assertIn('(date_to - date_from).days + 1', routes,
+                      'сервер перестал считать включительно')
 
     def test_stale_threshold_matches_the_frontend_constant(self):
         """Разъедься пороги — на экране «залежались 12», а в файле одиннадцать."""
@@ -339,12 +365,12 @@ class ContextSheetTests(unittest.TestCase):
                             filters_note='город: Алматы')
         lines = self.context(workbook)
         self.assertEqual(lines['Собрал'], 'Хайрихан Шерзад')
-        self.assertEqual(lines['Отобрано'], 'город: Алматы')
+        self.assertEqual(lines['Отобрано дополнительно'], 'город: Алматы')
 
     def test_without_filters_the_context_says_so_instead_of_leaving_a_blank(self):
         workbook, _ = build([parcel()], filters_note='')
-        self.assertEqual(self.context(workbook)['Отобрано'],
-                         'без фильтров — весь реестр целиком')
+        self.assertEqual(self.context(workbook)['Отобрано дополнительно'],
+                         'ничего — весь период целиком')
 
     def test_truncated_export_says_so_out_loud(self):
         """Молча обрезанный файл читается как полный."""
@@ -503,16 +529,47 @@ class TextWarningWiringTests(unittest.TestCase):
 
 
 class FilenameTests(unittest.TestCase):
-    def test_filename_carries_the_date_of_collection(self):
-        self.assertEqual(report.report_filename(datetime(2026, 8, 31, 14, 0)),
-                         'Посылки 31.08.2026.xlsx')
+    """Имя файла — по ВЫБРАННОМУ ПЕРИОДУ, а не по дате сборки.
 
-    def test_frontend_builds_the_same_name(self):
+    Два файла, собранные в один день за разные периоды, иначе назывались бы
+    одинаково, и второй лёг бы в загрузки как «Посылки (1)».
+    """
+
+    def test_single_day_period_names_one_date(self):
+        self.assertEqual(report.report_filename(date(2026, 9, 1), date(2026, 9, 1)),
+                         'Посылки 01.09.2026.xlsx')
+
+    def test_range_period_names_both_ends(self):
+        self.assertEqual(report.report_filename(date(2026, 8, 3), date(2026, 9, 1)),
+                         'Посылки 03.08.2026 — 01.09.2026.xlsx')
+
+    def test_empty_period_does_not_produce_a_dash_for_a_name(self):
+        """Через роут это недостижимо (период обязателен), но функция публичная,
+        и «Посылки —.xlsx» было бы хуже безымянного файла."""
+        self.assertEqual(report.report_filename(None, None), 'Посылки.xlsx')
+
+    def test_separator_is_a_long_dash(self):
+        """Подмена на дефис разошлась бы с фронтом молча — ни линтер, ни сборка
+        этого не увидят, а файл в загрузках назвался бы иначе."""
+        name = report.report_filename(date(2026, 8, 3), date(2026, 9, 1))
+        self.assertIn('—', name)
+
+    def test_frontend_builds_the_name_by_the_same_rules(self):
         """Content-Disposition до фронта не доходит (его нет в expose-headers),
-        поэтому имя собирается на клиенте и обязано совпадать с серверным."""
-        source = VIEW_PATH.read_text(encoding='utf-8')
-        self.assertIn("link.download = `Посылки ${todayISO().split('-').reverse().join('.')}.xlsx`",
-                      source)
+        поэтому имя собирается с двух сторон и обязано совпадать.
+
+        Сверяем не буквальную строку вызова, а САМО ПРАВИЛО в parcelMeta.js:
+        сборку имени вынесли туда именно затем, чтобы её можно было сверить.
+        """
+        source = META_PATH.read_text(encoding='utf-8-sig')
+        self.assertIn('export const exportFileName', source,
+                      'двойник имени файла пропал из parcelMeta.js')
+        for piece in ('`Посылки ${left}.xlsx`', '`Посылки ${left} — ${right}.xlsx`',
+                      "'Посылки.xlsx'"):
+            self.assertIn(piece, source, 'правило имени разошлось с серверным: %s' % piece)
+        # И ParcelsView зовёт именно его, а не собирает имя у себя.
+        view = VIEW_PATH.read_text(encoding='utf-8-sig')
+        self.assertIn('link.download = exportFileName(from, to);', view)
 
 
 class _Cursor:
@@ -652,7 +709,7 @@ class RouteTests(unittest.TestCase):
         """Ради оператора СЗоВ реестр и заводили: «сохранить то, что вижу» —
         то же самое, что «посмотреть»."""
         client, _ = self.build(rows=[parcel()])
-        response = client.get('/api/parcels/export')
+        response = client.get('/api/parcels/export?' + PERIOD_QUERY)
         self.assertEqual(response.status_code, 200)
         self.assertIn('spreadsheetml', response.mimetype)
 
@@ -664,7 +721,7 @@ class RouteTests(unittest.TestCase):
         """
         client, _ = self.build(rows=[parcel(id=7, description='Синяя коробка'),
                                      parcel(id=8, description='Пакет')])
-        sheet = self.book(client.get('/api/parcels/export'))[report.SHEET_PARCELS]
+        sheet = self.book(client.get('/api/parcels/export?' + PERIOD_QUERY))[report.SHEET_PARCELS]
         self.assertEqual(sheet.max_row, 3, 'строки не доехали до листа')
         self.assertEqual([cell(sheet, row, '№').value for row in (2, 3)], [7, 8])
         self.assertEqual(cell(sheet, 2, 'Описание').value, 'Синяя коробка')
@@ -674,7 +731,7 @@ class RouteTests(unittest.TestCase):
         нему потом спрашивают, кто его сделал."""
         client, _ = self.build(rows=[parcel()])
         lines = {row[0].value: (row[1].value if len(row) > 1 else None)
-                 for row in self.book(client.get('/api/parcels/export'))['Контекст'].iter_rows()}
+                 for row in self.book(client.get('/api/parcels/export?' + PERIOD_QUERY))['Контекст'].iter_rows()}
         self.assertEqual(lines['Собрал'], 'Оператор СЗоВ')
 
     def test_route_itself_decides_the_file_is_incomplete(self):
@@ -685,7 +742,7 @@ class RouteTests(unittest.TestCase):
         """
         client, _ = self.build(rows=[parcel()], total=12345)
         lines = {row[0].value: (row[1].value if len(row) > 1 else None)
-                 for row in self.book(client.get('/api/parcels/export'))['Контекст'].iter_rows()}
+                 for row in self.book(client.get('/api/parcels/export?' + PERIOD_QUERY))['Контекст'].iter_rows()}
         self.assertIn('В ФАЙЛ ПОПАЛО НЕ ВСЁ', lines)
         self.assertIn('12345', lines['В ФАЙЛ ПОПАЛО НЕ ВСЁ'])
         # И счётчики честно названы «в этом файле», а не выданы за весь реестр.
@@ -694,27 +751,27 @@ class RouteTests(unittest.TestCase):
     def test_a_complete_file_does_not_hedge(self):
         client, _ = self.build(rows=[parcel()], total=1)
         lines = {row[0].value: (row[1].value if len(row) > 1 else None)
-                 for row in self.book(client.get('/api/parcels/export'))['Контекст'].iter_rows()}
+                 for row in self.book(client.get('/api/parcels/export?' + PERIOD_QUERY))['Контекст'].iter_rows()}
         self.assertNotIn('В ФАЙЛ ПОПАЛО НЕ ВСЁ', lines)
         self.assertIn('В офисе', lines)
 
     def test_filename_reaches_the_browser(self):
         client, _ = self.build(rows=[parcel()])
-        response = client.get('/api/parcels/export')
+        response = client.get('/api/parcels/export?' + PERIOD_QUERY)
         self.assertIn('attachment', response.headers.get('Content-Disposition', ''))
 
     def test_all_seven_filters_reach_the_query(self):
         """Отбор разбирается тем же кодом, что у списка, — все семь условий."""
         client, captured = self.build(rows=[parcel()])
         client.get('/api/parcels/export?status=in_office&q=771&city=Алматы'
-                   '&office_id=17&manager_id=5&date_from=2026-08-01&date_to=2026-08-31')
+                   '&office_id=17&manager_id=5&date_from=2026-08-02&date_to=2026-08-31')
         self.assertEqual(captured['status'], ['in_office'])
         self.assertEqual(captured['query'], '771')
         self.assertEqual(captured['city'], 'Алматы')
         self.assertEqual(captured['office_id'], 17)
         self.assertEqual(captured['manager_id'], 5)
-        self.assertEqual(captured['date_from'], date(2026, 8, 1))
-        self.assertEqual(captured['date_to'], date(2026, 8, 31))
+        self.assertEqual(captured['date_from'], PERIOD_FROM)
+        self.assertEqual(captured['date_to'], PERIOD_TO)
 
     def test_screen_page_does_not_shrink_the_file(self):
         """limit и offset — это страница, а не отбор.
@@ -724,13 +781,82 @@ class RouteTests(unittest.TestCase):
         полным. Потолок у выгрузки свой и всегда один.
         """
         client, captured = self.build(rows=[parcel()])
-        client.get('/api/parcels/export?limit=5&offset=100')
+        client.get('/api/parcels/export?limit=5&offset=100&' + PERIOD_QUERY)
         self.assertEqual(captured['limit'], report.EXPORT_LIMIT)
         self.assertNotIn('offset', captured)
 
+    def test_period_is_required(self):
+        """Без периода файл не собирается: рамка у выгрузки обязательна.
+
+        Проверка на сервере, а не только в пикере: кнопку в интерфейсе можно
+        обойти, ручку зовут напрямую.
+        """
+        client, captured = self.build(rows=[parcel()])
+        response = client.get('/api/parcels/export')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'PARCELS_PERIOD_REQUIRED')
+        self.assertIn('30', response.get_json()['error'])
+        # И до базы дело не дошло — отказ стоит ДО выборки.
+        self.assertEqual(captured, {})
+
+    def test_half_a_period_is_not_a_period(self):
+        for query in ('date_from=2026-08-02', 'date_to=2026-08-31'):
+            with self.subTest(query=query):
+                client, _ = self.build(rows=[parcel()])
+                response = client.get('/api/parcels/export?' + query)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()['code'], 'PARCELS_PERIOD_REQUIRED')
+
+    def test_period_longer_than_the_cap_is_refused_with_the_number(self):
+        """«Слишком длинно» без числа заставляет человека считать самому."""
+        client, captured = self.build(rows=[parcel()])
+        response = client.get('/api/parcels/export?date_from=2026-08-01&date_to=2026-08-31')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'PARCELS_PERIOD_TOO_LONG')
+        error = response.get_json()['error']
+        self.assertIn('31', error, 'в отказе нет запрошенной длины')
+        self.assertIn(str(report.EXPORT_MAX_DAYS), error)
+        self.assertEqual(captured, {})
+
+    def test_the_cap_itself_passes(self):
+        """Ровно потолок — это ещё можно: границы считаются включительно, и
+        забытое «+1» молча выпускало бы период на сутки длиннее объявленного."""
+        client, captured = self.build(rows=[parcel()])
+        response = client.get('/api/parcels/export?' + PERIOD_QUERY)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((captured['date_to'] - captured['date_from']).days + 1,
+                         report.EXPORT_MAX_DAYS)
+
+    def test_reversed_period_is_turned_around_not_refused(self):
+        """«С 31-го по 2-е» — описка, а не попытка сломать выгрузку. Так же
+        поступают выгрузки табло СЗоВ и «Касаний»."""
+        client, captured = self.build(rows=[parcel()])
+        response = client.get('/api/parcels/export?date_from=2026-08-31&date_to=2026-08-02')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured['date_from'], PERIOD_FROM)
+        self.assertEqual(captured['date_to'], PERIOD_TO)
+
+    def test_period_replaces_the_screen_dates(self):
+        """Период выбран руками в пикере — экранный фильтр «Дата приёма» его не
+        сужает и не расширяет, иначе файл приехал бы не за то, что просили."""
+        client, captured = self.build(rows=[parcel()])
+        client.get('/api/parcels/export?date_from=2026-08-10&date_to=2026-08-12'
+                   '&city=Алматы')
+        self.assertEqual(captured['date_from'], date(2026, 8, 10))
+        self.assertEqual(captured['date_to'], date(2026, 8, 12))
+        self.assertEqual(captured['city'], 'Алматы')
+
+    def test_filename_and_context_carry_the_chosen_period(self):
+        client, _ = self.build(rows=[parcel()])
+        response = client.get('/api/parcels/export?date_from=2026-08-10&date_to=2026-08-12')
+        self.assertIn('10.08.2026', response.headers.get('Content-Disposition', ''))
+        lines = {row[0].value: (row[1].value if len(row) > 1 else None)
+                 for row in self.book(response)['Контекст'].iter_rows()}
+        self.assertEqual(lines['Период по дате приёма'], '10.08.2026 — 12.08.2026')
+
     def test_unknown_status_is_refused_the_same_way_as_in_the_list(self):
         client, _ = self.build(rows=[parcel()])
-        response = client.get('/api/parcels/export?status=выдумка')
+        response = client.get('/api/parcels/export?status=выдумка&' + PERIOD_QUERY)
         self.assertEqual(response.status_code, 400)
         self.assertIn('Неизвестный статус', response.get_json()['error'])
 
@@ -738,7 +864,7 @@ class RouteTests(unittest.TestCase):
         """«Раздел разворачивается» — это не «внутренняя ошибка»."""
         client, _ = self.build(rows=[])
         parcels_schema.schema_is_ready = lambda _c: False
-        response = client.get('/api/parcels/export')
+        response = client.get('/api/parcels/export?' + PERIOD_QUERY)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()['code'], 'PARCELS_SCHEMA_NOT_READY')
 
@@ -746,18 +872,21 @@ class RouteTests(unittest.TestCase):
         """Офис и менеджер разворачиваются в имена: «офис 17» не объясняет ничего."""
         client, _ = self.build(rows=[parcel()])
         response = client.get('/api/parcels/export?city=Алматы&office_id=17'
-                              '&manager_id=5&status=in_office&q=771'
-                              '&date_from=2026-08-01&date_to=2026-08-31')
+                              '&manager_id=5&status=in_office&q=771&' + PERIOD_QUERY)
         from io import BytesIO
         workbook = load_workbook(BytesIO(response.data))
         note = {row[0].value: (row[1].value if len(row) > 1 else None)
-                for row in workbook['Контекст'].iter_rows()}['Отобрано']
+                for row in workbook['Контекст'].iter_rows()}['Отобрано дополнительно']
         self.assertIn('статус: В офисе', note)
         self.assertIn('город: Алматы', note)
         self.assertIn('офис: Абая', note)
         self.assertIn('менеджер: Менеджер Тест', note)
-        self.assertIn('принята с 01.08.2026 по 31.08.2026', note)
         self.assertIn('поиск: «771»', note)
+        # Период сюда НЕ дублируется: он рамка файла и стоит своей строкой выше.
+        self.assertNotIn('принята с', note)
+        lines = {row[0].value: (row[1].value if len(row) > 1 else None)
+                 for row in workbook['Контекст'].iter_rows()}
+        self.assertEqual(lines['Период по дате приёма'], '02.08.2026 — 31.08.2026')
 
 
 class FrontendTests(unittest.TestCase):
@@ -789,10 +918,18 @@ class FrontendTests(unittest.TestCase):
         return self.source.split('const selection = useMemo(')[1].split('}, [')[0]
 
     def test_export_sends_the_same_selection_as_the_list(self):
-        """Один источник отбора на список и на выгрузку: собери выгрузка свою
-        строку параметров — файл разошёлся бы с экраном."""
-        self.assertIn('/api/parcels/export?${selection.toString()}', self.source)
-        self.assertIn('const params = new URLSearchParams(selection);', self.source)
+        """Один источник отбора на список и на выгрузку.
+
+        Собери выгрузка свою строку параметров — файл разошёлся бы с экраном по
+        статусу, городу, офису, менеджеру и поиску. Даты — единственное, что
+        выгрузка ставит своё, и ставит их ЯВНО, поверх копии общего отбора.
+        """
+        self.assertIn('/api/parcels/export?${params.toString()}', self.source)
+        block = self.source.split('const download = useCallback(')[1].split('}, [')[0]
+        self.assertIn('new URLSearchParams(selection)', block,
+                      'выгрузка перестала брать отбор экрана')
+        self.assertIn("params.set('date_from', from)", block)
+        self.assertIn("params.set('date_to', to)", block)
 
     def test_all_seven_conditions_are_inside_the_shared_selection(self):
         """Выпади хоть одно условие из общего отбора — список продолжит работать
@@ -822,8 +959,68 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('toastRef.current?.(', self.source)
 
     def test_button_is_off_while_the_file_is_being_prepared(self):
-        self.assertIn('disabled={downloading || !total}', self.source)
+        self.assertIn('disabled={downloading}', self.source)
         self.assertIn('Готовим файл…', self.source)
+
+    def test_button_opens_the_picker_instead_of_downloading_at_once(self):
+        """Период обязателен, значит нажатие раскрывает пикер, а не качает файл.
+
+        Скачивание зовётся только из «Подтвердить», и ровно с выбранными датами.
+        """
+        self.assertIn('onClick={() => setExportOpen((value) => !value)}', self.source)
+        self.assertIn('onClick={() => download(exportRange.from, exportRange.to)}',
+                      self.source)
+        self.assertIn('const download = useCallback((from, to) =>', self.source)
+
+    def test_picker_repeats_the_reference_form(self):
+        """Эталон — панель выгрузки табло СЗоВ: общий календарь, своя кнопка
+        «Подтвердить» под ним и строка-подсказка.
+
+        Своей сетки месяца в проекте быть не должно — она одна на все разделы,
+        в DateRangePicker.jsx.
+        """
+        self.assertIn('<IosDateRangeCalendar', self.source)
+        self.assertIn('Подтвердить', self.source)
+        # Панель рисуется ТОЛЬКО раскрытой: календарь берёт черновик выбора при
+        # монтировании, и спрятанный классом показал бы старый выбор повторно.
+        self.assertIn('{exportOpen && (', self.source)
+
+    def test_picker_closes_by_click_outside_and_escape(self):
+        """Иначе панель остаётся висеть поверх таблицы и её нечем убрать."""
+        self.assertIn("document.addEventListener('mousedown', onDown)", self.source)
+        self.assertIn("if (event.key === 'Escape') setExportOpen(false)", self.source)
+        # Именно mousedown: на click прокрутка колесом внутри панели считалась
+        # бы внешней и гасила бы её (грабля из памяти проекта).
+        self.assertNotIn("document.addEventListener('click', onDown)", self.source)
+
+    def test_confirm_is_off_when_the_period_is_too_long(self):
+        """Гасим ДО запроса: иначе человек узнаёт о потолке из ошибки после
+        ожидания. Границей при этом служит сервер, а не эта кнопка."""
+        self.assertIn('disabled={!exportDays || exportTooLong}', self.source)
+        self.assertIn('const exportTooLong = exportDays > EXPORT_MAX_DAYS;', self.source)
+        self.assertIn(f'Максимум ${{EXPORT_MAX_DAYS}} суток за раз', self.source)
+
+    def test_panel_is_anchored_so_it_never_leaves_the_screen(self):
+        """Панель календаря шириной 268 px не помещается «как есть» ни там, ни там.
+
+        Замеры 01.09.2026: при правой привязке на 390 px она уезжала за левый
+        край на 83 px, а от левого края САМОЙ КНОПКИ (58 px) — вылезала правым
+        краем на 6 px на 320 px. Горизонтальной прокрутки у страницы нет, так
+        что уехавшее ничем не достать. Отсюда две привязки: сдвиг к краю
+        содержимого на телефоне и правый край кнопки от sm.
+        """
+        self.assertIn('absolute -left-12 top-full z-[60] mt-2 sm:left-auto sm:right-0',
+                      self.source)
+
+    def test_presets_do_not_offer_a_period_longer_than_allowed(self):
+        """«Весь период» и «Квартал» в пикере выгрузки — обещание, которого
+        сервер не выполнит."""
+        block = self.source.split('const EXPORT_PRESETS = [')[1].split('];')[0]
+        self.assertNotIn('Весь период', block)
+        self.assertIn('EXPORT_MAX_DAYS - 1', block,
+                      'последний пресет должен быть ровно в потолок')
+        # Три пресета — практический потолок ширины карточки в 268 px.
+        self.assertEqual(block.count('label:'), 3)
 
     def test_header_row_wraps_instead_of_breaking_a_button_in_half(self):
         """Третья кнопка не помещается в строку на узком телефоне.

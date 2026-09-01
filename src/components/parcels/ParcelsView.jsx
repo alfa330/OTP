@@ -5,12 +5,13 @@ import {
     APPLE_FONT, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, iosGroupLabel,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
+import { IosDateRangeCalendar, IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import ParcelCard from './ParcelCard';
 import ParcelForm from './ParcelForm';
 import {
-    STATE_FILTERS, daysInOffice, driverAccountUrl, fmtDate, fmtPhone, isStale, kindMeta,
-    pluralDays, rowTone, statusMeta, todayISO, toneEdge, tonePill, toneRow, toneText,
+    EXPORT_MAX_DAYS, STATE_FILTERS, daysInOffice, driverAccountUrl, exportFileName, fmtDate,
+    fmtPhone, isStale, kindMeta, pluralDays, rangeDays, rowTone, shiftDaysBack, statusMeta,
+    todayISO, toneEdge, tonePill, toneRow, toneText,
 } from './parcelMeta';
 
 /*
@@ -80,6 +81,20 @@ const DATE_PRESETS = [
     { label: 'Месяц', range: () => ({ from: shiftDays(29), to: isoDate(new Date()) }) },
 ];
 
+/* Пресеты пикера выгрузки. «Весь период» здесь нет и быть не может: период у
+   файла обязателен и не длиннее EXPORT_MAX_DAYS суток. Последний пресет ровно
+   в потолок — им же человек и узнаёт, сколько максимум можно взять за раз.
+   Отсчёт от сегодняшнего дня по Алматы (`todayISO`), а не от `new Date()`:
+   у сотрудника в другом поясе иначе поехала бы граница на сутки. */
+const EXPORT_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: todayISO(), to: todayISO() }) },
+    { label: 'Неделя', range: () => ({ from: shiftDaysBack(todayISO(), 6), to: todayISO() }) },
+    {
+        label: `${EXPORT_MAX_DAYS} дней`,
+        range: () => ({ from: shiftDaysBack(todayISO(), EXPORT_MAX_DAYS - 1), to: todayISO() }),
+    },
+];
+
 
 /* Водитель в строке. Цвет приходит пропсом, а не берётся из slate: строка
    залита по статусу, и «серый по умолчанию» на янтаре и зелени выглядит
@@ -141,12 +156,43 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [loadError, setLoadError] = useState('');
     const [downloading, setDownloading] = useState(false);
 
+    /* Пикер периода выгрузки. Период — ОБЯЗАТЕЛЬНЫЙ параметр файла, поэтому он
+       живёт своим состоянием, а не берётся из фильтра «Дата приёма»: фильтр
+       человек мог не трогать вовсе, а выгрузка без рамки не собирается.
+       По умолчанию — максимальное окно, заканчивающееся сегодня: чаще всего
+       спрашивают «что было за месяц», и это же показывает потолок. */
+    const [exportOpen, setExportOpen] = useState(false);
+    const [exportRange, setExportRange] = useState(() => {
+        const today = todayISO();
+        return { from: shiftDaysBack(today, EXPORT_MAX_DAYS - 1), to: today };
+    });
+    const exportRef = useRef(null);
+
     /* showToast приходит новой функцией на каждый рендер App — известная
        ловушка портала. Держим её в ref, чтобы она не попала в зависимости
        колбэка выгрузки и не пересобирала его вместе со всем, что от него
        зависит. */
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
+
+    /* Клик мимо и Esc закрывают панель выгрузки — как у эталонного пикера
+       табло СЗоВ. Слушаем `mousedown`, а не `click`: прокрутка колесом внутри
+       панели тогда не считается внешней и не гасит её. */
+    useEffect(() => {
+        if (!exportOpen) return undefined;
+        const onDown = (event) => {
+            if (exportRef.current && !exportRef.current.contains(event.target)) {
+                setExportOpen(false);
+            }
+        };
+        const onKey = (event) => { if (event.key === 'Escape') setExportOpen(false); };
+        document.addEventListener('mousedown', onDown);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', onDown);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [exportOpen]);
 
     const [state, setState] = useState('all');
     const [search, setSearch] = useState('');
@@ -263,28 +309,31 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [state, query, filters, apiBaseUrl]);
 
-    /* Выгрузка в Excel (задача #257).
+    /* Выгрузка в Excel (задача #257, период выбирается пикером с 01.09.2026).
      *
      * Файл забираем axios'ом, а не ссылкой <a href>: портал авторизуется
      * заголовком, а ссылка заголовков не несёт — вместо книги приехала бы
      * страница входа. Отдаём его браузеру временной ссылкой на blob, как во
      * всех остальных выгрузках портала.
      *
-     * Уходит `selection` — ровно тот отбор, что виден на экране, и без номера
-     * страницы: в файл идёт всё отобранное, а не полсотни загруженных строк.
+     * Уходит `selection` — тот же отбор, что виден на экране, — но ДАТЫ в нём
+     * замещаются выбранным периодом: человек только что назвал его руками, и
+     * экранный фильтр «Дата приёма» здесь не при чём. Номера страницы нет: в
+     * файл идёт весь период, а не полсотни загруженных строк.
      */
-    const download = useCallback(() => {
+    const download = useCallback((from, to) => {
+        setExportOpen(false);
         setDownloading(true);
-        axios.get(`${apiBaseUrl}/api/parcels/export?${selection.toString()}`,
+        const params = new URLSearchParams(selection);
+        params.set('date_from', from);
+        params.set('date_to', to);
+        axios.get(`${apiBaseUrl}/api/parcels/export?${params.toString()}`,
             { headers: headers(), responseType: 'blob' })
             .then((response) => {
                 const url = URL.createObjectURL(response.data);
                 const link = document.createElement('a');
                 link.href = url;
-                // Имя собираем здесь: заголовок Content-Disposition до фронта не
-                // доходит (в Access-Control-Expose-Headers его нет), поэтому оно
-                // должно совпадать с серверным report_filename() вручную.
-                link.download = `Посылки ${todayISO().split('-').reverse().join('.')}.xlsx`;
+                link.download = exportFileName(from, to);
                 document.body.appendChild(link);
                 link.click();
                 link.remove();
@@ -349,6 +398,18 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         load({ append: false, from: 0 });
         loadFilters();
     }, [load, loadFilters]);
+
+    /* Длина выбранного периода и подсказка под календарём. Считаем здесь, а не
+       в разметке: и «Подтвердить», и строка под ней читают одно число.
+       Потолок сторожит сервер — здесь он лишь гасит кнопку заранее, чтобы
+       человек узнал о нём до ожидания, а не из ошибки после. */
+    const exportDays = rangeDays(exportRange.from, exportRange.to);
+    const exportTooLong = exportDays > EXPORT_MAX_DAYS;
+    const exportHint = exportTooLong
+        ? `Максимум ${EXPORT_MAX_DAYS} суток за раз — выберите период короче`
+        : (exportDays
+            ? `${rangeLabel(exportRange.from, exportRange.to)} · ${pluralDays(exportDays)} по дате приёма`
+            : 'Выберите период — по дате приёма посылки');
 
     /* Сколько на экране залежавшихся. Считаем по загруженной странице, а не
        запросом: это подсказка «есть чем заняться», а не число из отчёта, и
@@ -450,28 +511,69 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         то, что вижу» ничем не отличается от «посмотреть».
                         Внутри гейта кнопку видели бы одни фронт-офисы.
 
-                        Гасим на пустом отборе: файл с одной шапкой читается как
-                        «выгрузка сломалась», а не как «здесь ничего нет» — про
-                        пустоту уже сказано в самой таблице. */}
-                    <button
-                        type="button"
-                        className={`${iosBtnSecondary} shrink-0`}
-                        onClick={download}
-                        disabled={downloading || !total}
-                        /* Подсказка отвечает на вопрос «почему не нажимается».
-                           Пока реестр не загрузился (или не загрузился вовсе),
-                           «выгружать нечего» — неправда: мы просто не знаем. */
-                        title={loadError
-                            ? 'Сначала нужно загрузить реестр'
-                            : (total
-                                ? 'Выгрузить в Excel то, что сейчас отобрано'
-                                : 'Выгружать пока нечего')}
-                    >
-                        {downloading
-                            ? <Loader2 size={15} className="animate-spin" />
-                            : <Download size={15} />}
-                        {downloading ? 'Готовим файл…' : 'Выгрузить'}
-                    </button>
+                        Нажатие не качает файл сразу, а раскрывает пикер периода:
+                        период у выгрузки обязателен и не длиннее месяца. Форма
+                        пикера — эталонная, как у выгрузки табло СЗоВ: календарь
+                        из общего примитива, своя кнопка «Подтвердить» под ним и
+                        строка-подсказка. На пустом отборе кнопку НЕ гасим:
+                        период выбирают свой, и то, что сейчас на экране пусто,
+                        про него ничего не говорит. */}
+                    <div ref={exportRef} className="relative shrink-0">
+                        <button
+                            type="button"
+                            className={`${iosBtnSecondary} ${exportOpen ? 'bg-slate-200 text-slate-900' : ''}`}
+                            onClick={() => setExportOpen((value) => !value)}
+                            disabled={downloading}
+                            title="Выгрузить в Excel за выбранный период"
+                        >
+                            {downloading
+                                ? <Loader2 size={15} className="animate-spin" />
+                                : <Download size={15} />}
+                            {downloading ? 'Готовим файл…' : 'Выгрузить'}
+                        </button>
+                        {exportOpen && (
+                            /* От sm панель прижата к ПРАВОМУ краю кнопки: она
+                               стоит у правого края шапки, и раскрытие влево
+                               увело бы календарь за экран.
+                               На телефоне — наоборот, влево: там кнопка сама
+                               прижата к левому краю, и панель шириной 268 px
+                               при правой привязке уезжала за край на 83 px
+                               (замер на 390 px, 01.09.2026). Прокруткой это не
+                               достать — страница по горизонтали не едет.
+                               Сдвиг на 48 px выводит панель к краю содержимого
+                               раздела, а не к краю кнопки: от её левого края
+                               (58 px) панель иначе не помещалась на 320 px —
+                               вылезала правым краем на 6 px. */
+                            <div className="absolute -left-12 top-full z-[60] mt-2 sm:left-auto sm:right-0">
+                                <IosDateRangeCalendar
+                                    from={exportRange.from}
+                                    to={exportRange.to}
+                                    presets={EXPORT_PRESETS}
+                                    onChange={(next) => setExportRange({
+                                        from: next.from || next.to,
+                                        to: next.to || next.from,
+                                    })}
+                                    footer={(
+                                        <div className="mt-2.5 border-t border-slate-100 pt-2.5">
+                                            <button
+                                                type="button"
+                                                className={`${iosBtnPrimary} w-full`}
+                                                disabled={!exportDays || exportTooLong}
+                                                onClick={() => download(exportRange.from, exportRange.to)}
+                                            >
+                                                <Download size={15} />
+                                                Подтвердить
+                                            </button>
+                                            <p className={`mt-1.5 text-center text-[11px] ${
+                                                exportTooLong ? 'text-rose-500' : 'text-slate-400'}`}>
+                                                {exportHint}
+                                            </p>
+                                        </div>
+                                    )}
+                                />
+                            </div>
+                        )}
+                    </div>
                     {canEdit && (
                         <button
                             type="button"

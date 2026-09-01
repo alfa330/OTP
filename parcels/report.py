@@ -125,6 +125,18 @@ TEXT_COLUMNS = ('order_number', 'driver_phone', 'driver_callsign', 'driver_accou
 # молча обрезанный файл читался бы как полный.
 EXPORT_LIMIT = 20000
 
+# Потолок периода выгрузки, в сутках (решение владельца 01.09.2026: «выбрать
+# период — макс 30 дней»). Период у выгрузки ОБЯЗАТЕЛЕН и считается по ДАТЕ
+# ПРИЁМА — по той же колонке, что фильтр «Дата приёма» в разделе.
+#
+# Следствие, о котором надо помнить: посылка, принятая раньше окна, в файл не
+# попадёт, даже если она до сих пор лежит в офисе. То есть «выгрузка за месяц» —
+# это отчёт о ПРИНЯТОМ за месяц, а не опись полки. Для описи полки нужен период
+# пошире или отдельный режим; на листе «Контекст» это сказано словами.
+#
+# Двойник во фронте — EXPORT_MAX_DAYS в parcelMeta.js, их сверяет тест.
+EXPORT_MAX_DAYS = 30
+
 SHEET_PARCELS = 'Посылки'
 SHEET_CONTEXT = 'Контекст'
 SHEET_OFFICES = 'По офисам'
@@ -205,9 +217,34 @@ def kind_label(code):
     return KIND_LABELS.get(code, code or '—')
 
 
-def report_filename(generated_at=None):
-    generated_at = generated_at or datetime.now(ALMATY)
-    return 'Посылки %s.xlsx' % generated_at.strftime('%d.%m.%Y')
+def period_label(period_from, period_to):
+    """«01.08.2026 — 30.08.2026» или «01.09.2026», если период в один день."""
+    left, right = _ru_date(period_from), _ru_date(period_to)
+    if left == '—' and right == '—':
+        return 'весь реестр'
+    return left if left == right else '%s — %s' % (left, right)
+
+
+def report_filename(period_from, period_to):
+    """Имя файла — по ВЫБРАННОМУ ПЕРИОДУ, а не по дате сборки.
+
+    Два файла, собранные в один день за разные периоды, иначе назывались бы
+    одинаково, и второй лёг бы в папку загрузок как «Посылки (1)». Дата сборки
+    никуда не делась — она на листе «Контекст».
+
+    Двойник во фронте — `exportFileName` в parcelMeta.js: заголовок
+    Content-Disposition до него не доходит (его нет в Access-Control-Expose-Headers),
+    поэтому имя собирается с двух сторон и обязано совпадать.
+    """
+    left, right = _ru_date(period_from), _ru_date(period_to)
+    # Период у роута обязателен, но функция публичная: «Посылки —.xlsx» из
+    # пустых границ было бы хуже безымянного файла. Двойник во фронте на пустых
+    # границах отдаёт ровно это же имя.
+    if left == '—' and right == '—':
+        return 'Посылки.xlsx'
+    if left == right:
+        return 'Посылки %s.xlsx' % left
+    return 'Посылки %s — %s.xlsx' % (left, right)
 
 
 # ── книга ────────────────────────────────────────────────────────────────────
@@ -229,9 +266,14 @@ def _setup(sheet, titles, widths, freeze='A2'):
     sheet.append(header)
 
 
-def build_workbook(parcels, *, generated_at=None, generated_by='', filters_note='',
-                   total=None, truncated=False, today=None, text_warning_patch=None):
+def build_workbook(parcels, *, period_from=None, period_to=None, generated_at=None,
+                   generated_by='', filters_note='', total=None, truncated=False,
+                   today=None, text_warning_patch=None):
     """parcels — список карточек в том же виде, в каком их отдаёт список раздела.
+
+    `period_from`/`period_to` — выбранный человеком период по дате приёма. Он
+    вынесен из общего `filters_note` отдельной строкой «Период»: это не один из
+    фильтров, а рамка всего файла, и в имени файла стоит именно он.
 
     Возвращает (BytesIO, число строк). Список, а не генератор: по тем же строкам
     считается лист «По офисам», и второго прохода по базе ради сводки не будет.
@@ -247,7 +289,8 @@ def build_workbook(parcels, *, generated_at=None, generated_by='', filters_note=
 
     counters = _counters(rows, today)
     _fill_context(context_sheet, counters, generated_at, generated_by, filters_note,
-                  total if total is not None else len(rows), truncated)
+                  total if total is not None else len(rows), truncated,
+                  period_from, period_to)
 
     _setup(parcels_sheet, [title for _k, title, _w in COLUMNS],
            [width for _k, _t, width in COLUMNS])
@@ -399,17 +442,21 @@ def _parcel_row(sheet, parcel, today):
 
 
 def _fill_context(sheet, counters, generated_at, generated_by, filters_note,
-                  total, truncated):
+                  total, truncated, period_from=None, period_to=None):
     sheet.column_dimensions['A'].width = 46
     sheet.column_dimensions['B'].width = 92
+    period = period_label(period_from, period_to)
     lines = [
         ('Невостребованные посылки', None),
         ('', None),
         ('1. Главное', None),
+        # Период первым: он рамка файла, а не один из фильтров, и именно он
+        # стоит в имени. Всё остальное сужает уже выбранный период.
+        ('Период по дате приёма', period),
         ('Собрано', generated_at.strftime('%d.%m.%Y %H:%M') + ' (Алматы)'),
         ('Собрал', generated_by or '—'),
         ('Источник', 'Реестр раздела «Посылки» в iCORE'),
-        ('Отобрано', filters_note or 'без фильтров — весь реестр целиком'),
+        ('Отобрано дополнительно', filters_note or 'ничего — весь период целиком'),
         ('Строк в файле', counters['all']),
     ]
     if truncated:
@@ -436,6 +483,13 @@ def _fill_context(sheet, counters, generated_at, generated_by, filters_note,
         ('Вернули отправителю' + scope, counters.get('given_to_sender', 0)),
         ('', None),
         ('2. Что важно знать про эти данные', None),
+        # Первой стоит именно эта оговорка: она отвечает на вопрос «почему в
+        # файле нет посылки, которая точно лежит в офисе».
+        ('Это отчёт о ПРИНЯТОМ за период, а не опись полки.',
+         'Отбор идёт по дате приёма, поэтому посылка, принятая раньше начала '
+         'периода, в файл не попадёт — даже если она до сих пор лежит в офисе. '
+         'Чтобы увидеть залежавшиеся, берите период пораньше: за месяц лежат как '
+         'раз те, кого уже пора обзванивать.'),
         ('Файл — снимок на дату сборки.',
          'Реестр живой: посылку могут отдать завтра, и статус в файле останется '
          'вчерашним. Дата и время сборки — выше.'),
