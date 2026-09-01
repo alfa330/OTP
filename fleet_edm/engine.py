@@ -92,6 +92,45 @@ ID_RE = re.compile(r'^[0-9a-f]{32}$', re.I)
 # архива (она бьёт не по одной строке, а по каждой десятой).
 CONTROL_SAMPLE = 25
 
+# Источники, полученные фильтром списка. Значение из карточки в перепроверке не
+# нуждается — она и есть первоисточник.
+LIST_SOURCES = ('список', 'архив')
+
+# Ярлыки строк, прошедших подтверждение карточкой. Их ДВА, и это не педантизм:
+# «список сказал правду, мы проверили» и «список соврал, взяли из карточки» —
+# разные ответы, а третий ярлык, 'карточка', означает «список вовсе не отдал
+# строку». Свалить их в один — значит написать в отчёте «список их не отдал» про
+# строки, которые он прекрасно отдал, просто неверно.
+SOURCE_VERIFIED = 'список · сверено'
+SOURCE_CORRECTED = 'карточка · расхождение'
+CARD_SOURCES = ('карточка', SOURCE_VERIFIED, SOURCE_CORRECTED)
+
+# ПРОВАЙДЕРЫ, ЧЬЁ ЗНАЧЕНИЕ ОБЯЗАНО ПОДТВЕРЖДАТЬСЯ КАРТОЧКОЙ.
+#
+# Измерено 01.09.2026 на живом кабинете. Водитель 273a5c22… в парке 24a94d62…
+# (iTaxi/Караганда): карточка говорит edm_provider='Sapar', а фильтр списка
+# находит его ТОЛЬКО под 'paperdo' и ни под одним из шести остальных. Кабинет
+# противоречит сам себе, и наш обход честно повторяет за списком: все 178 строк
+# этого парка из выгрузки №32 совпали с корзинами фильтра, 178 из 178.
+#
+# Почему нельзя было заметить раньше: контрольная сверка берёт 25 случайных строк
+# на весь файл, а доля брака — доли процента (266 случайных карточек из корзины
+# paperdo этого парка дали 0 расхождений). Такую редкость выборка в 25 строк почти
+# никогда не поймает, зато заказчица находит её сразу — она смотрит конкретного
+# человека, а не выборку.
+#
+# Почему проверяем ИМЕННО «бумажный»: расхождение одностороннее. Список отстаёт
+# и держит человека в «бумажном» после перехода на реального провайдера; обратных
+# переходов (был провайдер — стал «бумажный») в природе не бывает, парки переходят
+# НА ЭДО, а не с него. Значит проверять остальные шесть корзин смысла нет, а
+# «бумажная» — это ровно тот ответ, ради которого файл и заказывают («кто ещё не
+# перешёл»), и ровно тот, за которым идут к живому человеку.
+#
+# Цена: карточка — один запрос на строку, пачкой кабинет её не отдаёт (проверено:
+# driver_ids, список в driver_id, ids → 400). Значением в списке провайдера тоже
+# нет: 37 имён в projection дают 400 invalid field. Другого пути к правде нет.
+VERIFY_BY_CARD = ('paperdo',)
+
 # Сколько «ничьих» строк (парк не определился) готовы искать карточкой по всем
 # паркам. Каждая такая строка стоит до 86 запросов.
 #
@@ -408,7 +447,8 @@ class Stopper:
 
 def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_SAMPLE,
             max_orphan_lookups=MAX_ORPHAN_CARD_LOOKUPS, rng=None,
-            checkpoint=None, resume=None, should_stop=None):
+            checkpoint=None, resume=None, should_stop=None,
+            verify_providers=VERIFY_BY_CARD, card_cache=None):
     """Главная функция: заполняет провайдера по строкам. Возвращает словарь с
     результатом по каждому уникальному ID и статистикой прогона.
 
@@ -594,12 +634,22 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
             else:
                 stats['not_found'] += 1
 
+    # ── шаг 4½: подтверждение «бумажных» карточками ──────────────────────────
+    # Зачем это вообще есть — см. VERIFY_BY_CARD. Коротко: фильтр списка врёт про
+    # часть людей, и врёт всегда в одну сторону.
+    verify = _verify_by_card(
+        client, results, providers, verify_providers, progress,
+        stop=stop, save=save, cache=card_cache)
+    stats['verified'] = verify['checked']
+    stats['verify_fixed'] = len(verify['fixed'])
+
     # ── шаг 5: контрольная сверка ────────────────────────────────────────────
     check = {'checked': 0, 'matched': 0, 'mismatched': []}
     sample = []
     if control_sample:
         from_list = [contractor_id for contractor_id, entry in results.items()
-                     if entry.get('provider_name') and entry.get('source') != 'карточка']
+                     if entry.get('provider_name')
+                     and entry.get('source') not in CARD_SOURCES]
         sample += rng.sample(from_list, min(control_sample, len(from_list)))
         # И отдельно — те, кому мы САМИ поставили «провайдера не бывает». Это
         # наше утверждение о чужой системе, и проверять его надо каждый прогон.
@@ -662,7 +712,149 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         'skipped_orphans': skipped_orphans,
         'stats': dict(stats),
         'provider_counts': dict(seen_providers),
+        'verify': verify,
     }
+
+
+def _verify_by_card(client, results, providers, verify_providers, progress,
+                    *, stop=None, save=None, cache=None):
+    """Подтверждает карточкой значения, которым фильтр списка доверять нельзя.
+
+    Возвращает {'checked', 'fixed', 'silent', 'blank', 'requests'} — сколько
+    строк проверили, что исправили, сколько карточек не ответило и у скольких
+    поле оказалось пустым.
+
+    ПОЧЕМУ ОТКАЗ КАРТОЧКИ НЕ ПЕРЕПИСЫВАЕТ СТРОКУ. Молчащая карточка — это «мы не
+    спросили», а не «провайдера нет»; ровно на этой разнице раздел один раз уже
+    погорел (1 250 ложных «не найден» в августе). Здесь безопасное поведение —
+    оставить значение списка и честно посчитать непроверенные, а не сочинить.
+
+    ПОЧЕМУ ПЕРЕЗАПУСК НЕ НАЧИНАЕТ ЗАНОВО. Отметку 'card_checked' кладём в саму
+    строку и сразу отправляем в контрольную точку. Строки приезжают обратно
+    вместе с отметкой, и вторая попытка спрашивает только неотмеченных: проход
+    длинный (тысячи запросов), а деплой разрешения не спрашивает.
+    """
+    verify_ids = tuple(verify_providers or ())
+    outcome = {'checked': 0, 'fixed': [], 'silent': 0, 'blank': 0,
+               'requests': 0, 'from_cache': 0}
+    if not verify_ids:
+        return outcome
+    save = save or Checkpoint(None)
+    by_name = {provider['name']: provider['id'] for provider in providers}
+    names = {provider['id']: provider['name'] for provider in providers}
+
+    pending = [contractor_id for contractor_id, entry in results.items()
+               if entry.get('provider_id') in verify_ids
+               and entry.get('source') in LIST_SOURCES]
+    if not pending:
+        return outcome
+
+    label = ', '.join(names.get(code, code) for code in verify_ids)
+    before = client.requests_count
+
+    def apply(contractor_id, card_value):
+        """Кладёт ответ карточки в строку. Возвращает True, если значение
+        пришлось поправить."""
+        entry = results[contractor_id]
+        if not card_value:
+            # Пусто в карточке — «поле не про него». Списку тут верить не в чем,
+            # но и переписывать нечем: оставляем как есть и считаем.
+            outcome['blank'] += 1
+            return False
+        if card_value == entry.get('provider_name'):
+            entry['source'] = SOURCE_VERIFIED
+            return False
+        outcome['fixed'].append({
+            'contractor_id': contractor_id,
+            'list': entry.get('provider_name') or '',
+            'card': card_value,
+        })
+        entry['comment'] = (
+            'Список кабинета отставал: показывал «{}», в карточке «{}»'
+            .format(entry.get('provider_name') or '—', card_value))
+        entry['provider_name'] = card_value
+        entry['provider_id'] = by_name.get(card_value, '')
+        entry['source'] = SOURCE_CORRECTED
+        return True
+
+    # Сперва то, что уже подтверждали раньше. Кеш общий для всех выгрузок и
+    # переживает перезапуск — без него подтверждение стоило бы полную цену
+    # КАЖДОМУ прогону (до 97 минут на файле в 15 738 строк), а раздел
+    # запускают по нескольку раз в день.
+    if cache is not None:
+        known = cache.get(pending) or {}
+        if known:
+            rows = []
+            for contractor_id, card_value in known.items():
+                if contractor_id not in results:
+                    continue
+                apply(contractor_id, card_value)
+                outcome['from_cache'] += 1
+                rows.append((contractor_id, results[contractor_id].get('park_id'),
+                             results[contractor_id]))
+            save(rows=rows)
+            pending = [contractor_id for contractor_id in pending
+                       if contractor_id not in known]
+            progress(percent=91, requests=client.requests_count,
+                     note='Подтверждение «{}»: {} строк уже сверено раньше, '
+                          'спрашиваем {}'.format(label, outcome['from_cache'], len(pending)))
+    if not pending:
+        outcome['requests'] = client.requests_count - before
+        return outcome
+
+    progress(percent=91, requests=client.requests_count,
+             note='Подтверждаем «{}» карточками: {} строк'.format(label, len(pending)))
+
+    def ask(contractor_id):
+        if stop:
+            stop()
+        entry = results[contractor_id]
+        try:
+            profile = client.driver_card(entry.get('park_id'), contractor_id)
+        except FleetSessionExpired:
+            raise
+        except FleetError as error:
+            logging.warning('Провайдер ЭДО: карточка %s… не ответила при '
+                            'подтверждении (%s)', contractor_id[:8], str(error)[:80])
+            return contractor_id, None
+        if profile is None:
+            return contractor_id, None
+        return contractor_id, FleetClient.card_provider(profile)
+
+    fresh = []
+
+    def tick(result, done, total):
+        contractor_id, card_value = result
+        if card_value is None:
+            # Не спросили — значение списка остаётся, но ярлык НЕ меняем: пусть
+            # следующая попытка вернётся к этой строке.
+            outcome['silent'] += 1
+            return
+        outcome['checked'] += 1
+        apply(contractor_id, card_value)
+        entry = results[contractor_id]
+        save(rows=[(contractor_id, entry.get('park_id'), entry)])
+        fresh.append((contractor_id, entry.get('park_id'), card_value))
+        if done % PROGRESS_EVERY == 0 or done == total:
+            if cache is not None and fresh:
+                # Кеш пополняем по ходу, а не в конце: прогон на тысячи строк
+                # переживает деплой, и подтверждённое не должно умирать вместе
+                # с процессом — иначе следующая попытка заплатит за него снова.
+                cache.put(list(fresh))
+                del fresh[:]
+            progress(percent=_percent(done, total, low=91, high=94),
+                     requests=client.requests_count,
+                     note='Подтверждаем «{}» карточками: {} из {}, поправлено {}'
+                          .format(label, done, total, len(outcome['fixed'])))
+
+    _run_parallel(client, pending, ask, stop=stop, on_result=tick)
+    if cache is not None and fresh:
+        cache.put(list(fresh))
+    outcome['requests'] = client.requests_count - before
+    progress(percent=94, requests=client.requests_count,
+             note='Подтверждение по карточкам: проверено {}, поправлено {}'
+                  .format(outcome['checked'], len(outcome['fixed'])))
+    return outcome
 
 
 def _entry_without_provider(contractor_id, info):

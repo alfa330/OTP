@@ -258,6 +258,30 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 if _lives.get(self.job_id) is self:
                     _lives.pop(self.job_id, None)
 
+    class CardCache:
+        """Общие для всех выгрузок подтверждения карточкой.
+
+        Обход не знает про базу — он получает объект с get/put, как получает
+        Checkpoint. Отказ базы здесь НЕ должен ронять выгрузку: кеш ускоряет
+        работу, а не хранит результат, и потерянная запись означает лишь лишний
+        запрос в кабинет на следующем прогоне.
+        """
+
+        def get(self, contractor_ids):
+            try:
+                with db._get_cursor() as cursor:
+                    return queries.load_card_providers(cursor, contractor_ids)
+            except Exception:
+                logging.exception('Провайдер ЭДО: не смог прочитать кеш карточек')
+                return {}
+
+        def put(self, rows):
+            try:
+                with db._get_cursor() as cursor:
+                    queries.save_card_providers(cursor, rows)
+            except Exception:
+                logging.exception('Провайдер ЭДО: не смог записать кеш карточек')
+
     def run_job(job_id):
         """Тело фоновой выгрузки. Живёт в потоке, поэтому не трогает ни request,
         ни flask.g — у потока их нет (на этом уже обжигались обработчики бота).
@@ -306,6 +330,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 # памяти, а не у базы, — дорогого здесь ничего нет, зато кнопка
                 # «Остановить» перестаёт стоить лишних запросов в чужой кабинет.
                 should_stop=engine.Stopper(life.should_stop, interval=1.0),
+                card_cache=CardCache(),
             )
             requests_count = requests_before + (resolution.get('requests')
                                                 or client.requests_count)
@@ -334,6 +359,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 'classify_requests': resolution.get('classify_requests') or 0,
                 'skipped_orphans': resolution.get('skipped_orphans') or 0,
                 'parks_total': resolution.get('parks_total') or 0,
+                'verify': resolution.get('verify') or {},
             }
             with db._get_cursor() as cursor:
                 queries.finish_job(

@@ -328,7 +328,10 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(result['stats']['not_found'], 1)
 
     def test_control_sample_catches_mismatch(self):
-        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'} for i in range(1, 6)}
+        # Подтверждение «бумажных» выключено намеренно: проверяем именно
+        # контрольную сверку, а с включённым подтверждением расхождение до неё
+        # уже не доживёт (см. VerifyByCardTest).
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': '2KZVZ'} for i in range(1, 6)}
 
         class LyingClient(FakeClient):
             def driver_card(self, park_id, driver_id):
@@ -337,10 +340,135 @@ class ResolveTest(unittest.TestCase):
                     card['edm_provider'] = 'Sapar'      # карточка говорит другое
                 return card
 
-        result = engine.resolve(_park_rows(drivers), LyingClient(drivers), control_sample=5)
+        result = engine.resolve(_park_rows(drivers), LyingClient(drivers),
+                                control_sample=5, verify_providers=())
         self.assertEqual(result['check']['checked'], 5)
         self.assertEqual(result['check']['matched'], 0)
         self.assertEqual(len(result['check']['mismatched']), 5)
+
+
+class VerifyByCardTest(unittest.TestCase):
+    """Подтверждение «Бумажного документооборота» карточками.
+
+    Дефект, ради которого проход появился (измерено 01.09.2026): фильтр списка
+    кабинета относит водителя к «Бумажному документообороту», а карточка того же
+    кабинета говорит «Sapar». Список отстаёт, и наш обход честно повторял за ним.
+    """
+
+    class LyingClient(FakeClient):
+        """Список говорит «бумажный», карточка — «Sapar». Ровно живой случай."""
+
+        def driver_card(self, park_id, driver_id):
+            card = super().driver_card(park_id, driver_id)
+            if card:
+                card['edm_provider'] = 'Sapar'
+            return card
+
+    def _drivers(self, count=4, provider='paperdo'):
+        return {_driver_id(i): {'park': PARK_A, 'provider': provider}
+                for i in range(1, count + 1)}
+
+    def test_card_overrides_stale_list_value(self):
+        drivers = self._drivers()
+        result = engine.resolve(_park_rows(drivers), self.LyingClient(drivers),
+                                control_sample=0)
+        self.assertEqual(result['verify']['checked'], 4)
+        self.assertEqual(len(result['verify']['fixed']), 4)
+        for entry in result['results'].values():
+            self.assertEqual(entry['provider_name'], 'Sapar')
+            # Ярлык отдельный от 'карточка': там «список не отдал строку», а
+            # здесь «отдал, но соврал». В отчёте это разные фразы.
+            self.assertEqual(entry['source'], engine.SOURCE_CORRECTED)
+            self.assertIn('отставал', entry['comment'])
+
+    def test_confirmed_rows_get_their_own_source(self):
+        # Карточка подтвердила список — строка тоже помечается, иначе перезапуск
+        # спросит её заново, а контрольная сверка потратит на неё запросы.
+        drivers = self._drivers()
+        result = engine.resolve(_park_rows(drivers), FakeClient(drivers),
+                                control_sample=0)
+        self.assertEqual(result['verify']['checked'], 4)
+        self.assertEqual(result['verify']['fixed'], [])
+        for entry in result['results'].values():
+            self.assertEqual(entry['provider_name'], 'Бумажный документооборот')
+            self.assertEqual(entry['source'], engine.SOURCE_VERIFIED)
+
+    def test_cache_replaces_requests(self):
+        # Смысл кеша: цену подтверждения платит первый прогон. Люди в файлах
+        # повторяются почти полностью, поэтому второй прогон не спрашивает никого.
+        drivers = self._drivers()
+        rows = _park_rows(drivers)
+
+        class Cache:
+            def __init__(self):
+                self.store = {}
+
+            def get(self, ids):
+                return {cid: self.store[cid] for cid in ids if cid in self.store}
+
+            def put(self, entries):
+                for cid, _park, name in entries:
+                    self.store[cid] = name
+
+        cache = Cache()
+        first = engine.resolve(rows, self.LyingClient(drivers), control_sample=0,
+                               card_cache=cache)
+        self.assertEqual(first['verify']['checked'], 4)
+        self.assertEqual(first['verify']['from_cache'], 0)
+        self.assertEqual(len(cache.store), 4)
+
+        client = self.LyingClient(drivers)
+        second = engine.resolve(rows, client, control_sample=0, card_cache=cache)
+        self.assertEqual(second['verify']['checked'], 0)
+        self.assertEqual(second['verify']['from_cache'], 4)
+        self.assertEqual(second['verify']['requests'], 0)
+        for entry in second['results'].values():
+            self.assertEqual(entry['provider_name'], 'Sapar')
+
+    def test_other_providers_are_not_re_asked(self):
+        # Расхождение одностороннее: список держит человека в «бумажном» после
+        # перехода. Остальные шесть корзин перепроверять незачем — это лишние
+        # тысячи запросов в чужой кабинет.
+        drivers = self._drivers(provider='2KZVZ')
+        client = self.LyingClient(drivers)
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+        self.assertEqual(result['verify']['checked'], 0)
+        self.assertEqual(result['verify']['requests'], 0)
+        for entry in result['results'].values():
+            self.assertEqual(entry['source'], 'список')
+
+    def test_silent_card_keeps_list_value_and_no_mark(self):
+        # Молчащая карточка — это «мы не спросили», а не «провайдера нет».
+        # Значение списка остаётся, отметку не ставим: следующая попытка вернётся.
+        # Четыре, а не два: парк меньше CARDS_CHEAPER_BELOW ушёл бы в добор
+        # карточками ещё до подтверждения, и тест проверял бы не то.
+        drivers = self._drivers(count=4)
+
+        class SilentClient(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                raise FleetError('кабинет молчит')
+
+        result = engine.resolve(_park_rows(drivers), SilentClient(drivers),
+                                control_sample=0)
+        self.assertEqual(result['verify']['checked'], 0)
+        self.assertEqual(result['verify']['silent'], 4)
+        for entry in result['results'].values():
+            self.assertEqual(entry['provider_name'], 'Бумажный документооборот')
+            self.assertNotIn('card_checked', entry)
+
+    def test_resume_does_not_re_ask_confirmed_rows(self):
+        # Проход длинный, а деплой разрешения не спрашивает: подтверждённые
+        # строки приезжают из контрольной точки с отметкой и второй раз не
+        # спрашиваются.
+        drivers = self._drivers(count=3)
+        rows = _park_rows(drivers)
+        first = engine.resolve(rows, self.LyingClient(drivers), control_sample=0)
+        resume = {'results': {cid: dict(entry)
+                              for cid, entry in first['results'].items()}}
+        client = self.LyingClient(drivers)
+        second = engine.resolve(rows, client, control_sample=0, resume=resume)
+        self.assertEqual(second['verify']['checked'], 0)
+        self.assertEqual(second['verify']['requests'], 0)
 
 
 class ParkEmployeeTest(unittest.TestCase):
@@ -697,6 +825,51 @@ class ClientPagingTest(unittest.TestCase):
         client.contractors_all(PARK_A, contractor_ids=[_driver_id(i) for i in range(5000)])
         self.assertEqual(len(session.bodies), 1)
         self.assertIn(_driver_id(4999), session.bodies[0])
+
+
+class NonJsonAnswerTest(unittest.TestCase):
+    """Ответ без JSON — это ДВА разных случая, и путать их нельзя.
+
+    Протухшая сессия отдаёт код 200 и HTML страницы входа. А неверно собранный
+    запрос отвечает 400 с пустым телом (измерено на живом кабинете 01.09.2026:
+    driver_ids вместо driver_id → 400, application/octet-stream, 0 байт).
+    До этой правки оба случая говорили «сессия протухла, нужен новый вход», и
+    человека отправляли логиниться заново из-за нашей же ошибки в запросе.
+    """
+
+    class _Response:
+        def __init__(self, status_code, body=b''):
+            self.status_code = status_code
+            self.content = body
+            self.text = body.decode('utf-8', 'replace')
+            self.headers = {'content-type': 'application/octet-stream'}
+
+        def json(self):
+            raise ValueError('не JSON')
+
+    class _Session:
+        def __init__(self, response):
+            self.response = response
+            self.cookies = type('J', (), {'update': lambda self, value: None})()
+
+        def request(self, method, url, headers=None, data=None, timeout=None):
+            return self.response
+
+    def _client(self, status_code, body=b''):
+        session = self._Session(self._Response(status_code, body))
+        return FleetClient({'Session_id': 'x'}, 'UA', session=session)
+
+    def test_html_with_200_is_expired_session(self):
+        client = self._client(200, b'<html><body>login</body></html>')
+        with self.assertRaises(FleetSessionExpired):
+            client.parks()
+
+    def test_empty_400_is_our_broken_request(self):
+        client = self._client(400)
+        with self.assertRaises(FleetError) as caught:
+            client.parks()
+        self.assertNotIsInstance(caught.exception, FleetSessionExpired)
+        self.assertIn('400', str(caught.exception))
 
 
 # ── сборка файла ─────────────────────────────────────────────────────────────

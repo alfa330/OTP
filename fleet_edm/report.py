@@ -116,6 +116,10 @@ def _rows_for_sheet(rows, results, park_names):
         comment = ''
         if row.get('error'):
             comment = row['error']
+        elif entry.get('comment'):
+            # Строку уже прокомментировал обход — например, подтверждение
+            # карточкой поправило отставшее значение списка.
+            comment = entry['comment']
         elif not entry:
             comment = 'Водитель не найден ни в одной диспетчерской'
         elif (entry.get('source') == SOURCE_NO_PROVIDER
@@ -197,6 +201,30 @@ def _fill_context(sheet, table, resolution, source_name, generated_at):
          'Поле ЭДО есть только у ИП и самозанятых.'),
         ('Соединение по ID водителя, а не по ФИО.', 'Совпадение точное.'),
     ]
+    verify = resolution.get('verify') or {}
+    verified_total = (verify.get('checked') or 0) + (verify.get('from_cache') or 0)
+    if verified_total:
+        lines.append(('Подтверждено карточками',
+                      '{} строк со значением «Бумажный документооборот». Фильтр '
+                      'списка кабинета по такой строке иногда расходится с '
+                      'карточкой того же кабинета, поэтому каждую спросили у '
+                      'первоисточника'.format(verified_total)))
+        if verify.get('from_cache'):
+            lines.append(('Из них спрошено раньше',
+                          '{} строк взяты из подтверждений прошлых выгрузок (срок '
+                          'годности — неделя), спрошено заново {}'.format(
+                              verify['from_cache'], verify.get('checked') or 0)))
+        lines.append(('Исправлено после подтверждения',
+                      '{} строк: список отставал, в карточке стоит другой '
+                      'провайдер'.format(len(verify.get('fixed') or []))))
+    if verify.get('silent'):
+        lines.append(('НЕ подтверждено',
+                      '{} строк: карточка не ответила, оставлено значение списка'
+                      .format(verify['silent'])))
+    for fixed in (verify.get('fixed') or [])[:10]:
+        lines.append(('Поправлено по карточке',
+                      '{}: список «{}», карточка «{}»'.format(
+                          fixed['contractor_id'], fixed['list'], fixed['card'])))
     if stats.get('no_provider_by_kind'):
         lines.append(('Сотрудников парка', '{} строк — ЭДО к ним не применяется '
                                            '(работают по трудовому договору)'

@@ -21,6 +21,15 @@ JOB_COLUMNS = (
     'error_code', 'stats', 'file_name', 'file_size', 'attempts',
 )
 
+# Сколько дней подтверждение карточкой считается свежим.
+#
+# Семь, а не «навсегда»: провайдера меняют, и за 12 дней истории список
+# зафиксировал 1 774 перехода с «бумажного» на реального. Но и не сутки: люди в
+# файлах повторяются почти полностью (в выгрузке №32 новых относительно
+# предыдущих двадцати четырёх — ни одного), и короткий срок вернул бы полную
+# цену подтверждения каждому прогону, а это до 97 минут на большом файле.
+CARD_CACHE_DAYS = 7
+
 
 def _columns(cursor):
     return [column[0] for column in (cursor.description or [])]
@@ -444,6 +453,55 @@ def load_checkpoint(cursor, job_id):
         if payload:
             results[contractor_id] = payload
     return {'results': results, 'parks': parks, 'stages': stages}
+
+
+# ── Подтверждённые карточкой провайдеры (общие для всех выгрузок) ────────────
+
+def load_card_providers(cursor, contractor_ids, max_age_days=CARD_CACHE_DAYS):
+    """Что карточка говорила про этих людей и не протухло ли это.
+
+    Возвращает {contractor_id: provider_name}. Строки старше срока не отдаём
+    вовсе: провайдера меняют, и подтверждение двухнедельной давности — это уже
+    не подтверждение, а прошлогодний снимок.
+    """
+    ids = [str(cid) for cid in (contractor_ids or []) if cid]
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT contractor_id, provider_name
+          FROM fleet_edm_card_providers
+         WHERE contractor_id = ANY(%s)
+           AND checked_at > NOW() - (%s || ' days')::INTERVAL
+        """,
+        (ids, str(int(max_age_days))),
+    )
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+def save_card_providers(cursor, rows):
+    """rows: [(contractor_id, park_id, provider_name), …].
+
+    Пишем и совпавшие, и расходящиеся: смысл кеша в том, чтобы НЕ спрашивать
+    второй раз, а совпавших как раз большинство. checked_at обновляем всегда —
+    иначе строка протухнет по первой записи и её спросят заново.
+    """
+    if not rows:
+        return 0
+    execute_values(
+        cursor,
+        """
+        INSERT INTO fleet_edm_card_providers (contractor_id, park_id, provider_name)
+        VALUES %s
+        ON CONFLICT (contractor_id) DO UPDATE
+            SET park_id = COALESCE(EXCLUDED.park_id, fleet_edm_card_providers.park_id),
+                provider_name = EXCLUDED.provider_name,
+                checked_at = NOW()
+        """,
+        [(str(cid), (park or None), str(name or '')) for cid, park, name in rows],
+        page_size=500,
+    )
+    return len(rows)
 
 
 def drop_checkpoint(cursor, job_id):
