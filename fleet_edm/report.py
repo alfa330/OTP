@@ -209,11 +209,11 @@ def _fill_context(sheet, table, resolution, source_name, generated_at):
                       'списка кабинета по такой строке иногда расходится с '
                       'карточкой того же кабинета, поэтому каждую спросили у '
                       'первоисточника'.format(verified_total)))
-        if verify.get('from_cache'):
-            lines.append(('Из них спрошено раньше',
-                          '{} строк взяты из подтверждений прошлых выгрузок (срок '
-                          'годности — неделя), спрошено заново {}'.format(
-                              verify['from_cache'], verify.get('checked') or 0)))
+        if verify.get('asked') is not None:
+            lines.append(('Спрошено в этот раз',
+                          '{} карточек. Остальное — подтверждения прошлых выгрузок '
+                          '(срок годности неделя) и прошлых попыток этой'
+                          .format(verify.get('asked') or 0)))
         lines.append(('Исправлено после подтверждения',
                       '{} строк: список отставал, в карточке стоит другой '
                       'провайдер'.format(len(verify.get('fixed') or []))))

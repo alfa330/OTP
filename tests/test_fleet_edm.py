@@ -438,7 +438,8 @@ class VerifyByCardTest(unittest.TestCase):
 
         client = self.LyingClient(drivers)
         second = engine.resolve(rows, client, control_sample=0, card_cache=cache)
-        self.assertEqual(second['verify']['checked'], 0)
+        self.assertEqual(second['verify']['asked'], 0)
+        self.assertEqual(second['verify']['checked'], 4)
         self.assertEqual(second['verify']['from_cache'], 4)
         self.assertEqual(second['verify']['requests'], 0)
         for entry in second['results'].values():
@@ -486,7 +487,12 @@ class VerifyByCardTest(unittest.TestCase):
                               for cid, entry in first['results'].items()}}
         client = self.LyingClient(drivers)
         second = engine.resolve(rows, client, control_sample=0, resume=resume)
-        self.assertEqual(second['verify']['checked'], 0)
+        # Спросили ноль — а вот «проверено» описывает ФАЙЛ, и после перезапуска
+        # обязано остаться прежним, иначе отчёт занизит работу до последнего
+        # захода (на проде вышло «478» вместо 1228).
+        self.assertEqual(second['verify']['asked'], 0)
+        self.assertEqual(second['verify']['checked'], 3)
+        self.assertEqual(len(second['verify']['fixed']), 3)
         self.assertEqual(second['verify']['requests'], 0)
 
 

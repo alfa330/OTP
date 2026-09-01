@@ -764,9 +764,30 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
     """
     verify_ids = tuple(verify_providers or ())
     outcome = {'checked': 0, 'fixed': [], 'silent': 0, 'blank': 0,
-               'requests': 0, 'from_cache': 0}
-    if not verify_ids:
+               'requests': 0, 'from_cache': 0, 'asked': 0}
+
+    def finish():
+        """Итоговые числа считаем ПО РЕЗУЛЬТАТУ, а не счётчиками этого захода.
+
+        То же правило, что и у stats['from_card'], и по той же причине: прогон
+        переживает перезапуски, половина строк приезжает из контрольной точки, а
+        счётчик той попытки остался в умершем процессе. На выгрузке №34 это дало
+        «проверено 478» вместо 1228 — отчёт описывал последний заход, а не файл.
+        """
+        confirmed = sum(1 for entry in results.values()
+                        if entry.get('source') == SOURCE_VERIFIED)
+        corrected = [{'contractor_id': contractor_id,
+                      'list': entry.get('was_provider_name') or '',
+                      'card': entry.get('provider_name') or ''}
+                     for contractor_id, entry in results.items()
+                     if entry.get('source') == SOURCE_CORRECTED]
+        outcome['asked'] = outcome['checked']
+        outcome['checked'] = confirmed + len(corrected)
+        outcome['fixed'] = corrected
         return outcome
+
+    if not verify_ids:
+        return finish()
     save = save or Checkpoint(None)
     by_name = {provider['name']: provider['id'] for provider in providers}
     names = {provider['id']: provider['name'] for provider in providers}
@@ -775,7 +796,7 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
                if entry.get('provider_id') in verify_ids
                and entry.get('source') in LIST_SOURCES]
     if not pending:
-        return outcome
+        return finish()
 
     label = ', '.join(names.get(code, code) for code in verify_ids)
     before = client.requests_count
@@ -800,6 +821,10 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
         entry['comment'] = (
             'Список кабинета отставал: показывал «{}», в карточке «{}»'
             .format(entry.get('provider_name') or '—', card_value))
+        # Прежнее значение храним В СТРОКЕ: после перезапуска список исправлений
+        # той попытки остаётся в умершем процессе, а отчёт обязан говорить про
+        # файл целиком — значит восстанавливать его придётся из results.
+        entry['was_provider_name'] = entry.get('provider_name') or ''
         entry['provider_name'] = card_value
         entry['provider_id'] = by_name.get(card_value, '')
         entry['source'] = SOURCE_CORRECTED
@@ -828,7 +853,7 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
                           'спрашиваем {}'.format(label, outcome['from_cache'], len(pending)))
     if not pending:
         outcome['requests'] = client.requests_count - before
-        return outcome
+        return finish()
 
     progress(percent=91, requests=client.requests_count,
              note='Подтверждаем «{}» карточками: {} строк'.format(label, len(pending)))
@@ -879,6 +904,7 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
     if cache is not None and fresh:
         cache.put(list(fresh))
     outcome['requests'] = client.requests_count - before
+    finish()
     progress(percent=94, requests=client.requests_count,
              note='Подтверждение по карточкам: проверено {}, поправлено {}'
                   .format(outcome['checked'], len(outcome['fixed'])))
