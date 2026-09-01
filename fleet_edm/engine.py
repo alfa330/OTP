@@ -614,14 +614,27 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         progress(percent=90, requests=client.requests_count,
                  note='Добираем из карточек: {} строк'.format(len(to_card)))
         # Карточки не зависят друг от друга — значит идут в те же потоки.
-        # Перебор диспетчерских включаем, только когда добирать нужно немногих:
-        # один такой водитель стоит до 86 запросов.
+        #
+        # ПЕРЕБОР ДИСПЕТЧЕРСКИХ — ТОЛЬКО ДЛЯ СТРОК БЕЗ ПАРКА, и вот почему.
+        # Условие было «немногих добираем — можно и перебрать» (len(to_card) <=
+        # MAX_CARD_SCANS), и оно подвело на живой выгрузке №36 (25 126 строк,
+        # 01.09.2026): 46 неразобранных строк уложились в порог, перебор включился
+        # для КАЖДОЙ, и раздел встал на 6 % — до 46 × 86 = 4 000 карточек, а
+        # кабинет в этот момент отвечал 429 почти на каждую. В логах один и тот же
+        # водитель шёл по паркам подряд по несколько секунд на парк.
+        #
+        # А главное — перебор для этих строк бессмыслен: парк у них ИЗВЕСТЕН,
+        # список сам его и назвал. Искать человека в чужих 85 диспетчерских стоит
+        # только тогда, когда парка нет вовсе, и такие строки уже ограничены
+        # отдельно (MAX_ORPHAN_CARD_LOOKUPS = 3).
         allow_scan = len(to_card) <= MAX_CARD_SCANS
 
         def card_task(task):
             stop()
+            park_id = task[0]
             try:
-                return _card_lookup(client, task[1], task[0], parks, allow_scan=allow_scan)
+                return _card_lookup(client, task[1], park_id, parks,
+                                    allow_scan=allow_scan and not park_id)
             except FleetSessionExpired:
                 raise
             except FleetError as error:

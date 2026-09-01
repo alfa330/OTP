@@ -638,6 +638,27 @@ class SilentParkTest(unittest.TestCase):
         # Главное: в «не найден» такая строка не попадает.
         self.assertEqual(result['stats'].get('not_found', 0), 0)
 
+    def test_known_park_row_does_not_scan_other_parks(self):
+        """Строку с известным парком нельзя искать во всех диспетчерских.
+
+        Так встала живая выгрузка №36 (25 126 строк, 01.09.2026): 46 неразобранных
+        строк уложились в порог MAX_CARD_SCANS, перебор включился для КАЖДОЙ, и
+        раздел замер на 6 % — до 46 × 86 карточек при кабинете, отвечающем 429
+        почти на каждую. Парк у этих строк известен, искать человека в чужих
+        диспетчерских незачем.
+        """
+        ghost = _driver_id(9)
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                   for i in range(1, 5)}
+        drivers[ghost] = {'park': PARK_A, 'provider': 'paperdo'}
+        rows = _park_rows(drivers)
+        client = FakeClient(drivers, hidden_from_list=[ghost],
+                            missing_everywhere=[ghost])
+        engine.resolve(rows, client, control_sample=0)
+        scanned = {park for park, cid in client.card_calls if cid == ghost}
+        self.assertEqual(scanned, {PARK_A})
+        self.assertNotIn(PARK_B, scanned)
+
     def test_unverified_row_says_so_in_the_file(self):
         """В файле «не смогли спросить» обязано читаться иначе, чем «нет в кабинете»."""
         drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'}}
