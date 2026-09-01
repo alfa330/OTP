@@ -1104,11 +1104,107 @@ class FrontendTest(unittest.TestCase):
         индекс и в историю версий, а автор увидит в редакторе россыпь пустых
         блоков вместо галереи.
         """
+        module = (ROOT / 'src' / 'components' / 'wiki'
+                  / 'gallery.js').read_text(encoding='utf-8')
+        self.assertIn('[data-wiki-block="gallery"]', module)
+        self.assertIn('wiki-gallery__dot', module)
+        self.assertIn('wiki-gallery__caption', module)
+
+    def test_gallery_wiring_lives_in_its_own_module(self):
+        """Витрина тянет React и половину раздела — проверять листание нечем.
+
+        Тот же приём, что у imageSize.js: счётная часть отдельным модулем, и её
+        сторожит node --test (tests/wiki_gallery.test.mjs).
+        """
         article = (ROOT / 'src' / 'components' / 'wiki'
                    / 'WikiArticle.jsx').read_text(encoding='utf-8')
-        self.assertIn('[data-wiki-block="gallery"]', article)
-        self.assertIn('wiki-gallery__dot', article)
-        self.assertIn('wiki-gallery__caption', article)
+        self.assertIn("from './gallery'", article)
+        self.assertIn('mountGalleries(bodyRef.current)', article)
+        module = ROOT / 'src' / 'components' / 'wiki' / 'gallery.js'
+        self.assertTrue(module.exists(), 'модуля галереи нет')
+        self.assertTrue((ROOT / 'tests' / 'wiki_gallery.test.mjs').exists(),
+                        'у счётной части галереи нет сторожа')
+
+    def test_gallery_can_be_dragged_and_keyed(self):
+        """Полоса прокрутки спрятана — мышью хватать нечего.
+
+        Пальцем лента листается сама (scroll-snap), а на десктопе без
+        перетаскивания остаются только стрелки. Плюс клавиши: браузер сам
+        прокрутит ленту на свой шаг (~40 пикселей), кадр уедет наполовину, и
+        scroll-snap вернёт его назад — это дёрганье, а не листание.
+        """
+        module = (ROOT / 'src' / 'components' / 'wiki'
+                  / 'gallery.js').read_text(encoding='utf-8')
+        self.assertIn('pointerdown', module)
+        self.assertIn('DRAG_THRESHOLD', module)
+        self.assertIn("event.pointerType === 'touch'", module,
+                      'касания надо оставить родной прокрутке')
+        self.assertIn("'keydown'", module)
+        self.assertIn("scrollSnapType = 'none'", module,
+                      'во время перетаскивания snap обязан отключаться')
+
+    def test_geometry_is_recomputed_after_images_load(self):
+        """У <img> без width/height до загрузки размеры НУЛЕВЫЕ.
+
+        Тогда «какой кадр открыт» и «куда прокрутить» считаются по нулям, и
+        снаружи это выглядит как «стрелки не работают».
+        """
+        module = (ROOT / 'src' / 'components' / 'wiki'
+                  / 'gallery.js').read_text(encoding='utf-8')
+        self.assertIn("'load'", module)
+        self.assertIn('frame.complete', module)
+
+    def test_gallery_option_is_in_the_image_controls(self):
+        """«Сделать листающейся» — мысль про КАРТИНКИ, и жить она должна там,
+        где на них смотрят: в панели самой картинки, рядом с размером.
+
+        Пункт меню вставки кладёт пустую галерею и годится, когда кадров ещё
+        нет; здесь кадры уже стоят в тексте.
+        """
+        node = (ROOT / 'src' / 'components' / 'wiki'
+                / 'WikiImageNode.jsx').read_text(encoding='utf-8')
+        self.assertIn('wrapImagesInGallery', node)
+        self.assertIn('unwrapWikiBlock', node)
+        self.assertIn('adjacentImageRun', node)
+        block = (ROOT / 'src' / 'components' / 'wiki'
+                 / 'WikiBlockNode.js').read_text(encoding='utf-8')
+        self.assertIn('wrapImagesInGallery:', block)
+        self.assertIn('export const adjacentImageRun', block)
+        # Кнопка, которая всегда отказывает, — мёртвая кнопка: одному кадру
+        # карусель бессмысленна.
+        self.assertIn('run.count >= 2', node)
+        self.assertIn('run.count < 2', block)
+
+    def test_the_ai_knows_how_to_build_a_gallery(self):
+        """Модель видит МАРКЕРЫ, а не теги картинок.
+
+        Наставление, показывающее <img src=…> там, где приходит
+        [[КАРТИНКА-1]], научило бы её несуществующей операции.
+        """
+        from wiki.ai import markup as ai_markup
+        self.assertIn('ЛИСТАЮЩАЯСЯ ГАЛЕРЕЯ', ai_markup.IMAGE_GUIDE)
+        self.assertIn('data-wiki-block="gallery"', ai_markup.IMAGE_GUIDE)
+        self.assertIn('[[КАРТИНКА-1]]', ai_markup.IMAGE_GUIDE)
+        guide = ai_markup.IMAGE_GUIDE[ai_markup.IMAGE_GUIDE.index('ЛИСТАЮЩАЯСЯ'):]
+        self.assertIn('размер и выравнивание НЕ задавай', guide)
+
+    def test_the_ai_can_actually_build_one(self):
+        """Прогон целиком: модель заворачивает маркеры — кадры возвращаются внутрь."""
+        from wiki.ai import authoring as ai_authoring
+        from wiki.ai import revise as ai_revise
+        before = ('<p>Шаг.</p>'
+                  '<img src="/api/wiki/file/a" alt="Шаг 1">'
+                  '<img src="/api/wiki/file/b" alt="Шаг 2">')
+        protected, tables, images = ai_revise.protect_tables(before)
+        self.assertIn('[[КАРТИНКА-1]]', protected)
+        answer = protected.replace(
+            '<p>[[КАРТИНКА-1]]</p><p>[[КАРТИНКА-2]]</p>',
+            '<div data-wiki-block="gallery">'
+            '<p>[[КАРТИНКА-1]]</p><p>[[КАРТИНКА-2]]</p></div>')
+        back = ai_revise.restore_tables(ai_authoring.canonicalize(answer), tables, images)
+        body = back if isinstance(back, str) else back[0]
+        self.assertEqual(body.count('data-wiki-block="gallery"'), 1)
+        self.assertEqual(body[body.index('gallery'):].count('<img'), 2)
 
     def test_swipe_comes_from_css_not_from_a_script(self):
         """Настоящий свайп пальцем даёт scroll-snap, а не обработчик touch."""
@@ -1116,9 +1212,9 @@ class FrontendTest(unittest.TestCase):
                / 'wiki-blocks.css').read_text(encoding='utf-8')
         self.assertIn('scroll-snap-type: x mandatory', css)
         self.assertIn("[data-wiki-block='gallery']", css)
-        article = (ROOT / 'src' / 'components' / 'wiki'
-                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
-        self.assertNotIn('touchstart', article,
+        module = (ROOT / 'src' / 'components' / 'wiki'
+                  / 'gallery.js').read_text(encoding='utf-8')
+        self.assertNotIn('touchstart', module,
                          'свайп написан руками там, где его умеет CSS')
 
     def test_arrows_are_drawn_not_typed(self):
@@ -1126,10 +1222,10 @@ class FrontendTest(unittest.TestCase):
 
         Раздел на этом уже обжигался на стрелках сортировки в таблицах.
         """
-        article = (ROOT / 'src' / 'components' / 'wiki'
-                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
-        block = article[article.index('wiki-gallery__arrow'):]
-        block = block[:block.index('wiki-gallery__dot')]
+        module = (ROOT / 'src' / 'components' / 'wiki'
+                  / 'gallery.js').read_text(encoding='utf-8')
+        block = module[module.index('PREV_ICON ='):]
+        block = block[:block.index('mountGallery')]
         self.assertIn('<svg', block)
         for glyph in ('‹', '›', '←', '→', '◀', '▶'):
             self.assertNotIn(glyph, block, 'стрелка набрана знаком: %s' % glyph)
@@ -1155,11 +1251,11 @@ class FrontendTest(unittest.TestCase):
         ширину ленты, а растянуть сам <img> нельзя — flex-basis у картинки
         растягивает КАРТИНКУ.
         """
-        article = (ROOT / 'src' / 'components' / 'wiki'
-                   / 'WikiArticle.jsx').read_text(encoding='utf-8')
+        module = (ROOT / 'src' / 'components' / 'wiki'
+                  / 'gallery.js').read_text(encoding='utf-8')
         css = (ROOT / 'src' / 'components' / 'wiki'
                / 'wiki-blocks.css').read_text(encoding='utf-8')
-        self.assertIn('wiki-gallery__slide', article, 'витрина не оборачивает кадры')
+        self.assertIn('wiki-gallery__slide', module, 'витрина не оборачивает кадры')
         self.assertIn('.wiki-prose .wiki-gallery__slide', css)
         slide = css[css.index('.wiki-prose .wiki-gallery__slide'):]
         self.assertIn('flex: 0 0 100%', slide[:300],

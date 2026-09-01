@@ -152,6 +152,48 @@ const findBlock = (state, kinds) => {
     return null;
 };
 
+/* Подряд идущие картинки вокруг позиции. {first, last, count} по индексам
+   детей родителя, или null — если в позиции не картинка.
+
+   Нужна двум местам: панель картинки решает, показывать ли кнопку «собрать в
+   галерею» (одному кадру она бессмысленна), и сама команда сборки. Считать
+   дважды по-разному — верный способ получить кнопку, которая ничего не делает.
+
+   «Подряд» намеренно не пропускает ничего между кадрами: два скриншота, между
+   которыми лежит абзац, — это два РАЗНЫХ шага инструкции, и листать их нельзя,
+   читатель не увидит второй. */
+export const adjacentImageRun = (state, pos) => {
+    let $pos;
+    try {
+        $pos = state.doc.resolve(pos);
+    } catch (error) {
+        return null;
+    }
+    const parent = $pos.parent;
+    const index = $pos.index();
+    const at = (i) => (i >= 0 && i < parent.childCount ? parent.child(i) : null);
+    if (at(index)?.type.name !== 'image') return null;
+    let first = index;
+    let last = index;
+    while (at(first - 1)?.type.name === 'image') first -= 1;
+    while (at(last + 1)?.type.name === 'image') last += 1;
+    return { first, last, count: last - first + 1 };
+};
+
+/* Лежит ли позиция внутри галереи. */
+export const insideGallery = (state, pos) => {
+    try {
+        const $pos = state.doc.resolve(pos);
+        for (let depth = $pos.depth; depth > 0; depth -= 1) {
+            const node = $pos.node(depth);
+            if (node.type.name === 'wikiBlock' && node.attrs.kind === 'gallery') return true;
+        }
+    } catch (error) {
+        return false;
+    }
+    return false;
+};
+
 export const WikiBlock = Node.create({
     name: 'wikiBlock',
     group: 'block',
@@ -249,6 +291,38 @@ export const WikiBlock = Node.create({
             /* Разобрать блок: содержимое остаётся в статье, обёртка уходит.
                Отдельно от удаления намеренно — «убрать оформление» и «стереть
                текст» это разные намерения, а кнопка была бы одна. */
+            /* СОБРАТЬ КАДРЫ В ГАЛЕРЕЮ — из панели самой картинки.
+               Позиция приходит снаружи (getPos у NodeView), а не берётся из
+               выделения: кнопку панели нажимают мышью, и к моменту обработки
+               выделение уже могло уехать с картинки — ровно та причина, по
+               которой у остальных кнопок панели стоит preventDefault. */
+            wrapImagesInGallery: (pos) => ({ state, tr, dispatch }) => {
+                const run = adjacentImageRun(state, pos);
+                /* Одному кадру карусель не нужна: стрелки, которым некуда
+                   листать, — это шум, а не управление. */
+                if (!run || run.count < 2) return false;
+                if (insideGallery(state, pos)) return false;
+                const $pos = state.doc.resolve(pos);
+                const from = $pos.posAtIndex(run.first);
+                const to = $pos.posAtIndex(run.last + 1);
+                if (dispatch) {
+                    /* Размер и выравнивание у кадров снимаем: внутри галереи их
+                       держит она сама (кадры одного действия обязаны быть
+                       одного размера), и оставленный процент всплыл бы потом —
+                       ровно в тот момент, когда кадр вынут из галереи
+                       обратно. */
+                    const frames = [];
+                    state.doc.slice(from, to).content.forEach((child) => frames.push(
+                        child.type.name === 'image'
+                            ? child.type.create({ ...child.attrs, size: null, align: null },
+                                                child.content, child.marks)
+                            : child));
+                    tr.replaceWith(from, to, state.schema.nodes.wikiBlock.create(
+                        { kind: 'gallery' }, frames));
+                }
+                return true;
+            },
+
             unwrapWikiBlock: (kinds) => ({ state, tr, dispatch }) => {
                 const found = findBlock(state, kinds);
                 if (!found) return false;

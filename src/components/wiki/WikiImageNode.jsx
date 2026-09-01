@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 /* mergeAttributes и обвязку узла берём из @tiptap/react, а не из @tiptap/core:
    core стоит транзитивно и в package.json не заявлен, а сборка на Pages идёт
    через `npm ci` — она сверяет манифест с локом. Та же причина расписана в
@@ -6,12 +6,14 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import { NodeViewWrapper, ReactNodeViewRenderer, mergeAttributes } from '@tiptap/react';
 import Image from '@tiptap/extension-image';
 import {
-    AlignCenter, AlignLeft, AlignRight, GripVertical, Minus, Plus, RotateCcw, Trash2,
+    AlignCenter, AlignLeft, AlignRight, GripVertical, Images, Minus, Plus, RotateCcw,
+    Trash2,
 } from 'lucide-react';
 
 import {
     ALIGNS, STEP, clampSize, normalizeAlign, sizeFromElement, styleFor,
 } from './imageSize';
+import { adjacentImageRun, insideGallery } from './WikiBlockNode';
 
 /* Картинка в статье, у которой можно менять размер.
  *
@@ -66,7 +68,7 @@ const ALIGN_TITLE = {
 
 /* ── Вид узла в редакторе ─────────────────────────────────────────────────── */
 
-const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor }) => {
+const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor, getPos }) => {
     const { src, alt, title, size, align, width } = node.attrs;
     /* Пиксельная ширина штатного расширения. Своей она у нас не появляется —
        её приносит картинка из импортированного документа, — но показать её
@@ -163,6 +165,35 @@ const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor })
        становится не к чему. Тот же приём — у кнопок тулбара (ToolButton). */
     const hold = (event) => event.preventDefault();
 
+    /* ГАЛЕРЕЯ — из панели самой картинки, а не из меню вставки.
+       «Сделать эти кадры листающимися» — мысль про КАРТИНКИ, и рождается она
+       там, где на них смотрят. Пункт меню вставки кладёт пустую галерею и
+       годится, когда кадров ещё нет; здесь кадры уже стоят в тексте.
+
+       Кнопка показывается, только если она что-то сделает: подряд идущих
+       картинок хотя бы две (одному кадру карусель бессмысленна) либо кадр уже
+       внутри галереи — тогда её можно разобрать. Кнопка, которая всегда
+       отказывает, — это и есть мёртвая кнопка. */
+    const galleryState = useMemo(() => {
+        if (!editable || typeof getPos !== 'function' || !editor?.state) return null;
+        let pos;
+        try { pos = getPos(); } catch (error) { return null; }
+        if (typeof pos !== 'number') return null;
+        if (insideGallery(editor.state, pos)) return { inside: true };
+        const run = adjacentImageRun(editor.state, pos);
+        return run && run.count >= 2 ? { inside: false, count: run.count } : null;
+    }, [editable, editor, getPos, node, selected]);
+
+    const toggleGallery = () => {
+        const pos = getPos?.();
+        if (typeof pos !== 'number') return;
+        if (galleryState?.inside) {
+            editor.chain().focus().unwrapWikiBlock(['gallery']).run();
+            return;
+        }
+        editor.chain().focus().wrapImagesInGallery(pos).run();
+    };
+
     return (
         <NodeViewWrapper
             ref={wrapRef}
@@ -207,6 +238,17 @@ const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor })
                             onClick={() => updateAttributes({ size: null })}>
                             <RotateCcw size={13} />
                         </button>
+                        {galleryState && (
+                            <button type="button"
+                                className={galleryState.inside ? 'is-on' : ''}
+                                title={galleryState.inside
+                                    ? 'Разобрать галерею: кадры встанут столбиком'
+                                    : `Сделать листающейся галереей (${galleryState.count} кадра)`}
+                                onMouseDown={hold}
+                                onClick={toggleGallery}>
+                                <Images size={13} />
+                            </button>
+                        )}
                         <button type="button" title="Удалить картинку" onMouseDown={hold}
                             onClick={() => deleteNode()}>
                             <Trash2 size={13} />

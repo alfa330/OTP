@@ -115,6 +115,7 @@ const readBlocks = (ed) => {
 
 /* Как назвать ближайший блок в подписи кнопки. */
 const TARGET_LABELS = {
+    gallery: 'галерею',
     card: 'карточку',
     cards: 'сетку карточек',
     stat: 'показатель',
