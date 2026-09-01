@@ -707,29 +707,42 @@ class ZaiProviderTest(unittest.TestCase):
         block = self.sent[-1]['payload']['messages'][-1]['content'][0]
         self.assertEqual('image_url', block['type'])
 
-    def test_editor_chain_puts_glm_first(self):
-        """Редактор статей собирает GLM, а не Vertex — по замеру полноты.
+    def test_editor_chain_puts_vertex_first(self):
+        """Редактор статей собирает Vertex — размен принят владельцем осознанно.
 
-        Доля переноса = знаки текста статьи / знаки текста документа. Два
-        настоящих документа, по два прогона 01.09.2026:
-          «Стоимость ИИ-оценки звонков» (8 328 знаков): vertex 0,466 и 0,474
-              против zai 0,992 и 1,009;
-          «Смета расшифровки звонков» (7 693 знака): vertex 0,651 и 0,649
-              против zai 0,992 и 1,037.
-        Vertex останавливается сам на ~1 400-1 500 выходных токенах при потолке
-        9 000 и finish='STOP' — это не обрыв и не наша обработка, модель просто
-        пересказывает документ вместо переноса. Решение владельца: редактору
-        статей — GLM.
+        Мерились две вещи, и модели разошлись по ним в разные стороны
+        (01.09.2026, два настоящих документа, по два прогона):
+          ПОЛНОТА, доля переноса: vertex 0,466-0,651 против zai 0,991-1,037.
+              Vertex останавливается сам на ~1 400-1 500 выходных токенах при
+              потолке 9 000 и finish='STOP' — пересказывает вместо переноса;
+          ОФОРМЛЕНИЕ, видов блоков из девяти: vertex 6 (lead, stats, stat,
+              cards, card, note; списки checks, crosses, chips, steps) против
+              zai 2 (lead, note; только steps). GLM повторяется до символа и
+              новых блоков гида не трогает вовсе.
+        Владелец посмотрел статьи глазами и выбрал оформление: «glm реально хуже
+        делает стили, надо вернуть gemini». Про сжатие человек узнаёт из
+        structure_warnings — при доле ниже 0,6 она пишет об этом в редактор.
         """
-        self.assertEqual(('zai', 'glm-5.3-flash'), ai_providers.editor_chain()[0])
+        self.assertEqual(('vertex', 'gemini-3-flash-preview'),
+                         ai_providers.editor_chain()[0])
 
-    def test_editor_keeps_vertex_as_fallback(self):
-        """Сжатая статья с предупреждением лучше, чем отказ.
+    def test_editor_keeps_glm_as_fallback(self):
+        """Полная статья с бедным оформлением лучше, чем отказ.
 
-        structure_warnings скажет редактору «текста заметно меньше», и он
-        поправит. Пустой экран поправить нечем.
+        Её редактор дооформит. Пустой экран дооформить нечем.
         """
-        self.assertIn('vertex', [p for p, _ in ai_providers.editor_chain()])
+        self.assertIn('zai', [p for p, _ in ai_providers.editor_chain()])
+
+    def test_editor_chain_drops_links_that_cannot_build_an_article(self):
+        """Бесплатные звенья чата в цепочку редактора не попадают.
+
+        Groq на сборке отдаёт 413 (потолок 8 000 токенов/мин против 9 000
+        забронированных), Cloudflare отваливается по таймауту на документе. В
+        цепочке редактора они были бы не резервом, а задержкой перед отказом.
+        """
+        providers = [p for p, _ in ai_providers.editor_chain()]
+        self.assertNotIn('groq', providers)
+        self.assertNotIn('cloudflare', providers)
 
     def test_chat_chain_is_untouched(self):
         """Чат помощника остаётся на Vertex: там он выбран замером на КАЧЕСТВЕ
@@ -748,23 +761,24 @@ class ZaiProviderTest(unittest.TestCase):
     def test_article_doors_use_the_editor_chain(self):
         """Обёртки существуют затем, чтобы вызывающий не помнил про цепочку.
 
-        Забыть передать chain — значит молча собрать статью моделью, которая её
-        вдвое сожмёт, и заметить это только по предупреждению в редакторе.
+        Забыть про неё — значит собрать статью не той моделью и заметить это
+        только по виду готовой статьи: бедное оформление или сжатый текст,
+        смотря в какую сторону ошибка.
         """
-        seen = {}
+        seen = []
 
         def adapter(model, system, user, history=(), max_tokens=None):
-            seen['model'] = model
+            seen.append(model)
             return {'text': 'Ответ', 'elapsed': 0.1, 'usage': {}}
 
         original = dict(ai_providers._ADAPTERS)
-        ai_providers._ADAPTERS['zai'] = adapter
+        ai_providers._ADAPTERS['vertex'] = adapter
         try:
             ai_providers.generate_article('sys', 'user')
         finally:
             ai_providers._ADAPTERS.clear()
             ai_providers._ADAPTERS.update(original)
-        self.assertEqual('glm-5.3-flash', seen['model'])
+        self.assertEqual(['gemini-3-flash-preview'], seen)
 
     def test_zai_reads_files_too(self):
         """У PDF и картинок резерва не было вовсе: цепочка файла — vertex+gemini,
