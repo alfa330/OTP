@@ -1030,6 +1030,17 @@ class FrontendTest(unittest.TestCase):
         for glyph in ('‹', '›', '←', '→', '◀', '▶'):
             self.assertNotIn(glyph, block, 'стрелка набрана знаком: %s' % glyph)
 
+    def test_unlink_button_is_labelled(self):
+        """Одна иконка рядом со «Сверить» уже привела к случайной отписке.
+
+        В первый день работы связь со статьёй «Межгород» сняли неумышленно:
+        понять, что вторая кнопка выключает слежение за источником, было
+        неоткуда. Заметно это становится только когда источник изменится, а
+        никто об этом не узнает.
+        """
+        block = self.dialog[self.dialog.index('onClick={onUnlink}'):]
+        self.assertIn('Отписать', block[:400], 'кнопка отписки снова без подписи')
+
     def test_every_badge_tone_exists_in_the_kit(self):
         """Незнакомый тон бейдж молча подменяет на серый.
 
