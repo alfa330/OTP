@@ -381,6 +381,25 @@ class VerifyByCardTest(unittest.TestCase):
             self.assertEqual(entry['source'], engine.SOURCE_CORRECTED)
             self.assertIn('отставал', entry['comment'])
 
+    def test_verify_survives_the_control_check(self):
+        """Итог подтверждения обязан дожить до отчёта, а не быть затёрт по дороге.
+
+        Так и вышло на проде: шаг 4½ клал словарь в `verify`, а контрольная сверка
+        объявляла `def verify(contractor_id)` — и наружу уезжала функция. Отчёт
+        падал на `verify.get('checked')` уже ПОСЛЕ получаса сверки, на сборке файла.
+        Ловится только на смеси провайдеров: когда все строки «бумажные», выборка
+        контрольной сверки пуста, её `def` не выполняется и подмены не происходит.
+        """
+        drivers = {_driver_id(i): {'park': PARK_A,
+                                   'provider': 'paperdo' if i <= 5 else '2KZVZ'}
+                   for i in range(1, 9)}
+        rows = _park_rows(drivers)
+        result = engine.resolve(rows, FakeClient(drivers), control_sample=3)
+        self.assertIsInstance(result['verify'], dict)
+        self.assertEqual(result['verify']['checked'], 5)
+        # И файл обязан собраться — именно здесь падало.
+        report.build_workbook(rows, result, source_name='проверка.xlsx')
+
     def test_confirmed_rows_get_their_own_source(self):
         # Карточка подтвердила список — строка тоже помечается, иначе перезапуск
         # спросит её заново, а контрольная сверка потратит на неё запросы.

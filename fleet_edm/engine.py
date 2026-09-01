@@ -689,7 +689,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         progress(percent=95, requests=client.requests_count,
                  note='Контрольная сверка {} строк по карточкам'.format(len(sample)))
 
-        def verify(contractor_id):
+        def check_card(contractor_id):
             stop()
             entry = results[contractor_id]
             try:
@@ -703,7 +703,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
             return (contractor_id, entry.get('provider_name') or '',
                     FleetClient.card_provider(profile))
 
-        for outcome in _run_parallel(client, sample, verify, stop=stop):
+        for outcome in _run_parallel(client, sample, check_card, stop=stop):
             if not outcome:
                 continue
             contractor_id, listed, card_value = outcome
