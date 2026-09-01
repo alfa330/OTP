@@ -598,6 +598,33 @@ def import_page(cursor, gcs, *, url, section_ids, author_id, space_ids=None,
             'source_url': parsed['url']}
 
 
+def link_article(cursor, *, article_id, url, linked_by, auto_sync=True,
+                 ai_format=False, fetch_page_fn=None):
+    """Подписать УЖЕ СУЩЕСТВУЮЩУЮ статью на страницу источника.
+
+    Ровно этого требует постановка: статья «Тариф „Межгород"» в вике уже
+    написана руками, и нужна не вторая такая же, а чтобы правки Яндекса
+    доезжали в неё.
+
+    content_hash остаётся ПУСТЫМ, и это главное решение здесь. Пустой отпечаток
+    означает «тело писали не мы», и первая же сверка отдаст 'conflict', а не
+    перепишет статью. Иначе связка руками написанной статьи с источником
+    означала бы её уничтожение ближайшей ночью — молча и без спроса. Взять
+    текст источника поверх можно, но это отдельное осознанное действие
+    (sync_article с force=True).
+    """
+    parsed = read_source(url, fetch_page_fn=fetch_page_fn)
+    taken = page_of_url(cursor, parsed['url'])
+    if taken and taken['article_id'] != article_id:
+        raise SyncError('На эту страницу источника уже подписана другая статья')
+    _remember_page(cursor, article_id=article_id, parsed=parsed,
+                   content_hash=None, linked_by=linked_by, auto_sync=auto_sync,
+                   ai_format=ai_format, status=STATUS_OK)
+    return {'article_id': article_id, 'url': parsed['url'],
+            'title': parsed['title'], 'entity_id': parsed.get('entity_id'),
+            'fingerprint': parsed['fingerprint']}
+
+
 def _free_slug(parsed, slug_taken):
     """Свободный слаг статьи. За основу — слаг страницы источника.
 
@@ -654,7 +681,11 @@ def sync_article(cursor, gcs, *, article_id, editor_id=None, force=False,
                 'title': parsed['title']}
 
     state = wiki_edit.current_state(cursor, article_id) or {}
-    touched = bool(page['content_hash']) and state.get('content_hash') != page['content_hash']
+    # Пустой content_hash — это «тело писали НЕ МЫ»: так подписывается уже
+    # существующая статья (link_article). Она тоже считается тронутой, и это
+    # главное: связать вручную написанную статью с источником и получить её
+    # переписанной первой же ночью — не то, о чём просили.
+    touched = state.get('content_hash') != page['content_hash']
     if touched and not force:
         # Статью правили руками. Тело не трогаем — но отпечаток источника
         # запоминаем, иначе каждая ночь повторяла бы одно и то же сообщение.

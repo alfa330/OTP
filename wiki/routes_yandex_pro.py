@@ -202,6 +202,40 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
             },
         })
 
+    # ── Подписать уже написанную статью ──────────────────────────────────
+    @wiki_route('/yandex/<int:article_id>/link', methods=('POST',))
+    def wiki_yandex_link_existing(cursor, ctx, article_id):
+        """Связать существующую статью со страницей источника.
+
+        Нужна ровно тогда, когда статья в вике уже написана руками, а следить
+        надо за источником — так поставлена задача #248. Второй статьи при этом
+        не появляется, и текст НЕ переписывается: связка только начинает
+        сверку, а первое расхождение придёт конфликтом.
+        """
+        article, permissions, error = load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+        if not permissions.get('can_edit'):
+            return jsonify({"error": "Нет права править эту статью",
+                            "code": "WIKI_FORBIDDEN"}), 403
+        data = _body()
+        url = str(data.get('url') or '').strip()
+        if not url:
+            return jsonify({"error": "Укажите ссылку на статью базы знаний"}), 400
+        try:
+            result = yandex_sync.link_article(
+                cursor, article_id=article_id, url=url, linked_by=ctx['user_id'],
+                auto_sync=_flag(data.get('auto_sync'), True),
+                ai_format=_flag(data.get('ai_format')))
+        except yandex_sync.SyncError as error:
+            return _fail(error)
+        queries.log_action(cursor, actor_id=ctx['user_id'],
+                           action='article.yandex_link',
+                           entity_type='article', entity_id=article_id,
+                           details={'url': result['url'], 'title': article['title']},
+                           ip_address=log_ip())
+        return jsonify(result), 201
+
     # ── Обновить сейчас ──────────────────────────────────────────────────
     @wiki_route('/yandex/<int:article_id>/sync', methods=('POST',))
     def wiki_yandex_sync_now(cursor, ctx, article_id):

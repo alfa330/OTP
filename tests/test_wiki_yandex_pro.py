@@ -594,6 +594,42 @@ class SyncTest(unittest.TestCase):
         with self.assertRaises(yandex_sync.SyncError):
             yandex_sync.sync_article(cursor, {}, article_id=715, page_html='{}')
 
+    # ── Связка уже написанной статьи ────────────────────────────────────
+    def test_linking_an_existing_article_does_not_rewrite_it(self):
+        """Постановка про «Межгород»: статья в вике уже есть, следить надо за Яндексом.
+
+        Связка обязана только начать сверку. Перепиши она текст сразу — и
+        кнопка «Связать» уничтожала бы статью, которую писали руками.
+        """
+        cursor = self._cursor(**{'FROM wiki_yandex_pages WHERE url': None})
+        result = yandex_sync.link_article(
+            cursor, article_id=715, url=PAGE_URL, linked_by=42,
+            fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
+        self.assertEqual(result['entity_id'], 2693)
+        self.assertEqual(self.updates, [], 'связка переписала статью')
+        inserted = [p for q, p in cursor.queries if 'INSERT INTO wiki_yandex_pages' in q]
+        self.assertTrue(inserted)
+        self.assertIsNone(inserted[0]['content_hash'],
+                          'у связанной статьи отпечаток тела должен быть пустым: '
+                          'это и означает «тело писали не мы»')
+
+    def test_a_linked_hand_written_article_reports_a_conflict(self):
+        """Пустой отпечаток тела = сверка зовёт человека, а не переписывает."""
+        cursor = self._cursor(**{'FROM wiki_yandex_pages WHERE article_id':
+                                 page_row(content_hash=None)})
+        result = self._sync(cursor)
+        self.assertEqual(result['status'], yandex_sync.STATUS_CONFLICT)
+        self.assertEqual(self.updates, [])
+
+    def test_two_articles_cannot_watch_the_same_page(self):
+        """Иначе ночная сверка писала бы обеим один текст — тот самый дубль."""
+        cursor = self._cursor(**{'FROM wiki_yandex_pages WHERE url':
+                                 page_row(article_id=999)})
+        with self.assertRaises(yandex_sync.SyncError):
+            yandex_sync.link_article(
+                cursor, article_id=715, url=PAGE_URL, linked_by=42,
+                fetch_page_fn=lambda _u: json.dumps(self.page, ensure_ascii=False))
+
     def test_ai_formatting_is_asked_not_to_touch_pictures(self):
         """Импортёр уже расставил размеры по самим кадрам — модели их трогать нельзя."""
         self.assertIn('КАРТИНКИ НЕ ТРОГАЙ', yandex_sync.FORMAT_INSTRUCTION)
@@ -758,6 +794,18 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(answer.status_code, 403)
         self.assertEqual(answer.get_json()['code'], 'WIKI_FORBIDDEN')
 
+    def test_linking_an_existing_article_needs_the_right_to_edit_it(self):
+        self.permissions = {'can_read': True, 'can_edit': False}
+        answer = self.client.post('/api/wiki/yandex/715/link', json={'url': PAGE_URL})
+        self.assertEqual(answer.status_code, 403)
+
+    def test_linking_an_existing_article_creates_nothing(self):
+        self.cursor.answers['FROM wiki_yandex_pages WHERE url'] = None
+        answer = self.client.post('/api/wiki/yandex/715/link', json={'url': PAGE_URL})
+        self.assertEqual(answer.status_code, 201, answer.get_json())
+        self.assertEqual(self.created, [], 'связка создала вторую статью')
+        self.assertEqual(self.updated, [], 'связка тронула текст статьи')
+
     def test_list_of_links_is_narrowed_to_the_perimeter(self):
         answer = self.client.get('/api/wiki/yandex')
         self.assertEqual(answer.status_code, 200)
@@ -827,9 +875,20 @@ class FrontendTest(unittest.TestCase):
         self.view = (src / 'WikiView.jsx').read_text(encoding='utf-8')
         self.queue = (src / 'WikiMigration.jsx').read_text(encoding='utf-8')
 
-    def test_dialog_talks_to_all_four_doors(self):
-        for door in ('/yandex/preview', '/yandex/import', '/yandex`', '/sync'):
+    def test_dialog_talks_to_all_the_doors(self):
+        for door in ('/yandex/preview', '/yandex/import', '/yandex`', '/sync', '/link'):
             self.assertIn(door, self.dialog, door)
+
+    def test_found_duplicate_can_be_linked_instead_of_copied(self):
+        """Дубль — чаще повод связать существующую статью, чем завести вторую.
+
+        Ровно этот случай в постановке #248: «Тариф „Межгород"» в вике уже
+        написан руками. Без кнопки «Связать» единственным выходом была бы
+        вторая статья с тем же текстом.
+        """
+        self.assertIn('linkExisting', self.dialog)
+        block = self.dialog[self.dialog.index('duplicates.slice'):]
+        self.assertIn('linkExisting(d)', block[:1600])
 
     def test_import_is_gated_exactly_like_a_new_article(self):
         """Способность та же, и гостевое пространство исключено так же.

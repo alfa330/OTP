@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, CheckCircle2, Copy, ExternalLink, Link2Off, Loader2, RefreshCw,
+    AlertTriangle, CheckCircle2, Copy, ExternalLink, Link2, Link2Off, Loader2, RefreshCw,
     Search, Sparkles,
 } from 'lucide-react';
 import {
@@ -203,6 +203,27 @@ export default function WikiYandexImport({
             .finally(() => setBusy(null));
     };
 
+    /* Связать уже написанную статью с источником. Текст при этом НЕ
+       переписывается: связка только начинает сверку, и первое расхождение
+       придёт конфликтом — иначе кнопка «Связать» уничтожала бы статью, которую
+       кто-то писал руками. */
+    const linkExisting = (item) => {
+        if (!url.trim()) return;
+        setBusy(`link-${item.article_id}`);
+        axios.post(`${base}/yandex/${item.article_id}/link`, {
+            url: url.trim(), auto_sync: autoSync, ai_format: aiFormat,
+        }, { headers })
+            .then(() => {
+                toast(`«${item.title}» связана с источником — текст не изменён`,
+                      'success');
+                loadLinked();
+                setPreview(null);
+                setUrl('');
+            })
+            .catch((e) => toast(errText(e, 'Не удалось связать статью'), 'error'))
+            .finally(() => setBusy(null));
+    };
+
     const syncRow = (item, force) => {
         setRowBusy(item.article_id);
         axios.post(`${base}/yandex/${item.article_id}/sync`, { force: !!force },
@@ -337,15 +358,22 @@ export default function WikiYandexImport({
                             </ul>
                         )}
 
+                        {/* Найденный дубль — чаще всего не повод отказаться от
+                            переноса, а повод СВЯЗАТЬ уже написанную статью с
+                            источником: так поставлена задача про «Межгород» —
+                            статья в вике есть, следить надо за Яндексом. Без
+                            этой кнопки единственным выходом была бы вторая
+                            статья с тем же текстом. */}
                         {duplicates.length > 0 && (
                             <div className="rounded-xl bg-rose-50 px-3 py-2">
                                 <span className="text-[11.5px] font-medium text-rose-700">
-                                    Похожее у нас уже есть
+                                    Похожее у нас уже есть — можно связать с источником
+                                    вместо переноса
                                 </span>
-                                <ul className="mt-1 space-y-0.5">
+                                <ul className="mt-1 space-y-1">
                                     {duplicates.slice(0, 3).map((d) => (
                                         <li key={d.article_id}
-                                            className="flex items-center gap-1.5 text-[11.5px] text-rose-700">
+                                            className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-rose-700">
                                             <Copy size={11} className="shrink-0" />
                                             <button
                                                 type="button"
@@ -357,6 +385,17 @@ export default function WikiYandexImport({
                                             <span className="shrink-0 text-rose-400">
                                                 {d.verdict}
                                             </span>
+                                            <button
+                                                type="button"
+                                                className={`${iosBtnGhost} ml-auto shrink-0 text-[11px]`}
+                                                disabled={busy !== null}
+                                                onClick={() => linkExisting(d)}
+                                            >
+                                                {busy === `link-${d.article_id}`
+                                                    ? <Loader2 size={12} className="animate-spin" />
+                                                    : <Link2 size={12} />}
+                                                Связать
+                                            </button>
                                         </li>
                                     ))}
                                 </ul>
