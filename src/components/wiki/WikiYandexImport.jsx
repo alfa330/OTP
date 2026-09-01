@@ -41,11 +41,14 @@ import useStableCallback from './useStableCallback';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Состояние сверки. Тона — ТОЛЬКО из BADGE_TONES (src/components/ui/ios.jsx:
+   slate/green/red/blue/amber): незнакомое имя бейдж молча подменяет на slate, и
+   «источник не прочитался» становится серой строчкой среди серых. */
 const STATUS_VIEW = {
     ok: { tone: 'slate', label: 'совпадает с источником' },
-    changed: { tone: 'emerald', label: 'обновлена из источника' },
+    changed: { tone: 'green', label: 'обновлена из источника' },
     conflict: { tone: 'amber', label: 'источник изменился, статью правили' },
-    error: { tone: 'rose', label: 'источник не прочитался' },
+    error: { tone: 'red', label: 'источник не прочитался' },
 };
 
 const plural = (n, one, few, many) => {

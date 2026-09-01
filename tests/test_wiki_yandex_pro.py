@@ -921,6 +921,23 @@ class FrontendTest(unittest.TestCase):
         self.assertEqual(front, server,
                          'коды источников во фронте и на сервере разошлись')
 
+    def test_every_badge_tone_exists_in_the_kit(self):
+        """Незнакомый тон бейдж молча подменяет на серый.
+
+        BADGE_TONES в UI-ките — slate/green/red/blue/amber, и `emerald`/`rose`
+        выглядят правдоподобно, но дают ровно серую плашку: «источник не
+        прочитался» теряется среди «совпадает с источником». Ошибку не видно ни
+        в сборке, ни в консоли.
+        """
+        kit = (ROOT / 'src' / 'components' / 'ui' / 'ios.jsx').read_text(encoding='utf-8')
+        block = re.search(r'const BADGE_TONES = \{(.*?)\};', kit, re.S)
+        self.assertIsNotNone(block, 'в UI-ките нет BADGE_TONES')
+        known = set(re.findall(r'^\s*([a-z]+):', block.group(1), re.M))
+        used = set(re.findall(r"tone: '([a-z]+)'", self.dialog))
+        self.assertTrue(used, 'в диалоге не нашлось ни одного тона')
+        self.assertFalse(used - known,
+                         'тона, которых нет в ките: %s' % sorted(used - known))
+
     def test_the_dialog_says_the_article_arrives_as_a_draft(self):
         """Обещание «ничего не публикуется само» должно стоять там, где нажимают."""
         self.assertIn('ЧЕРНОВИКОМ', self.dialog)
