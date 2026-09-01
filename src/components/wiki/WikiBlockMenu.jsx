@@ -91,7 +91,10 @@ const ToneButton = ({ tone, active, onClick }) => {
 /* Что вокруг курсора. Возвращает атрибуты ближайших блоков каждого вида —
    именно ближайших, потому что карточка лежит внутри сетки, и «сменить тон»
    относится к карточке, а «три колонки» к сетке. */
-const EMPTY = { card: null, cards: null, note: null, lead: null, innermost: null };
+const EMPTY = {
+    card: null, cards: null, note: null, lead: null,
+    stat: null, stats: null, innermost: null,
+};
 
 const readBlocks = (ed) => {
     const { $from } = ed.state.selection;
@@ -114,6 +117,8 @@ const readBlocks = (ed) => {
 const TARGET_LABELS = {
     card: 'карточку',
     cards: 'сетку карточек',
+    stat: 'показатель',
+    stats: 'сетку показателей',
     note: 'плашку',
     lead: 'вводку',
 };
@@ -136,11 +141,17 @@ export default function WikiBlockMenu({ editor }) {
     if (!editor) return null;
 
     const card = state?.card || null;
-    const cards = state?.cards || null;
     const note = state?.note || null;
     const toned = note || card;
     const tonedKind = note ? 'note' : 'card';
     const target = TARGET_LABELS[state?.innermost] || 'блок';
+
+    /* Столбцы и «добавить ячейку» одинаковы у обеих сеток, поэтому панель
+       работает с той, внутри которой стоит курсор, а не с сеткой карточек
+       поимённо. Нумерация — только у карточек: пронумерованные показатели
+       читались бы как список шагов, хотя это величины, а не порядок. */
+    const gridKind = state?.cards ? 'cards' : (state?.stats ? 'stats' : null);
+    const grid = gridKind ? state[gridKind] : null;
 
     /* Панель привязана к САМОМУ ВНЕШНЕМУ блоку, а не к выделению: у сетки
        карточек это её нижний край, а не край той карточки, в которой стоит
@@ -207,38 +218,43 @@ export default function WikiBlockMenu({ editor }) {
                 </>
             )}
 
-            {cards && (
+            {grid && (
                 <>
                     <Label>Сетка</Label>
                     <Btn
                         title="Один столбец"
-                        active={cards.cols === '1'}
-                        onClick={run((c) => c.setWikiBlockAttrs('cards', { cols: '1' }))}
+                        active={grid.cols === '1'}
+                        onClick={run((c) => c.setWikiBlockAttrs(gridKind, { cols: '1' }))}
                     >
                         <Square size={14} />
                     </Btn>
                     <Btn
                         title="Два столбца"
-                        active={cards.cols === '2' || !cards.cols}
-                        onClick={run((c) => c.setWikiBlockAttrs('cards', { cols: '2' }))}
+                        active={grid.cols === '2' || !grid.cols}
+                        onClick={run((c) => c.setWikiBlockAttrs(gridKind, { cols: '2' }))}
                     >
                         <Columns2 size={14} />
                     </Btn>
                     <Btn
                         title="Три столбца"
-                        active={cards.cols === '3'}
-                        onClick={run((c) => c.setWikiBlockAttrs('cards', { cols: '3' }))}
+                        active={grid.cols === '3'}
+                        onClick={run((c) => c.setWikiBlockAttrs(gridKind, { cols: '3' }))}
                     >
                         <Columns3 size={14} />
                     </Btn>
+                    {gridKind === 'cards' && (
+                        <Btn
+                            title="Нумеровать карточки"
+                            active={grid.numbered}
+                            onClick={run((c) => c.setWikiBlockAttrs('cards', { numbered: !grid.numbered }))}
+                        >
+                            <Hash size={14} />
+                        </Btn>
+                    )}
                     <Btn
-                        title="Нумеровать карточки"
-                        active={cards.numbered}
-                        onClick={run((c) => c.setWikiBlockAttrs('cards', { numbered: !cards.numbered }))}
+                        title={gridKind === 'cards' ? 'Добавить карточку' : 'Добавить показатель'}
+                        onClick={run((c) => c.addWikiCard())}
                     >
-                        <Hash size={14} />
-                    </Btn>
-                    <Btn title="Добавить карточку" onClick={run((c) => c.addWikiCard())}>
                         <Plus size={14} />
                     </Btn>
                     <Sep />

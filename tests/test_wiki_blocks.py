@@ -802,3 +802,189 @@ class ImageRenumberTest(unittest.TestCase):
         from wiki.ai import revise
         self.assertEqual('добавлена картинка 2 в раздел',
                          revise.humanize('добавлена [[КАРТИНКА-2 40% справа]] в раздел'))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПОКАЗАТЕЛИ, КРЕСТИКИ И НЕЙТРАЛЬНЫЙ ТОН
+# ─────────────────────────────────────────────────────────────────────────────
+class StatsBlockTest(unittest.TestCase):
+    """Сетка показателей устроена как сетка карточек — и обязана ею остаться.
+
+    Пар «сетка → ячейка» теперь две, и весь ремонт разметки ходит по таблице
+    GRIDS. Появись у второй пары своя копия правил — расхождение вылезло бы не
+    сразу, а на первой же правке чужой статьи через ИИ.
+    """
+
+    def test_both_grids_are_declared_in_one_table(self):
+        self.assertEqual((('cards', 'card'), ('stats', 'stat')), markup.GRIDS)
+        for grid, item in markup.GRIDS:
+            self.assertIn(grid, markup.BLOCK_KINDS)
+            self.assertIn(item, markup.BLOCK_KINDS)
+
+    def test_stray_stats_are_gathered_into_a_grid(self):
+        """Показатели подряд без обёртки — самая частая осечка модели.
+
+        Проверяется через canonicalize, а не прямым вызовом normalize: это тот
+        самый путь, которым проходит ответ модели, и мимо него ремонт не
+        работает вовсе.
+        """
+        out = authoring.canonicalize(
+            '<div data-wiki-block="stat"><h4>10 минут</h4><p>ожидание</p></div>'
+            '<div data-wiki-block="stat"><h4>4,75</h4><p>рейтинг</p></div>')
+        self.assertIn('data-wiki-block="stats"', out)
+        self.assertEqual(2, out.count('data-wiki-block="stat"'))
+
+    def test_three_cells_get_three_columns(self):
+        """Тройка встаёт в три колонки, всё прочее — в две.
+
+        Ряд из четырёх ячеек читается как два ряда по две, из пяти — как 3+2;
+        и то и другое лучше, чем четыре узких столбца.
+        """
+        for count, cols in ((2, '2'), (3, '3'), (4, '2'), (6, '3')):
+            out = authoring.canonicalize(
+                ''.join('<div data-wiki-block="stat"><p>%d</p></div>' % i
+                        for i in range(count)))
+            self.assertIn('data-cols="%s"' % cols, out,
+                          '%d показателей встали не в те колонки' % count)
+
+    def test_outsider_leaves_the_stats_grid(self):
+        out = authoring.canonicalize(
+            '<div data-wiki-block="stats">'
+            '<div data-wiki-block="stat"><p>3</p></div><p>чужак</p></div>')
+        self.assertIn('чужак', out, 'абзац потерян')
+        self.assertLess(out.index('</div>'), out.index('чужак'),
+                        'чужой абзац остался внутри сетки')
+
+    def test_card_inside_a_stats_grid_moves_to_its_own_grid(self):
+        """Вложенность разрешена только своя: карточка в сетке показателей — нет.
+
+        Карточку при этом НЕ разворачивают в голый текст: модель явно хотела
+        карточку, и ремонт даёт ей ту сетку, которой она принадлежит. Опустевшая
+        сетка показателей уходит сама — сетка без ячеек это пустой прямоугольник.
+        """
+        out = authoring.canonicalize(
+            '<div data-wiki-block="stats">'
+            '<div data-wiki-block="card"><p>текст</p></div></div>')
+        self.assertIn('текст', out)
+        self.assertIn('data-wiki-block="cards"', out)
+        self.assertNotIn('data-wiki-block="stats"', out)
+
+    def test_mixed_grid_keeps_both_kinds_of_cell(self):
+        """Сетка, в которую модель положила и то и другое, ничего не теряет."""
+        out = authoring.canonicalize(
+            '<div data-wiki-block="stats">'
+            '<div data-wiki-block="stat"><h4>5</h4><p>дней</p></div>'
+            '<div data-wiki-block="card"><h4>Заголовок</h4><p>текст</p></div></div>')
+        self.assertIn('дней', out)
+        self.assertIn('текст', out)
+        self.assertIn('data-wiki-block="stat"', out)
+        self.assertIn('data-wiki-block="card"', out)
+
+    def test_stat_keeps_its_tone(self):
+        """Тон красит значение показателя — «10 000 ₸» зелёным «это хорошо».
+
+        До правки _fix_attrs знал только карточки и плашки, и тон показателя
+        срезался вторым проходом ремонта — молча, уже после того, как первый
+        его сохранил.
+        """
+        out = authoring.canonicalize(
+            '<div data-wiki-block="stats" data-cols="3">'
+            '<div data-wiki-block="stat" data-tone="ok"><h4>5</h4><p>дней</p></div>'
+            '</div>')
+        self.assertIn('data-tone="ok"', out)
+
+    def test_stats_are_never_numbered(self):
+        """Пронумерованные показатели читались бы списком шагов."""
+        out = authoring.canonicalize(
+            '<div data-wiki-block="stats" data-numbered="true">'
+            '<div data-wiki-block="stat"><p>1</p></div></div>')
+        self.assertNotIn('data-numbered', out)
+
+    def test_editor_pairs_match_the_server(self):
+        """GRID_ITEMS во фронте — те же пары, что GRIDS здесь.
+
+        Разойдись они — кнопка «+» положила бы в сетку показателей карточку, а
+        ремонт при первой же правке через ИИ выкинул бы её наружу: с точки
+        зрения автора добавленное «выпало» само.
+        """
+        node = strip_comments(BLOCK_NODE)
+        for grid, item in markup.GRIDS:
+            self.assertRegex(
+                node, r"%s:\s*\{\s*item:\s*'%s'" % (grid, item),
+                'пара %s → %s редактору неизвестна' % (grid, item))
+
+    def test_stat_value_is_drawn_large(self):
+        """Смысл блока в том, что число берут ВЗГЛЯДОМ, не читая строку."""
+        rule = BLOCKS_CSS[BLOCKS_CSS.index("[data-wiki-block='stat'] h4"):][:400]
+        self.assertIn('font-size: 1.75rem', rule)
+        self.assertIn('tabular-nums', rule)
+
+    def test_stats_default_to_three_columns(self):
+        """У показателей по умолчанию три колонки, а не две, как у карточек.
+
+        В показателе одна короткая строка, и вдвоём они растягиваются на
+        пол-экрана каждый.
+        """
+        block = BLOCKS_CSS[BLOCKS_CSS.index(".wiki-prose [data-wiki-block='stats'] {"):][:300]
+        self.assertIn('repeat(3, minmax(0, 1fr))', block)
+
+
+class CrossesAndNeutralTest(unittest.TestCase):
+    def test_crosses_are_a_bullet_list_like_checks(self):
+        """Крестики — вид <ul>, а не свой узел: список обязан остаться списком."""
+        node = strip_comments(BLOCK_NODE)
+        self.assertRegex(node, r"value: 'crosses',[^}]*type: 'bulletList'")
+
+    def test_crosses_and_checks_are_drawn_differently(self):
+        """Пара «да/нет» имеет смысл, только если знаки разные и по цвету тоже."""
+        crosses = BLOCKS_CSS[BLOCKS_CSS.index("ul[data-variant='crosses'] > li::before"):][:900]
+        checks = BLOCKS_CSS[BLOCKS_CSS.index("ul[data-variant='checks'] > li::before"):][:900]
+        self.assertIn('#dc2626', crosses)
+        self.assertIn('#059669', checks)
+
+    def test_neutral_tone_has_no_colour(self):
+        """«Справочно» не должно выглядеть важным.
+
+        До нейтрального тона сведения без окраски приходилось красить в info,
+        то есть в акцент: три справки подряд читались как три уточнения, на
+        которые надо обратить внимание.
+        """
+        rule = BLOCKS_CSS[BLOCKS_CSS.index("[data-wiki-block][data-tone='neutral']"):][:500]
+        self.assertIn('--tone-bg: var(--wiki-surface-alt)', rule)
+        self.assertIn('--tone-ink: var(--wiki-ink-soft)', rule)
+
+    def test_guide_teaches_the_new_blocks(self):
+        for needle in ('data-wiki-block="stats"', 'data-wiki-block="stat"',
+                       'data-variant="crosses"', 'neutral'):
+            self.assertIn(needle, markup.MARKUP_GUIDE)
+
+    def test_guide_says_a_stat_is_a_number(self):
+        """Показатель — число, а не предложение: иначе блок вырождается в плашку."""
+        self.assertIn('ЧИСЛО, а не предложение', markup.MARKUP_GUIDE)
+
+
+class BlockMenuCompletenessTest(unittest.TestCase):
+    """Каждый вид блока обязан иметь пункт в меню редактора.
+
+    Забыть пункт — самый тихий способ сломать фичу: блок есть в схеме, в
+    санитайзере, в стилях и в наставлении для ИИ, статья с ним открывается
+    правильно, но поставить его руками автор не может — и понять почему, не
+    читая исходник, нельзя.
+    """
+
+    def test_every_kind_and_variant_has_a_menu_item(self):
+        node = strip_comments(BLOCK_NODE)
+        order = re.search(r'const MENU_ORDER = \[(.*?)\];', node, re.S)
+        self.assertIsNotNone(order, 'список пунктов меню не найден')
+        keys = set(re.findall(r"'([a-z]+)'", order.group(1)))
+        # Сетки в меню представлены собой, ячейки — нет: карточку добавляют
+        # кнопкой «+» у самой сетки, отдельного пункта у неё быть не должно.
+        cells = {item for _grid, item in markup.GRIDS}
+        for kind in markup.BLOCK_KINDS:
+            if kind in cells:
+                self.assertNotIn(kind, keys, 'ячейка %s не должна быть пунктом меню' % kind)
+                continue
+            self.assertIn(kind, keys, 'вид %s нельзя вставить из редактора' % kind)
+        for variant in markup.LIST_VARIANTS:
+            self.assertIn(variant, keys,
+                          'вид списка %s нельзя поставить из редактора' % variant)

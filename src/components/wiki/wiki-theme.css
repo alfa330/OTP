@@ -111,36 +111,64 @@
    ветки dark: убраны.
    ──────────────────────────────────────────────────────────────────────── */
 
+/* Цвет абзаца — slate-700, а не ink-soft (slate-600).
+   Замер на собранной странице: на белом фоне ink-soft читался как выцветший,
+   и статья целиком выглядела черновиком. Разница в один шаг палитры, но
+   именно она отделяет «текст» от «подписи»: ink-soft остаётся за подписями,
+   сносками и служебными строками раздела. */
 .wiki-prose {
-    color: var(--wiki-ink-soft);
+    color: #334155;
     line-height: 1.7;
     word-break: break-word;
     overflow-wrap: break-word;
 }
 
+/* Заголовок раздела. Акцентная метка слева — единственное цветное пятно в
+   статье выше уровня блока, и она делает ровно одно: показывает, где раздел
+   НАЧИНАЕТСЯ. До неё разделы отличались от подразделов только кеглем, и на
+   снимке длинной статьи это не читалось — глаз не находил, за что зацепиться.
+
+   Метка абсолютная, а не flex-элемент: у заголовка в две строки flex увёл бы
+   её на середину высоты, к пустому месту между строк. */
 .wiki-prose h1 {
-    font-size: 1.75rem;
-    font-weight: 700;
-    letter-spacing: -0.02em;
+    position: relative;
+    font-size: 1.875rem;
+    font-weight: 750;
+    letter-spacing: -0.022em;
     color: var(--wiki-ink);
-    margin: 2rem 0 1rem;
-    padding-bottom: 0.5rem;
+    margin: 2.75rem 0 1.125rem;
+    padding: 0 0 0.625rem 1.125rem;
     border-bottom: 1px solid var(--wiki-line);
 }
 
+.wiki-prose h1::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.28em;
+    width: 4px;
+    height: 0.95em;
+    border-radius: 2px;
+    background: var(--wiki-accent);
+}
+
+/* Первый заголовок статьи не отбивается сверху: над ним нет текста, от
+   которого его надо отделять, — только край страницы. */
+.wiki-prose > h1:first-child { margin-top: 0.5rem; }
+
 .wiki-prose h2 {
     font-size: 1.375rem;
-    font-weight: 650;
+    font-weight: 700;
     letter-spacing: -0.015em;
     color: var(--wiki-ink);
-    margin: 1.5rem 0 0.75rem;
+    margin: 2rem 0 0.75rem;
 }
 
 .wiki-prose h3 {
     font-size: 1.125rem;
-    font-weight: 600;
+    font-weight: 650;
     color: var(--wiki-ink);
-    margin: 1.25rem 0 0.5rem;
+    margin: 1.5rem 0 0.5rem;
 }
 
 .wiki-prose h4 {
@@ -193,9 +221,11 @@
 }
 
 .wiki-prose blockquote {
-    margin: 1rem 0;
-    padding-left: 1rem;
-    border-left: 4px solid var(--wiki-line);
+    margin: 1.25rem 0;
+    padding: 0.75rem 1rem 0.75rem 1.125rem;
+    border-left: 4px solid var(--wiki-accent-line);
+    border-radius: 0 10px 10px 0;
+    background: var(--wiki-line-soft);
     font-style: italic;
     /* ink-mute (#94a3b8) — цвет подписей, а не абзаца: цитата в статье
        читалась как выцветшая. Курсив и так снижает контраст, поэтому
@@ -490,10 +520,24 @@
     background: rgba(15, 23, 42, 0.35);
 }
 
+/* Шапка таблицы набрана как ПОДПИСЬ, а не как обычная ячейка: разрядка и
+   верхний регистр отделяют её от данных надёжнее, чем полутон заливки, —
+   и остаются видны на печати, где фон не печатается вовсе. */
 .wiki-prose th {
     background: var(--wiki-surface-alt);
-    font-weight: 600;
-    color: var(--wiki-ink);
+    font-size: 0.8125rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--wiki-ink-soft);
+    white-space: nowrap;
+}
+
+/* Чередование строк. На таблице в десять строк глаз теряет строку при
+   переходе к дальней колонке — «Алматы» читается вместе с комиссией Астаны.
+   Полоса держит строку целиком, и это дешевле, чем вертикальные линии. */
+.wiki-prose tbody tr:nth-child(even) > td {
+    background: rgba(248, 250, 252, 0.75);
 }
 
 /* Выделения из редактора: 251 <mark data-color> в контенте. */

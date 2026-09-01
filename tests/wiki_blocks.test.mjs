@@ -30,15 +30,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  BLOCK_COLS,
-  BLOCK_KINDS,
-  BLOCK_MENU,
-  BLOCK_TONES,
-  INSERT_BLOCKS,
-  LIST_VARIANTS,
-  TONE_VALUES,
-  VARIANT_VALUES,
-  pickAllowed,
+    BLOCK_COLS, BLOCK_KINDS, BLOCK_MENU, BLOCK_TONES, GRID_ITEMS, INSERT_BLOCKS, LIST_VARIANTS, TONE_VALUES, VARIANT_VALUES, pickAllowed,
 } from '../src/components/wiki/WikiBlockNode.js';
 
 test('чужое значение атрибута не сохраняется', () => {
@@ -108,12 +100,22 @@ test('сетка карточек вставляется сразу с двум�
   assert.equal((cards.template.match(/data-wiki-block="card"/g) || []).length, 2);
 });
 
-test('меню знает шесть блоков и различает вставку и превращение', () => {
+const MENU_KEYS = new Set(BLOCK_MENU.map((i) => i.key));
+
+test('меню знает все блоки и различает вставку и превращение', () => {
+  // Забытый здесь пункт — самая тихая поломка из возможных: блок есть в
+  // схеме, в санитайзере, в стилях и в наставлении для ИИ, статья с ним
+  // открывается правильно, но поставить его руками автор не может.
   assert.deepEqual(BLOCK_MENU.map((item) => item.key),
-    ['lead', 'note', 'steps', 'cards', 'chips', 'checks']);
+    ['lead', 'note', 'steps', 'cards', 'stats', 'chips', 'checks', 'crosses']);
   const byAction = (action) => BLOCK_MENU.filter((i) => i.action === action).map((i) => i.key);
-  assert.deepEqual(byAction('insert'), ['lead', 'note', 'cards']);
-  assert.deepEqual(byAction('variant'), ['steps', 'chips', 'checks']);
+  assert.deepEqual(byAction('insert'), ['lead', 'note', 'cards', 'stats']);
+  assert.deepEqual(byAction('variant'), ['steps', 'chips', 'checks', 'crosses']);
+
+  // Ни один вид блока не должен остаться без пункта меню.
+  const missing = [...INSERT_BLOCKS.map((b) => b.key),
+    ...LIST_VARIANTS.map((v) => v.value)].filter((k) => !MENU_KEYS.has(k));
+  assert.deepEqual(missing, [], `нет в меню: ${missing.join(', ')}`);
 });
 
 test('у каждого пункта меню есть подпись и объяснение', () => {
@@ -123,6 +125,31 @@ test('у каждого пункта меню есть подпись и объ�
   }
 });
 
+test('кнопка «+» кладёт в сетку ЕЁ ячейку', () => {
+  // Пары «сетка → ячейка» продублированы на сервере (GRIDS в
+  // wiki/ai/markup.py). Разойдись они — кнопка положила бы в сетку
+  // показателей карточку, а ремонт разметки при первой же правке через ИИ
+  // выкинул бы её из сетки наружу: человек увидел бы, что добавленное
+  // «выпало» само.
+  assert.deepEqual(Object.keys(GRID_ITEMS).sort(), ['cards', 'stats']);
+  assert.equal(GRID_ITEMS.cards.item, 'card');
+  assert.equal(GRID_ITEMS.stats.item, 'stat');
+  for (const [grid, spec] of Object.entries(GRID_ITEMS)) {
+    assert.ok(spec.template.includes(`data-wiki-block="${spec.item}"`),
+      `шаблон сетки ${grid} кладёт не свою ячейку`);
+  }
+});
+
+test('шаблон показателей несёт и значение, и подпись', () => {
+  // Показатель без подписи — это просто крупное число посреди статьи:
+  // читатель видит «4,75» и не знает, что это.
+  const stats = INSERT_BLOCKS.find((b) => b.key === 'stats');
+  assert.ok(stats, 'показателей нет в меню вставки');
+  assert.ok(stats.template.includes('<h4>'), 'в шаблоне нет значения');
+  assert.ok(stats.template.includes('<p>'), 'в шаблоне нет подписи');
+  assert.equal((stats.template.match(/data-wiki-block="stat"/g) || []).length, 3);
+});
+
 test('вид списка привязан к своему тегу', () => {
   // «Шаги» на <ul> и «чипы» на <ol> не нарисуются: правила CSS написаны под
   // конкретный тег. Привязка обязана быть объявлена рядом со значением.
@@ -130,12 +157,18 @@ test('вид списка привязан к своему тегу', () => {
   assert.equal(byValue.steps, 'orderedList');
   assert.equal(byValue.chips, 'bulletList');
   assert.equal(byValue.checks, 'bulletList');
+  assert.equal(byValue.crosses, 'bulletList');
 });
 
 test('у каждого тона есть подпись и объяснение, когда его ставить', () => {
   // Панель подписывает тона словами, а не только кружками: индиговый
   // «Обычная» и фиолетовый «Совет» по цвету не различаются.
-  assert.equal(BLOCK_TONES.length, 6);
+  //
+  // Числа тонов здесь нет намеренно: список растёт, и сверка с константой
+  // ломала бы тест на каждом добавлении, ничего при этом не проверяя.
+  // Настоящее правило — что значения не повторяются: два тона с одним
+  // value дали бы в панели две кнопки, из которых работает только первая.
+  assert.equal(new Set(TONE_VALUES).size, BLOCK_TONES.length);
   for (const tone of BLOCK_TONES) {
     assert.ok(tone.label, `тон ${tone.value} без подписи`);
     assert.ok(tone.hint && tone.hint.length > 5, `тон ${tone.value} без объяснения`);

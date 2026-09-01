@@ -31,10 +31,21 @@ import re
 # проверяются, а не пропускаются: data-tone="фиолетовый" пережил бы санитайзер,
 # не нарисовал бы ничего и остался в теле статьи навсегда — мусором, чьё
 # происхождение потом уже не установить.
-BLOCK_KINDS = ('lead', 'note', 'cards', 'card')
-TONES = ('info', 'ok', 'warn', 'danger', 'tip', 'dark')
+BLOCK_KINDS = ('lead', 'note', 'cards', 'card', 'stats', 'stat')
+TONES = ('info', 'ok', 'warn', 'danger', 'tip', 'dark', 'neutral')
 COLS = ('1', '2', '3')
-LIST_VARIANTS = ('steps', 'chips', 'checks')
+LIST_VARIANTS = ('steps', 'chips', 'checks', 'crosses')
+
+# Сетка и её ячейка. Пар две, устроены они одинаково, и весь ремонт
+# разметки (ячейка без сетки, чужак внутри сетки, допустимая вложенность)
+# работает по этой таблице — иначе второй вид сетки потребовал бы копии
+# трёх функций, которые обязаны меняться вместе.
+GRIDS = (('cards', 'card'), ('stats', 'stat'))
+_GRID_KINDS = tuple(grid for grid, _item in GRIDS)
+
+# Кому можно задать тон. Сетка своего тона не имеет: цвет несёт ячейка, а
+# крашеная сетка была бы прямоугольником под прямоугольниками.
+_TONED = ('note', 'card', 'stat')
 
 # Атрибуты блока, которые доезжают до базы. Ровно этот набор разрешён
 # санитайзером; всё прочее у div срезается.
@@ -61,7 +72,7 @@ CHIP_LIMIT = 40
 
 MARKUP_GUIDE = """
 ОФОРМИТЕЛЬСКИЕ БЛОКИ
-Кроме обычных тегов тебе доступны шесть блоков. Это ОФОРМЛЕНИЕ уже имеющегося
+Кроме обычных тегов тебе доступны восемь блоков. Это ОФОРМЛЕНИЕ уже имеющегося
 текста, а не повод дописать своё: внутри блока стоит ровно то, что стояло бы в
 обычном абзаце.
 
@@ -71,8 +82,9 @@ MARKUP_GUIDE = """
 2. Плашка — одна мысль, которую нельзя пропустить.
 <div data-wiki-block="note" data-tone="warn"><h4>Заголовок</h4><p>…</p></div>
 Тон: info — уточнение; ok — так правильно; warn — легко ошибиться; danger —
-запрет, отказ, потеря денег; tip — как быстрее; dark — разбор случая с числами
-(«Например: заказ стоил 11 000 ₸…»). Заголовок необязателен.
+запрет, отказ, потеря денег; tip — как быстрее; neutral — справочно, без
+окраски; dark — разбор случая с числами («Например: заказ стоил 11 000 ₸…»).
+Заголовок необязателен.
 
 3. Шаги — действия строго по порядку.
 <ol data-variant="steps"><li>Первое действие</li><li>Второе</li></ol>
@@ -91,6 +103,20 @@ data-cols — 1, 2 или 3 (по умолчанию 2); data-numbered="true" н
 6. Галочки — что входит или что уже сделано.
 <ul data-variant="checks"><li>…</li></ul>
 
+7. Крестики — чего делать нельзя. Пара к галочкам: рядом они читаются как
+«вот так да, вот так нет».
+<ul data-variant="crosses"><li>…</li></ul>
+
+8. Показатели — крупные числа: срок, сумма, доля, порог. От двух до четырёх.
+<div data-wiki-block="stats" data-cols="3">
+<div data-wiki-block="stat"><h4>10 минут</h4><p>бесплатное ожидание</p></div>
+<div data-wiki-block="stat"><h4>4,75</h4><p>минимальный рейтинг</p></div>
+</div>
+В <h4> — само значение с единицей, в <p> — подпись к нему. Показатель это
+ЧИСЛО, а не предложение: «10 минут» да, «ожидание бесплатное» нет.
+Показателю можно задать data-tone — он красит само число: ok для выгодного
+порога, danger для запретного значения. Без нужды не задавай.
+
 КОГДА БЛОК НЕ СТАВЯТ
 Связный текст остаётся абзацами. Блок нужен там, где экономит читателю время,
 и больше нигде.
@@ -100,8 +126,11 @@ data-cols — 1, 2 или 3 (по умолчанию 2); data-numbered="true" н
 <ul>.
 «Карточки» — только если кусков от двух и они равнозначны. Один кусок в сетке
 это плашка.
+«Показатели» — только там, где числа сравнивают взглядом. Одно число внутри
+предложения остаётся в предложении.
 «Чипы» — только для значений до трёх слов. Предложение в чип не кладут.
-Блок в блок не вкладывают. Единственное исключение — карточка внутри сетки.
+Блок в блок не вкладывают. Исключения ровно два: карточка внутри сетки
+карточек и показатель внутри сетки показателей.
 Заголовок внутри блока — только <h4>. h1, h2 и h3 внутри блока попадут в
 оглавление статьи и разорвут его.
 Таблицу и картинку в блок не кладут: и то и другое само по себе блок.
@@ -158,13 +187,23 @@ def _fix_attrs(soup):
             continue
         attrs = {'data-wiki-block': kind}
         tone = _attr(tag, 'data-tone')
-        if tone in TONES and kind in ('note', 'card'):
+        if tone in TONES and kind in _TONED:
             attrs['data-tone'] = tone
-        if kind == 'cards':
+        if kind in _GRID_KINDS:
             cols = _attr(tag, 'data-cols')
-            attrs['data-cols'] = cols if cols in COLS else '2'
-            if _attr(tag, 'data-numbered') == 'true':
-                attrs['data-numbered'] = 'true'
+            if cols in COLS:
+                attrs['data-cols'] = cols
+            elif kind == 'cards':
+                # У карточек умолчание пишется явно: их две колонки заданы
+                # правилом .wiki-prose [data-wiki-block='cards'], и явный
+                # атрибут нужен панели редактора, чтобы подсветить активную
+                # кнопку. У показателей умолчание — три, и его достаточно
+                # оставить в CSS: лишний атрибут только спорил бы с ним.
+                attrs['data-cols'] = '2'
+        # Нумерация — только у карточек. Пронумерованные показатели читались бы
+        # списком шагов, хотя это величины, а не порядок.
+        if kind == 'cards' and _attr(tag, 'data-numbered') == 'true':
+            attrs['data-numbered'] = 'true'
         tag.attrs = attrs
 
 
@@ -191,19 +230,24 @@ def _fix_lists(soup):
 
 
 def _fix_cards(soup):
-    """Карточка без сетки и сетка без карточек.
+    """Ячейка без сетки и сетка без ячеек — для обеих сеток сразу.
 
-    Карточка вне сетки — самая частая осечка модели: она пишет ряд карточек
+    Ячейка вне сетки — самая частая осечка модели: она пишет ряд карточек
     подряд, забыв обёртку. Такая карточка не потеряется (это по-прежнему div с
     рамкой), но встанет в один столбец во всю ширину — то есть ровно тем, чем
-    карточка не является. Дешевле собрать подряд идущие карточки в сетку, чем
+    карточка не является. Дешевле собрать подряд идущие ячейки в сетку, чем
     объяснять это моделью ещё одной строкой промпта.
     """
-    # Соседние карточки вне сетки — в одну сетку.
+    for grid_kind, item_kind in GRIDS:
+        _fix_one_grid(soup, grid_kind, item_kind)
+
+
+def _fix_one_grid(soup, grid_kind, item_kind):
+    # Соседние ячейки вне сетки — в одну сетку.
     for card in list(soup.find_all('div')):
-        if not is_block(card, 'card') or card.parent is None:
+        if not is_block(card, item_kind) or card.parent is None:
             continue
-        if is_block(card.parent, 'cards'):
+        if is_block(card.parent, grid_kind):
             continue
         row = [card]
         sibling = card.next_sibling
@@ -214,34 +258,36 @@ def _fix_cards(soup):
                     break
                 sibling = sibling.next_sibling
                 continue
-            if not is_block(sibling, 'card'):
+            if not is_block(sibling, item_kind):
                 break
             row.append(sibling)
             sibling = sibling.next_sibling
         grid = soup.new_tag('div')
-        grid['data-wiki-block'] = 'cards'
-        grid['data-cols'] = '2' if len(row) != 3 else '3'
+        grid['data-wiki-block'] = grid_kind
+        # Тройка встаёт в три колонки, всё остальное — в две: ряд из четырёх
+        # ячеек читается как два ряда по две, а из пяти — как 3+2.
+        grid['data-cols'] = '3' if len(row) % 3 == 0 else '2'
         card.insert_before(grid)
         for item in row:
             grid.append(item.extract())
 
-    # Не-карточка внутри сетки — наружу, за сетку. Класть её в карточку нельзя:
+    # Чужак внутри сетки — наружу, за сетку. Класть его в ячейку нельзя:
     # получилась бы карточка, которой автор не писал.
     for grid in list(soup.find_all('div')):
-        if not is_block(grid, 'cards'):
+        if not is_block(grid, grid_kind):
             continue
         for child in list(grid.children):
             if getattr(child, 'name', None) is None:
                 continue
-            if not is_block(child, 'card'):
+            if not is_block(child, item_kind):
                 grid.insert_after(child.extract())
-        if not any(is_block(child, 'card') for child in grid.children
+        if not any(is_block(child, item_kind) for child in grid.children
                    if getattr(child, 'name', None)):
             grid.unwrap()
 
 
 def _fix_nesting(soup):
-    """Блок в блоке. Разрешена ровно одна вложенность: карточка в сетке."""
+    """Блок в блоке. Разрешены ровно две вложенности — обе из GRIDS."""
     for tag in list(soup.find_all('div')):
         if not is_block(tag) or tag.parent is None:
             continue
@@ -249,7 +295,7 @@ def _fix_nesting(soup):
         parent = tag.find_parent(lambda node: node is not tag and is_block(node))
         if parent is None:
             continue
-        if kind == 'card' and _attr(parent, 'data-wiki-block') == 'cards':
+        if (_attr(parent, 'data-wiki-block'), kind) in GRIDS:
             continue
         tag.unwrap()
 
@@ -326,8 +372,9 @@ def warnings(*, before_html='', after_html=''):
 
 _HUMAN = {
     'lead': 'вводок', 'note': 'плашек', 'cards': 'сеток карточек',
-    'card': 'карточек', 'steps': 'списков шагов', 'chips': 'списков чипов',
-    'checks': 'списков с галочками',
+    'card': 'карточек', 'stats': 'сеток показателей', 'stat': 'показателей',
+    'steps': 'списков шагов', 'chips': 'списков чипов',
+    'checks': 'списков с галочками', 'crosses': 'списков с крестиками',
 }
 
 

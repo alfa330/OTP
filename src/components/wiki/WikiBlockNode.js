@@ -40,6 +40,7 @@ export const BLOCK_TONES = [
     { value: 'warn', label: 'Внимание', hint: 'легко ошибиться' },
     { value: 'danger', label: 'Нельзя', hint: 'запрет, потеря денег, отказ' },
     { value: 'tip', label: 'Совет', hint: 'как быстрее или удобнее' },
+    { value: 'neutral', label: 'Справка', hint: 'сведения без окраски' },
     { value: 'dark', label: 'Пример', hint: 'разбор случая с числами' },
 ];
 
@@ -74,16 +75,36 @@ export const INSERT_BLOCKS = [
             + '<div data-wiki-block="card"><h4>Второй</h4><p>Пояснение.</p></div>'
             + '</div><p></p>',
     },
+    {
+        key: 'stats',
+        label: 'Показатели',
+        hint: 'крупные числа рядом: сроки, суммы, доли, пороги',
+        template: '<div data-wiki-block="stats" data-cols="3">'
+            + '<div data-wiki-block="stat"><h4>10 минут</h4><p>подпись</p></div>'
+            + '<div data-wiki-block="stat"><h4>4,75</h4><p>подпись</p></div>'
+            + '<div data-wiki-block="stat"><h4>0 ₸</h4><p>подпись</p></div>'
+            + '</div><p></p>',
+    },
 ];
 
 /* Одна карточка — её же добавляет кнопка «+ карточка» у сетки. */
 const CARD_TEMPLATE = '<div data-wiki-block="card"><h4>Заголовок</h4><p>Пояснение.</p></div>';
+const STAT_TEMPLATE = '<div data-wiki-block="stat"><h4>0</h4><p>подпись</p></div>';
+
+/* Какую ячейку добавляет кнопка «+» у сетки. Пары те же, что в GRIDS на
+   сервере (wiki/ai/markup.py): разойдись они — кнопка положила бы в сетку
+   чужую ячейку, а ремонт разметки при первой же правке через ИИ выкинул бы
+   её наружу. Паритет сторожит tests/test_wiki_blocks.py. */
+export const GRID_ITEMS = {
+    cards: { item: 'card', template: CARD_TEMPLATE, label: 'карточка' },
+    stats: { item: 'stat', template: STAT_TEMPLATE, label: 'показатель' },
+};
 
 /* Разрешённые значения атрибутов. Чужое значение НЕ сохраняется: тон
    «data-tone=purple» не нарисовал бы ничего (в CSS такого набора нет), но
    пережил бы санитайзер и остался в теле статьи навсегда — мусором, который
    потом никто не решится вычистить, не зная, чей он. */
-export const BLOCK_KINDS = ['lead', 'note', 'cards', 'card'];
+export const BLOCK_KINDS = ['lead', 'note', 'cards', 'card', 'stats', 'stat'];
 export const BLOCK_COLS = ['1', '2', '3'];
 
 /* Значение из закрытого перечня — или запасное.
@@ -186,13 +207,17 @@ export const WikiBlock = Node.create({
                 return true;
             },
 
-            /* Ещё одна карточка — в конец той сетки, в которой стоит курсор. */
+            /* Ещё одна ячейка — в конец той сетки, в которой стоит курсор.
+               Какая именно ячейка, решает сама сетка (GRID_ITEMS): в сетке
+               карточек это карточка, в сетке показателей — показатель. */
             addWikiCard: () => ({ state, chain }) => {
-                const found = findBlock(state, 'cards');
+                const found = findBlock(state, Object.keys(GRID_ITEMS));
                 if (!found) return false;
+                const spec = GRID_ITEMS[found.node.attrs.kind];
+                if (!spec) return false;
                 // to указывает ЗА закрывающий тег сетки; минус единица ставит
                 // вставку внутрь, последним ребёнком.
-                return chain().insertContentAt(found.to - 1, CARD_TEMPLATE).focus().run();
+                return chain().insertContentAt(found.to - 1, spec.template).focus().run();
             },
 
             /* Разобрать блок: содержимое остаётся в статье, обёртка уходит.
@@ -263,6 +288,12 @@ export const LIST_VARIANTS = [
         hint: 'что входит, что уже сделано',
         type: 'bulletList',
     },
+    {
+        value: 'crosses',
+        label: 'Крестики',
+        hint: 'чего делать нельзя — пара к галочкам',
+        type: 'bulletList',
+    },
 ];
 
 export const VARIANT_VALUES = LIST_VARIANTS.map((v) => v.value);
@@ -314,13 +345,20 @@ export const WikiListVariant = Extension.create({
 /* Единый список пунктов меню «Вставить блок».
  *
  * Собран из двух разных механизмов нарочно: автору всё равно, что вводка —
- * это узел, а шаги — атрибут на списке; ему нужен один список из шести
- * пунктов. Разницу несёт поле action.
+ * это узел, а шаги — атрибут на списке; ему нужен один список пунктов.
+ * Разницу несёт поле action.
  *
  * Порядок — по частоте: вводка стоит первой, потому что нужна почти каждой
- * статье, а «галочки» последними, потому что заменимы обычным списком.
+ * статье, а «крестики» последними, потому что нужны реже всех и всегда
+ * рядом с галочками.
+ *
+ * ЗАБЫТЬ ЗДЕСЬ ПУНКТ — САМЫЙ ТИХИЙ СПОСОБ СЛОМАТЬ ФИЧУ: блок останется в
+ * схеме, в санитайзере, в стилях и в наставлении для ИИ, статья с ним будет
+ * открываться правильно — но поставить его руками автор не сможет, и понять
+ * почему, не читая исходник, нельзя. Список сторожит tests/wiki_blocks.test.mjs.
  */
-const MENU_ORDER = ['lead', 'note', 'steps', 'cards', 'chips', 'checks'];
+const MENU_ORDER = ['lead', 'note', 'steps', 'cards', 'stats', 'chips',
+                    'checks', 'crosses'];
 
 export const BLOCK_MENU = MENU_ORDER.map((key) => {
     const kind = INSERT_BLOCKS.find((item) => item.key === key);
