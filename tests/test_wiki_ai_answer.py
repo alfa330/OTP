@@ -604,15 +604,16 @@ class ZaiProviderTest(unittest.TestCase):
 
         self._real_post = ai_providers._post
         ai_providers._post = fake_post
-        self._env = os.environ.get('ZAI_API_KEY')
-        os.environ['ZAI_API_KEY'] = 'тест'
+        self.addCleanup(setattr, ai_providers, '_post', self._real_post)
 
-    def tearDown(self):
-        ai_providers._post = self._real_post
-        if self._env is None:
-            os.environ.pop('ZAI_API_KEY', None)
-        else:
-            os.environ['ZAI_API_KEY'] = self._env
+        # Ключи обоих платных провайдеров: без них _with_keys режет цепочку, и
+        # тест про порядок звеньев проверял бы не порядок, а наличие ключей.
+        patch = mock.patch.dict(os.environ, {
+            'ZAI_API_KEY': 'тест',
+            'GOOGLE_APPLICATION_CREDENTIALS_CONTENT': '{}',
+        })
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_zai_is_second_in_chain_right_after_vertex(self):
         """Резерв обязан быть ПЛАТНЫМ и стоять сразу за Vertex.
@@ -705,6 +706,65 @@ class ZaiProviderTest(unittest.TestCase):
                                     blob=b'\x89PNG', mime='image/png')
         block = self.sent[-1]['payload']['messages'][-1]['content'][0]
         self.assertEqual('image_url', block['type'])
+
+    def test_editor_chain_puts_glm_first(self):
+        """Редактор статей собирает GLM, а не Vertex — по замеру полноты.
+
+        Доля переноса = знаки текста статьи / знаки текста документа. Два
+        настоящих документа, по два прогона 01.09.2026:
+          «Стоимость ИИ-оценки звонков» (8 328 знаков): vertex 0,466 и 0,474
+              против zai 0,992 и 1,009;
+          «Смета расшифровки звонков» (7 693 знака): vertex 0,651 и 0,649
+              против zai 0,992 и 1,037.
+        Vertex останавливается сам на ~1 400-1 500 выходных токенах при потолке
+        9 000 и finish='STOP' — это не обрыв и не наша обработка, модель просто
+        пересказывает документ вместо переноса. Решение владельца: редактору
+        статей — GLM.
+        """
+        self.assertEqual(('zai', 'glm-5.3-flash'), ai_providers.editor_chain()[0])
+
+    def test_editor_keeps_vertex_as_fallback(self):
+        """Сжатая статья с предупреждением лучше, чем отказ.
+
+        structure_warnings скажет редактору «текста заметно меньше», и он
+        поправит. Пустой экран поправить нечем.
+        """
+        self.assertIn('vertex', [p for p, _ in ai_providers.editor_chain()])
+
+    def test_chat_chain_is_untouched(self):
+        """Чат помощника остаётся на Vertex: там он выбран замером на КАЧЕСТВЕ
+        ответа, и короткие ответы сжатием не страдают."""
+        self.assertEqual(('vertex', 'gemini-3-flash-preview'),
+                         ai_providers.available_chain()[0])
+
+    def test_editor_chain_is_overridable_and_key_gated(self):
+        with mock.patch.dict(os.environ,
+                             {'WIKI_AI_EDITOR_CHAIN': 'zai:glm-иная'}):
+            self.assertEqual((('zai', 'glm-иная'),), ai_providers.editor_chain())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('ZAI_API_KEY', None)
+            self.assertNotIn('zai', [p for p, _ in ai_providers.editor_chain()])
+
+    def test_article_doors_use_the_editor_chain(self):
+        """Обёртки существуют затем, чтобы вызывающий не помнил про цепочку.
+
+        Забыть передать chain — значит молча собрать статью моделью, которая её
+        вдвое сожмёт, и заметить это только по предупреждению в редакторе.
+        """
+        seen = {}
+
+        def adapter(model, system, user, history=(), max_tokens=None):
+            seen['model'] = model
+            return {'text': 'Ответ', 'elapsed': 0.1, 'usage': {}}
+
+        original = dict(ai_providers._ADAPTERS)
+        ai_providers._ADAPTERS['zai'] = adapter
+        try:
+            ai_providers.generate_article('sys', 'user')
+        finally:
+            ai_providers._ADAPTERS.clear()
+            ai_providers._ADAPTERS.update(original)
+        self.assertEqual('glm-5.3-flash', seen['model'])
 
     def test_zai_reads_files_too(self):
         """У PDF и картинок резерва не было вовсе: цепочка файла — vertex+gemini,

@@ -487,7 +487,7 @@ def format_with_ai(title, content, *, generate_fn=None):
         result = ai_revise.edit_by_instruction(
             current_title=title, current_html=content,
             instruction=FORMAT_INSTRUCTION,
-            generate_fn=generate_fn or ai_providers.generate)
+            generate_fn=generate_fn or ai_providers.generate_article)
     except ai_providers.ProviderError as error:
         return content, ['Помощник не оформил статью: %s' % str(error)[:160]]
     except Exception as error:                             # noqa: BLE001

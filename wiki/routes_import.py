@@ -23,10 +23,15 @@ document_import_sessions, правился во внешнем ONLYOFFICE и т�
 редактора, а не следствием того, что он нажал привычную кнопку.
 
 Модель здесь вызывается, пока держится курсор из wiki_route, и это осознанный
-размен. Сборка статьи занимает 3-5 секунд против 1-4 у ответа в чате, зато
-случается несколько раз в день, а не постоянно: два занятых соединения из
-сорока на несколько секунд дешевле, чем второй, отдельно написанный слой
-проверки прав ради их экономии.
+размен: два занятых соединения из сорока дешевле, чем второй, отдельно
+написанный слой проверки прав ради их экономии. Сборка случается несколько раз в
+день, а не постоянно.
+
+Цену размена надо знать в лицо: с 01.09.2026 статью собирает GLM, и это 28-37
+секунд на документе в 8 тысяч знаков, а не 3-5, как было на Vertex. Держать
+соединение полминуты приемлемо при нынешней частоте, но если сборка станет
+массовой (пакетный перенос, импорт пачкой), курсор придётся отпускать до вызова
+модели — тогда это уже не размен, а очередь.
 """
 
 import os
@@ -219,9 +224,10 @@ def register(bp, wiki_route, db, log_ip, gcs):
             draft = ai_authoring.compose(
                 filename=uploaded.filename, kind=kind,
                 source_html=source_html, source_text=source_text,
-                generate_fn=ai_providers.generate,
+                generate_fn=ai_providers.generate_article,
                 blob=data if vision_mime else None, mime=vision_mime,
-                generate_file_fn=ai_providers.generate_document, links=links)
+                generate_file_fn=ai_providers.generate_article_document,
+                links=links)
         except ai_providers.ProviderError as error:
             return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
                             "code": "WIKI_AI_UNAVAILABLE"}), 503
@@ -323,8 +329,8 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 current_title=str(request.form.get("title") or ""),
                 current_html=current, document_html=doc_html,
                 document_text=doc_text, filename=uploaded.filename, kind=kind,
-                generate_fn=ai_providers.generate, blob=blob, mime=mime,
-                generate_file_fn=ai_providers.generate_document,
+                generate_fn=ai_providers.generate_article, blob=blob, mime=mime,
+                generate_file_fn=ai_providers.generate_article_document,
                 links=_document_links(
                     os.path.splitext(str(uploaded.filename))[1].lower(), data))
         except ai_providers.ProviderError as error:
@@ -364,7 +370,8 @@ def register(bp, wiki_route, db, log_ip, gcs):
         try:
             result = ai_revise.edit_by_instruction(
                 current_title=str(data.get("title") or ""), current_html=current,
-                instruction=instruction, generate_fn=ai_providers.generate)
+                instruction=instruction,
+                generate_fn=ai_providers.generate_article)
         except ai_providers.ProviderError as error:
             return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
                             "code": "WIKI_AI_UNAVAILABLE"}), 503
