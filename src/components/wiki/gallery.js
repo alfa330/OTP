@@ -37,6 +37,14 @@
    ссылка внутри подписи перестала бы нажиматься. */
 export const DRAG_THRESHOLD = 4;
 
+/* Длительность доводки до кадра. 260 мс — столько же, сколько у остальных
+   переходов раздела; заметно, но не заставляет ждать. */
+export const SCROLL_MS = 260;
+
+/* Замедление к концу. Линейное движение читается как рывок: лента трогается и
+   встаёт мгновенно, и глазу не за что зацепиться. */
+export const ease = (t) => 1 - (1 - t) * (1 - t) * (1 - t);
+
 /** Индекс открытого кадра: тот, чья середина ближе к середине ленты.
  *
  * По scrollLeft считать нельзя: кадры бывают разной ширины (после правки через
@@ -113,6 +121,10 @@ export function mountGallery(strip, doc = document) {
         return slide;
     });
 
+    /* Список отмен заводится ДО обвязки: в него пишет и анимация прокрутки. */
+    const undo = [];
+    const undoLater = undo;
+
     const box = doc.createElement('div');
     box.className = 'wiki-gallery';
     strip.replaceWith(box);
@@ -147,10 +159,52 @@ export function mountGallery(strip, doc = document) {
     const prev = arrow('prev', 'Предыдущий кадр');
     const next = arrow('next', 'Следующий кадр');
 
+    /* ПРОКРУТКА СВОИМИ РУКАМИ, а не scrollTo({behavior:'smooth'}).
+       Замер на живой галерее: щелчок по стрелке не двигал ленту ВООБЩЕ —
+       scrollLeft оставался нулём при максимуме 868. Причина в том, что
+       scroll-snap-type: x mandatory возвращает ленту к текущему кадру в самом
+       начале плавной анимации: снап и анимация тянут её в разные стороны, и
+       побеждает снап. Присваивание scrollLeft снап не отменяет — оно
+       мгновенное, и снапу нечего отматывать. Поэтому анимируем сами, а на
+       время анимации снап выключаем, как и при перетаскивании. */
+    let frame = 0;
+    const stopAnimation = () => {
+        if (!frame) return;
+        cancelAnimationFrame(frame);
+        frame = 0;
+        strip.style.scrollSnapType = '';
+    };
+    undoLater.push(stopAnimation);
+
     const goTo = (index) => {
         const slide = slides[clampIndex(index, slides.length)];
         if (!slide) return;
-        strip.scrollTo({ left: scrollTargetFor(strip, slide), behavior: 'smooth' });
+        const to = scrollTargetFor(strip, slide);
+        stopAnimation();
+        const from = strip.scrollLeft;
+        if (Math.abs(to - from) < 1) { sync(); return; }
+        /* Уважаем системную настройку «меньше движения»: там анимация не
+           украшение, а помеха. */
+        const reduced = typeof window !== 'undefined' && window.matchMedia
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (reduced) {
+            strip.scrollLeft = to;
+            sync();
+            return;
+        }
+        strip.style.scrollSnapType = 'none';
+        const started = (typeof performance !== 'undefined' ? performance : Date).now();
+        const step = () => {
+            const passed = ((typeof performance !== 'undefined' ? performance : Date).now()
+                            - started) / SCROLL_MS;
+            const done = passed >= 1;
+            strip.scrollLeft = from + (to - from) * ease(done ? 1 : passed);
+            if (!done) { frame = requestAnimationFrame(step); return; }
+            frame = 0;
+            strip.style.scrollSnapType = '';
+            sync();
+        };
+        frame = requestAnimationFrame(step);
     };
 
     const dotNodes = slides.map((_slide, index) => {
@@ -175,7 +229,6 @@ export function mountGallery(strip, doc = document) {
         strip.setAttribute('aria-label', `Кадр ${index + 1} из ${slides.length}`);
     };
 
-    const undo = [];
     const on = (node, event, handler, options) => {
         node.addEventListener(event, handler, options);
         undo.push(() => node.removeEventListener(event, handler, options));
@@ -241,6 +294,21 @@ export function mountGallery(strip, doc = document) {
     on(strip, 'pointerleave', endDrag);
 
     sync();
+    /* Ещё раз на следующем кадре: к этому моменту браузер уже применил
+       обязательный снап и восстановление позиции прокрутки, а они умеют
+       сдвинуть ленту БЕЗ события scroll. Без этого на экране один кадр, а
+       подпись и точка — от другого; ровно это и было видно на живой статье. */
+    if (typeof requestAnimationFrame === 'function') {
+        const settle = requestAnimationFrame(sync);
+        undo.push(() => cancelAnimationFrame(settle));
+    }
+    /* Смена ширины ленты (свернули сайдбар, повернули телефон, сменили масштаб
+       раздела) меняет и ширину кадра, и цели прокрутки. */
+    if (typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(sync);
+        observer.observe(strip);
+        undo.push(() => observer.disconnect());
+    }
     return () => undo.forEach((fn) => fn());
 }
 

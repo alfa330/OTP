@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DRAG_THRESHOLD, activeIndex, clampIndex, scrollTargetFor,
+  DRAG_THRESHOLD, SCROLL_MS, activeIndex, clampIndex, ease, scrollTargetFor,
 } from '../src/components/wiki/gallery.js';
 
 /* Счётная часть галереи. Проверяется node --test, потому что витрина тянет за
@@ -63,4 +63,40 @@ test('индекс не выходит за границы', () => {
 test('порог перетаскивания больше нуля и меньше щелчка', () => {
   // Без порога любой щелчок по кадру превращался бы в микро-прокрутку.
   assert.ok(DRAG_THRESHOLD >= 2 && DRAG_THRESHOLD <= 10);
+});
+
+test('замедление к концу, а не рывок', () => {
+  // Линейное движение читается как рывок: лента трогается и встаёт мгновенно.
+  assert.equal(ease(0), 0);
+  assert.equal(ease(1), 1);
+  assert.ok(ease(0.5) > 0.5, 'к середине пути пройдено меньше половины');
+  let prev = -1;
+  for (let t = 0; t <= 1.0001; t += 0.1) {
+    const value = ease(t);
+    assert.ok(value >= prev, 'движение обязано быть монотонным');
+    prev = value;
+  }
+});
+
+test('доводка заметна, но не заставляет ждать', () => {
+  assert.ok(SCROLL_MS >= 150 && SCROLL_MS <= 400);
+});
+
+test('прокрутка идёт присваиванием, а не scrollTo со smooth', async () => {
+  /* ГЛАВНЫЙ сторож этого файла. scrollTo({behavior:'smooth'}) на ленте со
+     scroll-snap-type: x mandatory НЕ РАБОТАЕТ: снап возвращает ленту к
+     текущему кадру в начале анимации, и кнопка молча не делает ничего. Замер
+     на живой галерее: scrollLeft оставался нулём при максимуме 868. */
+  const source = await import('node:fs').then(
+    (fs) => fs.readFileSync('src/components/wiki/gallery.js', 'utf8'));
+  // Ищем сам ВЫЗОВ, а не упоминание: в комментарии выше эта конструкция
+  // названа по имени как раз затем, чтобы никто не вернул её обратно.
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.doesNotMatch(code, /scrollTo\(/,
+    'вернулась плавная прокрутка браузером — она проигрывает снапу');
+  assert.doesNotMatch(code, /behavior:/,
+    'вернулась плавная прокрутка браузером — она проигрывает снапу');
+  assert.match(source, /scrollSnapType = 'none'/,
+    'на время своей анимации снап обязан отключаться');
+  assert.match(source, /requestAnimationFrame/);
 });
