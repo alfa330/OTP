@@ -6099,6 +6099,7 @@ class Database:
             self._init_reg_contest_schema_tx(cursor)
             self._init_front_office_calls_schema_tx(cursor)
             self._init_wiki_schema_tx(cursor)
+            self._init_news_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
             self._init_parcels_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
@@ -6196,7 +6197,13 @@ class Database:
             DECLARE
                 targets INTEGER[] := ARRAY[]::INTEGER[];
             BEGIN
-                IF TG_TABLE_NAME IN ('events', 'four_you_images') THEN
+                IF TG_TABLE_NAME IN ('events', 'four_you_images', 'news_posts') THEN
+                    -- Новость широковещательная по той же причине, что ивенты:
+                    -- круг адресатов задан правилами (отдел, направление,
+                    -- группа, должность), и разворачивать их в PL/pgSQL значило
+                    -- бы продублировать news/access.py на втором языке. Дешевле
+                    -- разбудить всех — каждый клиент спросит своё /pending, и
+                    -- сервер отфильтрует по тем же правилам, что и всегда.
                     PERFORM pg_notify('bell_events', '{"b":1}');
                     RETURN NULL;
                 ELSIF TG_TABLE_NAME = 'lms_notifications' THEN
@@ -6438,6 +6445,29 @@ class Database:
             # перезаписывается по дате, а не вставляется заново, — на одном
             # INSERT тычок ушёл бы только в первый день жизни строки.
             ('trg_bell_birthday_reads', 'birthday_reads', 'AFTER INSERT OR UPDATE', ''),
+            # Новость дня: выпуск (INSERT сразу опубликованной) и переход
+            # черновика в опубликованные. WHEN обязателен — правку заголовка и
+            # текста черновика видит только автор, и будить ею весь портал
+            # значило бы разослать широковещательный тычок на каждое нажатие в
+            # форме (та же ловушка, что у автосейва черновика теста).
+            (
+                'trg_bell_news_insert', 'news_posts', 'AFTER INSERT',
+                """WHEN (NEW.status = 'published')""",
+            ),
+            # UPDATE OF перечисляет ДВЕ колонки, и вторая не для красоты:
+            # правка круга адресатов у уже выпущенной новости всегда переписывает
+            # audience_max_role_level (news/queries.py: set_audience), и без неё
+            # человек, которого только что дописали в адресаты, увидел бы окно
+            # лишь при следующем заходе. WHEN отсекает правку ЧЕРНОВИКА: у него
+            # NEW.status = 'draft', и будить весь портал на каждое сохранение
+            # формы было бы ровно той ловушкой, от которой лечили автосейв
+            # черновика теста.
+            (
+                'trg_bell_news', 'news_posts',
+                'AFTER UPDATE OF status, audience_max_role_level',
+                """WHEN (OLD.status IS DISTINCT FROM NEW.status
+                        OR NEW.status = 'published')""",
+            ),
             # Заявка на изменение смены: подача (INSERT) и решение/отзыв/отметка
             # прочтения (UPDATE). WHEN на UPDATE обязателен — updated_at трогает
             # каждая правка, а колокол интересует только смена статуса и гашение.
@@ -6877,6 +6907,27 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT wiki_schema")
+
+    def _init_news_schema_tx(self, cursor):
+        """Схема раздела «Новости» — своим SAVEPOINT'ом, как у вики.
+
+        Стоит ПОСЛЕ вики намеренно: раздел заимствует у неё лестницу выдачи
+        (news/access.py), и порядок разворачивания читается так же, как порядок
+        зависимости. Общих таблиц у них нет — новости живут отдельно, потому
+        что читать их обязан и тот, кому вики не выдана.
+        """
+        cursor.execute("SAVEPOINT news_schema")
+        try:
+            from news.schema import init_news_schema
+            init_news_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT news_schema")
+            logging.exception(
+                "Схема раздела «Новости» не применилась — окно новости "
+                "показываться не будет, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT news_schema")
 
     def _init_crm_schema_tx(self, cursor):
         """Схема раздела «Обращения» (таблицы crm_*).

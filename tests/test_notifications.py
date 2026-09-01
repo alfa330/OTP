@@ -995,7 +995,14 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'tasks', 'task_assignees', 'task_action_reads',
                            'event_reads', 'four_you_reads', 'birthday_reads',
                            'crm_tickets', 'operator_checkpoints',
-                           'work_shift_change_requests')
+                           'work_shift_change_requests',
+                           # news_posts источником колокола НЕ является: новость
+                           # показывается окном, а не строкой в списке. Триггер
+                           # ей всё равно нужен — тычок будит открытые вкладки,
+                           # и они спрашивают /api/news/pending. Без строки
+                           # здесь обратная проверка ниже нашла бы «лишний»
+                           # триггер и упала.
+                           'news_posts')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""

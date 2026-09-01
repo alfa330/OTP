@@ -54705,6 +54705,27 @@ except Exception:
     logging.exception("Раздел «Вики»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Новости» ─────────────────────────────────────────────────────────
+# Витрина управления живёт вкладкой внутри «Вики», но роуты — СВОИ и вне её
+# блюпринта. Причина в постановке: окно новости обязано доехать до сотрудника,
+# у которого вики не выдана отделу и сессия не подтверждена QR, — а обе эти
+# двери стоят на каждом роуте wiki/routes.py.
+try:
+    from news.routes import build_news_blueprint  # noqa: E402
+
+    app.register_blueprint(build_news_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раздел «Новости»: Blueprint подключён на /api/news")
+except Exception:
+    # Не собрался — портал работает как раньше, окно новости просто не
+    # показывается. Ронять вход в систему из-за объявления нельзя.
+    logging.exception("Раздел «Новости»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Обращения» (CRM поверх Telegram-групп) ───────────────────────────
 # Тот же приём, что у вики: Blueprint вместо десятка плоских роутов, зависимости
 # приходят аргументами (обратный импорт из crm.routes сюда был бы циклом).

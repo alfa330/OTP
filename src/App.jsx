@@ -16,6 +16,12 @@ import TezOpPlanCell from './components/salary/TezOpPlanCell';
 // lazyWithRetry: отдельным чанком он грузился бы при каждом входе, и до его
 // загрузки в сайдбаре зияла бы дыра.
 import NotificationsBell from './components/notifications/NotificationsBell';
+/* Окно «Новость дня». Не ленивое намеренно: оно обязано появиться СРАЗУ при
+   входе, а ленивый чанк подгружался бы уже после первого экрана — сотрудник
+   успел бы уйти в раздел мимо объявления. Весит оно немного: axios, lucide и
+   примитивы iOS в бандле и так есть. */
+import NewsOfDayModal from './components/news/NewsOfDayModal';
+import { emitNewsPoke } from './components/news/newsShared';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
@@ -45907,6 +45913,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 );
                 return (
                     <>
+                        {/* Окно «Новость дня» — поверх всего портала и вне
+                            раздела «Вики»: увидеть новость обязан и тот, кому
+                            вики не выдана. Само решает, показываться ли, и до
+                            первого ответа сервера не рисует ничего.
+
+                            Тычок канала колокола окно берёт ПОДПИСКОЙ МОДУЛЯ
+                            (newsShared), а не пропом: этот кусок разметки лежит
+                            внутри sidebarTree = useMemo(...), и значение,
+                            положенное в состояние App, замёрзло бы здесь на
+                            первом рендере — в списке зависимостей того useMemo
+                            под сорок значений, и новое в нём забыть проще, чем
+                            вспомнить. Окно молча перестало бы всплывать у
+                            открытой вкладки. Заодно снимается перерисовка всего
+                            портала на каждое чужое уведомление. */}
+                        <NewsOfDayModal
+                            apiBaseUrl={API_BASE_URL}
+                            user={user}
+                            getHeaders={stableNotificationsHeaders}
+                        />
                         {/* Гамбургер кнопка для мобильных */}
                         <button
                             className={`hamburger-btn ${mobileMenuOpen ? 'menu-open' : ''} ${!mobileMenuOpen && mobileIncomingNonce > 0 ? 'has-incoming' : ''}`}
@@ -45979,6 +46004,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onDigest={stableNotificationsDigest}
                                         readSource={bellReadSource}
                                         onIncoming={stableNotificationsIncoming}
+                                        onStreamPoke={emitNewsPoke}
                                         mobileMenuOpen={mobileMenuOpen}
                                     />
                                 </div>

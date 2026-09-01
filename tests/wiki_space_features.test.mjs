@@ -59,7 +59,10 @@ test('в гостевом пространстве нет справочнико
     // человеку не отдаёт (routes_structure._space_scope). Вкладка, которая
     // отвечает отказом, — тот же молчаливый отказ, только наоборот.
     const guest = effectiveFeatures({ guest_only: true, features: {} });
-    for (const key of ['parks', 'offices', 'analytics', 'audit', 'overview']) {
+    // «Новости» здесь же: должность у гостя бывает любая, вплоть до
+    // супервайзера, и без этой строки вкладка «напиши объявление сотрудникам
+    // чужого отдела» открылась бы приглашённому со стороны.
+    for (const key of ['parks', 'offices', 'analytics', 'audit', 'overview', 'news']) {
         assert.equal(guest[key], false, key);
     }
     // Витрина и помощник остаются: без них приглашение бессмысленно — прийти
@@ -69,7 +72,7 @@ test('в гостевом пространстве нет справочнико
 
     // В своём пространстве всё на месте.
     const own = effectiveFeatures({ features: {} });
-    for (const key of ['parks', 'offices', 'analytics', 'audit', 'overview']) {
+    for (const key of ['parks', 'offices', 'analytics', 'audit', 'overview', 'news']) {
         assert.equal(own[key], true, key);
     }
 });

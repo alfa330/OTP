@@ -5,8 +5,8 @@ import {
     AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
     Layers, MapPin,
     Network,
-    Building2, ChevronDown, LineChart, Loader2, Pencil, Plus, RefreshCw, ScrollText,
-    ShieldCheck, Sparkles, Users,
+    Building2, ChevronDown, LineChart, Loader2, Megaphone, Pencil, Plus, RefreshCw,
+    ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
@@ -27,6 +27,11 @@ import WikiSearch from './WikiSearch';
 import WikiSpaceModal from './WikiSpaceModal';
 import { effectiveFeatures } from './spaceFeatures';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
+/* «Новости» — лениво по той же причине, что редактор статей: у формы объявления
+   свой TipTap, а это ~128 КБ gzip, и платить за них должен тот, кто открыл
+   вкладку, а не каждый вошедший в вики. Без ленивости чанк раздела вырос бы
+   на треть у всех читателей. */
+const WikiNews = lazy(() => import('./WikiNews'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import { getScrollContainer, scrollPortalTo } from './scrollContainer';
 import { CAPABILITY_LABELS } from './sectionGrants';
@@ -356,6 +361,13 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        раз, разошлась бы с серверной молча — вкладка появлялась бы у того, кому
        роут отвечает 403. */
     const canReadAudit = !!state?.can_read_audit;
+    /* Вправе ли человек публиковать новости. Тот же признак, что и право
+       раздавать доступ: раздел «Новости» намеренно взял лестницу вики целиком
+       (news/access.py: publish_ceiling делегирует wiki_access.grant_ceiling),
+       и второй ответ на тот же вопрос — «кого этот человек вправе адресовать»
+       — разошёлся бы с первым молча. Что делегирование не отвяжут, сторожит
+       tests/test_news.py::NewsLadderTests. */
+    const canPublishNews = state?.grant_ceiling != null;
     /* Что открыто МНЕ и до какого срока. Едет тем же ответом /ping: срок обязан
        быть виден на любой вкладке, а второй запрос ради подписи в шапке дал бы
        вкладку, на которой подпись почему-то не появляется. */
@@ -491,6 +503,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
              появилась бы, а половина внутри неё — тем более. */
           show: features.catalog && (isEditor || canManageStructure
                                      || canGrantAccess || canGrantGuest) },
+        /* «Новости» — тому, кто их пишет. Получателю вкладка не нужна: новость
+           приходит к нему окном поверх портала, и второй экран с тем же
+           текстом был бы дублем. */
+        { key: 'news', label: 'Новости', icon: Megaphone,
+          show: features.news && canPublishNews },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: features.overview },
         { key: 'parks', label: 'Парки', icon: Building2, show: features.parks },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: features.offices },
@@ -514,7 +531,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
           show: features.audit && canReadAudit },
     ].filter((t) => t.show)),
     [canManageStructure, canManageAccess, canGrantAccess, canGrantGuest,
-     canReadAudit, isEditor, features]);
+     canReadAudit, canPublishNews, isEditor, features]);
 
     /* Поиск предлагает спросить помощника ровно тогда, когда вкладка помощника
        вообще есть: у пространства без неё это была бы кнопка в никуда.
@@ -1131,6 +1148,17 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     и телефон офиса Таксопарков не должны доезжать до Тез. Поэтому
                     spaceId — не уточнение выборки, а сам доступ, и сервер без
                     него отвечает 400 (wiki/routes_structure.request_space). */}
+                {tab === 'news' && (
+                    <Suspense fallback={(
+                        <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
+                            <Loader2 size={18} className="animate-spin" />
+                            <span className="text-[13px]">Загружаем новости…</span>
+                        </div>
+                    )}>
+                        <WikiNews apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                    </Suspense>
+                )}
+
                 {tab === 'parks' && (
                     <WikiParks base={base} headers={headers} showToast={showToast}
                                spaceId={activeSpace?.id || null} />

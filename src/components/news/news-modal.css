@@ -1,0 +1,64 @@
+/* Оформление текста новости.
+ *
+ * Своё, а не `.wiki-scope`: окно живёт в корне портала и показывается людям,
+ * у которых раздела «Вики» нет вовсе, — тянуть ради трёх абзацев чужую тему
+ * значило бы привязать окно к разделу, от которого оно намеренно отвязано.
+ *
+ * Всё под .news-body, ни одного глобального селектора: правило `*` из темы
+ * вики уже ломало цвета в чужих разделах (см. wiki-into-otp-project).
+ */
+.news-body {
+    font-size: 14px;
+    line-height: 1.7;
+    color: #475569;                 /* slate-600 */
+    overflow-wrap: anywhere;
+}
+
+.news-body > :first-child { margin-top: 0; }
+.news-body > :last-child { margin-bottom: 0; }
+
+.news-body p { margin: 0 0 10px; }
+.news-body strong { color: #0f172a; font-weight: 600; }
+
+.news-body h1,
+.news-body h2,
+.news-body h3 {
+    margin: 18px 0 8px;
+    color: #0f172a;
+    font-weight: 600;
+    line-height: 1.35;
+}
+.news-body h1 { font-size: 17px; }
+.news-body h2 { font-size: 16px; }
+.news-body h3 { font-size: 15px; }
+
+/* list-style задаётся ЯВНО: preflight Tailwind в теме портала гасит маркеры у
+   всех ul/ol (`list-style: none`), и без этой строки перечень условий акции
+   выглядит как три абзаца подряд — то есть теряет ровно то, ради чего его
+   и делали списком. */
+.news-body ul { list-style: disc; }
+.news-body ol { list-style: decimal; }
+.news-body ul,
+.news-body ol { margin: 0 0 10px; padding-left: 22px; }
+.news-body li { margin: 0 0 6px; padding-left: 2px; }
+.news-body li::marker { color: #6366f1; }
+
+.news-body a { color: #4f46e5; text-decoration: underline; text-underline-offset: 2px; }
+
+.news-body blockquote {
+    margin: 12px 0;
+    padding: 2px 0 2px 12px;
+    border-left: 2px solid #e2e8f0;
+    color: #64748b;
+}
+
+.news-body mark { background: #fef3c7; padding: 0 2px; border-radius: 3px; }
+
+.news-body img { max-width: 100%; height: auto; border-radius: 10px; margin: 10px 0; }
+
+/* Таблица не должна распирать окно: узкая колонка на телефоне иначе выносит
+   всю карточку за край экрана. */
+.news-body table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+.news-body th,
+.news-body td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }
+.news-body th { background: #f8fafc; color: #0f172a; font-weight: 600; }

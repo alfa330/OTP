@@ -102,10 +102,24 @@ const fmtWhen = (iso) => {
    реагирующий на сам факт перечитки, дёргал бы сервер у всех открытых вкладок
    без всякой причины. Отпечаток меняется только когда изменилось то, что
    касается этого пользователя, и достаётся бесплатно — из уже полученной сводки. */
+/* onStreamPoke — «сервер сказал, что где-то что-то изменилось». В отличие от
+   onDigest это СЫРОЙ тычок канала, до всякой фильтрации по составу сводки, и
+   нужен он тем, кого в сводке нет вовсе.
+   Первый такой потребитель — окно «Новость дня»: новость не строка в колоколе,
+   а модальное окно поверх портала, и узнать о ней иначе можно было бы только
+   вторым SSE-каналом. Второго канала здесь быть не должно: каждый поток
+   занимает нить waitress (их ~96), лимит BELL_STREAM_LIMIT = 50 на весь портал,
+   и дубль каналов срезал бы ёмкость реалтайма вдвое. */
 export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate,
                                             onCounts, onDigest, readSource, onIncoming,
-                                            mobileMenuOpen }) {
+                                            onStreamPoke, mobileMenuOpen }) {
     const [open, setOpen] = useState(false);
+    /* Колбэк тычка держим в ref: он приходит из App заново на каждом её
+       рендере, а список зависимостей эффекта канала — это список причин
+       ПЕРЕПОДКЛЮЧИТЬСЯ. Новая функция там рвала бы живой SSE-поток и заново
+       занимала слот на каждый чужой рендер. */
+    const streamPokeRef = useRef(onStreamPoke);
+    useEffect(() => { streamPokeRef.current = onStreamPoke; }, [onStreamPoke]);
     // Закрытие в два шага, как у дропдауна «Аккаунта»: сначала обратная
     // анимация, через 200мс — размонтирование панели.
     const [closing, setClosing] = useState(false);
@@ -439,6 +453,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                            после него закрывает окно между первой загрузкой и
                            подпиской; reload во время snapshot попадёт в очередь. */
                         load();
+                        /* И тем, кого в сводке нет: пока канал лежал, новость
+                           могли опубликовать, а окно у этой вкладки не всплыло.
+                           Подписка закрывает то же окно, что и load() выше. */
+                        streamPokeRef.current?.();
                     }
                     const poked = chunks.some((chunk) => chunk
                         .split('\n')
@@ -451,14 +469,20 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                            держали. fetch такому прижиму не подвержен. Размазывать
                            тут нечего: фоновых каналов мало, их держит лимит слотов. */
                         if (document.visibilityState === 'hidden') {
-                            if (!cancelled) load();
+                            if (!cancelled) { load(); streamPokeRef.current?.(); }
                         } else {
                             // Джиттер размазывает перечитки после широковещательного
                             // тычка (новый пост «Ивентов» будит все вкладки разом), а
                             // таймер-гард склеивает всплеск тычков в одну перечитку.
                             pokeTimer = setTimeout(() => {
                                 pokeTimer = null;
-                                if (!cancelled && !streamPaused()) load();
+                                if (cancelled || streamPaused()) return;
+                                load();
+                                // Тычок наружу — под тем же джиттером и тем же
+                                // гардом: публикация новости широковещательна,
+                                // и без размазывания все открытые вкладки
+                                // компании пришли бы за ней в одну секунду.
+                                streamPokeRef.current?.();
                             }, Math.random() * 2000);
                         }
                     }
