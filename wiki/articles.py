@@ -514,6 +514,14 @@ def recent_and_popular(cursor, visible_ids, user_id, limit=6, recent_limit=10):
     чтение» листается страницами по четыре, и шесть строк дали бы полторы
     страницы вместо обещанного десятка. Популярное страниц не имеет — ему
     хватает шести.
+
+    ВСЕ ТРИ полки отдают только опубликованное. Главная — витрина читателя, а
+    черновик и архив разбирают на вкладке «Статьи», где под них заведены
+    корзины (ARTICLE_BUCKETS). У редактора периметр состоит из них на четыре
+    пятых (в проде: 239 черновиков и 25 архивных против 51 опубликованной), и
+    без этого условия полки показывали бы ему работу, а не базу знаний.
+    Условие стоит В ЗАПРОСЕ, до LIMIT: отсев после него давал бы полку то на
+    десять строк, то на две — в зависимости от того, что человек читал вчера.
     """
     if not visible_ids:
         return {'recent': [], 'popular': [], 'favorites': []}
@@ -524,7 +532,7 @@ def recent_and_popular(cursor, visible_ids, user_id, limit=6, recent_limit=10):
         SELECT a.id, a.slug, a.title, a.summary, h.viewed_at
           FROM wiki_user_reading_history h
           JOIN wiki_articles a ON a.id = h.article_id
-         WHERE h.user_id = %s AND a.id = ANY(%s)
+         WHERE h.user_id = %s AND a.id = ANY(%s) AND a.status = 'published'
          ORDER BY h.viewed_at DESC LIMIT %s
         """,
         (user_id, ids, recent_limit),
@@ -549,7 +557,7 @@ def recent_and_popular(cursor, visible_ids, user_id, limit=6, recent_limit=10):
         SELECT a.id, a.slug, a.title, a.summary, f.position
           FROM wiki_user_favorite_articles f
           JOIN wiki_articles a ON a.id = f.article_id
-         WHERE f.user_id = %s AND a.id = ANY(%s)
+         WHERE f.user_id = %s AND a.id = ANY(%s) AND a.status = 'published'
          ORDER BY f.position, f.favorited_at DESC
         """,
         (user_id, ids),

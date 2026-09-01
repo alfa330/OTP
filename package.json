@@ -30,6 +30,7 @@
     "test:wiki-guest-access": "node --test tests/wiki_guest_access.test.mjs",
     "test:wiki-api-base": "node --test tests/wiki_api_base.test.mjs",
     "test:wiki-home-paging": "node --test tests/wiki_home_recent_paging.test.mjs",
+    "test:wiki-index-panel": "node --test tests/wiki_index_panel_published.test.mjs",
     "test:wiki-article-index": "node --test tests/wiki_article_index.test.mjs",
     "test:wiki-catalog-all": "node --test tests/wiki_catalog_all.test.mjs",
     "test:wiki-copy-guard": "node --test tests/wiki_copy_guard.test.mjs",

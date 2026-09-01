@@ -116,7 +116,26 @@ const toggled = (set, key) => {
     return next;
 };
 
-export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
+export default function WikiIndexPanel({ tree, articles: perimeter, onOpen, loading }) {
+    /* Оглавление показывает ТОЛЬКО опубликованное.
+     *
+     * Черновик и архив живут на вкладке «Статьи»: там под них заведены корзины
+     * (ARTICLE_BUCKETS на сервере), там же в меню строки стоят «Отправить в
+     * черновик» и «Убрать в архив» — то есть там их и разбирают. Здесь они были
+     * шумом ровно в той пропорции, в какой ведётся работа: в пространстве
+     * «Таксопарки» на 51 опубликованную статью приходится 239 черновиков и 25
+     * архивных, и дерево витрины на 84 % состояло из чужой незаконченной
+     * работы. Архивные при этом не отличались от живых ничем — плашка была
+     * только у черновика.
+     *
+     * Отсев ЗДЕСЬ, а не в запросе: тот же список уезжает в пикер внутренних
+     * ссылок редактора (WikiLibrary: articles={index}), а там цели как раз
+     * почти все черновые — фильтр на сервере выключил бы пикер.
+     */
+    const articles = useMemo(
+        () => perimeter.filter((a) => a.status === 'published'),
+        [perimeter],
+    );
     const [filter, setFilter] = useState('');
     const [openSections, setOpenSections] = useState(() => new Set());
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
@@ -146,8 +165,6 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
         tree.forEach(({ rows }) => rows.forEach(({ section }) => known.add(section.id)));
         return articles.filter((a) => !(a.section_ids || []).some((id) => known.has(id)));
     }, [tree, articles]);
-
-    const draftCount = articles.filter((a) => a.status !== 'published').length;
 
     const boxRef = useRef(null);
     useFitToViewport(boxRef);
@@ -195,11 +212,6 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
         >
             <FileText size={13} className="shrink-0 text-slate-400" />
             <span className="min-w-0 flex-1 truncate">{article.title}</span>
-            {article.status === 'draft' && (
-                <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-700">
-                    Черновик
-                </span>
-            )}
         </button>
     );
 
@@ -307,15 +319,8 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
                     <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
                         <Layers size={11} /> Разделы и статьи
                     </span>
-                    <span className="flex shrink-0 items-center gap-1">
-                        {draftCount > 0 && (
-                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[9.5px] font-bold text-amber-700 tabular-nums">
-                                {draftCount} черн.
-                            </span>
-                        )}
-                        <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[9.5px] font-bold text-indigo-600 tabular-nums">
-                            {articles.length}
-                        </span>
+                    <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[9.5px] font-bold text-indigo-600 tabular-nums">
+                        {articles.length}
                     </span>
                 </div>
 

@@ -170,7 +170,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const [filtersOpen, setFiltersOpen] = useState(false);
     const [authors, setAuthors] = useState([]);
     const [authorsLoading, setAuthorsLoading] = useState(false);
-    const [index, setIndex] = useState([]);         // весь периметр — для оглавления
+    const [index, setIndex] = useState([]);         // весь периметр: оглавление и пикер ссылок
     const [indexLoading, setIndexLoading] = useState(true);
     /* Номер захода за оглавлением: оно собирается из НЕСКОЛЬКИХ ответов, и за
        это время человек успевает переключить пространство в шапке. Без метки
@@ -544,9 +544,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                             .catch((e) => showToast?.(errText(e, 'Не удалось открыть статью'), 'error'));
                     }}
                     onClose={() => { setEditing(null); setPendingUpdateFile(null); }}
-                    /* Сохранение меняет и центр, и правую колонку: новая статья
-                       обязана появиться в оглавлении и в черновиках сразу, иначе
-                       после сохранения кажется, что её нет. */
+                    /* Сохранение меняет и центр, и правую колонку: статья
+                       обязана появиться на своём месте сразу, иначе после
+                       сохранения кажется, что её нет. Черновик при этом
+                       появится только в каталоге — в оглавлении витрины живёт
+                       одно опубликованное (WikiIndexPanel). */
                     onSaved={(slug) => {
                         setEditing(null);
                         load();
