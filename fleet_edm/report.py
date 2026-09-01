@@ -225,6 +225,11 @@ def _fill_context(sheet, table, resolution, source_name, generated_at):
         lines.append(('Поправлено по карточке',
                       '{}: список «{}», карточка «{}»'.format(
                           fixed['contractor_id'], fixed['list'], fixed['card'])))
+    if stats.get('unverified'):
+        lines.append(('НЕ СМОГЛИ ПРОВЕРИТЬ',
+                      '{} строк: диспетчерские не ответили на запрос карточки. Это '
+                      'не «водителя нет» — это «мы не смогли спросить»; повторите '
+                      'выгрузку позже'.format(stats['unverified'])))
     if stats.get('no_provider_by_kind'):
         lines.append(('Сотрудников парка', '{} строк — ЭДО к ним не применяется '
                                            '(работают по трудовому договору)'

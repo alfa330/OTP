@@ -589,7 +589,15 @@ class SilentParkTest(unittest.TestCase):
                          'Бумажный документооборот')
 
     def test_silent_card_is_not_absence(self):
-        """Молчащая карточка тоже не означает «такого водителя нет»."""
+        """Молчащая карточка не означает «такого водителя нет» — но и не роняет прогон.
+
+        Раньше отказ карточки прерывал обход целиком: контрольная точка есть,
+        подхват продолжит. На проде 01.09.2026 (выгрузка №33) это обернулось живым
+        клинчем: у строки БЕЗ парка перебор идёт по всем 86 диспетчерским, под
+        нагрузкой хоть одна молчит всегда, и «продолжим позже» не наступало
+        никогда — шесть подхватов подряд умерли на одном и том же водителе.
+        Теперь у такой строки свой ответ, и он по-прежнему НЕ «не найден».
+        """
         drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'}}
 
         class MuteCard(FakeClient):
@@ -597,8 +605,27 @@ class SilentParkTest(unittest.TestCase):
                 raise FleetError('429 Too Many Requests')
 
         rows = [{'contractor_id': _driver_id(1), 'park_id': PARK_A}]
-        with self.assertRaises(FleetError):
-            engine.resolve(rows, MuteCard(drivers), control_sample=0)
+        result = engine.resolve(rows, MuteCard(drivers), control_sample=0)
+        entry = result['results'][_driver_id(1)]
+        self.assertEqual(entry['source'], engine.SOURCE_UNVERIFIED)
+        self.assertEqual(entry['provider_name'], '')
+        self.assertEqual(result['stats'].get('unverified'), 1)
+        # Главное: в «не найден» такая строка не попадает.
+        self.assertEqual(result['stats'].get('not_found', 0), 0)
+
+    def test_unverified_row_says_so_in_the_file(self):
+        """В файле «не смогли спросить» обязано читаться иначе, чем «нет в кабинете»."""
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'}}
+
+        class MuteCard(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                raise FleetError('429 Too Many Requests')
+
+        rows = [{'contractor_id': _driver_id(1), 'park_id': PARK_A}]
+        result = engine.resolve(rows, MuteCard(drivers), control_sample=0)
+        table = report._rows_for_sheet(rows, result['results'], {})
+        self.assertIn('Не смогли проверить', table[0]['comment'])
+        self.assertNotIn('не найден', table[0]['comment'].lower())
 
 
 class SegmentTest(unittest.TestCase):

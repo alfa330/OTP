@@ -105,6 +105,10 @@ SOURCE_VERIFIED = 'список · сверено'
 SOURCE_CORRECTED = 'карточка · расхождение'
 CARD_SOURCES = ('карточка', SOURCE_VERIFIED, SOURCE_CORRECTED)
 
+# Ярлык строки, про которую кабинет отказался отвечать. Отдельный от «не найден»:
+# см. _entry_unverified.
+SOURCE_UNVERIFIED = 'не проверено'
+
 # ПРОВАЙДЕРЫ, ЧЬЁ ЗНАЧЕНИЕ ОБЯЗАНО ПОДТВЕРЖДАТЬСЯ КАРТОЧКОЙ.
 #
 # Измерено 01.09.2026 на живом кабинете. Водитель 273a5c22… в парке 24a94d62…
@@ -616,7 +620,27 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
 
         def card_task(task):
             stop()
-            return _card_lookup(client, task[1], task[0], parks, allow_scan=allow_scan)
+            try:
+                return _card_lookup(client, task[1], task[0], parks, allow_scan=allow_scan)
+            except FleetSessionExpired:
+                raise
+            except FleetError as error:
+                # ЖИВОЙ КЛИНЧ, пойманный на проде 01.09.2026 (выгрузка №33).
+                # Молчащие диспетчерские правильно НЕ дают сказать «не найден», и
+                # раньше обход на этом прерывался целиком: контрольная точка есть,
+                # подхват продолжит. Но у строки БЕЗ парка перебор идёт по всем 86
+                # диспетчерским, и под нагрузкой хоть одна молчит всегда — значит
+                # «продолжим позже» не наступает никогда. Шесть подхватов подряд
+                # умерли на одном и том же водителе, ни один запрос сверки так и не
+                # прошёл, а впереди был двенадцатый и закрытие «слишком много
+                # перезапусков».
+                #
+                # Поэтому отказ по ОДНОЙ строке больше не роняет прогон. Врать при
+                # этом не начинаем: у строки свой ответ — «не смогли проверить», и
+                # это НЕ «не найден ни в одной диспетчерской».
+                logging.warning('Провайдер ЭДО: карточку %s… добрать не удалось (%s)',
+                                task[1][:8], str(error)[:100])
+                return _entry_unverified(task[1], task[0])
 
         # Шаг длинный и однообразный — отмечаемся в базе по ходу, иначе сторож
         # сочтёт живую выгрузку мёртвой (так и вышло 21.08.2026 на 1068 строках).
@@ -629,10 +653,14 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
 
         for entry in _run_parallel(client, to_card, card_task,
                                    stop=stop, on_result=card_progress):
-            if entry:
-                results[entry['contractor_id']] = entry
-            else:
+            if not entry:
                 stats['not_found'] += 1
+                continue
+            results[entry['contractor_id']] = entry
+            if entry.get('source') == SOURCE_UNVERIFIED:
+                # Не «не найден»: кабинет отказался отвечать, и в отчёте это
+                # отдельная строка, а не молчаливое приписывание к пропавшим.
+                stats['unverified'] += 1
 
     # ── шаг 4½: подтверждение «бумажных» карточками ──────────────────────────
     # Зачем это вообще есть — см. VERIFY_BY_CARD. Коротко: фильтр списка врёт про
@@ -874,6 +902,29 @@ def _entry_without_provider(contractor_id, info):
         'employment_type': str(info.get('employment_type') or PARK_EMPLOYEE).strip(),
         'park_id': info.get('park_id') or '',
         'source': SOURCE_NO_PROVIDER,
+    }
+
+
+def _entry_unverified(contractor_id, park_id):
+    """Строка, про которую кабинет отказался отвечать.
+
+    Третий возможный ответ про человека, и он обязан отличаться от двух других:
+    «нашли провайдера», «водителя нет ни в одной диспетчерской» и вот это —
+    «спросить не смогли». Свалить его в «не найден» значит повторить самую
+    дорогую ошибку раздела (1 250 работающих ИП, объявленных ненайденными
+    24.08.2026), только с другой стороны.
+    """
+    return {
+        'contractor_id': contractor_id,
+        'provider_id': '',
+        'provider_name': '',
+        'full_name': '',
+        'phone': '',
+        'work_status': '',
+        'employment_type': '',
+        'park_id': park_id or '',
+        'source': SOURCE_UNVERIFIED,
+        'comment': 'Не смогли проверить: диспетчерские не ответили',
     }
 
 

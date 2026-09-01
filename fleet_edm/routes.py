@@ -355,6 +355,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 'from_card': resolution_stats.get('from_card', 0),
                 'not_found': resolution_stats.get('not_found', 0),
                 'no_provider_by_kind': resolution_stats.get('no_provider_by_kind', 0),
+                'unverified': resolution_stats.get('unverified', 0),
                 'park_probe_requests': resolution.get('park_probe_requests') or 0,
                 'classify_requests': resolution.get('classify_requests') or 0,
                 'skipped_orphans': resolution.get('skipped_orphans') or 0,
