@@ -270,6 +270,20 @@ class NumbersMatchTheScreenTests(unittest.TestCase):
         self.assertIsNotNone(found, 'EXPORT_MAX_DAYS пропал из parcelMeta.js')
         self.assertEqual(int(found.group(1)), report.EXPORT_MAX_DAYS)
 
+    def test_days_are_declined_the_same_way_on_both_sides(self):
+        """Экран и отказ сервера склоняют число одинаково — иначе в подсказке
+        «31 день», а в ошибке «31 дней», и это видит один и тот же человек."""
+        source = META_PATH.read_text(encoding='utf-8-sig')
+        js = source.split('export const pluralDays = (count) => {')[1].split('};')[0]
+        # Обе стороны знают про 11–14 (там всегда «дней», хотя цифра кончается
+        # на 1–4) — самая частая ошибка в таких помощниках.
+        self.assertIn('11', js)
+        self.assertIn('14', js)
+        for count, word in ((1, '1 день'), (2, '2 дня'), (5, '5 дней'),
+                            (11, '11 дней'), (14, '14 дней'), (21, '21 день'),
+                            (31, '31 день'), (32, '32 дня'), (45, '45 дней')):
+            self.assertEqual(report.plural_days(count), word)
+
     def test_period_length_is_counted_the_same_on_both_sides(self):
         """Обе границы включительно: «с 1 по 1» — одни сутки, а не ноль.
         Забытое «+1» на одной стороне даёт расхождение ровно в сутки."""
@@ -808,15 +822,32 @@ class RouteTests(unittest.TestCase):
                 self.assertEqual(response.get_json()['code'], 'PARCELS_PERIOD_REQUIRED')
 
     def test_period_longer_than_the_cap_is_refused_with_the_number(self):
-        """«Слишком длинно» без числа заставляет человека считать самому."""
+        """«Слишком длинно» без числа заставляет человека считать самому.
+
+        И число склоняется: текст ошибки едет в тост как есть, а «Период 31
+        суток» — не по-русски.
+        """
         client, captured = self.build(rows=[parcel()])
         response = client.get('/api/parcels/export?date_from=2026-08-01&date_to=2026-08-31')
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()['code'], 'PARCELS_PERIOD_TOO_LONG')
         error = response.get_json()['error']
-        self.assertIn('31', error, 'в отказе нет запрошенной длины')
-        self.assertIn(str(report.EXPORT_MAX_DAYS), error)
+        self.assertIn('31 день', error, 'запрошенная длина не названа или не склонена')
+        self.assertNotIn('31 суток', error)
+        self.assertIn('%d суток' % report.EXPORT_MAX_DAYS, error)
         self.assertEqual(captured, {})
+
+    def test_the_refusal_declines_the_number_for_any_length(self):
+        """Три формы русского числительного, а не одна на все случаи."""
+        client, _ = self.build(rows=[parcel()])
+        # Границы включительно, поэтому 01.08→02.09 это 33 дня, а не 32:
+        # три конца дают три разные формы числительного.
+        for date_to, expected in (('2026-08-31', '31 день'),
+                                  ('2026-09-02', '33 дня'),
+                                  ('2026-09-15', '46 дней')):
+            with self.subTest(date_to=date_to):
+                response = client.get('/api/parcels/export?date_from=2026-08-01&date_to=' + date_to)
+                self.assertIn(expected, response.get_json()['error'])
 
     def test_the_cap_itself_passes(self):
         """Ровно потолок — это ещё можно: границы считаются включительно, и

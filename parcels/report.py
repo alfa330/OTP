@@ -217,6 +217,26 @@ def kind_label(code):
     return KIND_LABELS.get(code, code or '—')
 
 
+def plural_days(count):
+    """«31 день», «32 дня», «45 дней». Двойник `pluralDays` из parcelMeta.js.
+
+    Нужен именно он, а не «%d суток»: «сутки» — множественное без формы
+    единственного, и «31 суток» — не по-русски (как и «31 сутки»). Обойти это
+    можно только сменив слово, что здесь и делается — число подставляется, а
+    текст читает живой человек в тосте.
+    """
+    value = abs(int(count or 0))
+    tail = value % 100
+    if 11 <= tail <= 14:
+        return '%d дней' % value
+    last = value % 10
+    if last == 1:
+        return '%d день' % value
+    if 2 <= last <= 4:
+        return '%d дня' % value
+    return '%d дней' % value
+
+
 def period_label(period_from, period_to):
     """«01.08.2026 — 30.08.2026» или «01.09.2026», если период в один день."""
     left, right = _ru_date(period_from), _ru_date(period_to)
