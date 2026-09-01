@@ -608,7 +608,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             .filter((v) => v.length >= 2)
             .slice(0, 8);
 
-        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        /* Обвязка галереи — не текст статьи, и подсвечивать её нельзя.
+           Подпись, точки и стрелки строит gallery.js, причём ДО этого эффекта
+           (его useEffect объявлен выше), поэтому обход находит их наравне с
+           абзацами. Совпадение, легшее в подпись, к тому же исчезает от первого
+           же сдвига ленты: подпись переписывается целиком, вместе с <mark>, — и
+           человек, которого только что к ней прокрутили, видит пустое место. */
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+            acceptNode: (node) => (node.parentElement?.closest('.wiki-gallery__chrome, .wiki-gallery__counter')
+                ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+        });
         const textNodes = [];
         while (walker.nextNode()) textNodes.push(walker.currentNode);
 

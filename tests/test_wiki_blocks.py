@@ -259,7 +259,29 @@ class EditorSchemaTest(unittest.TestCase):
 
     def test_block_menu_is_mounted(self):
         source = strip_comments(EDITOR_JSX)
-        self.assertIn('<WikiBlockMenu editor={editor} />', source)
+        self.assertIn('<WikiBlockMenu editor={editor}', source)
+
+    def test_gallery_can_be_filled_from_its_own_panel(self):
+        """У галереи обязана быть кнопка «+ кадр», как у сеток — «+ карточка».
+
+        Без неё добавить кадр в УЖЕ СОБРАННУЮ галерею нечем: кнопка картинки в
+        панели кадра собирает галерею из соседних картинок, но внутри готовой
+        отказывается работать намеренно, а вставка скриншота кладёт его туда,
+        где стоит курсор, — то есть чаще всего под галерею, а не в неё.
+
+        Сторожим всю цепочку: команда в узле, признак галереи в состоянии
+        панели, кнопка с загрузчиком и проводок между редактором и панелью.
+        Порвись любое звено — кнопка либо исчезнет, либо перестанет работать
+        молча.
+        """
+        node = strip_comments(BLOCK_NODE)
+        menu = strip_comments((WIKI_SRC / 'WikiBlockMenu.jsx').read_text(encoding='utf-8'))
+        editor = strip_comments(EDITOR_JSX)
+        self.assertIn('addWikiFrame:', node)
+        self.assertIn('gallery: null', menu)
+        self.assertIn('onAddFrame', menu)
+        self.assertIn('addWikiFrame(', editor)
+        self.assertIn('onAddFrame={', editor)
 
     def test_styles_are_imported_by_both_surfaces(self):
         """Витрина и редактор — разные чанки, и импорт нужен в обоих.

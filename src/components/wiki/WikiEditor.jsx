@@ -4,6 +4,10 @@ import axios from 'axios';
 // транзитивно и в package.json не заявлен, а на нетронутый транзитивный пакет
 // опираться нельзя — он переедет при первой же переустановке зависимостей.
 import { EditorContent, mergeAttributes, useEditor, useEditorState } from '@tiptap/react';
+/* NodeSelection — из @tiptap/pm, а не из prosemirror-state напрямую: тот стоит
+   транзитивно и в package.json не заявлен, а `npm ci` на Pages сверяет
+   манифест с локом. */
+import { NodeSelection } from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
@@ -451,7 +455,7 @@ export default function WikiEditor({
        обычная стрелка осталась бы там навсегда со ссылками на первый рендер —
        на ещё не созданный editor в том числе. */
     const uploadImage = useStableCallback((file, at) => {
-        if (!file) return;
+        if (!file) return undefined;
         const form = new FormData();
         form.append('file', file);
         return axios.post(`${base}/upload`, form, { headers })
@@ -459,11 +463,39 @@ export default function WikiEditor({
                 // Адрес постоянный (/api/wiki/file/<id>), подпись выдаётся при
                 // каждом запросе — картинки в статье не протухают.
                 const chain = editor.chain().focus();
-                if (typeof at === 'number') chain.setTextSelection(at);
+                if (typeof at === 'number') {
+                    chain.setTextSelection(at);
+                } else if (editor.state.selection instanceof NodeSelection) {
+                    /* ВЫДЕЛЕН УЗЕЛ — ВСТАВЛЯЕМ ЗА НИМ, А НЕ ВМЕСТО НЕГО.
+                       Щелчок по картинке даёт выделение всего узла, а обычная
+                       вставка заменяет выделенное: скриншот, вставленный при
+                       выбранном кадре галереи, ЗАТИРАЛ этот кадр. Пропажу и не
+                       заметить — кадров было три, стало три же. Текстовое
+                       выделение по-прежнему заменяется, как от вставки и ждут. */
+                    chain.insertContentAt(editor.state.selection.to,
+                        { type: 'image', attrs: { src: r.data.url } }).run();
+                    setDirty(true);
+                    return;
+                }
                 chain.setImage({ src: r.data.url }).run();
                 setDirty(true);
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось загрузить картинку'), 'error'));
+    });
+
+    /* «+ кадр» из панели галереи. Отдельно от uploadImage потому, что место
+       вставки здесь определяет не курсор, а сама галерея: команда addWikiFrame
+       кладёт кадр её ПОСЛЕДНИМ ребёнком. Файлы уходят по очереди — по тем же
+       двум причинам, что и при перетаскивании (см. insertImageFiles). */
+    const addGalleryFrames = useStableCallback((files) => {
+        if (!files?.length) return undefined;
+        return files.reduce((queue, file) => queue.then(() => {
+            const form = new FormData();
+            form.append('file', file);
+            return axios.post(`${base}/upload`, form, { headers })
+                .then((r) => { editor.chain().addWikiFrame(r.data.url).run(); setDirty(true); })
+                .catch((e) => showToast?.(errText(e, 'Не удалось загрузить кадр'), 'error'));
+        }), Promise.resolve());
     });
 
     /* true — событие разобрано нами, ProseMirror пусть не вставляет ничего сам.
@@ -883,7 +915,16 @@ export default function WikiEditor({
                                 type="file"
                                 className="hidden"
                                 accept="image/*"
-                                onChange={(e) => { uploadImage(e.target.files?.[0]); e.target.value = ''; }}
+                                multiple
+                                onChange={(e) => {
+                                    /* multiple, а не одна картинка: кадры
+                                       галереи выбирают пачкой, и без этого
+                                       автору приходилось открывать окно выбора
+                                       по разу на кадр. Очередь insertImageFiles
+                                       пачку уже умеет. */
+                                    insertImageFiles(Array.from(e.target.files || []));
+                                    e.target.value = '';
+                                }}
                             />
                         </label>
                         <Divider />
@@ -976,7 +1017,7 @@ export default function WikiEditor({
                             тулбаре стояли бы погашенными. Двух панелей разом
                             не бывает: у блока с таблицей внутри всплывает
                             панель таблицы — так решено в её shouldShow. */}
-                        <WikiBlockMenu editor={editor} />
+                        <WikiBlockMenu editor={editor} onAddFrame={addGalleryFrames} />
                     </div>
                 </div>
             </section>

@@ -188,7 +188,14 @@ const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor, g
         const pos = getPos?.();
         if (typeof pos !== 'number') return;
         if (galleryState?.inside) {
-            editor.chain().focus().unwrapWikiBlock(['gallery']).run();
+            /* Выделение СНАЧАЛА ставится на этот самый кадр, и только потом
+               идёт разбор. unwrapWikiBlock ищет блок от курсора наружу, а
+               панель показывается и по наведению, причём нажатие на её кнопках
+               намеренно погашено (hold), чтобы выделение не переезжало, — то
+               есть к моменту щелчка курсор мог стоять где угодно, и кнопка
+               молча не срабатывала. focus() последним: поставь его раньше, и
+               он вернёт прежнее выделение. */
+            editor.chain().setNodeSelection(pos).unwrapWikiBlock(['gallery']).focus().run();
             return;
         }
         editor.chain().focus().wrapImagesInGallery(pos).run();
@@ -211,33 +218,48 @@ const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor, g
                             title="Перетащить картинку по тексту">
                             <GripVertical size={13} />
                         </span>
-                        {ALIGNS.map((value) => {
-                            const Icon = ALIGN_ICON[value];
-                            return (
-                                <button key={value} type="button"
-                                    className={align === value ? 'is-on' : ''}
-                                    title={ALIGN_TITLE[value]}
-                                    onMouseDown={hold}
-                                    onClick={() => toggleAlign(value)}>
-                                    <Icon size={13} />
+                        {/* РАЗМЕР И ВЫРАВНИВАНИЕ — ТОЛЬКО ВНЕ ГАЛЕРЕИ.
+                            Внутри неё ширину и положение кадра задаёт сама
+                            галерея: кадры одного действия обязаны быть одного
+                            размера, иначе листание выглядит как дёрганье, и
+                            правило в wiki-blocks.css стоит с !important. То
+                            есть кнопки продолжали бы показывать проценты и
+                            писать data-width в тело статьи, а на экране не
+                            менялось бы ничего — ни у автора, ни у читателя.
+                            Хуже того, оставленный процент всплывал бы позже,
+                            когда кадр вынут из галереи обратно: команда сборки
+                            эти атрибуты как раз намеренно снимает. */}
+                        {!galleryState?.inside && (
+                            <>
+                                {ALIGNS.map((value) => {
+                                    const Icon = ALIGN_ICON[value];
+                                    return (
+                                        <button key={value} type="button"
+                                            className={align === value ? 'is-on' : ''}
+                                            title={ALIGN_TITLE[value]}
+                                            onMouseDown={hold}
+                                            onClick={() => toggleAlign(value)}>
+                                            <Icon size={13} />
+                                        </button>
+                                    );
+                                })}
+                                <button type="button" title="Уменьшить" onMouseDown={hold}
+                                    onClick={() => step(-STEP)}>
+                                    <Minus size={13} />
                                 </button>
-                            );
-                        })}
-                        <button type="button" title="Уменьшить" onMouseDown={hold}
-                            onClick={() => step(-STEP)}>
-                            <Minus size={13} />
-                        </button>
-                        <span className="wiki-image-node__size">
-                            {size ? `${clampSize(size)}%` : 'авто'}
-                        </span>
-                        <button type="button" title="Увеличить" onMouseDown={hold}
-                            onClick={() => step(STEP)}>
-                            <Plus size={13} />
-                        </button>
-                        <button type="button" title="Вернуть исходный размер" onMouseDown={hold}
-                            onClick={() => updateAttributes({ size: null })}>
-                            <RotateCcw size={13} />
-                        </button>
+                                <span className="wiki-image-node__size">
+                                    {size ? `${clampSize(size)}%` : 'авто'}
+                                </span>
+                                <button type="button" title="Увеличить" onMouseDown={hold}
+                                    onClick={() => step(STEP)}>
+                                    <Plus size={13} />
+                                </button>
+                                <button type="button" title="Вернуть исходный размер" onMouseDown={hold}
+                                    onClick={() => updateAttributes({ size: null })}>
+                                    <RotateCcw size={13} />
+                                </button>
+                            </>
+                        )}
                         {galleryState && (
                             <button type="button"
                                 className={galleryState.inside ? 'is-on' : ''}
@@ -262,7 +284,9 @@ const WikiImageView = ({ node, updateAttributes, deleteNode, selected, editor, g
                 <img ref={imgRef} src={src || ''} alt={alt || ''} title={title || undefined}
                     draggable={false} />
 
-                {editable && (
+                {/* Ручка тяги — тоже только вне галереи: внутри неё она тянула
+                    бы процент, который на экране не действует. */}
+                {editable && !galleryState?.inside && (
                     <span className="wiki-image-node__resize" onPointerDown={startResize}
                         role="presentation" title="Потяните, чтобы изменить размер" />
                 )}

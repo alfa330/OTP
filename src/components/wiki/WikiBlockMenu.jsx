@@ -93,7 +93,7 @@ const ToneButton = ({ tone, active, onClick }) => {
    относится к карточке, а «три колонки» к сетке. */
 const EMPTY = {
     card: null, cards: null, note: null, lead: null,
-    stat: null, stats: null, innermost: null,
+    stat: null, stats: null, gallery: null, innermost: null,
 };
 
 const readBlocks = (ed) => {
@@ -124,7 +124,7 @@ const TARGET_LABELS = {
     lead: 'вводку',
 };
 
-export default function WikiBlockMenu({ editor }) {
+export default function WikiBlockMenu({ editor, onAddFrame }) {
     /* Состояние читаем через useEditorState: useEditor в TipTap 3 по умолчанию
        НЕ перерисовывает компонент на транзакциях, и прочитанное прямо в теле
        рендера навсегда осталось бы значением на момент открытия редактора —
@@ -258,6 +258,34 @@ export default function WikiBlockMenu({ editor }) {
                     >
                         <Plus size={14} />
                     </Btn>
+                    <Sep />
+                </>
+            )}
+
+            {/* ГАЛЕРЕЯ: «+ кадр». У сеток такая кнопка есть с самого начала, а
+                у галереи её не было — и добавить кадр в уже собранную галерею
+                было нечем вовсе. Кнопка картинки в панели самого кадра собирает
+                галерею из соседних картинок, но ВНУТРИ готовой она намеренно
+                отказывается работать, а вставка скриншота кладёт его туда, где
+                стоит курсор, то есть чаще всего под галерею. */}
+            {state?.gallery && onAddFrame && (
+                <>
+                    <Label>Галерея</Label>
+                    <label
+                        title="Добавить кадр"
+                        className="grid h-7 w-7 shrink-0 cursor-pointer place-items-center rounded-lg
+                            text-slate-500 transition hover:bg-slate-100"
+                        onMouseDown={(e) => e.preventDefault()}
+                    >
+                        <Plus size={14} />
+                        <input
+                            type="file"
+                            className="hidden"
+                            accept="image/*"
+                            multiple
+                            onChange={(e) => { onAddFrame(Array.from(e.target.files || [])); e.target.value = ''; }}
+                        />
+                    </label>
                     <Sep />
                 </>
             )}

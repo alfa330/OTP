@@ -31,6 +31,13 @@
  */
 
 import { Extension, Node, mergeAttributes } from '@tiptap/react';
+/* TextSelection берётся из @tiptap/pm, а НЕ из prosemirror-state напрямую:
+   prosemirror-state стоит транзитивно и в package.json не заявлен, а сборка на
+   Pages идёт через `npm ci` — она сверяет манифест с локом. Та же причина
+   расписана в WikiImageNode.jsx про mergeAttributes. */
+import { TextSelection } from '@tiptap/pm/state';
+
+import { galleryNodeView } from './galleryNodeView.js';
 
 /* Тона плашек и карточек. Порядок — тот, в котором они стоят в панели: от
    нейтрального к тревожному, тёмный отдельно в конце. */
@@ -117,12 +124,13 @@ export const GRID_ITEMS = {
    пережил бы санитайзер и остался в теле статьи навсегда — мусором, который
    потом никто не решится вычистить, не зная, чей он. */
 export const BLOCK_KINDS = ['lead', 'note', 'cards', 'card', 'stats', 'stat',
-    /* Галерея — единственный блок, который заводит не человек, а импортёр
-       (wiki/yandex_pro.py): у источника несколько кадров одного действия
-       лежат каруселью. В меню вставки её нет намеренно — пустая галерея
-       без картинок выглядит поломкой вёрстки. Листание живёт на витрине
-       (WikiArticle.jsx), в редакторе это обычная полоса картинок, из
-       которой любую можно убрать. */
+    /* Галерея — несколько кадров одного действия, которые читатель листает
+       на месте. Заводится тремя путями: пунктом меню вставки (INSERT_BLOCKS),
+       кнопкой «собрать в галерею» у самой картинки (WikiImageNode.jsx) и
+       импортёром базы знаний Яндекс Про (wiki/yandex_pro.py) — у источника
+       такие кадры и лежат каруселью. Листание одно и то же в обоих местах:
+       при чтении его ставит mountGalleries (WikiArticle.jsx), в редакторе —
+       вид узла (galleryNodeView.js), и оба зовут attachGallery из gallery.js. */
     'gallery'];
 export const BLOCK_COLS = ['1', '2', '3'];
 
@@ -254,15 +262,48 @@ export const WikiBlock = Node.create({
         return ['div', mergeAttributes(HTMLAttributes), 0];
     },
 
+    /* СВОЙ ВИД — ТОЛЬКО У ГАЛЕРЕИ. Она единственная из блоков не просто
+       выглядит по-своему, а РАБОТАЕТ: кадры листаются. Без вида узла автор
+       видел в редакторе полосу кадров, которая не листалась вовсе (замер —
+       scrollWidth равнялся clientWidth), то есть собирал галерею вслепую.
+
+       Остальным блокам вид не нужен, и galleryNodeView возвращает для них
+       undefined: ProseMirror на пустой ответ рисует узел через toDOM схемы,
+       ровно как рисовал бы без всякого вида. Почему это надёжно и почему вид
+       не может разойтись с renderHTML — расписано в galleryNodeView.js. */
+    addNodeView() {
+        return galleryNodeView;
+    },
+
     addCommands() {
         return {
             /* Вставка блока по шаблону. Шаблон — строка HTML, а не описание
                узлов: ровно ту же строку понимает и санитайзер, и ИИ, и глаз
                человека, который читает этот файл. */
-            insertWikiBlock: (kindKey) => ({ chain }) => {
+            insertWikiBlock: (kindKey) => ({ state, chain }) => {
                 const kind = INSERT_BLOCKS.find((item) => item.key === kindKey);
                 if (!kind) return false;
-                return chain().focus().insertContent(kind.template).run();
+                const before = state.selection.from;
+                return chain().focus().insertContent(kind.template)
+                    /* КАРЕТКА ОСТАЁТСЯ В ГАЛЕРЕЕ, а не уезжает за неё.
+                       Шаблон кончается пустым абзацем, и TipTap по общему
+                       правилу ставит курсор в САМЫЙ конец вставки — то есть
+                       ниже блока. Для плашки это верно (текст пишут под ней),
+                       а для галереи губительно: следующий вставленный скриншот
+                       ложился ПОД галерею, и автор, сделавший ровно то, что
+                       просит подсказка внутри, получал кадр мимо неё. */
+                    .command(({ tr, dispatch }) => {
+                        if (kindKey !== 'gallery' || !dispatch) return true;
+                        let at = null;
+                        tr.doc.nodesBetween(Math.max(0, before - 1), tr.selection.to,
+                            (node, pos) => {
+                                if (at === null && node.type.name === 'wikiBlock'
+                                    && node.attrs.kind === 'gallery') at = pos;
+                            });
+                        if (at !== null) tr.setSelection(TextSelection.near(tr.doc.resolve(at + 1)));
+                        return true;
+                    })
+                    .run();
             },
 
             /* Сменить свойство ближайшего блока нужного вида. */
@@ -321,6 +362,25 @@ export const WikiBlock = Node.create({
                         { kind: 'gallery' }, frames));
                 }
                 return true;
+            },
+
+            /* Ещё один кадр — в конец той галереи, в которой стоит курсор.
+               Тот же приём, что у кнопки «+ карточка» у сеток: адрес картинки
+               приходит снаружи, потому что положить её в бакет умеет только
+               редактор (WikiEditor.jsx), а знать, куда именно её класть, — он
+               не обязан. Без этой команды добавить кадр в уже собранную
+               галерею было НЕЧЕМ: кнопка картинки собирает галерею из соседних
+               кадров, но внутри готовой отказывается работать намеренно. */
+            addWikiFrame: (src) => ({ state, chain }) => {
+                if (!src) return false;
+                const found = findBlock(state, ['gallery']);
+                if (!found) return false;
+                // to указывает ЗА закрывающий тег галереи; минус единица ставит
+                // вставку внутрь, последним кадром.
+                return chain()
+                    .insertContentAt(found.to - 1, { type: 'image', attrs: { src } })
+                    .focus()
+                    .run();
             },
 
             unwrapWikiBlock: (kinds) => ({ state, tr, dispatch }) => {
