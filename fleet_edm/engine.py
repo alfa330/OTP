@@ -608,8 +608,21 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         skipped_orphans = len(orphan_left) - max_orphan_lookups
         orphan_left = orphan_left[:max_orphan_lookups]
 
-    to_card = [(park_id, contractor_id) for park_id, contractor_id in leftovers] + \
-              [('', contractor_id) for contractor_id in orphan_left]
+    # ВЫБОРОЧНЫЙ КОНТРОЛЬ ПО «НИЧЬИМ» СТРОКАМ — В КОНЕЦ, А НЕ В НАЧАЛО.
+    #
+    # Строка без парка ищется перебором всех 86 диспетчерских, и на живой выгрузке
+    # №36 (25 126 строк, 01.09.2026) эта тройка стоила 11,5 минуты КАЖДОЙ попытке.
+    # Вместе с перезапуском и подхватом выходил оброк в 13,5 минуты — больше, чем
+    # промежуток между деплоями в тот день (медиана 10 минут при 11 деплоях за час
+    # сорок). Итог: пять попыток из восьми не сделали ни одной полезной строки, а
+    # подтверждение 5 675 карточек так и не начиналось.
+    #
+    # Полезность у этого шага при этом мизерная: перебор диспетчерских УЖЕ спросил
+    # про эти ID все 86 в обоих сегментах, и карточка нужна лишь как выборочный
+    # контроль известного дефекта списка. Значит его место — после главной работы,
+    # чтобы убитая деплоем попытка теряла контроль, а не весь прогон.
+    orphan_sample = [('', contractor_id) for contractor_id in orphan_left]
+    to_card = [(park_id, contractor_id) for park_id, contractor_id in leftovers]
     if to_card:
         progress(percent=90, requests=client.requests_count,
                  note='Добираем из карточек: {} строк'.format(len(to_card)))
@@ -683,6 +696,40 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         stop=stop, save=save, cache=card_cache)
     stats['verified'] = verify['checked']
     stats['verify_fixed'] = len(verify['fixed'])
+
+    # ── шаг 4¾: выборочный контроль по «ничьим» строкам ──────────────────────
+    # Тот самый перебор диспетчерских, который раньше стоял ПЕРЕД подтверждением
+    # и съедал каждую попытку целиком (см. комментарий у orphan_sample). Здесь он
+    # безопасен: главная работа уже сделана и лежит в контрольной точке.
+    if orphan_sample:
+        progress(percent=94, requests=client.requests_count,
+                 note='Проверяем строки без диспетчерской: {}'.format(len(orphan_sample)))
+
+        def orphan_task(task):
+            stop()
+            try:
+                return _card_lookup(client, task[1], '', parks, allow_scan=True)
+            except FleetSessionExpired:
+                raise
+            except FleetError as error:
+                logging.warning('Провайдер ЭДО: «ничья» строка %s… не проверилась (%s)',
+                                task[1][:8], str(error)[:100])
+                return _entry_unverified(task[1], '')
+
+        def orphan_progress(entry, done, total):
+            if entry:
+                save(rows=[(entry['contractor_id'], entry.get('park_id'), entry)])
+            progress(percent=94, requests=client.requests_count,
+                     note='Проверяем строки без диспетчерской: {} из {}'.format(done, total))
+
+        for entry in _run_parallel(client, orphan_sample, orphan_task,
+                                   stop=stop, on_result=orphan_progress):
+            if not entry:
+                stats['not_found'] += 1
+                continue
+            results[entry['contractor_id']] = entry
+            if entry.get('source') == SOURCE_UNVERIFIED:
+                stats['unverified'] += 1
 
     # ── шаг 5: контрольная сверка ────────────────────────────────────────────
     check = {'checked': 0, 'matched': 0, 'mismatched': []}
@@ -893,14 +940,18 @@ def _verify_by_card(client, results, providers, verify_providers, progress,
         contractor_id, card_value = result
         if card_value is None:
             # Не спросили — значение списка остаётся, но ярлык НЕ меняем: пусть
-            # следующая попытка вернётся к этой строке.
+            # следующая попытка вернётся к этой строке. Раньше здесь стоял
+            # ранний выход, и он перепрыгивал ЗАПИСЬ ПРОГРЕССА: пока кабинет
+            # молчал на всё подряд, карточка выгрузки не обновлялась вовсе и
+            # живой обход выглядел мёртвым (01.09.2026 я на этом сам обманулся
+            # и полез искать несуществующий клинч).
             outcome['silent'] += 1
-            return
-        outcome['checked'] += 1
-        apply(contractor_id, card_value)
-        entry = results[contractor_id]
-        save(rows=[(contractor_id, entry.get('park_id'), entry)])
-        fresh.append((contractor_id, entry.get('park_id'), card_value))
+        else:
+            outcome['checked'] += 1
+            apply(contractor_id, card_value)
+            entry = results[contractor_id]
+            save(rows=[(contractor_id, entry.get('park_id'), entry)])
+            fresh.append((contractor_id, entry.get('park_id'), card_value))
         if done % PROGRESS_EVERY == 0 or done == total:
             if cache is not None and fresh:
                 # Кеш пополняем по ходу, а не в конце: прогон на тысячи строк

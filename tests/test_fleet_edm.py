@@ -24,7 +24,8 @@ from openpyxl import Workbook, load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fleet_edm import access, engine, report  # noqa: E402
-from fleet_edm.client import MAX_BATCH, FleetClient, FleetError, FleetSessionExpired  # noqa: E402
+from fleet_edm.client import (MAX_BATCH, THROTTLE_RECOVERY_AFTER, FleetClient,  # noqa: E402
+                               FleetError, FleetSessionExpired)
 from fleet_edm.routes import _safe_name  # noqa: E402
 
 PARK_A = 'a' * 32
@@ -840,11 +841,18 @@ class ThrottleTest(unittest.TestCase):
         self.assertTrue(all(value <= first for value in echoes))
         self.assertEqual(client.concurrency, 5)     # поток убавили ровно один раз
 
-    def test_threads_return_only_after_a_long_quiet_stretch(self):
+    def test_threads_return_only_after_a_quiet_stretch(self):
+        """Поток возвращается не сразу, но и не «никогда».
+
+        Порог опущен с двухсот до сорока 01.09.2026: на длинном проходе
+        карточками кабинет отбивал каждый второй запрос, двухсот чистых ответов
+        ПОДРЯД не набиралось ни разу, и пул навсегда оседал на полу в два потока —
+        20 карточек в минуту вместо возможных пятидесяти.
+        """
         client = self._client()
         client._note_throttled()
         self.assertEqual(client.concurrency, 5)
-        for _ in range(199):
+        for _ in range(THROTTLE_RECOVERY_AFTER - 1):
             client._note_success()
         self.assertEqual(client.concurrency, 5)
         client._note_success()
