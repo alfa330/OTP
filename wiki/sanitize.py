@@ -87,6 +87,15 @@ ALLOWED_ATTRIBUTES['col'] |= {'span', 'width'}
 # поэтому имя добавляется отдельно.
 ALLOWED_ATTRIBUTES['ul'] |= {'data-variant'}
 ALLOWED_ATTRIBUTES['ol'] |= {'data-variant'}
+# start у нумерованного списка — не оформление, а СМЫСЛ, и потому отдельной
+# строкой от вида списка. Внешние источники разрывают один перечень картинкой
+# между пунктами и продолжают его вторым списком с start="2" — так устроены
+# инструкции базы знаний Яндекс Про (wiki/yandex_pro.py). Без этого атрибута
+# второй кусок начинает нумерацию заново, и шаг 2 читается как шаг 1: молча,
+# потому что разметка при этом совершенно правильная. Узел редактора
+# (StarterKit, orderedList) start знает сам, DOMPurify на витрине пропускает
+# его по умолчанию — правка нужна только здесь.
+ALLOWED_ATTRIBUTES['ol'] |= {'start'}
 ALLOWED_ATTRIBUTES['details'] |= {'open'} | _WIKI_DATA_ATTRS
 ALLOWED_ATTRIBUTES['summary'] |= _WIKI_DATA_ATTRS
 ALLOWED_ATTRIBUTES['div'] |= _WIKI_DATA_ATTRS

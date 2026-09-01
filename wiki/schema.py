@@ -1951,6 +1951,91 @@ _MIGRATION_STATEMENTS = [
 ]
 
 
+# ── Связь статьи с живой страницей базы знаний Яндекс Про ────────────────────
+#
+# ЗАЧЕМ ОТДЕЛЬНАЯ ТАБЛИЦА, А НЕ КОЛОНКИ В wiki_article_imports. Та отвечает на
+# вопрос «откуда это приехало» и закрывается решением модератора раз и
+# навсегда. Здесь же связь ЖИВАЯ: страница у Яндекса меняется, и её надо
+# сверять каждую ночь. Смешав это в одной строке, мы получили бы таблицу, у
+# которой половина колонок про прошлое, а половина про будущее, и очередь
+# модерации ожила бы от каждой ночной сверки.
+_YANDEX_PRO_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_yandex_pages (
+        article_id      INTEGER PRIMARY KEY
+                        REFERENCES wiki_articles(id) ON DELETE CASCADE,
+        -- Канонический адрес страницы (без параметров запроса). Он же ключ
+        -- повторного прогона: у страницы базы знаний есть и числовой
+        -- entity_id, но по адресу человек её узнаёт, а число видит только
+        -- разобранный JSON.
+        url             TEXT NOT NULL,
+        entity_id       INTEGER,
+        source_slug     VARCHAR(255),
+        source_title    VARCHAR(255),
+        -- Дата правки, как её пишет источник: «27 мая 2025». Строкой, потому
+        -- что это ТЕКСТ с их страницы, а не время: разбирать русский месяц
+        -- ради поля, по которому мы не сортируем, — лишний источник ошибок.
+        source_updated  VARCHAR(64),
+        -- Отпечаток СОДЕРЖИМОГО источника (wiki/yandex_pro.py: fingerprint).
+        -- По нему видно «страница изменилась», и только по нему: у самих
+        -- байтов страницы меняется buildId, и сверка по ним переписывала бы
+        -- статью каждую ночь.
+        fingerprint     CHAR(64),
+        -- Отпечаток ТЕЛА СТАТЬИ, каким его записал импортёр (md5, как в
+        -- wiki/edit.py: current_state). Нужен, чтобы отличить «статью с тех
+        -- пор никто не трогал» от «человек её поправил руками». Во втором
+        -- случае ночная сверка НЕ перезаписывает текст: она только помечает
+        -- страницу изменившейся, а решение остаётся за человеком.
+        content_hash    VARCHAR(32),
+        auto_sync       BOOLEAN NOT NULL DEFAULT TRUE,
+        -- Оформлять ли текст помощником после каждой сверки. Хранится у
+        -- страницы, а не у прогона: оформление — свойство статьи, и повторная
+        -- сверка обязана дать тот же вид, что и первый импорт.
+        ai_format       BOOLEAN NOT NULL DEFAULT FALSE,
+        linked_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        linked_at       TIMESTAMP NOT NULL DEFAULT %(now)s,
+        last_checked_at TIMESTAMP,
+        last_changed_at TIMESTAMP,
+        -- Состояние последней сверки: ok | changed | conflict | error.
+        -- 'conflict' — источник изменился, а статью правили руками.
+        last_status     VARCHAR(16),
+        last_error      TEXT
+    );
+    """,
+    # Одна статья на страницу и одна страница на статью. Без этого индекса две
+    # статьи подписались бы на один адрес, и ночная сверка переписывала бы обе
+    # одним и тем же текстом — то есть ровно тот дубль, ради отсутствия
+    # которого всё и затевалось.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_yandex_pages_url "
+    "ON wiki_yandex_pages (url);",
+    # Выборка ночной сверки: только подписанные на автообновление, по давности.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_yandex_pages_due "
+    "ON wiki_yandex_pages (last_checked_at) WHERE auto_sync;",
+
+    """
+    CREATE TABLE IF NOT EXISTS wiki_yandex_images (
+        -- Адрес кадра в хранилище Яндекса. Ключ именно он: у одного и того же
+        -- кадра там постоянный адрес, и по нему повторная сверка узнаёт, что
+        -- картинка уже у нас.
+        source_url  TEXT PRIMARY KEY,
+        file_id     UUID REFERENCES wiki_files(id) ON DELETE CASCADE,
+        -- Наш постоянный адрес /api/wiki/file/<uuid>. Дублирует file_id
+        -- намеренно: тело статьи собирается строкой, и лишний запрос за
+        -- адресом на каждую картинку — это лишний запрос на каждую сверку.
+        wiki_url    VARCHAR(255) NOT NULL,
+        width       INTEGER,
+        height      INTEGER,
+        created_at  TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    # Без этого соответствия каждая ночная сверка заливала бы те же кадры
+    # заново: в wiki_files нет ни хеша содержимого, ни удаления, и за месяц
+    # бакет распух бы на тридцать копий каждой картинки.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_yandex_images_file "
+    "ON wiki_yandex_images (file_id);",
+]
+
+
 _SPACE_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS wiki_space_departments (
@@ -2246,6 +2331,11 @@ def init_wiki_schema(cursor):
     # Перенос из внешней вики — после базовых таблиц: строка ссылается и на
     # wiki_articles, и на users.
     for statement in _MIGRATION_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Связь с базой знаний Яндекс Про — после переноса: та же зависимость от
+    # wiki_articles и users, плюс wiki_files у таблицы картинок.
+    for statement in _YANDEX_PRO_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
 
     for statement in _PARK_STATEMENTS:

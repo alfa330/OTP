@@ -359,4 +359,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     routes_migration.register(bp, wiki_route, db, _ip, session_id_provider,
                               edit_helpers)
 
+    # База знаний Яндекс Про — после routes_migration: делит с ним и проверку на
+    # дубль, и очередь модерации. gcs — ради картинок страницы: они ложатся в
+    # тот же бакет и тем же переводом в WebP, что картинки статей.
+    from . import routes_yandex_pro
+    routes_yandex_pro.register(bp, wiki_route, db, _ip, session_id_provider,
+                               edit_helpers, gcs or {})
+
     return bp
