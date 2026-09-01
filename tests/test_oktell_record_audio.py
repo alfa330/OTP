@@ -171,13 +171,31 @@ class OktellRecordAudioTests(unittest.TestCase):
         start = source.index("def fetch_random_evaluation_call(")
         end = source.index("\n@app.route('/api/audio/", start)
         endpoint = source[start:end]
-        fetch_pos = endpoint.index("_oktell_fetch_record_to_gcs(conn_id)")
+        fetch_pos = endpoint.index(
+            "_oktell_fetch_record_to_gcs(conn_id, record_paths.get(conn_id))")
         import_pos = endpoint.index("db.import_single_random_call(", fetch_pos)
 
         self.assertLess(fetch_pos, import_pos)
         self.assertIn('notes=f"random:{requester_id}:oktell"', endpoint)
         self.assertIn("audio_path=audio_path", endpoint)
         self.assertIn('"audio_pending": False', endpoint)
+
+    def test_random_call_resolves_record_paths_before_downloading(self):
+        """«Случайный звонок» обязан считать пути к записям пачкой.
+
+        Иначе скачивание идёт фолбэком на /record/{conn_id}, а та ручка сортирует линии
+        не строково и на исходящих (ct=1) всегда отдаёт 404 — у операторов исходящих
+        направлений кнопка не находила ни одного звонка."""
+        source = BOT_PATH.read_text(encoding="utf-8")
+        start = source.index("def fetch_random_evaluation_call(")
+        end = source.index("\n@app.route('/api/audio/", start)
+        endpoint = source[start:end]
+
+        paths_pos = endpoint.index("record_paths = _oktell_record_paths_by_conn(")
+        fetch_pos = endpoint.index("_oktell_fetch_record_to_gcs(")
+        self.assertLess(paths_pos, fetch_pos)
+        # Пути считаются один раз до цикла, а не на каждый звонок.
+        self.assertEqual(endpoint.count("_oktell_record_paths_by_conn("), 1)
 
     def test_old_imports_can_fetch_oktell_audio_on_demand(self):
         source = BOT_PATH.read_text(encoding="utf-8")

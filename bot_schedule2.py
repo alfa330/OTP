@@ -24334,6 +24334,14 @@ def fetch_random_evaluation_call():
 
         # 3) исключаем то, что уже в оценках/пуле, и кладём до `count` новых звонков
         existing = db.get_imported_call_external_ids_for_operator(operator_id)
+        # Пути к записям — одним SELECT-ом на всю выборку, как в «Делении звонков».
+        # Без них скачивание уходит фолбэком на /record/{conn_id}, а та ручка сортирует
+        # линии не строково и на ИСХОДЯЩИХ (ct=1, ALineNum вида 17eNNN) всегда отдаёт 404.
+        # Из-за этого у операторов исходящих направлений кнопка не находила ни одного
+        # звонка: кандидаты были, но каждый отсеивался как «без аудиозаписи».
+        record_paths = _oktell_record_paths_by_conn(
+            [c.get('conn_id') for c in sample
+             if str(c.get('conn_id') or '') and str(c.get('conn_id')) not in existing])
         created_list = []
         audio_missing = 0
         audio_errors = 0
@@ -24354,7 +24362,7 @@ def fetch_random_evaluation_call():
             if not month:
                 continue
             try:
-                audio_path = _oktell_fetch_record_to_gcs(conn_id)
+                audio_path = _oktell_fetch_record_to_gcs(conn_id, record_paths.get(conn_id))
             except Exception:
                 audio_errors += 1
                 logging.exception("random_call: Oktell audio fetch failed (conn_id=%s)", conn_id)
