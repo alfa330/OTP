@@ -707,31 +707,38 @@ class ZaiProviderTest(unittest.TestCase):
         block = self.sent[-1]['payload']['messages'][-1]['content'][0]
         self.assertEqual('image_url', block['type'])
 
-    def test_editor_chain_puts_vertex_first(self):
-        """Редактор статей собирает Vertex — размен принят владельцем осознанно.
+    def test_editor_chain_picks_the_model_strong_at_both(self):
+        """Первым — модель, берущая ОБЕ мерки сразу.
 
-        Мерились две вещи, и модели разошлись по ним в разные стороны
-        (01.09.2026, два настоящих документа, по два прогона):
-          ПОЛНОТА, доля переноса: vertex 0,466-0,651 против zai 0,991-1,037.
-              Vertex останавливается сам на ~1 400-1 500 выходных токенах при
-              потолке 9 000 и finish='STOP' — пересказывает вместо переноса;
-          ОФОРМЛЕНИЕ, видов блоков из девяти: vertex 6 (lead, stats, stat,
-              cards, card, note; списки checks, crosses, chips, steps) против
-              zai 2 (lead, note; только steps). GLM повторяется до символа и
-              новых блоков гида не трогает вовсе.
-        Владелец посмотрел статьи глазами и выбрал оформление: «glm реально хуже
-        делает стили, надо вернуть gemini». Про сжатие человек узнаёт из
-        structure_warnings — при доле ниже 0,6 она пишет об этом в редактор.
+        16 прогонов 01.09.2026, два настоящих документа, один и тот же промпт:
+
+          модель                        перенос (4 прогона)  блоков  сек  $/статью
+          vertex:gemini-3.5-flash       0,93 0,99 1,01 1,03  4-6     10   0,0291
+          vertex:gemini-3.6-flash       0,97 1,00 1,01 1,02  4       13   0,0255
+          vertex:gemini-3-flash-preview 0,51 0,54 0,58 0,67  6       15   0,0067
+          zai:glm-5.3-flash             0,99 0,99 0,99 1,00  2       33   0,0009
+
+        3.5-flash единственный переносит документ целиком и при этом дважды из
+        четырёх прогонов дотянулся до тех же ШЕСТИ видов блоков, что и
+        gemini-3-flash-preview. Предшественники не годились каждый по своему:
+        3-flash-preview пересказывал (0,58 в среднем), GLM брал два вида блоков
+        из девяти, и владелец забраковал его глазами.
         """
-        self.assertEqual(('vertex', 'gemini-3-flash-preview'),
+        self.assertEqual(('vertex', 'gemini-3.5-flash'),
                          ai_providers.editor_chain()[0])
 
-    def test_editor_keeps_glm_as_fallback(self):
-        """Полная статья с бедным оформлением лучше, чем отказ.
+    def test_editor_fallbacks_go_across_vendors(self):
+        """Второе звено — ближайшая замена, третье — другой поставщик.
 
-        Её редактор дооформит. Пустой экран дооформить нечем.
+        gemini-3.6-flash по переносу ровнее, по оформлению беднее (всегда 4 вида)
+        и на 12 % дешевле — годная замена при отказе. GLM третьим: он
+        единственный не от Google, и при недоступности Vertex целиком статья всё
+        же соберётся, пусть и бедно.
         """
-        self.assertIn('zai', [p for p, _ in ai_providers.editor_chain()])
+        self.assertEqual([('vertex', 'gemini-3.5-flash'),
+                          ('vertex', 'gemini-3.6-flash'),
+                          ('zai', 'glm-5.3-flash')],
+                         list(ai_providers.editor_chain()))
 
     def test_editor_chain_drops_links_that_cannot_build_an_article(self):
         """Бесплатные звенья чата в цепочку редактора не попадают.
@@ -778,7 +785,7 @@ class ZaiProviderTest(unittest.TestCase):
         finally:
             ai_providers._ADAPTERS.clear()
             ai_providers._ADAPTERS.update(original)
-        self.assertEqual(['gemini-3-flash-preview'], seen)
+        self.assertEqual(['gemini-3.5-flash'], seen)
 
     def test_zai_reads_files_too(self):
         """У PDF и картинок резерва не было вовсе: цепочка файла — vertex+gemini,
