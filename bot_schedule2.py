@@ -54723,6 +54723,10 @@ except Exception:
 # Тот же приём, что у вики и обращений. Ключ sensitive-access тот же самый:
 # в карточке ФИО и телефон живого водителя, и оба отдела — фронт-офисы и СЗоВ —
 # открывают раздел только после QR-подтверждения сессии (ТЗ задачи #240).
+#
+# Хелпер <ignoredErrors> передаётся аргументом (задача #257, выгрузка реестра в
+# Excel): он живёт здесь, в монолите, а обратный импорт из пакета был бы циклом.
+# Без него книга соберётся, просто с зелёным уголком на каждом телефоне.
 try:
     from parcels.routes import build_parcels_blueprint  # noqa: E402
 
@@ -54732,6 +54736,7 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         sensitive_access_granted=_sensitive_access_granted_for_user,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
     ))
     logging.info("Раздел «Посылки»: Blueprint подключён на /api/parcels")
 except Exception:

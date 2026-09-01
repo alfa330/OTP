@@ -13,6 +13,7 @@ OPTIONS и первым делом отдаётся preflight, авториза�
     queries.py  — SQL
     access.py   — кто что может
     drivers.py  — CRM yataxi
+    report.py   — сборка книги xlsx
     routes.py   — только разбор запроса и коды ответов
 """
 
@@ -21,9 +22,11 @@ import re
 from datetime import date
 from functools import wraps
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
-from . import access, drivers, queries, schema
+from . import access, drivers, queries, report, schema
+
+XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 # Пределы полей — те же, что в DDL. Проверяем здесь, чтобы длинная вставка
 # отвечала понятным «слишком длинно», а не «внутренняя ошибка» из-под INSERT.
@@ -40,7 +43,8 @@ _MAX_BACKDATE_DAYS = 366
 
 
 def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                            resolve_requester, sensitive_access_granted):
+                            resolve_requester, sensitive_access_granted,
+                            excel_text_warning=None):
     """Собирает Blueprint раздела.
 
     sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ сессия
@@ -49,6 +53,11 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
     оттуда был бы циклом. Аргумент обязательный, без значения по умолчанию:
     забытая зависимость должна уронить сборку блюпринта на старте (раздел тогда
     просто не поднимется), а не тихо открыть реестр всем.
+
+    excel_text_warning — хелпер `<ignoredErrors>` для выгрузки. У него, наоборот,
+    значение по умолчанию есть: без него книга соберётся, просто с зелёным
+    уголком «Число сохранено как текст» на каждом телефоне, и ронять из-за
+    косметики весь раздел незачем.
     """
     bp = Blueprint('parcels', __name__, url_prefix='/api/parcels')
 
@@ -195,26 +204,15 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
     # ── Реестр ───────────────────────────────────────────────────────────
     @parcels_route('')
     def parcels_list(ctx):
-        args = request.args
-        statuses = [code for code in (args.get('status') or '').split(',') if code]
-        unknown = [code for code in statuses if code not in schema.PARCEL_STATUSES]
-        if unknown:
-            return jsonify({"error": "Неизвестный статус: %s" % unknown[0]}), 400
-
-        filters = {
-            'query': args.get('q'),
-            'status': statuses or None,
-            'city': args.get('city') or None,
-            'office_id': _int_or_none(args.get('office_id')),
-            'manager_id': _int_or_none(args.get('manager_id')),
-            'date_from': _date_or_none(args.get('date_from')),
-            'date_to': _date_or_none(args.get('date_to')),
-        }
+        filters, error = _filters_from_args(request.args)
+        if error:
+            return error
+        # Страница — единственное, что список берёт из запроса сверх отбора.
         with db._get_cursor() as cursor:
             items, total = queries.list_parcels(
                 cursor,
-                limit=_int_or_none(args.get('limit')) or 50,
-                offset=_int_or_none(args.get('offset')) or 0,
+                limit=_int_or_none(request.args.get('limit')) or 50,
+                offset=_int_or_none(request.args.get('offset')) or 0,
                 **filters,
             )
             # Счётчики считаем теми же фильтрами, но без статуса: сегмент
@@ -223,6 +221,49 @@ def build_parcels_blueprint(*, db, require_api_key, build_cors_preflight_respons
             counter_filters.pop('status', None)
             counters = queries.status_counters(cursor, **counter_filters)
         return jsonify({"items": items, "total": total, "counters": counters})
+
+    # ── Выгрузка в Excel (задача #257) ───────────────────────────────────
+    #
+    # Роут ЧИТАЮЩИЙ (write=False), и это осознанно: реестр заводили ради того,
+    # чтобы оператор СЗоВ отвечал водителю сразу, — а «выгрузить то, что вижу»
+    # ничем не отличается от «посмотреть». Границей служит вход в раздел, тот
+    # же, что у списка: и отдел, и QR-подтверждение сессии проверены выше.
+    #
+    # Отбор берётся из тех же параметров, что у списка, и разбирается тем же
+    # `_filters_from_args`: в файл не попадает ничего, чего человек не видит на
+    # экране. `limit`/`offset` игнорируются намеренно — выгружается весь отбор,
+    # а не открытая страница.
+    @parcels_route('/export')
+    def parcels_export(ctx):
+        filters, error = _filters_from_args(request.args)
+        if error:
+            return error
+
+        with db._get_cursor() as cursor:
+            if not schema.schema_is_ready(cursor):
+                return jsonify({
+                    "error": "Раздел ещё разворачивается — выгрузка появится позже",
+                    "code": "PARCELS_SCHEMA_NOT_READY",
+                }), 409
+            items, total = queries.parcels_for_export(
+                cursor, limit=report.EXPORT_LIMIT, **filters)
+            note = _filters_note(cursor, filters)
+
+        workbook, written = report.build_workbook(
+            items,
+            generated_by=ctx.get('name') or '',
+            filters_note=note,
+            total=total,
+            # Потолок сработал, если в реестре по этому отбору строк больше, чем
+            # мы забрали. Считаем по `items`, а не по возвращённому `written`:
+            # его ещё нет, книга только собирается.
+            truncated=total > len(items),
+            text_warning_patch=excel_text_warning,
+        )
+        logging.info('Посылки: выгрузка %d строк из %d, собрал %s',
+                     written, total, ctx.get('name'))
+        return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,
+                         download_name=report.report_filename())
 
     @parcels_route('/<int:parcel_id>')
     def parcels_read(parcel_id, ctx):
@@ -307,6 +348,76 @@ def _date_or_none(value):
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def _filters_from_args(args):
+    """Отбор реестра из query-параметров. Возвращает (фильтры, ответ-ошибка).
+
+    Одно место на список и на выгрузку (задача #257): разбирай их порознь — и
+    файл рано или поздно отобрал бы не то, что человек видит на экране. Именно
+    поэтому `limit`/`offset` сюда не входят: это не отбор, а страница, и у
+    выгрузки её нет.
+    """
+    statuses = [code for code in (args.get('status') or '').split(',') if code]
+    unknown = [code for code in statuses if code not in schema.PARCEL_STATUSES]
+    if unknown:
+        return None, (jsonify({"error": "Неизвестный статус: %s" % unknown[0]}), 400)
+
+    return {
+        'query': args.get('q'),
+        'status': statuses or None,
+        'city': args.get('city') or None,
+        'office_id': _int_or_none(args.get('office_id')),
+        'manager_id': _int_or_none(args.get('manager_id')),
+        'date_from': _date_or_none(args.get('date_from')),
+        'date_to': _date_or_none(args.get('date_to')),
+    }, None
+
+
+def _ru_day(value):
+    return value.strftime('%d.%m.%Y') if value else ''
+
+
+def _filters_note(cursor, filters):
+    """Отбор словами — для листа «Контекст».
+
+    Через неделю по файлу «Посылки.xlsx» иначе не восстановить, весь это реестр
+    или один город за одну неделю, и два таких файла на столе спорят друг с
+    другом. Офис и менеджер разворачиваются в имена: «офис 17» на листе
+    контекста не объясняет ничего.
+    """
+    parts = []
+    if filters.get('status'):
+        parts.append('статус: %s' % ', '.join(
+            report.status_label(code) for code in filters['status']))
+    if filters.get('city'):
+        parts.append('город: %s' % filters['city'])
+    if filters.get('office_id'):
+        office = None
+        try:
+            office = queries.read_office(cursor, filters['office_id'],
+                                         space_ids=queries.section_space_ids(cursor))
+        except Exception:
+            logging.exception('parcels: не удалось назвать офис для листа «Контекст»')
+        parts.append('офис: %s' % ((office or {}).get('name') or '№%s' % filters['office_id']))
+    if filters.get('manager_id'):
+        name = None
+        try:
+            name = next((person['name'] for person in queries.list_managers(cursor)
+                         if person['id'] == filters['manager_id']), None)
+        except Exception:
+            logging.exception('parcels: не удалось назвать менеджера для листа «Контекст»')
+        parts.append('менеджер: %s' % (name or '№%s' % filters['manager_id']))
+    date_from, date_to = filters.get('date_from'), filters.get('date_to')
+    if date_from and date_to:
+        parts.append('принята с %s по %s' % (_ru_day(date_from), _ru_day(date_to)))
+    elif date_from:
+        parts.append('принята с %s' % _ru_day(date_from))
+    elif date_to:
+        parts.append('принята по %s' % _ru_day(date_to))
+    if (filters.get('query') or '').strip():
+        parts.append('поиск: «%s»' % filters['query'].strip())
+    return '; '.join(parts)
 
 
 # Схемы, которые вообще могут быть у ссылки. Всё остальное — включая

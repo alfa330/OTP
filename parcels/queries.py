@@ -252,16 +252,19 @@ def _search_clause(query, params):
     return '(%s)' % ' OR '.join(clauses)
 
 
-def list_parcels(cursor, *, query=None, status=None, city=None, office_id=None,
-                 manager_id=None, date_from=None, date_to=None,
-                 limit=50, offset=0):
-    """Реестр с фильтрами ТЗ: Все/статус, Город → Офис → Дата → Менеджер.
+def _filter_clause(params, *, query=None, status=None, city=None, office_id=None,
+                   manager_id=None, date_from=None, date_to=None):
+    """Условие WHERE реестра. Одно на список, счётчики и выгрузку.
 
-    Периметра «чьи посылки» нет и быть не может: реестр общий, ради того его и
-    заводили — оператор СЗоВ должен найти посылку, принятую чужим городом.
-    Границей служит вход в раздел (access.can_open_section).
+    Вынесено в общее место после задачи #257: раньше отбор был выписан дважды —
+    в списке и в счётчиках, — и третья копия в выгрузке означала бы, что файл
+    рано или поздно начнёт содержать не то, что человек видит на экране. Именно
+    это обещание («в файл не попадёт ничего, чего человек не видит») и держит
+    здесь один набор условий.
+
+    Пишет в переданный `params`, а не заводит свой: вызывающий кладёт туда же
+    `limit`/`offset`.
     """
-    params = {'limit': max(1, min(int(limit or 50), 200)), 'offset': max(0, int(offset or 0))}
     where = ['TRUE']
 
     search = _search_clause(query, params)
@@ -286,7 +289,23 @@ def list_parcels(cursor, *, query=None, status=None, city=None, office_id=None,
         params['date_to'] = date_to
         where.append('p.received_on <= %(date_to)s')
 
-    condition = ' AND '.join(where)
+    return ' AND '.join(where)
+
+
+def list_parcels(cursor, *, query=None, status=None, city=None, office_id=None,
+                 manager_id=None, date_from=None, date_to=None,
+                 limit=50, offset=0):
+    """Реестр с фильтрами ТЗ: Все/статус, Город → Офис → Дата → Менеджер.
+
+    Периметра «чьи посылки» нет и быть не может: реестр общий, ради того его и
+    заводили — оператор СЗоВ должен найти посылку, принятую чужим городом.
+    Границей служит вход в раздел (access.can_open_section).
+    """
+    params = {'limit': max(1, min(int(limit or 50), 200)), 'offset': max(0, int(offset or 0))}
+    condition = _filter_clause(
+        params, query=query, status=status, city=city, office_id=office_id,
+        manager_id=manager_id, date_from=date_from, date_to=date_to,
+    )
 
     cursor.execute(
         """
@@ -314,35 +333,57 @@ def status_counters(cursor, *, query=None, city=None, office_id=None,
     перестала бы отвечать на вопрос «а сколько уже отдали».
     """
     params = {}
-    where = ['TRUE']
-    search = _search_clause(query, params)
-    if search:
-        where.append(search)
-    if city:
-        params['city'] = str(city)
-        where.append('LOWER(TRIM(p.city)) = LOWER(TRIM(%(city)s))')
-    if office_id:
-        params['office_id'] = int(office_id)
-        where.append('p.office_id = %(office_id)s')
-    if manager_id:
-        params['manager_id'] = int(manager_id)
-        where.append('p.created_by = %(manager_id)s')
-    if date_from:
-        params['date_from'] = date_from
-        where.append('p.received_on >= %(date_from)s')
-    if date_to:
-        params['date_to'] = date_to
-        where.append('p.received_on <= %(date_to)s')
+    condition = _filter_clause(
+        params, query=query, city=city, office_id=office_id,
+        manager_id=manager_id, date_from=date_from, date_to=date_to,
+    )
 
     cursor.execute(
-        'SELECT p.status, COUNT(*) FROM parcels p WHERE %s GROUP BY p.status'
-        % ' AND '.join(where),
+        'SELECT p.status, COUNT(*) FROM parcels p WHERE %s GROUP BY p.status' % condition,
         params,
     )
     found = {row[0]: int(row[1]) for row in cursor.fetchall()}
     counters = {code: found.get(code, 0) for code in PARCEL_STATUSES}
     counters['all'] = sum(counters.values())
     return counters
+
+
+def parcels_for_export(cursor, *, query=None, status=None, city=None, office_id=None,
+                       manager_id=None, date_from=None, date_to=None, limit=20000):
+    """Весь отбор целиком — для выгрузки в xlsx (задача #257).
+
+    Отдельная функция, а не `list_parcels(limit=…)`: у списка потолок страницы
+    200 строк и он там намеренный (человек листает), а выгрузке нужен весь
+    отбор. Условие отбора при этом ОДНО И ТО ЖЕ — `_filter_clause`, — иначе
+    файл содержал бы не то, что видно на экране.
+
+    Возвращает (строки, сколько их в реестре всего). Второе число нужно, чтобы
+    честно сказать на листе «Контекст», что потолок сработал: молча обрезанный
+    файл читается как полный.
+    """
+    params = {'limit': max(1, int(limit or 20000))}
+    condition = _filter_clause(
+        params, query=query, status=status, city=city, office_id=office_id,
+        manager_id=manager_id, date_from=date_from, date_to=date_to,
+    )
+
+    # Порядок тот же, что в списке: человек ожидает увидеть в файле те же строки
+    # в том же порядке, что и на экране.
+    cursor.execute(
+        """
+        SELECT %s
+          FROM parcels p
+         WHERE %s
+         ORDER BY p.received_on DESC, p.id DESC
+         LIMIT %%(limit)s
+        """ % (_PARCEL_COLUMNS, condition),
+        params,
+    )
+    items = [_parcel_row(row) for row in cursor.fetchall()]
+
+    cursor.execute('SELECT COUNT(*) FROM parcels p WHERE %s' % condition, params)
+    total = int((cursor.fetchone() or [0])[0])
+    return items, total
 
 
 def read_parcel(cursor, parcel_id):

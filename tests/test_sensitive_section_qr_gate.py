@@ -289,6 +289,10 @@ class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
         client, _gate = self.build(parcels_ctx())
         for method, url in (('get', '/api/parcels/ping'),
                             ('get', '/api/parcels'),
+                            # Выгрузка (задача #257) — та же дверь, что у экрана:
+                            # файл с ФИО и телефонами водителей уносят с собой,
+                            # и мягче гейта раздела он быть не может.
+                            ('get', '/api/parcels/export'),
                             ('get', '/api/parcels/offices'),
                             ('get', '/api/parcels/filters'),
                             ('get', '/api/parcels/1'),

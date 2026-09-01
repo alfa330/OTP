@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Loader2, Package, Plus, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
+import { Download, Loader2, Package, Plus, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
 import {
     APPLE_FONT, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, iosGroupLabel,
 } from '../ui/ios';
@@ -10,7 +10,7 @@ import ParcelCard from './ParcelCard';
 import ParcelForm from './ParcelForm';
 import {
     STATE_FILTERS, daysInOffice, driverAccountUrl, fmtDate, fmtPhone, isStale, kindMeta,
-    pluralDays, rowTone, statusMeta, toneEdge, tonePill, toneRow, toneText,
+    pluralDays, rowTone, statusMeta, todayISO, toneEdge, tonePill, toneRow, toneText,
 } from './parcelMeta';
 
 /*
@@ -139,6 +139,14 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [counters, setCounters] = useState({});
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState('');
+    const [downloading, setDownloading] = useState(false);
+
+    /* showToast приходит новой функцией на каждый рендер App — известная
+       ловушка портала. Держим её в ref, чтобы она не попала в зависимости
+       колбэка выгрузки и не пересобирала его вместе со всем, что от него
+       зависит. */
+    const toastRef = useRef(showToast);
+    useEffect(() => { toastRef.current = showToast; }, [showToast]);
 
     const [state, setState] = useState('all');
     const [search, setSearch] = useState('');
@@ -196,14 +204,19 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     // успел дописать в поиск) не должен перезаписать свежий.
     const requestRef = useRef(0);
 
-    // `from` приходит аргументом, а не из состояния: иначе смена фильтра при
-    // догруженных страницах успевала уйти на сервер со СТАРЫМ смещением — и в
-    // список подмешивалась порция от прежнего запроса.
-    const load = useCallback(async ({ append = false, from = 0 } = {}) => {
-        const ticket = requestRef.current + 1;
-        requestRef.current = ticket;
-        setLoading(true);
-        setLoadError('');
+    /* Что именно отобрано — ОДНОЙ функцией на список и на выгрузку.
+     *
+     * Условий семь, и живут они в трёх местах состояния: сегмент статуса,
+     * придержанный поиск и объект фильтров. Пока их собирал только `load`, это
+     * было незаметно; выгрузке пришлось бы повторить всю семёрку своей строкой —
+     * и разошлись бы они на первой же новой фильтрации, а человек увидел бы в
+     * файле не то, что на экране. Тот же приём применён и на сервере: список,
+     * счётчики и выгрузка ходят через один `_filter_clause`.
+     *
+     * `limit`/`offset` сюда не входят: это не отбор, а страница, и у выгрузки
+     * её нет — иначе файл молча обрезался бы полусотней строк.
+     */
+    const selection = useMemo(() => {
         const params = new URLSearchParams();
         const status = STATE_FILTERS.find((item) => item.key === state)?.status;
         if (status) params.set('status', status);
@@ -213,6 +226,18 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         if (filters.manager_id) params.set('manager_id', String(filters.manager_id));
         if (filters.date_from) params.set('date_from', filters.date_from);
         if (filters.date_to) params.set('date_to', filters.date_to);
+        return params;
+    }, [state, query, filters]);
+
+    // `from` приходит аргументом, а не из состояния: иначе смена фильтра при
+    // догруженных страницах успевала уйти на сервер со СТАРЫМ смещением — и в
+    // список подмешивалась порция от прежнего запроса.
+    const load = useCallback(async ({ append = false, from = 0 } = {}) => {
+        const ticket = requestRef.current + 1;
+        requestRef.current = ticket;
+        setLoading(true);
+        setLoadError('');
+        const params = new URLSearchParams(selection);
         params.set('limit', String(PAGE_SIZE));
         params.set('offset', String(append ? from : 0));
         try {
@@ -229,7 +254,7 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         } finally {
             if (requestRef.current === ticket) setLoading(false);
         }
-    }, [apiBaseUrl, filters, headers, query, state]);
+    }, [apiBaseUrl, headers, selection]);
 
     // Смена условий всегда начинает список заново. Догрузка следующей порции —
     // отдельное действие кнопки, а не состояние в зависимостях эффекта.
@@ -237,6 +262,46 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         load({ append: false, from: 0 });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [state, query, filters, apiBaseUrl]);
+
+    /* Выгрузка в Excel (задача #257).
+     *
+     * Файл забираем axios'ом, а не ссылкой <a href>: портал авторизуется
+     * заголовком, а ссылка заголовков не несёт — вместо книги приехала бы
+     * страница входа. Отдаём его браузеру временной ссылкой на blob, как во
+     * всех остальных выгрузках портала.
+     *
+     * Уходит `selection` — ровно тот отбор, что виден на экране, и без номера
+     * страницы: в файл идёт всё отобранное, а не полсотни загруженных строк.
+     */
+    const download = useCallback(() => {
+        setDownloading(true);
+        axios.get(`${apiBaseUrl}/api/parcels/export?${selection.toString()}`,
+            { headers: headers(), responseType: 'blob' })
+            .then((response) => {
+                const url = URL.createObjectURL(response.data);
+                const link = document.createElement('a');
+                link.href = url;
+                // Имя собираем здесь: заголовок Content-Disposition до фронта не
+                // доходит (в Access-Control-Expose-Headers его нет), поэтому оно
+                // должно совпадать с серверным report_filename() вручную.
+                link.download = `Посылки ${todayISO().split('-').reverse().join('.')}.xlsx`;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+            })
+            .catch(async (error) => {
+                // Ошибку сервер прислал JSON-ом, а мы просили blob — разворачиваем,
+                // иначе в тост уехало бы «[object Blob]».
+                let message = 'Не удалось собрать выгрузку';
+                try {
+                    const text = await error?.response?.data?.text?.();
+                    message = JSON.parse(text || '{}').error || message;
+                } catch (_) { /* пусто — останется общая фраза */ }
+                toastRef.current?.(message, 'error');
+            })
+            .finally(() => setDownloading(false));
+    }, [apiBaseUrl, headers, selection]);
 
     const openParcel = useCallback(async (parcel) => {
         setOpened(parcel);
@@ -366,7 +431,12 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             : 'Поиск по посылкам, которые водители оставили в офисах'}
                     </p>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
+                {/* Ряд действий переносится: с появлением «Выгрузить» (задача
+                    #257) три кнопки перестали помещаться в строку уже на 375 px,
+                    и «Добавить посылку» ломалась на две строки внутри себя —
+                    ряд получался рваным (40/40/61). Пусть лучше кнопка целиком
+                    уедет на свою строку, чем разорвётся её подпись. */}
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <button
                         type="button"
                         className={iosBtnGhost}
@@ -375,10 +445,37 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     >
                         <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
                     </button>
+                    {/* Выгрузка стоит ДО гейта canEdit: реестр заводили ради
+                        оператора СЗоВ, он раздел только читает — а «сохранить
+                        то, что вижу» ничем не отличается от «посмотреть».
+                        Внутри гейта кнопку видели бы одни фронт-офисы.
+
+                        Гасим на пустом отборе: файл с одной шапкой читается как
+                        «выгрузка сломалась», а не как «здесь ничего нет» — про
+                        пустоту уже сказано в самой таблице. */}
+                    <button
+                        type="button"
+                        className={`${iosBtnSecondary} shrink-0`}
+                        onClick={download}
+                        disabled={downloading || !total}
+                        /* Подсказка отвечает на вопрос «почему не нажимается».
+                           Пока реестр не загрузился (или не загрузился вовсе),
+                           «выгружать нечего» — неправда: мы просто не знаем. */
+                        title={loadError
+                            ? 'Сначала нужно загрузить реестр'
+                            : (total
+                                ? 'Выгрузить в Excel то, что сейчас отобрано'
+                                : 'Выгружать пока нечего')}
+                    >
+                        {downloading
+                            ? <Loader2 size={15} className="animate-spin" />
+                            : <Download size={15} />}
+                        {downloading ? 'Готовим файл…' : 'Выгрузить'}
+                    </button>
                     {canEdit && (
                         <button
                             type="button"
-                            className={`${iosBtnPrimary} flex-1 sm:flex-none`}
+                            className={`${iosBtnPrimary} flex-1 whitespace-nowrap sm:flex-none`}
                             onClick={() => { setEditing(null); setFormOpen(true); }}
                         >
                             <Plus size={15} />
