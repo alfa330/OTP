@@ -818,5 +818,32 @@ class BoundaryTest(unittest.TestCase):
                         'страница качается уже под открытым курсором')
 
 
+class SchedulerTest(unittest.TestCase):
+    """Ночная сверка: без неё «обновляется автоматически» остаётся обещанием."""
+
+    def setUp(self):
+        self.monolith = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+
+    def test_job_is_registered_daily(self):
+        self.assertIn("id='wiki_yandex_pro_sync_daily'", self.monolith)
+        self.assertIn('run_wiki_yandex_pro_sync_async,', self.monolith)
+        self.assertIn("CronTrigger(hour=_env_int('WIKI_YANDEX_PRO_SYNC_HOUR'",
+                      self.monolith)
+
+    def test_job_runs_in_its_own_pool(self):
+        """Обход — десятки запросов наружу; в общем пуле он занял бы четверть приложения."""
+        self.assertIn("yandex_pro_pool = ThreadPoolExecutor(max_workers=1",
+                      self.monolith)
+        self.assertIn('run_in_executor(yandex_pro_pool, wiki_yandex_pro_sync_job)',
+                      self.monolith)
+
+    def test_job_never_lets_an_exception_escape(self):
+        """Упавшая джоба не должна валить планировщик — у соседей так же."""
+        body = self.monolith[self.monolith.index('def wiki_yandex_pro_sync_job('):]
+        body = body[:body.index('async def run_wiki_yandex_pro_sync_async')]
+        self.assertIn('except Exception:', body)
+        self.assertIn('logging.exception', body)
+
+
 if __name__ == '__main__':
     unittest.main()

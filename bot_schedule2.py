@@ -446,6 +446,12 @@ fleet_edm_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fleet-edm
 # amoCRM за минуту. В общем пуле из четырёх мест такой опрос занимал бы всё
 # приложение через раз.
 olx_amo_pool = ThreadPoolExecutor(max_workers=9, thread_name_prefix='olx-amo')
+# Сверка с базой знаний Яндекс Про держит свой пул на ОДНО место: обход — это
+# запрос за страницей и по запросу за каждой картинкой, то есть десятки
+# обращений наружу подряд. В общем пуле из четырёх воркеров ночная сверка
+# держала бы четверть приложения, а спешить ей некуда: она идёт раз в сутки и
+# сравнивает отпечатки, а не строит отчёт к утру.
+yandex_pro_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='yandex-pro')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -56534,6 +56540,42 @@ async def run_wiki_office_status_snapshot_async():
     except Exception:
         logging.exception("wiki offices day snapshot job failed")
 
+
+def wiki_yandex_pro_sync_job():
+    """Сверяет статьи вики с их страницами в базе знаний Яндекс Про.
+
+    Идемпотентна дважды. Во-первых, сопоставление идёт по адресу страницы,
+    поэтому повторный прогон обновляет статью, а не заводит вторую. Во-вторых,
+    статья с неизменившимся отпечатком источника не переписывается вовсе — иначе
+    каждая ночь оставляла бы в истории версий пустую редакцию.
+
+    Курсор внутри берётся порциями (wiki.yandex_sync.sync_all): страницы и
+    картинки качаются БЕЗ открытого соединения, потому что пул вики — сорок
+    мест, и держать одно из них на всё время сети нельзя.
+    """
+    try:
+        from wiki import yandex_sync as wiki_yandex_sync
+        gcs = {'signed_url': _lms_signed_url,
+               'bucket_name': _wiki_bucket_name,
+               'client': get_gcs_client}
+        summary = wiki_yandex_sync.sync_all(db, gcs, triggered_by='scheduler')
+        if summary.get('checked') or summary.get('errors'):
+            logging.info("Wiki Яндекс Про: сверка %s", summary)
+        return summary
+    except Exception:
+        logging.exception("wiki yandex pro sync job failed")
+        return None
+    finally:
+        _trim_process_memory('wiki_yandex_pro_sync', force=True)
+
+
+async def run_wiki_yandex_pro_sync_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(yandex_pro_pool, wiki_yandex_pro_sync_job)
+    except Exception:
+        logging.exception("wiki yandex pro sync job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -57178,6 +57220,21 @@ if __name__ == '__main__':
         run_wiki_office_status_snapshot_async,
         CronTrigger(hour=23, minute=45, timezone=ZoneInfo('Asia/Almaty')),
         id='wiki_office_status_snapshot_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Сверка статей с базой знаний Яндекс Про — в 05:00 по Алматы: после ночных
+    # ретеншнов и до рабочего дня, чтобы изменившуюся статью человек увидел уже
+    # с утра. Ходит наружу только за подписанными страницами: пока ни одна
+    # статья не связана с источником, прогон не делает ни одного запроса.
+    scheduler.add_job(
+        run_wiki_yandex_pro_sync_async,
+        CronTrigger(hour=_env_int('WIKI_YANDEX_PRO_SYNC_HOUR', 5, minimum=0, maximum=23),
+                    minute=_env_int('WIKI_YANDEX_PRO_SYNC_MINUTE', 0, minimum=0, maximum=59),
+                    timezone=ZoneInfo('Asia/Almaty')),
+        id='wiki_yandex_pro_sync_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
