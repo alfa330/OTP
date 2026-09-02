@@ -415,10 +415,12 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(len(keys), 4)
 
     def test_rating_time_straightened_by_request_stats(self):
-        """Время оценки выпрямляется по request_stats, а day считается уже по нему.
+        """Время выпрямляется по request_stats, и строка чужих суток откладывается.
 
-        Сдвинутая на 5 часов вечерняя оценка иначе уезжает в следующие сутки —
-        именно так 39 боевых пар разошлись по разным дням.
+        Отчёт за день D после поломки вендора содержит исправленное время
+        [D−1 19:00, D 19:00). Дневные метрики при записи ЗАМЕНЯЮТ значения дня,
+        поэтому вечернюю строку предыдущих суток писать нельзя: неполный срез
+        затёр бы уже посчитанный день. Её запишет прогон её собственного дня.
         """
         build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
         # Настоящее время оценки — 2026-08-31 21:40:00 (Алматы). Вендор отдал +5ч.
@@ -433,16 +435,58 @@ class ChatReportImportTests(unittest.TestCase):
         }]
         res = build("2026-09-01", None, [rating], self.lookup, self.index,
                     request_stats_rows=request_stats)
+        self.assertEqual(res["low_rating_count"], 0)
+        self.assertEqual(res["foreign_day_rating_rows"], 1)
+        self.assertEqual({m["day"] for m in res["metrics"] if m.get("score_count")}, set())
+        self.assertEqual(res["rating_time_shifts"], {"18000": 1})
+
+    def test_evening_of_the_day_comes_from_the_next_day_report(self):
+        """Вечер запрошенных суток лежит в отчёте за следующий день — берём его."""
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        # Оценка 31 августа в 21:40 по Алматы: вендор отдал её в отчёте за 1 сентября.
+        next_day_rating = self._rating_row("2026-09-01 02:40:00", request_id=75760512,
+                                           valuation_request_id=75755421)
+        request_stats = [{
+            "operator_name": OPERATORS[1][1],
+            "request_id": 75760512,
+            "request_end": "2026-08-31 21:40:00",
+            "reaction_time": "30",
+        }]
+        res = build("2026-08-31", None, [], self.lookup, self.index,
+                    request_stats_rows=request_stats,
+                    next_rating_rows=[next_day_rating])
         self.assertEqual(res["low_rating_count"], 1)
         low = res["low_ratings"][0]
         self.assertEqual(low["rated_at"], datetime(2026, 8, 31, 21, 40, 0))
         self.assertEqual(low["day"], "2026-08-31")
-        # Балл дня тоже должен лечь в 31 августа, а не в 1 сентября.
         self.assertEqual({m["day"] for m in res["metrics"] if m.get("score_count")}, {"2026-08-31"})
-        self.assertEqual(res["rating_time_shifts"], {"18000": 1})
+
+    def test_next_day_rows_of_the_next_day_are_not_written(self):
+        """Из отчёта за D+1 берём только строки дня D, остальное откладываем."""
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        ours = self._rating_row("2026-09-01 02:40:00", request_id=1, valuation_request_id=11)
+        theirs = self._rating_row("2026-09-01 14:00:00", request_id=2, valuation_request_id=22)
+        request_stats = [
+            {"operator_name": OPERATORS[1][1], "request_id": 1,
+             "request_end": "2026-08-31 21:40:00", "reaction_time": "30"},
+            {"operator_name": OPERATORS[1][1], "request_id": 2,
+             "request_end": "2026-09-01 09:00:00", "reaction_time": "30"},
+        ]
+        res = build("2026-08-31", None, [], self.lookup, self.index,
+                    request_stats_rows=request_stats,
+                    next_rating_rows=[ours, theirs])
+        self.assertEqual(res["low_rating_count"], 1)
+        self.assertEqual(res["foreign_day_rating_rows"], 1)
+        self.assertEqual(res["low_ratings"][0]["raw_payload"]["valuation_request_id"], 11)
 
     def test_rating_time_uses_previous_day_request_stats(self):
-        """Опора берётся и за предыдущие сутки: окно отчёта rating сдвинуто."""
+        """Опора берётся и за предыдущие сутки: окно отчёта rating сдвинуто.
+
+        Заявка этой оценки закончилась 31 августа, поэтому в request_stats за
+        1 сентября её нет. Без опоры за предыдущий день сдвиг определить нечем,
+        оценка осталась бы с временем 02:40 и легла бы в 1 сентября — то есть
+        чужие сутки получили бы лишнюю претензию.
+        """
         build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
         rating = self._rating_row("2026-09-01 02:40:00")
         prev_stats = [{
@@ -451,9 +495,17 @@ class ChatReportImportTests(unittest.TestCase):
             "request_end": "2026-08-31 21:40:00",
             "reaction_time": "30",
         }]
-        res = build("2026-09-01", None, [rating], self.lookup, self.index,
-                    request_stats_rows=[], prev_request_stats_rows=prev_stats)
-        self.assertEqual(res["low_ratings"][0]["rated_at"], datetime(2026, 8, 31, 21, 40, 0))
+        with_anchor = build("2026-09-01", None, [rating], self.lookup, self.index,
+                            request_stats_rows=[], prev_request_stats_rows=prev_stats)
+        self.assertEqual(with_anchor["rating_time_shifts"], {"18000": 1})
+        self.assertEqual(with_anchor["foreign_day_rating_rows"], 1)
+        self.assertEqual(with_anchor["low_rating_count"], 0)
+
+        without_anchor = build("2026-09-01", None, [rating], self.lookup, self.index,
+                               request_stats_rows=[])
+        self.assertEqual(without_anchor["rating_time_shifts"], {"0": 1})
+        self.assertEqual(without_anchor["low_rating_count"], 1)
+        self.assertEqual(without_anchor["low_ratings"][0]["day"], "2026-09-01")
 
     def test_rating_time_left_alone_when_vendor_is_healthy(self):
         """Когда сдвига нет, время не трогаем — вычитать 5 часов вслепую нельзя."""
