@@ -11,7 +11,11 @@ document_import_sessions, правился во внешнем ONLYOFFICE и т�
 Импорта два, и разница между ними не в качестве, а в том, уходит ли документ во
 внешний API:
   * /import — только разбор формата. Ничего никуда не отправляется;
-  * /import/ai — тот же разбор плюс сборка статьи моделью и проверка на дубль;
+  * /import/ai — тот же разбор плюс сборка статьи моделью и проверка на дубль.
+    Документ приходит с УКАЗАНИЕМ редактора («собери памятку для оператора»,
+    «возьми только раздел про штрафы»): в редакторе новой статьи файл сначала
+    прикрепляется и ждёт, пока человек напишет, что с ним сделать. На сервере
+    указание необязательно — почему, сказано у самого роута;
   * /articles/similar — та же проверка на дубль, но по тому, что уже набрано в
     редакторе (кнопка «Такая статья уже есть?»). Живёт здесь, а не в routes_ai,
     потому что делит с импортом одну дверь для редактора. Сама реализация — в
@@ -220,6 +224,15 @@ def register(bp, wiki_route, db, log_ip, gcs):
         else:
             kind = 'Изображение'
 
+        # Указание редактора — то, что он написал словами про прикреплённый
+        # документ. Обязательным на сервере оно НЕ сделано намеренно: требовать
+        # его — работа кнопки в редакторе (там она и требует), а фронт едет
+        # через Pages отдельно от сервера, и в окне выкладки старый бандл шлёт
+        # запрос без этого поля. Отказ в такой момент выглядел бы как поломка
+        # сборки, а не как новое правило.
+        instruction = ai_authoring.normalize_instruction(
+            request.form.get('instruction'))
+
         try:
             draft = ai_authoring.compose(
                 filename=uploaded.filename, kind=kind,
@@ -227,7 +240,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 generate_fn=ai_providers.generate_article,
                 blob=data if vision_mime else None, mime=vision_mime,
                 generate_file_fn=ai_providers.generate_article_document,
-                links=links)
+                links=links, instruction=instruction)
         except ai_providers.ProviderError as error:
             return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
                             "code": "WIKI_AI_UNAVAILABLE"}), 503
@@ -251,6 +264,10 @@ def register(bp, wiki_route, db, log_ip, gcs):
             details={'file': uploaded.filename, 'kind': kind,
                      'tables': draft['tables'], 'warnings': len(draft['warnings']),
                      'duplicate_verdict': duplicates.get('verdict'),
+                     # Указание в журнале — как у article.ai_edit: без него по
+                     # записи не понять, почему из одного и того же документа
+                     # вышли две разные статьи.
+                     'instruction': draft['instruction'][:200],
                      'provider': meta.get('provider'), 'model': meta.get('model')},
             space_id=_log_space(cursor, ctx),
             ip_address=log_ip())
@@ -361,7 +378,9 @@ def register(bp, wiki_route, db, log_ip, gcs):
             return jsonify({"error": "Включите «Поддержка ИИ», чтобы править текст",
                             "code": "WIKI_AI_DISABLED"}), 400
         current = str(data.get("content") or "")
-        instruction = " ".join(str(data.get("instruction") or "").split())[:1000]
+        # Нормализация одна на обе двери к модели (ai_authoring): «сократи вдвое»
+        # обязано доезжать одинаково и из правки словами, и из сборки документа.
+        instruction = ai_authoring.normalize_instruction(data.get("instruction"))
         if not current.strip():
             return jsonify({"error": "Нечего править: статья пуста"}), 400
         if len(instruction) < 3:

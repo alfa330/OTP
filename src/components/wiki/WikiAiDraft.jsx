@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, Check, FileUp, HelpCircle, Loader2, RefreshCw,
-    Search, Sparkles, Wand2,
+    AlertTriangle, Check, FileUp, HelpCircle, Loader2, Paperclip, RefreshCw,
+    Search, Sparkles, Wand2, X,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnSecondary, IosBadge, IosHint, IosToggle,
@@ -16,6 +16,27 @@ import {
  *   * обновить существующую статью новым документом;
  *   * поправить текст по указанию словами.
  * Ничего не пишется в базу отсюда. Кнопку «Сохранить» нажимает человек.
+ *
+ * У НОВОЙ СТАТЬИ выбор файла НЕ запускает модель. Файл прикрепляется и ждёт, а
+ * человек пишет словами, что с ним сделать, — и только тогда идёт запрос
+ * (решение владельца 02.09.2026). Раньше выбор файла был и выбором, и отправкой
+ * сразу: из одного документа получалась ровно одна статья, какая выйдет, а
+ * «возьми только раздел про штрафы» или «собери инструкцию для операторов»
+ * сказать было негде — оставалось переписывать результат правками поверх.
+ * Клик по «Обзор…» стоил при этом полминуты работы платной модели, и отменить
+ * его было нельзя.
+ *
+ * Поле указания у панели ОДНО, и цель у него та, что перед глазами: есть
+ * прикреплённый документ — указание про документ, нет — правка набранного
+ * текста статьи. Второе поле рядом с первым заставляло бы каждый раз выбирать,
+ * в какое писать, хотя выбор уже сделан прикреплением.
+ *
+ * У СУЩЕСТВУЮЩЕЙ статьи «Обновить из документа» осталось прежним, с отправкой
+ * по выбору файла: там указание уже есть и оно всегда одно — «сверь статью с
+ * новой версией документа». Тем же путём приезжает документ из проверки дублей
+ * (pendingUpdateFile), и ждать после этого ещё и промпта значило бы остановить
+ * человека на полпути к тому, что он уже попросил кнопкой «Обновить её этим
+ * документом».
  *
  * Отдельный компонент, а не ещё двести строк в WikiEditor: там уже 425 строк и
  * восемнадцать пакетов TipTap.
@@ -58,6 +79,49 @@ const UPDATE_HINT = 'Загрузите новую версию документ
 const EDIT_HINT = 'Напишите словами, что поправить: «сократи вдвое», «добавь раздел '
     + 'про доставку», «оформи условия таблицей», «расставь блоки, не меняя текст». '
     + 'Помощник меняет только то, о чём сказано, остальной текст переносит дословно.';
+
+const DOC_HINT = 'Напишите, что сделать с прикреплённым документом: «собери '
+    + 'инструкцию для операторов», «возьми только раздел про штрафы», «тарифы '
+    + 'оформи таблицей», «оставь как есть, просто расставь разделы». Указание '
+    + 'решает, что взять из документа и как это разложить, но дописать то, чего в '
+    + 'документе нет, помощник не станет даже по прямой просьбе.';
+
+const DOC_PLACEHOLDER = 'Что сделать с документом? Например: собери инструкцию для '
+    + 'операторов, тарифы оформи таблицей';
+
+const EDIT_PLACEHOLDER = 'Что поправить? Например: сократи вдвое и оформи условия таблицей';
+
+/* Размер прикреплённого файла человеку не любопытство, а предупреждение: от
+   него зависит, сколько ждать, а сканы на десятки мегабайт в этой панели
+   обычны. Десятичная точка, а не запятая, — так размеры печатает весь корпус
+   (ITTicketModal, FleetEdmView), и вразнобой хуже любого из двух вариантов. */
+const fileSize = (bytes) => {
+    const value = Number(bytes) || 0;
+    return value >= 1024 * 1024
+        ? `${(value / (1024 * 1024)).toFixed(1)} МБ`
+        : `${Math.max(1, Math.round(value / 1024))} КБ`;
+};
+
+/* Пределы сервера, названные здесь ВСЛУХ. Пока выбор файла был и отправкой,
+   отказ по размеру прилетал сразу; теперь между выбором и отправкой человек
+   успевает написать указание — и узнать, что файл велик, уже после работы.
+   Судьёй остаётся сервер (wiki/importer.py MAX_FILE_BYTES и
+   wiki/routes_import.py _VISION_MAX_BYTES): здесь только предупреждение,
+   отправку оно не запрещает — расходиться в числах эти два места будут, а
+   молча запрещать по устаревшей копии предела нельзя. */
+const MAX_FILE_MB = 25;
+const MAX_VISION_MB = 12;
+const VISION_EXT = /\.(pdf|png|jpe?g|webp)$/i;
+
+const sizeProblem = (file) => {
+    const mb = (Number(file?.size) || 0) / (1024 * 1024);
+    if (mb > MAX_FILE_MB) return `Файл больше ${MAX_FILE_MB} МБ — вика такой не примет.`;
+    if (VISION_EXT.test(file?.name || '') && mb > MAX_VISION_MB) {
+        return `PDF и снимки модель читает целиком и больше ${MAX_VISION_MB} МБ `
+            + 'за раз не берёт — разделите документ на части.';
+    }
+    return '';
+};
 
 const percent = (score) => `${Math.round((Number(score) || 0) * 100)}%`;
 
@@ -118,6 +182,10 @@ export default function WikiAiDraft({
     const [result, setResult] = useState(null);
     const [duplicates, setDuplicates] = useState(null);
     const [instruction, setInstruction] = useState('');
+    /* Прикреплённый документ — ЕЩЁ НЕ ОТПРАВЛЕННЫЙ. Живёт в состоянии, а не в
+       ref: от него зависит вид панели (чип с именем, подпись кнопки, смысл поля
+       указания), и рисоваться это обязано сразу после выбора файла. */
+    const [attached, setAttached] = useState(null);
     // Файл держим у себя: если документ окажется новой версией существующей
     // статьи, его надо унести в неё, а не заставлять человека выбирать заново.
     const lastFile = useRef(null);
@@ -157,12 +225,13 @@ export default function WikiAiDraft({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pendingUpdateFile, enabled]);
 
-    const buildFromDocument = (file) => {
+    const buildFromDocument = (file, task) => {
         if (!file) return;
         lastFile.current = file;
         const form = new FormData();
         form.append('file', file);
         form.append('ai_support', '1');
+        form.append('instruction', task || '');
         setBusy('draft');
         setResult(null);
         setDuplicates(null);
@@ -173,6 +242,12 @@ export default function WikiAiDraft({
                 onDraft?.(data);
                 setResult(data);
                 setDuplicates(data.duplicates || null);
+                /* Документ снимаем, указание чистим — работа с ним закончена, и
+                   оставленный чип читался бы как «файл ещё ждёт отправки».
+                   Сам файл остаётся в lastFile: если статья окажется дублем,
+                   его унесут в существующую («Обновить её этим документом»). */
+                setAttached(null);
+                setInstruction('');
                 showToast?.(`Статья собрана из документа (${data.kind})`, 'success');
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось собрать статью'), 'error'))
@@ -225,6 +300,17 @@ export default function WikiAiDraft({
     const items = duplicates?.items || [];
     const locked = !enabled || busy !== null;
     const fileButton = `${iosBtnSecondary} ${enabled ? 'cursor-pointer' : 'pointer-events-none opacity-40'}`;
+    const ready = instruction.trim().length >= 3;
+    const attachProblem = attached ? sizeProblem(attached) : '';
+
+    /* Одна кнопка и одно поле на два действия. Что делать, выбирает не человек
+       ещё раз, а то, что он уже сделал: прикреплён документ — собираем статью
+       по нему, нет — правим набранный текст. */
+    const submit = () => {
+        if (locked || !ready) return;
+        if (attached) buildFromDocument(attached, instruction);
+        else applyInstruction();
+    };
 
     return (
         <section className="space-y-1.5">
@@ -259,17 +345,20 @@ export default function WikiAiDraft({
                                 />
                             </label>
                         ) : (
+                            /* Прикрепляет, а НЕ отправляет: модель ждёт указания.
+                               e.target.value чистим всё равно — иначе повторный
+                               выбор того же файла не даёт события change, и
+                               снятый по крестику документ не вернуть тем же
+                               кликом. */
                             <label className={fileButton} title="Документ, из которого собрать статью">
-                                {busy === 'draft'
-                                    ? <Loader2 size={14} className="animate-spin" />
-                                    : <FileUp size={14} />}
-                                Собрать из документа
+                                <Paperclip size={14} />
+                                {attached ? 'Другой документ' : 'Прикрепить документ'}
                                 <input
                                     type="file"
                                     className="hidden"
                                     disabled={locked}
                                     accept={ACCEPT_WITH_AI}
-                                    onChange={(e) => { buildFromDocument(e.target.files?.[0]); e.target.value = ''; }}
+                                    onChange={(e) => { setAttached(e.target.files?.[0] || null); e.target.value = ''; }}
                                 />
                             </label>
                         )}
@@ -288,35 +377,85 @@ export default function WikiAiDraft({
                         </button>
                     </div>
 
-                    {/* Правка словами. Enter отправляет: поле однострочное, и
+                    {/* Прикреплённый документ стоит НАД полем указания, а не в
+                        ряду кнопок: он адресат того, что человек сейчас напишет,
+                        и читаться должен вместе с ним — как вложение над строкой
+                        сообщения в переписке. */}
+                    {attached && (
+                        /* Обёртка нужна: чип обязан быть по ширине имени, а не во
+                           всю карточку, и inline-flex внутри блока даёт это без
+                           борьбы с space-y родителя. */
+                        <div>
+                            <div className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1 text-[11.5px] text-slate-600">
+                                <Paperclip size={11} className="shrink-0 text-slate-400" />
+                                <span className="min-w-0 truncate" title={attached.name}>{attached.name}</span>
+                                <span className="shrink-0 text-slate-400">{fileSize(attached.size)}</span>
+                                <button
+                                    type="button"
+                                    title="Снять документ"
+                                    aria-label="Снять документ"
+                                    disabled={busy !== null}
+                                    onClick={() => setAttached(null)}
+                                    className="shrink-0 text-slate-400 transition hover:text-slate-600 disabled:opacity-40"
+                                >
+                                    <X size={11} />
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Указание словами. Цель одна на два случая: прикреплён
+                        документ — что сделать с ним, нет — что поправить в уже
+                        набранном тексте. Enter отправляет: поле однострочное, и
                         тянуться мышью к кнопке ради каждой правки утомительно. */}
                     <div className="flex flex-wrap items-center gap-2">
                         <input
                             className={`${iosInput} min-w-[220px] flex-1 text-[13px]`}
                             value={instruction}
                             disabled={locked}
-                            placeholder="Что поправить? Например: сократи вдвое и оформи условия таблицей"
+                            placeholder={attached ? DOC_PLACEHOLDER : EDIT_PLACEHOLDER}
                             onChange={(e) => setInstruction(e.target.value)}
                             onKeyDown={(e) => {
-                                if (e.key === 'Enter' && instruction.trim().length >= 3) {
+                                if (e.key === 'Enter' && ready) {
                                     e.preventDefault();
-                                    applyInstruction();
+                                    submit();
                                 }
                             }}
                         />
-                        <IosHint text={EDIT_HINT} label="Как формулировать правку" align="right" />
+                        <IosHint
+                            text={attached ? DOC_HINT : EDIT_HINT}
+                            label={attached ? 'Что писать про документ' : 'Как формулировать правку'}
+                            align="right"
+                        />
                         <button
                             type="button"
                             className={iosBtnSecondary}
-                            disabled={locked || instruction.trim().length < 3}
-                            onClick={applyInstruction}
+                            disabled={locked || !ready}
+                            onClick={submit}
                         >
-                            {busy === 'edit'
+                            {busy === 'edit' || busy === 'draft'
                                 ? <Loader2 size={14} className="animate-spin" />
-                                : <Wand2 size={14} />}
-                            Применить
+                                : (attached ? <FileUp size={14} /> : <Wand2 size={14} />)}
+                            {attached ? 'Собрать из документа' : 'Применить'}
                         </button>
                     </div>
+
+                    {/* Почему кнопка не нажимается. Без этой строки прикрепивший
+                        документ видит только серую кнопку и решает, что панель
+                        сломалась, — а ждут от него одной фразы. Размер вперёд
+                        указания: писать его ради файла, который сервер всё
+                        равно вернёт, — работа впустую.
+
+                        Про указание молчим, пока панель заперта: при выключенном
+                        рубильнике поле тоже серое, и «напишите» в него — тупик,
+                        а причина (выключенная поддержка ИИ) не названа. Про неё
+                        говорит сам тумблер, он в этой же карточке. */}
+                    {attached && (attachProblem || (!ready && !locked)) && (
+                        <p className="text-[11.5px] leading-snug text-amber-600">
+                            {attachProblem
+                                || 'Напишите, что сделать с документом, — без указания сборка не начнётся.'}
+                        </p>
+                    )}
 
                     {result && (
                         <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">

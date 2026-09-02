@@ -137,6 +137,10 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
 6. Оформление НЕ заменяет разделы: у статьи всё равно должны быть заголовки
    <h1>. Статья из одних плашек нечитаема так же, как статья без единого
    выделения.
+7. УКАЗАНИЕ РЕДАКТОРА, если оно дано ниже, — это то, ЧТО сделать с документом:
+   какие разделы нужны, что вынести таблицей, для кого писать, что опустить.
+   Выполняй его, но правила 1-6 оно не отменяет: дописать то, чего в документе
+   нет, нельзя даже по прямой просьбе — собери из того, что есть.
 """ + markup.MARKUP_GUIDE
 
 # Отдельная инструкция для файла, который модель читает сама (PDF, скан, фото).
@@ -614,7 +618,35 @@ def append_links(html, links):
             + '<h1>Ссылки из документа</h1><ul>%s</ul>' % rows)
 
 
-def build_user_prompt(*, filename, kind, body_html, tables, images=(), links=()):
+# Предел указания редактора. Тот же, что у правки по указанию в
+# routes_import (/articles/ai/edit): указание — это фраза «собери инструкцию для
+# операторов, тарифы оформи таблицей», а не второй документ. Длиннее принимать
+# незачем, а обрезать молча на любой длине честнее, чем отказать после того, как
+# человек уже прикрепил файл.
+MAX_INSTRUCTION = 1000
+
+
+def normalize_instruction(instruction):
+    """Указание редактора в одну строку и под потолок. Пустое — пустая строка."""
+    return ' '.join(str(instruction or '').split())[:MAX_INSTRUCTION]
+
+
+def instruction_block(instruction):
+    """Блок указания для промпта — или пустая строка, если указания нет.
+
+    Заголовок блока тот же, что в wiki/ai/revise.py у правки по указанию:
+    «УКАЗАНИЕ РЕДАКТОРА». Две двери к одной и той же модели должны называть
+    просьбу человека одинаково, иначе одна и та же фраза («сократи вдвое»)
+    работает по-разному в зависимости от того, откуда её ввели.
+    """
+    text = normalize_instruction(instruction)
+    if not text:
+        return ''
+    return 'УКАЗАНИЕ РЕДАКТОРА (что сделать с этим документом):\n' + text
+
+
+def build_user_prompt(*, filename, kind, body_html, tables, images=(), links=(),
+                      instruction=''):
     """Запрос к модели по разобранному документу."""
     parts = ['ФАЙЛ: %s (%s)' % (filename or 'без имени', kind or 'документ')]
     hints = table_hints(tables)
@@ -628,11 +660,19 @@ def build_user_prompt(*, filename, kind, body_html, tables, images=(), links=())
     if block:
         parts.append(block)
     parts.append('СОДЕРЖИМОЕ ДОКУМЕНТА:\n' + str(body_html or ''))
+    # Указание — ПОСЛЕДНИМ, после содержимого. Так же устроена правка по
+    # указанию (revise.edit_by_instruction), и так же читает модель: сначала
+    # материал, потом что с ним сделать. Перед документом указание теряется —
+    # на длинном файле оно оказывается за тысячами знаков от конца запроса.
+    task = instruction_block(instruction)
+    if task:
+        parts.append(task)
     return '\n\n'.join(parts)
 
 
 def compose(*, filename, kind, source_html='', source_text='', generate_fn,
-            blob=None, mime=None, generate_file_fn=None, links=()):
+            blob=None, mime=None, generate_file_fn=None, links=(),
+            instruction=''):
     """Документ -> черновик статьи.
 
     Две ветки, и различие между ними принципиальное:
@@ -641,8 +681,17 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
       * иначе на входе уже разобранный HTML, таблицы из него вырезаются и
         возвращаются на место программой.
 
-    Возвращает {title, summary, content, warnings, meta, tables}.
+    instruction — указание редактора, написанное словами к прикреплённому
+    документу («собери инструкцию для операторов, тарифы оформи таблицей»). Оно
+    доезжает В ОБЕ ветки: PDF и скан собираются моделью целиком, и именно там
+    просьба «возьми только раздел про штрафы» экономит человеку больше всего.
+    Аргумент с дефолтом сознательно: без указания сборка обязана работать
+    ровно как раньше — фронт может отстать от сервера (бандл едет через Pages
+    отдельно), и старая кнопка «Собрать из документа» не должна получать 400.
+
+    Возвращает {title, summary, content, warnings, meta, tables, instruction}.
     """
+    task = instruction_block(instruction)
     if blob is not None:
         if generate_file_fn is None:
             raise ValueError('для файла нужен generate_file_fn')
@@ -651,7 +700,8 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
             SYSTEM_PROMPT + FILE_PROMPT_EXTRA,
             ('ФАЙЛ: %s (%s). Собери из него статью вики по правилам выше.'
              % (filename or 'без имени', kind or 'документ'))
-            + (('\n\n' + block) if block else ''),
+            + (('\n\n' + block) if block else '')
+            + (('\n\n' + task) if task else ''),
             blob=blob, mime=mime, max_tokens=MAX_OUTPUT_TOKENS)
         tables, images = [], []
         protected = ''
@@ -660,7 +710,8 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
         text, meta = generate_fn(
             SYSTEM_PROMPT,
             build_user_prompt(filename=filename, kind=kind, body_html=protected,
-                              tables=tables, images=images, links=links),
+                              tables=tables, images=images, links=links,
+                              instruction=instruction),
             max_tokens=MAX_OUTPUT_TOKENS)
 
     title, summary, body = _envelope(text)
@@ -696,4 +747,8 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
         'warnings': warnings,
         'tables': len(tables),
         'meta': meta,
+        # Указание возвращаем нормализованным — его читает журнал
+        # (routes_import, article.ai_draft): записать надо то, что ушло в
+        # модель, а не то, что лежало в поле формы.
+        'instruction': normalize_instruction(instruction),
     }
