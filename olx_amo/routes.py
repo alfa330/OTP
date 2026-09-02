@@ -143,8 +143,14 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
         """
         idle = _int_arg('idle_minutes', DEFAULT_IDLE_MINUTES, 1, 1440)
         with db._get_cursor() as cursor:
-            queries.ensure_accounts(cursor)
             rows = queries.health(cursor, idle_minutes=idle)
+            # Строки кабинетов заводим ТОЛЬКО когда их не хватает. Раньше девять
+            # upsert'ов уходили на каждый запрос, а он идёт по таймеру у каждой
+            # открытой вкладки — семьдесят лишних миллисекунд и девять записей в
+            # минуту на пустом месте.
+            if len(rows) < len(cabinets.CABINETS):
+                queries.ensure_accounts(cursor)
+                rows = queries.health(cursor, idle_minutes=idle)
 
         known = {c.code: c for c in cabinets.CABINETS}
         items = []

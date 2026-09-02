@@ -45,12 +45,18 @@ const PAGE_SIZE = 50;
 
 /* Как часто сама подтягивается открытая переписка и список.
  *
- * Не чаще: каждое обращение к чату — запрос из ОБЩЕГО с роботом бюджета OLX
- * (4500 на адрес за 5 минут), и десяток забытых вкладок с опросом раз в пять
- * секунд сжёг бы его на пустом месте. Живость всё равно обеспечивает робот — он
- * проходит по чатам дважды в минуту. Таймеры молчат на скрытой вкладке. */
-const THREAD_REFRESH_MS = 25000;
-const LIST_REFRESH_MS = 60000;
+ * Считаем от бюджета: лимит OLX — 4500 запросов с адреса за 5 минут, робот
+ * съедает около двухсот. Открытая переписка при таком шаге — 25 запросов за
+ * окно, список — 10. Даже десять открытых вкладок остаются в пределах десятой
+ * части бюджета, поэтому «пореже» экономило бы то, чего и так вдоволь.
+ *
+ * Обновлять чаще смысла нет: сообщение всё равно попадает к нам не быстрее, чем
+ * его увидит опрос робота, а он ходит дважды в минуту.
+ *
+ * Таймеры молчат на скрытой вкладке и у невидимых панелей — забытое окно не
+ * должно ничего жечь. */
+const THREAD_REFRESH_MS = 12000;
+const LIST_REFRESH_MS = 30000;
 
 const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const headers = useCallback(
@@ -142,22 +148,31 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
             )}
 
-            {tab === 'chats' && (
+            {/* Панели монтируются один раз и прячутся классом, а не
+                размонтируются. Иначе каждое переключение вкладки — это заново
+                запрос, спиннер и потерянный выбранный диалог; переключаются же
+                между «кому ответить» и «что доехало» постоянно.
+
+                Невидимая панель не опрашивает сервер: `visible` глушит её
+                таймеры, данные при этом остаются и показываются мгновенно. */}
+            <div className={tab === 'chats' ? '' : 'hidden'}>
                 <ChatWorkspace
                     apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
                     canReply={!!capabilities?.can_reply}
                     cabinetOptions={cabinetOptions}
+                    visible={tab === 'chats'}
                     onAnswered={loadHealth}
                 />
-            )}
-            {tab === 'journal' && (
+            </div>
+            <div className={tab === 'journal' ? '' : 'hidden'}>
                 <JournalPanel
                     apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
-                    cabinetOptions={cabinetOptions} />
-            )}
-            {tab === 'summary' && (
-                <SummaryPanel apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
-            )}
+                    cabinetOptions={cabinetOptions} visible={tab === 'journal'} />
+            </div>
+            <div className={tab === 'summary' ? '' : 'hidden'}>
+                <SummaryPanel apiBaseUrl={apiBaseUrl} headers={headers}
+                    toast={toast} visible={tab === 'summary'} />
+            </div>
         </div>
     );
 };
@@ -246,7 +261,7 @@ const CabinetStrip = ({ health, onRefresh }) => {
  * переносится на вторую строку и меняет высоту; здесь над карточкой только
  * шапка раздела и полоса кабинетов постоянного размера. */
 const ChatWorkspace = ({ apiBaseUrl, headers, toast, canReply, cabinetOptions,
-                         onAnswered }) => {
+                         visible, onAnswered }) => {
     const [threads, setThreads] = useState(null);
     const [cabinet, setCabinet] = useState('');
     const [onlyAwaiting, setOnlyAwaiting] = useState(false);
@@ -263,12 +278,13 @@ const ChatWorkspace = ({ apiBaseUrl, headers, toast, canReply, cabinetOptions,
     }, [apiBaseUrl, headers, cabinet, onlyAwaiting]);
 
     useEffect(() => {
+        if (!visible) return undefined;
         loadThreads();
         const timer = setInterval(() => {
             if (!document.hidden) loadThreads();
         }, LIST_REFRESH_MS);
         return () => clearInterval(timer);
-    }, [loadThreads]);
+    }, [loadThreads, visible]);
 
     const awaiting = (threads || []).filter((t) => t.awaiting).length;
 
@@ -332,6 +348,7 @@ const ChatWorkspace = ({ apiBaseUrl, headers, toast, canReply, cabinetOptions,
                             apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
                             canReply={canReply}
                             thread={selected}
+                            visible={visible}
                             onBack={() => setSelected(null)}
                             onAnswered={() => { loadThreads(); onAnswered(); }}
                         />
@@ -390,7 +407,7 @@ const ThreadRow = ({ item, active, onSelect }) => (
  * направлением, и робот, ответ из раздела и написанное руками прямо в кабинете
  * там неразличимы. */
 const Conversation = ({ apiBaseUrl, headers, toast, canReply, thread, onBack,
-                        onAnswered }) => {
+                        onAnswered, visible }) => {
     const [data, setData] = useState(null);
     const [draft, setDraft] = useState('');
     const [busy, setBusy] = useState(false);
@@ -408,12 +425,13 @@ const Conversation = ({ apiBaseUrl, headers, toast, canReply, thread, onBack,
     }, [url, headers]);
 
     useEffect(() => {
+        if (!visible) return undefined;
         load();
         const timer = setInterval(() => {
             if (!document.hidden) load();
         }, THREAD_REFRESH_MS);
         return () => clearInterval(timer);
-    }, [load]);
+    }, [load, visible]);
 
     const send = (text) => {
         setBusy(true);
@@ -563,7 +581,7 @@ const TimelineEvent = ({ item }) => {
 };
 
 /* ─── Журнал ─────────────────────────────────────────────────────────── */
-const JournalPanel = ({ apiBaseUrl, headers, toast, cabinetOptions }) => {
+const JournalPanel = ({ apiBaseUrl, headers, toast, cabinetOptions, visible }) => {
     const [journal, setJournal] = useState({ items: [], total: 0 });
     const [loading, setLoading] = useState(false);
     const [exporting, setExporting] = useState(false);
@@ -594,7 +612,7 @@ const JournalPanel = ({ apiBaseUrl, headers, toast, cabinetOptions }) => {
             .finally(() => setLoading(false));
     }, [apiBaseUrl, headers, page, params, toast]);
 
-    useEffect(() => { load(); }, [load]);
+    useEffect(() => { if (visible) load(); }, [load, visible]);
     /* Смена фильтра возвращает на первую страницу: иначе после сужения выборки
        человек оказывается на пустой десятой странице и решает, что данных нет. */
     useEffect(() => { setPage(0); }, [cabinet, result, dateFrom, dateTo]);
@@ -727,7 +745,7 @@ const JournalPanel = ({ apiBaseUrl, headers, toast, cabinetOptions }) => {
 };
 
 /* ─── Сводка за день ─────────────────────────────────────────────────── */
-const SummaryPanel = ({ apiBaseUrl, headers, toast }) => {
+const SummaryPanel = ({ apiBaseUrl, headers, toast, visible }) => {
     const [summary, setSummary] = useState(null);
     const [loading, setLoading] = useState(false);
     const [day, setDay] = useState(isoToday());
@@ -736,12 +754,13 @@ const SummaryPanel = ({ apiBaseUrl, headers, toast }) => {
     useEffect(() => { toastRef.current = toast; }, [toast]);
 
     useEffect(() => {
+        if (!visible) return;
         setLoading(true);
         axios.get(`${apiBaseUrl}/api/olx_amo/summary?day=${day}`, { headers: headers() })
             .then((response) => setSummary(response.data))
             .catch(() => toastRef.current('Не удалось загрузить сводку', 'error'))
             .finally(() => setLoading(false));
-    }, [apiBaseUrl, headers, day]);
+    }, [apiBaseUrl, headers, day, visible]);
 
     const rows = summary?.cabinets || [];
     const totals = summary?.totals || {};
@@ -840,7 +859,7 @@ const AlertChatsPicker = ({ apiBaseUrl, headers, toast }) => {
             .catch(() => setChats(null));
     }, [apiBaseUrl, headers]);
 
-    useEffect(() => { load(); }, [load]);
+    useEffect(() => { if (visible) load(); }, [load, visible]);
 
     const chosen = useMemo(() => (chats?.chosen_ids || []).map(Number), [chats]);
     const options = useMemo(() => (chats?.available || []).map((chat) => ({

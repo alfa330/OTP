@@ -1121,3 +1121,61 @@ class TimelineEventTests(unittest.TestCase):
 
     def test_unknown_result_is_skipped_rather_than_shown_as_a_code(self):
         self.assertEqual([], self.kinds([self.row('skipped', 1)]))
+
+
+class SectionSpeedTests(unittest.TestCase):
+    """Свойства, за которые раздел ощущается быстрым.
+
+    Замеры на проде 02.09.2026: почти все ручки раздела 130-200 мс при базовой
+    задержке до Франкфурта 127 мс — то есть накладные расходы почти нулевые.
+    Дорого стоило ровно два места, и оба закрыты здесь.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = (ROOT / 'olx_amo' / 'routes.py').read_text(encoding='utf-8')
+        cls.service = (ROOT / 'olx_amo' / 'service.py').read_text(encoding='utf-8')
+        cls.view = (ROOT / 'src' / 'components' / 'olx' / 'OlxLeadsView.jsx').read_text(
+            encoding='utf-8')
+
+    def test_health_does_not_write_nine_rows_on_every_request(self):
+        """Ручка идёт по таймеру у каждой открытой вкладки.
+
+        Безусловный ensure_accounts стоил семидесяти лишних миллисекунд и
+        девяти записей в минуту на пустом месте.
+        """
+        block = self.routes[self.routes.index('def olx_amo_health('):]
+        block = block[:block.index('# ── ')]
+        self.assertIn('if len(rows) < len(cabinets.CABINETS):', block,
+                      'кабинеты заводим только когда их не хватает')
+
+    def test_thread_header_reuses_what_the_poll_already_stored(self):
+        """Опрос уже записал id собеседника и объявления при первом разборе.
+
+        Лишний запрос за описанием чата был третью времени первого открытия.
+        """
+        block = self.service[self.service.index('def _fill_thread_header('):]
+        block = block[:block.index('\ndef ')]
+        self.assertIn("interlocutor_id = state.get('interlocutor_id')", block)
+        self.assertIn('if not interlocutor_id or not advert_id:', block)
+
+    def test_header_lookups_go_in_parallel(self):
+        """Имя и вакансия независимы — последовательно это два круга подряд."""
+        block = self.service[self.service.index('def _fill_thread_header('):]
+        block = block[:block.index('\ndef ')]
+        self.assertIn('ThreadPoolExecutor', block)
+
+    def test_tabs_keep_their_data_instead_of_reloading(self):
+        """Размонтирование панели — это заново запрос, спиннер и потерянный выбор."""
+        self.assertIn("tab === 'chats' ? '' : 'hidden'", self.view)
+        self.assertNotIn("{tab === 'journal' && (", self.view)
+
+    def test_hidden_panels_do_not_poll(self):
+        """Данные остаются, но забытая вкладка ничего не жжёт."""
+        for guard in ('if (!visible) return undefined;', 'if (visible) load();'):
+            self.assertIn(guard, self.view)
+
+    def test_refresh_rate_is_justified_by_the_budget(self):
+        """Чаще опроса робота смысла нет: сообщение раньше к нам не попадёт."""
+        self.assertIn('const THREAD_REFRESH_MS = 12000;', self.view)
+        self.assertIn('const LIST_REFRESH_MS = 30000;', self.view)

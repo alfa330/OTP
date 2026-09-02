@@ -1047,24 +1047,46 @@ def _fill_thread_header(db, client, cabinet, thread_id, state):
     if state.get('interlocutor_name') and state.get('advert_title'):
         return state
 
-    thread = None
-    try:
-        thread = client.thread(thread_id)
-    except OlxError as exc:
-        log.debug('OLX %s: чат %s не описался: %s', cabinet.code, thread_id, exc)
-        return state
+    # Идентификаторы собеседника и объявления опрос уже записал, когда впервые
+    # разбирал чат. Лишний запрос за описанием чата делаем ТОЛЬКО если их нет:
+    # на первом открытии это была треть всего времени ответа.
+    interlocutor_id = state.get('interlocutor_id')
+    advert_id = state.get('advert_id')
+    if not interlocutor_id or not advert_id:
+        try:
+            thread = client.thread(thread_id) or {}
+        except OlxError as exc:
+            log.debug('OLX %s: чат %s не описался: %s', cabinet.code, thread_id, exc)
+            return state
+        interlocutor_id = interlocutor_id or thread.get('interlocutor_id')
+        advert_id = advert_id or thread.get('advert_id')
 
     name, title = state.get('interlocutor_name'), state.get('advert_title')
-    if not name and (thread or {}).get('interlocutor_id'):
+
+    # Два независимых запроса — спрашиваем их ОДНОВРЕМЕННО. Последовательно это
+    # два круга до OLX подряд, а нужны они оба и сразу.
+    def _name():
         try:
-            name = (client.user(thread['interlocutor_id']) or {}).get('name')
+            return (client.user(interlocutor_id) or {}).get('name')
         except OlxError:
-            name = None
-    if not title and (thread or {}).get('advert_id'):
+            return None
+
+    def _title():
         try:
-            title = (client.advert(thread['advert_id']) or {}).get('title')
+            return (client.advert(advert_id) or {}).get('title')
         except OlxError:
-            title = None
+            return None
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    jobs = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        if not name and interlocutor_id:
+            jobs['name'] = pool.submit(_name)
+        if not title and advert_id:
+            jobs['title'] = pool.submit(_title)
+    name = jobs['name'].result() if 'name' in jobs else name
+    title = jobs['title'].result() if 'title' in jobs else title
 
     if not name and not title:
         return state
