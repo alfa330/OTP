@@ -31974,11 +31974,13 @@ def _chat2desk_rating_time_shifts(rating_rows, request_end_index, target_tz=None
     день часть строк целая, а часть (подтянутый вечер предыдущих суток) — нет,
     поэтому сдвиг определяется построчно, а не одним числом на день.
 
-    Возвращает список сдвигов в секундах, выровненный по rating_rows. Там, где
-    заявка не нашлась или расхождение не кратно часу, подставляется
-    преобладающий сдвиг дня — он же 0, если опереться было не на что.
+    Возвращает список сдвигов в секундах, выровненный по rating_rows. Строке
+    достаётся её собственный сдвиг, только если он нулевой либо совпадает с
+    преобладающим сдвигом дня; иначе подставляется самый частый сдвиг дня. Это
+    защита от оценки, поставленной много позже конца диалога: у неё расхождение
+    своё, и принять его за часовой пояс нельзя.
     """
-    resolved = [None] * len(rating_rows or [])
+    candidates = [None] * len(rating_rows or [])
     counts = {}
     for row_index, row in enumerate(rating_rows or []):
         if not isinstance(row, dict):
@@ -31995,16 +31997,32 @@ def _chat2desk_rating_time_shifts(rating_rows, request_end_index, target_tz=None
             continue
         delta = (created_dt - end_dt).total_seconds()
         hours = round(delta / 3600.0)
-        # Оценку могли поставить много позже конца диалога — такие строки
-        # (единицы в день) в опору не берём, им достанется сдвиг дня.
+        # Расхождение не кратно часу либо больше любого мыслимого пояса — это не
+        # сдвиг, а оценка, поставленная позже конца диалога. В опору не берём.
+        if abs(hours) > 14:
+            continue
         if abs(delta - hours * 3600) > CHAT2DESK_RATING_SHIFT_TOLERANCE_SECONDS:
             continue
         shift = int(hours * 3600)
-        resolved[row_index] = shift
+        candidates[row_index] = shift
         counts[shift] = counts.get(shift, 0) + 1
 
-    dominant = max(counts, key=lambda key: (counts[key], -abs(key))) if counts else 0
-    return [dominant if shift is None else shift for shift in resolved]
+    def _most_common(source):
+        if not source:
+            return 0
+        return max(source, key=lambda key: (source[key], -abs(key)))
+
+    # Ненулевой сдвиг у дня ровно один — тот, которым вендор испортил ответ.
+    # Любое другое ненулевое расхождение принимать за пояс нельзя: оценка могла
+    # быть поставлена ровно через три часа после диалога, и тогда её «сдвиг»
+    # выглядел бы как честные 8 часов.
+    expected_shift = _most_common({shift: n for shift, n in counts.items() if shift})
+    allowed = {0, expected_shift}
+    fallback = _most_common(counts)
+    return [
+        fallback if shift is None or shift not in allowed else shift
+        for shift in candidates
+    ]
 
 
 def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score, rated_at=None):
