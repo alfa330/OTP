@@ -471,10 +471,16 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     useEffect(() => { loadPing(); loadStructure(); }, [loadPing, loadStructure]);
 
     /* Отделы — только тому, кто настраивает пространства: остальным этот
-       запрос вернёт 403 и добавит красную строку в консоль на каждом заходе. */
+       запрос вернёт 403 и добавит красную строку в консоль на каждом заходе.
+
+       scope=all — ЕДИНСТВЕННОЕ место, которому нужен полный список отделов, и
+       нужен он по делу: здесь пространство раздают отделам, а сузить выбор до
+       отделов этого же пространства значило бы запереть дверь ключом, лежащим
+       внутри — новому пространству некого было бы выдать. Все остальные
+       справочники сужены пространством (см. wiki/routes_structure.py). */
     useEffect(() => {
         if (!canManageSpaces) return;
-        axios.get(`${base}/access/subjects`, { headers })
+        axios.get(`${base}/access/subjects`, { headers, params: { scope: 'all' } })
             .then((r) => setDepartments(r.data?.department || []))
             .catch(() => setDepartments([]));
     }, [base, headers, canManageSpaces]);
@@ -1129,6 +1135,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                     base={base}
                                     headers={headers}
                                     showToast={showToast}
+                                    /* Пространство — граница справочников:
+                                       «Отдел ветки», субъект правила и список
+                                       людей обязаны быть сужены до него, иначе
+                                       в «Таксопарках» предлагается «Тез КЦ». */
+                                    spaceId={activeSpace?.id || null}
                                     structure={scopedStructure}
                                     loading={structureLoading}
                                     canManageAccess={canManageAccess}

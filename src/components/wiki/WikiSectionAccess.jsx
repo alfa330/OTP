@@ -276,7 +276,7 @@ const RoleRow = ({ row, draft, expanded, locked, mayGrant, onToggleExpand, onCha
 };
 
 export default function WikiSectionAccess({ base, headers, showToast, section, sections,
-                                            onClose, reload }) {
+                                            spaceId = null, onClose, reload }) {
     const toast = useStableCallback(showToast);
 
     const [rules, setRules] = useState([]);
@@ -332,15 +332,20 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     useEffect(() => { loadRules(); }, [loadRules]);
 
     useEffect(() => {
-        axios.get(`${base}/access/subjects`, { headers })
+        if (!spaceId) return;   // пространство ещё не приехало из ping
+        /* space_id — не уточнение выборки, а граница: без него справочник
+           предлагал отделы и людей ЧУЖОГО пространства (в «Таксопарках» —
+           «Тез КЦ» и его сотрудников). Правило на них ничего не открыло бы, но
+           чужая оргструктура показывалась целиком. */
+        axios.get(`${base}/access/subjects`, { headers, params: { space_id: spaceId } })
             .then((r) => setCatalog(r.data || {}))
             .catch(() => setCatalog({}));
-        // Сотрудники приходят уже отфильтрованными по потолку и отделу: форма
-        // не должна предлагать того, кого сервер потом отвергнет.
-        axios.get(`${base}/access/people`, { headers })
+        // Сотрудники приходят уже отфильтрованными по потолку, отделу и
+        // пространству: форма не должна предлагать того, кого сервер отвергнет.
+        axios.get(`${base}/access/people`, { headers, params: { space_id: spaceId } })
             .then((r) => setPeople(r.data?.items || []))
             .catch(() => setPeople([]));
-    }, [base, headers]);
+    }, [base, headers, spaceId]);
 
     /* Матрица должностей — производная от загруженных правил, но состояние
        собственное: человек правит несколько строк и сохраняет разом. */

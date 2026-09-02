@@ -622,5 +622,115 @@ class SectionSpaceSourceTest(unittest.TestCase):
         self.assertNotIn('NOT EXISTS', source)
 
 
+# Справочники, которые показывают ЧУЖУЮ ОРГСТРУКТУРУ, если забыть про
+# пространство: отделы, направления, группы и сотрудники.
+#
+# Дыра была ровно такой: 02.09.2026 владелец увидел в «Таксопарках» отдел
+# «Тез КЦ». Обе функции сужались только границей отдела РАЗДАЮЩЕГО, а у
+# супер-админа и администратора вики её нет вовсе — значит отдавались все семь
+# отделов и все 192 сотрудника, включая 21 человека чужой компании.
+CATALOG_ENDPOINTS = ('/access/subjects', '/access/people')
+
+
+class SubjectCatalogSpaceTest(unittest.TestCase):
+    """Пространство — вторая граница справочников, рядом с границей отдела."""
+
+    def test_both_catalogs_take_the_space_separately(self):
+        """Границы РАЗНЫЕ и приходят разными аргументами.
+
+        Подмешать пространство в department_ids было бы соблазнительно и
+        неверно: этим параметром справочник заодно решает, предлагать ли роли
+        вики и должности (они адресуют людей по всей компании, мимо отдела).
+        Супер-админ, открывший форму в конкретном пространстве, потерял бы
+        правило на должность — то есть починка одной дыры сломала бы рабочий
+        случай.
+        """
+        for func in (wiki_structure.subject_catalog, wiki_structure.grantable_people):
+            names = inspect.signature(func).parameters
+            self.assertIn('space_department_ids', names, func.__name__)
+            self.assertIn('department_ids', names, func.__name__)
+
+    def test_the_two_boundaries_add_up(self):
+        """Пересечение, а не замена: у супервайзера остаётся его отдел."""
+        narrow = wiki_structure.narrow_to_space
+        self.assertIsNone(narrow(None, None))
+        self.assertEqual(narrow(None, [1, 367]), [1, 367])
+        self.assertEqual(narrow([1], [1, 367]), [1])
+        # Чужой отдел в чужом пространстве — пусто, а НЕ «значит без границы».
+        self.assertEqual(narrow([560], [1, 367]), [])
+
+    def test_an_empty_space_is_not_all_departments(self):
+        """Пространству не выдали отделов — справочник пуст, а не полон.
+
+        Подмена пустого списка на «все» вернула бы дыру целиком: первое же
+        полунастроенное пространство снова показало бы чужую оргструктуру.
+        """
+        source = inspect.getsource(wiki_structure.space_department_ids)
+        self.assertIn('wiki_space_departments', source)
+        self.assertNotIn('NOT EXISTS', source)
+        self.assertEqual(wiki_structure.narrow_to_space(None, []), [])
+
+    def test_routes_resolve_the_space_before_answering(self):
+        """Оба роута спрашивают request_space — то есть проверяют, что
+        пространство вообще выдано спрашивающему. Без этого чужой space_id в
+        строке запроса перечислил бы отделы соседней вики."""
+        source = (ROOT / 'wiki' / 'routes_structure.py').read_text(encoding='utf-8')
+        for name in ('def wiki_access_subjects', 'def wiki_access_people'):
+            body = source[source.index(name):]
+            body = body[:body.index('\n    @wiki_route')] if '\n    @wiki_route' in body else body
+            self.assertIn('request_space(cursor, ctx)', body, name)
+            self.assertIn('space_department_ids', body, name)
+
+    def test_the_only_way_to_get_every_department_is_gated(self):
+        """Полный список отделов нужен КОНСТРУКТОРУ пространств — ему их
+        раздавать. Это исключение обязано быть явным и под тем же гейтом, что и
+        сам конструктор: иначе «покажи всё» станет обходом границы."""
+        source = (ROOT / 'wiki' / 'routes_structure.py').read_text(encoding='utf-8')
+        body = source[source.index('def wiki_access_subjects'):]
+        body = body[:body.index('\n    @wiki_route')]
+        self.assertIn("request.args.get('scope') == 'all'", body)
+        self.assertIn('_may_manage_space(ctx)', body)
+
+    def test_counters_are_counted_inside_the_boundary(self):
+        """Плитки на главной видит КАЖДЫЙ вошедший, а считались они по всей базе.
+
+        Имён это не выдавало, но «Пространств: 2» сообщало сотруднику «Тез КЦ» о
+        существовании чужой вики, а «Статей: 340» при двенадцати своих отвечало
+        на тот же вопрос числом.
+        """
+        names = inspect.signature(queries.counters).parameters
+        self.assertIn('space_ids', names)
+        source = inspect.getsource(queries.counters)
+        # Все три числа — внутри границы, а не одно поправленное снаружи.
+        self.assertIn('wiki_spaces', source)
+        self.assertIn('wiki_sections', source)
+        self.assertIn('wiki_article_sections', source)
+        ping = (ROOT / 'wiki' / 'routes.py').read_text(encoding='utf-8')
+        self.assertIn('queries.counters(cursor, space_ids=', ping)
+        # Правка отдельного ключа снаружи запроса — то самое второе место,
+        # которое однажды разойдётся с первым.
+        self.assertNotIn("payload['counters']['spaces'] =", ping)
+
+    def test_every_caller_in_the_front_passes_a_space_or_asks_for_all(self):
+        """СТРАЖ ОТ ВОЗВРАТА, и главный здесь.
+
+        Дыру вернёт не правка сервера, а новый экран, который позовёт справочник
+        без space_id: сервер у человека с ОДНИМ пространством ответит молча и
+        правильно, а у владельца с двумя — 400, и это заметят не сразу.
+        Поэтому проверяется каждый вызов во фронте, а не список известных.
+        """
+        offenders = []
+        for path in sorted((ROOT / 'src' / 'components').rglob('*.jsx')):
+            text = path.read_text(encoding='utf-8')
+            for endpoint in CATALOG_ENDPOINTS:
+                for match in re.finditer(re.escape(endpoint) + r'`', text):
+                    # Хвост вызова до конца строки: там и лежат params.
+                    tail = text[match.end():text.index('\n', match.end())]
+                    if 'space_id' in tail or "scope: 'all'" in tail:
+                        continue
+                    offenders.append('%s: %s%s' % (path.name, endpoint, tail.rstrip()))
+        self.assertEqual(offenders, [], 'вызов справочника без пространства: %s' % offenders)
+
+
 if __name__ == '__main__':
     unittest.main()

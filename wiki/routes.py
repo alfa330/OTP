@@ -274,7 +274,6 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 logging.exception('wiki: гостевой доступ недоступен в /ping')
                 payload['guest_access'] = []
                 payload['can_grant_guest'] = False
-            payload['counters'] = queries.counters(cursor)
             # Пространства для переключателя — вместе с тумблерами вкладок.
             # Именно здесь, а не в /structure: набор вкладок нужен раньше, чем
             # дерево разделов, и вкладка «Помощник» не должна мигнуть у того,
@@ -287,9 +286,15 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # (routes_structure._space_scope), но вкладка, которая отвечает
             # отказом, — это тот же молчаливый отказ, только наоборот.
             own = set(queries.spaces_for_user(cursor, ctx, include_guest=False))
-            # Счётчик пространств — по СВОИМ, а не по всем: «Пространств: 2» у
-            # сотрудника Тез КЦ сообщало бы, что рядом живёт чужая вика.
-            payload['counters']['spaces'] = len(allowed)
+            # Счётчики — по СВОИМ пространствам, а не по всей базе.
+            #
+            # Прежде здесь правился один лишь ключ 'spaces' («Пространств: 2» у
+            # сотрудника Тез КЦ сообщало бы, что рядом живёт чужая вика), а
+            # разделы и статьи так и считались по всей базе: плитка «Статей: 340»
+            # при двенадцати своих отвечала на тот же вопрос, только числом.
+            # Теперь границу знает сам запрос, и правка ключа снаружи не нужна —
+            # второе место, где её надо помнить, однажды разошлось бы с первым.
+            payload['counters'] = queries.counters(cursor, space_ids=sorted(allowed))
             payload['spaces'] = [
                 dict({k: sp[k] for k in ('id', 'name', 'code', 'icon', 'features')},
                      guest_only=sp['id'] not in own)

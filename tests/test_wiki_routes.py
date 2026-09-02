@@ -980,13 +980,19 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
         """Справочник субъектов сужается тем же отделом, что и проверка."""
         seen = {}
         self.addCleanup(setattr, structure, 'subject_catalog', structure.subject_catalog)
-        structure.subject_catalog = lambda cursor, department_ids=None: (
-            seen.update({'departments': department_ids}),
+        structure.subject_catalog = lambda cursor, department_ids=None, \
+            space_department_ids=None: (
+            seen.update({'departments': department_ids,
+                         'space_departments': space_department_ids}),
             {'department': [], 'direction': [], 'group': [], 'wiki_role': []})[1]
 
         client, _ = self.build(make_context('sv', department_id=1))
         body = client.get('/api/wiki/access/subjects').get_json()
         self.assertEqual(seen['departments'], [1])
+        # Вторая граница — пространства — приходит ОТДЕЛЬНЫМ аргументом, а не
+        # подмешивается в первый: иначе роли вики и должности пропали бы у
+        # супер-админа, открывшего форму в конкретном пространстве.
+        self.assertIsNotNone(seen['space_departments'])
         # Роль в системе супервайзеру не предлагается вовсе: она действует по
         # всей компании, и сервер такое правило отвергает.
         self.assertEqual(body['otp_role'], [])

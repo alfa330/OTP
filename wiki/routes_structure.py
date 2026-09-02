@@ -1005,7 +1005,34 @@ def register(bp, wiki_route, db, log_ip):
         # раздающему с границей не предлагаются вовсе — они адресуют людей по
         # всей компании, мимо отдела (access.may_grant_to_subject).
         departments = _grant_departments(ctx)
-        catalog = structure.subject_catalog(cursor, department_ids=departments)
+
+        # ГРАНИЦА ПРОСТРАНСТВА — вторая и независимая от границы отдела.
+        #
+        # Без неё в «Таксопарках» предлагался отдел «Тез КЦ»: справочник знал
+        # только «чей это человек» и ничего не знал про «чьё это пространство».
+        # Правило на чужой отдел всё равно ничего не открыло бы (до статей не
+        # пустит _SPACE_GATE_SQL), но чужая оргструктура показывалась целиком —
+        # а «Таксопарки» и «Тез» это разные компании.
+        #
+        # scope=all — единственное исключение, и оно с причиной: КОНСТРУКТОР
+        # пространств раздаёт пространство отделам, и список всех отделов ему
+        # нужен по делу. Гейт тот же, что у самого конструктора: сузить его до
+        # выбранного пространства значило бы запереть дверь ключом, лежащим
+        # внутри — новое пространство некому было бы выдать.
+        space_departments = None
+        if request.args.get('scope') == 'all':
+            if not _may_manage_space(ctx):
+                return jsonify({"error": "Полный справочник отделов доступен "
+                                         "тому, кто настраивает пространства",
+                                "code": "WIKI_FORBIDDEN"}), 403
+        else:
+            space_id, space_error = request_space(cursor, ctx)
+            if space_error:
+                return space_error
+            space_departments = structure.space_department_ids(cursor, space_id)
+
+        catalog = structure.subject_catalog(cursor, department_ids=departments,
+                                            space_department_ids=space_departments)
         catalog['otp_role'] = [] if departments is not None else [
             {'id': code, 'name': label} for code, label in (
                 ('super_admin', 'Супер-администратор'), ('admin', 'Администратор'),
@@ -1261,8 +1288,16 @@ def register(bp, wiki_route, db, log_ip):
         if ceiling is None:
             return jsonify({"error": "Доступ раздают супервайзер и выше",
                             "code": "WIKI_FORBIDDEN"}), 403
+        # Та же вторая граница, что и у справочника субъектов: без неё список
+        # «кому выдать доступ» в «Таксопарках» показывал 21 сотрудника «Тез КЦ»
+        # — людей чужой компании, с именами и должностями.
+        space_id, space_error = request_space(cursor, ctx)
+        if space_error:
+            return space_error
         return jsonify({"items": structure.grantable_people(
-            cursor, max_role_level=ceiling, department_ids=_grant_departments(ctx))})
+            cursor, max_role_level=ceiling,
+            department_ids=_grant_departments(ctx),
+            space_department_ids=structure.space_department_ids(cursor, space_id))})
 
     # ── «Почему этот человек это видит» ──────────────────────────────────
     @wiki_route('/access/effective', capability='can_manage_access')

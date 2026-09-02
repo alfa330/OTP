@@ -769,17 +769,53 @@ def schema_is_ready(cursor):
         return False
 
 
-def counters(cursor):
-    """Счётчики для диагностики раздела."""
+def counters(cursor, space_ids=None):
+    """Счётчики для диагностики раздела.
+
+    space_ids — пространства, доступные смотрящему. None означает «без
+    границы» и оставлено для диагностики; витрина всегда передаёт список.
+
+    БЕЗ ГРАНИЦЫ ЭТО УТЕЧКА, и не теоретическая: плитки на главной вики видит
+    каждый вошедший, а считались они по всей базе. Сотрудник «Тез КЦ» читал
+    «Пространств: 2» — то есть узнавал о существовании чужой вики, — и «Статей:
+    340» при двенадцати своих. Имён это не выдавало, но отвечало на вопрос
+    «а что там ещё есть», которого пространство существует не задавать.
+
+    Статья принадлежит пространству ЧЕРЕЗ РАЗДЕЛЫ, а статья без разделов — ничьё
+    и считается в любом: то же правило, что в articles_of_space, и заведено оно
+    там же (статья-классификатор из схемы и наследие импорта). Границу такая
+    статья не пробивает — без раздела её видно только тому, кому её выдали лично.
+
+    Роли вики не сужаются: они общекорпоративные, колонки space_id у них нет.
+    """
     cursor.execute(
         """
-        SELECT (SELECT count(*) FROM wiki_spaces   WHERE status = 'active'),
-               (SELECT count(*) FROM wiki_sections WHERE status = 'active'),
-               (SELECT count(*) FROM wiki_articles WHERE status = 'published'),
-               (SELECT count(*) FROM wiki_articles),
+        WITH ours AS (
+            SELECT a.id, a.status
+              FROM wiki_articles a
+             WHERE %(spaces)s::int[] IS NULL
+                -- Принадлежность считаем по ВСЕМ разделам статьи, а не только
+                -- активным: раздел, убранный в архив, пространства не теряет, а
+                -- статья в нём иначе стала бы «ничьей» и посчиталась бы у всех.
+                OR EXISTS (SELECT 1 FROM wiki_article_sections x
+                             JOIN wiki_sections sec ON sec.id = x.section_id
+                            WHERE x.article_id = a.id
+                              AND sec.space_id = ANY(%(spaces)s::int[]))
+                OR NOT EXISTS (SELECT 1 FROM wiki_article_sections x
+                                WHERE x.article_id = a.id)
+        )
+        SELECT (SELECT count(*) FROM wiki_spaces
+                 WHERE status = 'active'
+                   AND (%(spaces)s::int[] IS NULL OR id = ANY(%(spaces)s::int[]))),
+               (SELECT count(*) FROM wiki_sections
+                 WHERE status = 'active'
+                   AND (%(spaces)s::int[] IS NULL OR space_id = ANY(%(spaces)s::int[]))),
+               (SELECT count(*) FROM ours WHERE status = 'published'),
+               (SELECT count(*) FROM ours),
                (SELECT count(*) FROM wiki_roles),
-               (SELECT count(*) FROM wiki_articles WHERE status = 'draft')
-        """
+               (SELECT count(*) FROM ours WHERE status = 'draft')
+        """,
+        {'spaces': list(space_ids) if space_ids is not None else None},
     )
     row = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
     spaces, sections, published, articles, roles, drafts = row

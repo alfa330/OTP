@@ -42,7 +42,7 @@ const ROLE_TITLE = {
     admin: 'админ', super_admin: 'супер-админ',
 };
 
-export default function WikiAccessProbe({ base, headers, open, onClose }) {
+export default function WikiAccessProbe({ base, headers, spaceId = null, open, onClose }) {
     const [value, setValue] = useState('');
     const [people, setPeople] = useState([]);
     const [probe, setProbe] = useState(null);
@@ -50,11 +50,13 @@ export default function WikiAccessProbe({ base, headers, open, onClose }) {
     // Список тянем при открытии, а не при монтировании: кнопка живёт в шапке
     // вкладки, а заглядывают сюда изредка.
     useEffect(() => {
-        if (!open) return;
-        axios.get(`${base}/access/people`, { headers })
+        if (!open || !spaceId) return;
+        // Список сужен пространством: «почему этот человек это видит»
+        // спрашивают про своих, а не про сотрудников чужой компании.
+        axios.get(`${base}/access/people`, { headers, params: { space_id: spaceId } })
             .then((r) => setPeople(r.data?.items || []))
             .catch(() => setPeople([]));
-    }, [open, base, headers]);
+    }, [open, base, headers, spaceId]);
 
     const options = useMemo(() => people.map((person) => ({
         value: String(person.id),

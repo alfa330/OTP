@@ -291,6 +291,7 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
 };
 
 export default function WikiStructure({ base, headers, showToast, structure, reload, loading,
+                                        spaceId = null,
                                         canManageAccess = false,
                                         canManageStructure = true }) {
     const [departments, setDepartments] = useState([]);
@@ -332,10 +333,17 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
         // Справочник нужен только форме раздела; кто структуру не правит —
         // и форму не открывает, а лишний запрос отвечал бы 403 в консоль.
         if (!canBuildSomewhere) { setDepartments([]); return; }
-        axios.get(`${base}/access/subjects`, { headers })
+        // Пока пространство не приехало из ping, спрашивать нечего: у человека
+        // с двумя пространствами сервер ответит 400 «укажите какое», и в
+        // консоли на каждом заходе появлялась бы красная строка.
+        if (!spaceId) { setDepartments([]); return; }
+        /* space_id обязателен: справочник сужен пространством, и без параметра
+           сервер у человека с двумя пространствами ответит 400 — «какое из
+           них» он выбрать за нас не вправе. */
+        axios.get(`${base}/access/subjects`, { headers, params: { space_id: spaceId } })
             .then((r) => setDepartments(r.data?.department || []))
             .catch(() => setDepartments([]));   // не админ — справочник недоступен, это норма
-    }, [base, headers, canBuildSomewhere]);
+    }, [base, headers, canBuildSomewhere, spaceId]);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
@@ -1028,6 +1036,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                     showToast={showToast}
                     section={sections.find((x) => x.id === accessSection.id) || accessSection}
                     sections={sections}
+                    spaceId={spaceId}
                     onClose={() => setAccessSection(null)}
                     reload={reload}
                 />
@@ -1036,6 +1045,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             <WikiAccessProbe
                 base={base}
                 headers={headers}
+                spaceId={spaceId}
                 open={probeOpen}
                 onClose={() => setProbeOpen(false)}
             />

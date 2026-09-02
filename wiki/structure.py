@@ -177,6 +177,56 @@ def space_ids_for_departments(cursor, department_codes):
     return [row[0] for row in cursor.fetchall()]
 
 
+def space_department_ids(cursor, space_id):
+    """Отделы, которым выдано ЭТО пространство. Обратная сторона
+    space_ids_for_departments: там по отделам искали пространства, здесь по
+    пространству — отделы.
+
+    Нужна справочникам выбора субъекта и сотрудников. Пространство — граница
+    между отделами (и между клиентами: «Таксопарки» и «Тез» — разные компании),
+    поэтому предлагать в «Таксопарках» отдел «Тез КЦ» значит показывать чужую
+    оргструктуру и обещать правило, которое ничего не откроет: до статей чужого
+    пространства человека всё равно не пустит _SPACE_GATE_SQL.
+
+    Пустой список — законный ответ («пространству не выдали ни одного отдела»),
+    и подменять его на «все» НЕЛЬЗЯ: полунастроенное пространство снова вылило
+    бы чужие отделы в справочник. Та же причина, по которой правила «нет отделов
+    = видно всем» нет в space_ids_for_departments.
+    """
+    if not space_id:
+        return []
+    cursor.execute(
+        """
+        SELECT sd.department_id
+          FROM wiki_space_departments sd
+          JOIN departments d ON d.id = sd.department_id AND d.is_active
+         WHERE sd.space_id = %s
+         ORDER BY sd.department_id
+        """,
+        (space_id,),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def narrow_to_space(department_ids, space_department_ids):
+    """Пересечение границы РАЗДАЮЩЕГО и границы ПРОСТРАНСТВА.
+
+    Две разные границы, и складывать их надо, а не выбирать одну:
+      * department_ids — «чей это человек» (супервайзер работает со своим
+        отделом). None означает «без границы» — супер-админ, администратор вики;
+      * space_department_ids — «чьё это пространство». None означает «про
+        пространство не спрашивали» (например конструктор пространств, которому
+        нужны ВСЕ отделы, чтобы было из чего раздавать).
+
+    Обе None — None: список не сужается вовсе.
+    """
+    if space_department_ids is None:
+        return department_ids
+    if department_ids is None:
+        return sorted(space_department_ids)
+    return sorted(set(department_ids) & set(space_department_ids))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Разделы
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,8 +760,15 @@ def section_role_levels(cursor):
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
-def grantable_people(cursor, *, max_role_level, department_ids=None):
+def grantable_people(cursor, *, max_role_level, department_ids=None,
+                     space_department_ids=None):
     """Сотрудники, которым этот человек вправе выдать доступ.
+
+    space_department_ids — граница ПРОСТРАНСТВА, отдельная от границы отдела
+    раздающего (см. narrow_to_space). Без неё в «Таксопарках» предлагался
+    двадцать один сотрудник «Тез КЦ»: правило на них ничего не открыло бы (до
+    чужого пространства не пускает _SPACE_GATE_SQL), а список людей чужой
+    компании показывался целиком, с именами и должностями.
 
     Заменяет поле «ID сотрудника»: вводить туда число можно было, только
     подсмотрев его в базе, и опечатка выдавала доступ постороннему молча —
@@ -725,6 +782,7 @@ def grantable_people(cursor, *, max_role_level, department_ids=None):
     Порог должности отсекается в SQL по той же шкале ROLE_LEVELS, что и
     правила: держать вторую копию шкалы в питоне значило бы дать ей разойтись.
     """
+    depts = narrow_to_space(department_ids, space_department_ids)
     cursor.execute(
         """
         SELECT u.id, u.name, u.role, d.name AS department_name
@@ -739,28 +797,39 @@ def grantable_people(cursor, *, max_role_level, department_ids=None):
         """,
         {'levels': json.dumps(ROLE_LEVELS),
          'ceiling': max_role_level,
-         'depts': list(department_ids) if department_ids is not None else None},
+         'depts': list(depts) if depts is not None else None},
     )
     return [{'id': r[0], 'name': r[1], 'role': r[2], 'department_name': r[3]}
             for r in cursor.fetchall()]
 
 
-def subject_catalog(cursor, department_ids=None):
+def subject_catalog(cursor, department_ids=None, space_department_ids=None):
     """Справочники для выбора субъекта правила — одним запросом на все четыре.
+
+    ДВЕ ГРАНИЦЫ, и они разные (см. narrow_to_space):
 
     department_ids — граница отдела раздающего (None = без границы). С границей
     справочник сужается до своего отдела: супервайзеру и руководителю нельзя
     адресовать правило чужому отделу, чужой группе или чужому направлению, и
     предлагать их в форме значит обещать то, что сервер отвергнет
-    (access.may_grant_to_subject). Роли вики в таком справочнике нет вовсе —
-    она адресует людей по всей компании, мимо любого отдела.
+    (access.may_grant_to_subject). Роли вики и должности в таком справочнике нет
+    вовсе — они адресуют людей по всей компании, мимо любого отдела.
 
-    Полный справочник нужен не только форме правила: из него же выбирается
-    «Отдел ветки» в форме раздела. Границы у тех, кто правит структуру, нет
-    (super_admin и роль «Администратор вики» — оба без отдела в
-    _grant_departments), так что сужение до них не дотягивается.
+    space_department_ids — граница ПРОСТРАНСТВА (None = про пространство не
+    спрашивали). Отвечает на другой вопрос: не «чей это человек», а «чьё это
+    пространство». Без неё в «Таксопарках» предлагался отдел «Тез КЦ» — чужая
+    оргструктура и правило, которое ничего не откроет (до статей чужого
+    пространства не пустит _SPACE_GATE_SQL).
+
+    Складываются, а не заменяют друг друга: у супервайзера СЗоВ остаётся его
+    отдел, у супер-админа — шесть отделов пространства вместо всех семи.
+
+    ВАЖНО: наличие space_department_ids НЕ делает раздающего «ограниченным».
+    Роли вики и должности гасятся по department_ids — иначе супер-админ,
+    открывший форму в конкретном пространстве, потерял бы правило на должность.
     """
     bounded = department_ids is not None
+    depts = narrow_to_space(department_ids, space_department_ids)
     cursor.execute(
         """
         SELECT 'department' AS kind, id, name FROM departments
@@ -774,10 +843,10 @@ def subject_catalog(cursor, department_ids=None):
          WHERE status = 'active'
            AND (%(depts)s::int[] IS NULL OR department_id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'wiki_role', id, name FROM wiki_roles WHERE %(depts)s::int[] IS NULL
+        SELECT 'wiki_role', id, name FROM wiki_roles WHERE NOT %(bounded)s
         ORDER BY 1, 3
         """,
-        {'depts': list(department_ids) if bounded else None},
+        {'depts': list(depts) if depts is not None else None, 'bounded': bounded},
     )
     catalog = {'department': [], 'direction': [], 'group': [], 'wiki_role': []}
     for kind, ident, name in cursor.fetchall():
