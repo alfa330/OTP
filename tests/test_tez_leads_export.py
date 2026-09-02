@@ -103,20 +103,20 @@ def _load_database_method(name):
 
 
 class _FakeDb:
-    """Выгрузка тянет ДВА периода: отчётный месяц и предыдущий (второй лист).
+    """Выгрузка тянет отчёт периода ОДНИМ запросом: своя база + перенос.
 
-    prev_rows задаётся отдельно, иначе один и тот же набор строк вернулся бы на
-    оба листа и тест не отличил бы их друг от друга.
+    Разделение на два периода жило в самой выгрузке и давало два листа; теперь
+    периметр собирает get_tez_leads_report, а строка сама говорит, своя она или
+    перенесённая (is_carried / base_month).
     """
 
-    def __init__(self, rows, prev_rows=None):
+    def __init__(self, rows):
         self.rows = rows
-        self.prev_rows = [] if prev_rows is None else prev_rows
         self.calls = []
 
-    def get_tez_leads_detail(self, year, month, **kwargs):
+    def get_tez_leads_report(self, year, month, **kwargs):
         self.calls.append((year, month, kwargs))
-        return self.rows if (year, month) == (2026, 7) else self.prev_rows
+        return self.rows
 
 
 class _QuietLogging:
@@ -158,8 +158,8 @@ class _FakeDatabase:
 
 
 class TezLeadsExcelExportTests(unittest.TestCase):
-    def _export_bytes(self, rows, prev_rows=None):
-        db = _FakeDb(rows, prev_rows)
+    def _export_bytes(self, rows):
+        db = _FakeDb(rows)
 
         def send_file(stream, **kwargs):
             return {
@@ -191,13 +191,13 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         response = export()
         return db, response["content"]
 
-    def _export(self, rows, prev_rows=None):
-        db, content = self._export_bytes(rows, prev_rows)
+    def _export(self, rows):
+        db, content = self._export_bytes(rows)
         workbook = load_workbook(io.BytesIO(content), data_only=True)
         return db, workbook.active
 
-    def _export_book(self, rows, prev_rows=None):
-        db, content = self._export_bytes(rows, prev_rows)
+    def _export_book(self, rows):
+        db, content = self._export_bytes(rows)
         return db, load_workbook(io.BytesIO(content), data_only=True)
 
     @staticmethod
@@ -219,7 +219,27 @@ class TezLeadsExcelExportTests(unittest.TestCase):
             "prev_month_first_order_at": None,
             "source_file_name": "Лиды Алматы июль.xlsx",
             "talk_duration_seconds": 3723,
+            "is_carried": False,
+            "base_year": 2026,
+            "base_month": 7,
         }
+        row.update(overrides)
+        return row
+
+    @classmethod
+    def _carried_row(cls, **overrides):
+        """Строка переноса: лид ИЮНЬСКОЙ базы в отчёте за июль.
+
+        Все её колонки метод отчёта уже пересчитал на июль, поэтому фикстура
+        задаёт июльские даты и июльский статус — ровно то, что видит выгрузка.
+        """
+        row = cls._detail_row(
+            phone="77010000009",
+            full_name="Перенесённый водитель",
+            source_file_name="Лиды Алматы июнь.xlsx",
+            is_carried=True,
+            base_month=6,
+        )
         row.update(overrides)
         return row
 
@@ -228,8 +248,8 @@ class TezLeadsExcelExportTests(unittest.TestCase):
 
         self.assertEqual(
             db.calls,
-            [(2026, 7, {"limit": 50000}), (2026, 6, {"limit": 50000})],
-            "Excel строится из полной выборки: отчётный месяц + база предыдущего",
+            [(2026, 7, {"limit": 50000})],
+            "Лист один, и собирается он одним запросом отчёта за период",
         )
         headers = [cell.value for cell in sheet[1]]
         self.assertIn("Источник", headers)
@@ -243,71 +263,132 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         self.assertEqual(sheet.cell(2, duration_column).value, 3723)
         self.assertEqual(sheet.cell(2, duration_column).number_format, "0")
 
-    # ── Второй лист: база прошлого месяца ───────────────────────────────────
+    # ── Один лист: своя база месяца плюс перенос с прошлого ─────────────────
 
-    def test_previous_month_base_goes_to_a_second_sheet(self):
-        """Владелец: в выгрузку текущего месяца добавить базу прошлого целиком,
-        отдельным листом и с пометкой, за какой месяц она действует."""
-        prev = self._detail_row(phone="77010000002", status="in_progress",
-                                status_rule=None, success_date=None,
-                                month_first_order_at=None, first_order_at=None)
-        db, book = self._export_book([self._detail_row()], [prev])
+    def test_report_is_a_single_sheet_marked_by_base_month(self):
+        """Владелец: лиды двух месяцев — на ОДНОМ листе, и по строке должно быть
+        видно, из чьей базы она пришла."""
+        db, book = self._export_book([self._detail_row(), self._carried_row()])
 
-        self.assertEqual(book.sheetnames, ["Лиды 07.2026", "База 06.2026"])
-        sheet = book["База 06.2026"]
-        headers = [cell.value for cell in sheet[1]]
-        self.assertEqual(headers[0], "Действие базы")
-        self.assertEqual(sheet.cell(2, 1).value, "Июнь 2026")
-        # Дальше идут те же колонки, что и на основном листе, но со сдвигом.
-        self.assertEqual(headers[1:], [cell.value for cell in book["Лиды 07.2026"][1]])
-        self.assertEqual(sheet.cell(2, headers.index("Телефон") + 1).value, "77010000002")
-
-    def test_successes_paid_in_the_previous_month_are_excluded(self):
-        """Успешки, засчитанные и выплаченные прошлым месяцем, в лист не идут."""
-        paid = self._detail_row(phone="77010000003", success_date="2026-06-15")
-        db, book = self._export_book([self._detail_row()], [paid])
         self.assertEqual(book.sheetnames, ["Лиды 07.2026"])
-
-    def test_lead_counted_later_stays_in_the_previous_month_base(self):
-        """А вот лид прошлого месяца, ставший успешкой уже в этом (перенос),
-        остаётся: тем месяцем по нему не платили."""
-        carried = self._detail_row(phone="77010000004", success_date="2026-07-03")
-        db, book = self._export_book([self._detail_row()], [carried])
-        sheet = book["База 06.2026"]
+        sheet = book.active
         headers = [cell.value for cell in sheet[1]]
-        self.assertEqual(sheet.cell(2, headers.index("Телефон") + 1).value, "77010000004")
-        self.assertEqual(sheet.cell(2, headers.index("Дата успешки") + 1).value, "2026-07-03")
+        self.assertEqual(headers[0], "Месяц базы")
+        self.assertEqual(sheet.cell(2, 1).value, "Июль 2026")
+        # У переноса месяц базы — прошлый, и это сказано словом: читателю не
+        # приходится помнить, что июнь на июльском листе и означает перенос.
+        self.assertEqual(sheet.cell(3, 1).value, "Июнь 2026 (перенос)")
+        self.assertEqual(sheet.cell(3, headers.index("Телефон") + 1).value, "77010000009")
 
-    def test_previous_month_sheet_buckets_calls_by_its_own_month(self):
-        """Звонок 25 июня на листе июня — это «в отчётном месяце», а не «в прошлом»:
-        иначе на втором листе все звонки уехали бы в чужую колонку."""
-        prev = self._detail_row(phone="77010000005", success_date=None,
-                                call_at="2026-06-25T10:00:00", talk_duration_seconds=61)
-        db, book = self._export_book([self._detail_row()], [prev])
-        sheet = book["База 06.2026"]
+    def test_every_success_of_the_period_is_on_the_sheet(self):
+        """Тот самый расчёт, из-за которого файл расходился с разделом: успешки
+        периода = успешки своей базы ПЛЮС успешки переноса. За август в разделе
+        стояло 245, в файле — 134, потому что 111 переносов лежали отдельно."""
+        own = [self._detail_row(phone=f"7701000{idx:04d}") for idx in range(3)]
+        carried = [
+            self._carried_row(phone=f"7702000{idx:04d}", success_date="2026-07-05")
+            for idx in range(2)
+        ]
+        _, sheet = self._export(own + carried)
         headers = [cell.value for cell in sheet[1]]
-        own = headers.index("Звонок в отчётном месяце") + 1
-        prev_col = headers.index("Звонок в прошлом месяце") + 1
-        self.assertEqual(sheet.cell(2, own).value, "2026-06-25 10:00:00")
-        # Пустая текстовая ячейка читается обратно как None.
-        self.assertFalse(sheet.cell(2, prev_col).value)
-        self.assertEqual(sheet.cell(2, own + 1).value, 61)
+        status_column = headers.index("Статус") + 1
+
+        statuses = [sheet.cell(row, status_column).value for row in range(2, 7)]
+        self.assertEqual(statuses, ["Успешка"] * 5)
+        self.assertEqual(sheet.max_row, 6, "лист один, строки обеих баз в нём")
+
+    def test_carried_lead_shows_its_reporting_month_status(self):
+        """Главное: у перенесённой строки статус и правило — ОТЧЁТНОГО месяца.
+
+        Раньше здесь стоял статус прошлого месяца («В работе»), и понять, стал
+        лид успешкой в этом месяце или нет, было нельзя.
+        """
+        carried = self._carried_row(
+            status="success",
+            status_rule="reactivated_30d",
+            success_date="2026-07-14",
+            month_first_order_at="2026-07-14T09:00:00",
+            first_order_at="2026-07-14T09:00:00",
+            prev_month_first_order_at=None,
+        )
+        _, sheet = self._export([carried])
+        headers = [cell.value for cell in sheet[1]]
+
+        self.assertEqual(sheet.cell(2, headers.index("Статус") + 1).value, "Успешка")
+        self.assertEqual(
+            sheet.cell(2, headers.index("Правило") + 1).value,
+            "Не работал 30+ дней и вернулся после звонка",
+        )
+        self.assertEqual(sheet.cell(2, headers.index("Дата успешки") + 1).value, "2026-07-14")
+        self.assertEqual(
+            sheet.cell(2, headers.index("Поездка в отчётном месяце") + 1).value,
+            "2026-07-14 09:00:00",
+        )
+
+    def test_carried_lead_without_success_shows_why_it_was_not_counted(self):
+        """Перенос, который в отчётном месяце успешкой не стал: видно и статус,
+        и причину — иначе строка ничем не отличается от «просто базы»."""
+        carried = self._carried_row(
+            status="already_working",
+            status_rule="gap_under_30d",
+            success_date=None,
+            rule_code=None,
+            month_first_order_at="2026-07-06T08:00:00",
+            first_order_at="2026-07-06T08:00:00",
+            prev_month_first_order_at="2026-06-28T19:00:00",
+        )
+        _, sheet = self._export([carried])
+        headers = [cell.value for cell in sheet[1]]
+
+        self.assertEqual(
+            sheet.cell(2, headers.index("Статус") + 1).value, "Уже работающий"
+        )
+        self.assertIn(
+            "30 дней", sheet.cell(2, headers.index("Правило") + 1).value
+        )
+        self.assertFalse(sheet.cell(2, headers.index("Дата успешки") + 1).value)
+        # Поездка месяца базы у переноса становится «поездкой в прошлом месяце»:
+        # месяц базы для отчётного месяца и есть прошлый.
+        self.assertEqual(
+            sheet.cell(2, headers.index("Поездка в прошлом месяце") + 1).value,
+            "2026-06-28 19:00:00",
+        )
+
+    def test_missing_carry_status_is_named_rather_than_left_blank(self):
+        """Статуса доработки может не быть (пересчёт по периоду после появления
+        колонки не проходил). Пустая ячейка читалась бы как потерянный статус,
+        поэтому у состояния есть имя, и оно не врёт про «уже пересчитали»."""
+        _, sheet = self._export([self._carried_row(status="carry_pending",
+                                                   status_rule=None,
+                                                   success_date=None)])
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(
+            sheet.cell(2, headers.index("Статус") + 1).value, "Статус не рассчитан"
+        )
+
+    def test_status_success_without_a_success_row_is_not_counted_as_one(self):
+        """Обратная страховка того же расхождения: успешек в файле не должно
+        стать БОЛЬШЕ, чем в разделе. Успешкой строку делает запись об успешке
+        за период, а не залипший статус."""
+        _, sheet = self._export([self._carried_row(status="stale_success",
+                                                   status_rule="reactivated_30d",
+                                                   success_date=None)])
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(
+            sheet.cell(2, headers.index("Статус") + 1).value, "Требует сверки"
+        )
+        self.assertNotEqual(sheet.cell(2, headers.index("Статус") + 1).value, "Успешка")
 
     def test_carried_success_shows_its_call_like_an_ordinary_one(self):
-        """Перенесённая успешка: лид июня, поездка и звонок — в июле.
-
-        Раскладка от месяца ЛИСТА оставляла обе пары колонок пустыми, и строка
-        выходила успешкой без основания. Считаем от месяца зачёта — звонок
-        встаёт в те же колонки, что и у обычной июльской успешки.
-        """
-        carried = self._detail_row(
-            phone="77010000006",
+        """Перенесённая успешка: лид июня, поездка и звонок — в июле. Звонок
+        ложится в те же колонки, что и у обычной июльской успешки, потому что
+        лист один и месяц раскладки у всех строк отчётный."""
+        carried = self._carried_row(
             success_date="2026-07-14",
             call_at="2026-07-09T11:20:00",
             talk_duration_seconds=95,
         )
-        _, book = self._export_book([self._detail_row()], [carried])
-        sheet = book["База 06.2026"]
+        _, sheet = self._export([carried])
         col = self._call_columns(sheet)
 
         self.assertEqual(sheet.cell(2, col["month_call"]).value, "2026-07-09 11:20:00")
@@ -317,34 +398,20 @@ class TezLeadsExcelExportTests(unittest.TestCase):
 
     def test_carried_success_on_the_month_seam_fills_the_previous_pair(self):
         """Звонок 25 июня при поездке 3 июля — окно «последние 7 дней прошлого
-        месяца» относительно МЕСЯЦА ЗАЧЁТА, а не месяца листа."""
-        carried = self._detail_row(
-            phone="77010000007",
+        месяца» относительно ОТЧЁТНОГО месяца, для переноса тоже."""
+        carried = self._carried_row(
             success_date="2026-07-03",
             status_rule="prev_month_last7",
             rule_code="prev_month_last7",
             call_at="2026-06-25T10:00:00",
             talk_duration_seconds=61,
         )
-        _, book = self._export_book([self._detail_row()], [carried])
-        sheet = book["База 06.2026"]
+        _, sheet = self._export([carried])
         col = self._call_columns(sheet)
 
         self.assertEqual(sheet.cell(2, col["prev_call"]).value, "2026-06-25 10:00:00")
         self.assertEqual(sheet.cell(2, col["prev_duration"]).value, 61)
         self.assertFalse(sheet.cell(2, col["month_call"]).value)
-
-    def test_call_reference_month_falls_back_to_the_sheet(self):
-        """Без даты успешки (и при мусоре в ней) раскладка остаётся прежней —
-        от месяца листа, иначе сломался бы весь второй лист."""
-        reference = _load_top_level_function("_tez_leads_call_reference_month")
-        self.assertEqual(reference(None, 2026, 6), (2026, 6))
-        self.assertEqual(reference("", 2026, 6), (2026, 6))
-        self.assertEqual(reference("не дата", 2026, 6), (2026, 6))
-        self.assertEqual(reference("2026-13-01", 2026, 6), (2026, 6))
-        self.assertEqual(reference("2026-06-30", 2026, 6), (2026, 6))
-        self.assertEqual(reference("2026-07-03", 2026, 6), (2026, 7))
-        self.assertEqual(reference("2027-01-05", 2026, 12), (2027, 1))
 
     def test_missing_talk_duration_is_an_empty_excel_cell(self):
         _, sheet = self._export(
@@ -368,9 +435,10 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         )
         headers = [cell.value for cell in sheet[1]]
         source_column = headers.index("Источник") + 1
+        name_column = headers.index("ФИО") + 1
 
-        self.assertEqual(sheet.cell(2, 1).value, "=1+1")
-        self.assertEqual(sheet.cell(2, 1).data_type, "s")
+        self.assertEqual(sheet.cell(2, name_column).value, "=1+1")
+        self.assertEqual(sheet.cell(2, name_column).data_type, "s")
         self.assertEqual(
             sheet.cell(2, source_column).value,
             '=HYPERLINK("https://example.invalid")',
@@ -406,14 +474,15 @@ class TezLeadsExcelExportTests(unittest.TestCase):
             sheet_xml = book.read("xl/worksheets/sheet1.xml").decode("utf-8")
 
         self.assertIn('numberStoredAsText="1"', sheet_xml)
-        self.assertIn('sqref="B2:B3"', sheet_xml)
+        # «Месяц базы» стоит первой колонкой, поэтому телефон — это C.
+        self.assertIn('sqref="C2:C3"', sheet_xml)
         # Узел обязан стоять после pageMargins — иначе Excel считает книгу битой.
         self.assertLess(
             sheet_xml.index("<pageMargins"), sheet_xml.index("<ignoredErrors")
         )
         # Файл после правки zip остаётся читаемым книгой, а не только текстом.
         sheet = load_workbook(io.BytesIO(content), data_only=True).active
-        self.assertEqual(sheet.cell(2, 2).value, "77010000001")
+        self.assertEqual(sheet.cell(2, 3).value, "77010000001")
 
     def test_empty_export_is_not_patched(self):
         _, content = self._export_bytes([])
@@ -652,6 +721,127 @@ class TezLeadsDetailPayloadTests(unittest.TestCase):
         self.assertEqual(row["month_first_order_at"], "2026-07-03T22:47:00")
         self.assertEqual(row["prev_month_first_order_at"], "2026-06-30T23:27:00")
         self.assertIn("'month_first_order_at'", source)
+
+
+class TezLeadsReportPayloadTests(unittest.TestCase):
+    """Контракт выборки отчёта: периметр периода и пересчёт колонок на него."""
+
+    def setUp(self):
+        self.method, self.source = _load_database_method("get_tez_leads_report")
+
+    @staticmethod
+    def _row(**overrides):
+        values = {
+            "lead_id": "8d0c0346-9563-46c3-b757-696414b19bf2",
+            "phone_norm": "77010000001",
+            "full_name": "Перенесённый водитель",
+            "status": "success",
+            "status_rule": "reactivated_30d",
+            "upload_count": 2,
+            "trip_at": datetime(2026, 8, 31, 21, 18, 56),
+            "prev_trip_at": None,
+            "operator_id": 17,
+            "operator_name": "Оператор ТЕЗ",
+            "call_at": datetime(2026, 7, 30, 15, 22, 49),
+            "success_date": dt_date(2026, 8, 31),
+            "rule_code": "reactivated_30d",
+            "file_name": "Лиды Алматы июль.xlsx",
+            "billsec": 39,
+            "is_carried": True,
+            "base_year": 2026,
+            "base_month": 7,
+        }
+        values.update(overrides)
+        return tuple(values.values())
+
+    def test_carried_row_is_recomputed_onto_the_reporting_month(self):
+        db = _FakeDatabase(self._row())
+        row = self.method(db, 2026, 8)[0]
+
+        self.assertTrue(row["is_carried"])
+        self.assertEqual((row["base_year"], row["base_month"]), (2026, 7))
+        # Статус, правило и дата успешки — августовские, хотя лид июльский.
+        self.assertEqual(row["status"], "success")
+        self.assertEqual(row["status_rule"], "reactivated_30d")
+        self.assertEqual(row["success_date"], "2026-08-31")
+        self.assertEqual(row["month_first_order_at"], "2026-08-31T21:18:56")
+        self.assertEqual(row["talk_duration_seconds"], 39)
+        self.assertEqual(row["upload_count"], 2)
+
+    def test_period_perimeter_matches_the_funnel(self):
+        """Строки отчёта = своя база месяца + перенос прошлого (status <> success),
+        то есть ровно те лиды, на которых может лежать успешка периода."""
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 8)
+        sql = db.cursor.sql
+
+        self.assertIn("WHERE l.year = %(year)s AND l.month = %(month)s", sql)
+        self.assertIn("UNION ALL", sql)
+        self.assertIn("l.year = %(prev_year)s AND l.month = %(prev_month)s", sql)
+        self.assertIn("l.status <> 'success'", sql)
+        self.assertEqual(
+            db.cursor.params,
+            {"year": 2026, "month": 8, "prev_year": 2026, "prev_month": 7,
+             "limit": 50000},
+        )
+
+    def test_january_report_reaches_back_into_december(self):
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 1)
+        self.assertEqual(db.cursor.params["prev_year"], 2025)
+        self.assertEqual(db.cursor.params["prev_month"], 12)
+
+    def test_carried_columns_come_from_the_carry_pair(self):
+        """Перенос читает carry_*, а не собственные колонки лида: иначе в отчёт
+        уехали бы статус и поездка месяца базы."""
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 8)
+        query = db.cursor.sql
+
+        self.assertIn("l.carry_status, l.carry_status_rule,", query)
+        self.assertIn("l.carry_first_order_at,", query)
+        # Отсечка «последний звонок до поездки» берётся из строки отчёта, то
+        # есть у переноса — из его августовской поездки, а не из июльской.
+        self.assertIn("(r.trip_at IS NULL OR c.started_at < r.trip_at)", query)
+
+    def test_success_is_joined_only_for_the_reporting_period(self):
+        """Успешка, забронированная на СЛЕДУЮЩИЙ месяц, в этот отчёт не входит —
+        иначе счёт успешек разошёлся бы с разделом в другую сторону."""
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 8)
+        self.assertIn(
+            "ON s.lead_id = r.id AND s.year = %(year)s AND s.month = %(month)s",
+            db.cursor.sql,
+        )
+
+    def test_phone_present_in_both_bases_is_not_doubled_but_a_success_survives(self):
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 8)
+        sql = db.cursor.sql
+
+        self.assertIn("FROM tez_leads own", sql)
+        self.assertIn("own.phone_norm = l.phone_norm", sql)
+        # Исключение: строку с успешкой отчётного месяца оставляем всегда.
+        self.assertIn("FROM tez_lead_successes s", sql)
+        self.assertIn("s.lead_id = l.id", sql)
+
+    def test_own_base_goes_first_and_untouched_statuses_never_fall_out(self):
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 8)
+        self.assertIn("ORDER BY r.is_carried, r.trip_at DESC NULLS LAST", db.cursor.sql)
+        # base_status у своей строки NOT NULL, у переноса до пересчёта NULL —
+        # такое состояние называется своим именем, а не пустой ячейкой.
+        self.assertIn("COALESCE(r.base_status, 'carry_pending')", db.cursor.sql)
+        self.assertIn("'carry_pending'", self.source)
+
+    def test_only_a_success_row_makes_a_row_a_success(self):
+        """Равенство «успешек в файле = успешек в разделе» держится структурой
+        запроса: статус 'success' без записи об успешке за период успешкой не
+        называется."""
+        db = _FakeDatabase(self._row())
+        self.method(db, 2026, 8)
+        self.assertIn("WHEN r.base_status = 'success' THEN 'stale_success'",
+                      db.cursor.sql)
 
 
 if __name__ == "__main__":

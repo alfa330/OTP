@@ -865,6 +865,19 @@ class BatchWriteTests(unittest.TestCase):
         body = self._body('apply_tez_lead_outcomes')
         self.assertIn('CASE WHEN v.write_status THEN v.status ELSE l.status END', body)
 
+    def test_carried_status_is_stored_instead_of_being_thrown_away(self):
+        """Статус месяца ДОРАБОТКИ расчёт получал и выбрасывал: в отчёте у
+        перенесённого лида стоял его прошлый статус, и понять, стал он успешкой
+        в этом месяце или нет, было нельзя. Пишем его в свою пару колонок —
+        собственный статус лида при этом по-прежнему не трогаем."""
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn(
+            'carry_status = CASE WHEN v.write_status THEN l.carry_status ELSE v.status END',
+            body,
+        )
+        self.assertIn('carry_status_rule = CASE WHEN v.write_status THEN l.carry_status_rule',
+                      body)
+
     def test_period_comes_from_the_item_not_the_arguments(self):
         """Иначе UPDATE перенесённого лида не найдёт строку (год/месяц чужие),
         вернёт ноль строк — и перенос молча не работает."""
