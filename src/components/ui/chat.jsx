@@ -131,6 +131,9 @@ export const ChatComposer = ({
     value, onChange, onSubmit, busy = false, disabled = false,
     placeholder = 'Спросите что-нибудь…', maxLength = 1000, hint = null,
     focusKey = null,
+    // Подписи кнопки настраиваются: помощник вики «спрашивает», а в «Лидах OLX»
+    // сотрудник отвечает кандидату — «Спросить» там читалось бы как ошибка.
+    submitLabel = 'Спросить', busyLabel = 'Думаю…',
 }) => {
     const areaRef = useRef(null);
     const [rows, setRows] = useState(1);
@@ -196,7 +199,7 @@ export const ChatComposer = ({
                     className="inline-flex h-[40px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3.5 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                     {busy ? <Loader2 size={15} className="animate-spin" /> : <CornerDownLeft size={15} />}
-                    <span className="hidden sm:inline">{busy ? 'Думаю…' : 'Спросить'}</span>
+                    <span className="hidden sm:inline">{busy ? busyLabel : submitLabel}</span>
                 </button>
             </div>
             <div className="mt-1 flex items-center justify-between px-1 text-[11px] text-slate-400">

@@ -230,6 +230,100 @@ def get_thread(cursor, cabinet_code, thread_id):
     return _one(cursor)
 
 
+def suppress_canned_reply(cursor, cabinet_code, thread_id):
+    """Закрыть роботу возможность прислать автоответ поверх ответа человека.
+
+    Ставит ту же отметку, что и сама отправка автоответа, но только если она
+    ещё пуста. Без этого возможна некрасивая гонка: человек отвечает из раздела,
+    а робот, начавший цикл секундой раньше, кладёт следом своё «позвоните по
+    номеру» — и кандидат видит живой ответ, перечёркнутый машинным.
+    """
+    cursor.execute(
+        """
+        INSERT INTO olx_threads (cabinet_code, thread_id, canned_reply_sent_at)
+        VALUES (%(cabinet_code)s, %(thread_id)s, {now})
+        ON CONFLICT (cabinet_code, thread_id) DO UPDATE
+           SET canned_reply_sent_at = COALESCE(olx_threads.canned_reply_sent_at, {now}),
+               updated_at = {now}
+        """.format(now=_NOW),
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
+    )
+
+
+def claim_outbound(cursor, cabinet_code, thread_id, body, kind='portal',
+                   actor_id=None, actor_name=None, window_seconds=15,
+                   status='pending'):
+    """Занять право на отправку. Возвращает строку или None, если это повтор.
+
+    Защита от двойного нажатия. Ключа идемпотентности у ручки OLX нет, а проект
+    уже платил за это 172 копиями одного сообщения одному человеку, поэтому
+    замок нужен на СЕРВЕРЕ, а не только `disabled` на кнопке.
+
+    Признак повтора — тот же текст в тот же чат за последние секунды. Именно
+    текст, а не просто «недавно писали»: два разных ответа подряд — это
+    нормальная переписка, а два одинаковых за десять секунд — это дважды
+    нажатая кнопка.
+    """
+    cursor.execute(
+        """
+        SELECT id FROM olx_outbound
+         WHERE cabinet_code = %(cabinet_code)s
+           AND thread_id = %(thread_id)s
+           AND body = %(body)s
+           AND created_at > {now} - (%(window)s * INTERVAL '1 second')
+         LIMIT 1
+        """.format(now=_NOW),
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id), 'body': body,
+         'window': int(window_seconds)},
+    )
+    if cursor.fetchone() is not None:
+        return None
+
+    cursor.execute(
+        """
+        INSERT INTO olx_outbound (cabinet_code, thread_id, kind, body,
+                                  author_user_id, author_name, status, sent_at)
+        VALUES (%(cabinet_code)s, %(thread_id)s, %(kind)s, %(body)s,
+                %(actor_id)s, %(actor_name)s, %(status)s,
+                CASE WHEN %(status)s = 'sent' THEN {now} ELSE NULL END)
+        RETURNING *
+        """.format(now=_NOW),
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id), 'kind': kind,
+         'body': body, 'actor_id': actor_id, 'actor_name': _cut(actor_name, 200),
+         'status': status},
+    )
+    return _one(cursor)
+
+
+def finish_outbound(cursor, outbound_id, status, error=None):
+    """Проставить исход отправки: `sent` или `failed`."""
+    cursor.execute(
+        """
+        UPDATE olx_outbound
+           SET status = %(status)s,
+               error_text = %(error)s,
+               sent_at = CASE WHEN %(status)s = 'sent' THEN {now} ELSE sent_at END
+         WHERE id = %(id)s
+        """.format(now=_NOW),
+        {'id': int(outbound_id), 'status': status, 'error': _cut(error, 1000)},
+    )
+
+
+def outbound_for_thread(cursor, cabinet_code, thread_id):
+    """Что мы отправляли в этот чат — чтобы подписать авторов в переписке."""
+    cursor.execute(
+        """
+        SELECT id, kind, body, author_user_id, author_name, status, error_text,
+               sent_at, created_at
+          FROM olx_outbound
+         WHERE cabinet_code = %(cabinet_code)s AND thread_id = %(thread_id)s
+         ORDER BY created_at
+        """,
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
+    )
+    return _all(cursor)
+
+
 def mark_awaiting_human(cursor, cabinet_code, thread_id):
     """Пометить, что кандидат написал ещё раз и ждёт живого ответа.
 
@@ -260,6 +354,38 @@ def clear_awaiting_human(cursor, cabinet_code, thread_id):
         """.format(now=_NOW),
         {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
     )
+
+
+def recent_threads(cursor, cabinet_code=None, awaiting_only=False, limit=100):
+    """Диалоги для списка в разделе: свежие сверху, ждущие ответа — выше всех.
+
+    Порядок не «по времени», а «по срочности»: чат, где человек ждёт ответа,
+    обязан быть виден первым, даже если писали в него вчера. Ниже — обычная
+    лента по свежести последнего сообщения.
+    """
+    where = ["1 = 1"]
+    params = {'limit': max(1, min(int(limit or 100), 500))}
+    if cabinet_code:
+        where.append("cabinet_code = %(cabinet_code)s")
+        params['cabinet_code'] = cabinet_code
+    if awaiting_only:
+        where.append("awaiting_human_since IS NOT NULL")
+
+    cursor.execute(
+        """
+        SELECT cabinet_code, thread_id, interlocutor_name, advert_title,
+               last_message_at, awaiting_human_since, canned_reply_sent_at,
+               phone_normalized, amo_lead_id, messages_seen
+          FROM olx_threads
+         WHERE """ + " AND ".join(where) + """
+         ORDER BY (awaiting_human_since IS NULL),
+                  awaiting_human_since,
+                  last_message_at DESC NULLS LAST
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+    return _all(cursor)
 
 
 def awaiting_human(cursor, limit=200):

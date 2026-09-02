@@ -43,6 +43,8 @@ class FakeDb(object):
     def __init__(self):
         self.journal = []
         self.threads = {}
+        self.outbound = []
+        self.outbound_keys = set()
         self.open_cursors = 0
         self.max_open = 0
 
@@ -99,6 +101,36 @@ class FakeQueries(object):
     def mark_canned_reply_sent(self, cursor, cabinet_code, thread_id):
         key = (cabinet_code, str(thread_id))
         self.db.threads.setdefault(key, {})['canned_reply_sent_at'] = datetime.utcnow()
+
+    # -- исходящие -----------------------------------------------------
+    def claim_outbound(self, cursor, cabinet_code, thread_id, body, kind='portal',
+                       actor_id=None, actor_name=None, window_seconds=15,
+                       status='pending'):
+        key = (cabinet_code, str(thread_id), body)
+        if key in self.db.outbound_keys:
+            return None                    # тот же текст только что отправляли
+        self.db.outbound_keys.add(key)
+        row = {'id': len(self.db.outbound) + 1, 'cabinet_code': cabinet_code,
+               'thread_id': str(thread_id), 'kind': kind, 'body': body,
+               'author_user_id': actor_id, 'author_name': actor_name,
+               'status': status, 'error_text': None}
+        self.db.outbound.append(row)
+        return row
+
+    def finish_outbound(self, cursor, outbound_id, status, error=None):
+        for row in self.db.outbound:
+            if row['id'] == outbound_id:
+                row['status'] = status
+                row['error_text'] = error
+
+    def outbound_for_thread(self, cursor, cabinet_code, thread_id):
+        return [r for r in self.db.outbound
+                if r['cabinet_code'] == cabinet_code
+                and r['thread_id'] == str(thread_id)]
+
+    def suppress_canned_reply(self, cursor, cabinet_code, thread_id):
+        state = self.db.threads.setdefault((cabinet_code, str(thread_id)), {})
+        state.setdefault('canned_reply_sent_at', self.now_almaty())
 
     def mark_awaiting_human(self, cursor, cabinet_code, thread_id):
         state = self.db.threads.setdefault((cabinet_code, str(thread_id)), {})
@@ -844,3 +876,187 @@ class PoolWiringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ThrottleDetectionTests(unittest.TestCase):
+    """403 у OLX бывает двух смыслов, и спутать их дорого.
+
+    На «нет прав» повтор бесполезен, на бан по частоте повтор его продлевает.
+    Первая версия проверки искала в теле подстроку 'rate' — а это часть слова
+    «mode-rate-d». Один отказ модерации на сообщении, отправленном человеком,
+    погасил бы опрос всех девяти кабинетов на полчаса.
+    """
+
+    class Response(object):
+        def __init__(self, status, headers=None):
+            self.status_code = status
+            self.headers = headers or {}
+
+    def check(self, status, body, headers=None):
+        from olx_amo.olx_client import OlxClient
+        return OlxClient._is_throttle_ban(self.Response(status, headers), body)
+
+    def test_moderation_refusal_is_not_a_rate_limit(self):
+        body = {'error': {'status': 403, 'detail': 'Message was moderated and rejected'}}
+        self.assertFalse(self.check(403, body))
+
+    def test_permission_refusal_is_not_a_rate_limit(self):
+        self.assertFalse(self.check(403, {'error': 'Forbidden: no access to thread'}))
+
+    def test_real_rate_limit_is_recognised(self):
+        self.assertTrue(self.check(403, {'error': 'Too many requests, try later'}))
+        self.assertTrue(self.check(403, {'error': 'API rate limit reached'}))
+
+    def test_retry_after_header_settles_it(self):
+        """У настоящего ограничения заголовок обычно есть — верим ему."""
+        self.assertTrue(self.check(403, {'error': 'blocked'}, {'Retry-After': '1800'}))
+
+    def test_other_statuses_are_never_a_throttle(self):
+        self.assertFalse(self.check(401, {'error': 'too many requests'}))
+
+
+class BudgetReserveTests(unittest.TestCase):
+    """Часть бюджета запросов держится для живого человека.
+
+    Иначе робот, выбравший лимит на опросе, отказал бы сотруднику, который
+    нажал «Отправить» и ждёт. Робот подождёт полминуты и ничего не потеряет,
+    человек — потеряет написанный текст.
+    """
+
+    def test_background_stops_earlier_than_a_human(self):
+        from olx_amo.olx_client import OlxRateLimited, _Budget
+
+        budget = _Budget(limit=10, window=300)
+        for _ in range(9):
+            budget.take()
+        with self.assertRaises(OlxRateLimited):
+            budget.take()
+        budget.take(reserved=True)          # человеку остаток доступен
+
+    def test_ban_stops_everyone(self):
+        """Бан по адресу общий, обойти его резервом нельзя и не нужно."""
+        from olx_amo.olx_client import OlxRateLimited, _Budget
+
+        budget = _Budget(limit=10, window=300)
+        budget.block_for(60)
+        with self.assertRaises(OlxRateLimited):
+            budget.take(reserved=True)
+
+
+class MessageValidationTests(unittest.TestCase):
+    """Текст проверяется в клиенте: отправляют и робот, и человек."""
+
+    def client(self):
+        from olx_amo.olx_client import OlxClient
+        return OlxClient(token_provider=lambda: 'token')
+
+    def test_empty_is_refused(self):
+        from olx_amo.olx_client import OlxError
+
+        for bad in ('', '   ', None):
+            with self.assertRaises(OlxError):
+                self.client().send_message('1', bad)
+
+    def test_too_long_is_refused_not_trimmed(self):
+        """Обрезанное на полуслове сообщение кандидату хуже честного отказа."""
+        from olx_amo.olx_client import MAX_MESSAGE_LENGTH, OlxError
+
+        with self.assertRaises(OlxError):
+            self.client().send_message('1', 'я' * (MAX_MESSAGE_LENGTH + 1))
+
+
+class ReplyFromPortalTests(unittest.TestCase):
+    """Ответ кандидату из раздела."""
+
+    def setUp(self):
+        self.db = FakeDb()
+        self.queries = FakeQueries(self.db)
+        self._real = service.queries
+        service.queries = self.queries
+        self.addCleanup(lambda: setattr(service, 'queries', self._real))
+
+        self.cab = cabinets.BY_CODE['itaxi']
+        self.sent = []
+        self.fail_with = None
+
+        class _Client(object):
+            def __init__(inner, *a, **kw):
+                pass
+
+            def send_message(inner, thread_id, text):
+                if self.fail_with:
+                    raise self.fail_with
+                self.sent.append((str(thread_id), text))
+
+            def mark_read(inner, thread_id):
+                pass
+
+        self._real_client = service.OlxClient
+        service.OlxClient = _Client
+        self.addCleanup(lambda: setattr(service, 'OlxClient', self._real_client))
+
+        self._real_token = service.ensure_access_token
+        service.ensure_access_token = lambda db, cab: ('token', None)
+        self.addCleanup(lambda: setattr(service, 'ensure_access_token', self._real_token))
+
+        self.actor = {'user_id': 7, 'name': 'Асель'}
+
+    def reply(self, text='Здравствуйте, ответим сегодня'):
+        return service.reply_from_portal(self.db, self.cab, '77', text, self.actor)
+
+    def test_message_goes_out_and_is_written_down_with_its_author(self):
+        self.reply()
+
+        self.assertEqual(1, len(self.sent))
+        row = self.db.outbound[-1]
+        self.assertEqual('portal', row['kind'])
+        self.assertEqual('sent', row['status'])
+        self.assertEqual('Асель', row['author_name'])
+        self.assertEqual('human_reply', self.db.journal[-1]['result'])
+
+    def test_double_click_does_not_send_twice(self):
+        """Ключа идемпотентности у OLX нет, а копии кандидату мы уже слали."""
+        self.reply()
+        with self.assertRaises(service.ReplyRefused) as caught:
+            self.reply()
+        self.assertEqual('duplicate', caught.exception.code)
+        self.assertEqual(1, len(self.sent))
+
+    def test_robot_will_not_pile_its_canned_reply_on_top(self):
+        """Человек ответил — роботу в этом чате говорить уже нечего."""
+        self.reply()
+        state = self.db.threads[(self.cab.code, '77')]
+        self.assertIsNotNone(state.get('canned_reply_sent_at'))
+
+    def test_waiting_mark_is_cleared_immediately(self):
+        self.queries.mark_awaiting_human(None, self.cab.code, '77')
+        self.reply()
+        self.assertIsNone(self.db.threads[(self.cab.code, '77')].get('awaiting_human_since'))
+
+    def test_undelivered_reply_stays_visible_instead_of_vanishing(self):
+        """Человек уже написал текст и второй раз его не напишет."""
+        from olx_amo.olx_client import OlxError
+
+        self.fail_with = OlxError('OLX недоступен')
+        with self.assertRaises(service.ReplyRefused) as caught:
+            self.reply()
+        self.assertEqual('olx_error', caught.exception.code)
+        self.assertEqual('failed', self.db.outbound[-1]['status'])
+        self.assertEqual([], self.sent)
+
+    def test_empty_and_too_long_are_refused_before_the_network(self):
+        from olx_amo.olx_client import MAX_MESSAGE_LENGTH
+
+        for text, code in (('  ', 'empty'), ('я' * (MAX_MESSAGE_LENGTH + 1), 'too_long')):
+            with self.assertRaises(service.ReplyRefused) as caught:
+                self.reply(text)
+            self.assertEqual(code, caught.exception.code)
+        self.assertEqual([], self.sent)
+
+    def test_cabinet_without_access_refuses_early(self):
+        service.ensure_access_token = lambda db, cab: (None, 'needs_auth')
+        with self.assertRaises(service.ReplyRefused) as caught:
+            self.reply()
+        self.assertEqual('needs_auth', caught.exception.code)
+        self.assertEqual([], self.db.outbound,
+                         'строку заводить незачем: до сети дело не дошло')

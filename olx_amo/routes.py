@@ -13,6 +13,9 @@ Blueprint собирается фабрикой и получает зависи
     GET /api/olx_amo/ping        — жив ли раздел, что смотрящему можно
     GET /api/olx_amo/health      — состояние девяти кабинетов и простой
     GET /api/olx_amo/awaiting    — чаты, где ждут ответа живого человека
+    GET  /api/olx_amo/threads                      — список диалогов
+    GET  /api/olx_amo/threads/<кабинет>/<чат>       — переписка с кандидатом
+    POST /api/olx_amo/threads/<кабинет>/<чат>/reply — ответить кандидату
     GET /api/olx_amo/journal     — лента обращений с фильтрами и пагинацией
     GET /api/olx_amo/journal/export — тот же журнал файлом, за произвольный период
     GET /api/olx_amo/summary     — сводка за день по кабинетам
@@ -62,12 +65,18 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
     """
     bp = Blueprint('olx_amo', __name__, url_prefix='/api/olx_amo')
 
-    def section_route(rule, methods=('GET',), manage=False):
+    def section_route(rule, methods=('GET',), manage=False, reply=False):
         """Общий каркас роута: preflight, авторизация, контекст, ошибки.
 
         manage=True — роут выдаёт или отзывает доступ к переписке кабинетов;
-        такие открыты только глобальному админу. Проверка здесь, чтобы не
-        повторять её в каждом обработчике и не забыть в новом.
+        такие открыты только глобальному админу.
+
+        reply=True — роут пишет кандидату в чат OLX. Это единственное действие
+        раздела НАРУЖУ, от лица компании и в переписке с живым человеком, тогда
+        как остальное — чтение; поэтому у него своя проверка, а не общая.
+
+        Обе проверки здесь, чтобы не повторять их в каждом обработчике и не
+        забыть в новом.
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -96,6 +105,10 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     if manage and not access.can_manage_cabinets(ctx):
                         return jsonify({
                             "error": "Подключать кабинеты OLX может только администратор"
+                        }), 403
+                    if reply and not access.can_reply(ctx):
+                        return jsonify({
+                            "error": "Отвечать кандидатам в этом разделе вам нельзя"
                         }), 403
 
                     return handler(ctx, *args, **kwargs)
@@ -187,7 +200,7 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 "last_message_at": _iso(row.get('last_message_at')),
                 # Ссылка на сам чат в кабинете OLX — чтобы отвечать было куда
                 # нажать, а не искать переписку глазами.
-                "url": "https://www.olx.kz/mojolx/wiadomosci/#!thread=%s" % row.get('thread_id'),
+                "url": _thread_url(row.get('thread_id')),
             })
         return jsonify({"total": len(items), "items": items})
 
@@ -336,6 +349,119 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
             "attachment; filename=olx_leads.xlsx; filename*=UTF-8''%s"
             % quote(name))
         return response
+
+    # ── переписка с кандидатом ───────────────────────────────────────────
+
+    def _cabinet_or_404(code):
+        cabinet = cabinets.get(code)
+        if not cabinet:
+            return None, (jsonify({"error": "Неизвестный кабинет OLX"}), 404)
+        return cabinet, None
+
+    def _refusal(exc):
+        """Отказ отправки в понятный человеку ответ.
+
+        Коды разные не для красоты: «кабинет отключился» лечится входом
+        владельца, «слишком часто» — ожиданием, а «слишком длинно» — правкой
+        текста. Молчаливого 200 при неудачной отправке быть не должно ни в
+        одном случае: человек обязан сразу знать, что его текст НЕ доставлен.
+        """
+        from .service import ReplyRefused          # noqa: F401 — для читаемости
+
+        codes = {
+            'empty': 400, 'too_long': 400, 'duplicate': 409,
+            'needs_auth': 409, 'not_configured': 409, 'disabled': 409,
+            'rate_limited': 429, 'error': 502, 'olx_error': 502,
+        }
+        payload = {"error": str(exc), "code": exc.code}
+        if exc.retry_after:
+            payload["retry_after"] = exc.retry_after
+        return jsonify(payload), codes.get(exc.code, 502)
+
+    @section_route('/threads')
+    def olx_amo_threads(ctx):
+        """Список диалогов: ждущие ответа сверху, дальше по свежести."""
+        with db._get_cursor() as cursor:
+            rows = queries.recent_threads(
+                cursor,
+                cabinet_code=(request.args.get('cabinet') or '').strip() or None,
+                awaiting_only=str(request.args.get('awaiting') or '').strip() in ('1', 'true'),
+                limit=_int_arg('limit', 100, 1, 500))
+
+        now = queries.now_almaty()
+        items = []
+        for row in rows:
+            cab = cabinets.BY_CODE.get(row.get('cabinet_code'))
+            since = row.get('awaiting_human_since')
+            items.append({
+                "cabinet": row.get('cabinet_code'),
+                "cabinet_title": cab.title if cab else row.get('cabinet_code'),
+                "thread_id": row.get('thread_id'),
+                "interlocutor": row.get('interlocutor_name'),
+                "advert_title": row.get('advert_title'),
+                "last_message_at": _iso(row.get('last_message_at')),
+                "awaiting": since is not None,
+                "waiting_minutes": int((now - since).total_seconds() // 60) if since else None,
+                "phone": row.get('phone_normalized'),
+                "amo_lead_id": row.get('amo_lead_id'),
+                "answered": row.get('canned_reply_sent_at') is not None,
+            })
+        return jsonify({"total": len(items), "items": items})
+
+    @section_route('/threads/<code>/<thread_id>')
+    def olx_amo_thread(ctx, code, thread_id):
+        """Переписка с кандидатом: сообщения OLX плюс наши подписи авторов."""
+        from . import service
+
+        cabinet, error = _cabinet_or_404(code)
+        if error:
+            return error
+        try:
+            data = service.read_conversation(db, cabinet, thread_id)
+        except service.ReplyRefused as exc:
+            return _refusal(exc)
+
+        state = data.get('state') or {}
+        return jsonify({
+            "cabinet": cabinet.code,
+            "cabinet_title": cabinet.title,
+            "thread_id": str(thread_id),
+            "interlocutor": state.get('interlocutor_name'),
+            "advert_title": state.get('advert_title'),
+            "phone": state.get('phone_normalized'),
+            "amo_lead_id": state.get('amo_lead_id'),
+            "awaiting_since": _iso(state.get('awaiting_human_since')),
+            "can_reply": access.can_reply(ctx),
+            "url": _thread_url(thread_id),
+            "messages": [{
+                "id": item['id'],
+                "outgoing": item['outgoing'],
+                "text": item['text'],
+                "at": _iso(item['at']),
+                "author": item['author'],
+                "failed": item.get('failed', False),
+                "error": item.get('error'),
+                "attachments": item.get('attachments') or [],
+                "cvs": item.get('cvs') or [],
+            } for item in data['items']],
+        })
+
+    @section_route('/threads/<code>/<thread_id>/reply', methods=('POST',), reply=True)
+    def olx_amo_thread_reply(ctx, code, thread_id):
+        """Отправить кандидату сообщение от имени сотрудника."""
+        from . import service
+
+        cabinet, error = _cabinet_or_404(code)
+        if error:
+            return error
+
+        body = request.get_json(silent=True) or {}
+        text = str(body.get('text') or '')
+        try:
+            service.reply_from_portal(db, cabinet, thread_id, text, ctx)
+        except service.ReplyRefused as exc:
+            return _refusal(exc)
+        return jsonify({"ok": True, "author": ctx.get('name')})
 
     # ── куда слать отбивку ───────────────────────────────────────────────
 
@@ -608,6 +734,11 @@ def _extract_code(value):
         query = parse_qs(text.lstrip('?'))
     found = (query.get('code') or [''])[0].strip()
     return found or text
+
+
+def _thread_url(thread_id):
+    """Адрес чата в кабинете OLX — на случай, если отвечать удобнее там."""
+    return 'https://www.olx.kz/mojolx/wiadomosci/#!thread=%s' % (thread_id,)
 
 
 def _int_arg(name, default, low, high):

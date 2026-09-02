@@ -38,9 +38,9 @@ from datetime import datetime, timedelta
 
 from . import cabinets, phones, queries
 from .amo_writer import AmoWriteError, AmoWriter
-from .olx_client import (OlxAuthError, OlxClient, OlxError, OlxRateLimited,
-                         message_is_incoming, message_phone, message_time,
-                         refresh_tokens)
+from .olx_client import (MAX_MESSAGE_LENGTH, OlxAuthError, OlxClient, OlxError,
+                         OlxRateLimited, message_is_incoming, message_phone,
+                         message_time, refresh_tokens)
 
 log = logging.getLogger(__name__)
 
@@ -279,6 +279,13 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
 
         counters.replies_sent += 1
         with db._get_cursor() as cursor:
+            # Запоминаем и сам факт отправки: у OLX наше сообщение помечено
+            # только направлением, и без этой строки в переписке нельзя
+            # отличить робота от человека, ответившего из раздела. Статус сразу
+            # `sent` — сюда мы попадаем уже после успешной отправки.
+            queries.claim_outbound(cursor, cabinet.code, thread_id,
+                                   cabinet.canned_reply, kind='canned',
+                                   status='sent')
             queries.write_journal(
                 cursor, cabinet.code, 'canned_reply', thread_id=thread_id,
                 message_id=message_id, message_at=sent_at, message_excerpt=excerpt,
@@ -895,3 +902,224 @@ def _alert_text(title, state, detail):
         return ('✅ <b>OLX · %s</b>\n'
                 'Восстановилось, робот снова работает.' % title)
     return '⚠️ <b>OLX · %s</b>\n%s' % (title, detail or state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ответ кандидату из раздела
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ReplyRefused(Exception):
+    """Отправить не вышло. `code` разделяет причины: показывать их надо по-разному."""
+
+    def __init__(self, code, message, retry_after=None):
+        super(ReplyRefused, self).__init__(message)
+        self.code = code
+        self.retry_after = retry_after
+
+
+def read_conversation(db, cabinet, thread_id):
+    """Переписка для показа в разделе: сообщения OLX плюс наши подписи авторов.
+
+    Порядок наводим сами: сортировка выдачи OLX не документирована — по той же
+    причине сортирует и `_after_bookmark`.
+
+    Авторство берём из своей таблицы. У OLX сообщение помечено только
+    направлением, поэтому робот, ответ из портала и написанное руками прямо в
+    кабинете там неразличимы. Наше исходящее без нашей строки — это как раз
+    третий случай, и подписывается он честно, а не выдаётся за робота.
+    """
+    token, blocked = ensure_access_token(db, cabinet)
+    if not token:
+        raise ReplyRefused(blocked or 'not_configured',
+                           'кабинет сейчас недоступен')
+
+    client = OlxClient(token_provider=lambda: token, reserved=True)
+    messages, _, _ = client.messages(thread_id, limit=MESSAGES_PAGE_SIZE)
+    ordered = sorted(messages or [], key=_order_key)
+
+    with db._get_cursor() as cursor:
+        ours = queries.outbound_for_thread(cursor, cabinet.code, thread_id)
+        state = queries.get_thread(cursor, cabinet.code, thread_id) or {}
+
+    state = _fill_thread_header(db, client, cabinet, thread_id, state)
+
+    # Сопоставляем по тексту: id отправленного сообщения OLX не возвращает, и
+    # связать иначе нечем. Текст вместе с направлением различает надёжно — два
+    # одинаковых исходящих подряд запрещены замком отправки.
+    by_body = {}
+    for row in ours:
+        by_body.setdefault((row.get('body') or '').strip(), []).append(row)
+
+    items = []
+    for message in ordered:
+        outgoing = message.get('type') == 'sent'
+        body = (message.get('text') or '').strip()
+        mine = by_body.get(body) if outgoing else None
+        row = mine.pop(0) if mine else None
+        items.append({
+            'id': str(message.get('id')),
+            'outgoing': outgoing,
+            'text': message.get('text') or '',
+            'at': message_time(message),
+            'author': _author_of(row, outgoing),
+            'attachments': message.get('attachments') or [],
+            'cvs': message.get('cvs') or [],
+        })
+
+    # Не доехавшие ответы показываем тоже — иначе человек решит, что отправил.
+    for row in ours:
+        if row.get('status') == 'failed':
+            items.append({
+                'id': 'failed-%s' % row.get('id'),
+                'outgoing': True,
+                'text': row.get('body') or '',
+                'at': row.get('created_at'),
+                'author': _author_of(row, True),
+                'failed': True,
+                'error': row.get('error_text'),
+                'attachments': [],
+                'cvs': [],
+            })
+
+    items.sort(key=lambda x: (x['at'] or datetime.min, str(x['id'])))
+    return {'items': items, 'state': state}
+
+
+def _fill_thread_header(db, client, cabinet, thread_id, state):
+    """Дописать имя кандидата и название вакансии, если их ещё нет.
+
+    В объекте чата у OLX только числовые идентификаторы, поэтому без двух
+    дополнительных запросов шапка переписки — два числа, и маркетолог не
+    понимает, кому пишет.
+
+    Спрашиваем РОВНО один раз на чат и только когда переписку реально открыли:
+    оба значения неизменны, а в цикле опроса эти запросы жгли бы общий бюджет
+    впустую — там имя никому не нужно.
+
+    Неудача не мешает работе: шапка просто останется без подписи, а отвечать
+    это не мешает.
+    """
+    if state.get('interlocutor_name') and state.get('advert_title'):
+        return state
+
+    thread = None
+    try:
+        thread = client.thread(thread_id)
+    except OlxError as exc:
+        log.debug('OLX %s: чат %s не описался: %s', cabinet.code, thread_id, exc)
+        return state
+
+    name, title = state.get('interlocutor_name'), state.get('advert_title')
+    if not name and (thread or {}).get('interlocutor_id'):
+        try:
+            name = (client.user(thread['interlocutor_id']) or {}).get('name')
+        except OlxError:
+            name = None
+    if not title and (thread or {}).get('advert_id'):
+        try:
+            title = (client.advert(thread['advert_id']) or {}).get('title')
+        except OlxError:
+            title = None
+
+    if not name and not title:
+        return state
+
+    with db._get_cursor() as cursor:
+        queries.upsert_thread(cursor, cabinet.code, thread_id,
+                              interlocutor_name=name, advert_title=title)
+    updated = dict(state)
+    updated['interlocutor_name'] = name or state.get('interlocutor_name')
+    updated['advert_title'] = title or state.get('advert_title')
+    return updated
+
+
+def _author_of(row, outgoing):
+    """Кто написал. У входящих автор — сам кандидат, подпись не нужна."""
+    if not outgoing:
+        return None
+    if not row:
+        # Наше сообщение, которого нет в нашей таблице: его написали прямо в
+        # кабинете OLX. Врать «Робот» нельзя — API этого не различает.
+        return 'Из кабинета OLX'
+    if row.get('kind') == 'canned':
+        return 'Робот'
+    return row.get('author_name') or 'Сотрудник'
+
+
+def reply_from_portal(db, cabinet, thread_id, text, actor):
+    """Ответить кандидату из раздела. Возвращает строку отправки.
+
+    Порядок здесь ОБРАТНЫЙ автоответу робота, и это осознанно. У робота отметка
+    ставится до отправки, потому что там страшнее разослать копии. Здесь
+    страшнее потерять текст, который человек уже написал, — поэтому строка
+    заводится со статусом `pending`, а после ответа OLX переводится в `sent` или
+    `failed`, и не доехавший ответ виден в переписке, а не исчезает.
+
+    В той же первой транзакции гасится метка ожидания и, если она ещё пуста,
+    ставится отметка автоответа: иначе робот, подошедший через секунду, положил
+    бы своё «позвоните по номеру» поверх живого ответа.
+
+    Закладку по чату НЕ трогаем: `upsert_thread` пишет её через COALESCE, и
+    опрос, начатый раньше нас, откатил бы её назад.
+    """
+    body = (text or '').strip()
+    if not body:
+        raise ReplyRefused('empty', 'пустое сообщение отправлять нельзя')
+    if len(body) > MAX_MESSAGE_LENGTH:
+        raise ReplyRefused('too_long',
+                           'сообщение длиннее %d символов — сократите'
+                           % MAX_MESSAGE_LENGTH)
+
+    token, blocked = ensure_access_token(db, cabinet)
+    if not token:
+        raise ReplyRefused(blocked or 'not_configured', 'кабинет сейчас недоступен')
+
+    with db._get_cursor() as cursor:
+        claim = queries.claim_outbound(
+            cursor, cabinet.code, thread_id, body, kind='portal',
+            actor_id=(actor or {}).get('user_id'),
+            actor_name=(actor or {}).get('name'))
+        if claim is None:
+            raise ReplyRefused('duplicate', 'такое сообщение уже отправляется')
+        queries.clear_awaiting_human(cursor, cabinet.code, thread_id)
+        queries.suppress_canned_reply(cursor, cabinet.code, thread_id)
+
+    client = OlxClient(token_provider=lambda: token, reserved=True)
+    try:
+        client.send_message(thread_id, body)
+    except OlxRateLimited as exc:
+        _fail(db, claim['id'], str(exc))
+        raise ReplyRefused('rate_limited', 'OLX ограничил частоту запросов',
+                           retry_after=exc.retry_after)
+    except OlxAuthError as exc:
+        with db._get_cursor() as cursor:
+            queries.set_account_state(cursor, cabinet.code, 'needs_auth', str(exc))
+        _fail(db, claim['id'], str(exc))
+        raise ReplyRefused('needs_auth', 'кабинет отключился, нужен вход владельца')
+    except OlxError as exc:
+        _fail(db, claim['id'], str(exc))
+        raise ReplyRefused('olx_error', str(exc))
+
+    with db._get_cursor() as cursor:
+        queries.finish_outbound(cursor, claim['id'], 'sent')
+        queries.write_journal(
+            cursor, cabinet.code, 'human_reply', thread_id=thread_id,
+            message_at=queries.now_almaty(), message_excerpt=body,
+            tag=cabinet.tag_form)
+
+    # Гасим непрочитанное: иначе ответивший продолжит видеть чат непрочитанным
+    # в кабинете OLX и ответит второй раз. Неудача отметки ответом не считается.
+    try:
+        client.mark_read(thread_id)
+    except OlxError as exc:
+        log.debug('OLX %s: не отметили чат %s прочитанным: %s',
+                  cabinet.code, thread_id, exc)
+
+    log.info('Лиды OLX: %s ответил кандидату в чате %s/%s',
+             (actor or {}).get('name') or 'сотрудник', cabinet.code, thread_id)
+    return claim
+
+
+def _fail(db, outbound_id, error):
+    with db._get_cursor() as cursor:
+        queries.finish_outbound(cursor, outbound_id, 'failed', error=error)

@@ -1,112 +1,56 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Download, ExternalLink, Loader2, MessageSquare, RefreshCw, Send } from 'lucide-react';
 import {
-    APPLE_FONT, IosBadge, IosModal, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary,
-    iosBtnSecondary, iosCard, iosInput, iosGroupLabel,
+    AlertTriangle, Download, ExternalLink, Loader2, MessageSquare, RefreshCw, Send,
+} from 'lucide-react';
+import {
+    APPLE_FONT, IosBadge, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary,
+    iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../ui/ios';
+import {
+    ChatBubble, ChatComposer, ChatDayDivider, ChatEmpty, useThreadAutoScroll,
+} from '../ui/chat';
 import CustomSelect from '../ui/CustomSelect';
+import {
+    RESULTS, RESULT_LABEL, RESULT_TONE, SLA_MS, STATE_LABEL, STATE_TONE,
+    fmtAgo, fmtClock, fmtLatency, fmtPhone, fmtTime, fmtWaiting,
+    groupByDay, isoToday, plural,
+} from './olxMeta';
 
 /*
- * Раздел «Лиды OLX» — что сделал робот переноса откликов в amoCRM (задача #223).
+ * Раздел «Лиды OLX» — работа с откликами из чатов девяти кабинетов (задача #223).
  *
- * Раздел смотрят двое, и оба с одним вопросом — «всё ли доезжает»:
- *   маркетолог          раньше переносил лиды руками, теперь следит за роботом
- *   руководитель ОП     видит поток заявок и то, что не уложилось в минуту
+ * Раздел открывают двое, и вопросы у них разные:
+ *   маркетолог          «кому надо ответить прямо сейчас»
+ *   руководитель ОП     «всё ли доезжает в CRM и сколько там заявок»
  *
- * Отсюда раскладка. Первое, что видно, — ПОЛОСА КАБИНЕТОВ: девять плиток с
- * состоянием. Она отвечает на главный вопрос до всякой прокрутки, и она же
- * закрывает страх ТЗ про «тихий» простой: кабинет, который давно не
- * опрашивался, виден сразу, а не обнаруживается постфактум.
+ * Отсюда порядок вкладок: первая — ДИАЛОГИ, а не журнал. Журнал отвечает на
+ * второй вопрос, а на первый отвечает переписка, и ради неё раздел и открывают.
+ * Робот на повторное обращение молчит намеренно (решение владельца 02.09.2026:
+ * второе автоматическое сообщение раздражает и читается как поломка), поэтому
+ * отвечает здесь живой человек — прямо в этом экране, не уходя в кабинет OLX.
  *
- * Про цвет. Красится ТОЛЬКО отклонение — кабинет без доступа, ошибка, простой,
- * промах по SLA. Работающий кабинет и обычная строка журнала остаются
- * нейтральными: если раскрасить всё, «плохо» перестаёт бросаться в глаза.
+ * Про цвет. Красится ТОЛЬКО отклонение: кабинет без доступа, ошибка, простой,
+ * промах по SLA, ожидание ответа. Работающий кабинет и обычная строка журнала
+ * остаются нейтральными — если раскрасить всё, «плохо» перестаёт бросаться в
+ * глаза.
  *
- * Сводка и журнал разведены переключателем, а не показаны рядом: это два
- * разных вопроса («сколько всего» и «что именно»), и вместе они дали бы два
- * экрана прокрутки там, где обычно нужен один.
+ * Двухпанельная раскладка и лента сообщений повторяют «Обращения»: раздел
+ * должен выглядеть частью продукта, а не ещё одним чатом. Пузыри, разделитель
+ * дня, поле ввода и автопрокрутка взяты из общих примитивов ui/chat.jsx —
+ * своих копий в проекте и так уже было три.
  */
 
 const PAGE_SIZE = 50;
 
-// Подписи исходов обработки. Коды приходят с сервера, человеку они не
-// показываются. Порядок = порядок в фильтре.
-const RESULTS = [
-    { value: '', label: 'Все исходы' },
-    { value: 'lead_created', label: 'Сделка создана' },
-    { value: 'canned_reply', label: 'Отправлен ответ' },
-    { value: 'needs_human', label: 'Ждёт ответа человека' },
-    { value: 'duplicate', label: 'Повтор за день' },
-    { value: 'manual_review', label: 'Нужна проверка' },
-    { value: 'error', label: 'Ошибка' },
-];
-
-const RESULT_LABEL = RESULTS.reduce((acc, item) => {
-    if (item.value) acc[item.value] = item.label;
-    return acc;
-}, {});
-
-// Тон исхода. Нейтральное состояние не красим вовсе — см. про цвет выше.
-const RESULT_TONE = {
-    error: 'red',
-    manual_review: 'amber',
-    needs_human: 'blue',
-};
-
-// Подписи состояний кабинета. `needs_auth` — самое частое на старте: доступ
-// выдан на приложение, но владелец кабинета ещё не подтвердил согласие.
-const STATE_LABEL = {
-    ok: 'Работает',
-    needs_auth: 'Нужен вход владельца',
-    not_configured: 'Нет доступов',
-    disabled: 'Выключен',
-    error: 'Ошибка',
-};
-
-const STATE_TONE = {
-    ok: 'slate',
-    needs_auth: 'amber',
-    not_configured: 'slate',
-    disabled: 'slate',
-    error: 'red',
-};
-
-const SLA_MS = 60 * 1000;
-
-const fmtTime = (value) => {
-    if (!value) return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleString('ru-RU', {
-        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-    });
-};
-
-const fmtAgo = (value) => {
-    if (!value) return 'ни разу';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return 'ни разу';
-    const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-    if (seconds < 60) return `${seconds} с назад`;
-    if (seconds < 3600) return `${Math.round(seconds / 60)} мин назад`;
-    if (seconds < 86400) return `${Math.round(seconds / 3600)} ч назад`;
-    return `${Math.round(seconds / 86400)} дн назад`;
-};
-
-const fmtLatency = (ms) => {
-    if (ms === null || ms === undefined) return '—';
-    if (ms < 1000) return `${ms} мс`;
-    return `${(ms / 1000).toFixed(1)} с`;
-};
-
-const fmtPhone = (value) => {
-    const digits = String(value || '').replace(/\D/g, '');
-    if (digits.length !== 11) return value || '—';
-    return `+${digits[0]} ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7, 9)} ${digits.slice(9)}`;
-};
-
-const isoToday = () => new Date().toISOString().slice(0, 10);
+/* Как часто сама подтягивается открытая переписка и список.
+ *
+ * Не чаще: каждое обращение к чату — запрос из ОБЩЕГО с роботом бюджета OLX
+ * (4500 на адрес за 5 минут), и десяток забытых вкладок с опросом раз в пять
+ * секунд сжёг бы его на пустом месте. Живость всё равно обеспечивает робот — он
+ * проходит по чатам дважды в минуту. Таймеры молчат на скрытой вкладке. */
+const THREAD_REFRESH_MS = 25000;
+const LIST_REFRESH_MS = 60000;
 
 const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const headers = useCallback(
@@ -114,9 +58,9 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         [withAccessTokenHeader],
     );
 
-    // showToast приходит новой функцией на каждый рендер родителя, поэтому в
-    // зависимости эффектов он не идёт — иначе данные перезапрашивались бы на
-    // каждый чужой рендер. Держим его в ref и зовём оттуда.
+    /* showToast приходит новой функцией на каждый рендер родителя, поэтому в
+       зависимости эффектов он не идёт — иначе данные перезапрашивались бы на
+       каждый чужой рендер. Держим его в ref и зовём оттуда. */
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
     const toast = useCallback((text, kind) => {
@@ -125,29 +69,8 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const [schemaReady, setSchemaReady] = useState(true);
     const [capabilities, setCapabilities] = useState(null);
-    const [chats, setChats] = useState(null);
-    const [awaiting, setAwaiting] = useState(null);
-    const [connecting, setConnecting] = useState(null);
     const [health, setHealth] = useState(null);
-    const [tab, setTab] = useState('journal');
-
-    const [journal, setJournal] = useState({ items: [], total: 0 });
-    const [summary, setSummary] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [page, setPage] = useState(0);
-
-    const [cabinet, setCabinet] = useState('');
-    const [result, setResult] = useState('');
-    const [dateFrom, setDateFrom] = useState(isoToday());
-    const [dateTo, setDateTo] = useState(isoToday());
-
-    // ── загрузка ─────────────────────────────────────────────────────────
-
-    const loadHealth = useCallback(() => {
-        axios.get(`${apiBaseUrl}/api/olx_amo/health`, { headers: headers() })
-            .then((response) => setHealth(response.data))
-            .catch(() => setHealth(null));
-    }, [apiBaseUrl, headers]);
+    const [tab, setTab] = useState('chats');
 
     useEffect(() => {
         axios.get(`${apiBaseUrl}/api/olx_amo/ping`, { headers: headers() })
@@ -158,114 +81,32 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             .catch(() => setSchemaReady(false));
     }, [apiBaseUrl, headers]);
 
-    const loadChats = useCallback(() => {
-        axios.get(`${apiBaseUrl}/api/olx_amo/chats`, { headers: headers() })
-            .then((response) => setChats(response.data))
-            .catch(() => setChats(null));
+    const loadHealth = useCallback(() => {
+        axios.get(`${apiBaseUrl}/api/olx_amo/health`, { headers: headers() })
+            .then((response) => setHealth(response.data))
+            .catch(() => setHealth(null));
     }, [apiBaseUrl, headers]);
-
-    useEffect(() => {
-        // Список чатов открыт только тому, кто вправе его менять, — остальным
-        // запрос вернул бы отказ и зря шумел бы в консоли.
-        if (capabilities?.can_manage_cabinets) loadChats();
-    }, [capabilities, loadChats]);
-
-    const loadAwaiting = useCallback(() => {
-        axios.get(`${apiBaseUrl}/api/olx_amo/awaiting`, { headers: headers() })
-            .then((response) => setAwaiting(response.data))
-            .catch(() => setAwaiting(null));
-    }, [apiBaseUrl, headers]);
-
-    useEffect(() => {
-        loadAwaiting();
-        // Очередь живая: человек отвечает в кабинете, и строка должна уходить
-        // сама, без нажатия «Обновить».
-        const timer = setInterval(loadAwaiting, 60000);
-        return () => clearInterval(timer);
-    }, [loadAwaiting]);
 
     useEffect(() => {
         loadHealth();
-        // Полоса кабинетов обновляется сама раз в минуту: раздел открывают и
-        // оставляют открытым, а «тихий» простой должен становиться виден без
-        // того, чтобы человек вспомнил нажать «Обновить».
-        const timer = setInterval(loadHealth, 60000);
+        /* Полоса кабинетов обновляется сама: раздел открывают и оставляют
+           открытым, а «тихий» простой должен становиться виден без того, чтобы
+           человек вспомнил нажать «Обновить». */
+        const timer = setInterval(() => {
+            if (!document.hidden) loadHealth();
+        }, LIST_REFRESH_MS);
         return () => clearInterval(timer);
     }, [loadHealth]);
-
-    const loadJournal = useCallback(() => {
-        setLoading(true);
-        const params = new URLSearchParams();
-        params.set('limit', String(PAGE_SIZE));
-        params.set('offset', String(page * PAGE_SIZE));
-        if (cabinet) params.set('cabinet', cabinet);
-        if (result) params.set('result', result);
-        if (dateFrom) params.set('date_from', dateFrom);
-        if (dateTo) params.set('date_to', dateTo);
-        axios.get(`${apiBaseUrl}/api/olx_amo/journal?${params.toString()}`,
-            { headers: headers() })
-            .then((response) => setJournal(response.data || { items: [], total: 0 }))
-            .catch(() => toast('Не удалось загрузить журнал', 'error'))
-            .finally(() => setLoading(false));
-    }, [apiBaseUrl, cabinet, dateFrom, dateTo, headers, page, result, toast]);
-
-    const loadSummary = useCallback(() => {
-        setLoading(true);
-        axios.get(`${apiBaseUrl}/api/olx_amo/summary?day=${dateTo || isoToday()}`,
-            { headers: headers() })
-            .then((response) => setSummary(response.data))
-            .catch(() => toast('Не удалось загрузить сводку', 'error'))
-            .finally(() => setLoading(false));
-    }, [apiBaseUrl, dateTo, headers, toast]);
-
-    useEffect(() => {
-        if (tab === 'journal') loadJournal();
-        else loadSummary();
-    }, [tab, loadJournal, loadSummary]);
-
-    const [exporting, setExporting] = useState(false);
-
-    const exportJournal = useCallback(() => {
-        setExporting(true);
-        const params = new URLSearchParams();
-        if (cabinet) params.set('cabinet', cabinet);
-        if (dateFrom) params.set('date_from', dateFrom);
-        if (dateTo) params.set('date_to', dateTo);
-        // Файл забираем запросом, а не ссылкой: ссылка не несёт заголовок
-        // авторизации, и сервер ответил бы на неё отказом.
-        axios.get(`${apiBaseUrl}/api/olx_amo/journal/export?${params.toString()}`,
-            { headers: headers(), responseType: 'blob' })
-            .then((response) => {
-                const href = window.URL.createObjectURL(new Blob([response.data]));
-                const link = document.createElement('a');
-                link.href = href;
-                link.download = `Лиды OLX ${dateFrom || ''}${dateTo && dateTo !== dateFrom ? ` — ${dateTo}` : ''}.xlsx`.trim();
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                window.URL.revokeObjectURL(href);
-            })
-            .catch(() => toast('Не удалось выгрузить журнал', 'error'))
-            .finally(() => setExporting(false));
-    }, [apiBaseUrl, cabinet, dateFrom, dateTo, headers, toast]);
-
-    // Смена фильтра возвращает на первую страницу: иначе после сужения выборки
-    // человек оказывается на пустой десятой странице и решает, что данных нет.
-    useEffect(() => { setPage(0); }, [cabinet, result, dateFrom, dateTo]);
 
     const cabinetOptions = useMemo(() => ([
         { value: '', label: 'Все кабинеты' },
         ...((health?.cabinets || []).map((c) => ({ value: c.code, label: c.title }))),
     ]), [health]);
 
-    const pageCount = Math.max(1, Math.ceil((journal.total || 0) / PAGE_SIZE));
-
-    // ── разметка ─────────────────────────────────────────────────────────
-
     if (!schemaReady) {
         return (
             <div style={{ fontFamily: APPLE_FONT }} className="p-6">
-                <div className={`${iosCard} p-6 text-slate-600`}>
+                <div className={`${iosCard} p-6 text-[13.5px] text-slate-600`}>
                     Раздел ещё разворачивается. Обновите страницу через минуту.
                 </div>
             </div>
@@ -273,198 +114,703 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     }
 
     return (
-        <div style={{ fontFamily: APPLE_FONT }} className="p-4 sm:p-6 space-y-5">
-            <header className="flex items-center justify-between gap-3">
+        <div style={{ fontFamily: APPLE_FONT }} className="space-y-4 p-4 sm:p-6">
+            <header className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h1 className="text-[19px] font-semibold text-slate-900">Лиды OLX</h1>
                     <p className="text-[13px] text-slate-500">
-                        Отклики из чатов кабинетов OLX, перенесённые в amoCRM
+                        Отклики из чатов кабинетов OLX и переписка с кандидатами
                     </p>
                 </div>
-                <div className="flex items-center gap-2">
-                    {/* Выгрузка — требование раздела 7 ТЗ: журнал за произвольный
-                        период. Кнопка живёт рядом с фильтрами по смыслу: выгружается
-                        ровно то, что сейчас на экране. */}
-                    {tab === 'journal' && (
-                        <button
-                            type="button"
-                            onClick={exportJournal}
-                            disabled={exporting}
-                            className={`${iosBtnGhost} disabled:opacity-40 active:scale-[0.98]`}
-                        >
-                            <Download size={15} />
-                            {exporting ? 'Готовим…' : 'Выгрузить'}
-                        </button>
-                    )}
-                    <button
-                        type="button"
-                        onClick={() => { loadHealth(); loadAwaiting(); if (tab === 'journal') loadJournal(); else loadSummary(); }}
-                        className={`${iosBtnGhost} active:scale-[0.98]`}
-                    >
-                        <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-                        Обновить
-                    </button>
-                </div>
+                <IosSegmented
+                    ariaLabel="Что показывать"
+                    value={tab}
+                    onChange={setTab}
+                    size="lg"
+                    options={[
+                        { value: 'chats', label: 'Диалоги' },
+                        { value: 'journal', label: 'Журнал' },
+                        { value: 'summary', label: 'Сводка' },
+                    ]}
+                />
             </header>
 
-            <AwaitingHumans awaiting={awaiting} />
-
-            <CabinetStrip
-                health={health}
-                canManage={!!capabilities?.can_manage_cabinets}
-                onConnect={setConnecting}
-            />
+            <CabinetStrip health={health} onRefresh={loadHealth} />
 
             {capabilities?.can_manage_cabinets && (
                 <AlertChatsPicker
-                    chats={chats}
-                    apiBaseUrl={apiBaseUrl}
-                    headers={headers}
-                    onSaved={loadChats}
-                    toast={toast}
-                />
+                    apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
             )}
 
-            <ConnectCabinetModal
-                cabinet={connecting}
-                apiBaseUrl={apiBaseUrl}
-                headers={headers}
-                onClose={() => setConnecting(null)}
-                onDone={() => { setConnecting(null); loadHealth(); }}
-                toast={toast}
-            />
-
-            <div className="flex flex-wrap items-end gap-3">
-                <IosSegmented
-                    value={tab}
-                    onChange={setTab}
-                    options={[
-                        { value: 'journal', label: 'Журнал' },
-                        { value: 'summary', label: 'Сводка за день' },
-                    ]}
+            {tab === 'chats' && (
+                <ChatWorkspace
+                    apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
+                    canReply={!!capabilities?.can_reply}
+                    cabinetOptions={cabinetOptions}
+                    onAnswered={loadHealth}
                 />
-                <div className="flex flex-wrap items-end gap-3 ml-auto">
-                    {tab === 'journal' && (
-                        <>
-                            <label className="block">
-                                <span className={iosGroupLabel}>С</span>
-                                <input type="date" value={dateFrom} className={iosInput}
-                                    onChange={(e) => setDateFrom(e.target.value)} />
-                            </label>
-                            <div className="w-44">
-                                <span className={iosGroupLabel}>Кабинет</span>
-                                <CustomSelect value={cabinet} onChange={setCabinet}
-                                    options={cabinetOptions} />
-                            </div>
-                            <div className="w-44">
-                                <span className={iosGroupLabel}>Исход</span>
-                                <CustomSelect value={result} onChange={setResult}
-                                    options={RESULTS} />
-                            </div>
-                        </>
-                    )}
-                    <label className="block">
-                        <span className={iosGroupLabel}>{tab === 'journal' ? 'По' : 'День'}</span>
-                        <input type="date" value={dateTo} className={iosInput}
-                            onChange={(e) => setDateTo(e.target.value)} />
-                    </label>
-                </div>
-            </div>
-
-            {tab === 'journal'
-                ? (
-                    <JournalTable
-                        items={journal.items}
-                        loading={loading}
-                        page={page}
-                        pageCount={pageCount}
-                        total={journal.total}
-                        onPage={setPage}
-                    />
-                )
-                : <SummaryTable summary={summary} loading={loading} />}
+            )}
+            {tab === 'journal' && (
+                <JournalPanel
+                    apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
+                    cabinetOptions={cabinetOptions} />
+            )}
+            {tab === 'summary' && (
+                <SummaryPanel apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
+            )}
         </div>
     );
 };
 
-/* Полоса кабинетов. Отвечает на главный вопрос раздела до всякой прокрутки. */
-const CabinetStrip = ({ health, canManage, onConnect }) => {
+/* ─── Полоса кабинетов ───────────────────────────────────────────────────
+ *
+ * Отвечает на вопрос «всё ли живо» до всякой прокрутки и закрывает страх ТЗ про
+ * «тихий» простой: кабинет, который давно не опрашивался, виден сразу, а не
+ * обнаруживается постфактум. Работающий кабинет показывает только давность
+ * опроса — бейджем «Работает» девять раз подряд была бы ровно та плашка, мимо
+ * которой глаз перестаёт смотреть. */
+const CabinetStrip = ({ health, onRefresh }) => {
     if (!health) return null;
     const stale = health.stale || [];
+    const cabinets = health.cabinets || [];
+    const working = cabinets.filter((c) => c.state === 'ok').length;
+    const broken = cabinets.filter((c) => c.state !== 'ok' && c.is_enabled);
+
     return (
         <section className="space-y-2">
             {stale.length > 0 && (
-                <div className="flex items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-[13px] text-amber-800 ring-1 ring-amber-200">
-                    <AlertTriangle size={15} />
+                <div className="flex items-center gap-2 rounded-2xl bg-amber-50 px-3.5 py-2.5 text-[13px] text-amber-800 ring-1 ring-amber-200">
+                    <AlertTriangle size={15} className="shrink-0" />
                     {/* Порог — 15 минут из ТЗ: дольше робот молчать не должен. */}
                     Не опрашивались дольше {health.idle_minutes} мин: {stale.join(', ')}
                 </div>
             )}
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-                {(health.cabinets || []).map((cab) => (
-                    <div key={cab.code}
-                        className={`${iosCard} px-3 py-2.5 ${cab.is_stale && cab.is_enabled ? 'ring-amber-300' : ''}`}>
-                        <div className="flex items-center justify-between gap-2">
-                            <span className="truncate text-[13.5px] font-medium text-slate-900">
-                                {cab.title}
-                            </span>
-                            <IosBadge tone={STATE_TONE[cab.state] || 'slate'}>
-                                {STATE_LABEL[cab.state] || cab.state}
-                            </IosBadge>
-                        </div>
-                        <div className="mt-1 text-[12px] tabular-nums text-slate-500">
-                            опрос {fmtAgo(cab.last_poll_at)}
-                        </div>
-                        {cab.last_error && (
-                            <div className="mt-1 line-clamp-2 text-[11.5px] text-rose-600">
-                                {cab.last_error}
-                            </div>
-                        )}
-                        {/* Кнопка показывается только там, где она что-то меняет:
-                            кабинету без согласия владельца и только админу. */}
-                        {canManage && cab.is_configured && cab.state === 'needs_auth' && (
-                            <button
-                                type="button"
-                                onClick={() => onConnect(cab)}
-                                className="mt-2 text-[12.5px] font-medium text-blue-600 underline-offset-2 hover:underline active:scale-[0.98]"
-                            >
-                                Подключить кабинет
-                            </button>
-                        )}
+            <div className={`${iosCard} px-3.5 py-3`}>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className={iosGroupLabel}>Кабинеты</span>
+                    <div className="flex items-center gap-2 text-[12px] text-slate-500">
+                        <span className="tabular-nums">
+                            {working} из {cabinets.length} работают
+                        </span>
+                        <button type="button" onClick={onRefresh}
+                            className="text-slate-400 transition hover:text-slate-600 active:scale-95"
+                            aria-label="Обновить состояние кабинетов">
+                            <RefreshCw size={13} />
+                        </button>
                     </div>
-                ))}
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+                    {cabinets.map((cab) => {
+                        const bad = cab.state !== 'ok' && cab.is_enabled;
+                        return (
+                            <div key={cab.code}
+                                className={`rounded-xl px-2.5 py-2 ring-1 ${
+                                    bad ? 'bg-amber-50/60 ring-amber-200'
+                                        : 'bg-slate-50/70 ring-slate-200/70'}`}>
+                                <div className="truncate text-[13px] font-medium text-slate-900">
+                                    {cab.title}
+                                </div>
+                                <div className="mt-0.5">
+                                    {bad ? (
+                                        <IosBadge tone={STATE_TONE[cab.state] || 'slate'}>
+                                            {STATE_LABEL[cab.state] || cab.state}
+                                        </IosBadge>
+                                    ) : (
+                                        <span className="text-[11.5px] tabular-nums text-slate-500">
+                                            {fmtAgo(cab.last_poll_at)}
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+                {broken.length > 0 && broken[0].last_error && (
+                    <p className="mt-2 line-clamp-2 text-[11.5px] text-slate-500">
+                        {broken[0].title}: {broken[0].last_error}
+                    </p>
+                )}
             </div>
         </section>
     );
 };
 
-/* Куда слать отбивку робота.
+/* ─── Диалоги: список слева, переписка справа ───────────────────────────
+ *
+ * Раскладка повторяет «Обращения»: две панели в одной карточке, слева лента
+ * 340 px, справа переписка. На телефоне видна ровно одна из них — переключение
+ * по выбранному чату, иначе на узком экране обе сжались бы до нечитаемого.
+ *
+ * Высота задана вычислением, а не измерением. В «Обращениях» понадобился
+ * ResizeObserver, потому что там над карточкой стоит ряд фильтров, который
+ * переносится на вторую строку и меняет высоту; здесь над карточкой только
+ * шапка раздела и полоса кабинетов постоянного размера. */
+const ChatWorkspace = ({ apiBaseUrl, headers, toast, canReply, cabinetOptions,
+                         onAnswered }) => {
+    const [threads, setThreads] = useState(null);
+    const [cabinet, setCabinet] = useState('');
+    const [onlyAwaiting, setOnlyAwaiting] = useState(false);
+    const [selected, setSelected] = useState(null);
+
+    const loadThreads = useCallback(() => {
+        const params = new URLSearchParams();
+        if (cabinet) params.set('cabinet', cabinet);
+        if (onlyAwaiting) params.set('awaiting', '1');
+        axios.get(`${apiBaseUrl}/api/olx_amo/threads?${params.toString()}`,
+            { headers: headers() })
+            .then((response) => setThreads(response.data?.items || []))
+            .catch(() => setThreads([]));
+    }, [apiBaseUrl, headers, cabinet, onlyAwaiting]);
+
+    useEffect(() => {
+        loadThreads();
+        const timer = setInterval(() => {
+            if (!document.hidden) loadThreads();
+        }, LIST_REFRESH_MS);
+        return () => clearInterval(timer);
+    }, [loadThreads]);
+
+    const awaiting = (threads || []).filter((t) => t.awaiting).length;
+
+    return (
+        <section className={`${iosCard} overflow-hidden`}>
+            <div className="flex h-[calc(100dvh-400px)] min-h-[440px] flex-col lg:flex-row">
+                {/* ── список диалогов ── */}
+                <div className={`flex min-h-0 w-full flex-col border-slate-200/70 lg:w-[340px] lg:shrink-0 lg:border-r ${
+                    selected ? 'hidden lg:flex' : 'flex'}`}>
+                    <div className="space-y-2 border-b border-slate-200/70 px-3 py-2.5">
+                        <CustomSelect value={cabinet} onChange={setCabinet}
+                            options={cabinetOptions} variant="ios" />
+                        <IosSegmented
+                            ariaLabel="Какие диалоги показывать"
+                            value={onlyAwaiting ? 'awaiting' : 'all'}
+                            onChange={(v) => setOnlyAwaiting(v === 'awaiting')}
+                            stretch
+                            options={[
+                                { value: 'all', label: 'Все' },
+                                {
+                                    value: 'awaiting',
+                                    label: 'Ждут ответа',
+                                    count: awaiting || undefined,
+                                },
+                            ]}
+                        />
+                    </div>
+                    <div className="thin-scroll min-h-0 flex-1 overflow-y-auto">
+                        {threads === null && (
+                            <div className="p-6 text-center text-slate-400">
+                                <Loader2 size={18} className="mx-auto animate-spin" />
+                            </div>
+                        )}
+                        {threads !== null && !threads.length && (
+                            <ChatEmpty icon={MessageSquare} title="Диалогов пока нет"
+                                hint="Здесь появятся чаты кандидатов из кабинетов OLX" />
+                        )}
+                        <div className="divide-y divide-slate-100">
+                            {(threads || []).map((item) => (
+                                <ThreadRow
+                                    key={`${item.cabinet}-${item.thread_id}`}
+                                    item={item}
+                                    active={!!selected
+                                        && selected.cabinet === item.cabinet
+                                        && selected.thread_id === item.thread_id}
+                                    onSelect={() => setSelected(item)}
+                                />
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                {/* ── переписка ── */}
+                <div className={`min-h-0 min-w-0 flex-1 ${selected ? 'flex' : 'hidden lg:flex'}`}>
+                    {selected ? (
+                        /* key по чату: при переходе к другому диалогу компонент
+                           пересоздаётся целиком, и не надо руками сбрасывать
+                           черновик ответа и позицию прокрутки. */
+                        <Conversation
+                            key={`${selected.cabinet}-${selected.thread_id}`}
+                            apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
+                            canReply={canReply}
+                            thread={selected}
+                            onBack={() => setSelected(null)}
+                            onAnswered={() => { loadThreads(); onAnswered(); }}
+                        />
+                    ) : (
+                        <div className="flex flex-1 items-center justify-center">
+                            <ChatEmpty icon={MessageSquare} title="Выберите диалог"
+                                hint="Слева — чаты кандидатов, сверху те, кто ждёт ответа" />
+                        </div>
+                    )}
+                </div>
+            </div>
+        </section>
+    );
+};
+
+const ThreadRow = ({ item, active, onSelect }) => (
+    <button
+        type="button"
+        onClick={onSelect}
+        className={`relative w-full px-3.5 py-2.5 text-left transition ${
+            active ? 'bg-blue-50/70' : 'hover:bg-slate-50'}`}
+    >
+        {/* Полоска-акцент у ждущих ответа: единственный цвет в списке, потому
+            что это единственное, что требует действия человека. */}
+        {item.awaiting && (
+            <span className="absolute inset-y-1 left-0 w-[3px] rounded-r bg-blue-500" />
+        )}
+        <div className="flex items-baseline gap-2">
+            <span className="truncate text-[13.5px] font-medium text-slate-900">
+                {item.interlocutor || 'Кандидат'}
+            </span>
+            <span className={`ml-auto shrink-0 text-[11.5px] tabular-nums ${
+                item.awaiting ? 'text-blue-600' : 'text-slate-400'}`}>
+                {item.awaiting ? `ждёт ${fmtWaiting(item.waiting_minutes)}`
+                    : fmtTime(item.last_message_at)}
+            </span>
+        </div>
+        <div className="mt-0.5 truncate text-[12.5px] text-slate-500">
+            {item.cabinet_title}
+            {item.advert_title ? ` · ${item.advert_title}` : ''}
+        </div>
+        {(item.phone || item.amo_lead_id) && (
+            <div className="mt-1 flex items-center gap-2 text-[11.5px] tabular-nums text-slate-400">
+                {item.phone && <span>{fmtPhone(item.phone)}</span>}
+                {item.amo_lead_id && <span>сделка {item.amo_lead_id}</span>}
+            </div>
+        )}
+    </button>
+);
+
+/* Переписка с кандидатом.
+ *
+ * Сообщения читаются из OLX по запросу — своей копии переписки раздел не
+ * держит: она немедленно начала бы расходиться с оригиналом. А вот АВТОРСТВО
+ * наших сообщений берётся из нашей базы: у OLX сообщение помечено только
+ * направлением, и робот, ответ из раздела и написанное руками прямо в кабинете
+ * там неразличимы. */
+const Conversation = ({ apiBaseUrl, headers, toast, canReply, thread, onBack,
+                        onAnswered }) => {
+    const [data, setData] = useState(null);
+    const [draft, setDraft] = useState('');
+    const [busy, setBusy] = useState(false);
+    const { boxRef, onScroll } = useThreadAutoScroll(data?.messages?.length);
+
+    const url = `${apiBaseUrl}/api/olx_amo/threads/${thread.cabinet}/${thread.thread_id}`;
+
+    const load = useCallback(() => {
+        axios.get(url, { headers: headers() })
+            .then((response) => setData(response.data))
+            .catch((err) => setData({
+                error: err?.response?.data?.error || 'Переписка не открылась',
+                messages: [],
+            }));
+    }, [url, headers]);
+
+    useEffect(() => {
+        load();
+        const timer = setInterval(() => {
+            if (!document.hidden) load();
+        }, THREAD_REFRESH_MS);
+        return () => clearInterval(timer);
+    }, [load]);
+
+    const send = (text) => {
+        setBusy(true);
+        axios.post(`${url}/reply`, { text }, { headers: headers() })
+            .then(() => {
+                /* Поле очищаем только после успеха: не ушедший текст человек
+                   второй раз не напишет. */
+                setDraft('');
+                load();
+                onAnswered();
+            })
+            .catch((err) => toast(
+                err?.response?.data?.error || 'Сообщение не ушло', 'error'))
+            .finally(() => setBusy(false));
+    };
+
+    const groups = useMemo(() => groupByDay(data?.messages || []), [data]);
+
+    return (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header className="flex items-center gap-2 border-b border-slate-200/70 px-3.5 py-2.5">
+                <button type="button" onClick={onBack}
+                    className="shrink-0 text-[13px] text-blue-600 lg:hidden">← Назад</button>
+                <div className="min-w-0">
+                    <div className="truncate text-[14px] font-semibold text-slate-900">
+                        {data?.interlocutor || thread.interlocutor || 'Кандидат'}
+                    </div>
+                    <div className="truncate text-[12px] text-slate-500">
+                        {thread.cabinet_title}
+                        {(data?.advert_title || thread.advert_title)
+                            ? ` · ${data?.advert_title || thread.advert_title}` : ''}
+                    </div>
+                </div>
+                {data?.url && (
+                    <a href={data.url} target="_blank" rel="noreferrer"
+                        className="ml-auto inline-flex shrink-0 items-center gap-1 text-[12.5px] text-slate-400 transition hover:text-slate-600">
+                        В кабинете <ExternalLink size={13} />
+                    </a>
+                )}
+            </header>
+
+            <div ref={boxRef} onScroll={onScroll}
+                className="thin-scroll min-h-0 flex-1 space-y-1.5 overflow-y-auto bg-slate-50/60 py-3">
+                {data === null && (
+                    <div className="p-6 text-center text-slate-400">
+                        <Loader2 size={18} className="mx-auto animate-spin" />
+                    </div>
+                )}
+                {data?.error && (
+                    <div className="mx-4 rounded-xl bg-rose-50 px-3 py-2 text-[13px] text-rose-700 ring-1 ring-rose-200">
+                        {data.error}
+                    </div>
+                )}
+                {data && !data.error && !data.messages.length && (
+                    <ChatEmpty icon={MessageSquare} title="Сообщений нет" />
+                )}
+                {groups.map((group) => (
+                    <div key={group.key} className="space-y-1.5">
+                        <ChatDayDivider>{group.label}</ChatDayDivider>
+                        {group.messages.map((message) => (
+                            <ChatBubble
+                                key={message.id}
+                                out={message.outgoing}
+                                tone={message.failed ? 'warn' : null}
+                                meta={(
+                                    <>
+                                        {message.author && <span>{message.author}</span>}
+                                        <span className="tabular-nums">{fmtClock(message.at)}</span>
+                                        {message.failed && <span>· не отправлено</span>}
+                                    </>
+                                )}
+                            >
+                                {message.text}
+                                {(message.cvs || []).map((cv) => (
+                                    <a key={cv.url} href={cv.url} target="_blank" rel="noreferrer"
+                                        className="mt-1 block underline underline-offset-2">
+                                        {cv.name || 'Резюме'}
+                                    </a>
+                                ))}
+                            </ChatBubble>
+                        ))}
+                    </div>
+                ))}
+            </div>
+
+            {canReply ? (
+                <ChatComposer
+                    value={draft}
+                    onChange={setDraft}
+                    onSubmit={send}
+                    busy={busy}
+                    disabled={!!data?.error}
+                    placeholder="Ответьте кандидату…"
+                    maxLength={2000}
+                    submitLabel="Отправить"
+                    busyLabel="Отправляем…"
+                    hint="Сообщение уйдёт в чат OLX от имени компании. Enter — отправить"
+                />
+            ) : (
+                <div className="border-t border-slate-200/70 px-3.5 py-2.5 text-[12.5px] text-slate-500">
+                    Отвечать кандидатам вам нельзя — откройте чат в кабинете OLX.
+                </div>
+            )}
+        </div>
+    );
+};
+
+/* ─── Журнал ─────────────────────────────────────────────────────────── */
+const JournalPanel = ({ apiBaseUrl, headers, toast, cabinetOptions }) => {
+    const [journal, setJournal] = useState({ items: [], total: 0 });
+    const [loading, setLoading] = useState(false);
+    const [exporting, setExporting] = useState(false);
+    const [page, setPage] = useState(0);
+    const [cabinet, setCabinet] = useState('');
+    const [result, setResult] = useState('');
+    const [dateFrom, setDateFrom] = useState(isoToday());
+    const [dateTo, setDateTo] = useState(isoToday());
+
+    const params = useCallback(() => {
+        const search = new URLSearchParams();
+        if (cabinet) search.set('cabinet', cabinet);
+        if (result) search.set('result', result);
+        if (dateFrom) search.set('date_from', dateFrom);
+        if (dateTo) search.set('date_to', dateTo);
+        return search;
+    }, [cabinet, result, dateFrom, dateTo]);
+
+    const load = useCallback(() => {
+        setLoading(true);
+        const search = params();
+        search.set('limit', String(PAGE_SIZE));
+        search.set('offset', String(page * PAGE_SIZE));
+        axios.get(`${apiBaseUrl}/api/olx_amo/journal?${search.toString()}`,
+            { headers: headers() })
+            .then((response) => setJournal(response.data || { items: [], total: 0 }))
+            .catch(() => toast('Не удалось загрузить журнал', 'error'))
+            .finally(() => setLoading(false));
+    }, [apiBaseUrl, headers, page, params, toast]);
+
+    useEffect(() => { load(); }, [load]);
+    /* Смена фильтра возвращает на первую страницу: иначе после сужения выборки
+       человек оказывается на пустой десятой странице и решает, что данных нет. */
+    useEffect(() => { setPage(0); }, [cabinet, result, dateFrom, dateTo]);
+
+    const exportJournal = () => {
+        setExporting(true);
+        /* Файл забираем запросом, а не ссылкой: ссылка не несёт заголовок
+           авторизации, и сервер ответил бы на неё отказом. */
+        axios.get(`${apiBaseUrl}/api/olx_amo/journal/export?${params().toString()}`,
+            { headers: headers(), responseType: 'blob' })
+            .then((response) => {
+                const href = window.URL.createObjectURL(new Blob([response.data]));
+                const link = document.createElement('a');
+                link.href = href;
+                link.download = `Лиды OLX ${dateFrom || ''}.xlsx`.trim();
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(href);
+            })
+            .catch(() => toast('Не удалось выгрузить журнал', 'error'))
+            .finally(() => setExporting(false));
+    };
+
+    const pageCount = Math.max(1, Math.ceil((journal.total || 0) / PAGE_SIZE));
+
+    return (
+        <section className="space-y-3">
+            <div className="flex flex-wrap items-end gap-2.5">
+                <label className="block">
+                    <span className={iosGroupLabel}>С</span>
+                    <input type="date" value={dateFrom} className={iosInput}
+                        onChange={(e) => setDateFrom(e.target.value)} />
+                </label>
+                <label className="block">
+                    <span className={iosGroupLabel}>По</span>
+                    <input type="date" value={dateTo} className={iosInput}
+                        onChange={(e) => setDateTo(e.target.value)} />
+                </label>
+                <div className="w-44">
+                    <span className={iosGroupLabel}>Кабинет</span>
+                    <CustomSelect value={cabinet} onChange={setCabinet}
+                        options={cabinetOptions} variant="ios" />
+                </div>
+                <div className="w-48">
+                    <span className={iosGroupLabel}>Исход</span>
+                    <CustomSelect value={result} onChange={setResult}
+                        options={RESULTS} variant="ios" />
+                </div>
+                <button type="button" onClick={exportJournal} disabled={exporting}
+                    className={`${iosBtnGhost} ml-auto disabled:opacity-40 active:scale-[0.98]`}>
+                    <Download size={15} />
+                    {exporting ? 'Готовим…' : 'Выгрузить'}
+                </button>
+            </div>
+
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-[13px]">
+                        <thead className="bg-slate-50/80 text-left text-[11.5px] uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th className="px-3 py-2 font-medium">Время отклика</th>
+                                <th className="px-3 py-2 font-medium">Кабинет</th>
+                                <th className="px-3 py-2 font-medium">Телефон</th>
+                                <th className="px-3 py-2 font-medium">Исход</th>
+                                <th className="px-3 py-2 font-medium">Доставка</th>
+                                <th className="px-3 py-2 font-medium">Сделка</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {loading && !journal.items.length && (
+                                <tr><td colSpan={6} className="px-3 py-10 text-center text-slate-400">
+                                    <Loader2 size={18} className="mx-auto animate-spin" />
+                                </td></tr>
+                            )}
+                            {!loading && !journal.items.length && (
+                                <tr><td colSpan={6} className="px-3 py-10 text-center text-[13px] text-slate-400">
+                                    За выбранный период обращений нет
+                                </td></tr>
+                            )}
+                            {journal.items.map((row) => (
+                                <tr key={row.id} className="border-t border-slate-100">
+                                    <td className="whitespace-nowrap px-3 py-2 tabular-nums text-slate-600">
+                                        {fmtTime(row.message_at || row.created_at)}
+                                    </td>
+                                    <td className="px-3 py-2 text-slate-700">{row.cabinet_title}</td>
+                                    <td className="whitespace-nowrap px-3 py-2 tabular-nums text-slate-900">
+                                        {row.phone ? fmtPhone(row.phone) : (row.phone_raw || '—')}
+                                    </td>
+                                    <td className="px-3 py-2">
+                                        <IosBadge tone={RESULT_TONE[row.result] || 'slate'}>
+                                            {RESULT_LABEL[row.result] || row.result}
+                                        </IosBadge>
+                                        {row.error_text && (
+                                            <div className="mt-1 max-w-md text-[11.5px] text-rose-600">
+                                                {row.error_text}
+                                            </div>
+                                        )}
+                                    </td>
+                                    {/* Промах по SLA — единственное, что здесь красится:
+                                        ТЗ задаёт минуту как целевой показатель. */}
+                                    <td className={`whitespace-nowrap px-3 py-2 tabular-nums ${
+                                        row.latency_ms > SLA_MS ? 'text-amber-700' : 'text-slate-600'}`}>
+                                        {fmtLatency(row.latency_ms)}
+                                    </td>
+                                    <td className="px-3 py-2 tabular-nums text-slate-500">
+                                        {row.amo_lead_id || '—'}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+                {/* IosPager нумерует страницы С ЕДИНИЦЫ, а состояние здесь с нуля:
+                    из него умножением получается offset. Переводим на границе. */}
+                <div className="border-t border-slate-100 px-3 py-2">
+                    <IosPager
+                        page={page + 1}
+                        pageCount={pageCount}
+                        total={journal.total}
+                        from={page * PAGE_SIZE + 1}
+                        to={Math.min((page + 1) * PAGE_SIZE, journal.total)}
+                        onPage={(number) => setPage(number - 1)}
+                        unit="обращения"
+                    />
+                </div>
+            </div>
+        </section>
+    );
+};
+
+/* ─── Сводка за день ─────────────────────────────────────────────────── */
+const SummaryPanel = ({ apiBaseUrl, headers, toast }) => {
+    const [summary, setSummary] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [day, setDay] = useState(isoToday());
+
+    const toastRef = useRef(toast);
+    useEffect(() => { toastRef.current = toast; }, [toast]);
+
+    useEffect(() => {
+        setLoading(true);
+        axios.get(`${apiBaseUrl}/api/olx_amo/summary?day=${day}`, { headers: headers() })
+            .then((response) => setSummary(response.data))
+            .catch(() => toastRef.current('Не удалось загрузить сводку', 'error'))
+            .finally(() => setLoading(false));
+    }, [apiBaseUrl, headers, day]);
+
+    const rows = summary?.cabinets || [];
+    const totals = summary?.totals || {};
+
+    return (
+        <section className="space-y-3">
+            <label className="block w-44">
+                <span className={iosGroupLabel}>День</span>
+                <input type="date" value={day} className={iosInput}
+                    onChange={(e) => setDay(e.target.value)} />
+            </label>
+
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-[13px]">
+                        <thead className="bg-slate-50/80 text-left text-[11.5px] uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th className="px-3 py-2 font-medium">Кабинет</th>
+                                <th className="px-3 py-2 text-right font-medium">Обращений</th>
+                                <th className="px-3 py-2 text-right font-medium">Сделок</th>
+                                <th className="px-3 py-2 text-right font-medium">Повторов</th>
+                                <th className="px-3 py-2 text-right font-medium">На проверку</th>
+                                <th className="px-3 py-2 text-right font-medium">Автоответов</th>
+                                <th className="px-3 py-2 text-right font-medium">Ошибок</th>
+                                <th className="px-3 py-2 text-right font-medium">Вне минуты</th>
+                                <th className="px-3 py-2 text-right font-medium">Среднее</th>
+                                <th className="px-3 py-2 text-right font-medium">Максимум</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {loading && !rows.length && (
+                                <tr><td colSpan={10} className="px-3 py-10 text-center text-slate-400">
+                                    <Loader2 size={18} className="mx-auto animate-spin" />
+                                </td></tr>
+                            )}
+                            {!loading && !rows.length && (
+                                <tr><td colSpan={10} className="px-3 py-10 text-center text-[13px] text-slate-400">
+                                    За этот день обращений не было
+                                </td></tr>
+                            )}
+                            {rows.map((row) => (
+                                <tr key={row.code} className="border-t border-slate-100">
+                                    <td className="px-3 py-2 text-slate-700">{row.title}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums">{row.total}</td>
+                                    <td className="px-3 py-2 text-right font-medium tabular-nums">{row.leads}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{row.duplicates}</td>
+                                    <td className={`px-3 py-2 text-right tabular-nums ${row.manual ? 'text-amber-700' : 'text-slate-500'}`}>{row.manual}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{row.replies}</td>
+                                    <td className={`px-3 py-2 text-right tabular-nums ${row.errors ? 'text-rose-600' : 'text-slate-500'}`}>{row.errors}</td>
+                                    <td className={`px-3 py-2 text-right tabular-nums ${row.sla_missed ? 'text-amber-700' : 'text-slate-500'}`}>{row.sla_missed}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtLatency(row.avg_latency_ms)}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtLatency(row.max_latency_ms)}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                        {rows.length > 1 && (
+                            <tfoot className="border-t border-slate-200 bg-slate-50/60">
+                                <tr>
+                                    <td className="px-3 py-2 font-medium text-slate-700">Итого</td>
+                                    <td className="px-3 py-2 text-right tabular-nums">{totals.total || 0}</td>
+                                    <td className="px-3 py-2 text-right font-medium tabular-nums">{totals.leads || 0}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.duplicates || 0}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.manual || 0}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.replies || 0}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.errors || 0}</td>
+                                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.sla_missed || 0}</td>
+                                    <td className="px-3 py-2" />
+                                    <td className="px-3 py-2" />
+                                </tr>
+                            </tfoot>
+                        )}
+                    </table>
+                </div>
+            </div>
+        </section>
+    );
+};
+
+/* ─── Куда слать отбивку о сбоях ────────────────────────────────────────
  *
  * Свой реестр групп раздел не заводит: те, куда добавлен бот, уже копятся в
- * общей таблице портала, и из неё же берут списки «Обращения» и «Бот
+ * общей таблице портала, и оттуда же берут списки «Обращения» и «Бот
  * опозданий». Здесь только выбор.
  *
- * Блок свёрнут в одну строку и раскрывается по нажатию: настраивают его один
- * раз, а место на экране он занимал бы каждый день. По той же причине он виден
- * только тому, кто вправе его менять.
- */
-const AlertChatsPicker = ({ chats, apiBaseUrl, headers, onSaved, toast }) => {
+ * Блок свёрнут в одну строку: настраивают его один раз, а место на экране он
+ * занимал бы каждый день. И виден только тому, кто вправе его менять. */
+const AlertChatsPicker = ({ apiBaseUrl, headers, toast }) => {
+    const [chats, setChats] = useState(null);
     const [open, setOpen] = useState(false);
     const [saving, setSaving] = useState(false);
     const [draft, setDraft] = useState(null);
 
-    const chosen = useMemo(
-        () => (chats?.chosen_ids || []).map(Number),
-        [chats],
-    );
-    const value = draft === null ? chosen : draft;
+    const load = useCallback(() => {
+        axios.get(`${apiBaseUrl}/api/olx_amo/chats`, { headers: headers() })
+            .then((response) => setChats(response.data))
+            .catch(() => setChats(null));
+    }, [apiBaseUrl, headers]);
 
+    useEffect(() => { load(); }, [load]);
+
+    const chosen = useMemo(() => (chats?.chosen_ids || []).map(Number), [chats]);
     const options = useMemo(() => (chats?.available || []).map((chat) => ({
         value: Number(chat.chat_id),
         label: chat.title || String(chat.chat_id),
     })), [chats]);
 
-    const lost = (chats?.selected || []).filter((row) => row.is_available === false);
+    if (!chats) return null;
+
+    const value = draft === null ? chosen : draft;
+    const lost = (chats.selected || []).filter((row) => row.is_available === false);
 
     const save = () => {
         setSaving(true);
@@ -473,56 +819,46 @@ const AlertChatsPicker = ({ chats, apiBaseUrl, headers, onSaved, toast }) => {
             .then(() => {
                 toast('Адресаты отбивки сохранены', 'success');
                 setDraft(null);
-                onSaved();
+                load();
             })
             .catch((err) => toast(
                 err?.response?.data?.error || 'Не удалось сохранить', 'error'))
             .finally(() => setSaving(false));
     };
 
-    if (!chats) return null;
-
     return (
-        <section className={`${iosCard} px-4 py-3`}>
-            <button
-                type="button"
-                onClick={() => setOpen((was) => !was)}
-                className="flex w-full items-center gap-2 text-left"
-            >
-                <Send size={15} className="text-slate-400" />
+        <section className={`${iosCard} px-3.5 py-2.5`}>
+            <button type="button" onClick={() => setOpen((was) => !was)}
+                className="flex w-full items-center gap-2 text-left">
+                <Send size={14} className="shrink-0 text-slate-400" />
                 <span className="text-[13.5px] font-medium text-slate-900">
                     Уведомления о сбоях
                 </span>
                 <span className="text-[12.5px] text-slate-500">
                     {chosen.length
-                        ? `${chosen.length} ${pluralChats(chosen.length)}`
+                        ? `${chosen.length} ${plural(chosen.length, 'группа', 'группы', 'групп')}`
                         : 'не настроены'}
                 </span>
-                <span className="ml-auto text-[12.5px] text-blue-600">
+                <span className="ml-auto shrink-0 text-[12.5px] text-blue-600">
                     {open ? 'Свернуть' : 'Настроить'}
                 </span>
             </button>
 
             {open && (
-                <div className="mt-3 space-y-3">
+                <div className="mt-3 space-y-2.5">
                     <p className="text-[12.5px] text-slate-500">
-                        Выберите группы, куда робот сообщит о простое, потере доступа к
-                        кабинету и об ошибках передачи в amoCRM. В списке — те, куда уже
-                        добавлен бот. Сообщение уходит только когда что-то изменилось.
+                        Куда сообщать о простое робота, потере доступа к кабинету и об
+                        ошибках передачи в amoCRM. В списке — группы, куда уже добавлен
+                        бот. Сообщение уходит только при смене состояния.
                     </p>
                     {options.length ? (
-                        <CustomSelect
-                            multiple
-                            value={value}
-                            onChange={setDraft}
-                            options={options}
-                            placeholder="Выберите группы"
-                            searchable
-                        />
+                        <CustomSelect multiple value={value} onChange={setDraft}
+                            options={options} placeholder="Выберите группы" searchable
+                            variant="ios" />
                     ) : (
                         <p className="text-[12.5px] text-amber-700">
-                            Бот пока не добавлен ни в одну группу. Добавьте его туда,
-                            где должна приходить отбивка, — группа появится в списке сама.
+                            Бот пока не добавлен ни в одну группу. Добавьте его туда, где
+                            должна приходить отбивка, — группа появится в списке сама.
                         </p>
                     )}
                     {lost.length > 0 && (
@@ -531,347 +867,16 @@ const AlertChatsPicker = ({ chats, apiBaseUrl, headers, onSaved, toast }) => {
                             Отбивка туда не дойдёт.
                         </p>
                     )}
-                    <div className="flex justify-end">
-                        <button
-                            type="button"
-                            onClick={save}
-                            disabled={saving || draft === null}
-                            className={`${iosBtnPrimary} disabled:opacity-40 active:scale-[0.98]`}
-                        >
+                    <div className="flex justify-end gap-2">
+                        <button type="button" onClick={() => { setDraft(null); setOpen(false); }}
+                            className={iosBtnSecondary}>Отмена</button>
+                        <button type="button" onClick={save} disabled={saving || draft === null}
+                            className={`${iosBtnPrimary} disabled:opacity-40 active:scale-[0.98]`}>
                             {saving ? 'Сохраняем…' : 'Сохранить'}
                         </button>
                     </div>
                 </div>
             )}
-        </section>
-    );
-};
-
-const pluralChats = (count) => {
-    const tail = count % 100;
-    if (tail >= 11 && tail <= 14) return 'групп';
-    switch (count % 10) {
-        case 1: return 'группа';
-        case 2:
-        case 3:
-        case 4: return 'группы';
-        default: return 'групп';
-    }
-};
-
-/* Чаты, где кандидат написал ещё раз и ждёт живого ответа.
- *
- * Робот на повторное обращение молчит намеренно: второе автоматическое
- * сообщение раздражает и читается как поломка. Вместо ответа — этот список.
- *
- * Он стоит ВЫШЕ полосы кабинетов и всего остального, потому что это
- * единственное место раздела, где от человека ждут действия прямо сейчас;
- * всё остальное — наблюдение. Когда очередь пуста, блок исчезает совсем:
- * пустой список «всё хорошо» — ровно тот шум, из-за которого перестают
- * замечать непустой.
- */
-const AwaitingHumans = ({ awaiting }) => {
-    if (!awaiting || !awaiting.total) return null;
-    return (
-        <section className={`${iosCard} border-blue-200 bg-blue-50/40 px-4 py-3`}>
-            <div className="flex items-center gap-2">
-                <MessageSquare size={15} className="text-blue-600" />
-                <span className="text-[13.5px] font-medium text-slate-900">
-                    Ждут вашего ответа: {awaiting.total}
-                </span>
-                <span className="text-[12.5px] text-slate-500">
-                    робот ответил один раз и дальше молчит — напишите сами
-                </span>
-            </div>
-            <ul className="mt-2 space-y-1">
-                {awaiting.items.map((item) => (
-                    <li key={`${item.cabinet}-${item.thread_id}`}
-                        className="flex items-center gap-2 text-[13px]">
-                        <span className="w-28 shrink-0 truncate text-slate-600">
-                            {item.cabinet_title}
-                        </span>
-                        <span className="tabular-nums text-slate-500">
-                            ждёт {fmtWaiting(item.waiting_minutes)}
-                        </span>
-                        <a
-                            href={item.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="ml-auto inline-flex items-center gap-1 text-blue-600 underline-offset-2 hover:underline"
-                        >
-                            Открыть чат
-                            <ExternalLink size={13} />
-                        </a>
-                    </li>
-                ))}
-            </ul>
-        </section>
-    );
-};
-
-const fmtWaiting = (minutes) => {
-    if (minutes === null || minutes === undefined) return '—';
-    if (minutes < 60) return `${minutes} мин`;
-    if (minutes < 1440) return `${Math.round(minutes / 60)} ч`;
-    return `${Math.round(minutes / 1440)} дн`;
-};
-
-/* Подключение кабинета: одноразовый обряд на каждый из девяти.
- *
- * Двумя шагами, а не одной кнопкой, потому что согласие выдаёт ЧЕЛОВЕК в своём
- * браузере: OLX возвращает код на адрес из заявки, и портал этот код увидеть не
- * может. Админ открывает ссылку, подтверждает доступ и приносит код обратно.
- *
- * Главное предупреждение вынесено в текст шага, а не в подсказку под вопросом:
- * согласие выдаёт тот, кто ВОШЁЛ в браузере, а не тот, чей кабинет выбран в
- * списке. Перепутать вход — самая частая ошибка подключения, и заметна она не
- * сразу: токен приедет, робот начнёт читать чужие чаты.
- */
-const ConnectCabinetModal = ({ cabinet, apiBaseUrl, headers, onClose, onDone, toast }) => {
-    const [url, setUrl] = useState('');
-    const [code, setCode] = useState('');
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState('');
-
-    useEffect(() => {
-        setUrl('');
-        setCode('');
-        setError('');
-        if (!cabinet) return;
-        axios.get(`${apiBaseUrl}/api/olx_amo/cabinets/${cabinet.code}/authorize`,
-            { headers: headers() })
-            .then((response) => setUrl(response.data?.url || ''))
-            .catch((err) => setError(err?.response?.data?.error
-                || 'Не удалось собрать ссылку согласия'));
-    }, [cabinet, apiBaseUrl, headers]);
-
-    const save = () => {
-        if (!code.trim()) return;
-        setBusy(true);
-        setError('');
-        axios.post(`${apiBaseUrl}/api/olx_amo/cabinets/${cabinet.code}/callback`,
-            { code: code.trim() }, { headers: headers() })
-            .then(() => {
-                toast(`Кабинет «${cabinet.title}» подключён`, 'success');
-                onDone();
-            })
-            .catch((err) => setError(err?.response?.data?.error
-                || 'OLX не принял код. Он живёт секунды — получите новый по ссылке выше.'))
-            .finally(() => setBusy(false));
-    };
-
-    return (
-        <IosModal
-            open={!!cabinet}
-            onClose={onClose}
-            title={cabinet ? `Подключение кабинета «${cabinet.title}»` : ''}
-            subtitle="Владелец кабинета подтверждает доступ один раз"
-            footer={(
-                <div className="flex justify-end gap-2">
-                    <button type="button" onClick={onClose} className={iosBtnSecondary}>
-                        Отмена
-                    </button>
-                    <button
-                        type="button"
-                        onClick={save}
-                        disabled={busy || !code.trim()}
-                        className={`${iosBtnPrimary} disabled:opacity-40 active:scale-[0.98]`}
-                    >
-                        {busy ? 'Сохраняем…' : 'Сохранить доступ'}
-                    </button>
-                </div>
-            )}
-        >
-            <ol className="space-y-4 text-[13.5px] text-slate-700">
-                <li>
-                    <div className="font-medium text-slate-900">1. Войдите в этот кабинет OLX</div>
-                    <p className="mt-0.5 text-slate-500">
-                        Согласие выдаёт тот аккаунт, под которым выполнен вход в браузере,
-                        а не тот, что выбран здесь. Если войти под другим кабинетом,
-                        робот начнёт читать его чаты.
-                    </p>
-                </li>
-                <li>
-                    <div className="font-medium text-slate-900">2. Откройте экран согласия</div>
-                    {url ? (
-                        <a
-                            href={url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className={`${iosBtnGhost} mt-1.5 inline-flex active:scale-[0.98]`}
-                        >
-                            <ExternalLink size={15} />
-                            Подтвердить доступ в OLX
-                        </a>
-                    ) : (
-                        <p className="mt-0.5 text-slate-400">Собираем ссылку…</p>
-                    )}
-                </li>
-                <li>
-                    <div className="font-medium text-slate-900">3. Вставьте код</div>
-                    <p className="mt-0.5 text-slate-500">
-                        Можно вставить сам код, а можно скопировать адрес из строки
-                        браузера целиком — нужное достанем сами. Код живёт считанные
-                        секунды, поэтому вставляйте сразу.
-                    </p>
-                    <input
-                        value={code}
-                        onChange={(e) => setCode(e.target.value)}
-                        placeholder="код или адрес из строки браузера"
-                        className={`${iosInput} mt-1.5`}
-                    />
-                </li>
-            </ol>
-            {error && (
-                <div className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-[13px] text-rose-700 ring-1 ring-rose-200">
-                    {error}
-                </div>
-            )}
-        </IosModal>
-    );
-};
-
-const JournalTable = ({ items, loading, page, pageCount, total, onPage }) => (
-    <section className={`${iosCard} overflow-hidden`}>
-        <div className="overflow-x-auto">
-            <table className="w-full text-[13px]">
-                <thead className="bg-slate-50/80 text-left text-[12px] uppercase tracking-wide text-slate-500">
-                    <tr>
-                        <th className="px-3 py-2 font-medium">Время отклика</th>
-                        <th className="px-3 py-2 font-medium">Кабинет</th>
-                        <th className="px-3 py-2 font-medium">Телефон</th>
-                        <th className="px-3 py-2 font-medium">Исход</th>
-                        <th className="px-3 py-2 font-medium">Доставка</th>
-                        <th className="px-3 py-2 font-medium">Сделка</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {loading && !items.length && (
-                        <tr><td colSpan={6} className="px-3 py-8 text-center text-slate-400">
-                            <Loader2 size={18} className="mx-auto animate-spin" />
-                        </td></tr>
-                    )}
-                    {!loading && !items.length && (
-                        <tr><td colSpan={6} className="px-3 py-8 text-center text-slate-400">
-                            За выбранный период обращений нет
-                        </td></tr>
-                    )}
-                    {items.map((row) => (
-                        <tr key={row.id} className="border-t border-slate-100">
-                            <td className="whitespace-nowrap px-3 py-2 tabular-nums text-slate-600">
-                                {fmtTime(row.message_at || row.created_at)}
-                            </td>
-                            <td className="px-3 py-2 text-slate-700">{row.cabinet_title}</td>
-                            <td className="whitespace-nowrap px-3 py-2 tabular-nums text-slate-900">
-                                {row.phone ? fmtPhone(row.phone) : (row.phone_raw || '—')}
-                            </td>
-                            <td className="px-3 py-2">
-                                <IosBadge tone={RESULT_TONE[row.result] || 'slate'}>
-                                    {RESULT_LABEL[row.result] || row.result}
-                                </IosBadge>
-                                {row.error_text && (
-                                    <div className="mt-1 max-w-md text-[11.5px] text-rose-600">
-                                        {row.error_text}
-                                    </div>
-                                )}
-                            </td>
-                            {/* Промах по SLA — единственное, что здесь красится:
-                                ТЗ задаёт минуту как целевой показатель. */}
-                            <td className={`whitespace-nowrap px-3 py-2 tabular-nums ${
-                                row.latency_ms > SLA_MS ? 'text-amber-700' : 'text-slate-600'}`}>
-                                {fmtLatency(row.latency_ms)}
-                            </td>
-                            <td className="px-3 py-2 tabular-nums text-slate-500">
-                                {row.amo_lead_id || '—'}
-                            </td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </div>
-        {total > PAGE_SIZE && (
-            <div className="border-t border-slate-100 px-3 py-2">
-                <IosPager
-                    page={page + 1}
-                    pageCount={pageCount}
-                    total={total}
-                    from={page * PAGE_SIZE + 1}
-                    to={Math.min((page + 1) * PAGE_SIZE, total)}
-                    onPage={(number) => onPage(number - 1)}
-                    unit="обращения"
-                />
-            </div>
-        )}
-    </section>
-);
-
-const SummaryTable = ({ summary, loading }) => {
-    if (loading && !summary) {
-        return (
-            <div className={`${iosCard} p-8 text-center text-slate-400`}>
-                <Loader2 size={18} className="mx-auto animate-spin" />
-            </div>
-        );
-    }
-    const rows = summary?.cabinets || [];
-    const totals = summary?.totals || {};
-    return (
-        <section className={`${iosCard} overflow-hidden`}>
-            <div className="overflow-x-auto">
-                <table className="w-full text-[13px]">
-                    <thead className="bg-slate-50/80 text-left text-[12px] uppercase tracking-wide text-slate-500">
-                        <tr>
-                            <th className="px-3 py-2 font-medium">Кабинет</th>
-                            <th className="px-3 py-2 text-right font-medium">Обращений</th>
-                            <th className="px-3 py-2 text-right font-medium">Сделок</th>
-                            <th className="px-3 py-2 text-right font-medium">Повторов</th>
-                            <th className="px-3 py-2 text-right font-medium">На проверку</th>
-                            <th className="px-3 py-2 text-right font-medium">Автоответов</th>
-                            <th className="px-3 py-2 text-right font-medium">Ошибок</th>
-                            <th className="px-3 py-2 text-right font-medium">Вне минуты</th>
-                            <th className="px-3 py-2 text-right font-medium">Среднее</th>
-                            <th className="px-3 py-2 text-right font-medium">Максимум</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {!rows.length && (
-                            <tr><td colSpan={10} className="px-3 py-8 text-center text-slate-400">
-                                За этот день обращений не было
-                            </td></tr>
-                        )}
-                        {rows.map((row) => (
-                            <tr key={row.code} className="border-t border-slate-100">
-                                <td className="px-3 py-2 text-slate-700">{row.title}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{row.total}</td>
-                                <td className="px-3 py-2 text-right tabular-nums font-medium">{row.leads}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{row.duplicates}</td>
-                                <td className={`px-3 py-2 text-right tabular-nums ${row.manual ? 'text-amber-700' : 'text-slate-500'}`}>{row.manual}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{row.replies}</td>
-                                <td className={`px-3 py-2 text-right tabular-nums ${row.errors ? 'text-rose-600' : 'text-slate-500'}`}>{row.errors}</td>
-                                <td className={`px-3 py-2 text-right tabular-nums ${row.sla_missed ? 'text-amber-700' : 'text-slate-500'}`}>{row.sla_missed}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtLatency(row.avg_latency_ms)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-600">{fmtLatency(row.max_latency_ms)}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                    {rows.length > 1 && (
-                        <tfoot className="border-t border-slate-200 bg-slate-50/60">
-                            <tr>
-                                <td className="px-3 py-2 font-medium text-slate-700">Итого</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{totals.total || 0}</td>
-                                <td className="px-3 py-2 text-right tabular-nums font-medium">{totals.leads || 0}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.duplicates || 0}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.manual || 0}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.replies || 0}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.errors || 0}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{totals.sla_missed || 0}</td>
-                                <td className="px-3 py-2" />
-                                <td className="px-3 py-2" />
-                            </tr>
-                        </tfoot>
-                    )}
-                </table>
-            </div>
         </section>
     );
 };

@@ -88,7 +88,7 @@ class AccessTests(unittest.TestCase):
             self.assertFalse(access.can_view(ctx(role=role)), role)
 
     def test_capabilities_shape_is_stable(self):
-        self.assertEqual({'can_view', 'can_manage_cabinets'},
+        self.assertEqual({'can_view', 'can_reply', 'can_manage_cabinets'},
                          set(access.capabilities(ctx(role='admin')).keys()))
 
 
@@ -148,7 +148,7 @@ class SchemaTests(unittest.TestCase):
     def test_result_vocabulary_covers_all_branches(self):
         self.assertEqual(
             {'lead_created', 'duplicate', 'manual_review', 'canned_reply',
-             'needs_human', 'skipped', 'error'},
+             'needs_human', 'human_reply', 'skipped', 'error'},
             set(schema.JOURNAL_RESULTS))
 
     def test_every_result_has_a_human_label_on_the_front(self):
@@ -157,11 +157,11 @@ class SchemaTests(unittest.TestCase):
         Новый исход без подписи показался бы человеку как `needs_human` — это
         уже случалось в других разделах портала.
         """
-        view = (ROOT / 'src' / 'components' / 'olx' / 'OlxLeadsView.jsx').read_text(
+        view = (ROOT / 'src' / 'components' / 'olx' / 'olxMeta.js').read_text(
             encoding='utf-8')
         # Берём именно список исходов, а не любые пары value/label: рядом
         # такими же парами объявлены вкладки раздела.
-        block = view[view.index('const RESULTS = ['):]
+        block = view[view.index('export const RESULTS = ['):]
         block = block[:block.index('];')]
         labelled = set(re.findall(r"value: '(\w+)'", block))
         # 'skipped' наружу не показывается: это наше же сообщение в чате.
@@ -425,17 +425,19 @@ class WiringTests(unittest.TestCase):
         view = (ROOT / 'src' / 'components' / 'olx' / 'OlxLeadsView.jsx').read_text(
             encoding='utf-8')
         self.assertIn('page={page + 1}', view)
-        self.assertIn('onPage={(number) => onPage(number - 1)}', view)
+        self.assertIn('onPage={(number) => setPage(number - 1)}', view)
 
     def test_badge_tones_exist_in_the_design_system(self):
         """Неизвестный тон бейджа молча падает в серый — ошибка перестала бы гореть."""
         ios = (ROOT / 'src' / 'components' / 'ui' / 'ios.jsx').read_text(encoding='utf-8')
         palette = set(re.findall(r"^\s{4}(\w+):\s*'bg-", ios, re.M))
-        view = (ROOT / 'src' / 'components' / 'olx' / 'OlxLeadsView.jsx').read_text(
+        meta = (ROOT / 'src' / 'components' / 'olx' / 'olxMeta.js').read_text(
             encoding='utf-8')
-        used = set(re.findall(r"^\s+\w+:\s*'(\w+)',\s*$", view, re.M))
-        # Берём только те значения, что похожи на тона (остальное — подписи).
-        tones = {t for t in used if t in palette or t in ('rose', 'orange', 'yellow')}
+        tones = set()
+        for name in ('RESULT_TONE', 'STATE_TONE'):
+            block = meta[meta.index('export const %s = {' % name):]
+            block = block[:block.index('};')]
+            tones |= set(re.findall(r":\s*'(\w+)'", block))
         self.assertTrue(tones, 'не нашли ни одного тона — проверьте разбор')
         self.assertTrue(tones <= palette,
                         'тонов нет в палитре ios.jsx: %s' % sorted(tones - palette))

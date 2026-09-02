@@ -68,6 +68,12 @@ REDIRECT_URI = (os.getenv('OLX_REDIRECT_URI') or '').strip()
 
 REQUEST_TIMEOUT = float(os.getenv('OLX_REQUEST_TIMEOUT') or 20)
 
+# Потолок длины сообщения. В спецификации OLX ограничения нет вовсе, но у
+# developer-хаба задокументирован отказ 400 «Malformed request (e.g. size too
+# large)» — то есть предел существует, просто не назван. Ставим свой: две тысячи
+# символов с запасом покрывают любой человеческий ответ кандидату.
+MAX_MESSAGE_LENGTH = int(os.getenv('OLX_MAX_MESSAGE_LENGTH') or 2000)
+
 # Бюджет запросов: 4500 на IP за 5 минут. Берём с запасом вдвое — лимит общий на
 # весь наш адрес, и делить его с чем-то ещё безопаснее, чем упереться в
 # получасовую блокировку, из которой нет выхода, кроме ожидания.
@@ -112,7 +118,19 @@ class _Budget(object):
         self._blocked_until = 0.0
         self._lock = threading.Lock()
 
-    def take(self):
+    # Доля бюджета, дальше которой фоновый опрос не идёт. Остаток —
+    # неприкосновенный запас для действий ЖИВОГО человека: он нажал «Отправить»
+    # и ждёт, и отказ «робот занят» для него бессмысленен. Робот же подождёт
+    # полминуты до следующего цикла и ничего не потеряет.
+    _BACKGROUND_SHARE = 0.9
+
+    def take(self, reserved=False):
+        """Занять один запрос. `reserved=True` — действие человека, ему можно больше.
+
+        Ждать внутри нельзя ни в каком случае: за вызовом стоит поток из
+        небольшого пула, и заснувший запрос останавливает опрос остальных
+        кабинетов. Поэтому при исчерпании — сразу отказ.
+        """
         now = time.time()
         with self._lock:
             if now < self._blocked_until:
@@ -121,10 +139,11 @@ class _Budget(object):
                     retry_after=int(self._blocked_until - now))
             edge = now - self._window
             self._hits = [t for t in self._hits if t > edge]
-            if len(self._hits) >= self._limit:
+            ceiling = self._limit if reserved else int(self._limit * self._BACKGROUND_SHARE)
+            if len(self._hits) >= ceiling:
                 raise OlxRateLimited(
                     'исчерпан собственный бюджет запросов к OLX (%d за %d с)'
-                    % (self._limit, int(self._window)),
+                    % (ceiling, int(self._window)),
                     retry_after=int(self._hits[0] + self._window - now) + 1)
             self._hits.append(now)
 
@@ -269,15 +288,18 @@ class OlxClient(object):
     знать не должен.
     """
 
-    def __init__(self, token_provider, session=None, budget=None):
+    def __init__(self, token_provider, session=None, budget=None, reserved=False):
         self._token = token_provider
         self._session = session or requests.Session()
         self._budget = budget or BUDGET
+        # `reserved=True` — клиент обслуживает действие человека и берёт запросы
+        # из неприкосновенного остатка бюджета (см. `_Budget.take`).
+        self._reserved = reserved
 
     # -- транспорт ---------------------------------------------------------
 
     def _request(self, method, path, params=None, json_body=None):
-        self._budget.take()
+        self._budget.take(reserved=self._reserved)
         url = API_BASE + path
         headers = {
             'Authorization': 'Bearer %s' % (self._token(),),
@@ -318,17 +340,28 @@ class OlxClient(object):
 
         return _unwrap(body)
 
-    @staticmethod
-    def _is_throttle_ban(response, body):
+    # Признаки настоящей блокировки по частоте. Ищем ЦЕЛЫЕ словосочетания, а не
+    # подстроки: первая версия проверяла просто 'rate', а это подстрока слова
+    # «mode-rate-d». Отказ модерации OLX на нашем сообщении принимался бы за
+    # лимит и глушил бы опрос всех девяти кабинетов на полчаса — при том, что
+    # частота ни при чём.
+    _THROTTLE_PHRASES = ('too many requests', 'rate limit', 'request limit',
+                         'too many', 'limit exceeded')
+
+    @classmethod
+    def _is_throttle_ban(cls, response, body):
         """403 у OLX бывает двух смыслов: «нет прав» и «слишком часто, бан на 30 минут».
 
-        Отличаем по тексту: у блокировки в теле стоит про частоту запросов. Спутать
-        нельзя — на «нет прав» повтор бесполезен, а на бан повтор продлевает бан.
+        Спутать нельзя в обе стороны: на «нет прав» повтор бесполезен, а на бан
+        повтор продлевает бан. Поэтому опираемся на заголовок `Retry-After`,
+        который у настоящего ограничения обычно есть, и на явные словосочетания.
         """
         if response.status_code != 403:
             return False
+        if response.headers.get('Retry-After'):
+            return True
         text = str(body).lower()
-        return 'too many' in text or 'rate' in text or 'requests' in text
+        return any(phrase in text for phrase in cls._THROTTLE_PHRASES)
 
     @staticmethod
     def _retry_after(response):
@@ -373,11 +406,54 @@ class OlxClient(object):
         return list(data or []), meta, links
 
     def send_message(self, thread_id, text):
-        """Ответить кандидату. Это единственная операция робота на запись в OLX."""
+        """Отправить сообщение кандидату. Единственная операция на запись в OLX.
+
+        Текст проверяем ЗДЕСЬ, а не у вызывающего: отправляют и робот, и человек
+        из раздела, и правило должно быть одно.
+
+        Пустое отвергаем сразу — OLX примет его молча, и в переписке появится
+        пустой пузырь. Слишком длинное тоже отвергаем, а НЕ обрезаем: обрезанное
+        на полуслове сообщение кандидату хуже честного «сократите» до отправки.
+        Потолка в спецификации нет, поэтому берём свой разумный.
+
+        Повтора нет намеренно. Ключа идемпотентности у ручки не предусмотрено, и
+        второй POST после таймаута — это второе сообщение живому человеку. Лучше
+        честно сказать «не знаем, дошло ли», чем вежливо прислать копию.
+        """
+        body = (text or '').strip()
+        if not body:
+            raise OlxError('пустое сообщение отправлять нельзя')
+        if len(body) > MAX_MESSAGE_LENGTH:
+            raise OlxError('сообщение длиннее %d символов — сократите'
+                           % MAX_MESSAGE_LENGTH)
+
         data, _, _ = self._request(
             'POST', '/threads/%s/messages' % (thread_id,),
-            json_body={'text': text})
-        return data
+            json_body={'text': body})
+        # Ответ у ручки не описан и на практике приходит пустым, поэтому id
+        # отправленного сообщения может не приехать. Возвращаем что есть —
+        # вызывающий обязан быть готов к None.
+        if isinstance(data, dict) and data.get('id'):
+            return data
+        return None
+
+    def user(self, user_id):
+        """Кто наш собеседник. Единственный способ узнать его ИМЯ.
+
+        В объекте чата только числовой id, поэтому без этого запроса шапка
+        переписки — два числа. Значение неизменно, спрашивается один раз на чат.
+        """
+        data, _, _ = self._request('GET', '/users/%s' % (user_id,))
+        return data or {}
+
+    def advert(self, advert_id):
+        """Объявление, по которому пишет кандидат: название и ссылка.
+
+        Тоже неизменно и тоже нужно шапке: «Курьеры Яндекс Доставки» понятнее,
+        чем 397352902.
+        """
+        data, _, _ = self._request('GET', '/adverts/%s' % (advert_id,))
+        return data or {}
 
     def mark_read(self, thread_id):
         """Отметить чат прочитанным.
