@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { Bell, Check, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
+import NewsGallery from './NewsGallery';
 import { subscribeNewsPoke } from './newsShared';
 import './news-modal.css';
 
@@ -63,12 +64,20 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 const items = Array.isArray(r.data?.items) ? r.data.items : [];
                 setQueue((prev) => {
                     /* Сливаем, а не заменяем: карточка, которую человек читает
-                       прямо сейчас, обязана остаться на месте со своим
+                       прямо сейчас, обязана остаться НА МЕСТЕ со своим
                        отсчётом. Заменой её вытеснила бы более срочная новость
-                       ровно в тот момент, когда кнопка вот-вот загорится. */
+                       ровно в тот момент, когда кнопка вот-вот загорится.
+                       Место прежнее — а СОДЕРЖИМОЕ берём свежее: адреса кадров
+                       подписаны на срок, и вкладка, открытая утром, к вечеру
+                       показывала бы пустые рамки до конца дня. Раньше здесь
+                       оставалась старая копия головы, и перезапрос не обновлял
+                       её никогда. Отсчёт кнопки этим не сбивается: его держит
+                       shownRef по id новости. */
                     const head = prev[0];
-                    const rest = items.filter((item) => item.id !== head?.id);
-                    return head ? [head, ...rest] : rest;
+                    if (!head) return items;
+                    const fresh = items.find((item) => item.id === head.id);
+                    const rest = items.filter((item) => item.id !== head.id);
+                    return [fresh || head, ...rest];
                 });
             })
             .catch(() => { /* молчим: окно — не повод показывать ошибку сети */ });
@@ -212,6 +221,14 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 </div>
 
                 <div className="mt-3.5 flex-1 overflow-y-auto overscroll-contain border-t border-slate-100 px-5 py-4">
+                    {/* Кадры ВЫШЕ текста: у объявления с плакатом («Акция
+                        „Приведи друга“») читают сначала картинку, а под длинным
+                        текстом при обязательной задержке до неё просто не
+                        доскроллят.
+                        И СОСЕДОМ .news-body, а не внутри: иначе кадр получил бы
+                        от `.news-body img` свои поля и радиус и разъехался бы с
+                        видом карусели. */}
+                    <NewsGallery photos={current.photos} onBroken={() => load(true)} />
                     <div className="news-body" dangerouslySetInnerHTML={{ __html: current.body || '' }} />
                 </div>
 

@@ -47845,6 +47845,18 @@ def _parcels_bucket_name():
     )
 
 
+def _news_bucket_name():
+    """Бакет раздела «Новости» (фотографии объявления). Каскад env тот же, что у
+    вики и посылок: свой -> общий tasks -> общий. Своя переменная нужна на
+    случай, когда кадры объявлений захотят развести по сроку хранения; пока она
+    не задана, всё работает через общий бакет без единой настройки."""
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_NEWS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
 def _lms_signed_url(bucket_name, blob_path, expires_minutes=120, response_disposition=None, response_type=None):
     bucket_name = str(bucket_name or '').strip()
     blob_path = str(blob_path or '').strip()
@@ -54730,6 +54742,16 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Фотографии объявления (постановка владельца 02.09.2026). Отдаются
+        # подписанной ссылкой ПРЯМО из GCS, а не своим прокси-роутом: такой роут
+        # пришлось бы авторизовать кукой, а _cookie_options понижает мобильному
+        # UA SameSite до Lax — картинка молча пропала бы ровно у тех, ради кого
+        # раздел и выносили из вики. Подробности в шапке news/photos.py.
+        #
+        # signed_url в словарь не кладём намеренно: подписывает news/photos.py —
+        # ему нужен один клиент на запрос и свой кэш подписей, а _lms_signed_url
+        # строит клиент (с разбором ключа RSA) на каждую ссылку.
+        gcs={'bucket_name': _news_bucket_name, 'client': get_gcs_client},
     ))
     logging.info("Раздел «Новости»: Blueprint подключён на /api/news")
 except Exception:

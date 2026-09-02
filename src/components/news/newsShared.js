@@ -40,15 +40,10 @@ export const publishedLabel = (iso) => {
     return `${at.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long' })}, ${time}`;
 };
 
-/** Секунды задержки словами — для подписи под полем. */
-export const delayLabel = (seconds) => {
-    const value = Math.max(0, Number(seconds) || 0);
-    if (!value) return 'кнопка активна сразу';
-    if (value < 60) return `кнопка загорится через ${value} с`;
-    const minutes = Math.floor(value / 60);
-    const rest = value % 60;
-    return `кнопка загорится через ${minutes} мин${rest ? ` ${rest} с` : ''}`;
-};
+/* delayLabel («кнопка загорится через N с») здесь больше нет: подпись под
+   полем задержки пересказывала нажатый чип и число в соседнем поле — то же
+   значение третий раз, — и ушла вместе с остальными пояснениями формы под «i»
+   (решение владельца 02.09.2026). Функция осталась бы мёртвым кодом. */
 
 /* ── КАНАЛ ТЫЧКА ────────────────────────────────────────────────────────────
  *

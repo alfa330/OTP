@@ -17,6 +17,7 @@
   Ниже супервайзера его нет ни у кого, и по этому же признаку прячется вкладка.
 """
 
+import logging
 from datetime import datetime
 from functools import wraps
 
@@ -25,8 +26,10 @@ from flask import Blueprint, jsonify, request
 from wiki.sanitize import sanitize_html
 
 from . import access as news_access
+from . import photos as news_photos
 from . import queries
-from .schema import DEFAULT_CONFIRM_DELAY_SECONDS, schema_is_ready
+from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
+                     photos_ready as schema_photos_ready, schema_is_ready)
 
 # Отказ, который видит не-редактор. Одной строкой: текст показывают человеку,
 # и «недостаточно прав» без объяснения отправляет его писать в поддержку.
@@ -34,8 +37,12 @@ _NOT_A_PUBLISHER = ('Новости публикуют супервайзер и
 
 
 def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                         resolve_requester):
+                         resolve_requester, gcs=None):
     """db — Database (ради _get_cursor); остальное — общие вещи из bot_schedule2.
+
+    gcs=None по умолчанию НАМЕРЕННО: порядок деплоя не должен ронять старт
+    портала. Без хранилища раздел работает как вчера, только фотографию не
+    приложить — роут загрузки честно отвечает 503.
 
     Журнала действий у раздела нет намеренно: кто, когда и кому выпустил
     новость, записано в самой новости (author_id, published_at, адресаты), а
@@ -59,7 +66,22 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return True
         return False
 
-    def news_route(rule, methods=('GET',), publisher=False, rights=False):
+    # Готовность таблицы кадров. Отдельно от _schema_ready намеренно: тот
+    # отвечает за весь раздел, и «нет таблицы» превратилось бы в «раздел
+    # разворачивается» у всех вошедших в портал. Здесь отсутствие таблицы
+    # означает ровно «у новостей нет фотографий».
+    #
+    # Работает в одну сторону: False перепроверяется (таблица доедет следующим
+    # деплоем), True запоминается навсегда — таблицы не исчезают.
+    _photos_table = {'ready': False}
+
+    def _photos_ready(cursor):
+        if not _photos_table['ready']:
+            _photos_table['ready'] = schema_photos_ready(cursor)
+        return _photos_table['ready']
+
+    def news_route(rule, methods=('GET',), publisher=False, rights=False,
+                   defer_cursor=False):
         """Общий декоратор: preflight, авторизация, контекст, ошибки.
 
         publisher=True добавляет потолок должности. Флаг стоит НА ОБЪЯВЛЕНИИ
@@ -77,6 +99,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         плюс сам EXISTS), то есть больше половины запроса — ради ответа на
         вопрос, которого чтение не задаёт. Пул на портал — 40 соединений на
         всё, и его уже делит SSE аукциона.
+
+        defer_cursor=True — контекст и права считаются в коротком курсоре, он
+        ЗАКРЫВАЕТСЯ, и обработчик получает только ctx, а курсоры открывает сам.
+        Нужен там, где между проверкой прав и записью в базу стоит ЧУЖАЯ СЕТЬ:
+        пережатие кадра на 12 мегапикселей и заливка в бакет заняли бы слот
+        пула на секунды, а слотов сорок на весь портал. Заодно это единственный
+        способ снести блоб ПОСЛЕ фиксации транзакции, а не до неё.
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -131,9 +160,13 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             return jsonify({"error": message,
                                             "code": "NEWS_FORBIDDEN"}), status
 
-                        return handler(*args, cursor=cursor, ctx=ctx, **kwargs)
+                        if not defer_cursor:
+                            return handler(*args, cursor=cursor, ctx=ctx, **kwargs)
+
+                    # Курсор ОТДАН обратно в пул, и только теперь обработчик
+                    # уходит в сеть (пережатие кадра, заливка в бакет).
+                    return handler(*args, ctx=ctx, **kwargs)
                 except Exception as exc:  # noqa: BLE001 — общего errorhandler нет
-                    import logging
                     logging.exception('news: ошибка в %s', rule)
                     return jsonify({"error": "Внутренняя ошибка раздела «Новости»",
                                     "detail": str(exc)[:200]}), 500
@@ -230,6 +263,37 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         post['can_take_down'] = _may_take_down(ctx, post)
         return post
 
+    def _dress(cursor, ctx, post):
+        """Карточка, готовая к отдаче: права плюс подписанные адреса кадров.
+
+        Кадры берутся ОТДЕЛЬНЫМ запросом, а не подзапросом внутри get_post, и
+        это не лишнее обращение из лени. get_post зовут семь мест, из них два —
+        журнал прочтений и удаление — свой результат наружу не отдают. Положив
+        bucket и blob_path в общий словарь, мы завели бы семь возможностей
+        уронить путь в бакете в jsonify, и правильность держалась бы на том,
+        что никто не забудет его выкинуть.
+        """
+        post = _with_rights(ctx, post)
+        post['photos'] = (news_photos.sign_urls(gcs, queries.post_photos(cursor, post['id']))
+                          if _photos_ready(cursor) else [])
+        return post
+
+    def _set_photos_refusal(cursor, ctx, post_id, payload):
+        """Привязка кадров, если форма их прислала. Строка отказа или None.
+
+        Ключа нет — кадры не трогаем: тем же правилом живёт `audience`, и оно
+        нужно, чтобы правка одного поля не сносила остальные.
+        """
+        if 'photos' not in payload:
+            return None
+        if not _photos_ready(cursor):
+            # Кадры прислали, а таблицы нет: молча проглотить нельзя — автор
+            # решит, что фотографии прикреплены, и опубликует объявление без них.
+            return 'Фотографии ещё разворачиваются, попробуйте чуть позже'
+        return queries.set_photos(cursor, post_id=post_id,
+                                  photo_ids=payload.get('photos') or [],
+                                  user_id=ctx['user_id'])
+
     def _rules_from_request(payload):
         """Адресаты из тела запроса, приведённые к виду таблицы."""
         rules = []
@@ -270,9 +334,15 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         сервер ради неё означал бы окно, в котором кнопка не загорится никогда,
         если второй запрос не дошёл.
         """
+        with_photos = _photos_ready(cursor)
         items = queries.pending_for_user(
             cursor, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            subjects=ctx['subjects'])
+            subjects=ctx['subjects'], with_photos=with_photos)
+        if with_photos:
+            # Подписи берутся из процессного кэша и базу не трогают: обращений к
+            # ней у этого роута столько же, сколько было до фотографий.
+            for item in items:
+                item['photos'] = news_photos.sign_urls(gcs, item['photos'])
         if items:
             # Только ПЕРВУЮ: окно показывает по одной, а отметка «открыл» — это
             # запись в журнал и точка отсчёта задержки. Поставив её всей
@@ -332,7 +402,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             cursor, viewer_id=ctx['user_id'],
             viewer_level=news_access.effective_role_level(ctx['otp_role']),
             departments=ctx['departments'], status=status,
-            limit=limit, offset=offset)
+            limit=limit, offset=offset, with_photos=_photos_ready(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
                         "total": total})
 
@@ -344,7 +414,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _may_read_post(ctx, post):
             return jsonify({"error": "Эта новость не из вашего периметра"}), 403
         post['audience_size'] = queries.audience_size(cursor, post_id)
-        return jsonify(_with_rights(ctx, post))
+        return jsonify(_dress(cursor, ctx, post))
 
     @news_route('/posts', methods=('POST',), publisher=True)
     def news_post_create(cursor, ctx):
@@ -368,10 +438,17 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             created_by=ctx['user_id'])
         queries.set_audience(cursor, post_id=post_id, rules=rules,
                              audience_max_role_level=ctx['ceiling'])
+        # ДО публикации и в той же транзакции. Иначе между «новость есть» и
+        # «кадры прикреплены» открывается окно, в котором объявление уже
+        # всплыло у всего отдела без фотографий — а второй раз оно не всплывёт
+        # никогда: очередь /pending человек получает один раз.
+        photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
+        if photo_refusal:
+            return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
         if payload.get('publish'):
             queries.publish_post(cursor, post_id=post_id,
                                  audience_max_role_level=ctx['ceiling'])
-        return jsonify(_with_rights(ctx, queries.get_post(cursor, post_id))), 201
+        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id))), 201
 
     @news_route('/posts/<int:post_id>', methods=('PATCH',), publisher=True)
     def news_post_update(cursor, ctx, post_id):
@@ -425,7 +502,10 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if 'audience' in payload:
             queries.set_audience(cursor, post_id=post_id, rules=rules,
                                  audience_max_role_level=ctx['ceiling'])
-        return jsonify(_with_rights(ctx, queries.get_post(cursor, post_id)))
+        photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
+        if photo_refusal:
+            return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
+        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>/publish', methods=('POST',), publisher=True)
     def news_post_publish(cursor, ctx, post_id):
@@ -442,7 +522,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
         queries.publish_post(cursor, post_id=post_id,
                              audience_max_role_level=ctx['ceiling'])
-        return jsonify(_with_rights(ctx, queries.get_post(cursor, post_id)))
+        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>/archive', methods=('POST',), publisher=True)
     def news_post_archive(cursor, ctx, post_id):
@@ -453,7 +533,7 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             return jsonify({"error": "Снять новость может её автор "
                                      "или руководитель выше него"}), 403
         queries.set_status(cursor, post_id=post_id, status='archived')
-        return jsonify(_with_rights(ctx, queries.get_post(cursor, post_id)))
+        return jsonify(_dress(cursor, ctx, queries.get_post(cursor, post_id)))
 
     @news_route('/posts/<int:post_id>', methods=('DELETE',), publisher=True)
     def news_post_delete(cursor, ctx, post_id):
@@ -472,6 +552,112 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                      "журнал прочтений остаётся",
                             "code": "NEWS_PUBLISHED"}), 409
         queries.delete_post(cursor, post_id)
+        return jsonify({"status": "deleted"})
+
+    # ── ФОТОГРАФИИ ───────────────────────────────────────────────────────
+    # Роута ОТДАЧИ кадра здесь нет, и это решение: тег <img> не шлёт
+    # заголовков, значит такой роут пришлось бы авторизовать кукой, а на
+    # мобильном её SameSite понижается до Lax и кросс-сайтовый запрос её не
+    # приложит. Браузер идёт прямо в GCS по подписи; подробности и честная
+    # оговорка про пересылку адреса — в шапке news/photos.py.
+    @news_route('/photos', methods=('POST',), publisher=True, defer_cursor=True)
+    def news_photo_add(ctx):
+        """Приложить фотографию. Один файл на запрос.
+
+        По одному, а не пачкой: очередь грузится последовательно, и осечка на
+        третьем снимке не уносит два уже уехавших. Плюс только так осмысленна
+        проверка content_length — глобального MAX_CONTENT_LENGTH в приложении нет.
+        """
+        if not gcs or not (gcs.get('bucket_name') and gcs['bucket_name']()):
+            return jsonify({"error": "Хранилище фотографий не настроено",
+                            "code": "NEWS_PHOTO_STORAGE_OFF"}), 503
+        # `or 0` обязателен: при chunked заголовка нет, и None > int дал бы 500
+        # вместо честного 413.
+        if (request.content_length or 0) > news_photos.MAX_BYTES:
+            return jsonify({"error": 'Файл больше %d МБ'
+                                     % (news_photos.MAX_BYTES // (1024 * 1024)),
+                            "code": "NEWS_PHOTO_TOO_LARGE"}), 413
+        item = request.files.get('file')
+        if item is None:
+            return jsonify({"error": "Файл не выбран",
+                            "code": "NEWS_PHOTO_REJECTED"}), 400
+
+        # Потолок «ничьих» — ДО чтения байтов: тот, кто не собирается сохранять
+        # новость, не должен уметь набить бакет циклом.
+        with db._get_cursor() as cursor:
+            if not _photos_ready(cursor):
+                return jsonify({"error": "Фотографии ещё разворачиваются",
+                                "code": "NEWS_PHOTOS_NOT_READY"}), 409
+            stale = queries.sweep_loose_photos(cursor)
+            if queries.count_loose_photos(cursor, ctx['user_id']) >= MAX_LOOSE_PHOTOS_PER_USER:
+                news_photos.drop_blobs(gcs, stale)
+                return jsonify({"error": "Слишком много неприкреплённых фотографий — "
+                                         "сохраните новость или закройте форму",
+                                "code": "NEWS_PHOTO_LOOSE_LIMIT"}), 409
+        news_photos.drop_blobs(gcs, stale)      # после фиксации, а не внутри неё
+
+        try:                                    # пережатие и заливка — ВНЕ курсора
+            prepared = news_photos.prepare(item.read(), filename=item.filename,
+                                           content_type=item.mimetype)
+            bucket, blob_path = news_photos.upload(gcs, prepared)
+        except news_photos.PhotoError as refusal:
+            return jsonify({"error": refusal.message,
+                            "code": refusal.code}), refusal.status
+        except Exception:
+            # Наружу — общая фраза: текст ошибки хранилища несёт полный адрес
+            # объекта, а обёртка news_route кладёт detail прямо в тело ответа.
+            logging.exception('news: фотография не уехала в бакет')
+            return jsonify({"error": "Не удалось сохранить фотографию",
+                            "code": "NEWS_PHOTO_UPLOAD_FAILED"}), 502
+
+        try:
+            with db._get_cursor() as cursor:
+                row = queries.insert_loose_photo(
+                    cursor, prepared=prepared, bucket=bucket, blob_path=blob_path,
+                    uploaded_by=ctx['user_id'])
+        except Exception:
+            # Байты уже в бакете, а строки не будет — снимаем блоб, иначе он
+            # останется сиротой навсегда: сборщика сирот в проекте нет.
+            news_photos.drop_blobs(gcs, [(bucket, blob_path)])
+            raise
+
+        signed = news_photos.sign_urls(gcs, [row])
+        if not signed:
+            return jsonify({"error": "Фотография сохранена, но адрес не выдался",
+                            "code": "NEWS_PHOTO_UNSIGNED"}), 502
+        return jsonify({"photo": signed[0]}), 201
+
+    @news_route('/photos/<uuid:photo_id>', methods=('DELETE',),
+                publisher=True, defer_cursor=True)
+    def news_photo_drop(ctx, photo_id):
+        """Снять фотографию.
+
+        Конвертер <uuid:…> отсеивает мусор ещё в маршрутизации: без него «abc»
+        доехало бы до psycopg2 и вернулось пятисоткой вместо 404.
+        """
+        with db._get_cursor() as cursor:
+            if not _photos_ready(cursor):
+                return jsonify({"error": "Фотография не найдена"}), 404
+            row = queries.photo_by_id(cursor, str(photo_id))
+            if not row:
+                return jsonify({"error": "Фотография не найдена"}), 404
+            if row['news_id'] is None:
+                # Ничья — только своя. Второго читателя у неё нет по построению.
+                if row['uploaded_by'] != ctx['user_id']:
+                    return jsonify({"error": "Фотография не найдена"}), 404
+            else:
+                post = queries.get_post(cursor, row['news_id'])
+                if not post:
+                    return jsonify({"error": "Новость не найдена"}), 404
+                # _may_edit, а не _may_read_post: чужой текст не правят, и
+                # фотография здесь — часть текста.
+                if not _may_edit(ctx, post):
+                    return jsonify({"error": "Править новость может её автор"}), 403
+            refs = queries.drop_photo(cursor, str(photo_id))
+            refs += queries.sweep_loose_photos(cursor)
+        # ПОСЛЕ фиксации транзакции: снести блоб раньше, чем БД подтвердила
+        # удаление строки, значило бы получить запись, ссылающуюся в пустоту.
+        news_photos.drop_blobs(gcs, refs)
         return jsonify({"status": "deleted"})
 
     @news_route('/posts/<int:post_id>/report', publisher=True)

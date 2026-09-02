@@ -13,6 +13,8 @@ from wiki import structure as wiki_structure
 from . import access as news_access
 from .access import (AUDIENCE_MATCH_FOR_REPORT, AUDIENCE_MATCH_FOR_VIEWER,
                      ROLE_CANON, SQL_ROLE_LEVELS)
+# schema.py ничего не импортирует из пакета — цикла нет.
+from .schema import LOOSE_PHOTO_TTL_HOURS, MAX_PHOTOS_PER_POST
 
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
@@ -190,12 +192,23 @@ def is_wiki_admin(cursor, user_id):
 # ВЫДАЧА ОКНА
 # ─────────────────────────────────────────────────────────────────────────────
 
-def pending_for_user(cursor, *, user_id, otp_role, subjects):
+def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False):
     """Новости, которые этому человеку сейчас показывают. Свои — не показываем.
 
     Порядок: обязательные раньше необязательных, внутри — по публикации. Автор
     своей новости в выдачу не попадает: он её и написал, а окно, которое
     невозможно закрыть, у самого себя — это брак, а не контроль.
+
+    with_photos=False — таблица кадров ещё не развёрнута (см. schema.photos_ready).
+    Флагом, а не проверкой внутри: этот запрос дёргает каждый вошедший в портал,
+    и спрашивать про существование таблицы на каждый вызов означало бы третье
+    обращение к базе ради ответа, который не меняется.
+
+    КАДРЫ ПОДШИТЫ ВСЕЙ ОЧЕРЕДИ, а не только первой новости. Соблазн есть — окно
+    показывает по одной, — но фронт держит очередь целиком и рисует вторую
+    новость НЕМЕДЛЕННО из уже приехавшего ответа, не дожидаясь сети
+    (NewsOfDayModal: dropCurrent). Пришли кадры только у головы — вторая
+    новость показалась бы без фотографий, и навсегда.
     """
     params = news_access.audience_params(subjects, user_id, otp_role)
     params.update(_role_params())
@@ -209,7 +222,11 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects):
                r.shown_at,
                GREATEST(0, p.confirm_delay_seconds
                         - EXTRACT(EPOCH FROM (@NOW@ - COALESCE(r.shown_at, @NOW@)))
-               )::int AS remaining_seconds
+               )::int AS remaining_seconds,
+               -- Наружу не отдаётся (окно не показывает время публикации), но
+               -- обязано быть в CTE: по нему сортирует внешний запрос с
+               -- кадрами. Без него — «column q.published_at does not exist».
+               p.published_at
           FROM news_posts p
           LEFT JOIN news_reads r ON r.news_id = p.id AND r.user_id = %(user_id)s
          WHERE p.status = 'published'
@@ -223,6 +240,44 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects):
         """ + AUDIENCE_MATCH_FOR_VIEWER + """
          ORDER BY p.is_mandatory DESC, p.published_at, p.id
          LIMIT 20
+        """)
+    if with_photos:
+        params['max_photos'] = MAX_PHOTOS_PER_POST
+        # Кадры СКАЛЯРНЫМ подзапросом, а не джойном, и СНАРУЖИ лимита.
+        #
+        # Джойн испортил бы две вещи сразу. Во-первых, размножил бы строку
+        # новости на число кадров — вместе с телом объявления в каждой копии, а
+        # это самый горячий запрос портала. Во-вторых, и это хуже, он отдал бы
+        # LIMIT 20 КАРТИНКАМ: две новости по десять кадров съели бы всю очередь,
+        # и третье объявление молча не доехало бы до окна.
+        #
+        # Снаружи CTE, а не в исходном SELECT-листе: подзапрос с LIMIT в
+        # родителя не разворачивается, поэтому агрегат считается РОВНО для
+        # отобранных двадцати, а не для каждого кандидата до сортировки.
+        #
+        # bucket и blob_path здесь есть — без них нечего подписывать, — но
+        # наружу не уходят: роут гонит список через news_photos.sign_urls, а тот
+        # собирает новый словарь по белому списку ключей.
+        sql = ("""
+        WITH queue AS (""" + sql + """)
+        SELECT q.id, q.title, q.body, q.is_mandatory, q.confirm_delay_seconds,
+               q.shown_at, q.remaining_seconds,
+               COALESCE((
+                   SELECT json_agg(json_build_object(
+                              'id', f.id, 'bucket', f.bucket,
+                              'blob_path', f.blob_path, 'content_type', f.content_type,
+                              'width', f.width, 'height', f.height,
+                              'file_size', f.file_size, 'sort_order', f.sort_order)
+                          ORDER BY f.sort_order, f.id)
+                     FROM (SELECT id, bucket, blob_path, content_type,
+                                  width, height, file_size, sort_order
+                             FROM news_photos
+                            WHERE news_id = q.id
+                            ORDER BY sort_order, id
+                            LIMIT %(max_photos)s) f
+               ), '[]'::json) AS photos
+          FROM queue q
+         ORDER BY q.is_mandatory DESC, q.published_at, q.id
         """)
     # @NOW@ подставляем str.replace, а не %-форматом: в тексте запроса живут
     # именованные параметры psycopg2 (%(user_id)s), и %-формат сломался бы на
@@ -241,6 +296,9 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects):
         # может — время на машине сотрудника своё, а поля хранятся наивными в
         # Алматы (см. notifications/sources.py: _seconds_until).
         'remaining_seconds': int(row[6] or 0),
+        # Сырые строки кадров: подписывает и чистит их роут. Здесь они ещё с
+        # bucket/blob_path — наружу в таком виде не уходят.
+        'photos': (row[7] or []) if with_photos else [],
     } for row in cursor.fetchall()]
 
 
@@ -360,7 +418,7 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
-               limit=50, offset=0):
+               limit=50, offset=0, with_photos=False):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
@@ -379,7 +437,7 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                p.published_at, p.expires_at, p.created_at, p.updated_at,
                u.name AS author_name, d.name AS author_department,
                p.author_id, u.role AS author_role,
-               0 AS confirmed
+               {photo_count} AS photo_count
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -392,7 +450,16 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
            )
          ORDER BY COALESCE(p.published_at, p.created_at) DESC, p.id DESC
          LIMIT %(limit)s OFFSET %(offset)s
-        """.format(author_level=author_level),
+        """.format(
+            author_level=author_level,
+            # Скалярным подзапросом в тот же запрос, а не четвёртым обращением
+            # по образцу audience_stats: там отдельный запрос оправдан тяжёлым
+            # CTE сотрудников, а здесь это COUNT по индексу idx_news_photos_post.
+            # Нулём — когда таблицы кадров ещё нет: подзапрос по
+            # несуществующей таблице уронил бы список редактора пятисоткой.
+            photo_count=("(SELECT COUNT(*) FROM news_photos f WHERE f.news_id = p.id)"
+                         if with_photos else "0"),
+        ),
         params,
     )
     rows = cursor.fetchall()
@@ -430,6 +497,9 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         'author_department': row[10],
         'author_id': row[11],
         'author_role': row[12],
+        # Сколько кадров прикреплено. Числом, а не фразой: строка списка
+        # отвечает на «что это за новость», а не рассказывает про её устройство.
+        'photo_count': int(row[13] or 0),
         # Заполняется ниже одним запросом на всю страницу: считать его
         # подзапросом по news_reads значило бы считать НЕ ТО, что показывает
         # журнал (там знаменатель — нынешние адресаты), и «Прочитали: 14» на
@@ -822,3 +892,133 @@ def targetable_roles(ceiling):
     return [{'code': code, 'level': level}
             for code, level in sorted(wiki_access.ROLE_LEVELS.items(), key=lambda kv: kv[1])
             if ceiling is not None and level <= ceiling]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Фотографии объявления
+#
+# Байты и бакет живут в news/photos.py, здесь только строки. Колонки bucket и
+# blob_path выбираются НЕ для ответа: их читает только news_photos.sign_urls,
+# который собирает наружу новый словарь по белому списку.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PHOTO_COLUMNS = ('id, news_id, bucket, blob_path, content_type, '
+                  'file_size, width, height, sort_order, uploaded_by')
+
+
+def _photo_row(row):
+    return {
+        'id': row[0], 'news_id': row[1], 'bucket': row[2], 'blob_path': row[3],
+        'content_type': row[4], 'file_size': row[5], 'width': row[6],
+        'height': row[7], 'sort_order': row[8], 'uploaded_by': row[9],
+    }
+
+
+def insert_loose_photo(cursor, *, prepared, bucket, blob_path, uploaded_by):
+    """Кадр, ещё ни к какой новости не привязанный (news_id IS NULL).
+
+    «Ничей» — законное состояние, а не полуфабрикат: черновика, в который можно
+    было бы грузить, не существует, пока автор не выбрал адресатов
+    (news_post_create отвергает пустой набор). Подробности — в news/schema.py.
+    """
+    cursor.execute(
+        """
+        INSERT INTO news_photos (bucket, blob_path, content_type, file_size,
+                                 width, height, original_name, uploaded_by)
+        VALUES (%(bucket)s, %(blob)s, %(kind)s, %(size)s, %(w)s, %(h)s,
+                %(name)s, %(user)s)
+        RETURNING """ + _PHOTO_COLUMNS,
+        {'bucket': bucket, 'blob': blob_path,
+         'kind': prepared.get('content_type') or 'image/webp',
+         'size': int(prepared.get('file_size') or 0),
+         'w': prepared.get('width'), 'h': prepared.get('height'),
+         'name': prepared.get('original_name'), 'user': uploaded_by},
+    )
+    return _photo_row(cursor.fetchone())
+
+
+def count_loose_photos(cursor, user_id):
+    """Сколько «ничьих» кадров держит этот человек. Потолок — против цикла в
+    консоли, который иначе набил бы бакет молча."""
+    cursor.execute(
+        "SELECT COUNT(*) FROM news_photos WHERE news_id IS NULL AND uploaded_by = %s",
+        (user_id,))
+    return int(cursor.fetchone()[0])
+
+
+def photo_by_id(cursor, photo_id):
+    cursor.execute("SELECT " + _PHOTO_COLUMNS + " FROM news_photos WHERE id = %s",
+                   (photo_id,))
+    row = cursor.fetchone()
+    return _photo_row(row) if row else None
+
+
+def drop_photo(cursor, photo_id):
+    """Убирает строку. Возвращает ссылки на блобы — сносить их можно только
+    ПОСЛЕ фиксации транзакции (news/photos.py: drop_blobs)."""
+    cursor.execute(
+        "DELETE FROM news_photos WHERE id = %s RETURNING bucket, blob_path",
+        (photo_id,))
+    return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def post_photos(cursor, post_id):
+    """Кадры новости по порядку показа. Сырые строки — подписывает их роут."""
+    cursor.execute(
+        "SELECT " + _PHOTO_COLUMNS + """
+           FROM news_photos
+          WHERE news_id = %(post)s
+          ORDER BY sort_order, id
+          LIMIT %(max)s
+        """, {'post': post_id, 'max': MAX_PHOTOS_PER_POST})
+    return [_photo_row(row) for row in cursor.fetchall()]
+
+
+def sweep_loose_photos(cursor):
+    """Брошенные «ничьи» кадры: строки удаляются, ссылки на блобы возвращаются
+    вызывающему. Сутки, а не час: форму закрывают и возвращаются к ней завтра."""
+    cursor.execute(
+        """
+        DELETE FROM news_photos
+         WHERE news_id IS NULL
+           AND created_at < %(now)s - INTERVAL '%(ttl)s hours'
+        RETURNING bucket, blob_path
+        """.replace('%(now)s', _NOW).replace('%(ttl)s', str(int(LOOSE_PHOTO_TTL_HOURS))))
+    return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def set_photos(cursor, *, post_id, photo_ids, user_id):
+    """Привязка + порядок + отцепление одним движением. Строка отказа или None.
+
+    Одно поле формы на три действия: кадры, которых нет в списке, возвращаются
+    в «ничьи» (блобы уберёт ближайшая уборка), остальные привязываются к новости
+    и расставляются по местам массива.
+    """
+    ids = [str(value) for value in (photo_ids or [])][:MAX_PHOTOS_PER_POST + 1]
+    if len(ids) > MAX_PHOTOS_PER_POST:
+        return 'Больше %d фотографий к одной новости не прикрепить' % MAX_PHOTOS_PER_POST
+
+    # Отцепляем лишних — обратно в «ничьи», а не удаляем: автор мог убрать кадр
+    # по ошибке и вернуть его, пока форма открыта.
+    cursor.execute(
+        """
+        UPDATE news_photos SET news_id = NULL, sort_order = 0
+         WHERE news_id = %(post)s AND NOT (id = ANY(%(ids)s::uuid[]))
+        """, {'post': post_id, 'ids': ids})
+    if not ids:
+        return None
+
+    # Условие по news_id/uploaded_by ОБЯЗАТЕЛЬНО. Без него идентификатор кадра
+    # сам стал бы ключом доступа: правкой своей новости можно было бы
+    # «усыновить» чужую фотографию, подставив её id. Чужой id просто не
+    # совпадёт — ни ошибки, ни утечки.
+    cursor.execute(
+        """
+        UPDATE news_photos AS f
+           SET news_id = %(post)s, sort_order = data.ord - 1
+          FROM (SELECT * FROM unnest(%(ids)s::uuid[]) WITH ORDINALITY AS t(id, ord)) data
+         WHERE f.id = data.id
+           AND (f.news_id = %(post)s
+                OR (f.news_id IS NULL AND f.uploaded_by = %(me)s))
+        """, {'post': post_id, 'ids': ids, 'me': user_id})
+    return None

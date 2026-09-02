@@ -6,14 +6,24 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
-    Bold, Check, Italic, Link2, List, ListOrdered, Loader2, Megaphone, Plus,
-    Underline as UnderlineIcon, Users, X,
+    Bold, Check, Image as ImageIcon, Italic, Link2, List, ListOrdered, Loader2,
+    Megaphone, Plus, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
     iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
-    IosBadge, IosMenu, IosModal, IosSegmented, IosToggle,
+    IosBadge, IosHint, IosMenu, IosModal, IosSegmented, IosToggle,
 } from '../ui/ios';
-import { delayLabel, publishedLabel, roleTitle } from '../news/newsShared';
+import { publishedLabel, roleTitle } from '../news/newsShared';
+import NewsGallery from '../news/NewsGallery';
+/* Клиентский конвейер берём готовым у «Посылок»: модуль ничего не импортирует
+   и уже решает три вещи, которые пришлось бы решать заново и хуже — поворот из
+   EXIF (иначе половина снимков с телефона ляжет боком), сторож зависшего
+   toBlob (в части Android WebView колбэк не приходит никогда, и форма замерла
+   бы навсегда) и правило «пережали, а стало тяжелее — значит испортили».
+   Не берём оттуда только countIssue: там сказано «к одной посылке». */
+import {
+    PHOTO_ACCEPT, PHOTO_MAX_COUNT, pluralPhotos, preparePhoto,
+} from '../parcels/parcelPhoto';
 import '../news/news-modal.css';
 
 /* Вкладка «Новости» — там, где новость ПИШУТ.
@@ -101,7 +111,12 @@ function AudiencePicker({ open, onClose, access, value, onChange }) {
                     key: `otp_role:${role.code}`,
                     rule: { subject_type: 'otp_role', subject_id: null, subject_role: role.code },
                     title: roleTitle(role.code) || role.code,
-                    hint: 'все сотрудники этой должности',
+                    /* Подписи у строки нет намеренно: «все сотрудники этой
+                       должности» повторялось бы в КАЖДОЙ строке вкладки и
+                       давало стену серого, ничего не различая. Смысл сказан
+                       один раз — в подсказке за «i» рядом с переключателем
+                       вкладок. У вкладки «Люди» подпись, наоборот, осталась:
+                       там она различает однофамильцев. */
                 }));
         }
         return (access?.subjects?.[tab] || [])
@@ -129,22 +144,38 @@ function AudiencePicker({ open, onClose, access, value, onChange }) {
             open={open}
             onClose={onClose}
             title="Кому показать новость"
-            subtitle={access?.bounded
-                ? 'Список сужен вашим отделом и вашей должностью'
-                : 'Список сужен вашей должностью'}
+            /* Почему список сужен — под «i», а не подзаголовком: IosModal
+               рисует subtitle одной строкой с truncate, и на телефоне фраза
+               обрывалась на середине. Объяснение читают один раз, а место в
+               шапке оно занимало всегда. */
             maxWidth="max-w-xl"
             footer={(
                 <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
             )}
         >
-            {tabs.length > 1 && (
-                <IosSegmented
-                    value={tab}
-                    options={tabs.map((item) => ({ value: item.key, label: item.label }))}
-                    onChange={setTab}
-                    stretch
-                />
-            )}
+            <div className="flex items-center gap-2">
+                {tabs.length > 1 && (
+                    <div className="min-w-0 flex-1">
+                        <IosSegmented
+                            value={tab}
+                            options={tabs.map((item) => ({ value: item.key, label: item.label }))}
+                            onChange={setTab}
+                            stretch
+                        />
+                    </div>
+                )}
+                <span className="ml-auto shrink-0">
+                    <IosHint
+                        align="right"
+                        label="Почему список сужен"
+                        text={`В списке только те, кого вам можно адресовать: ${
+                            access?.bounded
+                                ? 'ваш отдел и должности ниже вашей'
+                                : 'должности ниже вашей'
+                        }. Выбрать должность целиком может лишь тот, у кого границы отдела нет: правило на должность адресует людей по всей компании.`}
+                    />
+                </span>
+            </div>
             <input
                 className={`${iosInput} mt-3`}
                 placeholder="Поиск"
@@ -187,7 +218,7 @@ function AudiencePicker({ open, onClose, access, value, onChange }) {
 // Форма новости
 // ─────────────────────────────────────────────────────────────────────────────
 
-function NewsForm({ open, post, access, onClose, onSave, saving }) {
+function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, headers }) {
     const [title, setTitle] = useState('');
     const [mandatory, setMandatory] = useState(true);
     const [delay, setDelay] = useState(access?.default_confirm_delay_seconds ?? 10);
@@ -195,6 +226,16 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
     const [audience, setAudience] = useState([]);
     const [pickerOpen, setPickerOpen] = useState(false);
     const [error, setError] = useState('');
+    /* Кадры: [{ key, id, url, localUrl, busy, failed }].
+       id и url появляются, когда файл доехал до сервера; localUrl живёт до
+       этого момента и показывает плитку сразу после выбора — иначе человек
+       десять секунд смотрит на пустое место и жмёт «добавить» второй раз. */
+    const [photos, setPhotos] = useState([]);
+    const [photoError, setPhotoError] = useState('');
+    const [preview, setPreview] = useState(false);
+    // Что отдали в URL.createObjectURL — освобождаем при закрытии формы, иначе
+    // байты кадров висят в памяти вкладки до перезагрузки страницы.
+    const localUrls = useRef([]);
 
     const editor = useEditor({
         extensions: [
@@ -228,8 +269,98 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
             subject_name: rule.subject_name,
         })));
         setError('');
+        setPhotoError('');
+        setPreview(false);
+        // Уже прикреплённые кадры приезжают с карточкой готовыми адресами.
+        setPhotos((post?.photos || []).map((photo) => ({
+            key: `id:${photo.id}`, id: photo.id, url: photo.url,
+        })));
         editor?.commands.setContent(post?.body || '');
     }, [open, post, access, editor]);
+
+    // Закрыли форму — отпускаем локальные адреса кадров.
+    useEffect(() => {
+        if (open) return undefined;
+        localUrls.current.forEach((url) => URL.revokeObjectURL(url));
+        localUrls.current = [];
+        return undefined;
+    }, [open]);
+
+    /* Кадр уезжает на сервер СРАЗУ при выборе, а не на «Опубликовать».
+       Причина не в удобстве: черновика, к которому можно было бы прикрепить
+       файл, ещё не существует — сервер отвергает новость без адресатов, — а
+       десять снимков с телефона на кнопке «Опубликовать» означали бы полминуты
+       заблокированной формы. Поэтому кадр грузится «ничьим», а привязывается
+       вместе с сохранением. */
+    const addFiles = useCallback(async (files) => {
+        const incoming = [...(files || [])];
+        if (!incoming.length) return;
+        setPhotoError('');
+        /* Счёт места — ОДИН раз на всю пачку и ДО цикла: счётчик из замыкания
+           рендера не растёт по ходу пачки, и двадцать брошенных файлов прошли
+           бы все двадцать. */
+        const already = photos.length;
+        const free = Math.max(0, PHOTO_MAX_COUNT - already);
+        if (incoming.length > free) {
+            setPhotoError(free
+                ? `Поместится ещё ${free} ${pluralPhotos(free)} — остальные не добавлены`
+                : `К одной новости можно прикрепить не больше ${PHOTO_MAX_COUNT} фотографий`);
+        }
+        if (!free) return;
+
+        for (const file of incoming.slice(0, free)) {
+            // eslint-disable-next-line no-await-in-loop
+            const ready = await preparePhoto(file);
+            if (!ready.ok) {
+                setPhotoError(`${file.name || 'Файл'}: ${ready.issue}`);
+                continue;
+            }
+            const localUrl = URL.createObjectURL(ready.blob);
+            localUrls.current.push(localUrl);
+            const key = `new:${file.name || 'photo'}:${file.size}:${file.lastModified || ''}`;
+            setPhotos((prev) => [...prev, { key, localUrl, busy: true }]);
+
+            const form = new FormData();
+            form.append('file', ready.blob, ready.name || 'photo.webp');
+            try {
+                // eslint-disable-next-line no-await-in-loop
+                const answer = await axios.post(`${apiBaseUrl}/api/news/photos`, form, { headers });
+                const saved = answer.data?.photo || {};
+                setPhotos((prev) => prev.map((item) => (item.key === key
+                    ? { ...item, id: saved.id, url: saved.url, busy: false } : item)));
+            } catch (e) {
+                setPhotoError(errText(e, 'Фотография не загрузилась'));
+                setPhotos((prev) => prev.map((item) => (item.key === key
+                    ? { ...item, busy: false, failed: true } : item)));
+            }
+        }
+    }, [apiBaseUrl, headers, photos.length]);
+
+    const dropPhoto = useCallback((photo) => {
+        setPhotos((prev) => prev.filter((item) => item.key !== photo.key));
+        setPhotoError('');
+        if (photo.localUrl) {
+            URL.revokeObjectURL(photo.localUrl);
+            localUrls.current = localUrls.current.filter((url) => url !== photo.localUrl);
+        }
+        // Уехавший кадр снимаем и с сервера: иначе он останется «ничьим» и
+        // будет занимать место в потолке до самой уборки.
+        if (photo.id) {
+            axios.delete(`${apiBaseUrl}/api/news/photos/${photo.id}`, { headers })
+                .catch(() => { /* не доехало — уберёт уборка брошенных */ });
+        }
+    }, [apiBaseUrl, headers]);
+
+    // Порядок здесь и есть порядок показа, поэтому переставлять надо уметь.
+    const movePhoto = useCallback((index, step) => {
+        setPhotos((prev) => {
+            const next = [...prev];
+            const to = index + step;
+            if (to < 0 || to >= next.length) return prev;
+            [next[index], next[to]] = [next[to], next[index]];
+            return next;
+        });
+    }, []);
 
     const audienceLabel = useCallback((rule) => {
         if (rule.subject_type === 'otp_role') {
@@ -245,6 +376,11 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
     const submit = (publish) => {
         const text = title.trim();
         if (!text) { setError('Укажите заголовок'); return; }
+        // ДО остальных проверок: сохранив сейчас, автор выпустил бы объявление
+        // без тех кадров, которые ещё едут, — и второй раз окно не всплывёт.
+        if (photos.some((photo) => photo.busy)) {
+            setError('Дождитесь загрузки фотографий'); return;
+        }
         if (!audience.length) { setError('Укажите, кому адресована новость'); return; }
         const body = editor?.getHTML() || '';
         // Пустой абзац TipTap отдаёт как <p></p> — для проверки «текст есть»
@@ -262,6 +398,9 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                 subject_id: rule.subject_id,
                 subject_role: rule.subject_role,
             })),
+            // Порядок массива и есть порядок показа в карусели. Кадры, которые
+            // не доехали, не отправляем: сервер их всё равно не знает.
+            photos: photos.filter((photo) => photo.id).map((photo) => photo.id),
             publish,
         });
     };
@@ -286,16 +425,22 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                 open={open}
                 onClose={onClose}
                 title={post ? 'Новость' : 'Новая новость'}
-                /* У опубликованной говорим главное, а не «опубликована» —
-                   это и так видно по вкладке. Главное здесь то, чего не видно:
-                   правка не спрашивает подтверждения заново. */
-                subtitle={post?.status === 'published'
-                    ? 'Правка не сбрасывает подтверждения — чтобы спросить заново, опубликуйте новую'
-                    : null}
+                /* Подзаголовка нет: у опубликованной там стояло «правка не
+                   сбрасывает подтверждения», и IosModal резал эту строку
+                   посередине (subtitle рисуется с truncate). Сказать её надо
+                   один раз и в том месте, где решение принимают, — у кнопки
+                   «Сохранить», за «i». */
                 maxWidth="max-w-2xl"
                 footer={(
                     <>
                         {error && <span className="mr-auto text-[12px] text-rose-600">{error}</span>}
+                        {post?.status === 'published' && (
+                            <IosHint
+                                align="right"
+                                label="Что будет с подтверждениями"
+                                text="Те, кто уже подтвердил эту новость, второй раз её не увидят: правка текста подтверждения не сбрасывает. Нужно спросить заново — опубликуйте новую новость."
+                            />
+                        )}
                         <button type="button" className={iosBtnSecondary} onClick={onClose}>Отмена</button>
                         {post?.status !== 'published' && (
                             <button type="button" className={iosBtnSecondary}
@@ -349,6 +494,116 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                     </div>
                 </div>
 
+                <div className="mt-4 flex items-center justify-between px-1">
+                    <span className={`${iosGroupLabel} flex items-center gap-2 px-0`}>
+                        Фотографии
+                        <IosHint
+                            label="Что будет с фотографиями"
+                            text="Снимки уменьшаются и переводятся в WebP прямо в браузере — уходит десятая часть исходного веса. Сотрудник видит их каруселью над текстом новости и листает пальцем, стрелками или трекпадом. Порядок здесь и есть порядок показа: первый кадр он увидит первым."
+                        />
+                    </span>
+                    <span className="text-[12px] tabular-nums text-slate-400">
+                        {photos.length} / {PHOTO_MAX_COUNT}
+                    </span>
+                </div>
+                <div className={`${iosCard} p-2`}>
+                    <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                        {photos.map((photo, index) => (
+                            <div
+                                key={photo.key}
+                                className={`relative aspect-square overflow-hidden rounded-xl bg-slate-100 ring-1 ${
+                                    photo.failed ? 'ring-rose-300' : 'ring-slate-200/70'}`}
+                            >
+                                <img
+                                    src={photo.localUrl || photo.url}
+                                    alt=""
+                                    loading="lazy"
+                                    decoding="async"
+                                    className="h-full w-full object-cover"
+                                />
+                                {photo.busy && (
+                                    <span className="absolute inset-0 grid place-items-center bg-white/60">
+                                        <Loader2 className="h-4 w-4 animate-spin text-slate-500" aria-hidden="true" />
+                                    </span>
+                                )}
+                                {/* Номер = место в карусели: он же отвечает на
+                                    вопрос «что сотрудник увидит первым». */}
+                                <span className="absolute left-1 top-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-slate-900/55 px-1 text-[10.5px] tabular-nums text-white backdrop-blur">
+                                    {index + 1}
+                                </span>
+                                {/* Крестик виден ВСЕГДА, а не по наведению: на
+                                    телефоне наведения нет, и спрятанная там
+                                    кнопка просто не существует. */}
+                                <button
+                                    type="button"
+                                    onClick={() => dropPhoto(photo)}
+                                    aria-label={`Убрать фотографию ${index + 1}`}
+                                    className="absolute right-1 top-1 grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-white backdrop-blur transition active:scale-95"
+                                >
+                                    <X className="h-3 w-3" aria-hidden="true" />
+                                </button>
+                                <div className="absolute inset-x-1 bottom-1 flex justify-between">
+                                    <button
+                                        type="button"
+                                        disabled={index === 0}
+                                        onClick={() => movePhoto(index, -1)}
+                                        aria-label={`Переставить фотографию ${index + 1} левее`}
+                                        className="grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-[13px] leading-none text-white backdrop-blur transition active:scale-95 disabled:opacity-0"
+                                    >
+                                        ‹
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={index === photos.length - 1}
+                                        onClick={() => movePhoto(index, 1)}
+                                        aria-label={`Переставить фотографию ${index + 1} правее`}
+                                        className="grid h-[22px] w-[22px] place-items-center rounded-full bg-slate-900/55 text-[13px] leading-none text-white backdrop-blur transition active:scale-95 disabled:opacity-0"
+                                    >
+                                        ›
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                        {photos.length < PHOTO_MAX_COUNT && (
+                            <label className="grid aspect-square cursor-pointer place-items-center rounded-xl border border-dashed border-slate-300 text-slate-400 transition hover:border-slate-400 hover:bg-slate-50">
+                                <Plus className="h-4 w-4" aria-hidden="true" />
+                                <input
+                                    type="file"
+                                    accept={PHOTO_ACCEPT}
+                                    multiple
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        addFiles(Array.from(e.target.files || []));
+                                        // Сбрасываем, иначе повторный выбор того
+                                        // же файла не поднимет событие.
+                                        e.target.value = '';
+                                    }}
+                                />
+                            </label>
+                        )}
+                    </div>
+                    {photoError && <p className="mt-2 px-1 text-[12px] text-rose-600">{photoError}</p>}
+                    {photos.filter((photo) => photo.url).length > 1 && (
+                        <button
+                            type="button"
+                            onClick={() => setPreview((value) => !value)}
+                            className="mt-2 px-1 text-[12px] text-indigo-600 transition hover:underline"
+                        >
+                            {preview ? 'Скрыть предпросмотр' : 'Как увидит сотрудник'}
+                        </button>
+                    )}
+                    {/* Плитка КРОПАЕТ (квадрат, object-cover), а карусель нет:
+                        вертикальный плакат в сетке выглядит нормально, а в окне
+                        встанет узкой полосой. Поэтому предпросмотр рисует ТОТ ЖЕ
+                        компонент, что и окно сотрудника, из того же CSS — один
+                        компонент, одна правда. */}
+                    {preview && (
+                        <div className="mt-2">
+                            <NewsGallery photos={photos.filter((photo) => photo.url)} />
+                        </div>
+                    )}
+                </div>
+
                 <label className={`${iosGroupLabel} mt-4`}>Кому</label>
                 <div className={`${iosCard} p-3`}>
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -376,11 +631,18 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                             Добавить
                         </button>
                     </div>
-                    {/* Обычной подписью, а не подсказкой за «i»: это не
-                        уточнение для любопытных, а граница, которая молча
-                        сузит выбранное. Прочитать её надо ДО того, как автор
-                        решит, что написал всему отделу. */}
-                    <p className="mt-2 text-[12px] text-slate-400">
+                    {/* ЕДИНСТВЕННОЕ пояснение формы, оставшееся на виду, — и
+                        это не недоделка. Остальные объясняют то, что человек
+                        и так видит на экране; это — границу, которой на экране
+                        НЕТ: потолок audience_max_role_level режет уже выбранный
+                        отдел на выдаче, а форма при сохранении об этом молчит.
+                        Автор публикует «отделу», журнал показывает знаменатель
+                        меньше состава отдела, и это читается как дефект данных.
+                        Прочитать надо ДО нажатия «Опубликовать», а подсказку за
+                        «i» читают после — то есть никогда.
+                        slate-500, а не slate-400: на белом slate-400 даёт около
+                        2.8:1 при норме 4.5. */}
+                    <p className="mt-2 text-[12px] text-slate-500">
                         {audience.length
                             ? 'Из выбранного новость увидят только те, кто ниже вас по должности'
                             : 'Новость увидят только те, кто ниже вас по должности'}
@@ -390,11 +652,16 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                 <div className={`${iosCard} mt-4 divide-y divide-slate-100`}>
                     <div className="flex items-center justify-between gap-3 px-3.5 py-3">
                         <div className="min-w-0">
-                            <p className="text-[14px] text-slate-900">Обязательно к прочтению</p>
-                            <p className="text-[12px] text-slate-400">
-                                {mandatory
-                                    ? 'Окно нельзя закрыть, отметка попадёт в журнал'
-                                    : 'Окно закрывается крестиком, журнал не ведётся'}
+                            {/* Оба состояния — в ОДНОМ пузырьке, а не подписью,
+                                которая переписывается на каждый щелчок тумблера:
+                                мигающая строка под переключателем читается как
+                                ошибка, а не как пояснение. */}
+                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                Обязательно к прочтению
+                                <IosHint
+                                    label="Что меняет обязательность"
+                                    text="Обязательную новость нельзя закрыть крестиком — только кнопкой «Прочитал», и отметка попадёт в журнал «Кто прочитал». Необязательная закрывается крестиком, и журнал по ней не ведётся."
+                                />
                             </p>
                         </div>
                         <IosToggle checked={mandatory} onChange={setMandatory} />
@@ -404,7 +671,13 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                         настройкой того, чего не существует. */}
                     {mandatory && (
                         <div className="px-3.5 py-3">
-                            <p className="text-[14px] text-slate-900">Задержка кнопки «Прочитал»</p>
+                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                Задержка кнопки «Прочитал»
+                                <IosHint
+                                    label="Зачем задержка"
+                                    text="Пока идёт задержка, кнопка «Прочитал» неактивна — чтобы объявление не закрыли, не читая. Отсчёт ведёт сервер с того момента, как окно открылось у сотрудника. Больше десяти минут поставить нельзя."
+                                />
+                            </p>
                             <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                 {DELAY_PRESETS.map((preset) => (
                                     <button
@@ -434,14 +707,29 @@ function NewsForm({ open, post, access, onClose, onSave, saving }) {
                                     aria-label="Задержка в секундах"
                                 />
                             </div>
-                            <p className="mt-1.5 text-[12px] text-slate-400">{delayLabel(delay)}</p>
+                            {/* Строки «загорится через N секунд» здесь больше
+                                нет: она пересказывала нажатый чип и число в
+                                соседнем поле — то есть третий раз повторяла
+                                одно и то же значение. */}
                         </div>
                     )}
                     <div className="flex items-center justify-between gap-3 px-3.5 py-3">
                         <div className="min-w-0">
-                            <p className="text-[14px] text-slate-900">Показывать до</p>
-                            <p className="text-[12px] text-slate-400">
-                                Пусто — пока не подтвердят
+                            <p className="flex items-center gap-2 text-[14px] text-slate-900">
+                                Показывать до
+                                <IosHint
+                                    label="Что значит срок показа"
+                                    text="Дата — момент, когда окно перестанет всплывать, даже если человек его не подтвердил. Оставите пусто — окно показывается до подтверждения, но не дольше 14 дней с публикации: иначе вышедший из отпуска получил бы подряд все объявления за год. Журнал «Кто прочитал» не обрезается ни в том, ни в другом случае."
+                                />
+                            </p>
+                            {/* Строку не спрятали, а ИСПРАВИЛИ: «пусто — пока
+                                не подтвердят» было неправдой. Показ снимает
+                                ещё и горизонт SHOW_HORIZON_DAYS = 14 дней
+                                (news/queries.py), про который форма молчала.
+                                Прятать неправду под «i» нельзя — её надо
+                                убрать. */}
+                            <p className="text-[12px] text-slate-500">
+                                Пусто — до подтверждения, максимум 14 дней
                             </p>
                         </div>
                         <input
@@ -724,6 +1012,15 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
                             {post.status === 'draft' && <IosBadge tone="slate">черновик</IosBadge>}
                             {post.status === 'archived' && <IosBadge tone="slate">снята</IosBadge>}
                             {!post.is_mandatory && <IosBadge tone="slate">необязательная</IosBadge>}
+                            {/* Числом, а не фразой: строка списка отвечает на
+                                «что это за новость», а не рассказывает про её
+                                устройство. */}
+                            {post.photo_count > 0 && (
+                                <span className="inline-flex items-center gap-1 text-[12px] tabular-nums text-slate-400">
+                                    <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                                    {post.photo_count}
+                                </span>
+                            )}
                         </div>
                         <p className="mt-1 truncate text-[12px] text-slate-400">
                             {[post.author_name, post.author_department,
@@ -784,6 +1081,8 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
                 post={formPost}
                 access={access}
                 saving={saving}
+                apiBaseUrl={apiBaseUrl}
+                headers={headers}
                 onClose={() => setFormPost(undefined)}
                 onSave={save}
             />

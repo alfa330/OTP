@@ -62,3 +62,260 @@
 .news-body th,
 .news-body td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }
 .news-body th { background: #f8fafc; color: #0f172a; font-weight: 600; }
+
+/* ── Карусель кадров новости ─────────────────────────────────────────────────
+ *
+ * СВОЯ КОПИЯ ПРАВИЛ, а не импорт wiki-blocks.css, и это осознанная плата.
+ *
+ * Все 46 селекторов галереи в вики начинаются с предка `.wiki-prose` (это
+ * сторожит отдельный тест) и берут цвета из переменных, объявленных на
+ * `.wiki-scope`, — а тот с недавних пор означает ещё и `zoom` до 1.35. Чтобы
+ * ими воспользоваться, окно новости пришлось бы завернуть в оба класса и
+ * притащить в ГЛАВНЫЙ чанк около 107 КБ чужой темы: окно смонтировано в App.jsx
+ * статически, то есть эти байты уехали бы каждому вошедшему в портал, включая
+ * тех, у кого раздела «Вики» нет вовсе. Плюс правило `.wiki-scope :where(*)`
+ * перекрасило бы границы внутри окна, а `zoom` увеличил бы модалку целиком.
+ *
+ * Имена классов `wiki-gallery__*` — не заимствование темы, а то, что ЖЁСТКО
+ * строит gallery.js. Переименовать их нельзя, поэтому здесь они и стоят.
+ * Что набор классов не разъехался, сверяет тест: он вынимает все классы из
+ * gallery.js регуляркой и требует каждый в этом файле.
+ *
+ * Переменные --wiki-* развёрнуты в литералы (значения из wiki-theme.css):
+ * accent #4f46e5, ink #0f172a, ink-soft #475569, ink-mute #94a3b8,
+ * surface-alt #f8fafc.
+ */
+
+/* Обёртка, которую держит React. Внутри всё строит gallery.js. */
+.news-gallery { margin: 0 0 14px; }
+
+/* Лента. `position: relative` — не украшение: скрипт считает «какой кадр
+   открыт» и «куда прокрутить» по offsetLeft, а тот меряется от ближайшего
+   позиционированного предка. */
+.news-gallery .news-gallery__strip {
+    position: relative;
+    display: flex;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0.5rem;
+    border-radius: 16px;
+    background: #f8fafc;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    /* Курсор-рука: полоса прокрутки спрятана, и без подсказки непонятно, что
+       ленту можно тянуть мышью. Пальцем это и так очевидно. */
+    cursor: grab;
+    /* Без этого свайп на КРАЙНЕМ кадре уходит браузеру, и вместо листания
+       человек уезжает по истории назад — прямо из обязательного окна. */
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+
+.news-gallery .news-gallery__strip::-webkit-scrollbar { display: none; }
+
+.news-gallery .news-gallery__strip.wiki-gallery--dragging {
+    cursor: grabbing;
+    user-select: none;
+}
+
+.news-gallery .news-gallery__strip:focus-visible {
+    outline: 2px solid #4f46e5;
+    outline-offset: 2px;
+}
+
+.news-gallery .news-gallery__strip > * {
+    flex: 0 0 auto;
+    margin: 0;
+    scroll-snap-align: center;
+    /* Резкий бросок обязан листать РОВНО НА КАДР, а не проматывать половину
+       галереи: без этого быстрый свайп пролетает мимо двух кадров сразу. */
+    scroll-snap-stop: always;
+}
+
+/* ОДИН КАДР ЗА РАЗ. Без обёртки во всю ширину ленты два вертикальных снимка
+   телефона спокойно встают в ряд: листать нечего, а стрелки двигают то, что и
+   так целиком видно. Растянуть сам <img> нельзя — flex-basis у картинки
+   растягивает КАРТИНКУ, и снимок расплывается. */
+.news-gallery .wiki-gallery__slide {
+    flex: 0 0 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    scroll-snap-align: center;
+}
+
+/* Кадр. Правила перебивают `.news-body img` не случайно: карусель рисуется
+   СОСЕДОМ тела новости, но радиус и поля оттуда всё равно разъехались бы с
+   видом карусели, попади она когда-нибудь внутрь. */
+.news-gallery .news-gallery__strip img {
+    display: block;
+    width: auto !important;
+    max-width: 100%;
+    /* Ниже, чем в статье вики (26rem): окно новости и так ограничено по высоте,
+       а под кадром обязаны поместиться текст и кнопка «Прочитал». */
+    max-height: 20rem;
+    margin: 0 auto !important;
+    border-radius: 12px;
+    cursor: zoom-in;
+}
+
+/* ── Обвязка: обёртка, сцена, стрелки, точки, подпись, счётчик ───────────── */
+.news-gallery .wiki-gallery {
+    position: relative;
+    /* auto по бокам: лента поджимается под ширину самого широкого кадра, и без
+       этого узкая карусель прижималась бы к левому краю окна. */
+    margin: 0 auto;
+}
+
+.news-gallery .wiki-gallery .news-gallery__strip { margin: 0; }
+
+/* Обвязка не участвует в раскладке сама: подпись и точки становятся обычными
+   детьми галереи и встают под лентой. */
+.news-gallery .wiki-gallery__chrome { display: contents; }
+
+/* СЦЕНА — обёртка вокруг ОДНОЙ ЛИШЬ ленты, и она обязательна: стрелки
+   позиционируются от неё, иначе уезжают вниз тем сильнее, чем длиннее подпись. */
+.news-gallery .wiki-gallery__stage { position: relative; }
+
+.news-gallery .wiki-gallery__arrow {
+    position: absolute;
+    top: 50%;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    margin-top: -1rem;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    /* Стеклянная кнопка macOS: полупрозрачный белый с размытием подложки,
+       волосяное кольцо тенью и мягкий ореол под ней. */
+    background: rgba(255, 255, 255, 0.82);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    box-shadow:
+        0 0 0 0.5px rgba(15, 23, 42, 0.12),
+        0 1px 2px rgba(15, 23, 42, 0.1),
+        0 6px 16px rgba(15, 23, 42, 0.12);
+    color: #0f172a;
+    line-height: 1;
+    cursor: pointer;
+    /* Проступают при наведении, как в App Store: постоянные кнопки поверх
+       кадра закрывают ровно то, ради чего окно и открыли. */
+    opacity: 0;
+    transform: scale(0.9);
+    transition: opacity 0.18s ease, transform 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+        background 0.15s ease;
+}
+
+.news-gallery .wiki-gallery:hover .wiki-gallery__arrow,
+.news-gallery .wiki-gallery:focus-within .wiki-gallery__arrow {
+    opacity: 1;
+    transform: none;
+}
+
+.news-gallery .wiki-gallery__arrow:hover { background: rgba(255, 255, 255, 0.92); }
+.news-gallery .wiki-gallery__arrow:active { transform: scale(0.9); }
+
+/* Стрелка, которой некуда листать, УБИРАЕТСЯ, а не гасится: погашенная кнопка
+   на краю карусели — это предложение нажать туда, где ничего нет. */
+.news-gallery .wiki-gallery__arrow[disabled] {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.news-gallery .wiki-gallery__arrow--prev { left: 0.75rem; }
+.news-gallery .wiki-gallery__arrow--next { right: 0.75rem; }
+
+/* Лента поджалась под узкий кадр и по бокам осталось пустое поле — кнопки
+   выходят наружу и перестают закрывать снимок. Класс ставит gallery.js. */
+.news-gallery .wiki-gallery--roomy .wiki-gallery__arrow--prev { left: -2.75rem; }
+.news-gallery .wiki-gallery--roomy .wiki-gallery__arrow--next { right: -2.75rem; }
+
+/* Один кадр — это ещё не карусель: ни стрелок, ни точек. */
+.news-gallery .wiki-gallery--single .wiki-gallery__arrow,
+.news-gallery .wiki-gallery--single .wiki-gallery__dots { display: none; }
+
+/* Подпись гасим: колонки под неё в базе нет, а alt кадра — служебное «Фото 2
+   из 5» для читалки с экрана, и показывать его глазами незачем. Место под неё
+   при этом не резервируем — в окне каждая строка на счету. */
+.news-gallery .wiki-gallery__caption { display: none; }
+
+.news-gallery .wiki-gallery__dots {
+    display: flex;
+    /* Промежутка между точками нет намеренно: он уже внутри самой кнопки.
+       Видимая точка мелкая, а нажимать её приходится пальцем. */
+    gap: 0;
+    align-items: center;
+    justify-content: center;
+    margin-top: 0.375rem;
+}
+
+/* Кнопка — это ПЛОЩАДЬ НАЖАТИЯ (20x24, вчетверо больше самой точки), а точку
+   рисует ::after. Так палец попадает, а ряд выглядит как page control в iOS. */
+.news-gallery .wiki-gallery__dot {
+    display: grid;
+    place-items: center;
+    width: 1.25rem;
+    height: 1.5rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+}
+
+.news-gallery .wiki-gallery__dot::after {
+    content: '';
+    display: block;
+    width: 0.4375rem;
+    height: 0.4375rem;
+    border-radius: 999px;
+    background: #94a3b8;
+    opacity: 0.4;
+    transition: width 0.24s cubic-bezier(0.32, 0.72, 0, 1), background 0.2s ease,
+        opacity 0.2s ease;
+}
+
+.news-gallery .wiki-gallery__dot:hover::after { opacity: 0.7; }
+
+/* Открытый кадр не просто перекрашен, а вытянут в пилюлю: разницу в цвете на
+   мелком элементе глаз ловит хуже, чем разницу в длине. */
+.news-gallery .wiki-gallery__dot[aria-current='true']::after {
+    width: 1rem;
+    background: #4f46e5;
+    opacity: 1;
+}
+
+/* Счётчик вместо точек, когда кадров больше восьми. Правило обязательное, а не
+   запасное: владелец просил ДО ДЕСЯТИ кадров, а gallery.js ставит
+   wiki-gallery--many уже на девятом — без этих строк карусель осталась бы
+   вообще без индикатора ровно на максимуме. */
+.news-gallery .wiki-gallery__counter { display: none; }
+
+.news-gallery .wiki-gallery--many .wiki-gallery__dots { display: none; }
+
+.news-gallery .wiki-gallery--many .wiki-gallery__counter {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    z-index: 2;
+    display: block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.55);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    color: #fff;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
+}
+
+/* Там, где наведения нет вовсе (телефон, планшет), стрелок нет тоже: они
+   проступают по наведению, а без него висели бы поверх кадра постоянно.
+   Листают там пальцем. */
+@media (hover: none), (max-width: 720px) {
+    .news-gallery .wiki-gallery__arrow { display: none; }
+}

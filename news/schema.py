@@ -37,6 +37,26 @@ STATUSES = ('draft', 'published', 'archived')
 DEFAULT_CONFIRM_DELAY_SECONDS = 10
 MAX_CONFIRM_DELAY_SECONDS = 600
 
+# Сколько фотографий у одной новости (постановка владельца 02.09.2026).
+# Столько же, сколько у посылки и у задачи, и это не совпадение: больше десяти
+# — уже не объявление, а альбом, а окно «Новость дня» листают стоя, между
+# звонками. Число проверяется И здесь, И в форме: правило, живущее только во
+# фронте, держится до первого запроса мимо него.
+MAX_PHOTOS_PER_POST = 10
+
+# Сколько «ничьих» кадров человек может держать одновременно.
+#
+# Кадр грузится ДО того, как у новости появился id, и это не прихоть формы:
+# news_post_create отвергает пустой набор адресатов (news/routes.py), то есть
+# черновика, в который можно было бы грузить, не существует, пока автор не
+# выбрал «Кому». Значит кадр обязан уметь полежать ничьим — а раз так, нужен
+# потолок, иначе цикл в консоли набьёт бакет молча.
+MAX_LOOSE_PHOTOS_PER_USER = 30
+
+# Через сколько «ничьи» кадры считаются брошенными и убираются вместе с
+# блобами. Сутки, а не час: форму закрывают и возвращаются к ней завтра.
+LOOSE_PHOTO_TTL_HOURS = 24
+
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
 _STATEMENTS = [
@@ -77,6 +97,64 @@ _STATEMENTS = [
      WHERE status = 'published';
     """,
     "CREATE INDEX IF NOT EXISTS idx_news_posts_author ON news_posts(author_id, created_at DESC);",
+    # ── Фотографии объявления ────────────────────────────────────────────────
+    # Своя таблица, а не wiki_files: тот файл отдаётся роутом /api/wiki/file/<id>,
+    # который стоит за тумблером отдела и QR-подтверждением сессии. Оператор без
+    # вики получил бы на каждый кадр 403 — ровно тот случай, ради которого весь
+    # пакет news/ и вынесен из wiki/ (см. шапку news/routes.py).
+    """
+    CREATE TABLE IF NOT EXISTS news_photos (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+        -- NULL — ЗАКОННОЕ состояние, и это главный приём таблицы (см.
+        -- MAX_LOOSE_PHOTOS_PER_USER выше). Ловушки logo_file_id из вики здесь
+        -- нет: там у файла два возможных читателя и роут отдачи вынужден
+        -- гадать, а здесь роута отдачи нет вовсе — ничью строку читает ровно
+        -- тот, кто её загрузил и уже получил подписанный адрес ответом.
+        news_id       INTEGER REFERENCES news_posts(id) ON DELETE CASCADE,
+
+        -- Где лежат байты. Наружу эти две колонки НЕ отдаются никогда: фронт
+        -- получает подписанный адрес, а путь в бакете служил бы подсказкой,
+        -- что искать. Собирает ответ news/photos.py: sign_urls.
+        bucket        VARCHAR(255) NOT NULL,
+        blob_path     TEXT NOT NULL,
+
+        -- Тип ПОСЛЕ конвертера, а не тот, что прислал браузер: to_webp вправе
+        -- вернуть исходные байты (ветка «пережали, а стало тяжелее» в
+        -- wiki/images.py), и записать всем 'image/webp' значило бы соврать про
+        -- содержимое.
+        content_type  VARCHAR(100) NOT NULL DEFAULT 'image/webp',
+        -- Вес и размеры — ПОСЛЕ пережатия: оригинал в бакет не попадает.
+        -- Ширина и высота нужны не для отчётности: без них <img> до загрузки
+        -- не имеет размеров, и вся арифметика карусели (какой кадр открыт,
+        -- куда прокрутить) считается по нулям — это уже ловили в вики.
+        file_size     BIGINT NOT NULL DEFAULT 0,
+        width         INTEGER,
+        height        INTEGER,
+        original_name VARCHAR(255),
+
+        -- Порядок показа = порядок в карусели. Двух кадров, загруженных в одну
+        -- секунду, хватает, чтобы сортировка по created_at стала случайной, а
+        -- в карусели порядок и есть смысл («шаг 1, шаг 2»).
+        sort_order    INTEGER NOT NULL DEFAULT 0,
+
+        uploaded_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    # «Кадры новости N по порядку» — оба чтения звучат одинаково. Порядковые
+    # колонки внутри индекса снимают сортировку в каждом из ≤20 исполнений
+    # подзапроса в /pending.
+    """
+    CREATE INDEX IF NOT EXISTS idx_news_photos_post
+        ON news_photos(news_id, sort_order, id);
+    """,
+    # Уборка брошенных и потолок «ничьих» на человека. Частичный: привязанных
+    # кадров в индексе нет вовсе, он остаётся крошечным.
+    """
+    CREATE INDEX IF NOT EXISTS idx_news_photos_loose
+        ON news_photos(created_at, uploaded_by) WHERE news_id IS NULL;
+    """,
     """
     CREATE TABLE IF NOT EXISTS news_audience_rules (
         id             SERIAL PRIMARY KEY,
@@ -124,5 +202,22 @@ def init_news_schema(cursor):
 def schema_is_ready(cursor):
     """Развёрнута ли схема. Отличает «раздела ещё не было» от «раздел сломан»."""
     cursor.execute("SELECT to_regclass('public.news_posts') IS NOT NULL")
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def photos_ready(cursor):
+    """Развёрнута ли таблица кадров.
+
+    Отдельно от schema_is_ready НАМЕРЕННО. Тот отвечает за весь раздел: скажи
+    он «нет» — и окно новости пропадёт у всех вошедших в портал. Отсутствие
+    одной этой таблицы обязано значить «у новостей нет фотографий», а не
+    «раздел разворачивается».
+
+    Нужно это ровно один деплой: код выдачи приезжает раньше, чем DDL успевает
+    отработать на старте, и подзапрос по несуществующей news_photos ответил бы
+    пятисоткой КАЖДОМУ вошедшему — на самом горячем роуте портала.
+    """
+    cursor.execute("SELECT to_regclass('public.news_photos') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])
