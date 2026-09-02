@@ -934,13 +934,22 @@ def read_conversation(db, cabinet, thread_id):
                            'кабинет сейчас недоступен')
 
     client = OlxClient(token_provider=lambda: token, reserved=True)
-    messages, _, _ = client.messages(thread_id, limit=MESSAGES_PAGE_SIZE)
-    ordered = sorted(messages or [], key=_order_key)
 
-    with db._get_cursor() as cursor:
-        ours = queries.outbound_for_thread(cursor, cabinet.code, thread_id)
-        state = queries.get_thread(cursor, cabinet.code, thread_id) or {}
-        events = queries.journal_for_thread(cursor, cabinet.code, thread_id)
+    # Поход в OLX и чтение базы независимы, поэтому идут ОДНОВРЕМЕННО. Круг до
+    # OLX занимает три четверти всего ответа, и ждать за ним ещё и базу незачем.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _own_records():
+        with db._get_cursor() as cursor:
+            return (queries.outbound_for_thread(cursor, cabinet.code, thread_id),
+                    queries.get_thread(cursor, cabinet.code, thread_id) or {},
+                    queries.journal_for_thread(cursor, cabinet.code, thread_id))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        own = pool.submit(_own_records)
+        messages, _, _ = client.messages(thread_id, limit=MESSAGES_PAGE_SIZE)
+    ours, state, events = own.result()
+    ordered = sorted(messages or [], key=_order_key)
 
     state = _fill_thread_header(db, client, cabinet, thread_id, state)
 

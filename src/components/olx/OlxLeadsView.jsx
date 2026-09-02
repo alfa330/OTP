@@ -1,12 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, Download, ExternalLink, Loader2, MessageSquare, RefreshCw, Send,
+    AlertTriangle, Download, ExternalLink, Loader2, MessageSquare, RefreshCw, Settings2,
 } from 'lucide-react';
 import {
-    APPLE_FONT, IosBadge, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary,
-    iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
+    APPLE_FONT, IosBadge, IosModal, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary,
+    iosBtnSecondary, iosCard, iosGroupLabel,
 } from '../ui/ios';
+import IosDatePicker from '../ui/DatePicker';
+/* Арифметику высоты берём у «Обращений», а не переписываем: беда там была ровно
+   эта — константа `calc(100vh-N)` под конкретную шапку, а шапка меняется. */
+import { fitHeight, measureShell } from '../crm/layout';
+import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import {
     ChatBubble, ChatComposer, ChatDayDivider, ChatEmpty, useThreadAutoScroll,
 } from '../ui/chat';
@@ -43,6 +48,30 @@ import {
 
 const PAGE_SIZE = 50;
 
+/* Пресеты периода журнала. Модульной константой, а не литералом внутри рендера:
+   массив уходит пропсом в пикер. «Весь период» не даём намеренно — журнал
+   копится вечно, и выгрузка без границ утянула бы всю таблицу. */
+const shiftBack = (days) => {
+    const value = new Date();
+    value.setDate(value.getDate() - days);
+    return isoDate(value);
+};
+
+const DATE_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: 'Неделя', range: () => ({ from: shiftBack(6), to: isoDate(new Date()) }) },
+    { label: 'Месяц', range: () => ({ from: shiftBack(29), to: isoDate(new Date()) }) },
+];
+
+/* Кнопка пикера подменяется целиком, поэтому её класс повторяет ios-вариант
+   CustomSelect — иначе чип в ряду фильтров был бы на пару пикселей другой.
+   `[&>span]:flex-1` нужен, чтобы подпись растянулась и шеврон ушёл вправо. */
+const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 '
+    + 'text-left text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:bg-slate-50 '
+    + 'active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
+    + '[&>span]:flex-1 [&>span]:text-left [&>span]:truncate';
+
 /* Как часто сама подтягивается открытая переписка и список.
  *
  * Считаем от бюджета: лимит OLX — 4500 запросов с адреса за 5 минут, робот
@@ -77,6 +106,7 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [capabilities, setCapabilities] = useState(null);
     const [health, setHealth] = useState(null);
     const [tab, setTab] = useState('chats');
+    const [settings, setSettings] = useState(false);
 
     useEffect(() => {
         axios.get(`${apiBaseUrl}/api/olx_amo/ping`, { headers: headers() })
@@ -95,9 +125,9 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     useEffect(() => {
         loadHealth();
-        /* Полоса кабинетов обновляется сама: раздел открывают и оставляют
-           открытым, а «тихий» простой должен становиться виден без того, чтобы
-           человек вспомнил нажать «Обновить». */
+        /* Состояние кабинетов обновляется само, даже когда модалка закрыта:
+           знак беды в шапке должен зажечься сам, а не после того, как человек
+           вспомнил заглянуть в настройки. */
         const timer = setInterval(() => {
             if (!document.hidden) loadHealth();
         }, LIST_REFRESH_MS);
@@ -128,25 +158,30 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         Отклики из чатов кабинетов OLX и переписка с кандидатами
                     </p>
                 </div>
-                <IosSegmented
-                    ariaLabel="Что показывать"
-                    value={tab}
-                    onChange={setTab}
-                    size="lg"
-                    options={[
-                        { value: 'chats', label: 'Диалоги' },
-                        { value: 'journal', label: 'Журнал' },
-                        { value: 'summary', label: 'Сводка' },
-                    ]}
-                />
+                <div className="flex items-center gap-2">
+                    <IosSegmented
+                        ariaLabel="Что показывать"
+                        value={tab}
+                        onChange={setTab}
+                        size="lg"
+                        options={[
+                            { value: 'chats', label: 'Диалоги' },
+                            { value: 'journal', label: 'Журнал' },
+                            { value: 'summary', label: 'Сводка' },
+                        ]}
+                    />
+                    <SettingsButton health={health} onClick={() => setSettings(true)} />
+                </div>
             </header>
 
-            <CabinetStrip health={health} onRefresh={loadHealth} />
-
-            {capabilities?.can_manage_cabinets && (
-                <AlertChatsPicker
-                    apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
-            )}
+            <SettingsModal
+                open={settings}
+                onClose={() => setSettings(false)}
+                health={health}
+                onRefresh={loadHealth}
+                canManage={!!capabilities?.can_manage_cabinets}
+                apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
+            />
 
             {/* Панели монтируются один раз и прячутся классом, а не
                 размонтируются. Иначе каждое переключение вкладки — это заново
@@ -177,19 +212,70 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     );
 };
 
-/* ─── Полоса кабинетов ───────────────────────────────────────────────────
+/* Сколько кабинетов требуют внимания: без доступа, с ошибкой или молчащие. */
+const troubled = (health) => (health?.cabinets || []).filter(
+    (c) => c.is_enabled && (c.state !== 'ok' || c.is_stale));
+
+/* ─── Кнопка настроек ────────────────────────────────────────────────────
  *
- * Отвечает на вопрос «всё ли живо» до всякой прокрутки и закрывает страх ТЗ про
- * «тихий» простой: кабинет, который давно не опрашивался, виден сразу, а не
- * обнаруживается постфактум. Работающий кабинет показывает только давность
- * опроса — бейджем «Работает» девять раз подряд была бы ровно та плашка, мимо
- * которой глаз перестаёт смотреть. */
-const CabinetStrip = ({ health, onRefresh }) => {
+ * Состояние кабинетов занимало полэкрана каждый день, хотя нужно оно в двух
+ * случаях: когда что-то сломалось и когда подключают новый кабинет. Поэтому в
+ * шапке осталась одна кнопка, и она молчит, пока всё в порядке.
+ *
+ * Знак беды — единственное, что здесь красится: если раскрасить и спокойное
+ * состояние, тревожное перестанет отличаться. */
+const SettingsButton = ({ health, onClick }) => {
+    const bad = troubled(health).length;
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            aria-label={bad ? `Кабинеты: проблем ${bad}` : 'Кабинеты и уведомления'}
+            className={`relative inline-flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-xl ring-1 transition active:scale-95 ${
+                bad ? 'bg-amber-50 text-amber-600 ring-amber-200 hover:bg-amber-100'
+                    : 'bg-slate-100 text-slate-500 ring-slate-200/70 hover:bg-slate-200/80'}`}
+        >
+            {bad ? <AlertTriangle size={16} /> : <Settings2 size={16} />}
+            {bad > 0 && (
+                <span className="absolute -right-1 -top-1 grid h-4 min-w-[16px] place-items-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold tabular-nums text-white">
+                    {bad}
+                </span>
+            )}
+        </button>
+    );
+};
+
+/* ─── Кабинеты и уведомления ─────────────────────────────────────────────
+ *
+ * Два блока в одной модалке намеренно: и то и другое — настройка робота, а не
+ * ежедневная работа, и открывают их одной и той же мыслью «что там с ним».
+ *
+ * Работающий кабинет показывает только давность опроса: бейдж «Работает» девять
+ * раз подряд был бы ровно той плашкой, мимо которой глаз перестаёт смотреть. */
+const SettingsModal = ({ open, onClose, health, onRefresh, canManage,
+                        apiBaseUrl, headers, toast }) => (
+    <IosModal open={open} onClose={onClose} title="Кабинеты и уведомления"
+        subtitle="Состояние робота и куда сообщать о сбоях" maxWidth="max-w-2xl">
+        <div className="space-y-4">
+            <CabinetsPanel health={health} onRefresh={onRefresh} />
+            {canManage && (
+                <AlertChatsPicker apiBaseUrl={apiBaseUrl} headers={headers} toast={toast}
+                    visible={open} />
+            )}
+        </div>
+    </IosModal>
+);
+
+const CabinetsPanel = ({ health, onRefresh }) => {
     if (!health) return null;
-    const stale = health.stale || [];
     const cabinets = health.cabinets || [];
     const working = cabinets.filter((c) => c.state === 'ok').length;
     const broken = cabinets.filter((c) => c.state !== 'ok' && c.is_enabled);
+    /* Молчащие называем как на плитках — человеческим именем. Сервер отдаёт
+       коды (`tez_olx`), и подставлять их в предупреждение значило бы просить
+       читателя держать в голове справочник. */
+    const stale = (health.stale || []).map(
+        (code) => cabinets.find((c) => c.code === code)?.title || code);
 
     return (
         <section className="space-y-2">
@@ -200,12 +286,19 @@ const CabinetStrip = ({ health, onRefresh }) => {
                     Не опрашивались дольше {health.idle_minutes} мин: {stale.join(', ')}
                 </div>
             )}
-            <div className={`${iosCard} px-3.5 py-3`}>
+            <div className="rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70">
                 <div className="mb-2 flex items-center justify-between gap-2">
                     <span className={iosGroupLabel}>Кабинеты</span>
                     <div className="flex items-center gap-2 text-[12px] text-slate-500">
-                        <span className="tabular-nums">
-                            {working} из {cabinets.length} работают
+                        {/* Пока всё хорошо — счёт работающих. Как только
+                            появилась беда, счёт беды: «8 из 9 работают» рядом с
+                            жёлтой шапкой отвечало не на тот вопрос, с которым
+                            модалку открыли. */}
+                        <span className={`tabular-nums ${troubled(health).length ? 'text-amber-700' : ''}`}>
+                            {troubled(health).length
+                                ? `${troubled(health).length} ${plural(troubled(health).length,
+                                    'требует', 'требуют', 'требуют')} внимания`
+                                : `${working} из ${cabinets.length} работают`}
                         </span>
                         <button type="button" onClick={onRefresh}
                             className="text-slate-400 transition hover:text-slate-600 active:scale-95"
@@ -214,9 +307,14 @@ const CabinetStrip = ({ health, onRefresh }) => {
                         </button>
                     </div>
                 </div>
-                <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+                {/* Колонок три, а не пять: ширину теперь задаёт модалка, и
+                    пятая колонка ужала бы название кабинета до многоточия. */}
+                <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
                     {cabinets.map((cab) => {
-                        const bad = cab.state !== 'ok' && cab.is_enabled;
+                        /* Замолчавший кабинет тоже беда: состояние у него
+                           «Работает», но данных из него нет. Без подсветки
+                           плитка ТЭЗ выглядела бы обычной при жёлтой шапке. */
+                        const bad = cab.is_enabled && (cab.state !== 'ok' || cab.is_stale);
                         return (
                             <div key={cab.code}
                                 className={`rounded-xl px-2.5 py-2 ring-1 ${
@@ -226,12 +324,13 @@ const CabinetStrip = ({ health, onRefresh }) => {
                                     {cab.title}
                                 </div>
                                 <div className="mt-0.5">
-                                    {bad ? (
+                                    {bad && cab.state !== 'ok' ? (
                                         <IosBadge tone={STATE_TONE[cab.state] || 'slate'}>
                                             {STATE_LABEL[cab.state] || cab.state}
                                         </IosBadge>
                                     ) : (
-                                        <span className="text-[11.5px] tabular-nums text-slate-500">
+                                        <span className={`text-[11.5px] tabular-nums ${
+                                            bad ? 'text-amber-700' : 'text-slate-500'}`}>
                                             {fmtAgo(cab.last_poll_at)}
                                         </span>
                                     )}
@@ -288,9 +387,37 @@ const ChatWorkspace = ({ apiBaseUrl, headers, toast, canReply, cabinetOptions,
 
     const awaiting = (threads || []).filter((t) => t.awaiting).length;
 
+    /* Карточка занимает всё, что осталось до низа видимой области. Было
+       `calc(100dvh-400px)`, где 400 — «шапка раздела, на глаз». Стоило убрать
+       полосу кабинетов в модалку, как под карточкой повисла полоса пустоты в
+       триста пикселей: вычитаемое считало то, чего на экране больше нет. */
+    const shellRef = useRef(null);
+    const [shellHeight, setShellHeight] = useState(null);
+
+    useEffect(() => {
+        const node = shellRef.current;
+        if (!node || typeof ResizeObserver === 'undefined') return undefined;
+        const recompute = () => setShellHeight(fitHeight(measureShell(node)));
+        recompute();
+        /* Наблюдаем и за прокрутчиком, и за шапкой раздела: на узком экране
+           вкладки переносятся на вторую строку уже после первого кадра. */
+        const observer = new ResizeObserver(recompute);
+        observer.observe(node.closest('.main-content') || document.body);
+        const header = document.querySelector('header');
+        if (header) observer.observe(header);
+        window.addEventListener('resize', recompute);
+        return () => {
+            observer.disconnect();
+            window.removeEventListener('resize', recompute);
+        };
+    }, [visible]);
+
     return (
-        <section className={`${iosCard} overflow-hidden`}>
-            <div className="flex h-[calc(100dvh-400px)] min-h-[440px] flex-col lg:flex-row">
+        <section ref={shellRef} className={`${iosCard} overflow-hidden`}>
+            {/* Пока не измерено, высоту не навязываем: мигнуть неправильной
+                хуже, чем один кадр по содержимому. */}
+            <div className="flex min-h-[440px] flex-col lg:flex-row"
+                style={shellHeight ? { height: shellHeight } : undefined}>
                 {/* ── список диалогов ── */}
                 <div className={`flex min-h-0 w-full flex-col border-slate-200/70 lg:w-[340px] lg:shrink-0 lg:border-r ${
                     selected ? 'hidden lg:flex' : 'flex'}`}>
@@ -642,16 +769,24 @@ const JournalPanel = ({ apiBaseUrl, headers, toast, cabinetOptions, visible }) =
     return (
         <section className="space-y-3">
             <div className="flex flex-wrap items-end gap-2.5">
-                <label className="block">
-                    <span className={iosGroupLabel}>С</span>
-                    <input type="date" value={dateFrom} className={iosInput}
-                        onChange={(e) => setDateFrom(e.target.value)} />
-                </label>
-                <label className="block">
-                    <span className={iosGroupLabel}>По</span>
-                    <input type="date" value={dateTo} className={iosInput}
-                        onChange={(e) => setDateTo(e.target.value)} />
-                </label>
+                {/* Наш пикер, а не системный input[type=date]: тот выглядит
+                    по-своему в каждом браузере и не знает ни пресетов, ни
+                    русских подписей. */}
+                <div className="w-52">
+                    <span className={iosGroupLabel}>Период</span>
+                    <IosDateRangePicker
+                        from={dateFrom} to={dateTo}
+                        max={isoDate(new Date())}
+                        presets={DATE_PRESETS}
+                        triggerClassName={DATE_TRIGGER}
+                        onChange={({ from, to }) => {
+                            /* Один клик по дню отдаёт `to` пустым — это ещё не
+                               «по сегодня», а выбранный день целиком. */
+                            setDateFrom(from || '');
+                            setDateTo(to || from || '');
+                        }}
+                    />
+                </div>
                 <div className="w-44">
                     <span className={iosGroupLabel}>Кабинет</span>
                     <CustomSelect value={cabinet} onChange={setCabinet}
@@ -767,11 +902,12 @@ const SummaryPanel = ({ apiBaseUrl, headers, toast, visible }) => {
 
     return (
         <section className="space-y-3">
-            <label className="block w-44">
+            <div className="w-44">
                 <span className={iosGroupLabel}>День</span>
-                <input type="date" value={day} className={iosInput}
-                    onChange={(e) => setDay(e.target.value)} />
-            </label>
+                <IosDatePicker value={day} onChange={setDay}
+                    max={isoDate(new Date())} ariaLabel="День сводки"
+                    triggerClassName={DATE_TRIGGER} />
+            </div>
 
             <div className={`${iosCard} overflow-hidden`}>
                 <div className="overflow-x-auto">
@@ -845,11 +981,11 @@ const SummaryPanel = ({ apiBaseUrl, headers, toast, visible }) => {
  * общей таблице портала, и оттуда же берут списки «Обращения» и «Бот
  * опозданий». Здесь только выбор.
  *
- * Блок свёрнут в одну строку: настраивают его один раз, а место на экране он
- * занимал бы каждый день. И виден только тому, кто вправе его менять. */
-const AlertChatsPicker = ({ apiBaseUrl, headers, toast }) => {
+ * Живёт в модалке настроек и виден только тому, кто вправе его менять. Своего
+ * сворачивания у блока больше нет: модалка и так открывается по нужде, а
+ * «Настроить» внутри неё было бы вторым щелчком за ту же мысль. */
+const AlertChatsPicker = ({ apiBaseUrl, headers, toast, visible }) => {
     const [chats, setChats] = useState(null);
-    const [open, setOpen] = useState(false);
     const [saving, setSaving] = useState(false);
     const [draft, setDraft] = useState(null);
 
@@ -866,6 +1002,9 @@ const AlertChatsPicker = ({ apiBaseUrl, headers, toast }) => {
         value: Number(chat.chat_id),
         label: chat.title || String(chat.chat_id),
     })), [chats]);
+    const chosenTitles = useCallback((values) => (values || [])
+        .map((id) => options.find((o) => String(o.value) === String(id))?.label || id)
+        .join(', '), [options]);
 
     if (!chats) return null;
 
@@ -887,56 +1026,59 @@ const AlertChatsPicker = ({ apiBaseUrl, headers, toast }) => {
     };
 
     return (
-        <section className={`${iosCard} px-3.5 py-2.5`}>
-            <button type="button" onClick={() => setOpen((was) => !was)}
-                className="flex w-full items-center gap-2 text-left">
-                <Send size={14} className="shrink-0 text-slate-400" />
+        <section className="rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70">
+            <div className="flex items-center gap-2">
+                <MessageSquare size={14} className="shrink-0 text-slate-400" />
                 <span className="text-[13.5px] font-medium text-slate-900">
                     Уведомления о сбоях
                 </span>
-                <span className="text-[12.5px] text-slate-500">
-                    {chosen.length
-                        ? `${chosen.length} ${plural(chosen.length, 'группа', 'группы', 'групп')}`
-                        : 'не настроены'}
-                </span>
-                <span className="ml-auto shrink-0 text-[12.5px] text-blue-600">
-                    {open ? 'Свернуть' : 'Настроить'}
-                </span>
-            </button>
+                {/* Счётчик показываем только у пустого выбора — это
+                    предупреждение. Выбранные группы и так названы в поле ниже,
+                    и «1 группа» рядом с их именами было бы тем же дважды. */}
+                {!chosen.length && (
+                    <span className="ml-auto shrink-0 text-[12.5px] text-amber-700">
+                        не настроены
+                    </span>
+                )}
+            </div>
 
-            {open && (
-                <div className="mt-3 space-y-2.5">
-                    <p className="text-[12.5px] text-slate-500">
-                        Куда сообщать о простое робота, потере доступа к кабинету и об
-                        ошибках передачи в amoCRM. В списке — группы, куда уже добавлен
-                        бот. Сообщение уходит только при смене состояния.
+            <div className="mt-2.5 space-y-2.5">
+                <p className="text-[12.5px] text-slate-500">
+                    Куда сообщать о простое робота, потере доступа к кабинету и об
+                    ошибках передачи в amoCRM. В списке — группы, куда уже добавлен
+                    бот. Сообщение уходит только при смене состояния.
+                </p>
+                {options.length ? (
+                    /* В кнопке — имена групп, а не «Выбрано: N»: у отбивки
+                       адресатов один-два, и важно ровно то, КУДА она уходит. */
+                    <CustomSelect multiple value={value} onChange={setDraft}
+                        options={options} placeholder="Выберите группы" searchable
+                        variant="ios" renderValue={chosenTitles} />
+                ) : (
+                    <p className="text-[12.5px] text-amber-700">
+                        Бот пока не добавлен ни в одну группу. Добавьте его туда, где
+                        должна приходить отбивка, — группа появится в списке сама.
                     </p>
-                    {options.length ? (
-                        <CustomSelect multiple value={value} onChange={setDraft}
-                            options={options} placeholder="Выберите группы" searchable
-                            variant="ios" />
-                    ) : (
-                        <p className="text-[12.5px] text-amber-700">
-                            Бот пока не добавлен ни в одну группу. Добавьте его туда, где
-                            должна приходить отбивка, — группа появится в списке сама.
-                        </p>
-                    )}
-                    {lost.length > 0 && (
-                        <p className="text-[12.5px] text-amber-700">
-                            Бота больше нет в группах: {lost.map((r) => r.title || r.chat_id).join(', ')}.
-                            Отбивка туда не дойдёт.
-                        </p>
-                    )}
+                )}
+                {lost.length > 0 && (
+                    <p className="text-[12.5px] text-amber-700">
+                        Бота больше нет в группах: {lost.map((r) => r.title || r.chat_id).join(', ')}.
+                        Отбивка туда не дойдёт.
+                    </p>
+                )}
+                {/* Кнопки показываем только при несохранённой правке: пара
+                    вечно серых кнопок под списком читалась бы как поломка. */}
+                {draft !== null && (
                     <div className="flex justify-end gap-2">
-                        <button type="button" onClick={() => { setDraft(null); setOpen(false); }}
+                        <button type="button" onClick={() => setDraft(null)}
                             className={iosBtnSecondary}>Отмена</button>
-                        <button type="button" onClick={save} disabled={saving || draft === null}
+                        <button type="button" onClick={save} disabled={saving}
                             className={`${iosBtnPrimary} disabled:opacity-40 active:scale-[0.98]`}>
                             {saving ? 'Сохраняем…' : 'Сохранить'}
                         </button>
                     </div>
-                </div>
-            )}
+                )}
+            </div>
         </section>
     );
 };
