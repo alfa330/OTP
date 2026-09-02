@@ -5,7 +5,7 @@ import {
     AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
     Layers, MapPin,
     Network,
-    Building2, ChevronDown, LineChart, Loader2, Megaphone, Pencil, Plus, RefreshCw,
+    Building2, LineChart, Loader2, Megaphone, Plus, RefreshCw,
     ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
@@ -25,6 +25,7 @@ import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
 import WikiSpaceModal from './WikiSpaceModal';
+import WikiSpaceSwitch from './WikiSpaceSwitch';
 import { effectiveFeatures } from './spaceFeatures';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
 /* «Новости» — лениво по той же причине, что редактор статей: у формы объявления
@@ -153,104 +154,6 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
         })}
     </div>
 );
-
-/* Переключатель пространств — правее заголовка раздела.
- *
- * Выпадающий список, а не ряд пилюль: пространств у клиента бывает и одно, и
- * десять, а ряд пилюль на десяти именах отжимает поиск и «Обновить» на вторую
- * строку. Одно пространство — списка нет вовсе: выбор из одного варианта это
- * подпись, притворяющаяся управлением.
- */
-const SpaceSwitch = ({ spaces, value, onChange, onCreate, onEdit }) => {
-    const [open, setOpen] = useState(false);
-    const boxRef = useRef(null);
-    const current = spaces.find((sp) => sp.id === value) || spaces[0];
-
-    /* Закрытие по клику мимо вешаем ТОЛЬКО пока список раскрыт: постоянный
-       слушатель на документе висел бы на каждом экране раздела ради окна,
-       которое открывают раз в месяц. */
-    useEffect(() => {
-        if (!open) return undefined;
-        const away = (event) => {
-            if (!boxRef.current?.contains(event.target)) setOpen(false);
-        };
-        document.addEventListener('mousedown', away);
-        return () => document.removeEventListener('mousedown', away);
-    }, [open]);
-
-    if (!current) return null;
-
-    return (
-        <div className="flex items-center gap-1.5">
-            <div ref={boxRef} className="relative">
-                <button
-                    type="button"
-                    onClick={() => spaces.length > 1 && setOpen((x) => !x)}
-                    aria-haspopup={spaces.length > 1 ? 'listbox' : undefined}
-                    aria-expanded={spaces.length > 1 ? open : undefined}
-                    className={`flex max-w-[220px] items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[13px] font-semibold text-slate-800 transition ${
-                        spaces.length > 1 ? 'hover:bg-slate-200 active:scale-[0.98]' : 'cursor-default'
-                    }`}
-                >
-                    <span className="min-w-0 truncate">{current.name}</span>
-                    {spaces.length > 1 && (
-                        <ChevronDown size={13}
-                            className={`shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
-                    )}
-                </button>
-
-                {open && (
-                    <div
-                        role="listbox"
-                        className="absolute left-0 top-full z-30 mt-1.5 w-[240px] overflow-hidden rounded-2xl bg-white/95 p-1 shadow-xl ring-1 ring-slate-900/10 backdrop-blur-xl"
-                    >
-                        {spaces.map((sp) => (
-                            <button
-                                key={sp.id}
-                                type="button"
-                                role="option"
-                                aria-selected={sp.id === current.id}
-                                onClick={() => { onChange(sp.id); setOpen(false); }}
-                                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition ${
-                                    sp.id === current.id
-                                        ? 'bg-slate-100 font-semibold text-slate-900'
-                                        : 'text-slate-700 hover:bg-slate-50'
-                                }`}
-                            >
-                                <span className="min-w-0 flex-1 truncate">{sp.name}</span>
-                            </button>
-                        ))}
-                    </div>
-                )}
-            </div>
-
-            {/* «+» и «править» показываем только тому, кто вправе: сервер
-                отвечает 403, и кнопка, ведущая в отказ, — это брак. */}
-            {onCreate && (
-                <button
-                    type="button"
-                    onClick={onCreate}
-                    aria-label="Новое пространство"
-                    title="Новое пространство"
-                    className="grid h-7 w-7 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
-                >
-                    <Plus size={14} />
-                </button>
-            )}
-            {onEdit && (
-                <button
-                    type="button"
-                    onClick={onEdit}
-                    aria-label="Настроить пространство"
-                    title="Настроить пространство"
-                    className="grid h-7 w-7 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
-                >
-                    <Pencil size={13} />
-                </button>
-            )}
-        </div>
-    );
-};
 
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
                                    initialArticleSlug, onInitialArticleConsumed }) {
@@ -392,15 +295,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         [spaces, spaceId],
     );
     const features = useMemo(() => effectiveFeatures(activeSpace), [activeSpace]);
-
-    /* Пространство ДЛЯ КОНСТРУКТОРА берём из /structure, а не из ping: в ping
-       лежит только то, что нужно шапке (имя и тумблеры), без списка отделов —
-       знать, кому ещё выдана вика, читателю незачем. Окно правки открывает
-       супер-админ, и полную карточку ему отдаёт /structure. */
-    const editableSpace = useMemo(
-        () => (structure?.spaces || []).find((sp) => sp.id === activeSpace?.id) || activeSpace,
-        [structure, activeSpace],
-    );
 
     /* Дерево, суженное до активного пространства. Витрина, каталог, оглавление
        и журнал получают ИМЕННО его: сервер отдаёт всё, к чему у человека есть
@@ -690,14 +584,22 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         он отвечает на вопрос «чья это вика», и ответ обязан
                         стоять рядом с самим заголовком, а не в настройках. */}
                     {spaces.length > 0 && (
-                        <SpaceSwitch
+                        <WikiSpaceSwitch
                             spaces={spaces}
                             value={activeSpace?.id}
                             onChange={setSpaceId}
-                            onCreate={canManageSpaces
-                                ? () => setSpaceModal({ mode: 'create' }) : null}
-                            onEdit={canManageSpaces
-                                ? () => setSpaceModal({ mode: 'edit' }) : null}
+                            /* Полные карточки — для окна настройки: список в
+                               шапке приходит из /ping и списка отделов не
+                               несёт. Меню правит ЛЮБОЕ пространство, поэтому
+                               сужать их активным нельзя. */
+                            cards={structure?.spaces || []}
+                            canManage={canManageSpaces}
+                            base={base}
+                            headers={headers}
+                            showToast={showToast}
+                            onCreate={() => setSpaceModal({ mode: 'create' })}
+                            onEdit={(card) => setSpaceModal({ mode: 'edit', space: card })}
+                            onRestored={(id) => { setSpaceId(id); refresh(); }}
                         />
                     )}
 
@@ -1227,7 +1129,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 в том числе с той, которую сам сейчас выключит. */}
             <WikiSpaceModal
                 open={!!spaceModal}
-                space={spaceModal?.mode === 'edit' ? editableSpace : null}
+                space={spaceModal?.mode === 'edit' ? spaceModal.space : null}
                 base={base}
                 headers={headers}
                 departments={departments}

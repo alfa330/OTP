@@ -295,8 +295,13 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # Теперь границу знает сам запрос, и правка ключа снаружи не нужна —
             # второе место, где её надо помнить, однажды разошлось бы с первым.
             payload['counters'] = queries.counters(cursor, space_ids=sorted(allowed))
+            # Описание отдаём вместе с именем: в переключателе оно стоит
+            # второй строкой и отвечает на «а это которая из них», когда имена
+            # похожи («Тез КЦ» и «Тез ОП»). Это подпись самого пространства,
+            # а не число из него, — счётчики по-прежнему считаются по границе.
             payload['spaces'] = [
-                dict({k: sp[k] for k in ('id', 'name', 'code', 'icon', 'features')},
+                dict({k: sp[k] for k in
+                      ('id', 'name', 'code', 'icon', 'description', 'features')},
                      guest_only=sp['id'] not in own)
                 for sp in structure.list_spaces(cursor)
                 if sp['id'] in allowed

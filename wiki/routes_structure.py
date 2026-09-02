@@ -516,14 +516,20 @@ def register(bp, wiki_route, db, log_ip):
 
     @wiki_route('/spaces', methods=('GET', 'POST'), capability='can_manage_structure')
     def wiki_spaces(cursor, ctx):
-        if request.method == 'GET':
-            return jsonify({"items": structure.list_spaces(cursor, include_archived=True)})
-
+        # Список ВСЕХ пространств, включая архивные и чужие, — это карта границ
+        # между отделами и клиентами, а не справочник. Отдаём его тому же, кто
+        # эти границы двигает: способности can_manage_structure для чтения было
+        # мало — её носит и назначенный руками администратор вики, которому
+        # соседнее пространство знать неоткуда. Гейт тот же, что у POST/PATCH,
+        # и он же считает признак can_manage_spaces для интерфейса.
         if not _may_manage_space(ctx):
             return jsonify({
-                "error": "Пространства заводит супер-администратор",
+                "error": "Пространства настраивает супер-администратор",
                 "code": "WIKI_SPACE_ADMIN_ONLY",
             }), 403
+
+        if request.method == 'GET':
+            return jsonify({"items": structure.list_spaces(cursor, include_archived=True)})
 
         data = _body()
         name = _clean(data.get('name'))
@@ -571,9 +577,14 @@ def register(bp, wiki_route, db, log_ip):
 
         data = _body()
         fields = {}
+        # Длины — по колонкам таблицы (wiki/schema.py): description TEXT,
+        # icon VARCHAR(64), code VARCHAR(80). Общие «255» на все четыре поля
+        # означали, что значок длиннее шестидесяти четырёх символов доезжал до
+        # базы и валил запрос ошибкой драйвера вместо понятного отказа.
+        limits = {'description': 2000, 'icon': 64, 'code': 80}
         for key in ('name', 'description', 'icon', 'code'):
             if key in data:
-                fields[key] = _clean(data[key], 2000 if key == 'description' else 255)
+                fields[key] = _clean(data[key], limits.get(key, 255))
         if 'department_id' in data:
             fields['department_id'] = _int_or_none(data['department_id'])
         if data.get('status') in ('active', 'archived'):
