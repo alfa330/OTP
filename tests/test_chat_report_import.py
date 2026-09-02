@@ -30,6 +30,8 @@ def _chat_report_namespace():
         "CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS",
         "CHAT2DESK_STATISTICS_REPORT_RATING",
         "CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS",
+        "CHAT2DESK_RATING_SOURCE_KEY_PREFIX",
+        "CHAT2DESK_RATING_SHIFT_TOLERANCE_SECONDS",
         "_KZ_TO_RU_FOLD",
     }
     wanted_functions = {
@@ -65,6 +67,8 @@ def _chat_report_namespace():
         "_chat2desk_operator_by_id",
         "_chat2desk_rating_operator_name",
         "_chat2desk_rating_source_key",
+        "_chat2desk_request_end_index",
+        "_chat2desk_rating_time_shifts",
         "_chat2desk_low_rating_payload",
         "_chat2desk_build_metrics_from_statistics_rows",
         "_chat2desk_sync_target_days",
@@ -339,7 +343,9 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(low["operator_name"], operator_name)
         self.assertEqual(low["phone_number"], "77010000002")
         self.assertEqual(low["taxi_park"], "Техподдержка iTaxi")
-        self.assertEqual(low["rated_at"], "2026-06-10 13:00:00")
+        # rated_at уходит в базу уже разобранным и приведённым к Asia/Almaty, а
+        # не сырой строкой: иначе время и day считаются в разных поясах.
+        self.assertEqual(low["rated_at"], datetime(2026, 6, 10, 13, 0, 0))
         self.assertEqual(low["score"], 3.0)
         self.assertEqual(low["raw_payload"]["valuation_request_id"], 74110002)
 
@@ -352,6 +358,187 @@ class ChatReportImportTests(unittest.TestCase):
         self.assertEqual(d10_after_surge["score_count"], 2)
         self.assertEqual(d10_after_surge["avg_score"], 4.0)
         self.assertEqual(res2["excluded_surge_rows"], 1)
+
+    # ── Дубли низких оценок Chat2Desk (задача #267) ──────────────────────────
+    # Вендор с вечера 01.09.2026 отдаёт закрытый день со сдвигом created_at на
+    # 5 часов. Время входило в source_key, поэтому сдвинутая копия не склеивалась
+    # и раздел показывал одно обращение дважды.
+
+    @staticmethod
+    def _rating_row(created_at, **over):
+        row = {
+            "operator_name": OPERATORS[1][1],
+            "created_at": created_at,
+            "rating_scale_score": "1",
+            "rating_scale_id": 1158,
+            "rating_id": 1042,
+            "phone": "77027121150",
+            "channel_name": "Jana Taxi",
+            "request_id": 75762949,
+            "valuation_request_id": 75762541,
+        }
+        row.update(over)
+        return row
+
+    def test_rating_source_key_ignores_shifted_created_at(self):
+        """Сдвинутое время не должно менять ключ: заявка та же — оценка та же."""
+        key = self.ns["_chat2desk_rating_source_key"]
+        straight = self._rating_row("2026-09-01 00:34:55")
+        shifted = self._rating_row("2026-09-01 05:34:55", assigned_phone="")
+        self.assertEqual(
+            key(straight, "2026-09-01", 1.0),
+            key(shifted, "2026-09-01", 1.0),
+        )
+        # И ключ не зависит от того, какой day ему передали: сдвиг уводил часть
+        # копий в соседние сутки, а склеиться они всё равно обязаны.
+        self.assertEqual(
+            key(straight, "2026-08-31", 1.0),
+            key(shifted, "2026-09-01", 1.0),
+        )
+        self.assertTrue(key(straight, "2026-09-01", 1.0).startswith("c2d-rating:"))
+
+    def test_rating_source_key_keeps_different_ratings_apart(self):
+        """Обратная опасность: более узкий ключ не должен склеивать разные оценки."""
+        key = self.ns["_chat2desk_rating_source_key"]
+        base = self._rating_row("2026-09-01 00:34:55")
+        keys = {
+            key(base, "2026-09-01", 1.0),
+            # другая шкала (клиент переоценил обращение)
+            key(self._rating_row("2026-09-01 00:34:55", rating_scale_id=1156,
+                                 rating_scale_score="3"), "2026-09-01", 3.0),
+            # другая заявка того же клиента
+            key(self._rating_row("2026-09-01 00:34:55", request_id=75762950,
+                                 valuation_request_id=75762542), "2026-09-01", 1.0),
+            # другой оператор
+            key(self._rating_row("2026-09-01 00:34:55", operator_id=42815), "2026-09-01", 1.0),
+        }
+        self.assertEqual(len(keys), 4)
+
+    def test_rating_time_straightened_by_request_stats(self):
+        """Время оценки выпрямляется по request_stats, а day считается уже по нему.
+
+        Сдвинутая на 5 часов вечерняя оценка иначе уезжает в следующие сутки —
+        именно так 39 боевых пар разошлись по разным дням.
+        """
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        # Настоящее время оценки — 2026-08-31 21:40:00 (Алматы). Вендор отдал +5ч.
+        rating = self._rating_row("2026-09-01 02:40:00", request_id=75760512,
+                                  valuation_request_id=75755421)
+        request_stats = [{
+            "operator_name": OPERATORS[1][1],
+            "request_id": 75760512,
+            "request_start": "2026-08-31 21:30:00",
+            "request_end": "2026-08-31 21:40:00",
+            "reaction_time": "30",
+        }]
+        res = build("2026-09-01", None, [rating], self.lookup, self.index,
+                    request_stats_rows=request_stats)
+        self.assertEqual(res["low_rating_count"], 1)
+        low = res["low_ratings"][0]
+        self.assertEqual(low["rated_at"], datetime(2026, 8, 31, 21, 40, 0))
+        self.assertEqual(low["day"], "2026-08-31")
+        # Балл дня тоже должен лечь в 31 августа, а не в 1 сентября.
+        self.assertEqual({m["day"] for m in res["metrics"] if m.get("score_count")}, {"2026-08-31"})
+        self.assertEqual(res["rating_time_shifts"], {"18000": 1})
+
+    def test_rating_time_uses_previous_day_request_stats(self):
+        """Опора берётся и за предыдущие сутки: окно отчёта rating сдвинуто."""
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        rating = self._rating_row("2026-09-01 02:40:00")
+        prev_stats = [{
+            "operator_name": OPERATORS[1][1],
+            "request_id": 75762949,
+            "request_end": "2026-08-31 21:40:00",
+            "reaction_time": "30",
+        }]
+        res = build("2026-09-01", None, [rating], self.lookup, self.index,
+                    request_stats_rows=[], prev_request_stats_rows=prev_stats)
+        self.assertEqual(res["low_ratings"][0]["rated_at"], datetime(2026, 8, 31, 21, 40, 0))
+
+    def test_rating_time_left_alone_when_vendor_is_healthy(self):
+        """Когда сдвига нет, время не трогаем — вычитать 5 часов вслепую нельзя."""
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        rating = self._rating_row("2026-09-02 19:15:15")
+        request_stats = [{
+            "operator_name": OPERATORS[1][1],
+            "request_id": 75762949,
+            "request_end": "2026-09-02 19:15:15",
+            "reaction_time": "30",
+        }]
+        res = build("2026-09-02", None, [rating], self.lookup, self.index,
+                    request_stats_rows=request_stats)
+        self.assertEqual(res["low_ratings"][0]["rated_at"], datetime(2026, 9, 2, 19, 15, 15))
+        self.assertEqual(res["low_ratings"][0]["day"], "2026-09-02")
+        self.assertEqual(res["rating_time_shifts"], {"0": 1})
+
+    def test_rating_shift_is_per_row_not_per_day(self):
+        """В одном ответе бывают и целые строки, и сдвинутые — сдвиг построчный."""
+        shifts = self.ns["_chat2desk_rating_time_shifts"]
+        index = self.ns["_chat2desk_request_end_index"]([
+            {"request_id": 1, "request_end": "2026-09-02 19:15:15"},
+            {"request_id": 2, "request_end": "2026-09-01 21:40:00"},
+        ])
+        rows = [
+            self._rating_row("2026-09-02 19:15:15", request_id=1),
+            self._rating_row("2026-09-02 02:40:00", request_id=2),
+        ]
+        self.assertEqual(shifts(rows, index), [0, 18000])
+
+    def test_rating_shift_falls_back_to_dominant_and_tolerates_rounding(self):
+        """Оценка много позже конца диалога не опора — ей достаётся сдвиг дня.
+
+        Заодно: источник иногда округляет секунду, 17999 с — тот же сдвиг.
+        """
+        shifts = self.ns["_chat2desk_rating_time_shifts"]
+        index = self.ns["_chat2desk_request_end_index"]([
+            {"request_id": 1, "request_end": "2026-09-01 10:00:00"},
+            {"request_id": 2, "request_end": "2026-09-01 11:00:01"},
+            {"request_id": 3, "request_end": "2026-09-01 12:00:00"},
+        ])
+        rows = [
+            self._rating_row("2026-09-01 15:00:00", request_id=1),   # ровно +5ч
+            self._rating_row("2026-09-01 16:00:00", request_id=2),   # +5ч без секунды
+            self._rating_row("2026-09-01 21:31:07", request_id=3),   # опоздала, не опора
+            self._rating_row("2026-09-01 20:00:00", request_id=99),  # заявки нет вовсе
+        ]
+        self.assertEqual(shifts(rows, index), [18000, 18000, 18000, 18000])
+
+    def test_duplicate_rating_in_one_response_counted_once(self):
+        """Вендор кладёт обе копии в один ответ: вторая не должна ни удваивать
+        средний балл дня, ни уезжать второй строкой в базу (там она уронила бы
+        execute_values на «cannot affect row a second time»)."""
+        build = self.ns["_chat2desk_build_metrics_from_statistics_rows"]
+        request_stats = [{
+            "operator_name": OPERATORS[1][1],
+            "request_id": 75762949,
+            "request_end": "2026-09-01 00:34:55",
+            "reaction_time": "30",
+        }]
+        rows = [
+            self._rating_row("2026-09-01 00:34:55"),
+            self._rating_row("2026-09-01 05:34:55", assigned_phone="77078544502"),
+        ]
+        res = build("2026-09-01", None, rows, self.lookup, self.index,
+                    request_stats_rows=request_stats)
+        self.assertEqual(res["low_rating_count"], 1)
+        self.assertEqual(res["duplicate_rating_rows"], 1)
+        day = {(m["operator_id"], m["day"]): m for m in res["metrics"]}[(2, "2026-09-01")]
+        self.assertEqual(day["score_count"], 1)
+        self.assertEqual(day["score_sum"], 1.0)
+
+    def test_rating_without_request_ids_keeps_time_in_key(self):
+        """Без номеров заявки склеивать нечем — там время в ключе остаётся."""
+        key = self.ns["_chat2desk_rating_source_key"]
+        bare = {
+            "operator_name": OPERATORS[1][1],
+            "rating_scale_score": "1",
+            "rating_id": 1042,
+            "created_at": "2026-09-01 00:34:55",
+        }
+        other = dict(bare, created_at="2026-09-01 05:34:55")
+        first = key(bare, "2026-09-01", 1.0)
+        self.assertNotEqual(first, key(other, "2026-09-01", 1.0))
+        self.assertFalse(first.startswith("c2d-rating:"))
 
     def test_response_time_uses_request_stats_not_operator_replies(self):
         """Время ответа считается по request_stats (одна строка на заявку), а не по
