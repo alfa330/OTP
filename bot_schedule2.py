@@ -32050,7 +32050,9 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
                                                   operator_stats_rows=None,
                                                   surge_windows=None, preview_limit=None,
                                                   request_stats_rows=None,
-                                                  prev_request_stats_rows=None):
+                                                  prev_request_stats_rows=None,
+                                                  next_request_stats_rows=None,
+                                                  next_rating_rows=None):
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if preview_limit is not None:
         try:
@@ -32120,18 +32122,28 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
 
     score_agg = {}
     # Время оценки выпрямляем по request_stats — тому же вендору, но целому
-    # отчёту. Берём и предыдущий день: окно отчёта rating сдвинуто, поэтому
-    # часть оценок относится к заявкам предыдущих суток (без него совпадает
-    # ~две трети строк, с ним — все).
+    # отчёту. Берём соседние сутки: окно отчёта rating сдвинуто, поэтому часть
+    # оценок относится к заявкам других суток (без соседей совпадает ~две трети
+    # строк, с ними — все).
     rating_request_end_index = _chat2desk_request_end_index(
-        request_stats_rows, prev_request_stats_rows, target_tz=target_tz
+        request_stats_rows, prev_request_stats_rows, next_request_stats_rows,
+        target_tz=target_tz
     )
+    # Отчёт за день D после поломки вендора содержит исправленное время
+    # [D−1 19:00, D 19:00), то есть вечер самого D лежит в отчёте за D+1.
+    # Поэтому разбираем оба отчёта, а оставляем только строки запрошенных суток:
+    # дневные метрики при записи ЗАМЕНЯЮТ значения дня, и неполный срез затёр бы
+    # соседний день. Строки соседних суток запишет их собственный прогон.
+    all_rating_rows = list(rating_rows or []) + list(next_rating_rows or [])
     rating_shifts = _chat2desk_rating_time_shifts(
-        rating_rows or [], rating_request_end_index, target_tz=target_tz
+        all_rating_rows, rating_request_end_index, target_tz=target_tz
     )
+    # day_str приходит и как '2026-09-01', и в других видах — приводим к одному.
+    target_day = _chat2desk_metric_day(None, day_str, target_tz=target_tz) or str(day_str or '')
     seen_rating_keys = set()
     duplicate_rating_rows = 0
-    for row_index, row in enumerate(rating_rows or []):
+    foreign_day_rating_rows = 0
+    for row_index, row in enumerate(all_rating_rows):
         if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
             continue
         raw_name = _chat2desk_rating_operator_name(row)
@@ -32150,6 +32162,11 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if not raw_name or score is None or not metric_day:
             if raw_name:
                 note_unmatched(raw_name, f"rating:{row_index}")
+            continue
+        # Строку чужих суток не пишем: день оценок мы обязаны собрать целиком
+        # либо не трогать вовсе. Её запишет прогон её собственного дня.
+        if metric_day != target_day:
+            foreign_day_rating_rows += 1
             continue
         op_id, _ = _chat_report_resolve_operator(raw_name, operator_lookup, operator_token_index)
         if op_id is None:
@@ -32281,6 +32298,8 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         # Сколько копий одной и той же оценки вендор положил в один ответ —
         # молча их отбрасывать нельзя, иначе «всё сошлось» скроет поломку API.
         'duplicate_rating_rows': int(duplicate_rating_rows),
+        # Строки соседних суток, отложенные до их собственного прогона.
+        'foreign_day_rating_rows': int(foreign_day_rating_rows),
         'rating_time_shifts': {
             str(int(shift)): rating_shifts.count(shift)
             for shift in sorted(set(rating_shifts))
@@ -32310,26 +32329,39 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
     request_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
     operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
-    # Тот же отчёт за предыдущие сутки нужен только как опора для времени оценок:
-    # окно отчёта rating у вендора сдвинуто, и часть оценок ссылается на заявки
-    # вчерашнего вечера. В метрики эти строки не идут.
-    prev_request_stats_rows = []
-    prev_day = _chat_metrics_parse_date(day_str)
-    if prev_day is not None:
-        prev_day_str = (prev_day - timedelta(days=1)).strftime('%Y-%m-%d')
+    # Соседние сутки нужны из-за сдвинутого окна отчёта rating: исправленное
+    # время его строк укладывается в [D−1 19:00, D 19:00), то есть вечер самого D
+    # лежит в отчёте за D+1, а начало отчёта за D относится к D−1. Поэтому за
+    # D−1 берём request_stats (опора для времени), а за D+1 — и rating (вечер
+    # нашего дня), и request_stats (опора для его строк). Ни один из этих
+    # запросов не обязателен: без них выпрямится и попадёт в день меньше строк,
+    # но прогон не должен из-за этого падать.
+    def _optional_report(report_name, target_day, purpose):
         try:
-            prev_request_stats_rows = _chat2desk_statistics_get(
-                CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, prev_day_str
-            )
+            return _chat2desk_statistics_get(report_name, target_day)
         except Exception:
-            # Опора необязательная: без неё выпрямится меньше строк, но день
-            # синхронизируется. Ронять из-за этого прогон нельзя.
             logging.warning(
-                "Chat2Desk: не удалось получить request_stats за %s (опора времени оценок)",
-                prev_day_str,
-                exc_info=True
+                "Chat2Desk: не удалось получить %s за %s (%s)",
+                report_name, target_day, purpose, exc_info=True
             )
-            prev_request_stats_rows = []
+            return []
+
+    prev_request_stats_rows = []
+    next_request_stats_rows = []
+    next_rating_rows = []
+    day_obj = _chat_metrics_parse_date(day_str)
+    if day_obj is not None:
+        prev_day_str = (day_obj - timedelta(days=1)).strftime('%Y-%m-%d')
+        next_day_str = (day_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+        prev_request_stats_rows = _optional_report(
+            CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, prev_day_str, 'опора времени оценок'
+        )
+        next_request_stats_rows = _optional_report(
+            CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, next_day_str, 'опора времени оценок'
+        )
+        next_rating_rows = _optional_report(
+            CHAT2DESK_STATISTICS_REPORT_RATING, next_day_str, 'вечер запрошенных суток'
+        )
     report = _chat2desk_build_metrics_from_statistics_rows(
         day_str,
         None,
@@ -32340,7 +32372,9 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
         surge_windows=surge_windows,
         preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
         request_stats_rows=request_stats_rows,
-        prev_request_stats_rows=prev_request_stats_rows
+        prev_request_stats_rows=prev_request_stats_rows,
+        next_request_stats_rows=next_request_stats_rows,
+        next_rating_rows=next_rating_rows
     )
     # Те же строки идут в c2d_requests (раздел «Оценка чатов ЧМ») — без
     # дополнительных запросов к API.
