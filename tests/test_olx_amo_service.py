@@ -100,6 +100,18 @@ class FakeQueries(object):
         key = (cabinet_code, str(thread_id))
         self.db.threads.setdefault(key, {})['canned_reply_sent_at'] = datetime.utcnow()
 
+    def mark_awaiting_human(self, cursor, cabinet_code, thread_id):
+        state = self.db.threads.setdefault((cabinet_code, str(thread_id)), {})
+        if state.get('awaiting_human_since'):
+            return False               # метка ставится ОДИН раз на обращение
+        state['awaiting_human_since'] = self.now_almaty()
+        return True
+
+    def clear_awaiting_human(self, cursor, cabinet_code, thread_id):
+        state = self.db.threads.get((cabinet_code, str(thread_id)))
+        if state:
+            state['awaiting_human_since'] = None
+
     # -- прочее --------------------------------------------------------
     @staticmethod
     def now_almaty():
@@ -238,6 +250,29 @@ class HandleMessageTests(unittest.TestCase):
 
         self.assertEqual(1, len(self.olx.sent))
         self.assertEqual(1, self.counters.replies_sent)
+
+    def test_second_question_marks_the_chat_as_waiting_for_a_human(self):
+        """Робот молчит, но обращение не пропадает: чат всплывает в разделе.
+
+        Решение владельца 02.09.2026: второе автоматическое сообщение раздражает
+        и читается как поломка, поэтому вместо ответа — метка «ждёт человека».
+        """
+        self.handle(message('Здравствуйте', mid='1'))
+        self.handle(message('А с 15 лет можно?', mid='2'))
+
+        self.assertEqual(1, len(self.olx.sent), 'второго сообщения быть не должно')
+        state = self.db.threads[(self.cab.code, '77')]
+        self.assertIsNotNone(state.get('awaiting_human_since'))
+        self.assertEqual('needs_human', self.db.journal[-1]['result'])
+
+    def test_a_third_message_does_not_pile_up_journal_rows(self):
+        """Метка ставится один раз: очередь — это чаты, а не каждое «ау?»."""
+        self.handle(message('Здравствуйте', mid='1'))
+        self.handle(message('А с 15 лет можно?', mid='2'))
+        self.handle(message('Ау', mid='3'))
+
+        rows = [r for r in self.db.journal if r['result'] == 'needs_human']
+        self.assertEqual(1, len(rows))
 
     # -- дедупликация ---------------------------------------------------
     def test_same_number_same_cabinet_same_day_does_not_create_a_second_lead(self):

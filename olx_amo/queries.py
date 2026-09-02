@@ -230,6 +230,54 @@ def get_thread(cursor, cabinet_code, thread_id):
     return _one(cursor)
 
 
+def mark_awaiting_human(cursor, cabinet_code, thread_id):
+    """Пометить, что кандидат написал ещё раз и ждёт живого ответа.
+
+    Ставится ОДИН раз на обращение: `WHERE awaiting_human_since IS NULL`. Иначе
+    каждое следующее сообщение сдвигало бы время ожидания вперёд, и очередь
+    выглядела бы вечно свежей — а именно давность здесь и есть повод поторопиться.
+    """
+    cursor.execute(
+        """
+        UPDATE olx_threads
+           SET awaiting_human_since = {now}, updated_at = {now}
+         WHERE cabinet_code = %(cabinet_code)s
+           AND thread_id = %(thread_id)s
+           AND awaiting_human_since IS NULL
+        """.format(now=_NOW),
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
+    )
+    return cursor.rowcount > 0
+
+
+def clear_awaiting_human(cursor, cabinet_code, thread_id):
+    """Человек ответил — снять метку."""
+    cursor.execute(
+        """
+        UPDATE olx_threads
+           SET awaiting_human_since = NULL, updated_at = {now}
+         WHERE cabinet_code = %(cabinet_code)s AND thread_id = %(thread_id)s
+        """.format(now=_NOW),
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
+    )
+
+
+def awaiting_human(cursor, limit=200):
+    """Чаты, где ждут ответа человека. Самые давние сверху — им хуже всех."""
+    cursor.execute(
+        """
+        SELECT cabinet_code, thread_id, awaiting_human_since, last_message_at,
+               phone_normalized
+          FROM olx_threads
+         WHERE awaiting_human_since IS NOT NULL
+         ORDER BY awaiting_human_since
+         LIMIT %(limit)s
+        """,
+        {'limit': max(1, min(int(limit or 200), 1000))},
+    )
+    return _all(cursor)
+
+
 def threads_state(cursor, cabinet_code, thread_ids):
     """Состояние сразу по списку чатов. Один запрос вместо пятидесяти.
 
@@ -243,7 +291,7 @@ def threads_state(cursor, cabinet_code, thread_ids):
     cursor.execute(
         """
         SELECT thread_id, last_message_id, last_message_at, last_unread_count,
-               last_total_count, canned_reply_sent_at
+               last_total_count, canned_reply_sent_at, awaiting_human_since
           FROM olx_threads
          WHERE cabinet_code = %(cabinet_code)s
            AND thread_id = ANY(%(ids)s)

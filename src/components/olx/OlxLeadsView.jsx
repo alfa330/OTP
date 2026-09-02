@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { AlertTriangle, Download, ExternalLink, Loader2, RefreshCw, Send } from 'lucide-react';
+import { AlertTriangle, Download, ExternalLink, Loader2, MessageSquare, RefreshCw, Send } from 'lucide-react';
 import {
     APPLE_FONT, IosBadge, IosModal, IosPager, IosSegmented, iosBtnGhost, iosBtnPrimary,
     iosBtnSecondary, iosCard, iosInput, iosGroupLabel,
@@ -36,6 +36,7 @@ const RESULTS = [
     { value: '', label: 'Все исходы' },
     { value: 'lead_created', label: 'Сделка создана' },
     { value: 'canned_reply', label: 'Отправлен ответ' },
+    { value: 'needs_human', label: 'Ждёт ответа человека' },
     { value: 'duplicate', label: 'Повтор за день' },
     { value: 'manual_review', label: 'Нужна проверка' },
     { value: 'error', label: 'Ошибка' },
@@ -50,6 +51,7 @@ const RESULT_LABEL = RESULTS.reduce((acc, item) => {
 const RESULT_TONE = {
     error: 'red',
     manual_review: 'amber',
+    needs_human: 'blue',
 };
 
 // Подписи состояний кабинета. `needs_auth` — самое частое на старте: доступ
@@ -124,6 +126,7 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [schemaReady, setSchemaReady] = useState(true);
     const [capabilities, setCapabilities] = useState(null);
     const [chats, setChats] = useState(null);
+    const [awaiting, setAwaiting] = useState(null);
     const [connecting, setConnecting] = useState(null);
     const [health, setHealth] = useState(null);
     const [tab, setTab] = useState('journal');
@@ -166,6 +169,20 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         // запрос вернул бы отказ и зря шумел бы в консоли.
         if (capabilities?.can_manage_cabinets) loadChats();
     }, [capabilities, loadChats]);
+
+    const loadAwaiting = useCallback(() => {
+        axios.get(`${apiBaseUrl}/api/olx_amo/awaiting`, { headers: headers() })
+            .then((response) => setAwaiting(response.data))
+            .catch(() => setAwaiting(null));
+    }, [apiBaseUrl, headers]);
+
+    useEffect(() => {
+        loadAwaiting();
+        // Очередь живая: человек отвечает в кабинете, и строка должна уходить
+        // сама, без нажатия «Обновить».
+        const timer = setInterval(loadAwaiting, 60000);
+        return () => clearInterval(timer);
+    }, [loadAwaiting]);
 
     useEffect(() => {
         loadHealth();
@@ -281,7 +298,7 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     )}
                     <button
                         type="button"
-                        onClick={() => { loadHealth(); if (tab === 'journal') loadJournal(); else loadSummary(); }}
+                        onClick={() => { loadHealth(); loadAwaiting(); if (tab === 'journal') loadJournal(); else loadSummary(); }}
                         className={`${iosBtnGhost} active:scale-[0.98]`}
                     >
                         <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
@@ -289,6 +306,8 @@ const OlxLeadsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     </button>
                 </div>
             </header>
+
+            <AwaitingHumans awaiting={awaiting} />
 
             <CabinetStrip
                 health={health}
@@ -538,6 +557,63 @@ const pluralChats = (count) => {
         case 4: return 'группы';
         default: return 'групп';
     }
+};
+
+/* Чаты, где кандидат написал ещё раз и ждёт живого ответа.
+ *
+ * Робот на повторное обращение молчит намеренно: второе автоматическое
+ * сообщение раздражает и читается как поломка. Вместо ответа — этот список.
+ *
+ * Он стоит ВЫШЕ полосы кабинетов и всего остального, потому что это
+ * единственное место раздела, где от человека ждут действия прямо сейчас;
+ * всё остальное — наблюдение. Когда очередь пуста, блок исчезает совсем:
+ * пустой список «всё хорошо» — ровно тот шум, из-за которого перестают
+ * замечать непустой.
+ */
+const AwaitingHumans = ({ awaiting }) => {
+    if (!awaiting || !awaiting.total) return null;
+    return (
+        <section className={`${iosCard} border-blue-200 bg-blue-50/40 px-4 py-3`}>
+            <div className="flex items-center gap-2">
+                <MessageSquare size={15} className="text-blue-600" />
+                <span className="text-[13.5px] font-medium text-slate-900">
+                    Ждут вашего ответа: {awaiting.total}
+                </span>
+                <span className="text-[12.5px] text-slate-500">
+                    робот ответил один раз и дальше молчит — напишите сами
+                </span>
+            </div>
+            <ul className="mt-2 space-y-1">
+                {awaiting.items.map((item) => (
+                    <li key={`${item.cabinet}-${item.thread_id}`}
+                        className="flex items-center gap-2 text-[13px]">
+                        <span className="w-28 shrink-0 truncate text-slate-600">
+                            {item.cabinet_title}
+                        </span>
+                        <span className="tabular-nums text-slate-500">
+                            ждёт {fmtWaiting(item.waiting_minutes)}
+                        </span>
+                        <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="ml-auto inline-flex items-center gap-1 text-blue-600 underline-offset-2 hover:underline"
+                        >
+                            Открыть чат
+                            <ExternalLink size={13} />
+                        </a>
+                    </li>
+                ))}
+            </ul>
+        </section>
+    );
+};
+
+const fmtWaiting = (minutes) => {
+    if (minutes === null || minutes === undefined) return '—';
+    if (minutes < 60) return `${minutes} мин`;
+    if (minutes < 1440) return `${Math.round(minutes / 60)} ч`;
+    return `${Math.round(minutes / 1440)} дн`;
 };
 
 /* Подключение кабинета: одноразовый обряд на каждый из девяти.

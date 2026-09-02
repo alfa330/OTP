@@ -148,8 +148,24 @@ class SchemaTests(unittest.TestCase):
     def test_result_vocabulary_covers_all_branches(self):
         self.assertEqual(
             {'lead_created', 'duplicate', 'manual_review', 'canned_reply',
-             'skipped', 'error'},
+             'needs_human', 'skipped', 'error'},
             set(schema.JOURNAL_RESULTS))
+
+    def test_every_result_has_a_human_label_on_the_front(self):
+        """Код исхода в базе, подпись на фронте — и они обязаны совпадать.
+
+        Новый исход без подписи показался бы человеку как `needs_human` — это
+        уже случалось в других разделах портала.
+        """
+        view = (ROOT / 'src' / 'components' / 'olx' / 'OlxLeadsView.jsx').read_text(
+            encoding='utf-8')
+        # Берём именно список исходов, а не любые пары value/label: рядом
+        # такими же парами объявлены вкладки раздела.
+        block = view[view.index('const RESULTS = ['):]
+        block = block[:block.index('];')]
+        labelled = set(re.findall(r"value: '(\w+)'", block))
+        # 'skipped' наружу не показывается: это наше же сообщение в чате.
+        self.assertEqual(set(schema.JOURNAL_RESULTS) - {'skipped'}, labelled)
 
 
 class AmoWriterTests(unittest.TestCase):

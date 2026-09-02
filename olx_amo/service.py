@@ -234,8 +234,21 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
         with db._get_cursor() as cursor:
             state = queries.get_thread(cursor, cabinet.code, thread_id) or {}
         if state.get('canned_reply_sent_at'):
-            # ТЗ прямо запрещает слать заготовленное сообщение дважды в рамках
-            # одного обращения. Молча пропускаем — это не ошибка.
+            # Автоответ этому человеку уже уходил, и второго робот не шлёт: ТЗ
+            # запрещает повторную отправку, а другой автоматический текст
+            # раздражает и читается как поломка (решение владельца 02.09.2026).
+            #
+            # Но и молчать вникуда нельзя — человек задал живой вопрос. Помечаем
+            # чат «ждёт ответа человека»: он всплывёт в разделе, и маркетолог
+            # ответит сам. Метка ставится один раз на обращение, поэтому строка
+            # журнала появляется только на ПЕРВОЕ такое сообщение, а не на
+            # каждое следующее «ау?».
+            with db._get_cursor() as cursor:
+                if queries.mark_awaiting_human(cursor, cabinet.code, thread_id):
+                    queries.write_journal(
+                        cursor, cabinet.code, 'needs_human', thread_id=thread_id,
+                        message_id=message_id, message_at=sent_at,
+                        message_excerpt=excerpt, tag=tag_name)
             return
         # Отметку ставим ДО отправки и отдельной транзакцией.
         #
@@ -495,6 +508,17 @@ def _poll_thread(db, writers, cabinet, thread, result):
 
     with db._get_cursor() as cursor:
         state = queries.get_thread(cursor, cabinet.code, thread_id) or {}
+
+    # Человек ответил — снимаем метку ожидания. Признак: наше исходящее позже
+    # того момента, когда метка была поставлена. Без этого список «ждут ответа»
+    # пришлось бы разгребать руками, а такой список быстро перестают открывать.
+    waiting_since = state.get('awaiting_human_since')
+    if waiting_since and any(
+            m.get('type') == 'sent' and (message_time(m) or datetime.min) > waiting_since
+            for m in messages or []):
+        with db._get_cursor() as cursor:
+            queries.clear_awaiting_human(cursor, cabinet.code, thread_id)
+
     fresh = _after_bookmark(messages, state.get('last_message_id'),
                             seen_until=state.get('last_message_at'))
     incoming = [m for m in fresh if message_is_incoming(m)]

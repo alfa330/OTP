@@ -12,6 +12,7 @@ Blueprint собирается фабрикой и получает зависи
 
     GET /api/olx_amo/ping        — жив ли раздел, что смотрящему можно
     GET /api/olx_amo/health      — состояние девяти кабинетов и простой
+    GET /api/olx_amo/awaiting    — чаты, где ждут ответа живого человека
     GET /api/olx_amo/journal     — лента обращений с фильтрами и пагинацией
     GET /api/olx_amo/journal/export — тот же журнал файлом, за произвольный период
     GET /api/olx_amo/summary     — сводка за день по кабинетам
@@ -159,6 +160,36 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
             "stale": stale,
             "is_healthy": not stale,
         })
+
+    @section_route('/awaiting')
+    def olx_amo_awaiting(ctx):
+        """Чаты, где кандидат написал ещё раз и ждёт живого ответа.
+
+        Робот на повторное обращение молчит намеренно (решение владельца
+        02.09.2026): второе автоматическое сообщение раздражает и читается как
+        поломка. Вместо него — вот этот список. Он рабочая очередь маркетолога,
+        а не отчёт, поэтому самые давние сверху: им хуже всех.
+        """
+        with db._get_cursor() as cursor:
+            rows = queries.awaiting_human(cursor)
+
+        now = queries.now_almaty()
+        items = []
+        for row in rows:
+            cab = cabinets.BY_CODE.get(row.get('cabinet_code'))
+            since = row.get('awaiting_human_since')
+            items.append({
+                "cabinet": row.get('cabinet_code'),
+                "cabinet_title": cab.title if cab else row.get('cabinet_code'),
+                "thread_id": row.get('thread_id'),
+                "since": _iso(since),
+                "waiting_minutes": int((now - since).total_seconds() // 60) if since else None,
+                "last_message_at": _iso(row.get('last_message_at')),
+                # Ссылка на сам чат в кабинете OLX — чтобы отвечать было куда
+                # нажать, а не искать переписку глазами.
+                "url": "https://www.olx.kz/mojolx/wiadomosci/#!thread=%s" % row.get('thread_id'),
+            })
+        return jsonify({"total": len(items), "items": items})
 
     # ── журнал и сводка ──────────────────────────────────────────────────
 
