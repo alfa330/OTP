@@ -707,59 +707,45 @@ class ZaiProviderTest(unittest.TestCase):
         block = self.sent[-1]['payload']['messages'][-1]['content'][0]
         self.assertEqual('image_url', block['type'])
 
-    def test_editor_chain_head_is_the_owners_call(self):
-        """Первое звено выбирает владелец, и сейчас это 3-flash-preview.
+    def test_editor_chain_head_is_the_cheapest_and_richest(self):
+        """Первым preview — после того как выяснилось, что сжимал ПРОМПТ.
 
-        ВРЕМЕННО: 01.09.2026 он попросил вернуть preview, пока идёт замер порога.
-        Числа ниже при этом в силе — на документах ~8 тыс. знаков preview
-        переносит половину, и редактор увидит предупреждение о сжатии.
-
-        16 прогонов 01.09.2026, два настоящих документа, один и тот же промпт:
-
-          модель                        перенос (4 прогона)  блоков  сек  $/статью
-          vertex:gemini-3.5-flash       0,93 0,99 1,01 1,03  4-6     10   0,0291
-          vertex:gemini-3.6-flash       0,97 1,00 1,01 1,02  4       13   0,0255
-          vertex:gemini-3-flash-preview 0,51 0,54 0,58 0,67  6       15   0,0067
-          zai:glm-5.3-flash             0,99 0,99 0,99 1,00  2       33   0,0009
-
-        3.5-flash единственный переносит документ целиком и при этом дважды из
-        четырёх прогонов дотянулся до тех же ШЕСТИ видов блоков, что и
-        gemini-3-flash-preview; GLM брал два вида блоков из девяти, и владелец
-        забраковал его глазами. Открытый вопрос: preview выдаёт 4 247-5 116
-        знаков независимо от размера входа, то есть на документе меньше ~4 500
-        знаков сжимать ему нечего. Замер порога идёт.
+        В промпте стояло «убираешь служебный мусор документа», и модель это и
+        делала. Замер 02.09.2026 на двух настоящих .docx, по два прогона:
+            прежняя формулировка  0,540 0,604 0,627 0,631
+            исправленная          0,902 0,945 1,012 1,014
+        С исправленным промптом preview лучший по всем меркам сразу: перенос
+        0,968, блоков 4-6, $0,0067 против $0,0291 у 3.5-flash. Разбор — над
+        authoring.SYSTEM_PROMPT.
         """
         self.assertEqual(('vertex', 'gemini-3-flash-preview'),
                          ai_providers.editor_chain()[0])
 
-    def test_editor_fallbacks_go_across_vendors(self):
-        """Второе звено — замена по качеству, третье — другой поставщик.
+    def test_no_size_fork(self):
+        """Развилки по размеру НЕТ, и заводить её обратно не надо.
 
-        3.5-flash вторым: он переносит документ целиком там, где preview
-        пересказывает. GLM третьим — единственный не от Google, страхует
-        недоступность Vertex целиком.
+        Она готовилась, пока сжатие считали свойством модели: preview срывался с
+        трёх тысяч знаков (0,58 на восьми тысячах, 0,43 на двенадцати). С
+        исправленным промптом он держит 0,902-1,014 на тех же восьмитысячных —
+        обходить стало нечего, а две ветви кто-нибудь потом сломает.
         """
-        self.assertEqual([('vertex', 'gemini-3-flash-preview'),
-                          ('vertex', 'gemini-3.5-flash'),
-                          ('zai', 'glm-5.3-flash')],
-                         list(ai_providers.editor_chain()))
+        self.assertFalse(hasattr(ai_providers, 'SMALL_DOC_CHARS'))
+        self.assertFalse(hasattr(ai_providers, '_EDITOR_CHAIN_SMALL'))
+        self.assertFalse(hasattr(ai_providers, 'article_doors'))
 
-    def test_editor_chain_drops_links_that_cannot_build_an_article(self):
-        """Бесплатные звенья чата в цепочку редактора не попадают.
+    def test_prompt_carries_over_instead_of_cleaning_up(self):
+        """Указание убирать «служебный мусор» вернуться не должно.
 
-        Groq на сборке отдаёт 413 (потолок 8 000 токенов/мин против 9 000
-        забронированных), Cloudflare отваливается по таймауту на документе. В
-        цепочке редактора они были бы не резервом, а задержкой перед отказом.
+        Оно и было причиной: запрет «НЕ сокращай» рядом не помогал — он
+        отрицание, а указание убрать мусор утвердительное и конкретное.
+        Служебная шапка при этом в тело НЕ попадает и без указания: название
+        модель обязана положить в поле НАЗВАНИЕ, а подпись отдела сама по себе
+        никуда не встаёт (проверено на восьми прогонах).
         """
-        providers = [p for p, _ in ai_providers.editor_chain()]
-        self.assertNotIn('groq', providers)
-        self.assertNotIn('cloudflare', providers)
-
-    def test_chat_chain_is_untouched(self):
-        """Чат помощника остаётся на Vertex: там он выбран замером на КАЧЕСТВЕ
-        ответа, и короткие ответы сжатием не страдают."""
-        self.assertEqual(('vertex', 'gemini-3-flash-preview'),
-                         ai_providers.available_chain()[0])
+        from wiki.ai import authoring
+        self.assertNotIn('служебный мусор', authoring.SYSTEM_PROMPT)
+        self.assertIn('ПЕРЕНОСИШЬ', authoring.SYSTEM_PROMPT)
+        self.assertIn('не твоя работа', authoring.SYSTEM_PROMPT)
 
     def test_editor_chain_is_overridable_and_key_gated(self):
         with mock.patch.dict(os.environ,
