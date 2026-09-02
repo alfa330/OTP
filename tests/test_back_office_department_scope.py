@@ -196,10 +196,18 @@ class BackOfficeSipSettingsTests(unittest.TestCase):
             "const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser",
             app,
         )
+        # Раздел разъехался на два, и общего флага не осталось: «Таксопарки»
+        # пускают главу отдела с локальной АТС и СВ ОП, «Tez» — только главу ТЭЗ.
+        self.assertNotIn("const canAccessSipSettings =", app)
         self.assertIn(
-            "const canAccessSipSettings = isAdminLikeRole\n"
-            "                || isSipSettingsDepartmentHead(user)\n"
+            "const canAccessSipSettingsFleet = isAdminLikeRole\n"
+            "                || isSipSettingsFleetDepartmentHead(user)\n"
             "                || isOpSalesSupervisorForAiQa(user);",
+            app,
+        )
+        self.assertIn(
+            "const canAccessSipSettingsTez = isAdminLikeRole\n"
+            "                || isSipSettingsTezDepartmentHead(user);",
             app,
         )
 

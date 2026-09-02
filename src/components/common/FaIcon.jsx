@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import {
     AlertCircle,
     ArrowDown,
@@ -30,6 +30,7 @@ import {
     CircleUser,
     ClipboardCheck,
     Clock3,
+    Cloud,
     CloudDownload,
     CloudUpload,
     Code2,
@@ -118,6 +119,7 @@ import {
     Route,
     RotateCw,
     Search,
+    Server,
     Save,
     Send,
     Settings,
@@ -303,6 +305,9 @@ const TOKEN_TO_ICON = {
     'fa-box': 'Package',
     'fa-rotate-left': 'RotateCcw',
     'fa-sitemap': 'Workflow',
+    // Переключатель телефонии отдела в «Настройках SIP»: локальная АТС и облако.
+    'fa-server': 'Server',
+    'fa-cloud': 'Cloud',
     'fa-user-gear': 'UserCog',
     'fa-magnifying-glass': 'Search',
     'fa-lightbulb': 'Lightbulb',
@@ -460,6 +465,7 @@ const ICON_COMPONENTS = {
     CircleUser,
     ClipboardCheck,
     Clock3,
+    Cloud,
     CloudDownload,
     CloudUpload,
     Code2,
@@ -547,6 +553,7 @@ const ICON_COMPONENTS = {
     Route,
     RotateCw,
     Search,
+    Server,
     Save,
     Send,
     Settings,
