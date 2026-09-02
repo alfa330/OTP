@@ -2633,6 +2633,7 @@ class Database:
                 WHERE zhanna_updated_by IS NOT NULL AND zhanna_status IS NOT NULL
                 ON CONFLICT (review_id, reviewer_id) DO NOTHING;
             """)
+            self._migrate_chat_low_rating_duplicate_keys(cursor)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_metric_surge_windows (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -18084,7 +18085,12 @@ class Database:
         try:
             parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
             if getattr(parsed, 'tzinfo', None) is not None:
-                parsed = parsed.astimezone().replace(tzinfo=None)
+                # Пояс задаём явно. astimezone() без аргумента берёт пояс
+                # процесса, а он зависит от машины: на Render это UTC, локально —
+                # Алматы, и одно и то же значение раскладывалось на пять часов
+                # по-разному. День оценки считается по Алматы, время обязано
+                # считаться там же.
+                parsed = parsed.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
             return parsed
         except Exception:
             pass
@@ -18365,6 +18371,13 @@ class Database:
             invalid_count = int(invalid_count_raw or 0)
             effective_count = max(0, base_count - invalid_count)
             effective_sum = round(max(0.0, base_sum - invalid_sum), 4)
+            # Счётчик и сумма урезаются по отдельности, поэтому у испорченного
+            # дня получалось «оценок 0, сумма 4.0». Месячный балл считается как
+            # SUM(score_sum)/SUM(score_count), и такой день добавлял в числитель,
+            # не добавляя в знаменатель, — балл за месяц завышался. Ноль оценок
+            # означает нулевую сумму, иначе состояние противоречиво.
+            if effective_count == 0:
+                effective_sum = 0.0
             effective_avg = round(effective_sum / effective_count, 4) if effective_count > 0 else None
 
             cursor.execute(
@@ -18390,11 +18403,182 @@ class Database:
             )
         return {'adjusted_days': len(adjusted), 'aggregations': aggregations}
 
+    # Ключ идентичности оценки Chat2Desk, тот же, что считает
+    # _chat2desk_rating_source_key в bot_schedule2.py. Формула читаемая, а не
+    # хеш, именно чтобы миграция и синк не могли разъехаться.
+    _C2D_RATING_KEY_SQL = (
+        "'c2d-rating:' || COALESCE(lr.raw_payload->>'valuation_request_id', '')"
+        " || ':' || COALESCE(lr.raw_payload->>'request_id', '')"
+        " || ':' || COALESCE(lr.raw_payload->>'rating_scale_id', '')"
+        " || ':' || COALESCE(lr.raw_payload->>'operator_id', '')"
+    )
+    _C2D_RATING_KEY_SCOPE_SQL = (
+        "lr.source = 'chat2desk_rating'"
+        " AND (COALESCE(lr.raw_payload->>'valuation_request_id', '') <> ''"
+        "      OR COALESCE(lr.raw_payload->>'request_id', '') <> '')"
+    )
+
+    def _migrate_chat_low_rating_duplicate_keys(self, cursor):
+        """Склеивает дубли низких оценок Chat2Desk и переводит их на новый ключ.
+
+        Chat2Desk с вечера 01.09.2026 отдаёт закрытый день со сдвигом на 5 часов
+        (задача #267). Время оценки входило в source_key, поэтому сдвинутая копия
+        не склеивалась и в разделе одно обращение показывалось дважды. Ключ
+        переведён на номера заявки, а накопленные пары надо свести.
+
+        Выживает строка с САМЫМ РАННИМ rated_at: сверка с отчётом request_stats и
+        с сообщениями (там время отдаётся с явной меткой UTC) показала, что верное
+        местное время — раннее, а сдвинутая копия уехала на 5 часов вперёд, часть —
+        в следующие сутки. Вердикты проверяющих переносятся на выжившую строку;
+        если у неё вердикт этого же проверяющего уже есть, остаётся её собственный.
+
+        Идемпотентна: после первого прогона выборка дублей пуста, а переименование
+        ключа отфильтровано по несовпадению.
+        """
+        ranked_cte = f"""
+            WITH ranked AS (
+                SELECT lr.id,
+                       lr.operator_id,
+                       lr.day,
+                       row_number() OVER (
+                           PARTITION BY lr.source, {self._C2D_RATING_KEY_SQL}
+                           ORDER BY lr.rated_at ASC, lr.created_at ASC, lr.id ASC
+                       ) AS rn,
+                       first_value(lr.id) OVER (
+                           PARTITION BY lr.source, {self._C2D_RATING_KEY_SQL}
+                           ORDER BY lr.rated_at ASC, lr.created_at ASC, lr.id ASC
+                       ) AS winner_id
+                FROM chat_manager_low_rating_reviews lr
+                WHERE {self._C2D_RATING_KEY_SCOPE_SQL}
+            )
+        """
+
+        # Дни, которые придётся пересчитать: и у выживших, и у удаляемых строк.
+        cursor.execute(f"""
+            {ranked_cte}
+            SELECT DISTINCT lr.operator_id, lr.day
+            FROM ranked r
+            JOIN chat_manager_low_rating_reviews lr
+              ON lr.id IN (r.id, r.winner_id)
+            WHERE r.rn > 1
+        """)
+        affected_pairs = {(int(row[0]), row[1]) for row in (cursor.fetchall() or [])}
+
+        if affected_pairs:
+            # 1. Перенести журнал вердиктов ДО удаления: внешний ключ стоит
+            #    с ON DELETE CASCADE и молча унёс бы записи вместе со строкой.
+            cursor.execute(f"""
+                {ranked_cte}
+                UPDATE chat_manager_low_rating_review_entries e
+                SET review_id = r.winner_id,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM ranked r
+                WHERE e.review_id = r.id
+                  AND r.rn > 1
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM chat_manager_low_rating_review_entries kept
+                      WHERE kept.review_id = r.winner_id
+                        AND kept.reviewer_id = e.reviewer_id
+                  )
+            """)
+            moved_entries = cursor.rowcount or 0
+
+            # 2. Денормализованные вердикты — только в пустые поля выжившей.
+            cursor.execute(f"""
+                {ranked_cte}
+                UPDATE chat_manager_low_rating_reviews w
+                SET arai_status = COALESCE(w.arai_status, l.arai_status),
+                    arai_comment = CASE WHEN w.arai_comment = '' THEN l.arai_comment ELSE w.arai_comment END,
+                    arai_updated_by = COALESCE(w.arai_updated_by, l.arai_updated_by),
+                    arai_updated_at = COALESCE(w.arai_updated_at, l.arai_updated_at),
+                    zhanna_status = COALESCE(w.zhanna_status, l.zhanna_status),
+                    zhanna_comment = CASE WHEN w.zhanna_comment = '' THEN l.zhanna_comment ELSE w.zhanna_comment END,
+                    zhanna_updated_by = COALESCE(w.zhanna_updated_by, l.zhanna_updated_by),
+                    zhanna_updated_at = COALESCE(w.zhanna_updated_at, l.zhanna_updated_at),
+                    head_status = COALESCE(w.head_status, l.head_status),
+                    head_comment = CASE WHEN w.head_comment = '' THEN l.head_comment ELSE w.head_comment END,
+                    head_updated_by = COALESCE(w.head_updated_by, l.head_updated_by),
+                    head_updated_at = COALESCE(w.head_updated_at, l.head_updated_at),
+                    final_status = COALESCE(w.final_status, l.final_status),
+                    final_source = COALESCE(w.final_source, l.final_source),
+                    final_comment = CASE WHEN w.final_comment = '' THEN l.final_comment ELSE w.final_comment END,
+                    final_decided_by = COALESCE(w.final_decided_by, l.final_decided_by),
+                    final_decided_at = COALESCE(w.final_decided_at, l.final_decided_at),
+                    raw_payload = l.raw_payload || w.raw_payload,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM ranked r
+                JOIN chat_manager_low_rating_reviews l ON l.id = r.id
+                WHERE w.id = r.winner_id AND r.rn > 1
+            """)
+
+            # 2a. Вердикт этого же проверяющего у выжившей строки уже есть —
+            #     перенести второй нельзя (UNIQUE(review_id, reviewer_id)), он
+            #     уйдёт каскадом. Молча терять оценку человека нельзя: пишем в
+            #     лог, что именно отбрасываем, и отдельно — где проверяющий
+            #     разметил копии по-разному (там решение за ним, не за нами).
+            cursor.execute(f"""
+                {ranked_cte}
+                SELECT lost.reviewer_id, lost.status, kept.status,
+                       r.winner_id, victim.day, victim.operator_id
+                FROM ranked r
+                JOIN chat_manager_low_rating_reviews victim ON victim.id = r.id
+                JOIN chat_manager_low_rating_review_entries lost ON lost.review_id = r.id
+                JOIN chat_manager_low_rating_review_entries kept
+                  ON kept.review_id = r.winner_id AND kept.reviewer_id = lost.reviewer_id
+                WHERE r.rn > 1
+            """)
+            for reviewer_id, lost_status, kept_status, winner_id, day, operator_id in (cursor.fetchall() or []):
+                if lost_status == kept_status:
+                    continue
+                logging.warning(
+                    "Низкие оценки Chat2Desk: проверяющий %s разметил копии одного обращения "
+                    "по-разному (оставлено «%s», отброшено «%s»); оценка %s, оператор %s, день %s — "
+                    "требуется повторное решение",
+                    reviewer_id, kept_status, lost_status, winner_id, operator_id, day
+                )
+
+            # 3. Удалить сдвинутые копии.
+            cursor.execute(f"""
+                {ranked_cte}
+                DELETE FROM chat_manager_low_rating_reviews victim
+                USING ranked r
+                WHERE victim.id = r.id AND r.rn > 1
+            """)
+            removed_rows = cursor.rowcount or 0
+
+            logging.warning(
+                "Низкие оценки Chat2Desk: склеено %s дублей, перенесено %s записей вердиктов, "
+                "пересчитывается %s пар (оператор, день)",
+                removed_rows, moved_entries, len(affected_pairs)
+            )
+
+        # 4. Перевести выживших на новый ключ. Старые ключи — hex uuid5, новые
+        #    начинаются с 'c2d-rating:', поэтому совпасть со ещё не обновлённой
+        #    строкой новый ключ не может и уникальность по ходу не ломается.
+        cursor.execute(f"""
+            UPDATE chat_manager_low_rating_reviews lr
+            SET source_key = LEFT({self._C2D_RATING_KEY_SQL}, 255),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE {self._C2D_RATING_KEY_SCOPE_SQL}
+              AND lr.source_key <> LEFT({self._C2D_RATING_KEY_SQL}, 255)
+        """)
+        rekeyed = cursor.rowcount or 0
+        if rekeyed:
+            logging.warning(
+                "Низкие оценки Chat2Desk: %s строк переведено на ключ по номеру заявки",
+                rekeyed
+            )
+
+        if affected_pairs:
+            self._recalculate_chat_manager_score_adjustments_tx(cursor, affected_pairs)
+
     def save_chat_manager_low_ratings(self, low_ratings, imported_by=None, source_batch_id=None):
         if not isinstance(low_ratings, list):
             raise ValueError("low_ratings must be a list")
 
-        rows = []
+        rows_by_key = {}
+        duplicates_in_batch = 0
         affected_pairs = set()
         imported_by_id = int(imported_by) if imported_by is not None else None
         batch_id = str(source_batch_id) if source_batch_id else None
@@ -18435,6 +18619,15 @@ class Database:
             taxi_park = str(item.get('taxi_park') or item.get('taxopark') or item.get('direction') or '').strip()[:255]
             operator_name = str(item.get('operator_name') or '').strip()[:255]
             raw_payload = item.get('raw_payload') if isinstance(item.get('raw_payload'), dict) else dict(item)
+            # Пустые поля в payload не записываем. Chat2Desk присылает одну и ту
+            # же оценку двумя ответами, и во втором часть полей (например
+            # transport) пустая; при склейке по общему ключу пустое значение
+            # затёрло бы уже известное. Читатели payload пустую строку и так
+            # считают отсутствием значения.
+            raw_payload = {
+                key: value for key, value in raw_payload.items()
+                if value is not None and not (isinstance(value, str) and not value.strip())
+            }
 
             source_key = str(item.get('source_key') or item.get('external_id') or '').strip()
             if not source_key:
@@ -18452,7 +18645,19 @@ class Database:
                 source_key = uuid.uuid5(uuid.NAMESPACE_URL, source_key_seed).hex
             source_key = source_key[:255]
 
-            rows.append((
+            # Ключ внутри пачки должен быть уникален. Chat2Desk кладёт одну и ту
+            # же оценку в ответ дважды, а INSERT ... ON CONFLICT DO UPDATE, где
+            # одна строка задета дважды одной командой, Postgres отклоняет
+            # (21000, «cannot affect row a second time»). Поэтому вторую копию
+            # сливаем в первую, а не отправляем отдельной строкой.
+            previous = rows_by_key.get((source, source_key))
+            if previous is not None:
+                merged_payload = dict(previous[10])
+                merged_payload.update(raw_payload)
+                raw_payload = merged_payload
+                duplicates_in_batch += 1
+
+            rows_by_key[(source, source_key)] = (
                 source,
                 source_key,
                 operator_id,
@@ -18463,14 +18668,23 @@ class Database:
                 rated_at,
                 day_obj,
                 score,
-                Json(raw_payload),
+                raw_payload,
                 imported_by_id,
                 batch_id,
-            ))
+            )
             affected_pairs.add((operator_id, day_obj))
 
+        rows = [
+            row[:10] + (Json(row[10]),) + row[11:]
+            for row in rows_by_key.values()
+        ]
         if not rows:
             return {'processed': 0, 'adjusted_days': 0}
+        if duplicates_in_batch:
+            logging.warning(
+                "Chat2Desk: %s копий одной оценки в одной пачке низких оценок — склеены по source_key",
+                duplicates_in_batch
+            )
 
         with self._get_cursor() as cursor:
             execute_values(
@@ -18492,7 +18706,9 @@ class Database:
                     rated_at = EXCLUDED.rated_at,
                     day = EXCLUDED.day,
                     score = EXCLUDED.score,
-                    raw_payload = EXCLUDED.raw_payload,
+                    -- Дополняем, а не заменяем: во втором ответе вендора часть
+                    -- полей отсутствует, и замена целиком их бы потеряла.
+                    raw_payload = chat_manager_low_rating_reviews.raw_payload || EXCLUDED.raw_payload,
                     imported_by = EXCLUDED.imported_by,
                     source_batch_id = COALESCE(EXCLUDED.source_batch_id, chat_manager_low_rating_reviews.source_batch_id),
                     updated_at = CURRENT_TIMESTAMP

@@ -31901,11 +31901,36 @@ def _chat2desk_rating_operator_name(row):
     return _chat2desk_operator_display_name(operator_payload)
 
 
+CHAT2DESK_RATING_SOURCE_KEY_PREFIX = 'c2d-rating'
+
+
 def _chat2desk_rating_source_key(row, metric_day, score):
+    """Идентичность оценки Chat2Desk — только номера заявки.
+
+    Времени в ключе быть не должно: Chat2Desk отдаёт для одной и той же оценки
+    created_at то по Алматы, то со сдвигом на 5 часов (закрытый день), и время в
+    ключе давало второй source_key, из-за чего ON CONFLICT не срабатывал и на
+    каждый повторный синк появлялась вторая строка (задача #267).
+    rating_id в ключ тоже не годится — это id шаблона опроса, он одинаков у всех
+    строк. Ключ — читаемая строка, а не uuid5: ту же формулу считает миграция
+    одним SQL-выражением, поэтому две реализации не могут разъехаться.
+    """
+    valuation_id = _chat2desk_row_first(row, 'valuation_request_id')
+    request_id = _chat2desk_row_first(row, 'request_id')
+    if valuation_id or request_id:
+        parts = [
+            str(valuation_id or '').strip(),
+            str(request_id or '').strip(),
+            str(_chat2desk_row_first(row, 'rating_scale_id') or '').strip(),
+            str(_chat2desk_row_first(row, 'operator_id') or '').strip(),
+        ]
+        return f"{CHAT2DESK_RATING_SOURCE_KEY_PREFIX}:{':'.join(parts)}"[:255]
+
+    # Номеров заявки нет вовсе — склеить такую строку больше нечем, поэтому
+    # оставляем прежний состав вместе со временем. На боевых данных не
+    # встречается: valuation_request_id непустой у всех строк отчёта.
     parts = [
         _chat2desk_row_first(row, 'rating_id'),
-        _chat2desk_row_first(row, 'valuation_request_id'),
-        _chat2desk_row_first(row, 'request_id'),
         _chat2desk_row_first(row, 'operator_id'),
         _chat2desk_row_first(row, 'created_at', 'request_start', 'date') or metric_day,
         score,
@@ -31916,8 +31941,78 @@ def _chat2desk_rating_source_key(row, metric_day, score):
     return uuid.uuid5(uuid.NAMESPACE_URL, f"chat2desk-rating:{seed}").hex
 
 
-def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score):
-    created_at_value = _chat2desk_row_first(row, 'created_at', 'request_start', 'date')
+# Расхождение created_at с request_end у неискажённых строк — ноль, у искажённых
+# ровно 5 часов; источник иногда округляет секунду, поэтому допуск на секунду.
+CHAT2DESK_RATING_SHIFT_TOLERANCE_SECONDS = 2
+
+
+def _chat2desk_request_end_index(*row_groups, target_tz=None):
+    """request_id → момент завершения заявки по отчёту request_stats."""
+    index = {}
+    for rows in row_groups:
+        for row in (rows or []):
+            if not isinstance(row, dict):
+                continue
+            request_id = str(_chat2desk_row_first(row, 'request_id') or '').strip()
+            if not request_id or request_id in index:
+                continue
+            end_dt = _chat2desk_parse_datetime(
+                _chat2desk_row_first(row, 'request_end', 'request_start'),
+                target_tz=target_tz
+            )
+            if end_dt is not None:
+                index[request_id] = end_dt
+    return index
+
+
+def _chat2desk_rating_time_shifts(rating_rows, request_end_index, target_tz=None):
+    """На сколько Chat2Desk сдвинул created_at у каждой строки отчёта rating.
+
+    Опора — request_stats того же вендора: у целых строк created_at совпадает с
+    request_end до секунды, у испорченных отстоит ровно на 5 часов. С вечера
+    01.09.2026 вендор отдаёт закрытый день сдвинутым, причём в ответе за текущий
+    день часть строк целая, а часть (подтянутый вечер предыдущих суток) — нет,
+    поэтому сдвиг определяется построчно, а не одним числом на день.
+
+    Возвращает список сдвигов в секундах, выровненный по rating_rows. Там, где
+    заявка не нашлась или расхождение не кратно часу, подставляется
+    преобладающий сдвиг дня — он же 0, если опереться было не на что.
+    """
+    resolved = [None] * len(rating_rows or [])
+    counts = {}
+    for row_index, row in enumerate(rating_rows or []):
+        if not isinstance(row, dict):
+            continue
+        created_dt = _chat2desk_parse_datetime(
+            _chat2desk_row_first(row, 'created_at', 'request_start', 'date'),
+            target_tz=target_tz
+        )
+        if created_dt is None:
+            continue
+        request_id = str(_chat2desk_row_first(row, 'request_id') or '').strip()
+        end_dt = request_end_index.get(request_id) if request_id else None
+        if end_dt is None:
+            continue
+        delta = (created_dt - end_dt).total_seconds()
+        hours = round(delta / 3600.0)
+        # Оценку могли поставить много позже конца диалога — такие строки
+        # (единицы в день) в опору не берём, им достанется сдвиг дня.
+        if abs(delta - hours * 3600) > CHAT2DESK_RATING_SHIFT_TOLERANCE_SECONDS:
+            continue
+        shift = int(hours * 3600)
+        resolved[row_index] = shift
+        counts[shift] = counts.get(shift, 0) + 1
+
+    dominant = max(counts, key=lambda key: (counts[key], -abs(key))) if counts else 0
+    return [dominant if shift is None else shift for shift in resolved]
+
+
+def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score, rated_at=None):
+    # rated_at приходит уже выпрямленным (см. _chat2desk_rating_rated_at): сырую
+    # строку сюда передавать нельзя, иначе время и day считаются в разных поясах.
+    rated_at_value = rated_at if rated_at is not None else _chat2desk_row_first(
+        row, 'created_at', 'request_start', 'date'
+    )
     return {
         'source': 'chat2desk_rating',
         'source_key': _chat2desk_rating_source_key(row, metric_day, score),
@@ -31925,7 +32020,7 @@ def _chat2desk_low_rating_payload(row, op_id, operator_name, metric_day, score):
         'operator_name': operator_name,
         'phone_number': _chat2desk_row_first(row, 'phone'),
         'taxi_park': _chat2desk_row_first(row, 'channel_name'),
-        'rated_at': created_at_value,
+        'rated_at': rated_at_value,
         'day': metric_day,
         'score': float(score),
         'raw_payload': dict(row),
@@ -31936,7 +32031,8 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
                                                   operator_lookup, operator_token_index,
                                                   operator_stats_rows=None,
                                                   surge_windows=None, preview_limit=None,
-                                                  request_stats_rows=None):
+                                                  request_stats_rows=None,
+                                                  prev_request_stats_rows=None):
     preview_limit_value = STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT
     if preview_limit is not None:
         try:
@@ -32005,15 +32101,33 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         bucket['count'] += 1
 
     score_agg = {}
+    # Время оценки выпрямляем по request_stats — тому же вендору, но целому
+    # отчёту. Берём и предыдущий день: окно отчёта rating сдвинуто, поэтому
+    # часть оценок относится к заявкам предыдущих суток (без него совпадает
+    # ~две трети строк, с ним — все).
+    rating_request_end_index = _chat2desk_request_end_index(
+        request_stats_rows, prev_request_stats_rows, target_tz=target_tz
+    )
+    rating_shifts = _chat2desk_rating_time_shifts(
+        rating_rows or [], rating_request_end_index, target_tz=target_tz
+    )
+    seen_rating_keys = set()
+    duplicate_rating_rows = 0
     for row_index, row in enumerate(rating_rows or []):
         if not isinstance(row, dict) or not _chat2desk_row_is_nonempty(row):
             continue
         raw_name = _chat2desk_rating_operator_name(row)
         score = _chat_metrics_parse_number(_chat2desk_row_first(row, 'rating_scale_score', 'score', 'rating'))
-        metric_day = _chat2desk_metric_day(
+        created_dt = _chat2desk_parse_datetime(
             _chat2desk_row_first(row, 'created_at', 'request_start', 'date'),
-            day_str,
             target_tz=target_tz
+        )
+        rated_dt = None
+        if created_dt is not None:
+            rated_dt = created_dt - timedelta(seconds=rating_shifts[row_index])
+        metric_day = (
+            rated_dt.date().strftime('%Y-%m-%d') if rated_dt is not None
+            else _chat2desk_metric_day(None, day_str, target_tz=target_tz)
         )
         if not raw_name or score is None or not metric_day:
             if raw_name:
@@ -32023,11 +32137,22 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         if op_id is None:
             note_unmatched(raw_name, f"rating:{row_index}")
             continue
+        # Одну и ту же оценку вендор кладёт в ответ дважды — целой и сдвинутой.
+        # Ключ у копий теперь общий, поэтому вторую отбрасываем здесь: иначе она
+        # второй раз войдёт в средний балл дня, а execute_values упадёт на
+        # попытке дважды задеть одну строку в одной команде.
+        rating_key = _chat2desk_rating_source_key(row, metric_day, score)
+        if rating_key in seen_rating_keys:
+            duplicate_rating_rows += 1
+            continue
+        seen_rating_keys.add(rating_key)
         bucket = score_agg.setdefault((op_id, metric_day), {'score_sum': 0.0, 'score_count': 0})
         bucket['score_sum'] += float(score)
         bucket['score_count'] += 1
         if float(score) < 4:
-            low_ratings.append(_chat2desk_low_rating_payload(row, op_id, raw_name, metric_day, score))
+            low_ratings.append(
+                _chat2desk_low_rating_payload(row, op_id, raw_name, metric_day, score, rated_at=rated_dt)
+            )
 
     chat_count_agg = {}
     for row_index, row in enumerate(operator_stats_rows or []):
@@ -32135,6 +32260,13 @@ def _chat2desk_build_metrics_from_statistics_rows(day_str, reply_rows, rating_ro
         'low_ratings': low_ratings,
         'low_rating_count': len(low_ratings),
         'excluded_surge_rows': int(excluded_surge),
+        # Сколько копий одной и той же оценки вендор положил в один ответ —
+        # молча их отбрасывать нельзя, иначе «всё сошлось» скроет поломку API.
+        'duplicate_rating_rows': int(duplicate_rating_rows),
+        'rating_time_shifts': {
+            str(int(shift)): rating_shifts.count(shift)
+            for shift in sorted(set(rating_shifts))
+        },
         'api_rows': {
             CHAT2DESK_STATISTICS_REPORT_REPLIES: len(reply_rows or []),
             CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS: len(request_stats_rows or []),
@@ -32160,6 +32292,26 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
     request_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str)
     rating_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_RATING, day_str)
     operator_stats_rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_OPERATOR_STATS, day_str)
+    # Тот же отчёт за предыдущие сутки нужен только как опора для времени оценок:
+    # окно отчёта rating у вендора сдвинуто, и часть оценок ссылается на заявки
+    # вчерашнего вечера. В метрики эти строки не идут.
+    prev_request_stats_rows = []
+    prev_day = _chat_metrics_parse_date(day_str)
+    if prev_day is not None:
+        prev_day_str = (prev_day - timedelta(days=1)).strftime('%Y-%m-%d')
+        try:
+            prev_request_stats_rows = _chat2desk_statistics_get(
+                CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, prev_day_str
+            )
+        except Exception:
+            # Опора необязательная: без неё выпрямится меньше строк, но день
+            # синхронизируется. Ронять из-за этого прогон нельзя.
+            logging.warning(
+                "Chat2Desk: не удалось получить request_stats за %s (опора времени оценок)",
+                prev_day_str,
+                exc_info=True
+            )
+            prev_request_stats_rows = []
     report = _chat2desk_build_metrics_from_statistics_rows(
         day_str,
         None,
@@ -32169,7 +32321,8 @@ def _chat2desk_build_daily_metrics(day_str, operator_lookup, operator_token_inde
         operator_stats_rows=operator_stats_rows,
         surge_windows=surge_windows,
         preview_limit=STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT,
-        request_stats_rows=request_stats_rows
+        request_stats_rows=request_stats_rows,
+        prev_request_stats_rows=prev_request_stats_rows
     )
     # Те же строки идут в c2d_requests (раздел «Оценка чатов ЧМ») — без
     # дополнительных запросов к API.
