@@ -53,6 +53,7 @@ import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmploye
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
+import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 
@@ -37854,6 +37855,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [isBulkManageUsersSaving, setIsBulkManageUsersSaving] = useState(false);
             const [promotingUserId, setPromotingUserId] = useState(null);
             const [showSidebarAccountDropdown, setShowSidebarAccountDropdown] = useState(false);
+            /* Тёмный режим. Выдан поимённо одному аккаунту (src/utils/darkTheme.js),
+               включается тычком в аватар в подвале сайдбара. Пока аккаунт не
+               определён — на экране входа и после выхода — тема светлая: право
+               проверяется по логину, а не по сохранённому выбору. */
+            const darkThemeAllowed = canUseDarkTheme(user);
+            const [darkTheme, setDarkTheme] = useState(readStoredDarkTheme);
+            useEffect(() => {
+                let cancelled = false;
+                applyDarkTheme(darkThemeAllowed && darkTheme, () => cancelled);
+                return () => { cancelled = true; };
+            }, [darkThemeAllowed, darkTheme]);
+            const toggleDarkTheme = useCallback(() => {
+                setDarkTheme((prev) => {
+                    const next = !prev;
+                    storeDarkTheme(next);
+                    return next;
+                });
+            }, []);
             const [showSidebarEmployeesDropdown, setShowSidebarEmployeesDropdown] = useState(false);
             const [showSidebarResourceDropdown, setShowSidebarResourceDropdown] = useState(false);
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -46982,7 +47001,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             aria-expanded={showSidebarAccountDropdown}
                                             aria-haspopup="menu"
                                         >
-                                            <span className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-xs font-semibold text-white shrink-0">
+                                            {/* Аватар — переключатель тёмного режима у аккаунтов,
+                                                которым он выдан. Клик не должен раскрывать меню
+                                                аккаунта, поэтому всплытие останавливается; у всех
+                                                остальных это по-прежнему просто картинка, и ни
+                                                курсора, ни подсказки у неё нет. */}
+                                            <span
+                                                className="sidebar-avatar border border-white/40 bg-blue-500 flex items-center justify-center text-xs font-semibold text-white shrink-0"
+                                                title={darkThemeAllowed ? (darkTheme ? 'Светлая тема' : 'Тёмная тема') : undefined}
+                                                style={darkThemeAllowed ? { cursor: 'pointer' } : undefined}
+                                                onClick={darkThemeAllowed ? ((e) => { e.stopPropagation(); toggleDarkTheme(); }) : undefined}
+                                            >
                                                 {user?.avatar_url ? (
                                                     <AvatarImage src={user.avatar_url} alt={user?.name || 'avatar'} className="h-full w-full object-cover" />
                                                 ) : (
@@ -47072,6 +47101,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canManageFourYouSection,
                 canAccessDevLetterSection,
                 canChangeAccountAvatar,
+                darkThemeAllowed,
+                darkTheme,
+                toggleDarkTheme,
                 showSidebarAccountDropdown,
                 showSidebarEmployeesDropdown,
                 showSidebarResourceDropdown,

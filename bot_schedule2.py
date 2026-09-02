@@ -1021,11 +1021,19 @@ def _get_user_payload(user):
     user_id = None
     name = None
     telegram_id = None
+    login = None
     if isinstance(user, (tuple, list)):
         role = user[3]
         user_id = user[0]
         name = user[2]
         telegram_id = user[1]
+        # Логин лежит седьмым во ВСЕХ выборках пользователя, которые сюда
+        # доходят: get_user (20 колонок), get_user_by_login (17),
+        # get_user_by_name (8). Отдаём его клиенту вместе с профилем —
+        # своего логина человек и так не знать не может, зато фронт получает
+        # устойчивое имя учётки, переживающее перезагрузку страницы.
+        if len(user) >= 8:
+            login = user[7]
         if len(user) >= 20:
             gender = user[13]
             avatar_bucket = user[15]
@@ -1046,6 +1054,7 @@ def _get_user_payload(user):
         name = user.get("name")
         telegram_id = user.get("telegram_id")
         gender = user.get("gender")
+        login = user.get("login")
         avatar_bucket = user.get("avatar_bucket")
         avatar_blob_path = user.get("avatar_blob_path")
         avatar_updated_at = user.get("avatar_updated_at")
@@ -1121,6 +1130,7 @@ def _get_user_payload(user):
         "role": role,
         "id": user_id,
         "name": name,
+        "login": login,
         "telegram_id": telegram_id,
         "gender": gender,
         "department_id": department_id,

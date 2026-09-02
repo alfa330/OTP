@@ -1,0 +1,230 @@
+/* ═══ Хром приложения ═════════════════════════════════════════════════════
+   Рукописная часть слоя: то, что задано не утилитами Tailwind, а собственным
+   CSS — сайдбар, плеер разбора звонков, полотно «Обращений», переменные вики.
+   Утилиты ниже собираются скриптом, эту часть он подставляет как есть. */
+
+html[data-otp-theme="dark"] {
+    /* Полотно, поверхность, кант — теми же значениями, что и у решётки утилит
+       ниже; здесь они нужны как переменные для рукописных правил. */
+    --otp-d-canvas: #17191e;
+    --otp-d-surface: #1e2127;
+    --otp-d-raised: #22262d;
+    --otp-d-line: #2e333c;
+    --otp-d-ink: #e8ecf2;
+    --otp-d-ink-soft: #a8b1bf;
+    --otp-d-ink-mute: #7d8695;
+
+    /* Системные элементы — полосы прокрутки, календарь в <input type="date">,
+       выпадающий список <select> — рисует браузер. Без этой строки они
+       остались бы белыми поверх тёмного экрана. */
+    color-scheme: dark;
+    background-color: var(--otp-d-canvas);
+}
+
+html[data-otp-theme="dark"] body {
+    background-color: var(--otp-d-canvas);
+    color: var(--otp-d-ink);
+    /* Водяной знак-логотип на полотне: в темноте светлый PNG светится пятном.
+       Смешивание по яркости гасит его до едва заметной фактуры. */
+    background-blend-mode: luminosity;
+}
+
+html[data-otp-theme="dark"] .main-content {
+    background-color: var(--otp-d-canvas);
+}
+
+html[data-otp-theme="dark"] ::selection {
+    background: rgba(59, 130, 246, 0.35);
+}
+
+/* ── Сайдбар ──
+   В светлой теме он синий (from-blue-800 to-blue-900) и остаётся единственным
+   тёмным пятном экрана. В тёмной теме синяя плита перестаёт быть «тёмной
+   стороной» и превращается в самый яркий объект: графит с синим подтоном
+   возвращает ей роль опоры, а не акцента. */
+html[data-otp-theme="dark"] .sidebar {
+    background-image: linear-gradient(to bottom, #1a1d23, #14161b);
+    border-right: 1px solid #24282f;
+}
+html[data-otp-theme="dark"] .sidebar-footer-menu {
+    background: linear-gradient(to bottom, rgba(36, 40, 47, 0.9), rgba(28, 31, 37, 0.96));
+}
+html[data-otp-theme="dark"] .sidebar button:hover {
+    background-color: #262b33 !important;
+}
+html[data-otp-theme="dark"] .sidebar button.bg-blue-700,
+html[data-otp-theme="dark"] .sidebar button.bg-blue-800 {
+    background-color: #2c3340 !important;
+}
+/* Активный пункт помечен подсветкой, а не цветом текста, — в темноте одной
+   подсветки мало, добавляем светящуюся полосу слева. */
+html[data-otp-theme="dark"] .sidebar-avatar {
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) !important;
+}
+html[data-otp-theme="dark"] .sidebar-menu-scroll {
+    scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+}
+
+/* ── Скелетоны загрузки ── */
+html[data-otp-theme="dark"] .sk-shimmer {
+    background: linear-gradient(90deg, #23272e 25%, #2c313a 50%, #23272e 75%);
+    background-size: 800px 100%;
+}
+
+/* ── Плеер записи разговора (src/styles.css) ── */
+html[data-otp-theme="dark"] .icon-btn {
+    background: #23303f;
+    color: #7dd3fc;
+}
+html[data-otp-theme="dark"] .icon-btn:hover {
+    background: #2b3b4e;
+    color: #bae6fd;
+}
+html[data-otp-theme="dark"] .time-display,
+html[data-otp-theme="dark"] .speed-control {
+    color: var(--otp-d-ink-soft);
+}
+html[data-otp-theme="dark"] .speed-control select {
+    background: var(--otp-d-raised);
+    border-color: var(--otp-d-line);
+    color: var(--otp-d-ink);
+}
+html[data-otp-theme="dark"] .timeline {
+    background: #2e333c;
+}
+
+/* ── Всплывающее меню групп вкладок ── */
+html[data-otp-theme="dark"] .tab-dropdown {
+    background: var(--otp-d-surface);
+    border-color: var(--otp-d-line);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.55), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Раздел «Обращения» и док переписки ── */
+html[data-otp-theme="dark"] .chat-dock,
+html[data-otp-theme="dark"] .crm-aside {
+    background: var(--otp-d-surface);
+    border-left-color: var(--otp-d-line);
+}
+html[data-otp-theme="dark"] .crm-thread {
+    background-color: #131519;
+    background-image:
+        radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.05) 1px, transparent 0),
+        radial-gradient(900px 320px at 50% 0%, rgba(59, 130, 246, 0.10), transparent 72%);
+}
+html[data-otp-theme="dark"] .crm-day-chip {
+    background: rgba(30, 33, 39, 0.78);
+}
+
+/* ── Вики ──
+   У раздела своя палитра в переменных (--wiki-*), заданных на .wiki-scope.
+   Перекрываем именно их: утилиты внутри раздела подхватит решётка ниже, а вот
+   типографику статьи, канты таблиц и подложки блоков держат эти переменные. */
+html[data-otp-theme="dark"] .wiki-scope {
+    --wiki-accent: #a5b4fc;
+    --wiki-accent-soft: rgba(99, 102, 241, 0.16);
+    --wiki-accent-line: rgba(99, 102, 241, 0.34);
+    --wiki-selection: rgba(129, 140, 248, 0.34);
+    --wiki-ink: #e8ecf2;
+    --wiki-ink-soft: #a8b1bf;
+    --wiki-ink-mute: #7d8695;
+    --wiki-line: #2e333c;
+    --wiki-line-soft: #24282f;
+    --wiki-surface: #1e2127;
+    --wiki-surface-alt: #17191e;
+}
+
+/* Оформительские плашки статьи: цвет тона остаётся смыслом («успех»,
+   «предупреждение», «опасность»), но плотную светлую заливку в темноте
+   заменяет прозрачная — иначе плашка светится прямоугольником на всю ширину. */
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='ok'] {
+    --tone-bg: rgba(16, 185, 129, 0.13);
+    --tone-line: rgba(16, 185, 129, 0.34);
+    --tone-ink: #6ee7b7;
+}
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='warn'] {
+    --tone-bg: rgba(245, 158, 11, 0.13);
+    --tone-line: rgba(245, 158, 11, 0.34);
+    --tone-ink: #fcd34d;
+}
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='danger'] {
+    --tone-bg: rgba(239, 68, 68, 0.13);
+    --tone-line: rgba(239, 68, 68, 0.34);
+    --tone-ink: #fca5a5;
+}
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='tip'] {
+    --tone-bg: rgba(139, 92, 246, 0.13);
+    --tone-line: rgba(139, 92, 246, 0.34);
+    --tone-ink: #c4b5fd;
+}
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='info'] {
+    --tone-bg: rgba(59, 130, 246, 0.13);
+    --tone-line: rgba(59, 130, 246, 0.34);
+    --tone-ink: #93c5fd;
+}
+
+/* Ответ ИИ-помощника размечается markdown.css — там свои цвета ссылок и цитат. */
+html[data-otp-theme="dark"] .ai-md a { color: #93c5fd; }
+html[data-otp-theme="dark"] .ai-md a:hover { color: #bfdbfe; }
+html[data-otp-theme="dark"] .ai-md blockquote { color: var(--otp-d-ink-soft); }
+
+/* ── Тени ──
+   Плоские карточки в темноте не страдают: их отделяет разница светлот, а
+   лишняя тень под каждым блоком — это шум. Усиливаем только КРУПНЫЕ тени —
+   ими подняты слои, которые физически висят над содержимым: выпадающие меню,
+   поповеры, модальные окна. Там тень несёт смысл «это сверху», и тень
+   Tailwind (чёрный на 10 %) на графите не видна вовсе.
+
+   Переопределяем --tw-shadow, а не box-shadow: утилита ссылается на эту
+   переменную, и подмены достаточно — кольца (ring-*) остаются на месте. */
+html[data-otp-theme="dark"] .shadow-lg {
+    --tw-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.55), 0 4px 6px -4px rgba(0, 0, 0, 0.5);
+}
+html[data-otp-theme="dark"] .shadow-xl {
+    --tw-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+}
+html[data-otp-theme="dark"] .shadow-2xl {
+    --tw-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75);
+}
+
+/* ── Раздел «Задачи» ──
+   У раздела своя дизайн-система: переменные на .tv-root и 2600 строк CSS,
+   которые он вставляет тегом <style>. Правила с хексами разбирает генератор
+   (PALETTE_SOURCES), а переменные — здесь: их смысл из имени не выводится,
+   и «просто светлое сделать тёмным» для --accent дало бы чёрную кнопку на
+   чёрной карточке. В светлой теме кнопка почти чёрная на кремовом полотне,
+   значит в тёмной она обязана быть светлой на графите — роль сохраняется,
+   меняется сторона. */
+html[data-otp-theme="dark"] .tv-root {
+    --bg: #17191e;
+    --surface: #1e2127;
+    --surface-2: #23272e;
+    --border: #2e333c;
+    --border-strong: #414954;
+    --ink: #e8ecf2;
+    --ink-2: #a8b1bf;
+    --ink-3: #7d8695;
+    --accent: #e8ecf2;
+    --accent-fg: #17191e;
+    --amber: #fcd34d;
+    --indigo: #a5b4fc;
+    --emerald: #6ee7b7;
+    --rose: #fda4af;
+    --blue: #93c5fd;
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
+    --shadow-lg: 0 20px 60px rgba(0, 0, 0, .7), 0 8px 24px rgba(0, 0, 0, .5);
+}
+
+/* ── Раздел «4 You» ──
+   Лента карточек и так живёт на тёмных градиентах — темнить нечего, кроме
+   подложки сцены под ними. */
+html[data-otp-theme="dark"] .lenta-scene {
+    --bg: #17191e;
+}
+
+/* Зазор кольца фокуса рисуется цветом фона; белый оставил бы вокруг кнопки
+   светлый ореол. */
+html[data-otp-theme="dark"] .ring-offset-white {
+    --tw-ring-offset-color: #1e2127;
+}
