@@ -1125,7 +1125,10 @@ class FrontendTest(unittest.TestCase):
         """
         self.assertIn('linkExisting', self.dialog)
         block = self.dialog[self.dialog.index('duplicates.slice'):]
-        self.assertIn('linkExisting(d)', block[:1600])
+        # Окно, а не соседняя строка: важно, что кнопка стоит в самой строке
+        # находки, а не отдельным блоком под списком. Запас взят с расчётом на
+        # уровень вложенности — половины диалога добавили строкам отступ.
+        self.assertIn('linkExisting(d)', block[:2000])
 
     def test_import_is_gated_exactly_like_a_new_article(self):
         """Способность та же, и гостевое пространство исключено так же.
@@ -1367,9 +1370,20 @@ class FrontendTest(unittest.TestCase):
         self.assertNotIn('axios.delete', self.dialog,
                          'интерфейс снова удаляет связь одним нажатием')
         self.assertIn('Не сверять', self.dialog)
-        self.assertIn('onToggleSync', self.dialog)
-        block = self.dialog[self.dialog.index('onClick={onToggleSync}'):]
-        self.assertIn('item.auto_sync', block[:600])
+        # Сторожим ПРИВЯЗКУ обработчика, а не виджет: действия строки переехали
+        # из ряда кнопок в меню «трёх точек» (общий приём раздела), и дословный
+        # `onClick={…}` запрещал бы такую переделку, ничего не защищая. Смотрим
+        # при этом на КОД без комментариев: довод «почему тумблер, а не отвязка»
+        # написан ровно здесь и занимает больше места, чем сам пункт меню.
+        code = re.sub(r'/\*[\s\S]*?\*/', '', self.dialog)
+        handler = re.search(r'on(?:Click=\{|Select: )onToggleSync', code)
+        self.assertIsNotNone(handler, 'переключение сверки ни к чему не привязано')
+        # Подпись стоит рядом с привязкой — до или после неё, смотря по виджету:
+        # в меню сначала идёт label, у кнопки шёл onClick. Важно, что она
+        # ДВОЙНАЯ: то же нажатие включает сверку обратно.
+        block = code[max(0, handler.start() - 400):handler.start() + 400]
+        self.assertIn('item.auto_sync', block)
+        self.assertIn('Снова сверять', block)
 
     def test_every_badge_tone_exists_in_the_kit(self):
         """Незнакомый тон бейдж молча подменяет на серый.
@@ -1392,11 +1406,84 @@ class FrontendTest(unittest.TestCase):
         """Обещание «ничего не публикуется само» должно стоять там, где нажимают."""
         self.assertIn('ЧЕРНОВИКОМ', self.dialog)
 
+    def test_the_linked_list_is_paged(self):
+        """Список связей растёт навсегда: перенесённая страница — строка в нём.
+
+        Пока он рисовался целиком, форма переноса уезжала за верхний край, и
+        ради следующей страницы приходилось прокручивать чужой список до конца.
+        """
+        self.assertIn('IosPager', self.dialog)
+        self.assertIn('ROWS_PER_PAGE', self.dialog)
+        self.assertNotRegex(self.dialog, r'linked\.map\(',
+                            'список рисуется целиком мимо страницы')
+        # Арифметику окна берём у каталога, а не пишем вторую: «с какой по
+        # какую строку» ошибается на единицу молча, и у каталожной версии для
+        # этого уже есть тест (tests/wiki_catalog_all.test.mjs).
+        self.assertIn("pageWindow } from './WikiCatalog'", self.dialog)
+
+    def test_the_two_halves_do_not_stack(self):
+        """Перенос и список связей — одна дверь, но не один свиток.
+
+        Одновременно они не нужны никогда: работают либо с формой, либо со
+        списком. Переключатель половин заодно убирает мёртвую главную кнопку —
+        «Создать статью» на списке создавать нечего.
+        """
+        self.assertIn('IosSegmented', self.dialog)
+        self.assertIn("tab === 'import'", self.dialog)
+        button = self.dialog[self.dialog.index('className={iosBtnPrimary}') - 400:
+                             self.dialog.index('className={iosBtnPrimary}')]
+        self.assertIn("tab === 'import'", button,
+                      '«Создать статью» висит и на половине со списком')
+
+    def test_explanations_are_folded_under_the_hint(self):
+        """Пояснение нужно ОДИН раз — в первый; место оно занимает всегда.
+
+        Четыре абзаца серого текста между тумблерами и полями приходилось
+        каждый раз перепрыгивать глазами до нужного переключателя. Под «i» они
+        никуда не делись и открываются наведением.
+        """
+        self.assertGreaterEqual(self.dialog.count('<IosHint'), 4,
+                                'пояснения снова стоят абзацами в форме')
+
+    def test_a_hint_at_the_bottom_of_the_dialog_opens_upwards(self):
+        """Подсказка последней строки формы упиралась в край тела модалки.
+
+        Замер в браузере (1280×800, 1366×768, 1024×640): из 95 пикселей
+        пузырька было видно 24, остальное срезала прокручиваемая область. На
+        телефоне (390×844) места хватает — значит отсчитывать надо от
+        БЛИЖАЙШЕГО прокручиваемого предка, а не от окна, и переворачивать
+        только когда снизу действительно нечем показать.
+        """
+        kit = (ROOT / 'src' / 'components' / 'ui' / 'ios.jsx').read_text(encoding='utf-8')
+        hint = kit[kit.index('export const IosHint'):]
+        hint = hint[:hint.index('export const IosPager')]
+        self.assertIn("bottom-[24px]", hint, 'подсказке нечем открыться вверх')
+        self.assertIn('overflowY', hint,
+                      'место считается от окна, а не от прокручиваемого предка')
+        self.assertIn('useLayoutEffect', hint,
+                      'переворот считается после отрисовки — пузырёк прыгает')
+        self.assertIn('offsetHeight', hint,
+                      'высота пузырька подставлена числом, а не измерена')
+
+    def test_a_toggle_row_is_not_a_label(self):
+        """Строка тумблера обязана перестать быть <label>, раз в ней есть «i».
+
+        Ярлык подписывает ПЕРВЫЙ labelable-потомок, а им теперь оказывается
+        кнопка подсказки: нажатие по названию открывало бы пояснение вместо
+        переключения. Ни сборка, ни консоль об этом не скажут.
+        """
+        row = self.dialog[self.dialog.index('checked={aiFormat}') - 800:
+                          self.dialog.index('checked={aiFormat}')]
+        self.assertIn('IosHint', row, 'у тумблера пропало пояснение')
+        self.assertNotIn('<label', row, 'строка тумблера снова стала ярлыком')
+
     def test_overwrite_button_appears_only_on_conflict(self):
         """Единственное действие, затирающее работу человека, — не по умолчанию."""
         self.assertIn("item.last_status === 'conflict'", self.dialog)
+        force = re.search(r'on(?:Click=\{|Select: )onForce', self.dialog)
+        self.assertIsNotNone(force, '«Переписать» ни к чему не привязано')
         self.assertLess(self.dialog.index("item.last_status === 'conflict'"),
-                        self.dialog.index('onClick={onForce}'),
+                        force.start(),
                         'кнопка «Переписать» стоит вне проверки на конфликт')
 
 

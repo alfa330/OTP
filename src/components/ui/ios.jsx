@@ -152,7 +152,42 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
     // на тач-экране подсказка не закреплялась. Теперь клик закрепляет.
     const [hover, setHover] = React.useState(false);
     const [pinned, setPinned] = React.useState(false);
+    const [up, setUp] = React.useState(false);
+    const btnRef = React.useRef(null);
+    const tipRef = React.useRef(null);
     const open = hover || pinned;
+
+    /* Пузырёк раскрывается ВВЕРХ, когда снизу его нечем показать.
+     *
+     * Замер в модалке импорта (1280×800, 1366×768, 1024×640): у «i» последней
+     * строки формы из 95 пикселей подсказки видно 24 — остальное съедала
+     * прокручиваемая область тела модалки. Прокруткой это достаётся, но
+     * пояснение, ради которого «i» и заведена, при первом же наведении
+     * оказывалось наполовину за краем.
+     *
+     * Отсчитываем не от окна, а от БЛИЖАЙШЕГО прокручиваемого предка: режет
+     * именно он, и на телефоне (390×844) той же строке места хватает — там
+     * переворачивать нечего. Меряем настоящую высоту пузырька в
+     * useLayoutEffect, то есть до отрисовки: текст у подсказок разной длины, а
+     * подстановка «примерно ста пикселей» ошибается ровно на длинных.
+     */
+    React.useLayoutEffect(() => {
+        if (!open) return;
+        const anchor = btnRef.current;
+        const tip = tipRef.current;
+        if (!anchor || !tip) return;
+        let box = anchor.parentElement;
+        while (box && !/(auto|scroll)/.test(window.getComputedStyle(box).overflowY)) {
+            box = box.parentElement;
+        }
+        const rect = anchor.getBoundingClientRect();
+        const floor = Math.min(window.innerHeight,
+                               box ? box.getBoundingClientRect().bottom : Infinity);
+        const ceiling = Math.max(0, box ? box.getBoundingClientRect().top : 0);
+        const need = tip.offsetHeight + 30;
+        setUp(floor - rect.bottom < need && rect.top - ceiling >= need);
+    }, [open]);
+
     return (
         <span
             className="relative inline-flex"
@@ -160,6 +195,7 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
             onMouseLeave={() => setHover(false)}
         >
             <button
+                ref={btnRef}
                 type="button"
                 aria-label={label}
                 aria-expanded={open}
@@ -172,10 +208,11 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
             </button>
             {open && (
                 <span
+                    ref={tipRef}
                     role="tooltip"
-                    className={`absolute top-[24px] z-30 w-64 rounded-xl bg-slate-900/95 px-3 py-2 text-[11.5px] font-normal leading-snug text-white shadow-lg backdrop-blur ${
-                        align === 'right' ? 'right-0' : 'left-0'
-                    }`}
+                    className={`absolute z-30 w-64 rounded-xl bg-slate-900/95 px-3 py-2 text-[11.5px] font-normal leading-snug text-white shadow-lg backdrop-blur ${
+                        up ? 'bottom-[24px]' : 'top-[24px]'
+                    } ${align === 'right' ? 'right-0' : 'left-0'}`}
                 >
                     {text}
                 </span>
