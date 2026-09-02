@@ -416,12 +416,12 @@ def poll_cabinet(db, cabinet, amo_client=None):
                 break
             result.threads_seen += len(threads)
 
-            unread = [t for t in threads if int(t.get('unread_count') or 0) > 0]
             # Отсев «ничего не изменилось» — ОТДЕЛЬНО от признака «страница без
             # непрочитанного». Условие остановки ниже смотрит на `unread`, а не
             # на `fresh`: страница, где всё непрочитанное уже разобрано, ещё не
             # значит, что дальше пусто, а сортировка выдачи OLX не документирована.
-            fresh = _drop_unchanged(db, cabinet, unread)
+            unread = [t for t in threads if int(t.get('unread_count') or 0) > 0]
+            fresh = _candidates(db, cabinet, threads)
             for index, thread in enumerate(fresh):
                 if handled >= MAX_THREADS_PER_CYCLE:
                     # Молчаливого усечения быть не должно: «разобрали всё» и
@@ -515,6 +515,7 @@ def _poll_thread(db, writers, cabinet, thread, result):
             last_message_id=_text((newest or {}).get('id')),
             last_message_at=message_time(newest) if newest else None,
             last_unread_count=int(thread.get('unread_count') or 0),
+            last_total_count=int(thread.get('total_count') or 0),
             messages_seen=len(incoming))
 
     # Гасим непрочитанное в кабинете — ради человека, не ради робота: то, что
@@ -535,23 +536,37 @@ def _poll_thread(db, writers, cabinet, thread, result):
                   cabinet.code, thread_id, exc)
 
 
-def _drop_unchanged(db, cabinet, threads):
-    """Выбросить чаты, в которых с прошлого раза ничего не появилось.
+def _candidates(db, cabinet, threads):
+    """Чаты, которые стоит прочитать на этом круге.
 
-    Зачем это нужно. Счётчик непрочитанного в кабинете гасит не только робот, но
-    и человек, а чат, отсечённый горизонтом на первом запуске, робот намеренно
-    прочитанным НЕ помечает — он оставляет его маркетологу. Такой чат так и
-    висит непрочитанным, и без этой проверки он занимал бы место в лимите цикла
-    вечно, вытесняя свежие обращения: старой истории в девяти кабинетах больше,
-    чем помещается за полминуты.
+    Непрочитанного мало для отбора, и это выяснилось на проде 02.09.2026: чат,
+    который маркетолог открыл в кабинете раньше робота, теряет счётчик
+    непрочитанного, и робот к нему уже не подходит — обращение остаётся без
+    ответа навсегда. Так потерялись четыре обращения, два из них с телефоном.
 
-    Признак «ничего не появилось» — неизменившийся `unread_count` при уже
-    поставленной закладке. OLX увеличивает его на каждое входящее, поэтому
-    равенство означает именно отсутствие нового. Если человек прочитал часть
-    чата, счётчик уменьшится, отличится — и мы сходим лишний раз, что безвредно.
+    Поэтому кандидатов три вида:
+
+    * есть непрочитанное — обычный случай;
+    * чат нам ЗНАКОМ, и число сообщений в нём выросло — значит появилось новое,
+      даже если счётчик непрочитанного уже погашен человеком;
+    * чат СОВСЕМ новый и создан только что — его мог открыть человек в те
+      секунды, что прошли до нашего опроса. Окно берём равным горизонту: всё,
+      что старше, робот и так не стал бы разбирать.
+
+    Обратная сторона — отсев. Чат, отсечённый горизонтом, робот намеренно НЕ
+    помечает прочитанным (он оставляет его человеку), поэтому тот висит
+    непрочитанным вечно. Без проверки «число сообщений не изменилось» такие чаты
+    занимали бы весь лимит цикла и вытесняли свежие обращения: старой истории в
+    девяти кабинетах больше, чем помещается за полминуты.
+
+    У чатов, заведённых до этой правки, общего числа не записано. Такие
+    пропускаем — лишний раз прочитать безвредно, а потерять нет.
+
+    Расход при этом почти не растёт: сообщения дочитываются только у отобранных,
+    а список чатов мы и так получаем целиком.
     """
     if not threads:
-        return threads
+        return []
 
     with db._get_cursor() as cursor:
         known = {
@@ -560,16 +575,31 @@ def _drop_unchanged(db, cabinet, threads):
                                               [t.get('id') for t in threads]) or [])
         }
 
-    kept = []
+    edge = queries.now_almaty() - HORIZON
+    picked = []
     for thread in threads:
-        state = known.get(str(thread.get('id')))
-        if (state
-                and state.get('last_message_id')
-                and state.get('last_unread_count') is not None
-                and int(state['last_unread_count']) == int(thread.get('unread_count') or 0)):
+        tid = str(thread.get('id'))
+        if int(thread.get('unread_count') or 0) > 0:
+            picked.append(thread)
             continue
-        kept.append(thread)
-    return kept
+
+        state = known.get(tid)
+        if state:
+            stored = state.get('last_total_count')
+            if stored is None or int(stored) != int(thread.get('total_count') or 0):
+                picked.append(thread)
+            continue
+
+        # Незнакомый чат без непрочитанного: берём только совсем свежий.
+        created = _thread_created(thread)
+        if created is not None and created > edge:
+            picked.append(thread)
+    return picked
+
+
+def _thread_created(thread):
+    """Когда чат заведён, в местном времени. OLX и здесь отдаёт UTC без зоны."""
+    return message_time({'created_at': (thread or {}).get('created_at')})
 
 
 def _after_bookmark(messages, bookmark, seen_until=None, now=None):

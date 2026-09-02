@@ -483,14 +483,16 @@ class BookmarkTests(unittest.TestCase):
         self.assertIn("os.getenv('OLX_MESSAGE_HORIZON_HOURS')", source)
 
 
-class SkipUnchangedTests(unittest.TestCase):
-    """Чат без нового не должен занимать место в лимите цикла.
+class CandidateTests(unittest.TestCase):
+    """Кого робот берёт в разбор. Ошибка здесь тихо теряет живые обращения.
 
-    Ловушка неочевидная. Чат, отсечённый горизонтом на первом запуске, робот
-    намеренно НЕ помечает прочитанным — он оставляет его человеку. Значит чат
-    так и висит непрочитанным, и без этой проверки он попадал бы в разбор
-    вечно, вытесняя свежие обращения: старой истории в девяти кабинетах больше,
-    чем помещается за полминуты.
+    Прод, 02.09.2026: отбор шёл только по непрочитанному, и чат, который
+    маркетолог открыл раньше робота, выпадал навсегда — счётчик непрочитанного
+    гасился человеком. Так потерялись четыре обращения, два из них с телефоном.
+
+    Обратная крайность не менее опасна: чат, отсечённый горизонтом, робот
+    намеренно не помечает прочитанным, поэтому тот висит непрочитанным вечно —
+    и без отсева занимал бы весь лимит цикла, вытесняя свежие обращения.
     """
 
     def setUp(self):
@@ -498,6 +500,8 @@ class SkipUnchangedTests(unittest.TestCase):
         self.states = []
 
         class _Q(object):
+            now_almaty = staticmethod(FakeQueries.now_almaty)
+
             @staticmethod
             def threads_state(cursor, cabinet_code, thread_ids):
                 return self.states
@@ -505,36 +509,59 @@ class SkipUnchangedTests(unittest.TestCase):
         self._real = service.queries
         service.queries = _Q
         self.addCleanup(lambda: setattr(service, 'queries', self._real))
+
+        self._horizon = service.HORIZON
+        service.HORIZON = timedelta(minutes=15)
+        self.addCleanup(lambda: setattr(service, 'HORIZON', self._horizon))
+
         self.cab = cabinets.BY_CODE['itaxi']
 
-    def test_thread_with_the_same_unread_count_is_skipped(self):
-        self.states = [{'thread_id': '77', 'last_message_id': '5',
-                        'last_unread_count': 2}]
-        kept = service._drop_unchanged(
-            self.db, self.cab, [{'id': '77', 'unread_count': 2}])
-        self.assertEqual([], kept)
+    def pick(self, threads):
+        return [str(t['id']) for t in service._candidates(self.db, self.cab, threads)]
 
-    def test_thread_with_a_new_message_is_kept(self):
+    def test_unread_thread_is_always_taken(self):
         self.states = [{'thread_id': '77', 'last_message_id': '5',
-                        'last_unread_count': 2}]
-        kept = service._drop_unchanged(
-            self.db, self.cab, [{'id': '77', 'unread_count': 3}])
-        self.assertEqual(1, len(kept))
+                        'last_total_count': 3}]
+        self.assertEqual(['77'], self.pick([{'id': '77', 'unread_count': 1,
+                                             'total_count': 3}]))
 
-    def test_unknown_thread_is_always_kept(self):
-        """Чат, который робот видит впервые, пропускать нельзя ни при каких счётчиках."""
+    def test_known_thread_with_a_new_message_is_taken_even_if_read_by_a_human(self):
+        """Главный случай инцидента: человек открыл чат, счётчик обнулился."""
+        self.states = [{'thread_id': '77', 'last_message_id': '5',
+                        'last_total_count': 3}]
+        self.assertEqual(['77'], self.pick([{'id': '77', 'unread_count': 0,
+                                             'total_count': 4}]))
+
+    def test_known_thread_without_changes_is_skipped(self):
+        self.states = [{'thread_id': '77', 'last_message_id': '5',
+                        'last_total_count': 3}]
+        self.assertEqual([], self.pick([{'id': '77', 'unread_count': 0,
+                                         'total_count': 3}]))
+
+    def test_thread_from_before_the_change_has_no_total_and_is_taken(self):
+        """Строки, заведённые старым кодом, пропускаем: лучше лишний запрос."""
+        self.states = [{'thread_id': '77', 'last_message_id': '5',
+                        'last_total_count': None}]
+        self.assertEqual(['77'], self.pick([{'id': '77', 'unread_count': 0,
+                                             'total_count': 3}]))
+
+    def test_brand_new_thread_is_taken_even_without_unread(self):
+        """Кандидат написал, человек открыл раньше нас — чат всё равно наш."""
         self.states = []
-        kept = service._drop_unchanged(
-            self.db, self.cab, [{'id': '99', 'unread_count': 1}])
-        self.assertEqual(1, len(kept))
+        created = (FakeQueries.now_almaty() - timedelta(minutes=2)
+                   - timedelta(hours=5))          # OLX отдаёт UTC
+        self.assertEqual(['99'], self.pick([{
+            'id': '99', 'unread_count': 0, 'total_count': 1,
+            'created_at': created.strftime('%Y-%m-%d %H:%M:%S')}]))
 
-    def test_thread_without_a_bookmark_is_kept(self):
-        """Закладки нет — значит разбор до конца не доходил, надо вернуться."""
-        self.states = [{'thread_id': '77', 'last_message_id': None,
-                        'last_unread_count': 2}]
-        kept = service._drop_unchanged(
-            self.db, self.cab, [{'id': '77', 'unread_count': 2}])
-        self.assertEqual(1, len(kept))
+    def test_old_unknown_thread_without_unread_is_left_alone(self):
+        """Иначе первый же опрос полез бы читать всю историю кабинета."""
+        self.states = []
+        created = (FakeQueries.now_almaty() - timedelta(days=3)
+                   - timedelta(hours=5))
+        self.assertEqual([], self.pick([{
+            'id': '99', 'unread_count': 0, 'total_count': 1,
+            'created_at': created.strftime('%Y-%m-%d %H:%M:%S')}]))
 
 
 class ThreadSafetyTests(unittest.TestCase):

@@ -243,7 +243,7 @@ def threads_state(cursor, cabinet_code, thread_ids):
     cursor.execute(
         """
         SELECT thread_id, last_message_id, last_message_at, last_unread_count,
-               canned_reply_sent_at
+               last_total_count, canned_reply_sent_at
           FROM olx_threads
          WHERE cabinet_code = %(cabinet_code)s
            AND thread_id = ANY(%(ids)s)
@@ -261,7 +261,7 @@ def upsert_thread(cursor, cabinet_code, thread_id, **fields):
     """
     allowed = ('advert_id', 'advert_title', 'interlocutor_id', 'interlocutor_name',
                'last_message_id', 'last_message_at', 'amo_lead_id', 'phone_normalized',
-               'last_unread_count')
+               'last_unread_count', 'last_total_count')
     payload = {k: fields.get(k) for k in allowed}
     payload['cabinet_code'] = cabinet_code
     payload['thread_id'] = str(thread_id)
@@ -277,11 +277,11 @@ def upsert_thread(cursor, cabinet_code, thread_id, **fields):
         INSERT INTO olx_threads (cabinet_code, thread_id, advert_id, advert_title,
                                  interlocutor_id, interlocutor_name, last_message_id,
                                  last_message_at, amo_lead_id, phone_normalized,
-                                 last_unread_count, messages_seen)
+                                 last_unread_count, last_total_count, messages_seen)
         VALUES (%(cabinet_code)s, %(thread_id)s, %(advert_id)s, %(advert_title)s,
                 %(interlocutor_id)s, %(interlocutor_name)s, %(last_message_id)s,
                 %(last_message_at)s, %(amo_lead_id)s, %(phone_normalized)s,
-                %(last_unread_count)s, %(seen)s)
+                %(last_unread_count)s, %(last_total_count)s, %(seen)s)
         ON CONFLICT (cabinet_code, thread_id) DO UPDATE
            SET {sets},
                messages_seen = olx_threads.messages_seen + EXCLUDED.messages_seen,
