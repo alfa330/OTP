@@ -38,6 +38,12 @@ logging.basicConfig(level=logging.INFO)
 os.environ['TZ'] = 'Asia/Almaty'
 time.tzset()
 
+# Отличает «поле не пришло» от «поле пришло пустым»: снять значение — это записать
+# NULL, а None здесь уже занят смыслом «не трогать».
+# Часовой ровно один и живёт в модуле. Одноимённый атрибут внутри класса — ловушка:
+# значения по умолчанию в сигнатурах методов свяжутся с классовым объектом, а сравнения
+# `x is not _UNSET` в телах методов уйдут к модульному (область класса в разрешении имён
+# внутри функций не участвует), и «поле не пришло» перестанет отличаться от «пришло».
 _UNSET = object()
 
 def _env_int(name, default, minimum=None):
@@ -33922,11 +33928,6 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
-    # Отличает «поле не пришло» от «поле пришло пустым». Для topic_id это не
-    # придирка: снятие корпоративной темы — это запись NULL, а None здесь уже
-    # занят смыслом «не трогать».
-    _UNSET = object()
-
     def update_training(self, training_id, training_date=None, start_time=None, end_time=None,
                         reason=None, comment=_UNSET, count_in_hours=None, topic_id=_UNSET):
         updates = []
@@ -33942,11 +33943,11 @@ class Database:
         # Через _UNSET, а не через None: комментарий — единственное поле, которое
         # человек осмысленно СТИРАЕТ, а с проверкой `is not None` пустая правка
         # молча не доезжала и старый текст оставался в базе.
-        if comment is not Database._UNSET:
+        if comment is not _UNSET:
             updates.append("comment = %s"); params.append(comment or None)
         if count_in_hours is not None:
             updates.append("count_in_hours = %s"); params.append(count_in_hours)
-        if topic_id is not Database._UNSET:
+        if topic_id is not _UNSET:
             updates.append("topic_id = %s"); params.append(topic_id)
 
         if not updates:
