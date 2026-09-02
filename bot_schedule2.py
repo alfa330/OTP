@@ -42876,27 +42876,6 @@ def _tez_leads_call_bucket(call_at, year, month):
     return None
 
 
-def _tez_leads_call_reference_month(success_date, sheet_year, sheet_month):
-    """(год, месяц), относительно которых раскладывается звонок строки.
-
-    Обычно это месяц листа. У ПЕРЕНЕСЁННОЙ успешки — месяц зачёта: её лид
-    остался в базе своего месяца, а поездка и звонок случились в следующем.
-    От месяца листа такой звонок не попадает ни в одну корзину, и строка
-    выходит успешкой без основания — пустые «Звонок» и «Время разговора» при
-    заполненной «Дате успешки». Месяц зачёта равен месяцу поездки
-    (tez_op_leads: success_date = дата поездки), поэтому звонок ложится в те же
-    колонки, что и у обычной успешки того месяца.
-    """
-    text = str(success_date or '')
-    try:
-        year, month = int(text[:4]), int(text[5:7])
-    except ValueError:
-        return sheet_year, sheet_month
-    if not 1 <= month <= 12:
-        return sheet_year, sheet_month
-    return year, month
-
-
 def _excel_suppress_number_as_text_warning(stream, sqref,
                                            sheet_path='xl/worksheets/sheet1.xml'):
     """Убирает у диапазона зелёный уголок «Число сохранено как текст».
@@ -43243,7 +43222,17 @@ def tez_leads_detail():
 @app.route('/api/tez_leads/export', methods=['GET'])
 @require_api_key
 def tez_leads_export():
-    """Выгрузка детализации в Excel — для разбора спорных случаев с операторами."""
+    """Выгрузка отчёта в Excel — для разбора спорных случаев с операторами.
+
+    Лист один, и на нём весь периметр месяца: своя база (успешные и нет) плюс
+    лиды прошлого месяца, которые дорабатываются в этом. У перенесённой строки
+    все колонки пересчитаны на ОТЧЁТНЫЙ месяц (см. db.get_tez_leads_report),
+    поэтому видно, стал перенесённый лид успешкой здесь или нет, и число
+    успешек в файле совпадает с числом в разделе. Раньше перенос уезжал на
+    отдельный лист со своим прошлым статусом: в разделе за август стояло 245
+    успешек, в файле — 134, а недостающие 111 лежали на листе июля как обычная
+    база без признака зачёта.
+    """
     requester_id, error = _tez_leads_require_manager()
     if error:
         return error
@@ -43257,6 +43246,18 @@ def tez_leads_export():
         'already_working': 'Уже работающий',
         'success': 'Успешка',
         'not_counted': 'Не засчитана',
+        # Статуса доработки у строки нет: либо пересчёт после появления
+        # carry_status по этому периоду ещё не проходил, либо период закрыт
+        # и автоматически уже не пересчитывается. Пустая ячейка читалась бы
+        # как потерянный статус, поэтому состояние названо и подсказывает
+        # выход — кнопку «Сверка» в разделе. «Ещё не пересчитан» тут писать
+        # нельзя: пересчёт периода мог идти много раз, просто складывать
+        # результат было некуда.
+        'carry_pending': 'Статус не рассчитан',
+        # Статус говорит «успешка», а записи об успешке за период нет. Успешкой
+        # такую строку не называем (иначе в файле их станет больше, чем в
+        # разделе), но и не прячем: лечится кнопкой «Сверка».
+        'stale_success': 'Требует сверки',
     }
     rule_labels = {
         'same_month': 'Звонок в месяце поездки',
@@ -43273,134 +43274,103 @@ def tez_leads_export():
         'trip_after_day7': 'Поездка позже 7-го числа (старое правило)',
     }
 
-    # Второй лист выгрузки — база ПРОШЛОГО месяца целиком, кроме тех, кого уже
-    # засчитали и выплатили тем месяцем. Лид, ставший успешкой позже (перенос),
-    # в листе остаётся: в том месяце по нему не платили, и супервайзеру важно
-    # видеть, что работа по нему продолжается.
-    prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
-    prev_paid_prefix = f'{prev_year}-{prev_month:02d}'
     try:
-        rows = db.get_tez_leads_detail(year, month, limit=50000)
-        prev_rows = [
-            row for row in db.get_tez_leads_detail(prev_year, prev_month, limit=50000)
-            if not str(row.get('success_date') or '').startswith(prev_paid_prefix)
-        ]
+        rows = db.get_tez_leads_report(year, month, limit=50000)
     except Exception:
         logging.exception('tez_leads: экспорт не удался')
         return jsonify({"error": "Internal server error"}), 500
 
-    # Месяц прописью — для пометки «Действие базы» на листе прошлого месяца.
+    # Месяц прописью — для колонки «Месяц базы».
     MONTHS_RU = ('Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль',
                  'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
-    headers = ['ФИО', 'Телефон', 'Источник', 'Статус', 'Правило', 'Загрузок',
+    # «Месяц базы» — первой колонкой и у КАЖДОЙ строки: на одном листе это
+    # единственное, что отличает свою базу от переноса. Пометку «(перенос)»
+    # ставим прямо в значение, чтобы читателю не приходилось помнить, что
+    # прошлый месяц на этом листе и означает перенос.
+    headers = ['Месяц базы',
+               'ФИО', 'Телефон', 'Источник', 'Статус', 'Правило', 'Загрузок',
                'Поездка в прошлом месяце', 'Поездка в отчётном месяце',
                'Оператор',
                'Звонок в прошлом месяце', 'Время разговора в прошлом месяце',
                'Звонок в отчётном месяце', 'Время разговора в отчётном месяце',
                'Дата успешки']
-    widths = [34, 16, 34, 18, 40, 10, 24, 24, 28, 22, 26, 22, 26, 14]
-
-    def _fill_sheet(sheet, sheet_rows, sheet_year, sheet_month, base_label=None):
-        """Заполняет лист детализацией и возвращает сдвиг колонок.
-
-        base_label — пометка «Действие базы». Ставится только на листе прошлого
-        месяца: на основном это была бы колонка с одним и тем же значением в
-        каждой строке, то есть чистый шум.
-        """
-        off = 1 if base_label else 0
-        titles = (['Действие базы'] if base_label else []) + headers
-        for col, title in enumerate(titles, start=1):
-            cell = sheet.cell(row=1, column=col, value=title)
-            cell.font = Font(bold=True, color='FFFFFF')
-            cell.fill = PatternFill(fill_type='solid', fgColor='1F2937')
-            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
-        for idx, row in enumerate(sheet_rows, start=2):
-            if base_label:
-                _tez_leads_excel_text_cell(sheet, idx, 1, base_label)
-            _tez_leads_excel_text_cell(sheet, idx, off + 1, row['full_name'])
-            _tez_leads_excel_text_cell(sheet, idx, off + 2, row['phone'])
-            _tez_leads_excel_text_cell(sheet, idx, off + 3, row.get('source_file_name') or '')
-            _tez_leads_excel_text_cell(
-                sheet, idx, off + 4, status_labels.get(row['status'], row['status'])
-            )
-            _tez_leads_excel_text_cell(
-                sheet, idx, off + 5,
-                rule_labels.get(row['status_rule'], row['status_rule'] or ''),
-            )
-            sheet.cell(row=idx, column=off + 6, value=row['upload_count'])
-            _tez_leads_excel_text_cell(
-                sheet, idx, off + 7,
-                (row.get('prev_month_first_order_at') or '').replace('T', ' ')[:19],
-            )
-            _tez_leads_excel_text_cell(
-                sheet, idx, off + 8,
-                (row.get('month_first_order_at') or row.get('first_order_at') or '')
-                .replace('T', ' ')[:19],
-            )
-            _tez_leads_excel_text_cell(sheet, idx, off + 9, row['operator_name'])
-            # Звонок один, но лежит он в паре колонок своего месяца: так по строке
-            # видно, привлечение это внутри месяца или на стыке с прошлым. Месяц
-            # берём от ЛИСТА, а не от запрошенного периода — иначе на листе
-            # прошлого месяца все звонки уехали бы в колонку «в прошлом месяце».
-            # Исключение — перенесённая успешка: она датирована следующим
-            # месяцем, и её звонок раскладывается от месяца зачёта, иначе не
-            # показывается вовсе (см. _tez_leads_call_reference_month).
-            call_year, call_month = _tez_leads_call_reference_month(
-                row['success_date'], sheet_year, sheet_month
-            )
-            bucket = _tez_leads_call_bucket(row['call_at'], call_year, call_month)
-            call_text = (row['call_at'] or '').replace('T', ' ')[:19]
-            duration_seconds = row.get('talk_duration_seconds')
-            for target, call_column in (('prev', off + 10), ('month', off + 12)):
-                matched = bucket == target
-                _tez_leads_excel_text_cell(
-                    sheet, idx, call_column, call_text if matched else ''
-                )
-                # Длительность — обычное число секунд, а не формат времени: по
-                # решению владельца отчёт считают и фильтруют в секундах (порог
-                # успешки тоже задан в секундах), а «00:44» пришлось бы
-                # конвертировать.
-                has_duration = matched and duration_seconds is not None
-                duration_cell = sheet.cell(
-                    row=idx,
-                    column=call_column + 1,
-                    value=max(int(duration_seconds), 0) if has_duration else '',
-                )
-                if has_duration:
-                    duration_cell.number_format = '0'
-            _tez_leads_excel_text_cell(sheet, idx, off + 14, row['success_date'] or '')
-
-        for col, width in enumerate((([18] if base_label else []) + widths), start=1):
-            sheet.column_dimensions[sheet.cell(row=1, column=col).column_letter].width = width
-        return off
+    widths = [22,
+              34, 16, 34, 18, 40, 10, 24, 24, 28, 22, 26, 22, 26, 14]
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = f'Лиды {month:02d}.{year}'[:31]
-    sheets = [(rows, _fill_sheet(ws, rows, year, month))]
+    sheet = wb.active
+    sheet.title = f'Лиды {month:02d}.{year}'[:31]
+    for col, title in enumerate(headers, start=1):
+        cell = sheet.cell(row=1, column=col, value=title)
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = PatternFill(fill_type='solid', fgColor='1F2937')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-    if prev_rows:
-        ws_prev = wb.create_sheet(f'База {prev_month:02d}.{prev_year}'[:31])
-        sheets.append((
-            prev_rows,
-            _fill_sheet(ws_prev, prev_rows, prev_year, prev_month,
-                        base_label=f'{MONTHS_RU[prev_month - 1]} {prev_year}'),
-        ))
+    for idx, row in enumerate(rows, start=2):
+        base_month = int(row.get('base_month') or month)
+        base_year = int(row.get('base_year') or year)
+        base_label = f'{MONTHS_RU[base_month - 1]} {base_year}'
+        if row.get('is_carried'):
+            base_label += ' (перенос)'
+        _tez_leads_excel_text_cell(sheet, idx, 1, base_label)
+        _tez_leads_excel_text_cell(sheet, idx, 2, row['full_name'])
+        _tez_leads_excel_text_cell(sheet, idx, 3, row['phone'])
+        _tez_leads_excel_text_cell(sheet, idx, 4, row.get('source_file_name') or '')
+        _tez_leads_excel_text_cell(
+            sheet, idx, 5, status_labels.get(row['status'], row['status'])
+        )
+        _tez_leads_excel_text_cell(
+            sheet, idx, 6,
+            rule_labels.get(row['status_rule'], row['status_rule'] or ''),
+        )
+        sheet.cell(row=idx, column=7, value=row['upload_count'])
+        _tez_leads_excel_text_cell(
+            sheet, idx, 8,
+            (row.get('prev_month_first_order_at') or '').replace('T', ' ')[:19],
+        )
+        _tez_leads_excel_text_cell(
+            sheet, idx, 9,
+            (row.get('month_first_order_at') or row.get('first_order_at') or '')
+            .replace('T', ' ')[:19],
+        )
+        _tez_leads_excel_text_cell(sheet, idx, 10, row['operator_name'])
+        # Звонок один, но лежит он в паре колонок своего месяца: так по строке
+        # видно, привлечение это внутри месяца или на стыке с прошлым. Месяц
+        # один на весь лист — отчётный, — и у переноса тоже: его строка целиком
+        # пересчитана на этот месяц, поэтому звонок зачёта встаёт в те же
+        # колонки, что и у обычной успешки.
+        bucket = _tez_leads_call_bucket(row['call_at'], year, month)
+        call_text = (row['call_at'] or '').replace('T', ' ')[:19]
+        duration_seconds = row.get('talk_duration_seconds')
+        for target, call_column in (('prev', 11), ('month', 13)):
+            matched = bucket == target
+            _tez_leads_excel_text_cell(
+                sheet, idx, call_column, call_text if matched else ''
+            )
+            # Длительность — обычное число секунд, а не формат времени: по
+            # решению владельца отчёт считают и фильтруют в секундах (порог
+            # успешки тоже задан в секундах), а «00:44» пришлось бы
+            # конвертировать.
+            has_duration = matched and duration_seconds is not None
+            duration_cell = sheet.cell(
+                row=idx,
+                column=call_column + 1,
+                value=max(int(duration_seconds), 0) if has_duration else '',
+            )
+            if has_duration:
+                duration_cell.number_format = '0'
+        _tez_leads_excel_text_cell(sheet, idx, 15, row['success_date'] or '')
+
+    for col, width in enumerate(widths, start=1):
+        sheet.column_dimensions[sheet.cell(row=1, column=col).column_letter].width = width
 
     stream = BytesIO()
     wb.save(stream)
     stream.seek(0)
-    # Гасим «Число сохранено как текст» на КАЖДОМ листе: тег пишется в конкретный
-    # xl/worksheets/sheetN.xml, и одним вызовом оба листа не накрыть.
-    for sheet_index, (sheet_rows, off) in enumerate(sheets, start=1):
-        if not sheet_rows:
-            continue
-        phone_letter = get_column_letter(off + headers.index('Телефон') + 1)
+    if rows:
+        phone_letter = get_column_letter(headers.index('Телефон') + 1)
         stream = _excel_suppress_number_as_text_warning(
-            stream,
-            f'{phone_letter}2:{phone_letter}{len(sheet_rows) + 1}',
-            sheet_path=f'xl/worksheets/sheet{sheet_index}.xml',
+            stream, f'{phone_letter}2:{phone_letter}{len(rows) + 1}'
         )
     return send_file(
         stream,

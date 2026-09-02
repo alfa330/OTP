@@ -5900,6 +5900,20 @@ class Database:
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_first_order_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_last_order_before_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_checked_at TIMESTAMP WITH TIME ZONE;
+                -- Статус того же лида в месяце ДОРАБОТКИ. Своя пара колонок по
+                -- той же причине, что и у carry_first_order_at: status описывает
+                -- месяц базы, и перенос не имеет права его переписать (пересчёт
+                -- месяца базы тут же вернул бы всё назад, а статус мигал бы
+                -- между прогонами). Без этих колонок результат доработки нигде
+                -- не хранился: расчёт его получал и выбрасывал, поэтому в отчёте
+                -- у перенесённого лида стоял его прошлый статус.
+                -- Месяц в колонках не нужен: перенос — это всегда ровно +1 месяц
+                -- к месяцу базы (инвариант get_tez_leads_for_recompute), состояния
+                -- «перенесён дважды» нечем выразить.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_status VARCHAR(20)
+                    CHECK (carry_status IN ('new', 'in_progress', 'already_working',
+                                            'success', 'not_counted'));
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_status_rule VARCHAR(32);
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS first_order_checked_at TIMESTAMP WITH TIME ZONE;
                 -- Отметка «звонки по этому лиду уже подняли из Binotel». Гейтить
                 -- докачку звонков статусом нельзя: лид со СТАРЫМ статусом
@@ -21007,6 +21021,13 @@ class Database:
                     -- принадлежит месяцу базы, и трогать его отсюда нельзя.
                     status = CASE WHEN v.write_status THEN v.status ELSE l.status END,
                     status_rule = CASE WHEN v.write_status THEN v.status_rule ELSE l.status_rule END,
+                    -- Зеркальная пара для переноса: статус месяца доработки
+                    -- писать больше некуда, а выбросить его нельзя — именно он
+                    -- отвечает на вопрос «стал ли перенесённый лид успешкой в
+                    -- этом месяце и если нет, то почему».
+                    carry_status = CASE WHEN v.write_status THEN l.carry_status ELSE v.status END,
+                    carry_status_rule = CASE WHEN v.write_status THEN l.carry_status_rule
+                                             ELSE v.status_rule END,
                     archive_state_event_seq = CASE WHEN v.write_status THEN 0
                                                    ELSE l.archive_state_event_seq END,
                     updated_at = CURRENT_TIMESTAMP
@@ -21511,6 +21532,165 @@ class Database:
                 'prev_month_first_order_at': r[12].isoformat() if r[12] else None,
                 'source_file_name': r[13] or '',
                 'talk_duration_seconds': int(r[14]) if r[14] is not None else None,
+            } for r in cursor.fetchall()]
+
+    def get_tez_leads_report(self, year, month, limit=50000):
+        """Отчёт за месяц одним списком: своя база + перенос с прошлого месяца.
+
+        Отличие от get_tez_leads_detail: тот отдаёт лиды ОДНОГО месяца в разрезе
+        ИХ месяца, поэтому успешка переноса (лид прошлого месяца, поездка в этом)
+        в него не попадала — в выгрузке августа было 134 успешки против 245 в
+        разделе. Здесь набор строк равен периметру воронки периода:
+
+          * вся база отчётного месяца — и успешные, и нет;
+          * лиды прошлого месяца, не ставшие успешкой ТАМ (те самые, которые
+            дорабатываются ещё месяц; тот же отбор, что у ветви переноса в
+            get_tez_leads_for_recompute).
+
+        Все колонки перенесённой строки пересчитаны на ОТЧЁТНЫЙ месяц: статус и
+        правило берутся из carry_status, поездка — из carry_first_order_at, а
+        поездка месяца базы становится «поездкой в прошлом месяце» (месяц базы и
+        есть прошлый). Поэтому по строке видно, стал перенесённый лид успешкой
+        или нет, а не только то, что он был в базе.
+
+        Гарантия на число успешек: успешка периода всегда лежит на лиде этого
+        месяца или на лиде прошлого со status <> 'success' (проверено на проде —
+        других вариантов в tez_lead_successes нет), то есть ровно на строках
+        этой выборки. Считать успешки в отчёте и в разделе теперь одно и то же.
+        """
+        year, month = int(year), int(month)
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+        sql = """
+            WITH report AS (
+                SELECT l.id, l.year AS base_year, l.month AS base_month,
+                       FALSE AS is_carried, l.phone_norm, l.full_name,
+                       l.upload_count, l.first_batch_id,
+                       l.status AS base_status, l.status_rule AS base_status_rule,
+                       l.month_first_order_at AS trip_at,
+                       l.prev_month_first_order_at AS prev_trip_at
+                FROM tez_leads l
+                WHERE l.year = %(year)s AND l.month = %(month)s
+                UNION ALL
+                SELECT l.id, l.year, l.month,
+                       TRUE, l.phone_norm, l.full_name,
+                       l.upload_count, l.first_batch_id,
+                       l.carry_status, l.carry_status_rule,
+                       l.carry_first_order_at,
+                       l.month_first_order_at
+                FROM tez_leads l
+                WHERE l.year = %(prev_year)s AND l.month = %(prev_month)s
+                  AND l.status <> 'success'
+                  -- Номер, пришедший в базу и этого месяца тоже (на августе это
+                  -- 2797 строк из 6993), в отчёте не двоим: в отчётном месяце
+                  -- водителя представляет строка СВОЕЙ базы — она же побеждает
+                  -- в _drop_duplicate_successes, — а вторая читалась бы как
+                  -- расхождение статусов по одному человеку. Строку с успешкой
+                  -- отчётного месяца оставляем при любом раскладе: потерять
+                  -- успешку тут страшнее, чем показать номер дважды.
+                  AND (NOT EXISTS (
+                           SELECT 1 FROM tez_leads own
+                           WHERE own.year = %(year)s AND own.month = %(month)s
+                             AND own.phone_norm = l.phone_norm
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM tez_lead_successes s
+                           WHERE s.lead_id = l.id
+                             AND s.year = %(year)s AND s.month = %(month)s
+                       ))
+            )
+            SELECT r.id, r.phone_norm, r.full_name,
+                   -- Успешка отчётного месяца — сама себе статус: она уже
+                   -- записана и посчитана разделом, поэтому в отчёте не может
+                   -- зависеть от того, добежал ли пересчёт до carry_status.
+                   CASE WHEN s.id IS NOT NULL THEN 'success'
+                        -- И наоборот: успешкой строку делает ТОЛЬКО запись в
+                        -- tez_lead_successes за период — по ней раздел считает
+                        -- свои 245, по ней же обязан считать отчёт. Статус
+                        -- 'success' без такой записи означает, что статус залип
+                        -- (лид пропущен пересчётом по несовпадению версии,
+                        -- номер отдан строке своей базы), и назвать его
+                        -- успешкой — снова разойтись с разделом, теперь в
+                        -- другую сторону. Так равенство «успешек в файле =
+                        -- успешек в разделе» держится структурой запроса, а не
+                        -- цепочкой инвариантов в трёх файлах.
+                        WHEN r.base_status = 'success' THEN 'stale_success'
+                        -- base_status у своей строки NOT NULL; NULL бывает только
+                        -- у переноса, которого пересчёт ещё не видел.
+                        ELSE COALESCE(r.base_status, 'carry_pending') END,
+                   CASE WHEN s.id IS NOT NULL THEN s.rule_code
+                        ELSE r.base_status_rule END,
+                   r.upload_count,
+                   -- Даты храним в UTC (TIMESTAMPTZ), показываем в Asia/Almaty:
+                   -- без AT TIME ZONE время уезжает на −5 часов, а у полуночных
+                   -- поездок сдвигается день.
+                   r.trip_at AT TIME ZONE 'Asia/Almaty',
+                   r.prev_trip_at AT TIME ZONE 'Asia/Almaty',
+                   COALESCE(s.operator_id, lc.operator_id),
+                   COALESCE(u.name, s.operator_name, lu.name),
+                   COALESCE(s.call_at, lc.started_at) AT TIME ZONE 'Asia/Almaty',
+                   s.success_date, s.rule_code,
+                   source_batch.file_name,
+                   CASE WHEN s.id IS NOT NULL THEN success_call.billsec
+                        ELSE lc.billsec END,
+                   r.is_carried, r.base_year, r.base_month
+            FROM report r
+            -- Успешка берётся ТОЛЬКО за отчётный период: успешка, забронированная
+            -- лидом на следующий месяц (август уже дал 4 сентябрьские), в отчёт
+            -- этого месяца не входит, иначе счёт разошёлся бы с разделом.
+            LEFT JOIN tez_lead_successes s
+                   ON s.lead_id = r.id AND s.year = %(year)s AND s.month = %(month)s
+            LEFT JOIN users u ON u.id = s.operator_id
+            LEFT JOIN tez_lead_batches source_batch ON source_batch.id = r.first_batch_id
+            LEFT JOIN tez_lead_calls success_call
+                   ON success_call.general_call_id = s.call_general_id
+            -- У строки без успешки оператора и звонок показываем запасным путём —
+            -- последний квалифицирующий звонок ДО поездки, тот же, что рассматривал
+            -- расчёт. Порог поездки у переноса свой (carry_first_order_at), поэтому
+            -- отсечка берётся из r.trip_at, а не из колонки лида.
+            LEFT JOIN LATERAL (
+                SELECT c.operator_id, c.started_at, c.billsec
+                FROM tez_lead_calls c
+                WHERE c.phone_norm = r.phone_norm
+                  AND c.is_qualifying
+                  AND (r.trip_at IS NULL OR c.started_at < r.trip_at)
+                ORDER BY c.started_at DESC
+                LIMIT 1
+            ) lc ON TRUE
+            LEFT JOIN users lu ON lu.id = lc.operator_id
+            -- Своя база месяца идёт первой, перенос — за ней: у листа одна
+            -- шапка, и блоками он читается так же, как раньше читались два листа.
+            ORDER BY r.is_carried, r.trip_at DESC NULLS LAST, r.full_name
+            LIMIT %(limit)s
+        """
+        params = {
+            'year': year, 'month': month,
+            'prev_year': prev_year, 'prev_month': prev_month,
+            'limit': int(limit),
+        }
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, params)
+            return [{
+                'lead_id': str(r[0]),
+                'phone': r[1],
+                'full_name': r[2] or '',
+                'status': r[3],
+                'status_rule': r[4],
+                'upload_count': int(r[5] or 1),
+                # Имена колонок — от ОТЧЁТНОГО месяца, а не от месяца базы:
+                # у переноса это carry-поездка и поездка его собственного месяца.
+                'month_first_order_at': r[6].isoformat() if r[6] else None,
+                'first_order_at': r[6].isoformat() if r[6] else None,
+                'prev_month_first_order_at': r[7].isoformat() if r[7] else None,
+                'operator_id': int(r[8]) if r[8] is not None else None,
+                'operator_name': r[9] or '',
+                'call_at': r[10].isoformat() if r[10] else None,
+                'success_date': r[11].isoformat() if r[11] else None,
+                'rule_code': r[12],
+                'source_file_name': r[13] or '',
+                'talk_duration_seconds': int(r[14]) if r[14] is not None else None,
+                'is_carried': bool(r[15]),
+                'base_year': int(r[16]),
+                'base_month': int(r[17]),
             } for r in cursor.fetchall()]
 
     def get_tez_success_counts_for_operators(self, operator_ids, year, month):
