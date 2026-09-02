@@ -375,6 +375,61 @@ class JournalWriteTests(unittest.TestCase):
         self.assertIn('ON CONFLICT (cabinet_code, thread_id) DO UPDATE', block)
 
 
+class MessageTimeTests(unittest.TestCase):
+    """Время сообщения OLX. Ошибка здесь тихо съедает обращения.
+
+    Прод-инцидент 01.09.2026: OLX отдаёт время В UTC и БЕЗ пометки о зоне,
+    строкой вида `'2026-09-01 16:57:32'` — даже не по ISO, с пробелом вместо
+    «T». Код считал такое время местным, из-за чего каждое сообщение выглядело
+    на пять часов старше, и горизонт в 15 минут отсекал ПЕРВОЕ сообщение любого
+    нового чата. Закладка при этом вставала, и обращение не возвращалось никогда.
+    """
+
+    @staticmethod
+    def at(raw):
+        from olx_amo.olx_client import message_time
+        return message_time({'created_at': raw})
+
+    def test_naive_timestamp_is_utc_not_local(self):
+        """Форма, в которой время реально приходит с боевого OLX."""
+        self.assertEqual(datetime(2026, 9, 1, 21, 57, 32),
+                         self.at('2026-09-01 16:57:32'))
+
+    def test_iso_with_explicit_zone_still_works(self):
+        self.assertEqual(datetime(2026, 9, 1, 21, 57, 32),
+                         self.at('2026-09-01T16:57:32+00:00'))
+        self.assertEqual(datetime(2026, 9, 1, 21, 57, 32),
+                         self.at('2026-09-01T16:57:32Z'))
+        # Уже местное со своим смещением — не должно сдвинуться второй раз.
+        self.assertEqual(datetime(2026, 9, 1, 21, 57, 32),
+                         self.at('2026-09-01T21:57:32+05:00'))
+
+    def test_garbage_and_emptiness_do_not_crash(self):
+        for raw in ('', None, 'вчера', '2026-13-45'):
+            self.assertIsNone(self.at(raw), repr(raw))
+
+    def test_fresh_message_passes_a_short_horizon(self):
+        """Главное следствие: только что пришедшее обращение не считается старым.
+
+        Ровно это и ломалось — при горизонте в 15 минут отклик, поступивший
+        секунду назад, выглядел пятичасовой давностью и отбрасывался.
+
+        Горизонт задаём ЯВНО, а не берём из окружения: на проде он 15 минут, а
+        локально по умолчанию шесть часов — на шести часах этот тест прошёл бы и
+        со старым, сломанным разбором времени, то есть ничего бы не сторожил.
+        """
+        original = service.HORIZON
+        service.HORIZON = timedelta(minutes=15)
+        self.addCleanup(lambda: setattr(service, 'HORIZON', original))
+
+        now = datetime(2026, 9, 1, 21, 58, 2)
+        message = {'id': '1', 'type': 'received', 'text': '',
+                   'created_at': '2026-09-01 16:57:32'}   # это 21:57:32 по Алматы
+        fresh = service._after_bookmark([message], None, now=now)
+        self.assertEqual(['1'], [m['id'] for m in fresh],
+                         'сообщение минутной давности обязано пройти горизонт')
+
+
 class BookmarkTests(unittest.TestCase):
     """Что робот считает «ещё не разобранным». Ошибка здесь стоит дороже всего.
 
