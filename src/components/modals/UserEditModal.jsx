@@ -219,7 +219,9 @@ const compressAvatarImageFile = async (sourceFile, cropState = null) => {
     });
 };
 
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user }) => {
+// onOpenSipSettings(departmentId) — переход в «Настройки SIP» нужного провайдера.
+// Приходит из App.jsx только тем, кому раздел вообще открыт; без него кнопки нет.
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups = [], onSave, user, onOpenSipSettings = null }) => {
     const [editedUser, setEditedUser] = useState(userToEdit || {});
     const [isLoading, setIsLoading] = useState(false);
     const [modalError, setModalError] = useState("");
@@ -2486,7 +2488,24 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             {showOperatorLineFields && (
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
+                                <div className="flex items-end justify-between gap-2 mb-1">
+                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">SIP номер</label>
+                                    {/* Только ссылка в раздел, без паролей и учётки кабинета:
+                                        карточка сохраняется через /api/admin/update_user, куда
+                                        проходит глава ЛЮБОГО отдела, — класть секреты телефонии
+                                        в тот whitelist значит расширять периметр. */}
+                                    {typeof onOpenSipSettings === 'function' && (
+                                        <button
+                                            type="button"
+                                            onClick={() => onOpenSipSettings(editedUser?.department_id ?? userToEdit?.department_id)}
+                                            className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline"
+                                            title="Пароль, домен и остальная телефония живут в разделе «Настройки SIP»"
+                                        >
+                                            <FaIcon className="fas fa-headset"></FaIcon>
+                                            Настройки SIP
+                                        </button>
+                                    )}
+                                </div>
                                 <input
                                 type="text"
                                 value={editedUser?.sip_number || ""}

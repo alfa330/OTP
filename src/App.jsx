@@ -241,6 +241,16 @@ const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
 // sip_config_history приходили только оттуда. Ту же границу держит
 // _can_manage_sip_config на бэкенде.
 const SIP_SETTINGS_DEPARTMENT_CODES = new Set(['szov', 'op', 'tez']);
+// Раздел разъехался на два: телефония у таксопарков — локальная АТС Asterisk,
+// у ТЭЗ — облачная Binotel. Наборы полей у них разные (у Binotel персональные
+// SIP-логин и учётка кабинета, автодозвона нет вовсе), поэтому и пункта меню
+// два, каждый со своим списком отделов. Общий литерал выше остаётся: на нём
+// держится доступ к разделу в целом.
+const SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES = new Set(['szov', 'op']);
+const SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES = new Set(['tez']);
+// Отдел ТЭЗ КЦ — тот же, что у «Чатов ChatApp». Код 'tez' в карточке отдела
+// проставлен не у всех записей, поэтому главу проверяем и по id (как там же).
+const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -1542,6 +1552,23 @@ const aiQaHeadDepartmentCodesOf = (userLike) => {
 const isSipSettingsDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
     && aiQaHeadDepartmentCodesOf(userLike).some((code) => SIP_SETTINGS_DEPARTMENT_CODES.has(code))
+);
+
+// «Настройки SIP — Таксопарки»: главы отделов с локальной АТС. Главе ТЭЗ этот
+// раздел не нужен — у него свой, с полями Binotel.
+const isSipSettingsFleetDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => SIP_SETTINGS_ASTERISK_DEPARTMENT_CODES.has(code))
+);
+
+// «Настройки SIP — Tez»: только глава ТЭЗ. Проверяем и id отдела, и код —
+// ровно как в isChatAppDepartmentHead: код в базе заполнен не везде, а по
+// одному id глава, назначенный через справочник кодов, не прошёл бы.
+const isSipSettingsTezDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike) && (
+        Number(headedDepartmentId(userLike)) === SIP_SETTINGS_TEZ_DEPARTMENT_ID ||
+        aiQaHeadDepartmentCodesOf(userLike).some((code) => SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES.has(code))
+    )
 );
 
 const isAiQaDepartmentHead = (userLike) => (
@@ -37336,6 +37363,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessSipSettings = isAdminLikeRole
                 || isSipSettingsDepartmentHead(user)
                 || isOpSalesSupervisorForAiQa(user);
+            // Раздел разъехался на два: «Таксопарки» (локальная АТС) и «Tez» (Binotel).
+            // Главе видно только своё, админ и СВ ОП видят оба — СВ ОП работает по
+            // очередям Asterisk и в списке Тез ему нечего делать, но раздел един
+            // по правам, и резать его отдельным правилом смысла нет.
+            const canAccessSipSettingsFleet = isAdminLikeRole
+                || isSipSettingsFleetDepartmentHead(user)
+                || isOpSalesSupervisorForAiQa(user);
+            const canAccessSipSettingsTez = isAdminLikeRole
+                || isSipSettingsTezDepartmentHead(user);
             // Программа iCORE Phone: отдел продаж и админы (решение владельца).
             // Правило дублируется на бэкенде, и там оно решающее: за подписанной
             // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.
@@ -45444,6 +45480,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings' && canAccessSipSettings) return;
+                // «Настройки SIP — Tez» — тот же раздел с провайдером Binotel: свой
+                // предикат (глава ТЭЗ и админы), поэтому и своя строка обхода.
+                if (view === 'sip_settings_tez' && canAccessSipSettingsTez) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
                 // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
@@ -45473,7 +45512,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettings, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettings, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -46149,13 +46188,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
                                                 </button>
                                             </li>
-                                            {canAccessSipSettings && (
+                                            {canAccessSipSettingsFleet && (
                                                 <li>
                                                     <button
                                                         onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
                                                         className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                     >
-                                                        <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                        <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP — Таксопарки</span>
+                                                    </button>
+                                                </li>
+                                            )}
+                                            {canAccessSipSettingsTez && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings_tez')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings_tez' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-phone-volume"></FaIcon> <span className="sidebar-text">Настройки SIP — Tez</span>
                                                     </button>
                                                 </li>
                                             )}
@@ -46467,13 +46516,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {canAccessSipSettings && (
+                                            {canAccessSipSettingsFleet && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
-                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP — Таксопарки</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessSipSettingsTez && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings_tez')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings_tez' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-phone-volume"></FaIcon> <span className="sidebar-text">Настройки SIP — Tez</span>
                                                 </button>
                                             </li>
                                             )}
@@ -49228,7 +49287,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {/* Настройки SIP: админ / глава отдела / СВ отдела продаж — общий раздел вне веток по ролям */}
+                        {/* Настройки SIP — Таксопарки: админ / глава отдела / СВ отдела продаж —
+                            общий раздел вне веток по ролям. Локальная АТС Asterisk. */}
                         {( view === "sip_settings" && canAccessSipSettings && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <SipSettingsView
@@ -49238,6 +49298,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     canEdit={canAccessSipSettings}
                                     canDownloadPhone={canDownloadIcorePhone}
+                                    provider="asterisk"
+                                    canSwitchProvider={isAdminLikeRoleFn(user?.role)}
+                                />
+                            </Suspense>
+                        ))}
+                        {/* Настройки SIP — Tez: тот же раздел с провайдером Binotel.
+                            Программу телефона отсюда не раздают — она одна, и ссылка
+                            на неё живёт в разделе «Таксопарки». */}
+                        {( view === "sip_settings_tez" && canAccessSipSettingsTez && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <SipSettingsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    canEdit={canAccessSipSettingsTez}
+                                    canDownloadPhone={canDownloadIcorePhone}
+                                    provider="binotel"
                                 />
                             </Suspense>
                         ))}
@@ -53529,6 +53607,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     groups={userModalGroups}
                                     user={user}
                                     onSave={saveUserChanges}
+                                    onOpenSipSettings={(canAccessSipSettings || canAccessSipSettingsTez) ? ((departmentId) => {
+                                        // Куда вести, решает провайдер отдела сотрудника: у ТЭЗ
+                                        // поля Binotel, у остальных — локальная АТС. Если раздел
+                                        // человеку не открыт, просто никуда не идём: обход
+                                        // allowlist его всё равно выкинет на первый доступный.
+                                        const code = normalizeDepartmentCode(
+                                            (departments || []).find((d) => Number(d?.id) === Number(departmentId))?.code
+                                        );
+                                        const isTez = SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES.has(code);
+                                        if (isTez ? !canAccessSipSettingsTez : !canAccessSipSettings) return;
+                                        setShowUserEditModal(false);
+                                        navigateToView(isTez ? 'sip_settings_tez' : 'sip_settings');
+                                    }) : null}
                                 />
                             </Suspense>
                         )}
