@@ -272,6 +272,26 @@ def build_sip_password(template, number) -> str:
     return f'{template}{number}'
 
 
+# Провайдер телефонии отдела. «asterisk» — локальная АТС: сервер и база пароля
+# общие для отдела, логин = внутренний номер, пароль = база + номер, есть FOP2.
+# «binotel» — облако Binotel: у каждого сотрудника свой сервер, свой непрозрачный
+# логин и свой пароль, FOP2 нет вообще.
+SIP_PROVIDERS = ('asterisk', 'binotel')
+BINOTEL_CABINET_URL_DEFAULT = 'https://my.binotel.kz'
+SIP_PROVIDER_DEFAULT = 'asterisk'
+
+
+def normalize_sip_provider(value, default=SIP_PROVIDER_DEFAULT) -> str:
+    """Провайдер из payload'а. Неизвестное значение — ошибка, а не тихий дефолт:
+    молча съеденный «binotel» отдал бы тезовцам пароль «база + номер»."""
+    if value is None or str(value).strip() == '':
+        return default
+    provider = str(value).strip().lower()
+    if provider not in SIP_PROVIDERS:
+        raise ValueError(f"Неизвестный провайдер телефонии: {value}")
+    return provider
+
+
 SIP_FLAG_FALSE = ('', '0', 'false', 'no', 'off')
 
 
@@ -4790,6 +4810,56 @@ class Database:
             cursor.execute("""
                 ALTER TABLE user_sip_settings
                 ADD COLUMN IF NOT EXISTS fop2_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+            """)
+            # Провайдер телефонии отдела: локальная АТС («asterisk») или Binotel.
+            # У Binotel общих значений нет в принципе — сервер, логин и пароль
+            # выдаются каждому сотруднику свои, поэтому провайдер решает и набор
+            # полей в панели, и способ регистрации в телефоне.
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS provider VARCHAR(16) NOT NULL DEFAULT 'asterisk';
+            """)
+            # SIP-логин Binotel — непрозрачная строка (напр. «68m77pnw»), а не
+            # номер. У локальной АТС логин совпадает с внутренним номером, у
+            # Binotel это разные вещи, и users.sip_number у тезовцев обязан
+            # остаться ВНУТРЕННИМ НОМЕРОМ: по нему tez_binotel_calls матчит звонки.
+            cursor.execute("""
+                ALTER TABLE user_sip_settings
+                ADD COLUMN IF NOT EXISTS sip_login VARCHAR(128) NOT NULL DEFAULT '';
+            """)
+            # Учётка веб-кабинета my.binotel.kz. Отдельной таблицей, а не
+            # колонками в user_sip_settings: та строка удаляется, когда у
+            # сотрудника не осталось SIP-переопределений, и сброс SIP унёс бы
+            # вместе с ней доступ в кабинет.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS binotel_user_accounts (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    cabinet_login VARCHAR(255) NOT NULL DEFAULT '',
+                    cabinet_password VARCHAR(255) NOT NULL DEFAULT '',
+                    employee_id VARCHAR(32) NOT NULL DEFAULT '',
+                    cabinet_url VARCHAR(255) NOT NULL DEFAULT '',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            # Снятие общего яруса: раньше отдел без своей строки наследовал
+            # sip_config. Ярус убираем — одна унификация на все отделы опасна, —
+            # поэтому действующие значения переносим в строки отделов, иначе
+            # операторы таких отделов разом остались бы без сервера и пароля.
+            # Идемпотентно: только там, где своей строки ещё нет.
+            cursor.execute("""
+                INSERT INTO sip_department_config (
+                    department_id, sip_server, base_password, autodial_code,
+                    autodial_server, autodial_base_password)
+                SELECT DISTINCT u.department_id, c.sip_server, c.base_password,
+                       c.autodial_code, c.autodial_server, c.autodial_base_password
+                FROM users u
+                CROSS JOIN sip_config c
+                WHERE c.id = 1
+                  AND u.department_id IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(c.sip_server, '')), '') IS NOT NULL
+                  AND NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
+                ON CONFLICT (department_id) DO NOTHING;
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS resource_saved_schedule_plans (
@@ -26342,6 +26412,7 @@ class Database:
                        COALESCE(c.sip_server, ''), COALESCE(c.base_password, ''),
                        COALESCE(c.autodial_code, ''), COALESCE(c.autodial_server, ''),
                        COALESCE(c.autodial_base_password, ''),
+                       COALESCE(c.provider, 'asterisk') AS provider,
                        (c.department_id IS NOT NULL) AS configured,
                        c.updated_at, u.name,
                        COALESCE(ops.cnt, 0)
@@ -26368,15 +26439,19 @@ class Database:
             "autodial_code": r[5],
             "autodial_server": r[6],
             "autodial_base_password": r[7],
-            "configured": bool(r[8]),
-            "updated_at": r[9].isoformat() if r[9] else None,
-            "updated_by_name": r[10],
-            "operators_count": int(r[11] or 0),
+            "provider": r[8] or SIP_PROVIDER_DEFAULT,
+            "configured": bool(r[9]),
+            "updated_at": r[10].isoformat() if r[10] else None,
+            "updated_by_name": r[11],
+            "operators_count": int(r[12] or 0),
         } for r in rows]
 
     def update_sip_department_config(self, department_id: int, payload: dict, user_id=None) -> dict:
-        """Сохранить настройки отдела. Все три поля пустые — строку убираем,
-        отдел снова наследует общие настройки."""
+        """Сохранить настройки отдела.
+
+        Строку убираем, только если отдел на локальной АТС и все её поля пусты:
+        у отдела на Binotel полей отдела нет вообще (всё персональное), и удаление
+        строки потеряло бы сам признак провайдера."""
         department_id = int(department_id)
         payload = payload or {}
         current = next(
@@ -26397,40 +26472,47 @@ class Database:
         autodial_code = normalize_sip_identifier(_field('autodial_code'), field="Код автодозвона")
         autodial_server = _field('autodial_server')
         autodial_base = _field('autodial_base_password')
+        provider = normalize_sip_provider(payload.get('provider'), current['provider'])
         filled = (sip_server, base_password, autodial_code, autodial_server, autodial_base)
+        # Binotel описывается одним признаком провайдера, поэтому его строка
+        # «непустая» даже без единого заполненного поля.
+        keep_row = any(filled) or provider != SIP_PROVIDER_DEFAULT
         unchanged = (
             sip_server == current['sip_server']
             and base_password == current['base_password']
             and autodial_code == current['autodial_code']
             and autodial_server == current['autodial_server']
             and autodial_base == current['autodial_base_password']
+            and provider == current['provider']
         )
-        if unchanged and current['configured'] == any(filled):
+        if unchanged and current['configured'] == keep_row:
             return current
 
         with self._get_cursor() as cur:
-            if any(filled):
+            if keep_row:
                 cur.execute("""
                     INSERT INTO sip_department_config (
                         department_id, sip_server, base_password, autodial_code, autodial_server,
-                        autodial_base_password, updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                        autodial_base_password, provider, updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (department_id) DO UPDATE SET
                         sip_server = EXCLUDED.sip_server,
                         base_password = EXCLUDED.base_password,
                         autodial_code = EXCLUDED.autodial_code,
                         autodial_server = EXCLUDED.autodial_server,
                         autodial_base_password = EXCLUDED.autodial_base_password,
+                        provider = EXCLUDED.provider,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, (department_id, sip_server, base_password, autodial_code, autodial_server,
-                      autodial_base, user_id))
+                      autodial_base, provider, user_id))
             else:
                 cur.execute("DELETE FROM sip_department_config WHERE department_id = %s", (department_id,))
             cur.execute("""
                 INSERT INTO sip_config_history (changed_by, department_id, settings)
                 VALUES (%s, %s, %s::jsonb)
             """, (user_id, department_id, json.dumps({
+                "provider": provider,
                 "sip_server": sip_server,
                 "base_password": self._mask_sip_secret(base_password),
                 "autodial_code": autodial_code,
@@ -26475,13 +26557,21 @@ class Database:
             COALESCE(dc.autodial_code, '') AS department_autodial_code,
             COALESCE(dc.autodial_server, '') AS department_autodial_server,
             COALESCE(dc.autodial_base_password, '') AS department_autodial_base_password,
+            COALESCE(s.fop2_enabled, TRUE) AS fop2_enabled,
+            COALESCE(dc.provider, 'asterisk') AS department_provider,
+            COALESCE(s.sip_login, '') AS sip_login,
+            COALESCE(b.cabinet_login, '') AS binotel_cabinet_login,
+            COALESCE(b.employee_id, '') AS binotel_employee_id,
+            COALESCE(b.cabinet_url, '') AS binotel_cabinet_url,
+            -- Пароль кабинета наружу не отдаём никогда — только признак «задан».
             -- Строго последней колонкой: _sip_operator_row читает row по индексам,
             -- вставка в середину сдвинула бы все поля после неё.
-            COALESCE(s.fop2_enabled, TRUE) AS fop2_enabled
+            (NULLIF(b.cabinet_password, '') IS NOT NULL) AS has_binotel_cabinet_password
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
         LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+        LEFT JOIN binotel_user_accounts b ON b.user_id = u.id
         LEFT JOIN users upd ON upd.id = s.updated_by
         LEFT JOIN LATERAL (
             SELECT g.name AS group_name
@@ -26521,6 +26611,14 @@ class Database:
             # Строки в user_sip_settings у большинства нет — COALESCE в SELECT
             # уже отдал TRUE, поэтому здесь достаточно приведения к bool.
             "fop2_enabled": bool(row[21]),
+            # Провайдер отдела: решает, какие поля вообще имеют смысл у сотрудника.
+            "department_provider": row[22] or SIP_PROVIDER_DEFAULT,
+            # SIP-логин Binotel («68m77pnw»); у локальной АТС пусто = логин равен номеру.
+            "sip_login": row[23] or "",
+            "binotel_cabinet_login": row[24] or "",
+            "binotel_employee_id": row[25] or "",
+            "binotel_cabinet_url": row[26] or "",
+            "has_binotel_cabinet_password": bool(row[27]),
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -26593,50 +26691,43 @@ class Database:
         exclude = sorted({int(u) for u in (exclude_user_ids or []) if u is not None})
         with self._get_cursor() as cur:
             cur.execute("""
-                WITH cfg AS (
-                    SELECT COALESCE((
-                        SELECT LOWER(TRIM(COALESCE(sip_server, ''))) FROM sip_config WHERE id = 1
-                    ), '') AS common,
-                    COALESCE((
-                        SELECT LOWER(TRIM(COALESCE(autodial_server, ''))) FROM sip_config WHERE id = 1
-                    ), '') AS autodial_common
-                ), wanted AS (
-                    SELECT w.num, COALESCE(NULLIF(w.dom, ''), cfg.common) AS dom
-                    FROM unnest(%s::text[], %s::text[]) AS w(num, dom) CROSS JOIN cfg
+                WITH wanted AS (
+                    SELECT w.num, w.dom
+                    FROM unnest(%s::text[], %s::text[]) AS w(num, dom)
                 ), taken AS (
-                    -- Домен сотрудника: персональный → домен его отдела → общий.
+                    -- Домен сотрудника: персональный → домен его отдела.
+                    -- Общего яруса больше нет: отдел без настроек даёт пустой
+                    -- домен, а пустые пары в сравнении не участвуют (иначе все
+                    -- ненастроенные отделы конфликтовали бы друг с другом).
                     SELECT TRIM(u.sip_number) AS num,
                            COALESCE(
                                NULLIF(LOWER(TRIM(COALESCE(s.sip_domain, ''))), ''),
                                NULLIF(LOWER(TRIM(COALESCE(dc.sip_server, ''))), ''),
-                               cfg.common) AS dom,
+                               '') AS dom,
                            u.id, u.name, 'main'::text AS kind
                     FROM users u
                     LEFT JOIN user_sip_settings s ON s.user_id = u.id
                     LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
-                    CROSS JOIN cfg
                     WHERE NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
                     UNION ALL
-                    -- У автодозвона может быть своя АТС: домен отдела для
-                    -- автодозвона → общий для автодозвона → домен основного.
+                    -- У автодозвона может быть своя АТС: его домен отдела,
+                    -- иначе домен основного аккаунта того же отдела.
                     SELECT TRIM(s.autodial_number),
                            COALESCE(
                                NULLIF(LOWER(TRIM(COALESCE(s.autodial_domain, ''))), ''),
                                NULLIF(LOWER(TRIM(COALESCE(dc.autodial_server, ''))), ''),
-                               NULLIF(cfg.autodial_common, ''),
                                NULLIF(LOWER(TRIM(COALESCE(dc.sip_server, ''))), ''),
-                               cfg.common),
+                               ''),
                            u.id, u.name, 'autodial'::text
                     FROM user_sip_settings s
                     JOIN users u ON u.id = s.user_id
                     LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
-                    CROSS JOIN cfg
                     WHERE NULLIF(TRIM(COALESCE(s.autodial_number, '')), '') IS NOT NULL
                 )
                 SELECT w.num, w.dom, t.id, t.name, t.kind
                 FROM wanted w
                 JOIN taken t ON t.num = w.num AND t.dom = w.dom
-                WHERE t.id <> ALL(%s)
+                WHERE w.dom <> '' AND t.id <> ALL(%s)
             """, (numbers, domains, exclude))
             rows = cur.fetchall()
         owners = {}
@@ -26645,6 +26736,28 @@ class Database:
                 "user_id": owner_id, "name": owner_name or "", "kind": kind, "domain": domain,
             })
         return owners
+
+    def find_sip_login_owner(self, sip_login, exclude_user_ids=None) -> Optional[dict]:
+        """Кто уже занял этот SIP-логин, или None.
+
+        В отличие от номера логин Binotel уникален ГЛОБАЛЬНО, без привязки к
+        домену: это учётка на стороне провайдера, и два оператора с одним
+        логином отбирали бы регистрацию друг у друга."""
+        sip_login = str(sip_login or '').strip()
+        if not sip_login:
+            return None
+        exclude = sorted({int(u) for u in (exclude_user_ids or []) if u is not None})
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT u.id, u.name
+                FROM user_sip_settings s
+                JOIN users u ON u.id = s.user_id
+                WHERE LOWER(TRIM(s.sip_login)) = LOWER(%s)
+                  AND u.id <> ALL(%s)
+                LIMIT 1
+            """, (sip_login, exclude))
+            row = cur.fetchone()
+        return {"user_id": row[0], "name": row[1] or ""} if row else None
 
     def save_user_sip_settings(self, user_id: int, payload: dict, changed_by=None) -> dict:
         """Сохранить SIP-аккаунты сотрудника одной транзакцией.
@@ -26671,25 +26784,41 @@ class Database:
             # разошлись бы при первой же правке.
             return parse_sip_flag(payload.get(key), default)
 
+        provider = current.get('department_provider') or SIP_PROVIDER_DEFAULT
+        binotel = provider == 'binotel'
+
         sip_number = normalize_sip_identifier(_field('sip_number', current['sip_number']), field="SIP-номер")
-        autodial_number = normalize_sip_identifier(
-            _field('autodial_number', current['autodial_number']), field="Номер автодозвона")
         sip_password = _field('sip_password', current['sip_password'])
         sip_domain = _field('sip_domain', current['sip_domain'])
-        autodial_password = _field('autodial_password', current['autodial_password'])
-        autodial_domain = _field('autodial_domain', current['autodial_domain'])
-        # Флаг относится только к основному аккаунту: у режима автодозвона свой FOP2.
-        fop2_enabled = _flag('fop2_enabled', current.get('fop2_enabled', True))
+        # SIP-логин Binotel через normalize_sip_identifier не гоняем: тот режет
+        # «@» и «:» и рубит на 64 символах, а логин здесь — выданная провайдером
+        # непрозрачная строка, и портить её нельзя.
+        sip_login = _field('sip_login', current['sip_login'])[:128]
+        if binotel:
+            # Автодозвон — механика локальной АТС (второй номер, код, свой FOP2).
+            # В Binotel его нет, и пустые поля тут не «наследование», а отсутствие.
+            autodial_number = autodial_password = autodial_domain = ''
+            # FOP2 в Binotel не существует: телефон не должен даже пытаться.
+            fop2_enabled = False
+        else:
+            autodial_number = normalize_sip_identifier(
+                _field('autodial_number', current['autodial_number']), field="Номер автодозвона")
+            autodial_password = _field('autodial_password', current['autodial_password'])
+            autodial_domain = _field('autodial_domain', current['autodial_domain'])
+            # Флаг относится только к основному аккаунту: у автодозвона свой FOP2.
+            fop2_enabled = _flag('fop2_enabled', current.get('fop2_enabled', True))
+            sip_login = ''
 
         # Занятость номера считается в пределах домена: одинаковые номера на
         # разных АТС конфликтом не считаются. Домен «по умолчанию» для этого
         # сотрудника — его отдела, а если отдел не настроен — общий. У
         # автодозвона своя цепочка: он часто живёт на отдельной АТС.
-        cfg = self.get_sip_config()
-        common_domain = self.normalize_sip_domain(
-            current.get('department_sip_server') or cfg.get('sip_server'))
+        # Только домен отдела: общего яруса больше нет (одна унификация на все
+        # отделы опасна). У отдела без своих настроек домен пуст — и пара
+        # «номер + домен» тогда не проверяется, см. ниже.
+        common_domain = self.normalize_sip_domain(current.get('department_sip_server'))
         autodial_common = self.normalize_sip_domain(
-            current.get('department_autodial_server') or cfg.get('autodial_server')) or common_domain
+            current.get('department_autodial_server')) or common_domain
 
         def _effective(domain):
             return self.normalize_sip_domain(domain) or common_domain
@@ -26706,26 +26835,59 @@ class Database:
             (current['sip_number'], _effective(current['sip_domain'])),
             (current['autodial_number'], _effective_autodial(current['autodial_domain'])),
         }
-        changed_pairs = [p for p in (main_pair, autodial_pair) if p[0] and p not in was]
+        # Пара без домена ни о чём не говорит: у отдела без настроек домен пуст,
+        # и такие пары схлопнулись бы в «номер@» — все отделы стали бы конфликтовать
+        # друг с другом. Уникальность номера проверяем только там, где домен известен.
+        changed_pairs = [p for p in (main_pair, autodial_pair) if p[0] and p[1] and p not in was]
         owners = self.find_sip_number_owners(changed_pairs, exclude_user_ids=[user_id])
         if owners:
             (number, domain), owner = next(iter(owners.items()))
             raise ValueError(f"Номер {number} на домене {domain or '—'} уже занят: {owner['name']}")
+        # SIP-логин Binotel уникален глобально: он и есть учётка на стороне провайдера,
+        # два оператора с одним логином отобрали бы регистрацию друг у друга.
+        if sip_login and sip_login != current['sip_login']:
+            owner = self.find_sip_login_owner(sip_login, exclude_user_ids=[user_id])
+            if owner:
+                raise ValueError(f"SIP-логин {sip_login} уже занят: {owner['name']}")
 
         # Выключенный FOP2 — тоже персональная настройка: без него строка с
         # одним лишь fop2_enabled=FALSE ушла бы в DELETE ниже, и флаг молча
         # вернулся бы к «включён» (COALESCE отдаёт TRUE при отсутствии строки).
-        has_overrides = any((sip_password, sip_domain, autodial_number, autodial_password,
-                             autodial_domain, not fop2_enabled))
+        has_overrides = any((sip_password, sip_domain, sip_login, autodial_number,
+                             autodial_password, autodial_domain, not fop2_enabled))
+
+        # Учётка кабинета: пустой пароль = «не менять» (так же ведёт себя сам
+        # кабинет), поэтому «не передали» и «передали пусто» здесь одно и то же.
+        cab_login = _field('binotel_cabinet_login', current['binotel_cabinet_login'])
+        cab_url = _field('binotel_cabinet_url', current['binotel_cabinet_url'])
+        cab_employee = _field('binotel_employee_id', current['binotel_employee_id'])[:32]
+        cab_password_raw = payload.get('binotel_cabinet_password')
+        cab_password = None if cab_password_raw is None else str(cab_password_raw).strip()
+        if not binotel:
+            # У локальной АТС полей кабинета нет. Игнорируем их, но и не стираем:
+            # отдел могли перевести на Binotel и обратно.
+            cab_login = current['binotel_cabinet_login']
+            cab_url = current['binotel_cabinet_url']
+            cab_employee = current['binotel_employee_id']
+            cab_password = None
+        cabinet_changed = binotel and any((
+            cab_login != current['binotel_cabinet_login'],
+            cab_url != current['binotel_cabinet_url'],
+            cab_employee != current['binotel_employee_id'],
+            bool(cab_password),
+        ))
+
         changed = any((
             sip_number != current['sip_number'],
             sip_password != current['sip_password'],
             sip_domain != current['sip_domain'],
+            sip_login != current['sip_login'],
             autodial_number != current['autodial_number'],
             autodial_password != current['autodial_password'],
             autodial_domain != current['autodial_domain'],
             # Без этой строки PUT с одним только флагом уходил бы в ранний return.
             fop2_enabled != bool(current.get('fop2_enabled', True)),
+            cabinet_changed,
         ))
         if not changed:
             return current
@@ -26745,30 +26907,56 @@ class Database:
             if has_overrides:
                 cur.execute("""
                     INSERT INTO user_sip_settings (
-                        user_id, sip_password, sip_domain,
+                        user_id, sip_password, sip_domain, sip_login,
                         autodial_number, autodial_password, autodial_domain,
                         fop2_enabled, updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (user_id) DO UPDATE SET
                         sip_password = EXCLUDED.sip_password,
                         sip_domain = EXCLUDED.sip_domain,
+                        sip_login = EXCLUDED.sip_login,
                         autodial_number = EXCLUDED.autodial_number,
                         autodial_password = EXCLUDED.autodial_password,
                         autodial_domain = EXCLUDED.autodial_domain,
                         fop2_enabled = EXCLUDED.fop2_enabled,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
-                """, (user_id, sip_password, sip_domain, autodial_number,
+                """, (user_id, sip_password, sip_domain, sip_login, autodial_number,
                       autodial_password, autodial_domain, fop2_enabled, changed_by))
             else:
                 cur.execute("DELETE FROM user_sip_settings WHERE user_id = %s", (user_id,))
+            if cabinet_changed:
+                # Пароль пишем только когда его прислали: COALESCE(NULLIF(...))
+                # оставляет прежний, поэтому «сохранить без пароля» не стирает его.
+                cur.execute("""
+                    INSERT INTO binotel_user_accounts (
+                        user_id, cabinet_login, cabinet_password, employee_id, cabinet_url,
+                        updated_by, updated_at)
+                    VALUES (%s, %s, COALESCE(%s, ''), %s, %s, %s,
+                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        cabinet_login = EXCLUDED.cabinet_login,
+                        cabinet_password = COALESCE(
+                            NULLIF(EXCLUDED.cabinet_password, ''),
+                            binotel_user_accounts.cabinet_password),
+                        employee_id = EXCLUDED.employee_id,
+                        cabinet_url = EXCLUDED.cabinet_url,
+                        updated_by = EXCLUDED.updated_by,
+                        updated_at = EXCLUDED.updated_at
+                """, (user_id, cab_login, cab_password, cab_employee, cab_url, changed_by))
             cur.execute("""
                 INSERT INTO sip_config_history (changed_by, target_user_id, settings)
                 VALUES (%s, %s, %s::jsonb)
             """, (changed_by, user_id, json.dumps({
+                "provider": provider,
                 "sip_number": sip_number,
+                "sip_login": sip_login,
                 "sip_password": self._mask_sip_secret(sip_password),
                 "sip_domain": sip_domain,
+                "binotel_cabinet_login": cab_login,
+                "binotel_employee_id": cab_employee,
+                # Пароль кабинета в историю не попадает — только факт замены.
+                "binotel_cabinet_password_set": bool(cab_password),
                 "autodial_number": autodial_number,
                 "autodial_password": self._mask_sip_secret(autodial_password),
                 "autodial_domain": autodial_domain,
@@ -26804,9 +26992,9 @@ class Database:
         if not fields:
             raise ValueError("Не выбрано ни одного поля для изменения")
 
-        cfg = self.get_sip_config()
-        global_domain = self.normalize_sip_domain(cfg.get('sip_server'))
-        global_autodial = self.normalize_sip_domain(cfg.get('autodial_server')) or global_domain
+        # Общего яруса нет: домен по умолчанию — только отдела сотрудника.
+        global_domain = ''
+        global_autodial = ''
 
         with self._get_cursor() as cur:
             cur.execute("""
@@ -26815,7 +27003,7 @@ class Database:
                        COALESCE(s.autodial_number, ''), COALESCE(s.autodial_password, ''),
                        COALESCE(s.autodial_domain, ''), COALESCE(u.sip_number, ''),
                        COALESCE(dc.sip_server, ''), COALESCE(dc.autodial_server, ''),
-                       COALESCE(s.fop2_enabled, TRUE)
+                       COALESCE(s.fop2_enabled, TRUE), COALESCE(s.sip_login, '')
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
                 LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
@@ -26830,6 +27018,10 @@ class Database:
                     # чистка пароля удалила бы строку и молча вернула FOP2 тем,
                     # кому его выключали (COALESCE отдаёт TRUE без строки).
                     "fop2_enabled": bool(r[10]),
+                    # Логин Binotel массовые операции не меняют, но обязаны его
+                    # сохранить: иначе чистка пароля отправит строку в DELETE и
+                    # оператор потеряет учётку у провайдера.
+                    "sip_login": r[11],
                 }
                 names[r[0]] = r[1] or ""
                 numbers[r[0]] = r[7]
@@ -26900,11 +27092,11 @@ class Database:
                 # Выключенный FOP2 — тоже повод хранить строку, поэтому считаем
                 # не any(after.values()): там лежит и fop2_enabled=True, который
                 # сам по себе строку не оправдывает (это состояние по умолчанию).
-                if any((after['sip_password'], after['sip_domain'], after['autodial_number'],
-                        after['autodial_password'], after['autodial_domain'],
-                        not after['fop2_enabled'])):
+                if any((after['sip_password'], after['sip_domain'], after['sip_login'],
+                        after['autodial_number'], after['autodial_password'],
+                        after['autodial_domain'], not after['fop2_enabled'])):
                     upserts.append((
-                        user_id, after['sip_password'], after['sip_domain'],
+                        user_id, after['sip_password'], after['sip_domain'], after['sip_login'],
                         after['autodial_number'], after['autodial_password'],
                         after['autodial_domain'], after['fop2_enabled'], changed_by,
                     ))
@@ -26923,13 +27115,14 @@ class Database:
             if upserts:
                 execute_values(cur, """
                     INSERT INTO user_sip_settings (
-                        user_id, sip_password, sip_domain,
+                        user_id, sip_password, sip_domain, sip_login,
                         autodial_number, autodial_password, autodial_domain,
                         fop2_enabled, updated_by, updated_at)
                     VALUES %s
                     ON CONFLICT (user_id) DO UPDATE SET
                         sip_password = EXCLUDED.sip_password,
                         sip_domain = EXCLUDED.sip_domain,
+                        sip_login = EXCLUDED.sip_login,
                         autodial_number = EXCLUDED.autodial_number,
                         autodial_password = EXCLUDED.autodial_password,
                         autodial_domain = EXCLUDED.autodial_domain,
@@ -26937,7 +27130,7 @@ class Database:
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, upserts,
-                    template="(%s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))")
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))")
             if deletes:
                 cur.execute("DELETE FROM user_sip_settings WHERE user_id = ANY(%s)", (deletes,))
             if history:
@@ -26948,37 +27141,97 @@ class Database:
 
         return self.get_sip_operators_by_ids(ids)
 
+    def get_binotel_account(self, user_id: int) -> Optional[dict]:
+        """Учётка веб-кабинета Binotel вместе с паролем — только для самого оператора.
+
+        Панель руководителя пароль не получает никогда (там лишь признак
+        «задан»); телефон получает, потому что сам поднимает сессию кабинета и
+        переключает статус запросом."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT cabinet_login, cabinet_password, employee_id, cabinet_url
+                FROM binotel_user_accounts WHERE user_id = %s
+            """, (int(user_id),))
+            row = cur.fetchone()
+        if not row or not (row[0] or '').strip():
+            return None
+        base_url = (row[3] or '').strip() or BINOTEL_CABINET_URL_DEFAULT
+        employee_id = (row[2] or '').strip()
+        return {
+            "cabinet_url": base_url,
+            "cabinet_login": row[0] or "",
+            "cabinet_password": row[1] or "",
+            "employee_id": employee_id,
+            # «me» кабинет понимает сам, поэтому ссылка работает и без employee_id.
+            "status_url": "%s/f/pbx/#/settings/users/manage-users/%s" % (
+                base_url.rstrip('/'), employee_id or 'me'),
+        }
+
     def get_user_sip_account(self, user_id: int) -> dict:
         """Готовые данные регистрации для iCORE Phone: основной аккаунт + автодозвон.
 
-        Значения берутся по цепочке «персональное → отдела → общее»."""
-        cfg = self.get_sip_config()
+        Значения берутся по цепочке «персональное → отдела»; общего яруса больше
+        нет. У Binotel наследовать нечего в принципе: сервер, логин и пароль
+        выданы каждому свои, а логин с номером не совпадает."""
         row = self.get_sip_operator(int(user_id)) or {}
-        server = (row.get("department_sip_server") or cfg.get("sip_server") or "").strip()
-        # Автодозвон может стоять на отдельной АТС; если её не задали — тот же сервер.
-        autodial_server = (
-            row.get("department_autodial_server") or cfg.get("autodial_server") or "").strip() or server
-        base = row.get("department_base_password") or cfg.get("base_password") or ""
-        # У автодозвона своя база: пароль = база автодозвона + номер автодозвона.
-        autodial_base = (
-            row.get("department_autodial_base_password")
-            or cfg.get("autodial_base_password") or base)
-        autodial_code = row.get("department_autodial_code") or cfg.get("autodial_code") or ""
+        provider = row.get("department_provider") or SIP_PROVIDER_DEFAULT
         sip_number = (row.get("sip_number") or "").strip()
+
+        if provider == 'binotel':
+            login = (row.get("sip_login") or "").strip()
+            password = row.get("sip_password") or ""
+            server = (row.get("sip_domain") or "").strip()
+            main = None
+            if login and password and server:
+                main = {
+                    # Регистрируемся логином провайдера, а не номером.
+                    "username": login,
+                    "password": password,
+                    "server": server,
+                    "transport": "UDP",
+                    "domain": server,
+                    "auth_id": login,
+                    # Внутренний номер — только для показа и матчинга звонков.
+                    "number": sip_number,
+                }
+            return {
+                "provider": provider,
+                "main": main,
+                # Автодозвон — механика локальной АТС, в Binotel его нет.
+                "autodial": None,
+                "autodial_code": "",
+                # FOP2 у Binotel не существует: телефон не должен и пытаться.
+                "fop2_enabled": False,
+                "binotel": self.get_binotel_account(user_id),
+            }
+
+        server = (row.get("department_sip_server") or "").strip()
+        # Автодозвон может стоять на отдельной АТС; если её не задали — тот же сервер.
+        autodial_server = (row.get("department_autodial_server") or "").strip() or server
+        base = row.get("department_base_password") or ""
+        # У автодозвона своя база: пароль = база автодозвона + номер автодозвона.
+        autodial_base = row.get("department_autodial_base_password") or base
+        autodial_code = row.get("department_autodial_code") or ""
         autodial_number = (row.get("autodial_number") or "").strip()
 
         def _account(number, password, domain, fallback_server, fallback_base):
             if not number:
                 return None
+            resolved = (domain or fallback_server)
             return {
                 "username": number,
                 "password": password or build_sip_password(fallback_base, number),
-                "server": (domain or fallback_server),
+                "server": resolved,
                 "transport": "UDP",
+                # Явные поля рядом с плоскими: у локальной АТС логин и есть номер,
+                # но телефон один и тот же код применяет к обоим провайдерам.
+                "domain": resolved,
+                "auth_id": number,
+                "number": number,
             }
 
         return {
-            "config": cfg,
+            "provider": provider,
             "main": _account(sip_number, row.get("sip_password"), row.get("sip_domain"), server, base),
             "autodial": _account(autodial_number, row.get("autodial_password"),
                                  row.get("autodial_domain"), autodial_server, autodial_base),
@@ -26986,6 +27239,7 @@ class Database:
             # Выключатель входа в FOP2 для основного аккаунта. Режим автодозвона
             # логинится в свой FOP2 и этим флагом не управляется.
             "fop2_enabled": bool(row.get("fop2_enabled", True)),
+            "binotel": None,
         }
 
     # ── Релизы iCORE Phone ──────────────────────────────────────────────────
