@@ -12,7 +12,7 @@ import {
 } from '../ui/chat';
 import CustomSelect from '../ui/CustomSelect';
 import {
-    RESULTS, RESULT_LABEL, RESULT_TONE, SLA_MS, STATE_LABEL, STATE_TONE,
+    EVENT_TONE, RESULTS, RESULT_LABEL, RESULT_TONE, SLA_MS, STATE_LABEL, STATE_TONE,
     fmtAgo, fmtClock, fmtLatency, fmtPhone, fmtTime, fmtWaiting,
     groupByDay, isoToday, plural,
 } from './olxMeta';
@@ -473,7 +473,9 @@ const Conversation = ({ apiBaseUrl, headers, toast, canReply, thread, onBack,
                 {groups.map((group) => (
                     <div key={group.key} className="space-y-1.5">
                         <ChatDayDivider>{group.label}</ChatDayDivider>
-                        {group.messages.map((message) => (
+                        {group.messages.map((message) => (message.event ? (
+                            <TimelineEvent key={message.id} item={message} />
+                        ) : (
                             <ChatBubble
                                 key={message.id}
                                 out={message.outgoing}
@@ -494,7 +496,7 @@ const Conversation = ({ apiBaseUrl, headers, toast, canReply, thread, onBack,
                                     </a>
                                 ))}
                             </ChatBubble>
-                        ))}
+                        )))}
                     </div>
                 ))}
             </div>
@@ -517,6 +519,45 @@ const Conversation = ({ apiBaseUrl, headers, toast, canReply, thread, onBack,
                     Отвечать кандидатам вам нельзя — откройте чат в кабинете OLX.
                 </div>
             )}
+        </div>
+    );
+};
+
+/* Системная отметка в ленте: «Создана сделка», «Повтор за сутки» и подобное.
+ *
+ * По центру и мельче реплик — это не разговор, а пометка на полях. Без них
+ * переписка выглядит как беседа без последствий, и маркетолог идёт проверять
+ * amoCRM руками; с ними видно прямо здесь, что отклик доехал. */
+const TimelineEvent = ({ item }) => {
+    const tone = EVENT_TONE[item.event] || 'slate';
+    const skin = {
+        green: 'bg-emerald-50 text-emerald-700 ring-emerald-100',
+        amber: 'bg-amber-50 text-amber-700 ring-amber-100',
+        blue: 'bg-blue-50 text-blue-700 ring-blue-100',
+        red: 'bg-rose-50 text-rose-600 ring-rose-100',
+        slate: 'bg-slate-100 text-slate-500 ring-slate-200/60',
+    }[tone];
+
+    return (
+        <div className="flex justify-center px-4 py-0.5">
+            <div className={`max-w-[86%] rounded-full px-3 py-1 text-center text-[11.5px] ring-1 ${skin}`}>
+                <span>{item.text}</span>
+                {item.amo_url && (
+                    <a href={item.amo_url} target="_blank" rel="noreferrer"
+                        className="ml-1.5 underline underline-offset-2">
+                        №{item.amo_lead_id}
+                    </a>
+                )}
+                {item.latency_ms != null && (
+                    <span className="ml-1.5 tabular-nums opacity-70">
+                        за {fmtLatency(item.latency_ms)}
+                    </span>
+                )}
+                <span className="ml-1.5 tabular-nums opacity-70">{fmtClock(item.at)}</span>
+                {item.error && (
+                    <div className="mt-0.5 opacity-80">{item.error}</div>
+                )}
+            </div>
         </div>
     );
 };

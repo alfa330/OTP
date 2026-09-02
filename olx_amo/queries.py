@@ -564,6 +564,27 @@ def write_journal(cursor, cabinet_code, result, **fields):
     return written
 
 
+def journal_for_thread(cursor, cabinet_code, thread_id):
+    """Что робот сделал по этому чату — для системных отметок в переписке.
+
+    Человек, открывший диалог, должен видеть не только реплики, но и что
+    произошло между ними: завелась сделка, обращение сочли повтором, передача
+    сорвалась. Иначе переписка выглядит как разговор без последствий, и
+    маркетолог идёт проверять amoCRM руками.
+    """
+    cursor.execute(
+        """
+        SELECT id, result, message_at, created_at, phone_normalized, phone_raw,
+               amo_lead_id, error_text, latency_ms
+          FROM olx_journal
+         WHERE cabinet_code = %(cabinet_code)s AND thread_id = %(thread_id)s
+         ORDER BY id
+        """,
+        {'cabinet_code': cabinet_code, 'thread_id': str(thread_id)},
+    )
+    return _all(cursor)
+
+
 def find_recent_lead(cursor, cabinet_code, phone_normalized, day=None):
     """Уже была сегодня сделка по этому номеру в этом кабинете?
 

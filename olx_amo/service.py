@@ -940,6 +940,7 @@ def read_conversation(db, cabinet, thread_id):
     with db._get_cursor() as cursor:
         ours = queries.outbound_for_thread(cursor, cabinet.code, thread_id)
         state = queries.get_thread(cursor, cabinet.code, thread_id) or {}
+        events = queries.journal_for_thread(cursor, cabinet.code, thread_id)
 
     state = _fill_thread_header(db, client, cabinet, thread_id, state)
 
@@ -981,8 +982,52 @@ def read_conversation(db, cabinet, thread_id):
                 'cvs': [],
             })
 
+    # Системные отметки идут В ТОЙ ЖЕ ленте, а не отдельным списком: человек
+    # читает переписку сверху вниз, и «сделка создана» имеет смысл ровно там,
+    # где она случилась — между репликой кандидата и следующей.
+    items.extend(_timeline_events(events))
+
     items.sort(key=lambda x: (x['at'] or datetime.min, str(x['id'])))
     return {'items': items, 'state': state}
+
+
+# Что показывать системной отметкой, а что нет.
+#
+# `canned_reply` и `human_reply` сюда НЕ входят намеренно: сами эти сообщения
+# уже стоят в ленте пузырями, и отметка «отправлен ответ» рядом с ним была бы
+# той же информацией дважды.
+_EVENT_LABELS = {
+    'lead_created': 'Создана сделка',
+    'manual_review': 'Создана сделка, номер требует проверки',
+    'duplicate': 'Повтор за сутки — сделку не заводили',
+    'needs_human': 'Ждёт ответа человека',
+    'error': 'Не доехало в amoCRM',
+}
+
+
+def _timeline_events(rows):
+    """Строки журнала → системные отметки ленты.
+
+    Время берём то, когда СОБЫТИЕ произошло (`created_at`), а не время отклика:
+    отметка должна стоять в ленте после сообщения, которое её вызвало, а
+    `message_at` совпадает с самим сообщением и вставал бы перед ним.
+    """
+    out = []
+    for row in rows or []:
+        label = _EVENT_LABELS.get(row.get('result'))
+        if not label:
+            continue
+        out.append({
+            'id': 'event-%s' % row.get('id'),
+            'event': row.get('result'),
+            'text': label,
+            'at': row.get('created_at') or row.get('message_at'),
+            'amo_lead_id': row.get('amo_lead_id'),
+            'phone': row.get('phone_normalized'),
+            'error': row.get('error_text'),
+            'latency_ms': row.get('latency_ms'),
+        })
+    return out
 
 
 def _fill_thread_header(db, client, cabinet, thread_id, state):

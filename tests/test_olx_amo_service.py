@@ -1060,3 +1060,64 @@ class ReplyFromPortalTests(unittest.TestCase):
         self.assertEqual('needs_auth', caught.exception.code)
         self.assertEqual([], self.db.outbound,
                          'строку заводить незачем: до сети дело не дошло')
+
+
+class TimelineEventTests(unittest.TestCase):
+    """Системные отметки в ленте переписки.
+
+    Без них диалог выглядит как разговор без последствий: кандидат написал,
+    сотрудник прочитал — а завелась ли сделка, видно только в amoCRM. Отметки
+    отвечают на это прямо в ленте.
+    """
+
+    @staticmethod
+    def row(result, jid=1, lead=None, error=None, latency=None):
+        return {
+            'id': jid, 'result': result,
+            'created_at': datetime(2026, 9, 2, 10, 0),
+            'message_at': datetime(2026, 9, 2, 9, 59),
+            'amo_lead_id': lead, 'phone_normalized': '77085846020',
+            'error_text': error, 'latency_ms': latency,
+        }
+
+    def kinds(self, rows):
+        return [e['event'] for e in service._timeline_events(rows)]
+
+    def test_lead_and_failures_become_marks(self):
+        rows = [self.row('lead_created', 1, lead=555, latency=5949),
+                self.row('duplicate', 2, lead=555),
+                self.row('manual_review', 3, lead=556),
+                self.row('needs_human', 4),
+                self.row('error', 5, error='amoCRM отклонила запись')]
+        self.assertEqual(
+            ['lead_created', 'duplicate', 'manual_review', 'needs_human', 'error'],
+            self.kinds(rows))
+
+    def test_sent_messages_do_not_get_a_second_mark(self):
+        """Автоответ и ответ сотрудника уже стоят в ленте пузырями.
+
+        Отметка «отправлен ответ» рядом с самим ответом была бы той же
+        информацией дважды — ровно тот шум, из-за которого перестают читать.
+        """
+        self.assertEqual([], self.kinds([self.row('canned_reply', 1),
+                                         self.row('human_reply', 2)]))
+
+    def test_mark_carries_what_the_human_needs(self):
+        mark = service._timeline_events([self.row('lead_created', 7, lead=555,
+                                                  latency=5949)])[0]
+        self.assertEqual('Создана сделка', mark['text'])
+        self.assertEqual(555, mark['amo_lead_id'])
+        self.assertEqual(5949, mark['latency_ms'])
+        self.assertEqual('event-7', mark['id'])
+
+    def test_mark_stands_where_the_event_happened_not_where_the_message_did(self):
+        """Иначе отметка встала бы ПЕРЕД сообщением, которое её вызвало.
+
+        Время отклика совпадает с самим сообщением, поэтому берётся время
+        записи события.
+        """
+        mark = service._timeline_events([self.row('lead_created', 1, lead=5)])[0]
+        self.assertEqual(datetime(2026, 9, 2, 10, 0), mark['at'])
+
+    def test_unknown_result_is_skipped_rather_than_shown_as_a_code(self):
+        self.assertEqual([], self.kinds([self.row('skipped', 1)]))

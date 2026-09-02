@@ -52,6 +52,17 @@ export const STATE_TONE = {
     error: 'red',
 };
 
+/* Тон системной отметки в ленте переписки. Нейтральное — серым: отметка не
+ * должна спорить с самими сообщениями за внимание. Красим только то, что
+ * требует действия или означает потерю. */
+export const EVENT_TONE = {
+    lead_created: 'green',
+    manual_review: 'amber',
+    needs_human: 'blue',
+    error: 'red',
+    duplicate: 'slate',
+};
+
 /* Порог SLA из пункта 6.2 ТЗ — минута от отклика до сделки. */
 export const SLA_MS = 60 * 1000;
 

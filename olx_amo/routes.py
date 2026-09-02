@@ -433,17 +433,7 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
             "awaiting_since": _iso(state.get('awaiting_human_since')),
             "can_reply": access.can_reply(ctx),
             "url": _thread_url(thread_id),
-            "messages": [{
-                "id": item['id'],
-                "outgoing": item['outgoing'],
-                "text": item['text'],
-                "at": _iso(item['at']),
-                "author": item['author'],
-                "failed": item.get('failed', False),
-                "error": item.get('error'),
-                "attachments": item.get('attachments') or [],
-                "cvs": item.get('cvs') or [],
-            } for item in data['items']],
+            "messages": [_timeline_item(item) for item in data['items']],
         })
 
     @section_route('/threads/<code>/<thread_id>/reply', methods=('POST',), reply=True)
@@ -734,6 +724,47 @@ def _extract_code(value):
         query = parse_qs(text.lstrip('?'))
     found = (query.get('code') or [''])[0].strip()
     return found or text
+
+
+def _timeline_item(item):
+    """Одна строка ленты: реплика или системная отметка робота.
+
+    Обе едут одним списком, потому что читаются подряд: «сделка создана» имеет
+    смысл ровно там, где случилась, между репликами.
+    """
+    if item.get('event'):
+        return {
+            "id": item['id'],
+            "event": item['event'],
+            "text": item['text'],
+            "at": _iso(item['at']),
+            "amo_lead_id": item.get('amo_lead_id'),
+            "amo_url": _lead_url(item.get('amo_lead_id')),
+            "phone": item.get('phone'),
+            "error": item.get('error'),
+            "latency_ms": item.get('latency_ms'),
+        }
+    return {
+        "id": item['id'],
+        "outgoing": item['outgoing'],
+        "text": item['text'],
+        "at": _iso(item['at']),
+        "author": item['author'],
+        "failed": item.get('failed', False),
+        "error": item.get('error'),
+        "attachments": item.get('attachments') or [],
+        "cvs": item.get('cvs') or [],
+    }
+
+
+def _lead_url(lead_id):
+    """Ссылка на сделку в amoCRM. Домен тот же, что у выгрузки лидов."""
+    if not lead_id:
+        return None
+    import os
+
+    domain = (os.getenv('AMO_DOMAIN') or 'igroupkz.amocrm.ru').strip()
+    return 'https://%s/leads/detail/%s' % (domain, lead_id)
 
 
 def _thread_url(thread_id):
