@@ -30,6 +30,26 @@ def read(path):
     return path.read_text(encoding="utf-8-sig")
 
 
+def split_selectors(selector):
+    """Разрез по запятым ВЕРХНЕГО уровня.
+
+    Наивный split(',') рвёт `:is(code, mark)` пополам, и страж сообщал бы о
+    несуществующих правилах без scope — на огрызок `mark)` он и ругался."""
+    parts, depth, current = [], 0, []
+    for char in selector:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current).strip())
+    return [part for part in parts if part]
+
+
 class DarkThemeLayerTests(unittest.TestCase):
     def test_every_rule_is_scoped_to_the_attribute(self):
         """Ни одно правило слоя не должно действовать без атрибута темы.
@@ -44,9 +64,8 @@ class DarkThemeLayerTests(unittest.TestCase):
             selector = " ".join(selector.split())
             if not selector:
                 continue
-            for part in selector.split(","):
-                part = part.strip()
-                if part and not part.startswith(SCOPE):
+            for part in split_selectors(selector):
+                if not part.startswith(SCOPE):
                     unscoped.append(part)
         self.assertEqual([], unscoped[:10],
                          "Правила слоя без scope темы: %s" % unscoped[:10])

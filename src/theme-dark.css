@@ -175,6 +175,23 @@ html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='info'] {
     --tone-ink: #93c5fd;
 }
 
+/* Акцент вики в тёмной теме светлый (иначе ссылки в статье не читаются), и в
+   двух местах это ломает пару «белым по акценту»: номера шагов и номера
+   карточек — цифра в кружке. Возвращаем им контраст, перекрашивая ЦИФРУ, а не
+   акцент: акцент здесь работает на весь раздел, а кружок — одно место.
+
+   Кнопка тренажёра — третий такой случай, но у неё градиент, и половина его
+   после разбора становится тёмной: белая надпись на светлом конце пропадала
+   бы. Ей проще вернуть плотный тёмный акцент целиком. */
+html[data-otp-theme="dark"] .wiki-prose ol[data-variant='steps'] > li::before,
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='cards'][data-numbered='true'] > [data-wiki-block='card']::before {
+    color: #17191e !important;
+}
+html[data-otp-theme="dark"] .wiki-prose .wiki-trainer-embed,
+html[data-otp-theme="dark"] .wiki-trainer-node .wiki-trainer-embed {
+    background: linear-gradient(135deg, #4f46e5, #4338ca) !important;
+}
+
 /* Ответ ИИ-помощника размечается markdown.css — там свои цвета ссылок и цитат. */
 html[data-otp-theme="dark"] .ai-md a { color: #93c5fd; }
 html[data-otp-theme="dark"] .ai-md a:hover { color: #bfdbfe; }
@@ -1047,7 +1064,7 @@ html[data-otp-theme="dark"] .tv-chip.is-active-emerald { color: #8beed2 !importa
 html[data-otp-theme="dark"] .tv-chip.is-active-violet { background: #272445 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-violet { border-color: #3e3482 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-violet { color: #b38feb !important; }
-html[data-otp-theme="dark"] .tv-btn-primary:hover:not(:disabled) { background: #e8ecf2 !important; }
+html[data-otp-theme="dark"] .tv-btn-primary:hover:not(:disabled) { background: #2b3039 !important; }
 html[data-otp-theme="dark"] .tv-btn-amber { background: #3d3a29 !important; }
 html[data-otp-theme="dark"] .tv-btn-amber { border-color: #7a6e39 !important; }
 html[data-otp-theme="dark"] .tv-btn-amber:hover:not(:disabled) { background: #514a2b !important; }
@@ -1105,6 +1122,7 @@ html[data-otp-theme="dark"] .tv-badge-violet { background: #272445 !important; }
 html[data-otp-theme="dark"] .tv-badge-violet { color: #b38feb !important; }
 html[data-otp-theme="dark"] .tv-badge-violet { border-color: #3e3482 !important; }
 html[data-otp-theme="dark"] .tv-skeleton { background: linear-gradient(90deg, #242830 25%, #242830 50%, #242830 75%) !important; }
+html[data-otp-theme="dark"] .tv-overlay { background: rgba(43, 48, 57, 0.3) !important; }
 html[data-otp-theme="dark"] .tv-icon-btn-danger { border-color: #7a3442 !important; }
 html[data-otp-theme="dark"] .tv-icon-btn-danger { background: #3d242b !important; }
 html[data-otp-theme="dark"] .tv-icon-btn-danger:hover:not(:disabled) { background: #3d242b !important; }
@@ -1138,6 +1156,7 @@ html[data-otp-theme="dark"] .tv-history-item-recipient .tv-history-bubble { back
 html[data-otp-theme="dark"] .tv-history-item-recipient .tv-history-bubble { border: 1px solid #317c61 !important; }
 html[data-otp-theme="dark"] .tv-history-item-neutral .tv-history-bubble { background: #242830 !important; }
 html[data-otp-theme="dark"] .tv-participant-avatar { background: #2a2f37 !important; }
+html[data-otp-theme="dark"] .tv-modal-overlay { background: rgba(43, 48, 57, 0.35) !important; }
 html[data-otp-theme="dark"] .tv-kbd { background: #242830 !important; }
 html[data-otp-theme="dark"] .tv-pin-header-btn-danger { color: #ee8ba1 !important; }
 html[data-otp-theme="dark"] .tv-pin-header-btn-danger:hover:not(:disabled) { background: #3d242b !important; }
@@ -1153,6 +1172,27 @@ html[data-otp-theme="dark"] .tv-file-remove-btn:hover:not(:disabled) { border-co
 html[data-otp-theme="dark"] .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count { background: #222b45 !important; }
 html[data-otp-theme="dark"] .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count { border-color: #314382 !important; }
 html[data-otp-theme="dark"] .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count { color: #9d99e1 !important; }
+html[data-otp-theme="dark"] .wiki-prose { color: #d5dae2 !important; }
+html[data-otp-theme="dark"] .wiki-prose pre { background: #2b3039 !important; }
+html[data-otp-theme="dark"] .wiki-image-node__resize { border: 2px solid #2e333c !important; }
+html[data-otp-theme="dark"] .wiki-table-scroll::-webkit-scrollbar-thumb { background: rgba(43, 48, 57, 0.22) !important; }
+html[data-otp-theme="dark"] .wiki-prose .tableWrapper::-webkit-scrollbar-thumb { background: rgba(43, 48, 57, 0.22) !important; }
+html[data-otp-theme="dark"] .wiki-table-scroll::-webkit-scrollbar-thumb:hover { background: rgba(43, 48, 57, 0.35) !important; }
+html[data-otp-theme="dark"] .wiki-prose .tableWrapper::-webkit-scrollbar-thumb:hover { background: rgba(43, 48, 57, 0.35) !important; }
+html[data-otp-theme="dark"] .wiki-prose tbody tr:nth-child(even) > td { background: rgba(36, 40, 48, 0.75) !important; }
+html[data-otp-theme="dark"] .wiki-prose mark { background: #3d3a29 !important; }
+html[data-otp-theme="dark"] .wiki-prose mark.wiki-search-hit { background: rgba(36, 40, 88, 0.22) !important; }
+html[data-otp-theme="dark"] .wiki-prose .wiki-trainer-embed { background: linear-gradient(135deg, var(--wiki-accent), #242858) !important; }
+html[data-otp-theme="dark"] .wiki-trainer-node .wiki-trainer-embed { background: linear-gradient(135deg, var(--wiki-accent), #242858) !important; }
+html[data-otp-theme="dark"] .wiki-prose .wiki-trainer-embed:not([data-preview])::before { border-left: 0.65rem solid rgba(46, 51, 60, 0.92) !important; }
+html[data-otp-theme="dark"] .wiki-trainer-node .wiki-trainer-embed__icon { background: rgba(30, 33, 39, 0.18) !important; }
+html[data-otp-theme="dark"] .wiki-trainer-node__resize { border: 2px solid #2e333c !important; }
+html[data-otp-theme="dark"] .wiki-trainer-node__warn { color: #ee928b !important; }
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='note'][data-tone='dark'] { border-color: #454c58 !important; }
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='note'][data-tone='dark'] :is(code, mark) { background: rgba(52, 58, 68, 0.18) !important; }
+html[data-otp-theme="dark"] .wiki-prose .wiki-gallery__arrow { background: rgba(30, 33, 39, 0.82) !important; }
+html[data-otp-theme="dark"] .wiki-prose .wiki-gallery__arrow:hover { background: rgba(30, 33, 39, 0.92) !important; }
+html[data-otp-theme="dark"] .wiki-prose .wiki-gallery--many .wiki-gallery__counter { background: rgba(43, 48, 57, 0.55) !important; }
 html[data-otp-theme="dark"] .msv-shell { color: #e8ecf2 !important; }
 html[data-otp-theme="dark"] .msv-header { border-bottom: 1px solid #2e333c !important; }
 html[data-otp-theme="dark"] .msv-subtitle { color: #a8b1bf !important; }
@@ -1243,7 +1283,6 @@ html[data-otp-theme="dark"] .crit-row.is-active { border-color: #315682 !importa
 html[data-otp-theme="dark"] .crit-row.is-active { background: #223045 !important; }
 html[data-otp-theme="dark"] .crit-row-name { color: #e8ecf2 !important; }
 html[data-otp-theme="dark"] .crit-row-desc { color: #a8b1bf !important; }
-html[data-otp-theme="dark"] .crit-row-desc.is-placeholder { color: #a8b1bf !important; }
 html[data-otp-theme="dark"] .msv-criterion-panel { border: 1px solid #2e333c !important; }
 html[data-otp-theme="dark"] .msv-criterion-panel { background: linear-gradient(180deg, #1e2127 0%, #1e2127 100%) !important; }
 html[data-otp-theme="dark"] .crit-icon { background: #242830 !important; }
@@ -1279,6 +1318,8 @@ html[data-otp-theme="dark"] .btn-green { border-color: #317c53 !important; }
 html[data-otp-theme="dark"] .btn-green:hover { background: #224033 !important; }
 html[data-otp-theme="dark"] .btn-amber { border-color: #7a6e39 !important; }
 html[data-otp-theme="dark"] .btn-amber:hover { background: #3d3a29 !important; }
+html[data-otp-theme="dark"] .notification-settings-fab { border: 1px solid rgba(58, 65, 75, 0.88) !important; }
+html[data-otp-theme="dark"] .notification-settings-fab { background: rgba(30, 33, 39, 0.82) !important; }
 html[data-otp-theme="dark"] .notification-settings-intro { border: 1px solid #315382 !important; }
 html[data-otp-theme="dark"] .notification-settings-intro { color: #8ea4ec !important; }
 html[data-otp-theme="dark"] .notification-settings-intro { background: #223045 !important; }
@@ -1289,10 +1330,11 @@ html[data-otp-theme="dark"] .notification-settings-switch-thumb { background: #1
 html[data-otp-theme="dark"] .notification-settings-telegram-note { border: 1px solid #7a6e39 !important; }
 html[data-otp-theme="dark"] .notification-settings-telegram-note span { color: #eeb18b !important; }
 html[data-otp-theme="dark"] .notification-report-preview { background: #223045 !important; }
-html[data-otp-theme="dark"] .analytics-plan-tooltip { background: #e8ecf2 !important; }
+html[data-otp-theme="dark"] .analytics-plan-tooltip { background: #2b3039 !important; }
 html[data-otp-theme="dark"] .calibration-history-dot[data-type="etalon_updated"] { background: #322658 !important; }
 html[data-otp-theme="dark"] tbody tr.imported { background: #3d3929 !important; }
 html[data-otp-theme="dark"] .resolution-flag.active { border-color: #317c53 !important; }
+html[data-otp-theme="dark"] .modal-backdrop { background: rgba(43, 48, 57, 0.4) !important; }
 html[data-otp-theme="dark"] .crit-card.is-error { border-color: #7a3439 !important; }
 html[data-otp-theme="dark"] .score-toggle.active-correct { border-color: #317c53 !important; }
 html[data-otp-theme="dark"] .score-toggle.active-na { background: #3d3e29 !important; }
@@ -1302,7 +1344,8 @@ html[data-otp-theme="dark"] .score-toggle.active-error { border-color: #7a3439 !
 html[data-otp-theme="dark"] .score-toggle.active-incorrect { border-color: #7a3439 !important; }
 html[data-otp-theme="dark"] .score-toggle.active-deficiency { border-color: #7a6e39 !important; }
 html[data-otp-theme="dark"] .chat-quote-btn:hover { background: var(--amber-light, #3d3a29) !important; }
-html[data-otp-theme="dark"] .tooltip-box { background: #e8ecf2 !important; }
+html[data-otp-theme="dark"] .spinner { border: 2px solid rgba(46, 51, 60, 0.3) !important; }
+html[data-otp-theme="dark"] .tooltip-box { background: #2b3039 !important; }
 html[data-otp-theme="dark"] .ce-cp-note { border: 1px solid #7a6e39 !important; }
 html[data-otp-theme="dark"] .ce-cp-badge.is-due { border-color: #7a6e39 !important; }
 html[data-otp-theme="dark"] .ce-cp-badge.is-overdue { border-color: #7a3439 !important; }
@@ -1312,8 +1355,6 @@ html[data-otp-theme="dark"] .news-body strong { color: #e8ecf2 !important; }
 html[data-otp-theme="dark"] .news-body h1 { color: #e8ecf2 !important; }
 html[data-otp-theme="dark"] .news-body h2 { color: #e8ecf2 !important; }
 html[data-otp-theme="dark"] .news-body h3 { color: #e8ecf2 !important; }
-html[data-otp-theme="dark"] .news-body li::marker { color: #8b8dee !important; }
-html[data-otp-theme="dark"] .news-body a { color: #918bee !important; }
 html[data-otp-theme="dark"] .news-body blockquote { border-left: 2px solid #2e333c !important; }
 html[data-otp-theme="dark"] .news-body blockquote { color: #a8b1bf !important; }
 html[data-otp-theme="dark"] .news-body mark { background: #3d3a29 !important; }
@@ -1322,12 +1363,36 @@ html[data-otp-theme="dark"] .news-body td { border: 1px solid #2e333c !important
 html[data-otp-theme="dark"] .news-body th { background: #242830 !important; }
 html[data-otp-theme="dark"] .news-body th { color: #e8ecf2 !important; }
 html[data-otp-theme="dark"] .news-gallery .news-gallery__strip { background: #242830 !important; }
+html[data-otp-theme="dark"] .news-gallery .wiki-gallery__arrow { background: rgba(30, 33, 39, 0.82) !important; }
 html[data-otp-theme="dark"] .news-gallery .wiki-gallery__arrow { color: #e8ecf2 !important; }
+html[data-otp-theme="dark"] .news-gallery .wiki-gallery__arrow:hover { background: rgba(30, 33, 39, 0.92) !important; }
 html[data-otp-theme="dark"] .news-gallery .wiki-gallery__dot::after { background: #343a44 !important; }
+html[data-otp-theme="dark"] .news-gallery .wiki-gallery--many .wiki-gallery__counter { background: rgba(43, 48, 57, 0.55) !important; }
 html[data-otp-theme="dark"] .lms-rich-text-editor .ql-container.ql-snow { background: #1e2127 !important; }
 html[data-otp-theme="dark"] .ai-md a { color: #8baaee !important; }
 html[data-otp-theme="dark"] .ai-md a:hover { color: #8ba5ee !important; }
+html[data-otp-theme="dark"] .ai-md code { background: rgba(43, 48, 57, 0.06) !important; }
+html[data-otp-theme="dark"] .ai-md pre { background: rgba(43, 48, 57, 0.06) !important; }
+html[data-otp-theme="dark"] .ai-md blockquote { border-left: 2px solid rgba(69, 76, 88, 0.15) !important; }
 html[data-otp-theme="dark"] .ai-md blockquote { color: #d5dae2 !important; }
+html[data-otp-theme="dark"] .ai-md hr { border-top: 1px solid rgba(69, 76, 88, 0.1) !important; }
+html[data-otp-theme="dark"] .ai-md th { border: 1px solid rgba(69, 76, 88, 0.12) !important; }
+html[data-otp-theme="dark"] .ai-md td { border: 1px solid rgba(69, 76, 88, 0.12) !important; }
+html[data-otp-theme="dark"] .ai-md th { background: rgba(43, 48, 57, 0.04) !important; }
+html[data-otp-theme="dark"] .ai-md tbody tr:nth-child(even) td { background: rgba(43, 48, 57, 0.02) !important; }
+html[data-otp-theme="dark"] .ai-md table::-webkit-scrollbar-thumb { background: rgba(43, 48, 57, 0.22) !important; }
+html[data-otp-theme="dark"] .ai-md table::-webkit-scrollbar-thumb:hover { background: rgba(43, 48, 57, 0.35) !important; }
 html[data-otp-theme="dark"] .bg-\[\#c7d2fe\] { background-color: #222a45 !important; }
 html[data-otp-theme="dark"] .bg-\[\#f2f2f7\] { background-color: #242830 !important; }
 html[data-otp-theme="dark"] .bg-\[\#f8fafc\] { background-color: #242830 !important; }
+
+@media print {
+    html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='note'][data-tone='dark'] { background: #1e2127 !important; }
+    html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='note'][data-tone='dark'] { color: #e8ecf2 !important; }
+    html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='note'][data-tone='dark'] { border-color: #3a414b !important; }
+    html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='note'][data-tone='dark'] :is(strong, b, a) { color: #e8ecf2 !important; }
+    html[data-otp-theme="dark"] .wiki-prose ol[data-variant='steps'] > li::before { color: #e8ecf2 !important; }
+    html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='cards'][data-numbered='true'] > [data-wiki-block='card']::before { color: #e8ecf2 !important; }
+    html[data-otp-theme="dark"] .wiki-prose ol[data-variant='steps'] > li::before { border: 1.5px solid #454c58 !important; }
+    html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='cards'][data-numbered='true'] > [data-wiki-block='card']::before { border: 1.5px solid #454c58 !important; }
+}

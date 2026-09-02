@@ -289,7 +289,7 @@ def build_selector(prefix, class_name):
         if variant in SKIP_VARIANTS or variant.startswith('peer-'):
             return None
         if variant in SCREENS:
-            media = SCREENS[variant]
+            media = '@media (min-width: %dpx)' % SCREENS[variant]
         elif variant in ANCESTOR:
             ancestor = ANCESTOR[variant]
         elif variant in PSEUDO:
@@ -361,20 +361,24 @@ def rules_for(tokens):
             continue
         media, selector = built
         rows.append((media, selector + SELECTOR_TAIL.get(prop, ''), decl))
-    rows.sort(key=lambda r: (r[0] or 0, r[1]))
+    rows.sort(key=lambda r: (r[0] or '', r[1]))
     return rows
 
 
 def emit(rows):
+    """Правила блоками: сперва безусловные, потом каждый @media своим блоком.
+
+    Медиазапрос сохраняется дословно. Правило из `@media print` обязано
+    остаться в `@media print`: вынесенное наружу, оно начнёт действовать на
+    экране — а печатная версия как раз перекрашивает то, что на экране должно
+    выглядеть иначе."""
     lines = []
-    plain = [r for r in rows if r[0] is None]
-    for _, selector, decl in plain:
+    for media, selector, decl in [r for r in rows if r[0] is None]:
         lines.append('%s { %s !important; }' % (selector, decl))
-    for width in sorted({r[0] for r in rows if r[0] is not None}):
-        block = [r for r in rows if r[0] == width]
+    for media in sorted({r[0] for r in rows if r[0] is not None}):
         lines.append('')
-        lines.append('@media (min-width: %dpx) {' % width)
-        for _, selector, decl in block:
+        lines.append('%s {' % media)
+        for _, selector, decl in [r for r in rows if r[0] == media]:
             lines.append('    %s { %s !important; }' % (selector, decl))
         lines.append('}')
     return '\n'.join(lines)
@@ -403,6 +407,12 @@ import colorsys
 
 PALETTE_SOURCES = (
     ('src/components/tasks/TasksView.jsx', 'style'),
+    # Вики. Переменные --wiki-* перекрыты вручную в dark_theme_chrome.css, но
+    # цвет ТЕКСТА СТАТЬИ переменной не задан: `.wiki-prose { color: #334155 }`
+    # стоит литералом, и без разбора этого файла тело статьи оставалось
+    # тёмно-серым на графите — то есть статьи было не прочитать.
+    ('src/components/wiki/wiki-theme.css', 'css'),
+    ('src/components/wiki/wiki-blocks.css', 'css'),
     # Раздел рисует свои стили тегом <style> прямо в разметке.
     ('src/components/monitoring/MonitoringScaleView.jsx', 'jsx-style'),
     ('src/components/technical/TechnicalIssuesView.jsx', 'jsx-style'),
@@ -420,7 +430,22 @@ LINE_PROPS = ('border', 'border-color', 'border-top', 'border-bottom', 'border-l
               'border-left-color', 'border-right-color', 'outline', 'outline-color')
 INK_PROPS = ('color', 'caret-color', '-webkit-text-fill-color')
 
-HEX_RE = re.compile(r'#[0-9a-fA-F]{3,8}\b')
+# Цвет в правиле бывает не только хексом. Полоса чередования строк в таблице
+# статьи вики записана как `rgba(248, 250, 252, 0.75)` — искали бы только
+# хексы, она осталась бы светлой, и текст на ней стал бы белым по белому.
+HEX_RE = re.compile(
+    r'#[0-9a-fA-F]{3,8}\b'
+    r'|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*[\d.]+\s*)?\)')
+
+
+def split_css_color(token):
+    """'rgba(248, 250, 252, .75)' → ('#f8fafc', 0.75); хекс → (хекс, None)."""
+    if token.startswith('#'):
+        return token, None
+    parts = [part.strip() for part in token[token.index('(') + 1:-1].split(',')]
+    channels = [max(0, min(255, int(float(part)))) for part in parts[:3]]
+    alpha = float(parts[3]) if len(parts) > 3 else None
+    return '#%02x%02x%02x' % tuple(channels), alpha
 
 
 def hex_to_hsl(value):
@@ -492,7 +517,12 @@ def dark_counterpart(value, role):
                 return '#2a2f37'
             if lightness >= 0.45:
                 return '#343a44'
-            return '#e8ecf2'              # тёмная кнопка светлой темы — светлая в тёмной
+            # Уже тёмная поверхность светлой темы — блок кода в статье вики,
+            # тёмная плашка, подсказка. Переворачивать её в светлую нельзя:
+            # белый прямоугольник кода на графите бьёт по глазам сильнее, чем
+            # что-либо ещё на экране. Оставляем тёмной, но чуть светлее
+            # карточки, чтобы она от карточки отличалась.
+            return '#2b3039'
         if lightness >= 0.82:
             return mix_rgb(HUE_BG_BASE, hsl_channels(hue, 0.55, tint_saturation), 0.16)
         if lightness >= 0.62:
@@ -511,9 +541,15 @@ def dark_counterpart(value, role):
         return None
 
     # role == 'ink'
+    if lightness >= 0.55:
+        # Светлый текст НЕ трогаем ни в каком виде. В светлой теме он лежит на
+        # тёмном или цветном — на плашке [data-tone='dark'] в вики, на цветной
+        # кнопке, — и там ничего не изменилось. А если он всё-таки на белом,
+        # то это «еле заметная» подпись, и на графите она читается как есть.
+        # Правило важнее, чем кажется: без него #cbd5e1 с тёмной плашки вики
+        # ушёл бы в #7d8695, то есть стал бы серым по тёмно-серому.
+        return None
     if neutral:
-        if lightness >= 0.92:
-            return None                   # белый текст на цветной кнопке — не трогаем
         if lightness <= 0.22:
             return '#e8ecf2'
         if lightness <= 0.45:
@@ -540,6 +576,75 @@ def strip_comments(css):
     return re.sub(r'/\*.*?\*/', '', css, flags=re.S)
 
 
+def split_selectors(selector):
+    """Разрезать список селекторов по запятым ВЕРХНЕГО уровня.
+
+    Наивный split(',') рвёт `:is(strong, b)` пополам и выдаёт два огрызка,
+    один из которых — незакрытая скобка. Такое правило браузер отбрасывает
+    целиком, вместе с соседями по строке.
+    """
+    parts, depth, current = [], 0, []
+    for char in selector:
+        if char in '([':
+            depth += 1
+        elif char in ')]':
+            depth = max(0, depth - 1)
+        if char == ',' and depth == 0:
+            parts.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    parts.append(''.join(current).strip())
+    return [part for part in parts if part]
+
+
+def iter_rules(css):
+    """(медиазапрос | None, селектор, тело) по всему файлу.
+
+    Разбор со счётчиком скобок, а не регуляркой: правила внутри `@media`
+    обязаны и в тёмном слое остаться внутри своего `@media`. Регулярка их
+    просто не видела и выносила наружу — правила из `@media print` начинали
+    действовать на экране и перекрашивали то, что видно всегда.
+
+    `@keyframes` пропускаем целиком: внутри не селекторы, а проценты.
+    """
+    index, length = 0, len(css)
+    media = None
+    media_depth = None
+    depth = 0
+    while index < length:
+        brace = css.find('{', index)
+        if brace < 0:
+            break
+        prelude = css[index:brace].strip()
+        close = _matching_brace(css, brace)
+        if close < 0:
+            break
+        if prelude.startswith('@'):
+            name = prelude.split()[0].lower()
+            if name in ('@media', '@supports'):
+                inner = css[brace + 1:close]
+                for _, selector, body in iter_rules(inner):
+                    yield (prelude if media is None else media, selector, body)
+            # @keyframes, @font-face и прочее пропускаем
+            index = close + 1
+            continue
+        yield (media, prelude, css[brace + 1:close])
+        index = close + 1
+
+
+def _matching_brace(text, opening):
+    depth = 0
+    for position in range(opening, len(text)):
+        if text[position] == '{':
+            depth += 1
+        elif text[position] == '}':
+            depth -= 1
+            if depth == 0:
+                return position
+    return -1
+
+
 def palette_rules():
     """Тёмные двойники правил из разделов с собственной палитрой."""
     rows = []
@@ -560,7 +665,7 @@ def palette_rules():
         else:
             css = text
         css = strip_comments(css)
-        for selector, body in re.findall(r'([^{}@]+)\{([^{}]*)\}', css):
+        for media, selector, body in iter_rules(css):
             selector = ' '.join(selector.split())
             if not selector or selector.startswith('%') or '&' in selector:
                 continue
@@ -574,17 +679,20 @@ def palette_rules():
                 if not role or prop.startswith('--') or not HEX_RE.search(value):
                     continue
                 def swap(match, _role=role):
-                    replacement = dark_counterpart(match.group(0), _role)
-                    return replacement or match.group(0)
+                    source, alpha = split_css_color(match.group(0))
+                    replacement = dark_counterpart(source, _role)
+                    if not replacement:
+                        return match.group(0)
+                    if alpha is None:
+                        return replacement
+                    return rgba(replacement, alpha)
 
                 new_value = HEX_RE.sub(swap, value)
                 if new_value == value:
                     continue
-                for part in selector.split(','):
-                    part = part.strip()
-                    if not part:
-                        continue
-                    rows.append((None, '%s %s' % (ROOT_SEL, part), '%s: %s' % (prop, new_value)))
+                for part in split_selectors(selector):
+                    rows.append((media, '%s %s' % (ROOT_SEL, part),
+                                 '%s: %s' % (prop, new_value)))
     return rows
 
 

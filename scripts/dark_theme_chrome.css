@@ -163,6 +163,23 @@ html[data-otp-theme="dark"] .wiki-prose [data-wiki-block][data-tone='info'] {
     --tone-ink: #93c5fd;
 }
 
+/* Акцент вики в тёмной теме светлый (иначе ссылки в статье не читаются), и в
+   двух местах это ломает пару «белым по акценту»: номера шагов и номера
+   карточек — цифра в кружке. Возвращаем им контраст, перекрашивая ЦИФРУ, а не
+   акцент: акцент здесь работает на весь раздел, а кружок — одно место.
+
+   Кнопка тренажёра — третий такой случай, но у неё градиент, и половина его
+   после разбора становится тёмной: белая надпись на светлом конце пропадала
+   бы. Ей проще вернуть плотный тёмный акцент целиком. */
+html[data-otp-theme="dark"] .wiki-prose ol[data-variant='steps'] > li::before,
+html[data-otp-theme="dark"] .wiki-prose [data-wiki-block='cards'][data-numbered='true'] > [data-wiki-block='card']::before {
+    color: #17191e !important;
+}
+html[data-otp-theme="dark"] .wiki-prose .wiki-trainer-embed,
+html[data-otp-theme="dark"] .wiki-trainer-node .wiki-trainer-embed {
+    background: linear-gradient(135deg, #4f46e5, #4338ca) !important;
+}
+
 /* Ответ ИИ-помощника размечается markdown.css — там свои цвета ссылок и цитат. */
 html[data-otp-theme="dark"] .ai-md a { color: #93c5fd; }
 html[data-otp-theme="dark"] .ai-md a:hover { color: #bfdbfe; }
