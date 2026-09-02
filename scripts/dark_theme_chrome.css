@@ -30,7 +30,7 @@ html[data-otp-theme="dark"] body {
 }
 
 html[data-otp-theme="dark"] .main-content {
-    background-color: var(--otp-d-canvas);
+    background-color: var(--otp-d-canvas) !important;
 }
 
 html[data-otp-theme="dark"] ::selection {
@@ -185,6 +185,62 @@ html[data-otp-theme="dark"] .shadow-xl {
 }
 html[data-otp-theme="dark"] .shadow-2xl {
     --tw-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75);
+}
+
+/* ── «Журнал оценок» — отдельная сборка в iframe ──
+   Свой документ, свой набор переменных на :root, Tailwind нет. Правила с
+   хексами разбирает генератор (call_evaluation/styles.css в PALETTE_SOURCES),
+   переменные — здесь.
+
+   Селектор — САМ html, а не `html[...] :root`: :root это и есть html, и
+   потомком самого себя он не бывает — такое правило не срабатывает никогда.
+
+   Имена переменных общие (--bg, --surface, --card), а файл слоя один на два
+   документа. В портале эти имена заняты плеером записи разговора из
+   src/styles.css, и тёмные значения ему ровно так же к лицу. НЕ трогаем
+   --accent и --primary: у плеера это зелёный прогресс и синяя кнопка, у
+   журнала — свой синий, и обоим перекраска не нужна. */
+html[data-otp-theme="dark"] {
+    --bg: #17191e;
+    --surface: #1e2127;
+    --surface-2: #23272e;
+    --border: #2e333c;
+    --border-strong: #414954;
+    --text: #e8ecf2;
+    --text-2: #a8b1bf;
+    --text-3: #7d8695;
+    --accent-light: rgba(59, 130, 246, 0.16);
+    --green: #4ade80;
+    --green-light: rgba(34, 197, 94, 0.14);
+    --red: #f87171;
+    --red-light: rgba(239, 68, 68, 0.14);
+    --amber: #fbbf24;
+    --amber-light: rgba(245, 158, 11, 0.14);
+    --shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, .55), 0 2px 4px rgba(0, 0, 0, .4);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, .7), 0 2px 8px rgba(0, 0, 0, .5);
+    /* Карточка плеера записи (src/styles.css) — то же имя, свой документ. */
+    --card: #1e2127;
+}
+
+/* ── «Мониторинговая шкала» ──
+   Правила раздела разбирает генератор (MonitoringScaleView в PALETTE_SOURCES),
+   но часть цветов там приходит ИНЛАЙНОВЫМ стилем из палитры тонов в JS
+   (MSV_TONES: blue/emerald/amber/slate/red). CSS различить тона не может —
+   в разметке их нет ни классом, ни атрибутом, — поэтому здесь ровно то, что
+   от тона не зависит.
+
+   Число всегда нейтральное (#111827 во всех пяти тонах) — его просто
+   переворачиваем. Подпись тон несёт, но рядом с ней стоит значок, у которого
+   тон остался и заливкой, и цветом: повторять его ещё и буквами не нужно —
+   в тёмной теме подпись становится нейтральной приглушённой. */
+html[data-otp-theme="dark"] .msv-summary-value,
+html[data-otp-theme="dark"] .msv-weight-value {
+    color: var(--otp-d-ink) !important;
+}
+html[data-otp-theme="dark"] .msv-summary-label,
+html[data-otp-theme="dark"] .msv-weight-title {
+    color: var(--otp-d-ink-soft) !important;
 }
 
 /* ── Раздел «Задачи» ──

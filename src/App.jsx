@@ -37861,11 +37861,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                проверяется по логину, а не по сохранённому выбору. */
             const darkThemeAllowed = canUseDarkTheme(user);
             const [darkTheme, setDarkTheme] = useState(readStoredDarkTheme);
+            const darkThemeActive = darkThemeAllowed && darkTheme;
             useEffect(() => {
                 let cancelled = false;
-                applyDarkTheme(darkThemeAllowed && darkTheme, () => cancelled);
+                applyDarkTheme(darkThemeActive, () => cancelled);
                 return () => { cancelled = true; };
-            }, [darkThemeAllowed, darkTheme]);
+            }, [darkThemeActive]);
             const toggleDarkTheme = useCallback(() => {
                 setDarkTheme((prev) => {
                     const next = !prev;
@@ -47290,7 +47291,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ? operatorData.evaluations.reduce((sum, eval1) => sum + (parseFloat(eval1.score) || 0), 0) / operatorData.evaluations.length
                     : 0;
             const isManageOperatorsReadOnly = isPlainTrainer;
-            const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
+            /* «Журнал оценок» — отдельная сборка в iframe, то есть ДРУГОЙ документ:
+               слой темы из этой страницы туда не достаёт. Решение принимает
+               родитель (он один знает, кому режим выдан) и передаёт меткой в
+               адресе; сборка журнала по ней подгружает тот же слой. */
+            const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html${darkThemeActive ? '?theme=dark' : ''}`;
+            const callEvaluationCanvas = darkThemeActive ? '#17191e' : '#f7f7f5';
             const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRole || isDepartmentManager);
             const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager;
             const manageOperatorsBirthdaysCaption = isDepartmentManager ? 'Все операторы' : 'Мои сотрудники';
@@ -47366,7 +47372,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
                                         : 'p-8 bg-gray-50 min-h-screen overflow-y-auto'
                         }`}
-                        style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
+                        style={isCallEvaluationView ? { backgroundColor: callEvaluationCanvas } : undefined}
                     >
                         {canAccessFourYouSection && view === 'four_you' && (
                             <Suspense fallback={<div className="h-screen flex items-center justify-center text-sm text-slate-500">Загрузка 4 You…</div>}>
@@ -47388,13 +47394,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         )}
                         {canSeeCallEvaluation && (
-                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: '#f7f7f5', display: isCallEvaluationView ? undefined : 'none' }}>
+                        <div className="w-full h-full px-2 md:px-3 py-3" style={{ backgroundColor: callEvaluationCanvas, display: isCallEvaluationView ? undefined : 'none' }}>
                             <iframe
                                 ref={callEvaluationFrameRef}
                                 title="Журнал оценок"
                                 src={callEvaluationIframeUrl}
                                 className="block w-full"
-                                style={{ height: 'calc(100vh - 24px)', border: 'none', backgroundColor: '#f7f7f5' }}
+                                style={{ height: 'calc(100vh - 24px)', border: 'none', backgroundColor: callEvaluationCanvas }}
                             />
                         </div>
                         )}

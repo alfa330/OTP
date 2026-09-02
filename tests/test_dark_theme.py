@@ -23,6 +23,7 @@ APP_JSX = ROOT / "src" / "App.jsx"
 BUILDER = ROOT / "scripts" / "build_dark_theme.py"
 
 SCOPE = 'html[data-otp-theme="dark"]'
+DARK_THEME_STORAGE_KEY = 'otp.theme'
 
 
 def read(path):
@@ -67,6 +68,8 @@ class DarkThemeLayerTests(unittest.TestCase):
             "%s .border-slate-200 " % SCOPE,
             "%s .tv-root " % SCOPE,
             "%s .wiki-scope " % SCOPE,
+            "%s .msv-card " % SCOPE,        # «Мониторинговая шкала»
+            "%s .ce-switch-track " % SCOPE, # «Журнал оценок» в iframe
         ):
             self.assertIn(selector, css, "В слое нет правила для %s" % selector)
 
@@ -92,6 +95,29 @@ class DarkThemeLayerTests(unittest.TestCase):
         self.assertIn("СОБРАН СКРИПТОМ", read(THEME_CSS)[:400])
 
 
+class DarkThemeEmbeddedBundleTests(unittest.TestCase):
+    """«Журнал оценок» — отдельная сборка в iframe, свой документ.
+
+    Слой темы туда не достаёт сам по себе, а решение о теме принимает портал:
+    он один знает, кому режим выдан. Проверяем обе половины связки — без любой
+    из них раздел остаётся светлым островом внутри тёмного портала.
+    """
+
+    def test_parent_passes_theme_into_the_frame(self):
+        app = read(APP_JSX)
+        self.assertIn("call_evaluation.html${darkThemeActive ? '?theme=dark' : ''}", app)
+        # Полотно вокруг рамки задано инлайновым стилем — CSS его не достанет.
+        self.assertIn("const callEvaluationCanvas = darkThemeActive ?", app)
+
+    def test_frame_takes_theme_only_from_the_address(self):
+        source = read(ROOT / 'src' / 'call_evaluation' / 'main.jsx')
+        self.assertIn("get('theme') === 'dark'", source)
+        self.assertIn("import('../theme-dark.css')", source)
+        # Читать сохранённый выбор самой сборке нельзя: тогда тему получил бы
+        # любой, у кого этот ключ когда-то остался в браузере.
+        self.assertNotIn(DARK_THEME_STORAGE_KEY, source)
+
+
 class DarkThemeAccessTests(unittest.TestCase):
     def test_access_is_decided_by_login(self):
         util = read(THEME_UTIL)
@@ -103,7 +129,8 @@ class DarkThemeAccessTests(unittest.TestCase):
 
     def test_app_applies_theme_only_for_allowed_account(self):
         app = read(APP_JSX)
-        self.assertIn("applyDarkTheme(darkThemeAllowed && darkTheme", app)
+        self.assertIn("const darkThemeActive = darkThemeAllowed && darkTheme;", app)
+        self.assertIn("applyDarkTheme(darkThemeActive", app)
         self.assertIn("const darkThemeAllowed = canUseDarkTheme(user)", app)
 
     def test_avatar_click_toggles_theme_without_opening_account_menu(self):

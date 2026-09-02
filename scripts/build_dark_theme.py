@@ -124,8 +124,15 @@ HUES = {
     'sky':     ((14, 165, 233),  '#7dd3fc', '#7dd3fc'),
 }
 
-HUE_BG_ALPHA = {'50': 0.12, '100': 0.18, '200': 0.26}
-HUE_LINE_ALPHA = {'100': 0.24, '200': 0.32, '300': 0.40}
+# Доля цвета, подмешиваемая в тёмную поверхность. ПОДМЕШИВАЕМАЯ, а не
+# положенная сверху с прозрачностью: прозрачная плашка выглядит правильно,
+# только пока под ней тёмная карточка. В «Опросах» такой же чип `bg-blue-50
+# text-blue-700` лежит на СИНЕЙ кнопке — прозрачная заливка там сливалась с
+# кнопкой, и счётчик пропадал. Непрозрачный цвет одинаково читается везде.
+HUE_BG_MIX = {'50': 0.10, '100': 0.16, '200': 0.24}
+HUE_LINE_MIX = {'100': 0.30, '200': 0.42, '300': 0.55}
+HUE_BG_BASE = (30, 33, 39)      # #1e2127 — карточка
+HUE_LINE_BASE = (46, 51, 60)    # #2e333c — кант
 
 NEUTRALS = ('slate', 'gray')
 SHADES = ('50', '100', '200', '300', '400', '500', '600', '700', '800', '900', '950')
@@ -167,6 +174,12 @@ SCREENS = {'sm': 640, 'md': 768, 'lg': 1024, 'xl': 1280, '2xl': 1536}
 SKIP_VARIANTS = ('dark', 'file')
 
 
+def mix_rgb(base, color, amount):
+    """Подмешать цвет в основу: '#rrggbb' на выходе."""
+    return '#%02x%02x%02x' % tuple(
+        round(base[i] + (color[i] - base[i]) * amount) for i in range(3))
+
+
 def rgba(hex_or_rgb, alpha):
     if isinstance(hex_or_rgb, str):
         h = hex_or_rgb.lstrip('#')
@@ -201,18 +214,20 @@ def declaration(prop, color, alpha):
         elif is_neutral:
             value = BG_NEUTRAL[shade]
         else:
-            if shade not in HUE_BG_ALPHA:
+            if shade not in HUE_BG_MIX:
                 return None                  # 400…950 — акцентная заливка, остаётся собой
-            base = HUES[family][0]
-            a = HUE_BG_ALPHA[shade] * (alpha if alpha is not None else 1.0)
-            return 'background-color: %s' % rgba(base, a)
+            value = mix_rgb(HUE_BG_BASE, HUES[family][0], HUE_BG_MIX[shade])
+            if alpha is not None:
+                return 'background-color: %s' % rgba(value, alpha)
+            return 'background-color: %s' % value
         if alpha is not None:
             return 'background-color: %s' % rgba(value, alpha)
         return 'background-color: %s' % value
 
     if prop in ('text', 'placeholder'):
-        if alpha is not None:
-            return None                      # полупрозрачный текст живёт на цветном
+        if family in ('white', 'black') and alpha is not None:
+            # `text-white/70` лежит на цветной кнопке — там всё в порядке.
+            return None
         if family == 'white':
             return None
         if is_neutral:
@@ -224,6 +239,10 @@ def declaration(prop, color, alpha):
             value = HUES[family][1] if shade == '500' else HUES[family][2]
         if not value:
             return None
+        if alpha is not None:
+            # `text-blue-900/80` в «Технических проблемах»: тёмно-синий на
+            # 80 % — это подпись поля, а не текст на цветной кнопке.
+            return 'color: %s' % rgba(value, alpha)
         return 'color: %s' % value
 
     # border / ring / divide
@@ -238,10 +257,11 @@ def declaration(prop, color, alpha):
             if alpha is not None:
                 value = rgba(value, alpha)
     else:
-        if shade not in HUE_LINE_ALPHA:
+        if shade not in HUE_LINE_MIX:
             return None
-        a = HUE_LINE_ALPHA[shade] * (alpha if alpha is not None else 1.0)
-        value = rgba(HUES[family][0], a)
+        value = mix_rgb(HUE_LINE_BASE, HUES[family][0], HUE_LINE_MIX[shade])
+        if alpha is not None:
+            value = rgba(value, alpha)
 
     if prop == 'ring':
         return '--tw-ring-color: %s' % value
@@ -249,7 +269,10 @@ def declaration(prop, color, alpha):
 
 
 def escape_class(name):
-    return name.replace('\\', '\\\\').replace(':', r'\:').replace('/', r'\/').replace('.', r'\.')
+    out = name.replace('\\', '\\\\')
+    for char in (':', '/', '.', '[', ']', '#', '(', ')', ',', '%', '!'):
+        out = out.replace(char, '\\' + char)
+    return out
 
 
 def build_selector(prefix, class_name):
@@ -380,6 +403,12 @@ import colorsys
 
 PALETTE_SOURCES = (
     ('src/components/tasks/TasksView.jsx', 'style'),
+    # Раздел рисует свои стили тегом <style> прямо в разметке.
+    ('src/components/monitoring/MonitoringScaleView.jsx', 'jsx-style'),
+    ('src/components/technical/TechnicalIssuesView.jsx', 'jsx-style'),
+    # «Журнал оценок» — ОТДЕЛЬНАЯ сборка, живущая в iframe: Tailwind там нет
+    # вовсе, вся палитра в этом файле (см. call_evaluation.html).
+    ('src/call_evaluation/styles.css', 'css'),
     ('src/components/news/news-modal.css', 'css'),
     ('src/components/lms/LmsRichText.css', 'css'),
     ('src/components/ui/markdown.css', 'css'),
@@ -403,19 +432,55 @@ def hex_to_hsl(value):
     return colorsys.rgb_to_hls(r, g, b)   # (hue, lightness, saturation)
 
 
+def colorfulness(value):
+    """Насыщенность по HLS и абсолютный размах каналов.
+
+    Порог «серый или цветной» стоит на HLS-насыщенности, потому что она
+    единственная сравнивает размах каналов с ТЕМ, ЧТО ВОЗМОЖНО при такой
+    светлоте. Абсолютный размах для этого не годится в обе стороны:
+    у #111827 (почти чёрный slate) он всего 22, но это предел для такой
+    темноты, а у #dbeafe (blue-100) — 35, и это уже почти максимум для
+    такой светлоты.
+
+    Порог 0.45, а не 0.16, как было сперва: у нейтральных серых портала
+    насыщенность доходит до 0.4 (#f8fafc, #f1f5f9, #111827), а у самых
+    бледных настоящих оттенков — 0.75 и выше (#eef2ff, #f0fdf4, #fef2f2).
+    Заниженный порог красил системный серый #f2f2f7 (0.24) в синий и залил
+    им целое полотно списка чатов Wazzup.
+
+    Второе условие — для почти белого с размахом в один-два канала: там
+    насыщенность скачет от округления.
+    """
+    h = value.lstrip('#')
+    if len(h) == 3:
+        h = ''.join(c * 2 for c in h)
+    h = h[:6]
+    channels = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+    return max(channels) - min(channels)
+
+
 def hsl_hex(hue, lightness, saturation):
     r, g, b = colorsys.hls_to_rgb(hue, lightness, saturation)
     return '#%02x%02x%02x' % (round(r * 255), round(g * 255), round(b * 255))
 
 
-def hsl_rgba(hue, lightness, saturation, alpha):
+def hsl_channels(hue, lightness, saturation):
     r, g, b = colorsys.hls_to_rgb(hue, lightness, saturation)
-    return rgba((round(r * 255), round(g * 255), round(b * 255)), alpha)
+    return (round(r * 255), round(g * 255), round(b * 255))
 
 
 def dark_counterpart(value, role):
     hue, lightness, saturation = hex_to_hsl(value)
-    neutral = saturation < 0.16
+    chroma = colorfulness(value)
+    # Три условия, и достаточно любого. Первое — обычные серые. Второе — почти
+    # чёрные и почти белые: у #0f172a насыщенность 0.47, а размах всего 27,
+    # то есть это slate-900, а не синий; у настоящего индиго-800 (#3730a3) при
+    # похожей насыщенности размах 115. Третье — белёсое, где насыщенность
+    # скачет от округления одного канала.
+    neutral = (saturation < 0.45
+               or (saturation < 0.75 and chroma <= 32)
+               or chroma <= 6)
+    tint_saturation = min(0.75, max(0.45, saturation))
 
     if role == 'surface':
         if neutral:
@@ -429,9 +494,9 @@ def dark_counterpart(value, role):
                 return '#343a44'
             return '#e8ecf2'              # тёмная кнопка светлой темы — светлая в тёмной
         if lightness >= 0.82:
-            return hsl_rgba(hue, 0.55, 0.75, 0.16)
+            return mix_rgb(HUE_BG_BASE, hsl_channels(hue, 0.55, tint_saturation), 0.16)
         if lightness >= 0.62:
-            return hsl_rgba(hue, 0.55, 0.75, 0.24)
+            return mix_rgb(HUE_BG_BASE, hsl_channels(hue, 0.55, tint_saturation), 0.26)
         return None                       # насыщенный акцент остаётся собой
 
     if role == 'line':
@@ -442,7 +507,7 @@ def dark_counterpart(value, role):
                 return '#3a414b'
             return '#454c58'
         if lightness >= 0.62:
-            return hsl_rgba(hue, 0.55, 0.75, 0.34)
+            return mix_rgb(HUE_LINE_BASE, hsl_channels(hue, 0.55, tint_saturation), 0.42)
         return None
 
     # role == 'ink'
@@ -457,7 +522,7 @@ def dark_counterpart(value, role):
             return '#a8b1bf'
         return '#7d8695'
     if lightness <= 0.72:
-        return hsl_hex(hue, 0.74, min(max(saturation, 0.45), 0.85))
+        return hsl_hex(hue, 0.74, min(max(tint_saturation, 0.45), 0.85))
     return None
 
 
@@ -490,6 +555,8 @@ def palette_rules():
             if start < 0 or end < 0:
                 continue
             css = text[start + len('styleTag.textContent = `'):end]
+        elif kind == 'jsx-style':
+            css = '\n'.join(re.findall(r'<style>\{`(.*?)`\}', text, flags=re.S))
         else:
             css = text
         css = strip_comments(css)
@@ -521,6 +588,51 @@ def palette_rules():
     return rows
 
 
+# Произвольные цвета в утилитах — bg-[#f2f2f7]. Их пять на весь проект, но одна
+# такая заливка держит целую колонку раздела (полотно списка чатов Wazzup),
+# и без неё половина экрана остаётся светлой.
+ARBITRARY_RE = re.compile(
+    r'(?<![\w:/.-])((?:[a-z0-9-]+:)*)(bg|text|border|ring)-\[(#[0-9a-fA-F]{3,8})\](?![\w-])')
+
+ARBITRARY_ROLE = {'bg': 'surface', 'border': 'line', 'ring': 'line', 'text': 'ink'}
+
+
+def arbitrary_rules():
+    """Тёмные двойники утилит с цветом в квадратных скобках."""
+    rows = []
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(SRC):
+        dirnames[:] = [d for d in dirnames if d != 'node_modules']
+        for fn in filenames:
+            if not fn.endswith(('.jsx', '.js')):
+                continue
+            with open(os.path.join(dirpath, fn), encoding='utf-8', errors='ignore') as fh:
+                text = fh.read()
+            for prefix, prop, value in ARBITRARY_RE.findall(text):
+                key = (prefix, prop, value.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                replacement = dark_counterpart(value, ARBITRARY_ROLE[prop])
+                if not replacement:
+                    continue
+                built = build_selector(prefix, '%s%s-[%s]' % (prefix, prop, value))
+                if not built:
+                    continue
+                media, selector = built
+                if prop == 'bg':
+                    decl = 'background-color: %s' % replacement
+                elif prop == 'ring':
+                    decl = '--tw-ring-color: %s' % replacement
+                elif prop == 'border':
+                    decl = 'border-color: %s' % replacement
+                else:
+                    decl = 'color: %s' % replacement
+                rows.append((media, selector, decl))
+    rows.sort(key=lambda r: r[1])
+    return rows
+
+
 def main():
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dark_theme_chrome.css'),
               encoding='utf-8') as fh:
@@ -528,7 +640,7 @@ def main():
 
     base = rules_for(base_tokens())
     variants = rules_for(sorted(scan_tokens()))
-    palette = palette_rules()
+    palette = palette_rules() + arbitrary_rules()
 
     header = (
         '/* ЭТОТ ФАЙЛ СОБРАН СКРИПТОМ. Правки вносить в scripts/build_dark_theme.py\n'

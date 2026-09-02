@@ -8984,6 +8984,23 @@ const App = ({ user, initialSelection }) => {
     );
 };
 
+/* Тёмный режим.
+
+   Журнал оценок — отдельная сборка в своём документе (call_evaluation.html),
+   Tailwind в ней нет вовсе, вся палитра лежит в ./styles.css. Слой темы,
+   подключённый порталом, сюда не достаёт — документ другой.
+
+   Решение принимает ПОРТАЛ: он один знает, кому режим выдан, и передаёт метку
+   в адресе iframe (см. callEvaluationIframeUrl в src/App.jsx). Читать
+   localStorage самим нельзя — тогда тему получил бы любой, у кого этот ключ
+   когда-то остался. Слой тот же самый, из общей сборки, поэтому второй раз он
+   не скачивается. */
+if (new URLSearchParams(window.location.search).get('theme') === 'dark') {
+    import('../theme-dark.css')
+        .then(() => { document.documentElement.setAttribute('data-otp-theme', 'dark'); })
+        .catch(() => {});
+}
+
 const rootEl = document.getElementById('root');
 const root = rootEl ? createRoot(rootEl) : null;
 
