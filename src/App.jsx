@@ -37357,12 +37357,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // других у документа одно, поэтому и здесь одно значение, а не флаг на каждое.
             const [szovWallboardWidget, setSzovWallboardWidget] = useState(null);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
-            // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
-            // Глава отдела — только с телефонией (SIP_SETTINGS_DEPARTMENT_CODES):
-            // главе бэк-офиса и фронт-офисов показывать в разделе нечего.
-            const canAccessSipSettings = isAdminLikeRole
-                || isSipSettingsDepartmentHead(user)
-                || isOpSalesSupervisorForAiQa(user);
+            // Панель «Настройки SIP» (iCORE Phone). Общего флага на оба раздела
+            // намеренно нет: он пускал главу ЛЮБОГО отдела с телефонией, и
+            // раздел «Таксопарки» оставался достижим по ссылке даже главе ТЭЗ,
+            // которому там нечего делать. У каждого раздела свой предикат.
             // Раздел разъехался на два: «Таксопарки» (локальная АТС) и «Tez» (Binotel).
             // Главе видно только своё, админ и СВ ОП видят оба — СВ ОП работает по
             // очередям Asterisk и в списке Тез ему нечего делать, но раздел един
@@ -45479,7 +45477,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Бот опозданий» — тоже свой предикат: раздел общий, а не «раздел отдела».
                 if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
-                if (view === 'sip_settings' && canAccessSipSettings) return;
+                if (view === 'sip_settings' && canAccessSipSettingsFleet) return;
                 // «Настройки SIP — Tez» — тот же раздел с провайдером Binotel: свой
                 // предикат (глава ТЭЗ и админы), поэтому и своя строка обхода.
                 if (view === 'sip_settings_tez' && canAccessSipSettingsTez) return;
@@ -45512,7 +45510,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettings, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -49289,14 +49287,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ))}
                         {/* Настройки SIP — Таксопарки: админ / глава отдела / СВ отдела продаж —
                             общий раздел вне веток по ролям. Локальная АТС Asterisk. */}
-                        {( view === "sip_settings" && canAccessSipSettings && (
+                        {( view === "sip_settings" && canAccessSipSettingsFleet && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <SipSettingsView
                                     user={user}
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
-                                    canEdit={canAccessSipSettings}
+                                    canEdit={canAccessSipSettingsFleet}
                                     canDownloadPhone={canDownloadIcorePhone}
                                     provider="asterisk"
                                     canSwitchProvider={isAdminLikeRoleFn(user?.role)}
@@ -53607,7 +53605,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     groups={userModalGroups}
                                     user={user}
                                     onSave={saveUserChanges}
-                                    onOpenSipSettings={(canAccessSipSettings || canAccessSipSettingsTez) ? ((departmentId) => {
+                                    onOpenSipSettings={(canAccessSipSettingsFleet || canAccessSipSettingsTez) ? ((departmentId) => {
                                         // Куда вести, решает провайдер отдела сотрудника: у ТЭЗ
                                         // поля Binotel, у остальных — локальная АТС. Если раздел
                                         // человеку не открыт, просто никуда не идём: обход
@@ -53616,7 +53614,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             (departments || []).find((d) => Number(d?.id) === Number(departmentId))?.code
                                         );
                                         const isTez = SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES.has(code);
-                                        if (isTez ? !canAccessSipSettingsTez : !canAccessSipSettings) return;
+                                        if (isTez ? !canAccessSipSettingsTez : !canAccessSipSettingsFleet) return;
                                         setShowUserEditModal(false);
                                         navigateToView(isTez ? 'sip_settings_tez' : 'sip_settings');
                                     }) : null}

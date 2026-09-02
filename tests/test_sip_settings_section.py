@@ -1722,10 +1722,12 @@ class SipSectionFrontendTests(unittest.TestCase):
             self.app.count("view === 'sip_settings' ? 'bg-blue-700' : ''"), 2)
 
     def test_section_renders_behind_the_access_flag(self):
-        self.assertIn('view === "sip_settings" && canAccessSipSettings', self.app)
+        self.assertIn('view === "sip_settings" && canAccessSipSettingsFleet', self.app)
+        self.assertIn("view === 'sip_settings_tez' && canAccessSipSettingsTez", self.app)
 
     def test_department_allowlist_guard_lets_the_section_through(self):
-        self.assertIn("if (view === 'sip_settings' && canAccessSipSettings) return;", self.app)
+        self.assertIn("if (view === 'sip_settings' && canAccessSipSettingsFleet) return;", self.app)
+        self.assertIn("if (view === 'sip_settings_tez' && canAccessSipSettingsTez) return;", self.app)
 
     def test_view_is_built_from_shared_ios_primitives(self):
         view = _read(VIEW_PATH)
