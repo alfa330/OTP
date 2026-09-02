@@ -293,6 +293,59 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         self.assertFalse(sheet.cell(2, prev_col).value)
         self.assertEqual(sheet.cell(2, own + 1).value, 61)
 
+    def test_carried_success_shows_its_call_like_an_ordinary_one(self):
+        """Перенесённая успешка: лид июня, поездка и звонок — в июле.
+
+        Раскладка от месяца ЛИСТА оставляла обе пары колонок пустыми, и строка
+        выходила успешкой без основания. Считаем от месяца зачёта — звонок
+        встаёт в те же колонки, что и у обычной июльской успешки.
+        """
+        carried = self._detail_row(
+            phone="77010000006",
+            success_date="2026-07-14",
+            call_at="2026-07-09T11:20:00",
+            talk_duration_seconds=95,
+        )
+        _, book = self._export_book([self._detail_row()], [carried])
+        sheet = book["База 06.2026"]
+        col = self._call_columns(sheet)
+
+        self.assertEqual(sheet.cell(2, col["month_call"]).value, "2026-07-09 11:20:00")
+        self.assertEqual(sheet.cell(2, col["month_duration"]).value, 95)
+        self.assertFalse(sheet.cell(2, col["prev_call"]).value)
+        self.assertFalse(sheet.cell(2, col["prev_duration"]).value)
+
+    def test_carried_success_on_the_month_seam_fills_the_previous_pair(self):
+        """Звонок 25 июня при поездке 3 июля — окно «последние 7 дней прошлого
+        месяца» относительно МЕСЯЦА ЗАЧЁТА, а не месяца листа."""
+        carried = self._detail_row(
+            phone="77010000007",
+            success_date="2026-07-03",
+            status_rule="prev_month_last7",
+            rule_code="prev_month_last7",
+            call_at="2026-06-25T10:00:00",
+            talk_duration_seconds=61,
+        )
+        _, book = self._export_book([self._detail_row()], [carried])
+        sheet = book["База 06.2026"]
+        col = self._call_columns(sheet)
+
+        self.assertEqual(sheet.cell(2, col["prev_call"]).value, "2026-06-25 10:00:00")
+        self.assertEqual(sheet.cell(2, col["prev_duration"]).value, 61)
+        self.assertFalse(sheet.cell(2, col["month_call"]).value)
+
+    def test_call_reference_month_falls_back_to_the_sheet(self):
+        """Без даты успешки (и при мусоре в ней) раскладка остаётся прежней —
+        от месяца листа, иначе сломался бы весь второй лист."""
+        reference = _load_top_level_function("_tez_leads_call_reference_month")
+        self.assertEqual(reference(None, 2026, 6), (2026, 6))
+        self.assertEqual(reference("", 2026, 6), (2026, 6))
+        self.assertEqual(reference("не дата", 2026, 6), (2026, 6))
+        self.assertEqual(reference("2026-13-01", 2026, 6), (2026, 6))
+        self.assertEqual(reference("2026-06-30", 2026, 6), (2026, 6))
+        self.assertEqual(reference("2026-07-03", 2026, 6), (2026, 7))
+        self.assertEqual(reference("2027-01-05", 2026, 12), (2027, 1))
+
     def test_missing_talk_duration_is_an_empty_excel_cell(self):
         _, sheet = self._export(
             [self._detail_row(source_file_name="", talk_duration_seconds=None)]

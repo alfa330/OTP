@@ -42555,6 +42555,27 @@ def _tez_leads_call_bucket(call_at, year, month):
     return None
 
 
+def _tez_leads_call_reference_month(success_date, sheet_year, sheet_month):
+    """(год, месяц), относительно которых раскладывается звонок строки.
+
+    Обычно это месяц листа. У ПЕРЕНЕСЁННОЙ успешки — месяц зачёта: её лид
+    остался в базе своего месяца, а поездка и звонок случились в следующем.
+    От месяца листа такой звонок не попадает ни в одну корзину, и строка
+    выходит успешкой без основания — пустые «Звонок» и «Время разговора» при
+    заполненной «Дате успешки». Месяц зачёта равен месяцу поездки
+    (tez_op_leads: success_date = дата поездки), поэтому звонок ложится в те же
+    колонки, что и у обычной успешки того месяца.
+    """
+    text = str(success_date or '')
+    try:
+        year, month = int(text[:4]), int(text[5:7])
+    except ValueError:
+        return sheet_year, sheet_month
+    if not 1 <= month <= 12:
+        return sheet_year, sheet_month
+    return year, month
+
+
 def _excel_suppress_number_as_text_warning(stream, sqref,
                                            sheet_path='xl/worksheets/sheet1.xml'):
     """Убирает у диапазона зелёный уголок «Число сохранено как текст».
@@ -43001,7 +43022,13 @@ def tez_leads_export():
             # видно, привлечение это внутри месяца или на стыке с прошлым. Месяц
             # берём от ЛИСТА, а не от запрошенного периода — иначе на листе
             # прошлого месяца все звонки уехали бы в колонку «в прошлом месяце».
-            bucket = _tez_leads_call_bucket(row['call_at'], sheet_year, sheet_month)
+            # Исключение — перенесённая успешка: она датирована следующим
+            # месяцем, и её звонок раскладывается от месяца зачёта, иначе не
+            # показывается вовсе (см. _tez_leads_call_reference_month).
+            call_year, call_month = _tez_leads_call_reference_month(
+                row['success_date'], sheet_year, sheet_month
+            )
+            bucket = _tez_leads_call_bucket(row['call_at'], call_year, call_month)
             call_text = (row['call_at'] or '').replace('T', ' ')[:19]
             duration_seconds = row.get('talk_duration_seconds')
             for target, call_column in (('prev', off + 10), ('month', off + 12)):
