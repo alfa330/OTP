@@ -503,6 +503,37 @@ class ChatReportImportTests(unittest.TestCase):
         ]
         self.assertEqual(shifts(rows, index), [18000, 18000, 18000, 18000])
 
+    def test_rating_shift_ignores_late_rating_that_looks_like_a_timezone(self):
+        """Оценку, поставленную ровно через 3 часа после диалога, нельзя принять
+        за пояс: иначе её «сдвиг» выглядит честными 8 часами и время уедет."""
+        shifts = self.ns["_chat2desk_rating_time_shifts"]
+        index = self.ns["_chat2desk_request_end_index"]([
+            {"request_id": 1, "request_end": "2026-09-01 10:00:00"},
+            {"request_id": 2, "request_end": "2026-09-01 11:00:00"},
+            {"request_id": 3, "request_end": "2026-09-01 12:00:00"},
+        ])
+        rows = [
+            self._rating_row("2026-09-01 15:00:00", request_id=1),  # +5ч, настоящий сдвиг
+            self._rating_row("2026-09-01 16:00:00", request_id=2),  # +5ч
+            # +8ч: сдвиг дня плюс три часа задержки. Ровно целые часы, поэтому
+            # прежнее правило приняло бы это за пояс и вычло бы 8 часов.
+            self._rating_row("2026-09-01 20:00:00", request_id=3),
+        ]
+        self.assertEqual(shifts(rows, index), [18000, 18000, 18000])
+
+    def test_rating_shift_rejects_implausible_offsets(self):
+        """Расхождение больше любого мыслимого пояса в опору не берётся."""
+        shifts = self.ns["_chat2desk_rating_time_shifts"]
+        index = self.ns["_chat2desk_request_end_index"]([
+            {"request_id": 1, "request_end": "2026-09-01 10:00:00"},
+            {"request_id": 2, "request_end": "2026-09-01 10:00:00"},
+        ])
+        rows = [
+            self._rating_row("2026-09-01 10:00:00", request_id=1),  # цел
+            self._rating_row("2026-09-02 11:00:00", request_id=2),  # +25ч, не пояс
+        ]
+        self.assertEqual(shifts(rows, index), [0, 0])
+
     def test_duplicate_rating_in_one_response_counted_once(self):
         """Вендор кладёт обе копии в один ответ: вторая не должна ни удваивать
         средний балл дня, ни уезжать второй строкой в базу (там она уронила бы
