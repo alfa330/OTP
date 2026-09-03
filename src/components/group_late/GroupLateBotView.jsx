@@ -32,6 +32,35 @@ const EVENT_TYPES = {
 
 const eventMeta = (type) => EVENT_TYPES[type] || { label: type || '—', tone: 'slate', icon: Bell };
 
+/* Статусы дня на вкладке «Отметки». Цветом отмечено только то, где он несёт смысл:
+ * «вовремя» и «не отмечается» нейтральные — первое потому, что вопросов нет, второе
+ * потому, что это про человека, который вообще не пользуется терминалом, а не про
+ * нарушение. Подписи приходят с сервера, здесь только тон. */
+const ATTENDANCE_STATUS_TONES = {
+    absent: 'red',
+    late: 'red',
+    early_out: 'amber',
+    no_out: 'amber',
+    off_schedule: 'blue',
+    no_terminal: 'slate',
+    ok: 'slate',
+};
+
+/* Оси сортировки из постановки: подразделение, локация, приход/уход. Остальные
+ * добавлены потому, что таблицу читают ради них же. */
+const ATTENDANCE_SORTS = [
+    { value: 'status', label: 'Сначала проблемные' },
+    { value: 'employee', label: 'По ФИО' },
+    { value: 'department', label: 'По подразделению' },
+    { value: 'location', label: 'По локации' },
+    { value: 'position', label: 'По должности' },
+    { value: 'fact_in', label: 'По времени прихода' },
+    { value: 'fact_out', label: 'По времени ухода' },
+    { value: 'late_minutes', label: 'По опозданию' },
+    { value: 'work_seconds', label: 'По времени в работе' },
+    { value: 'system', label: 'По системе отметки' },
+];
+
 const MUTE_KIND_LABELS = { all: 'Все уведомления', user: 'Сотрудник', dept: 'Отдел' };
 
 /* Почему карточка Workpace осталась без нашего сотрудника. `excluded` — не промах
@@ -43,6 +72,7 @@ const UNLINKED_REASONS = {
 };
 
 const TABS = [
+    { key: 'attendance', label: 'Отметки', icon: Clock },
     { key: 'overview', label: 'Обзор', icon: Activity },
     { key: 'employees', label: 'Сотрудники', icon: Users },
     { key: 'events', label: 'Отбивки', icon: Bell },
@@ -82,6 +112,16 @@ const fmtDateTime = (iso) => (iso
 const fmtTime = (iso) => (iso
     ? new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
     : '—');
+
+/* Время в работе — уже за вычетом обеда, его считает сервер. Ноль показываем
+ * прочерком: у человека без пары отметок «00:00» читалось бы как «не работал». */
+const fmtWorked = (seconds) => {
+    const total = Number(seconds || 0);
+    if (total <= 0) return '—';
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+};
 
 const fmtDay = (iso) => (iso
     ? new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
@@ -530,7 +570,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     );
     const base = `${apiBaseUrl}/api/group_late_bot`;
 
-    const [tab, setTab] = useState('overview');
+    // «Отметки» — то, ради чего в раздел заходят чаще всего, поэтому они и открываются.
+    const [tab, setTab] = useState('attendance');
 
     const [overview, setOverview] = useState(null);
     const [overviewError, setOverviewError] = useState(null);
@@ -557,6 +598,21 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     });
     const [eventSearch, setEventSearch] = useState('');
 
+    /* Вкладка «Отметки» — главная в разделе: кто когда пришёл и ушёл, сразу по
+     * обоим источникам. Данные тянутся из Workpace и Clockster прямо в запросе,
+     * поэтому окно короткое (бэкенд отдаёт не больше недели), а за месяц кадровик
+     * берёт выгрузку со вкладки «Отчёты». */
+    const [attendance, setAttendance] = useState(null);
+    const [attendanceTotal, setAttendanceTotal] = useState(0);
+    const [attendanceError, setAttendanceError] = useState(null);
+    const [attendanceNotice, setAttendanceNotice] = useState(null);
+    const [attendanceFilters, setAttendanceFilters] = useState({
+        from: isoDate(new Date()), to: isoDate(new Date()),
+        department: '', q: '', kind: '', sort: 'status',
+    });
+    const [attendanceSearch, setAttendanceSearch] = useState('');
+    const [expandedMarks, setExpandedMarks] = useState(() => new Set());
+
     const [employees, setEmployees] = useState(null);
     const [employeesError, setEmployeesError] = useState(null);
     const [employeeFilters, setEmployeeFilters] = useState({
@@ -580,6 +636,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const eventsRequest = useRef({ id: 0, controller: null });
     const employeesRequest = useRef({ id: 0, controller: null });
+    const attendanceRequest = useRef({ id: 0, controller: null });
+    const attendanceSearchDebounce = useRef(null);
     const searchDebounce = useRef(null);
     const employeeSearchDebounce = useRef(null);
     const reportPoll = useRef(null);
@@ -683,6 +741,42 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         });
     }, [base, headers, events]);
 
+    const loadAttendance = useCallback((filters) => {
+        attendanceRequest.current.controller?.abort();
+        const controller = new AbortController();
+        const requestId = attendanceRequest.current.id + 1;
+        attendanceRequest.current = { id: requestId, controller };
+        setAttendance(null);
+        setAttendanceError(null);
+        setAttendanceNotice(null);
+        axios.get(`${base}/attendance`, {
+            headers: headers(), signal: controller.signal,
+            params: {
+                date_start: filters.from || undefined,
+                date_end: filters.to || undefined,
+                department: filters.department || undefined,
+                q: filters.q || undefined,
+                kind: filters.kind || undefined,
+                sort: filters.sort || undefined,
+                limit: 500,
+            },
+        }).then((r) => {
+            if (requestId !== attendanceRequest.current.id) return;
+            setAttendance(r.data.rows || []);
+            setAttendanceTotal(r.data.total || 0);
+            // Второй источник мог отвалиться — таблица при этом рабочая, но
+            // неполная, и молчать об этом нельзя: пропал бы целый офис.
+            if (r.data.clockster_error) {
+                setAttendanceNotice('Clockster сейчас недоступен — отметок центрального офиса в таблице нет');
+            }
+        }).catch((e) => {
+            if (axios.isCancel?.(e) || e.name === 'CanceledError') return;
+            if (requestId !== attendanceRequest.current.id) return;
+            setAttendance([]);
+            setAttendanceError(errText(e, 'Не удалось загрузить отметки'));
+        });
+    }, [base, headers]);
+
     const loadEmployees = useCallback((filters) => {
         employeesRequest.current.controller?.abort();
         const controller = new AbortController();
@@ -747,6 +841,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         if (tab === 'overview') loadPollRuns();
         // id === 0 — лента ещё ни разу не грузилась. Переход на вкладку из
         // «Обзора» уже запускает загрузку со своим фильтром, второй запрос лишний.
+        if (tab === 'attendance' && attendanceRequest.current.id === 0) loadAttendance(attendanceFilters);
         if (tab === 'events' && eventsRequest.current.id === 0) loadEvents(eventFilters);
         if (tab === 'employees' && employeesRequest.current.id === 0) loadEmployees(employeeFilters);
         if (tab === 'employees' && planLinks === null) loadPlanLinks();
@@ -771,6 +866,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         clearInterval(reportPoll.current);
         eventsRequest.current.controller?.abort();
         employeesRequest.current.controller?.abort();
+        clearTimeout(attendanceSearchDebounce.current);
+        attendanceRequest.current.controller?.abort();
     }, []);
 
     /* ─── действия ─────────────────────────────────────────────────────── */
@@ -837,6 +934,25 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             URL.revokeObjectURL(url);
         });
     };
+
+    const applyAttendanceFilters = (patch) => {
+        const next = { ...attendanceFilters, ...patch };
+        setAttendanceFilters(next);
+        loadAttendance(next);
+    };
+
+    const onAttendanceSearch = (value) => {
+        setAttendanceSearch(value);
+        clearTimeout(attendanceSearchDebounce.current);
+        attendanceSearchDebounce.current = setTimeout(
+            () => applyAttendanceFilters({ q: value.trim() }), 350);
+    };
+
+    const toggleMarks = (key) => setExpandedMarks((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key); else next.add(key);
+        return next;
+    });
 
     const applyEventFilters = (patch) => {
         const next = { ...eventFilters, ...patch };
@@ -1072,6 +1188,201 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             </div>
         );
     };
+
+    const renderAttendance = () => (
+        <div className="space-y-3">
+            <div className={`${iosCard} p-3`}>
+                <div className="flex flex-wrap items-end gap-2.5">
+                    <FilterField label="Период">
+                        <IosDateRangePicker from={attendanceFilters.from} to={attendanceFilters.to}
+                                            max={isoDate(new Date())}
+                                            onChange={({ from, to }) => applyAttendanceFilters({ from, to })} />
+                    </FilterField>
+                    <FilterField label="Отметка" className="w-[170px]">
+                        <CustomSelect
+                            variant="ios"
+                            value={attendanceFilters.kind}
+                            onChange={(kind) => applyAttendanceFilters({ kind })}
+                            options={[
+                                { value: '', label: 'Приход и уход' },
+                                { value: 'in', label: 'Только приход' },
+                                { value: 'out', label: 'Только уход' },
+                                { value: 'absent', label: 'Без отметки' },
+                            ]}
+                            ariaLabel="Отметка"
+                        />
+                    </FilterField>
+                    {!scoped && (
+                        <FilterField label="Подразделение" className="w-[210px]">
+                            <CustomSelect
+                                variant="ios"
+                                searchable
+                                value={attendanceFilters.department}
+                                onChange={(department) => applyAttendanceFilters({ department })}
+                                options={[
+                                    { value: '', label: 'Все подразделения' },
+                                    ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                ]}
+                                searchPlaceholder="Поиск подразделения…"
+                                ariaLabel="Подразделение"
+                            />
+                        </FilterField>
+                    )}
+                    <FilterField label="Сортировка" className="w-[190px]">
+                        <CustomSelect
+                            variant="ios"
+                            value={attendanceFilters.sort}
+                            onChange={(sort) => applyAttendanceFilters({ sort })}
+                            options={ATTENDANCE_SORTS}
+                            ariaLabel="Сортировка"
+                        />
+                    </FilterField>
+                    <FilterField label="Поиск" className="flex-1 min-w-[220px]">
+                        <div className="relative">
+                            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                            <input
+                                className={`${iosInput} pl-9`}
+                                value={attendanceSearch}
+                                onChange={(e) => onAttendanceSearch(e.target.value)}
+                                placeholder="ФИО или должность"
+                            />
+                        </div>
+                    </FilterField>
+                </div>
+            </div>
+
+            {attendanceNotice && (
+                <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-amber-800`}>
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />
+                    {attendanceNotice}
+                </div>
+            )}
+            {attendanceError && (
+                <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-rose-700`}>
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    {attendanceError}
+                </div>
+            )}
+
+            {attendance === null && (
+                <div className={`${iosCard} flex items-center justify-center gap-2 p-8 text-sm text-slate-500`}>
+                    <Loader2 className="h-4 w-4 animate-spin" /> Загружаем отметки…
+                </div>
+            )}
+
+            {attendance !== null && attendance.length === 0 && !attendanceError && (
+                <div className={`${iosCard} p-8 text-center text-sm text-slate-500`}>
+                    За выбранный период отметок нет
+                </div>
+            )}
+
+            {attendance !== null && attendance.length > 0 && (
+                <div className={`${iosCard} overflow-hidden`}>
+                    <div className="flex items-center justify-between px-4 py-2.5 text-xs text-slate-500">
+                        <span>Показано {fmtInt(attendance.length)} из {fmtInt(attendanceTotal)}</span>
+                        <span className="tabular-nums">{attendanceFilters.from === attendanceFilters.to
+                            ? attendanceFilters.from
+                            : `${attendanceFilters.from} — ${attendanceFilters.to}`}</span>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full min-w-[1040px] text-sm">
+                            <thead>
+                                <tr className="border-y border-slate-200/70 bg-slate-50/70 text-xs text-slate-500">
+                                    <th className="px-4 py-2 text-left font-medium">Сотрудник</th>
+                                    <th className="px-3 py-2 text-left font-medium">Подразделение</th>
+                                    <th className="px-3 py-2 text-left font-medium">График</th>
+                                    <th className="px-3 py-2 text-left font-medium">Система</th>
+                                    <th className="px-3 py-2 text-center font-medium">Приход</th>
+                                    <th className="px-3 py-2 text-center font-medium">Уход</th>
+                                    <th className="px-3 py-2 text-right font-medium">Опоздание</th>
+                                    <th className="px-3 py-2 text-right font-medium">В работе</th>
+                                    <th className="px-3 py-2 text-left font-medium">Статус</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {attendance.map((row, index) => {
+                                    const key = `${row.date}:${row.employee_id}:${index}`;
+                                    const open = expandedMarks.has(key);
+                                    const tone = ATTENDANCE_STATUS_TONES[row.status] || 'slate';
+                                    return (
+                                        <React.Fragment key={key}>
+                                            <tr className="border-b border-slate-100 last:border-0 align-top">
+                                                <td className="px-4 py-2.5">
+                                                    <div className="font-medium text-slate-900">{row.employee || '—'}</div>
+                                                    <div className="text-xs text-slate-500">
+                                                        {row.position || 'должность не указана'}
+                                                        {attendanceFilters.from !== attendanceFilters.to && ` · ${row.date}`}
+                                                    </div>
+                                                </td>
+                                                <td className="px-3 py-2.5 text-slate-700">
+                                                    <div>{row.department || '—'}</div>
+                                                    {row.location && (
+                                                        <div className="flex items-center gap-1 text-xs text-slate-500">
+                                                            <MapPin className="h-3 w-3" />{row.location}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="px-3 py-2.5 text-slate-700">{row.schedule || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-600">{row.system_label}</td>
+                                                <td className="px-3 py-2.5 text-center tabular-nums">
+                                                    <div className="text-slate-900">{fmtTime(row.fact_in)}</div>
+                                                    <div className="text-xs text-slate-400">{fmtTime(row.plan_in)}</div>
+                                                </td>
+                                                <td className="px-3 py-2.5 text-center tabular-nums">
+                                                    <div className="text-slate-900">{fmtTime(row.fact_out)}</div>
+                                                    <div className="text-xs text-slate-400">{fmtTime(row.plan_out)}</div>
+                                                </td>
+                                                {/* Ноль не красим и не печатаем: цвет только там, где он
+                                                    что-то значит, иначе таблица рябит. */}
+                                                <td className={`px-3 py-2.5 text-right tabular-nums ${row.late_minutes > 0 ? 'font-medium text-rose-600' : 'text-slate-400'}`}>
+                                                    {row.late_minutes > 0 ? `${fmtInt(row.late_minutes)} м` : '—'}
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">
+                                                    {fmtWorked(row.work_seconds)}
+                                                </td>
+                                                <td className="px-3 py-2.5">
+                                                    <div className="flex items-center gap-2">
+                                                        <IosBadge tone={tone}>{row.status_label}</IosBadge>
+                                                        {(row.marks || []).length > 0 && (
+                                                            <button type="button" onClick={() => toggleMarks(key)}
+                                                                    className={iosBtnGhost}
+                                                                    title="Все отметки за день">
+                                                                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                            {open && (
+                                                <tr className="border-b border-slate-100 bg-slate-50/60">
+                                                    <td colSpan={9} className="px-4 py-2.5">
+                                                        <div className="flex flex-wrap gap-1.5">
+                                                            {(row.marks || []).map((mark, i) => (
+                                                                <span key={i}
+                                                                      className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-xs text-slate-600 ring-1 ring-slate-200/70">
+                                                                    {mark.kind === 'in'
+                                                                        ? <ArrowDown className="h-3 w-3 text-emerald-600" />
+                                                                        : <ArrowUp className="h-3 w-3 text-slate-400" />}
+                                                                    <span className="tabular-nums">{fmtTime(mark.at)}</span>
+                                                                    {mark.suspicious && (
+                                                                        <ShieldAlert className="h-3 w-3 text-amber-500" title="Терминал не подтвердил отметку" />
+                                                                    )}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
 
     const renderEvents = () => (
         <div className="space-y-3">
@@ -1961,6 +2272,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 </div>
             )}
 
+            {tab === 'attendance' && renderAttendance()}
             {tab === 'overview' && renderOverview()}
             {tab === 'employees' && renderEmployees()}
             {tab === 'events' && renderEvents()}
