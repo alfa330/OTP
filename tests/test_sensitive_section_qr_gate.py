@@ -48,6 +48,9 @@ from parcels.routes import build_parcels_blueprint  # noqa: E402
 from wiki import access as wiki_access  # noqa: E402
 from wiki import queries as wiki_queries  # noqa: E402
 from wiki.routes import build_wiki_blueprint  # noqa: E402
+from driver_chats import access as dch_access  # noqa: E402
+from driver_chats import queries as dch_queries  # noqa: E402
+from driver_chats.routes import build_driver_chats_blueprint  # noqa: E402
 
 
 QR_CODE = 'SENSITIVE_ACCESS_REQUIRED'
@@ -75,6 +78,22 @@ def parcels_ctx(role='operator', user_id=10, department_code='front_office', hea
         'department_id': 909,
         'department_code': department_code,
         'city': 'Тараз',
+        'headed_department_ids': list(headed),
+        'headed_department_codes': [department_code] if headed else [],
+    }
+
+
+def driver_chats_ctx(role='operator', user_id=10, department_code='szov',
+                     direction_model=None, headed=()):
+    """Портрет сотрудника раздела «Чаты водителей». По умолчанию — оператор СЗоВ."""
+    return {
+        'user_id': user_id,
+        'name': 'Тест',
+        'role': role,
+        'department_id': 1,
+        'department_code': department_code,
+        'direction_model': direction_model,
+        'status': 'working',
         'headed_department_ids': list(headed),
         'headed_department_codes': [department_code] if headed else [],
     }
@@ -165,6 +184,25 @@ class ParcelsGateHarness(_Harness):
             build_cors_preflight_response=lambda: ('', 204),
             resolve_requester=lambda: (context['user_id'], None, None),
             sensitive_access_granted=gate,
+        ))
+        app.config['TESTING'] = True
+        return app.test_client(), gate
+
+
+class DriverChatsGateHarness(_Harness):
+    def build(self, context, granted=False):
+        _cursor, db = self._cursor_and_db()
+        self._patch(dch_queries, 'load_access_context', lambda _c, _uid: dict(context))
+
+        gate = _GateRecorder(granted)
+        app = Flask(__name__)
+        app.register_blueprint(build_driver_chats_blueprint(
+            db=db,
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (context['user_id'], None, None),
+            sensitive_access_granted=gate,
+            client_ip=lambda: '127.0.0.1',
         ))
         app.config['TESTING'] = True
         return app.test_client(), gate
@@ -379,6 +417,114 @@ class ParcelsQrGateTest(ParcelsGateHarness, unittest.TestCase):
         client, gate = self.build(parcels_ctx(), granted=False)
         self.assertEqual(client.options('/api/parcels').status_code, 204)
         self.assertEqual(client.options('/api/parcels/1').status_code, 204)
+        self.assertEqual(gate.calls, [])
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
+    """«Чаты водителей» (#271): переписка живого водителя за тем же ключом."""
+
+    def _forbid_vendor(self):
+        """Ни один роут не должен дойти до Chat2Desk, пока стоит гейт.
+
+        Это не придирка: обращение к вендору тратит общий месячный лимит, из
+        которого живёт ночной синк метрик отдела. Отказ обязан прийти раньше.
+        """
+        def _boom(*_args, **_kwargs):
+            raise AssertionError('раздел пошёл в Chat2Desk мимо гейта')
+
+        from driver_chats import chat2desk as dch_c2d
+        for name in ('find_client', 'fetch_window_messages', 'send_internal_comment',
+                     'operator_names', 'api_info'):
+            self._patch(dch_c2d, name, _boom)
+
+    def test_operator_without_confirmation_is_stopped_everywhere(self):
+        """Закрыт весь раздел, а не только поиск."""
+        self._forbid_vendor()
+        client, _gate = self.build(driver_chats_ctx())
+        for method, url in (('get', '/api/driver_chats/context'),
+                            ('get', '/api/driver_chats/search?phone=77071234567'),
+                            ('post', '/api/driver_chats/open'),
+                            ('post', '/api/driver_chats/handoff'),
+                            ('get', '/api/driver_chats/journal'),
+                            # Выгрузка журнала — та же дверь, что у экрана: файл
+                            # с телефонами водителей уносят с собой, и мягче
+                            # гейта раздела он быть не может.
+                            ('get', '/api/driver_chats/journal/export')):
+            response = getattr(client, method)(url, json={})
+            self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
+            self.assertEqual(response.get_json().get('code'), QR_CODE, url)
+
+    def test_trainee_is_asked_for_qr_too(self):
+        """Стажёр СЗоВ — НЕ исключение, в отличие от «Посылок» и вики.
+
+        Там роль `trainee` проходит гейт молча (известный незакрытый дефект,
+        parcels/access.py). Здесь на кону не карточка с телефоном, а переписка
+        целиком, и решение принято обратное — осознанно.
+        """
+        self._forbid_vendor()
+        client, _gate = self.build(driver_chats_ctx(role='trainee'))
+        response = client.get('/api/driver_chats/context')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), QR_CODE)
+
+    def test_supervisor_and_admin_are_not_asked_for_qr(self):
+        for context in (driver_chats_ctx(role='sv'),
+                        driver_chats_ctx(role='admin', department_code='op'),
+                        driver_chats_ctx(role='super_admin', department_code='op'),
+                        driver_chats_ctx(role='operator', headed=[1])):
+            with self.subTest(role=context['role'], headed=context['headed_department_ids']):
+                client, gate = self.build(context, granted=False)
+                self.assertEqual(client.get('/api/driver_chats/ping').status_code, 200)
+                self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
+
+    def test_closed_section_answers_before_the_qr_gate(self):
+        """Тренеру, чужому отделу и ЧАТ-МЕНЕДЖЕРУ — «раздел не открыт».
+
+        Иначе человеку предлагают подтвердить доступ к тому, чего ему не
+        выдавали, — тупик, из которого он не выйдет. Чат-менеджер здесь главный
+        случай: он сотрудник СЗоВ, то есть по отделу проходит, и отсечь его
+        обязана именно проверка направления.
+        """
+        self._forbid_vendor()
+        for context in (driver_chats_ctx(role='trainer'),
+                        driver_chats_ctx(department_code='op'),
+                        driver_chats_ctx(direction_model='chat_manager'),
+                        driver_chats_ctx(role='sv', direction_model='chat_manager')):
+            with self.subTest(role=context['role'], dept=context['department_code'],
+                              model=context['direction_model']):
+                client, gate = self.build(context, granted=False)
+                response = client.get('/api/driver_chats/context')
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.get_json().get('code'),
+                                 'DRIVER_CHATS_SECTION_CLOSED')
+                self.assertEqual(gate.calls, [])
+
+    def test_operator_passes_the_qr_gate_but_not_the_journal(self):
+        """Порядок гейтов: сначала QR, потом «журнал не для вас».
+
+        Оператор с подтверждённой сессией обязан получить именно
+        DRIVER_CHATS_JOURNAL_CLOSED: «покажите QR» на подтверждённой сессии
+        читалось бы как сбой подтверждения.
+        """
+        self._forbid_vendor()
+        client, _gate = self.build(driver_chats_ctx(), granted=True)
+        for url in ('/api/driver_chats/journal', '/api/driver_chats/journal/export'):
+            response = client.get(url)
+            self.assertEqual(response.status_code, 403, url)
+            self.assertEqual(response.get_json().get('code'),
+                             'DRIVER_CHATS_JOURNAL_CLOSED', url)
+
+    def test_supervisor_reads_the_journal(self):
+        client, _gate = self.build(driver_chats_ctx(role='sv'), granted=False)
+        self.assertEqual(client.get('/api/driver_chats/journal').status_code, 200)
+
+    def test_preflight_is_never_gated(self):
+        """OPTIONS обязан отвечать без ключа: иначе браузер не пустит и сам отказ."""
+        client, gate = self.build(driver_chats_ctx(), granted=False)
+        for url in ('/api/driver_chats/search', '/api/driver_chats/handoff',
+                    '/api/driver_chats/journal'):
+            self.assertEqual(client.options(url).status_code, 204, url)
         self.assertEqual(gate.calls, [])
 
 

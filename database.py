@@ -6228,6 +6228,7 @@ class Database:
             self._init_news_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
             self._init_parcels_schema_tx(cursor)
+            self._init_driver_chats_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
@@ -7111,6 +7112,50 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT parcels_schema")
+
+    def _init_driver_chats_schema_tx(self, cursor):
+        """Схема раздела «Чаты водителей» (таблицы dch_events/dch_message_cache).
+
+        DDL живёт в пакете driver_chats/schema.py по той же причине, что у вики,
+        обращений и посылок; импорт локальный — на уровне модуля он создал бы
+        цикл.
+
+        Порядок относительно других разделов безразличен: внешний ключ у раздела
+        один, на `users`, а та создаётся в самом начале _init_db.
+
+        SAVEPOINT — потому что весь _init_db идёт одной транзакцией: падение
+        здесь не должно ронять инициализацию всей базы. При отказе раздел просто
+        не откроется, а остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT driver_chats_schema")
+        try:
+            from driver_chats.schema import init_driver_chats_schema
+            init_driver_chats_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT driver_chats_schema")
+            logging.exception(
+                "Схема раздела «Чаты водителей» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT driver_chats_schema")
+
+    def cleanup_driver_chats_data(self, events_days=None, cache_days=None):
+        """Ретеншн раздела «Чаты водителей»: журнал и кеш переписки.
+
+        Журнал живёт год (вопрос «кто вынес переписку» задают постфактум), кеш —
+        двое суток, ровно окно раздела. Зовётся ежедневной джобой рядом с
+        чисткой c2d_eval: обе про одни и те же данные вендора.
+        """
+        from driver_chats import schema as dch_schema
+
+        with self._get_cursor() as cursor:
+            return dch_schema.cleanup(
+                cursor,
+                events_days=events_days or dch_schema.EVENTS_RETENTION_DAYS,
+                cache_days=cache_days or dch_schema.CACHE_RETENTION_DAYS)
 
     def _init_olx_amo_schema_tx(self, cursor):
         """Схема робота «Лиды OLX» (таблицы olx_accounts/threads/journal/poll_runs).
@@ -16561,6 +16606,30 @@ class Database:
             """, (user_id,))
             r = cursor.fetchone()
             return (r[0], r[1]) if r else (None, None)
+
+    def get_user_direction_model(self, user_id):
+        """Код модели расчёта направления сотрудника ('chat_manager', 'tez_op', …).
+
+        Отдельным запросом, а не колонкой в get_user: тот возвращает КОРТЕЖ и
+        читается по индексам в десятках мест — расширять его ради одного поля
+        нельзя (та же причина, что у get_user_hr_card).
+
+        Нужен разделу «Чаты водителей»: чат-менеджеру пункт меню не показывается,
+        а опознаётся он именно моделью — направления версионируются, и id 69 лишь
+        текущая версия «Чат менеджера», тогда как модель переживает и новую
+        версию, и переименование.
+        """
+        if not user_id:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT dir.calculation_model_code
+                  FROM users u
+                  JOIN directions dir ON dir.id = u.direction_id
+                 WHERE u.id = %s
+            """, (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row else None
 
     def get_user_hr_card(self, user_id):
         """Должность и название отдела сотрудника — для карточки «Профиль».
