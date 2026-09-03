@@ -47,12 +47,23 @@ def _format_department_filter(dept_filter) -> str:
     return ", ".join(department_filters) if department_filters else "Все отделы"
 
 
+def _employee_selected(name, selected) -> bool:
+    """Отчёт «по выбранному(-ым) сотруднику(-ам)» из ТЗ #273.
+
+    Сверяем по ФИО и без учёта регистра: одного и того же человека две системы
+    пишут по-разному, а стабильного общего идентификатора у них нет."""
+    if not selected:
+        return True
+    return str(name or "").strip().casefold() in selected
+
+
 def generate_report(
     start_date_str: str,
     end_date_str: Optional[str] = None,
     dept_filter=None,
     stats_out: Optional[dict] = None,
     db=None,
+    employees=None,
 ) -> Tuple[Optional[bytes], str, str]:
     """Excel-отчёт по посещаемости за день или период, с фильтром по отделам.
 
@@ -84,6 +95,7 @@ def generate_report(
         return None, "", f"❌ Период отчета не должен превышать {config.MAX_REPORT_DAYS} дн."
 
     threshold = config.LATE_THRESHOLD_MINUTES
+    selected_employees = {str(x).strip().casefold() for x in (employees or []) if str(x).strip()}
     department_filters = _normalize_department_filters(dept_filter)
     department_filter_label = _format_department_filter(dept_filter)
 
@@ -197,6 +209,11 @@ def generate_report(
             if not emp_id:
                 continue
             emp_name = _employee_name(rec)
+            # Отчёт может быть заказан по конкретным людям (ТЗ #273): остальных
+            # отбрасываем здесь, до сборки строки, чтобы они не попали ни в лист
+            # дня, ни в сводку, ни в показатели карточки отчёта.
+            if not _employee_selected(emp_name, selected_employees):
+                continue
             dept_name = resolve_department_name(rec, employee_lookup)
             if emp_id not in emp_data:
                 emp_data[emp_id] = {
@@ -219,6 +236,8 @@ def generate_report(
                 continue
             emp_id = mark_alias.get(str(emp_id), emp_id)
             emp_name = _employee_name(m)
+            if not _employee_selected(emp_name, selected_employees):
+                continue
             dept_name = resolve_department_name(m, employee_lookup)
             m = {**m, "departmentName": dept_name}
             if emp_id not in emp_data:
@@ -634,6 +653,9 @@ def generate_report(
         summary_lines.append(f"📊 <b>Сводный отчет по посещаемости за период</b>\n")
         summary_lines.append(f"📅 Период: <b>{start_date_str}</b> по <b>{end_date_str}</b>")
         summary_lines.append(f"🏢 Отдел: <b>{department_filter_label}</b>")
+        if selected_employees:
+            # Иначе выгрузка по трём людям читается как выгрузка по всему отделу.
+            summary_lines.append(f"👤 Сотрудников выбрано: <b>{len(selected_employees)}</b>")
         summary_lines.append(f"\n📈 <b>Итоги за {diff_days + 1} дн.:</b>")
         summary_lines.append(f"• Всего уникальных сотрудников: <b>{len(total_unique_employees)}</b>")
         summary_lines.append(f"• Человеко-дней вовремя: <b>{total_ontime_days}</b>")
@@ -647,6 +669,9 @@ def generate_report(
     else:
         summary_lines.append(f"📊 <b>Отчет по посещаемости за {start_date_str}</b>\n")
         summary_lines.append(f"🏢 Отдел: <b>{department_filter_label}</b>")
+        if selected_employees:
+            # Иначе выгрузка по трём людям читается как выгрузка по всему отделу.
+            summary_lines.append(f"👤 Сотрудников выбрано: <b>{len(selected_employees)}</b>")
         summary_lines.append(f"\n📈 <b>Итоги дня по компании:</b>")
         summary_lines.append(f"• Всего уникальных сотрудников: <b>{len(total_unique_employees)}</b>")
         summary_lines.append(f"• Пришли вовремя: <b>{total_ontime_days}</b>")
