@@ -50586,17 +50586,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {!profileHidesOperatorBlocks && (() => {
                                           const evals = operatorData?.evaluations ?? [];
                                           const evalsFiltered = evals.filter(ev => !(ev?.call?.is_imported === true || ev?.is_imported === true));
-                                          // «Тестирование знаний» входит в средний балл, но прослушанным
-                                          // звонком не считается — план прослушки от него не уменьшается.
-                                          const listenedEvals = evalsFiltered.filter(ev => !ev?.knowledge_test);
-                                          const evalCount = listenedEvals.length;
+                                          // «Тестирование знаний» входит в средний балл — тест тоже влияет
+                                          // на качество. Плана проверок в плитках больше нет (решение
+                                          // владельца 03.09.2026, задача #272), поэтому и делить оценки
+                                          // на прослушанные и тестовые здесь незачем.
                                           const avgScore = evalsFiltered.length > 0
                                             ? evalsFiltered.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalsFiltered.length
                                             : 0;
-                                          const evaluationTarget = operatorData?.evaluation_target || null;
-                                          const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
-                                          const remainingEvalCount = Math.max(0, targetEvalCount - evalCount);
-                                          
+
+
                                           const hoursOp = hoursData?.operators?.find(o => Number(o.operator_id) === Number(user.id)) || hoursData?.operators?.[0];
                                           const totalHoursBase = Number(hoursOp?.aggregates?.regular_hours ?? hoursOp?.aggregates?.regular ?? 0);
                                           const totalHoursFromServer = Number(hoursOp?.worked_hours_used ?? hoursOp?.accounted_hours);
@@ -50628,10 +50626,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           // ОП TEZ: качество у них не в выплате и звонки почти не прослушивают,
                                           // поэтому первые две плитки — успешки и выполнение плана.
                                           const profileIsTezOp = resolveWorkHoursMonthModelInfo(hoursOp).modelCode === 'tez_op';
-                                          // Чат-менеджеру план проверок не показываем (задача #272): плитка
-                                          // «Прослушано / нужно» уходит целиком, остаются средний балл, часы
-                                          // и норма — то есть три плитки вместо четырёх.
-                                          const profileHidesEvalPlan = operatorData?.is_chat_manager === true && !profileIsTezOp;
                                           const profileSuccesses = Number(hoursOp?.aggregates?.total_tez_successes ?? 0) || 0;
                                           const profilePlanResult = profileIsTezOp
                                             ? calculateTezOpMonthlyPlan({
@@ -50652,7 +50646,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             : null;
 
                                           return (
-                                            <div className={`grid grid-cols-2 ${profileHidesEvalPlan ? 'sm:grid-cols-3' : 'sm:grid-cols-4'} gap-3 sm:gap-4`}>
+                                            /* У ОП TEZ четыре плитки (успешки и план — их рабочие мерки),
+                                               у остальных три: плитки плана проверок здесь больше нет. */
+                                            <div className={`grid grid-cols-2 ${profileIsTezOp ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-3 sm:gap-4`}>
                                               {profileIsTezOp ? (
                                                 <>
                                               <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
@@ -50677,15 +50673,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </>
                                               ) : (
                                                 <>
-                                              {!profileHidesEvalPlan && (
-                                              <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
-                                                <div className="text-2xl sm:text-3xl font-bold text-blue-600">{evalCount}/{targetEvalCount}</div>
-                                                <div className="text-xs text-gray-600 mt-1">Прослушано / нужно</div>
-                                                <div className={`text-[11px] mt-1 ${remainingEvalCount > 0 ? 'text-amber-600' : 'text-green-600'}`}>
-                                                  {remainingEvalCount > 0 ? `Осталось ${remainingEvalCount}` : 'Норма выполнена'}
-                                                </div>
-                                              </div>
-                                              )}
                                               <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
                                                 <div className={`text-2xl sm:text-3xl font-bold ${avgScore >= 90 ? 'text-green-600' : avgScore >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
                                                   {avgScore > 0 ? avgScore.toFixed(1) : '-'}
@@ -51783,12 +51770,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         // prepare filtered lists: exclude evaluations whose call is imported
                                         const allEvals = operatorData?.evaluations ?? [];
                                         const canAccessSensitiveCallData = !!operatorData?.sensitive_access?.granted;
-                                        const evaluationTarget = operatorData?.evaluation_target || null;
-                                        // Чат-менеджеру количество чатов для проверки не показываем
-                                        // (задача #272): карточка «Прослушано / нужно» вместе с остатком,
-                                        // общим числом оценок и раскрытым расчётом плана уходит целиком,
-                                        // средний балл и сами оценки остаются.
-                                        const hidesEvalPlan = operatorData?.is_chat_manager === true;
                                         const evalsForCalc = allEvals.filter(ev => {
                                             // if ev.call?.is_imported === true -> should be excluded from calculations
                                             return !(ev?.call?.is_imported === true || ev?.is_imported === true);
@@ -51857,23 +51838,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             );
                                         };
 
-                                        // Средний балл — по всем оценкам (тест тоже влияет на качество),
-                                        // а прогресс по плану — только по прослушанным звонкам:
-                                        // «Тестирование знаний» план прослушки не закрывает.
-                                        const listenedEvalsForCalc = evalsForCalc.filter(ev => !ev?.knowledge_test);
-                                        const evaluationCount = listenedEvalsForCalc.length;
+                                        // Средний балл — по всем оценкам, включая «Тестирование знаний»:
+                                        // тест тоже влияет на качество. План проверок (сколько звонков
+                                        // и чатов должны прослушать) сотруднику больше не показывается
+                                        // (решение владельца 03.09.2026, задача #272), поэтому счётчиков
+                                        // плана здесь нет — только балл.
                                         const averageScore =
                                             evalsForCalc.length > 0
                                             ? evalsForCalc.reduce((sum, ev) => sum + Number(ev.score || 0), 0) / evalsForCalc.length
                                             : 0;
-                                        const knowledgeTestEvalCount = evalsForCalc.length - evaluationCount;
-                                        const targetEvalCount = Number.isFinite(Number(evaluationTarget?.required_calls)) ? Number(evaluationTarget.required_calls) : 20;
-                                        const remainingEvalCount = Math.max(0, targetEvalCount - evaluationCount);
-                                        const workedHoursUsed = Number(evaluationTarget?.worked_hours_used ?? evaluationTarget?.accounted_hours ?? 0);
-                                        const targetNormHours = Number(evaluationTarget?.full_rate_norm_hours ?? evaluationTarget?.norm_hours ?? 0);
-                                        const baseCallTarget = Number(evaluationTarget?.base_call_target ?? 20);
-                                        const requiredCallsRaw = Number(evaluationTarget?.required_calls_raw ?? targetEvalCount);
-                                        const hasCalculationDetails = evaluationTarget != null;
                                         const directionCandidatesMap = allEvals.reduce((acc, ev, index) => {
                                             const direction = ev?.direction;
                                             const hasCriteria = Array.isArray(direction?.criteria) && direction.criteria.length > 0;
@@ -52212,38 +52185,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 );
                                             })()}
 
-                                            {/* KPI cards */}
-                                            <div className={hidesEvalPlan
-                                                ? 'flex justify-center mb-6 sm:mb-8'
-                                                : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8'}>
-                                                {!hidesEvalPlan && (
-                                                <div className="col-span-1 sm:col-span-2">
-                                                <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
-                                                    <p className="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1">
-                                                    <FaIcon className="fas fa-list-ol text-gray-400"></FaIcon> Прослушано / нужно
-                                                    </p>
-                                                    <p className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900">{evaluationCount} / {targetEvalCount}</p>
-                                                    <p className={`mt-2 text-base sm:text-lg font-medium ${remainingEvalCount > 0 ? 'text-yellow-600' : 'text-green-600'}`}>
-                                                    {remainingEvalCount > 0 ? `Осталось прослушать ${remainingEvalCount}` : 'Норма прослушки выполнена'}
-                                                    </p>
-                                                    <p className="mt-1 text-xs text-gray-500">Всего оценок (включая не оцененные): {allEvals.length}</p>
-                                                    {hasCalculationDetails && (
-                                                        <p className="mt-2 text-xs text-gray-500 leading-5">
-                                                            Расчет: ({workedHoursUsed.toFixed(2)} ч / {targetNormHours.toFixed(2)} ч полной ставки) x {baseCallTarget} = {requiredCallsRaw.toFixed(2)}, итог {targetEvalCount}
-                                                        </p>
-                                                    )}
-                                                </div>
-                                                </div>
-                                                )}
-
-                                                <div className={hidesEvalPlan ? 'flex justify-center items-center' : 'col-span-1 flex justify-center items-center'}>
+                                            {/* Средний балл. Карточки с планом проверок рядом больше нет:
+                                                сколько звонков и чатов сотрудника должны проверить — не его
+                                                показатель, а рабочая мерка проверяющих (решение владельца
+                                                03.09.2026, задача #272). Балл остаётся по центру один. */}
+                                            <div className="flex justify-center mb-6 sm:mb-8">
                                                 <SemiCircleProgress
                                                     percentage={Math.min(averageScore || 0, 100)}
                                                     label="Средний балл"
                                                     width={window.innerWidth < 640 ? 160 : 200}
                                                     height={window.innerWidth < 640 ? 96 : 120}
                                                 />
-                                                </div>
                                             </div>
 
                                             {/* Низкие оценки клиентов: сводка на странице, детали —

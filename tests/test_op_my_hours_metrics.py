@@ -263,10 +263,15 @@ class ProfileTilesTests(unittest.TestCase):
         self.assertIn("planPerFte: hoursOp?.tez_plan_per_fte,", self.src)
         self.assertIn("'План не задан'", self.src)
 
-    def test_other_models_keep_evaluation_tiles(self):
-        """Прослушки и средний балл остаются у всех остальных моделей."""
-        self.assertIn("Прослушано / нужно", self.src)
+    def test_other_models_keep_the_score_tile(self):
+        """У остальных моделей остаётся средний балл.
+
+        Плитки «Прослушано / нужно» здесь больше нет ни у кого: план проверок
+        сотруднику не показывается (решение владельца 03.09.2026, задача #272,
+        сторожит tests/test_review_counts_hidden_from_operators.py).
+        """
         self.assertIn("Ср. балл", self.src)
+        self.assertNotIn("Прослушано / нужно", self.src)
 
     def test_hours_and_norm_tiles_are_shared(self):
         """Часы и норма показываются всем — они вне ветвления по модели."""
