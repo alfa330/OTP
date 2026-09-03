@@ -6967,6 +6967,11 @@ GROUP_LATE_BOT_FULL_DEPARTMENT_CODE = 'hr'
 _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
 _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL = 600
 
+# Сколько дней отметок отдаётся на экран за один запрос. Данные тянутся из двух
+# внешних API прямо в запросе, и каждый лишний день — ещё два обращения к Workpace.
+# Неделя закрывает «посмотреть, что было», а месяц кадровик берёт выгрузкой.
+GROUP_LATE_ATTENDANCE_MAX_DAYS = 6
+
 
 def _group_late_bot_scope_by_department_id():
     """{id нашего отдела: название отдела Workpace} по GROUP_LATE_BOT_DEPARTMENT_SCOPES."""
@@ -7397,6 +7402,93 @@ def api_group_late_bot_events():
         return jsonify({"error": str(error)}), 400
     except Exception as error:
         logging.exception("group_late_bot events failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/attendance', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_attendance():
+    """Отметки прихода и ухода за период по обоим источникам (задача #273).
+
+    Тянет из внешних API прямо в запросе: за день это два обращения к Workpace и
+    три к Clockster. Поэтому окно экрана короткое — длинные периоды собирает
+    выгрузка, она и считается в фоне."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, scope, err = _group_late_bot_guard()
+    if err:
+        return err
+    if not group_late.is_configured():
+        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
+                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
+    try:
+        from group_late import attendance as _attendance
+
+        def _as_day(value, fallback):
+            text = str(value or '').strip()[:10]
+            if not text:
+                return fallback
+            try:
+                return datetime.strptime(text, '%Y-%m-%d').date()
+            except ValueError:
+                raise ValueError('Дата должна быть в формате ГГГГ-ММ-ДД')
+
+        now_local = datetime.now(group_late.TZ)
+        today = now_local.date()
+        date_start = _as_day(request.args.get('date_start'), today)
+        date_end = _as_day(request.args.get('date_end'), date_start)
+        if date_end < date_start:
+            date_start, date_end = date_end, date_start
+        if (date_end - date_start).days > GROUP_LATE_ATTENDANCE_MAX_DAYS:
+            return jsonify({
+                "error": f"На экране показывается не больше "
+                         f"{GROUP_LATE_ATTENDANCE_MAX_DAYS + 1} дн. "
+                         f"За больший период соберите выгрузку.",
+                "code": "PERIOD_TOO_LONG",
+            }), 400
+
+        payload = _attendance.collect(
+            db, date_start, date_end,
+            department=scope or request.args.get('department'),
+            now_local=now_local,
+        )
+        rows = _attendance.search_rows(payload['rows'], request.args.get('q'))
+        rows = _attendance.sort_rows(rows, request.args.get('sort'))
+
+        # Фильтры экрана: тип отметки и конкретные сотрудники (ТЗ просит отчёт
+        # «по выбранному(-ым) сотруднику(-ам)»).
+        kind = (request.args.get('kind') or '').strip().lower()
+        if kind == 'in':
+            rows = [r for r in rows if r['fact_in']]
+        elif kind == 'out':
+            rows = [r for r in rows if r['fact_out']]
+        elif kind == 'absent':
+            rows = [r for r in rows if r['status'] == _attendance.STATUS_ABSENT]
+        employees = [e for e in (request.args.get('employees') or '').split(',') if e.strip()]
+        if employees:
+            wanted = {e.strip() for e in employees}
+            rows = [r for r in rows if r['employee_id'] in wanted]
+
+        total = len(rows)
+        try:
+            limit = max(1, min(int(request.args.get('limit', 200)), 1000))
+            offset = max(0, int(request.args.get('offset', 0)))
+        except (TypeError, ValueError):
+            limit, offset = 200, 0
+
+        return jsonify({
+            'status': 'success',
+            'rows': rows[offset:offset + limit],
+            'total': total,
+            'date_start': date_start.isoformat(),
+            'date_end': date_end.isoformat(),
+            'department_scope': scope,
+            'clockster_error': payload.get('clockster_error'),
+        }), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot attendance failed")
         return jsonify({"error": str(error)}), 500
 
 
