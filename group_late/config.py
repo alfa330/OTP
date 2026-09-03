@@ -18,6 +18,20 @@ WORKPACE_BASE_URL = (os.getenv("WORKPACE_BASE_URL") or "https://api.workpace.kz"
 WORKPACE_LOGIN = (os.getenv("WORKPACE_LOGIN") or "").strip()
 WORKPACE_PASSWORD = (os.getenv("WORKPACE_PASSWORD") or "").strip()
 
+# Второй источник отметок — Clockster: в нём отмечается центральный офис, которого в
+# Workpace нет вовсе (задача #273). ТОЛЬКО ЧТЕНИЕ: интеграция статусов операторов
+# через Clockster была убрана 01.08.2026 после «висящих приходов», и возвращать её
+# нельзя — ни в operator_status_events, ни в сегменты, ни в учёт часов отсюда не
+# пишется ничего.
+CLOCKSTER_BASE_URL = (os.getenv("CLOCKSTER_API_URL")
+                      or "https://api.clockster.com/company/v2").rstrip("/")
+CLOCKSTER_API_TOKEN = (os.getenv("CLOCKSTER_API_TOKEN") or "").strip()
+
+
+def is_clockster_configured() -> bool:
+    """Без токена второй источник просто не подключается — раздел работает на Workpace."""
+    return bool(CLOCKSTER_API_TOKEN)
+
 # Опоздание/ранний уход считаем нарушением от этого числа минут.
 LATE_THRESHOLD_MINUTES = _env_int("LATE_THRESHOLD_MINUTES", 1)
 # «Отсутствует на месте» — столько минут после начала смены без отметки о приходе.

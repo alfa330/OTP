@@ -53,24 +53,39 @@ def mark_type(mark: dict):
     return mark.get("markType") if mark.get("markType") is not None else mark.get("type")
 
 
-def lunch_seconds(span_seconds: float) -> int:
+def lunch_seconds(span_seconds: float, planned_break_seconds=None) -> int:
     """Сколько обеда вычесть из отрезка «приход → уход».
 
-    Отрезок короче порога обеда не содержит — так же считают и правила перерывов
-    проекта. Вычитаем не больше самого отрезка: иначе время в работе уходит в минус
-    и в отчёте появляется отрицательный час, которого не было."""
+    `planned_break_seconds` — настоящий перерыв по расписанию человека, если
+    источник его даёт (Clockster отдаёт `break_time`). Он главнее общего правила:
+    у части людей обед не час, а у отпускного дня его нет вовсе, и плоский час
+    врал бы обоим. Когда источник молчит (Workpace перерывов не ведёт), берём час
+    из настроек — по правилам перерывов проекта столько даёт стандартная смена.
+
+    Отрезок короче порога обеда не содержит — так же считают и правила перерывов.
+    Вычитаем не больше самого отрезка: иначе время в работе уходит в минус и в
+    отчёте появляется отрицательный час, которого не было."""
     if span_seconds <= 0:
+        return 0
+    if planned_break_seconds is None:
+        planned = config.LUNCH_BREAK_MINUTES * 60
+    else:
+        try:
+            planned = max(0, int(planned_break_seconds))
+        except (TypeError, ValueError):
+            planned = config.LUNCH_BREAK_MINUTES * 60
+    if planned <= 0:
         return 0
     if span_seconds < config.LUNCH_BREAK_MIN_WORK_MINUTES * 60:
         return 0
-    return int(min(config.LUNCH_BREAK_MINUTES * 60, span_seconds))
+    return int(min(planned, span_seconds))
 
 
-def net_work_seconds(span_seconds: float) -> int:
+def net_work_seconds(span_seconds: float, planned_break_seconds=None) -> int:
     """Время в работе за вычетом обеда — то, что просит ТЗ #273."""
     if span_seconds <= 0:
         return 0
-    return max(0, int(span_seconds) - lunch_seconds(span_seconds))
+    return max(0, int(span_seconds) - lunch_seconds(span_seconds, planned_break_seconds))
 
 
 def employee_name(item: dict) -> str:

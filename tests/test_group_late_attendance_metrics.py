@@ -48,6 +48,24 @@ class LunchDeductionTests(unittest.TestCase):
         self.assertEqual(lunch_seconds(9 * HOUR), config.LUNCH_BREAK_MINUTES * 60)
         self.assertEqual(net_work_seconds(9 * HOUR), 8 * HOUR)
 
+    def test_real_break_of_the_person_wins(self):
+        # Полчаса по расписанию — вычитаем полчаса, а не общий час.
+        self.assertEqual(lunch_seconds(9 * HOUR, 1800), 1800)
+        self.assertEqual(net_work_seconds(9 * HOUR, 1800), 9 * HOUR - 1800)
+
+    def test_zero_break_means_no_deduction(self):
+        # У расписания без перерыва вычитать нечего — это не «нет данных».
+        self.assertEqual(lunch_seconds(9 * HOUR, 0), 0)
+        self.assertEqual(net_work_seconds(9 * HOUR, 0), 9 * HOUR)
+
+    def test_broken_break_value_falls_back_to_the_rule(self):
+        for junk in ("", "нет", None):
+            self.assertEqual(lunch_seconds(9 * HOUR, junk), config.LUNCH_BREAK_MINUTES * 60, junk)
+
+    def test_real_break_never_exceeds_the_span(self):
+        self.assertLessEqual(lunch_seconds(6 * HOUR, 99 * HOUR), 6 * HOUR)
+        self.assertGreaterEqual(net_work_seconds(6 * HOUR, 99 * HOUR), 0)
+
     def test_short_shift_keeps_everything(self):
         # 4 часа — короче порога, перерыв не планируется, вычитать нечего.
         self.assertEqual(lunch_seconds(4 * HOUR), 0)
@@ -73,8 +91,19 @@ class LunchDeductionTests(unittest.TestCase):
 
 class ReportUsesTheDeductionTests(unittest.TestCase):
     def test_report_computes_work_time_through_the_helper(self):
-        self.assertIn("work_seconds = _net_work_seconds(span_sec)", REPORTS_SRC)
-        self.assertIn("lunch_sec = _lunch_seconds(span_sec)", REPORTS_SRC)
+        self.assertIn("work_seconds = _net_work_seconds(span_sec, planned_break)", REPORTS_SRC)
+        self.assertIn("lunch_sec = _lunch_seconds(span_sec, planned_break)", REPORTS_SRC)
+
+    def test_report_prefers_the_real_break_of_the_person(self):
+        # Обед берётся из расписания человека, когда источник его знает: у части
+        # людей он не час, и плоское правило соврало бы именно им.
+        self.assertIn('planned_break = (span or {}).get("breakSeconds")', REPORTS_SRC)
+
+    def test_report_shows_position_and_source_system(self):
+        # Требование ТЗ: кадровик ищет по должности и видит, где смотреть первоисточник.
+        self.assertIn('"Должность"', REPORTS_SRC)
+        self.assertIn('"Система"', REPORTS_SRC)
+        self.assertIn('"Клокстер" if row_span.get("markSystem") == CLOCKSTER_SYSTEM', REPORTS_SRC)
 
     def test_norm_is_net_of_lunch_too(self):
         # Иначе у отработавшего ровно по графику «Отклонение» показывало бы −1:00.

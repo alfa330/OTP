@@ -15,6 +15,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from group_late import config, icore_plan
+from group_late.clockster import (
+    MARK_SYSTEM as CLOCKSTER_SYSTEM,
+    build_user_lookup as build_clockster_user_lookup,
+    clockster_client,
+    to_records as clockster_to_records,
+)
 from group_late.departments import (
     build_employee_department_lookup,
     clean_department_filters as _normalize_department_filters,
@@ -129,6 +135,28 @@ def generate_report(
     is_period = start_date != end_date
     current_date = start_date
 
+    # Второй источник — Clockster (центральный офис, которого в Workpace нет вовсе).
+    # Тянем ОДИН раз на весь период: /schedules отдаёт даты словарём внутри записи,
+    # тогда как Workpace приходится опрашивать по одному дню. Раскладываем по датам
+    # заранее, чтобы в цикле дня оставалась только выборка.
+    clockster_records_by_date: dict[str, list] = {}
+    clockster_marks_by_date: dict[str, list] = {}
+    if config.is_clockster_configured():
+        try:
+            schedule_rows = clockster_client.get_schedules(start_date.date(), end_date.date())
+            user_lookup = build_clockster_user_lookup(clockster_client.get_users())
+            cl_records, cl_marks = clockster_to_records(schedule_rows, user_lookup)
+            for rec in cl_records:
+                clockster_records_by_date.setdefault(str(rec.get("date"))[:10], []).append(rec)
+            for mark in cl_marks:
+                day = str(_mark_date(mark) or "")[:10]
+                if day:
+                    clockster_marks_by_date.setdefault(day, []).append(mark)
+        except Exception as exc:
+            # Отчёт по Workpace важнее полноты: без второго источника он всё равно
+            # нужен, а падение выгрузки из-за чужого API — худший исход.
+            logger.warning("Clockster недоступен, отчёт собирается без него: %s", exc)
+
     # To maintain sheet insertion order correctly
     first_sheet = True
 
@@ -153,6 +181,11 @@ def generate_report(
         # Отметка человека может лежать на другой его карточке Workpace, чем план:
         # сводим их к одной, иначе он попадёт в отчёт как не пришедший.
         mark_alias = icore_plan.mark_alias_map(records)
+
+        # Clockster подмешиваем ПОСЛЕ подмены плана из iCore и построения alias-карты:
+        # обе они про карточки Workpace, а у людей центрального офиса их нет.
+        records = records + clockster_records_by_date.get(date_iso, [])
+        marks = marks + clockster_marks_by_date.get(date_iso, [])
 
         # Group data
         emp_data = {}
@@ -224,8 +257,11 @@ def generate_report(
         ws.row_dimensions[1].height = 30
         ws.append([]) # Spacer
 
+        # «Должность» и «Система» — требование ТЗ #273: кадровик ищет по должности,
+        # а по системе отметки понимает, где смотреть первоисточник.
         headers = [
-            "Отдел", "ФИО сотрудника", "График", "Все отметки за день",
+            "Отдел", "ФИО сотрудника", "Должность", "График", "Система",
+            "Все отметки за день",
             "Время прихода (план)", "Время прихода (факт)", "Опоздание (мин)",
             "Время ухода (план)", "Время ухода (факт)", "Ранний уход (мин)",
             "Отработано (без обеда)", "Отклонение (HH:MM)", "Статус"
@@ -380,8 +416,11 @@ def generate_report(
                 if fact_in_dt and fact_out_dt:
                     span_sec = (fact_out_dt - fact_in_dt).total_seconds()
                     if span_sec > 0:
-                        lunch_sec = _lunch_seconds(span_sec)
-                        work_seconds = _net_work_seconds(span_sec)
+                        # Настоящий перерыв этого человека, если источник его знает
+                        # (Clockster отдаёт break_time); иначе общее правило.
+                        planned_break = (span or {}).get("breakSeconds")
+                        lunch_sec = _lunch_seconds(span_sec, planned_break)
+                        work_seconds = _net_work_seconds(span_sec, planned_break)
                         h = int(work_seconds // 3600)
                         m = int((work_seconds % 3600) // 60)
                         work_time_str = f"{h:02d}:{m:02d}"
@@ -436,8 +475,16 @@ def generate_report(
                     stats["absent_count"] += 1
 
                 # Append Row Data
+                row_span = info.get("span") or {}
+                # Система берётся из записи, а не угадывается: у записей Workpace
+                # пометки нет, и отсутствие пометки и есть Workpace.
+                system_label = ("Клокстер" if row_span.get("markSystem") == CLOCKSTER_SYSTEM
+                                else "Воркпейс")
                 row_data = [
-                    dept_name, name, info.get("span", {}).get("scheduleName", "—") if info.get("span") else "—",
+                    dept_name, name,
+                    row_span.get("positionName") or "—",
+                    row_span.get("scheduleName") or "—",
+                    system_label,
                     marks_str, plan_in, fact_in, late_in if late_in > 0 else "—",
                     plan_out, fact_out, early_out if early_out > 0 else "—",
                     work_time_str, deviation_str, status_text
@@ -446,17 +493,19 @@ def generate_report(
                 ws.row_dimensions[current_row].height = 20
 
                 # Style the row
-                for col_idx in range(1, 14):
+                for col_idx in range(1, len(headers) + 1):
                     cell = ws.cell(row=current_row, column=col_idx)
                     cell.font = font_regular
                     cell.border = thin_border
-                    
-                    if col_idx in [1, 2, 3, 4]:
+
+                    # Текстовые колонки слева: отдел, ФИО, должность, график,
+                    # система и лента отметок.
+                    if col_idx in [1, 2, 3, 4, 5, 6]:
                         cell.alignment = align_left
                     else:
                         cell.alignment = align_center
-                    
-                    if col_idx == 13:
+
+                    if col_idx == len(headers):
                         cell.fill = status_fill
                         cell.font = font_bold
                     else:
