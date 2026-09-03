@@ -28824,7 +28824,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         <div className="mt-3 flex items-center justify-between gap-3">
                             <div className="text-xs text-slate-500">
-                                Статус выделяется цветом в ячейках на весь указанный период
+                                Статус выделяется цветом в ячейках на весь указанный период.
+                                Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте.
                             </div>
                             <div className="flex items-center gap-2">
                                 {modalActiveScheduleStatus?.id && (

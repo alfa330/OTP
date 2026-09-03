@@ -46792,10 +46792,97 @@ class Database:
         deleted_rows = cursor.fetchall() or []
         return len(deleted_rows)
 
-    def _delete_shifts_for_period_tx(self, cursor, operator_id, start_date, end_date=None):
+    def _schedule_days_with_worked_time_tx(self, cursor, operator_id, start_date, end_date=None):
+        """
+        Дни периода, за которые у оператора уже есть отработанное время.
+
+        Такой день нельзя чистить вслед за периодом статуса: часы считаются как
+        пересечение смены со статусами, поэтому снятие смены обнуляет уже
+        отработанное. Именно так терялись часы за последнюю смену при увольнении
+        в день этой смены.
+
+        Отработанным день считается по прямым признакам: в учёте часов за день уже
+        стоят часы или звонки, либо есть рабочие статусы, пересекающиеся со сменой
+        (часы за день могли ещё не посчитаться — агрегация идёт следом за импортом).
+        """
+        operator_id = int(operator_id)
+        start_date_obj = self._normalize_schedule_date(start_date)
+        end_date_obj = self._normalize_schedule_date(end_date) if end_date is not None else None
+
+        # Будущий день отработать нельзя, поэтому дальше сегодняшнего не смотрим:
+        # у открытого увольнения диапазон иначе уходит «до конца времён».
+        today = datetime.now().date()
+        range_end = today if end_date_obj is None else min(end_date_obj, today)
+        if range_end < start_date_obj:
+            return set()
+
+        cursor.execute("""
+            SELECT DISTINCT shift_date
+            FROM work_shifts
+            WHERE operator_id = %s
+              AND shift_date >= %s
+              AND shift_date <= %s
+            ORDER BY shift_date
+        """, (operator_id, start_date_obj, range_end))
+        shift_days = [row[0] for row in (cursor.fetchall() or []) if row and row[0] is not None]
+        if not shift_days:
+            return set()
+
+        worked_days = set()
+        cursor.execute("""
+            SELECT day
+            FROM daily_hours
+            WHERE operator_id = %s
+              AND day = ANY(%s)
+              AND (COALESCE(work_time, 0) > 0 OR COALESCE(calls, 0) > 0)
+        """, (operator_id, shift_days))
+        for row in cursor.fetchall() or []:
+            if row and row[0] is not None:
+                worked_days.add(row[0])
+
+        for day_value in shift_days:
+            if day_value in worked_days:
+                continue
+            status_profile = self._status_profile_for_calculation_model(
+                self._get_operator_calculation_model_tx(cursor, operator_id, as_of=day_value)
+            )
+            work_status_keys = sorted({
+                str(key).strip().lower()
+                for key in (status_profile.get('work') or set())
+                if str(key or '').strip()
+            })
+            if not work_status_keys:
+                continue
+            # Ночная смена уходит за полночь, поэтому окно смены собираем как
+            # пару отметок времени, а сегменты берём с запасом в сутки по обе стороны.
+            cursor.execute("""
+                SELECT 1
+                FROM work_shifts ws
+                JOIN operator_status_segments oss
+                  ON oss.operator_id = ws.operator_id
+                 AND oss.status_date >= ws.shift_date - 1
+                 AND oss.status_date <= ws.shift_date + 1
+                 AND LOWER(oss.status_key) = ANY(%s)
+                 AND oss.start_at < (
+                        ws.shift_date + ws.end_time
+                        + CASE WHEN ws.end_time <= ws.start_time
+                               THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END
+                     )
+                 AND oss.end_at > (ws.shift_date + ws.start_time)
+                WHERE ws.operator_id = %s
+                  AND ws.shift_date = %s
+                LIMIT 1
+            """, (work_status_keys, operator_id, day_value))
+            if cursor.fetchone():
+                worked_days.add(day_value)
+
+        return worked_days
+
+    def _delete_shifts_for_period_tx(self, cursor, operator_id, start_date, end_date=None, keep_days=None):
         """
         Удалить смены и выходные оператора в периоде [start_date, end_date] включительно.
         Если end_date не указан, удаляются записи начиная с start_date и далее.
+        keep_days — даты, смены за которые снимать нельзя (уже отработанные дни).
         """
         operator_id = int(operator_id)
         start_date_obj = self._normalize_schedule_date(start_date)
@@ -46803,21 +46890,29 @@ class Database:
         if end_date_obj is not None and end_date_obj < start_date_obj:
             raise ValueError("end_date must be >= start_date")
 
+        keep_days_list = sorted({
+            self._normalize_schedule_date(day)
+            for day in (keep_days or [])
+            if day is not None
+        })
+
         if end_date_obj is None:
             cursor.execute("""
                 DELETE FROM work_shifts
                 WHERE operator_id = %s
                   AND shift_date >= %s
+                  AND (%s::date[] IS NULL OR NOT (shift_date = ANY(%s::date[])))
                 RETURNING id, shift_date
-            """, (operator_id, start_date_obj))
+            """, (operator_id, start_date_obj, keep_days_list or None, keep_days_list or None))
         else:
             cursor.execute("""
                 DELETE FROM work_shifts
                 WHERE operator_id = %s
                   AND shift_date >= %s
                   AND shift_date <= %s
+                  AND (%s::date[] IS NULL OR NOT (shift_date = ANY(%s::date[])))
                 RETURNING id, shift_date
-            """, (operator_id, start_date_obj, end_date_obj))
+            """, (operator_id, start_date_obj, end_date_obj, keep_days_list or None, keep_days_list or None))
 
         deleted_rows = cursor.fetchall() or []
         deleted_shifts_count = len(deleted_rows)
@@ -46858,7 +46953,8 @@ class Database:
             'deleted_shifts': deleted_shifts_count,
             'deleted_day_off_rows': deleted_days_off_count,
             'max_deleted_shift_date': max_deleted_shift_date,
-            'max_deleted_day_off_date': max_deleted_day_off_date
+            'max_deleted_day_off_date': max_deleted_day_off_date,
+            'kept_shift_days': keep_days_list
         }
 
     def _clear_day_schedule_tx(self, cursor, operator_id, target_date):
@@ -48016,11 +48112,21 @@ class Database:
                 cursor,
                 self._schedule_days_with_records_tx(cursor, operator_id, start_date_obj, end_date_obj)
             )
-            deleted_schedule = self._delete_shifts_for_period_tx(
+            # Отработанный день статус не снимает: иначе увольнение (или задним
+            # числом поставленный отпуск/больничный) обнуляет часы за смену,
+            # которую человек уже отработал.
+            worked_days = self._schedule_days_with_worked_time_tx(
                 cursor=cursor,
                 operator_id=operator_id,
                 start_date=start_date_obj,
                 end_date=end_date_obj
+            )
+            deleted_schedule = self._delete_shifts_for_period_tx(
+                cursor=cursor,
+                operator_id=operator_id,
+                start_date=start_date_obj,
+                end_date=end_date_obj,
+                keep_days=worked_days
             )
             self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
             recalc_end_date_obj = end_date_obj
@@ -48040,12 +48146,20 @@ class Database:
                 end_date=recalc_end_date_obj
             )
             self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
-            return self._serialize_schedule_status_period(saved_row)
+            serialized = self._serialize_schedule_status_period(saved_row)
+            # Дни, смены за которые остались: раздел должен объяснить, почему смена
+            # уволенного никуда не делась, — по ней есть отработанные часы.
+            serialized['keptWorkedDays'] = [
+                day.strftime('%Y-%m-%d')
+                for day in ((deleted_schedule or {}).get('kept_shift_days') or [])
+            ]
+            return serialized
 
     def _interrupt_dismissal_period_by_work_day_tx(self, cursor, operator_id, work_date):
         """
         Если на рабочую дату приходится статус "увольнение", обрываем его:
-        - если увольнение начинается в этот день -> удаляем период
+        - если увольнение начинается в этот день -> период остаётся: дата увольнения
+          и есть последний рабочий день, смена за него законна
         - если началось раньше -> ставим конец на день раньше
         """
         operator_id = int(operator_id)
@@ -48063,14 +48177,13 @@ class Database:
         rows = cursor.fetchall()
 
         for period_id, start_date_value, end_date_value, is_blacklist_value in rows:
+            if start_date_value >= work_date_obj:
+                # Смена в день начала увольнения — это последняя отработанная смена,
+                # а не возврат на работу. Раньше период здесь удалялся целиком, и
+                # ручное восстановление смены стирало дату и причину увольнения.
+                continue
             if bool(is_blacklist_value):
                 raise ValueError("ЧС-увольнение нельзя прервать сменой")
-            if start_date_value >= work_date_obj:
-                cursor.execute("""
-                    DELETE FROM operator_schedule_status_periods
-                    WHERE id = %s
-                """, (period_id,))
-                continue
 
             new_end_date = work_date_obj - timedelta(days=1)
             cursor.execute("""

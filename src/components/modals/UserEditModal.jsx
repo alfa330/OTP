@@ -1524,7 +1524,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {usesScheduleStatusPeriodForm(editedUser?.status) && (
                     <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                         <div className="text-xs text-slate-600">
-                            Для этих статусов используется логика планировщика: статус сохраняется как период.
+                            Для этих статусов используется логика планировщика: статус сохраняется как период. Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте.
                         </div>
                         <div className={`grid grid-cols-1 ${shouldShowStatusPeriodEndDate(editedUser) ? 'sm:grid-cols-2' : ''} gap-3`}>
                             <div>
@@ -2216,7 +2216,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         {usesScheduleStatusPeriodForm(editedUser?.status) && (
                         <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                             <div className="text-xs text-slate-600">
-                                Статус будет сохранен как период графика (аналогично планировщику).
+                                Статус будет сохранен как период графика (аналогично планировщику). Смены за эти дни снимаются, кроме уже отработанных — их часы остаются в учёте.
                             </div>
                             <div className={`grid grid-cols-1 ${shouldShowStatusPeriodEndDate(editedUser) ? 'sm:grid-cols-2' : ''} gap-3`}>
                                 <div>
