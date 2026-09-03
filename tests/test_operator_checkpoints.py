@@ -503,7 +503,11 @@ class OperatorBannerTests(unittest.TestCase):
     def _banner(self):
         source = _read(self.APP_PATH)
         start = source.index('Назначенная повторная проверка (задача #86)')
-        end = source.index('{/* KPI cards */}', start)
+        # Конец плашки — блок среднего балла. Раньше маркером был комментарий
+        # «KPI cards»: карточек стало одна (план проверок убран по задаче #272),
+        # комментарий переписали, и тест сломался. Держимся за код, не за текст
+        # комментария.
+        end = source.index('<SemiCircleProgress', start)
         return source[start:end]
 
     def test_banner_exists(self):
