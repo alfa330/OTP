@@ -24,6 +24,7 @@ tests/test_sensitive_section_qr_gate.py — там же, где гейты ви�
 import json
 import re
 import sys
+from unittest import mock
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
@@ -52,14 +53,46 @@ def ctx(role='operator', department_code='szov', direction_model=None, headed=()
     }
 
 
+class RolloutTests(unittest.TestCase):
+    """Стадия выката: пока флаг включён, раздел виден ТОЛЬКО супер-админу.
+
+    Решение владельца 03.09.2026 на время обкатки. Периметр при этом описан
+    целиком и проверен классами ниже — открыть раздел отделу значит снять флаг,
+    а не восстанавливать правила по памяти.
+    """
+
+    def test_flag_is_on_right_now(self):
+        """Если флаг снимут, этот тест напомнит поправить и фронт: там свой
+        двойник, и разъехавшись, они дадут пункт меню, ведущий в 403."""
+        self.assertTrue(access.ROLLOUT_SUPER_ADMIN_ONLY)
+        source = APP_JSX.read_text(encoding='utf-8-sig')
+        self.assertIn('const DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY = true;', source)
+
+    def test_only_super_admin_passes_while_the_flag_is_on(self):
+        with mock.patch.object(access, 'ROLLOUT_SUPER_ADMIN_ONLY', True):
+            self.assertTrue(access.can_open_section(
+                ctx(role='super_admin', department_code='')))
+            for person in (ctx(), ctx(role='trainee'), ctx(role='sv'),
+                           ctx(role='admin', department_code=''),
+                           ctx(role='admin', department_code='szov', headed=('szov',))):
+                with self.subTest(role=person['role']):
+                    self.assertFalse(access.can_open_section(person))
+
+    def test_removing_the_flag_restores_the_perimeter(self):
+        with mock.patch.object(access, 'ROLLOUT_SUPER_ADMIN_ONLY', False):
+            self.assertTrue(access.can_open_section(ctx()))
+            self.assertTrue(access.can_open_section(ctx(role='sv')))
+            self.assertFalse(access.can_open_section(ctx(direction_model='chat_manager')))
+
+
 class SectionPerimeterTests(unittest.TestCase):
-    """Кого пускать в раздел. Постановка: «доступен в отделе СЗоВ»,
-    «чат-менеджерам он виден не будет»."""
+    """Кого пускать в раздел ПО ПЕРИМЕТРУ, без учёта стадии выката. Постановка:
+    «доступен в отделе СЗоВ», «чат-менеджерам он виден не будет»."""
 
     def test_szov_line_staff_is_allowed(self):
         for role in ('operator', 'trainee', 'sv'):
             with self.subTest(role=role):
-                self.assertTrue(access.can_open_section(ctx(role=role)))
+                self.assertTrue(access.section_perimeter_allows(ctx(role=role)))
 
     def test_chat_manager_is_excluded_even_inside_szov(self):
         """Главный случай: по отделу он проходит, отсекает его направление.
@@ -69,7 +102,7 @@ class SectionPerimeterTests(unittest.TestCase):
         """
         for role in ('operator', 'trainee', 'sv'):
             with self.subTest(role=role):
-                self.assertFalse(access.can_open_section(
+                self.assertFalse(access.section_perimeter_allows(
                     ctx(role=role, direction_model='chat_manager')))
 
     def test_chat_manager_model_outside_szov_is_not_the_same_people(self):
@@ -81,36 +114,53 @@ class SectionPerimeterTests(unittest.TestCase):
 
     def test_trainer_is_excluded(self):
         """То же решение, что закрыло тренеру «Обращения» и «Посылки»."""
-        self.assertFalse(access.can_open_section(ctx(role='trainer')))
+        self.assertFalse(access.section_perimeter_allows(ctx(role='trainer')))
 
     def test_other_departments_are_excluded(self):
         for code in ('op', 'tez', 'front_office', 'accounting', 'hr', ''):
             with self.subTest(code=code):
-                self.assertFalse(access.can_open_section(ctx(department_code=code)))
+                self.assertFalse(access.section_perimeter_allows(ctx(department_code=code)))
 
     def test_global_admin_and_szov_head_are_allowed(self):
-        self.assertTrue(access.can_open_section(ctx(role='super_admin', department_code='')))
-        self.assertTrue(access.can_open_section(ctx(role='admin', department_code='')))
-        self.assertTrue(access.can_open_section(
+        self.assertTrue(access.section_perimeter_allows(ctx(role='super_admin', department_code='')))
+        self.assertTrue(access.section_perimeter_allows(ctx(role='admin', department_code='')))
+        self.assertTrue(access.section_perimeter_allows(
             ctx(role='admin', department_code='szov', headed=('szov',))))
 
     def test_head_of_another_department_is_not_a_global_admin(self):
         """Назначение главой ЗАМЕНЯЕТ базовую роль — действующая семантика
         портала. Иначе глава Бухгалтерии читал бы переписку водителей."""
-        self.assertFalse(access.can_open_section(
+        self.assertFalse(access.section_perimeter_allows(
             ctx(role='admin', department_code='accounting', headed=('accounting',))))
 
     def test_unknown_role_falls_to_the_closed_side(self):
         """Незнакомая роль сводится к оператору: закрыто и с QR — правильная
         сторона ошибки."""
         person = ctx(role='невиданная_роль')
-        self.assertTrue(access.can_open_section(person))       # он всё ещё в СЗоВ
+        self.assertTrue(access.section_perimeter_allows(person))  # он всё ещё в СЗоВ
         self.assertTrue(access.requires_sensitive_qr(person))   # но подтверждает доступ
 
 
 class JournalPerimeterTests(unittest.TestCase):
     """Кто видит журнал. Постановка: аккаунт Ару Омаровой, супервайзеры СЗоВ и
-    суперадмины."""
+    суперадмины.
+
+    Флаг выката здесь снят: пока он стоит, журнал доступен только супер-админу
+    (как и весь раздел), а проверять надо правило, которое заработает после
+    открытия раздела отделу.
+    """
+
+    def setUp(self):
+        patcher = mock.patch.object(access, 'ROLLOUT_SUPER_ADMIN_ONLY', False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_journal_is_closed_to_supervisors_while_the_rollout_flag_is_on(self):
+        """Сейчас, на обкатке, журнал видит только супер-админ — включая Ару."""
+        with mock.patch.object(access, 'ROLLOUT_SUPER_ADMIN_ONLY', True):
+            self.assertFalse(access.can_view_journal(ctx(role='sv')))
+            self.assertTrue(access.can_view_journal(
+                ctx(role='super_admin', department_code='')))
 
     def test_szov_supervisors_and_super_admins(self):
         self.assertTrue(access.can_view_journal(ctx(role='sv')))
@@ -253,6 +303,24 @@ class ChatGroupingTests(unittest.TestCase):
         ])
         self.assertTrue(chats[0]['is_service'])
 
+    def test_channel_travels_with_the_chat(self):
+        """Таксопарк берётся из САМОГО сообщения: в ночном срезе заявок канал
+        есть только за вчера, а оператору чаще нужен сегодняшний чат — и парк у
+        него не показывался вовсе."""
+        chats = chat2desk.group_chats([
+            msg(1, 'from_client', '2026-09-03T10:00:00', 'привет',
+                request_id=900, channelId=2137),
+        ])
+        self.assertEqual(chats[0]['channel_id'], 2137)
+
+    def test_channel_is_taken_from_the_first_message_that_has_one(self):
+        """Системная строка канал иногда не несёт — парк не должен теряться."""
+        chats = chat2desk.group_chats([
+            msg(1, 'system', '2026-09-03T09:00:00', 'открыт', request_id=901, channelId=None),
+            msg(2, 'from_client', '2026-09-03T09:01:00', 'привет', request_id=901, channelId=3624),
+        ])
+        self.assertEqual(chats[0]['channel_id'], 3624)
+
     def test_live_chat_is_not_service(self):
         chats = chat2desk.group_chats([
             msg(1, 'from_client', '2026-09-03T10:00:00', 'помогите', request_id=400),
@@ -345,6 +413,14 @@ class HandoffTextTests(unittest.TestCase):
         self.assertIn('Оператор', text)
         self.assertIn('уточнить статус заказа', text)
 
+    def test_form_is_short(self):
+        """Требование владельца 03.09.2026: «комментарий от оператора такого-то и
+        его сообщение». Длинная преамбула про скриншот занимала в ленте
+        Chat2Desk две строки и повторяла очевидное."""
+        text = chat2desk.build_handoff_text('Иванов И.', 'нужен статус заказа')
+        self.assertEqual(text, 'Комментарий от оператора Иванов И.: нужен статус заказа')
+        self.assertNotIn('Скриншот переписки передан', text)
+
     def test_nameless_author_still_says_something(self):
         self.assertIn('оператор', chat2desk.build_handoff_text('').lower())
 
@@ -353,6 +429,26 @@ class HandoffTextTests(unittest.TestCase):
         удаления у вендора нет. Ограничение стоит на входе."""
         text = chat2desk.build_handoff_text('Оператор', 'я' * 5000)
         self.assertLessEqual(len(text), chat2desk.MAX_COMMENT_LENGTH)
+
+
+class HandoffFlowTests(unittest.TestCase):
+    """Порядок действий кнопки «Передан» — то, что ломается молча."""
+
+    def test_cache_is_dropped_right_after_sending(self):
+        """Заметка уже в чате у вендора, а наш снимок ей на пять минут старше.
+
+        Без сброса оператор жмёт «Найти» и НЕ видит собственный комментарий —
+        выглядит как «кнопка не сработала», и он жмёт её второй раз. Отозвать
+        лишнюю заметку через API нельзя (метода DELETE у вендора нет), поэтому
+        сброс кеша обязателен, а не желателен. Замечено на живом прогоне
+        03.09.2026.
+        """
+        source = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        handoff = source.split('def driver_chats_handoff')[1].split('def ')[0]
+        self.assertIn('drop_cached_messages', handoff)
+        self.assertLess(handoff.index('send_internal_comment'),
+                        handoff.index('drop_cached_messages'),
+                        'кеш сбрасывается ПОСЛЕ успешной отправки, а не до')
 
 
 class LabelTwinTests(unittest.TestCase):
@@ -527,6 +623,39 @@ class ViewContractTests(unittest.TestCase):
     def test_screenshot_hint_is_present(self):
         """Снимок делает человек — интерфейс обязан сказать, чем именно."""
         self.assertIn('⌘⇧4', self.source)
+
+    def test_taxi_park_is_shown_on_every_chat(self):
+        """По одному номеру приходят чаты разных парков. Без названия оператор
+        не понимает, чей это чат, — на это указал владелец 03.09.2026."""
+        # Два места показа: строка списка и шапка открытого чата. Третье
+        # вхождение — отправка канала в журнал, оно к показу не относится.
+        self.assertEqual(self.source.count("chat.channel_name || 'Парк не определён'"), 2,
+                         'парк показывается и в списке чатов, и в шапке чата')
+
+
+class ThreadNoteRenderingTests(unittest.TestCase):
+    """Внутренний комментарий в ленте — ПО ЦЕНТРУ, как в самом Chat2Desk.
+
+    Лента общая с «Журналом оценок» и «Моими оценками», поэтому решение
+    сторожится тестом: у правого края заметка читалась как ответ оператора,
+    хотя это служебная пометка для коллег (требование владельца 03.09.2026).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (ROOT / 'src' / 'components' / 'c2d_eval' / 'ChatThread.jsx'
+                      ).read_text(encoding='utf-8')
+
+    def test_note_is_centered(self):
+        self.assertIn("note ? 'justify-center'", self.source)
+
+    def test_note_has_no_bubble_tail(self):
+        """Хвост пузыря показывает сторону разговора, а у заметки стороны нет."""
+        block = re.search(r"const bubbleClass = (.*?);\n", self.source, re.S)
+        self.assertIsNotNone(block)
+        note_branch = re.search(r"note\s*\?\s*'([^']*)'", block.group(1))
+        self.assertIsNotNone(note_branch)
+        self.assertNotIn('rounded-br-md', note_branch.group(1))
 
 
 if __name__ == '__main__':

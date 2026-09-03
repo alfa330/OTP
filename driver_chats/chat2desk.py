@@ -70,6 +70,7 @@ _STORAGE_BASE_URL = (os.getenv('CHAT2DESK_STORAGE_BASE_URL')
 # Справочник операторов вендора кешируется в процессе: он нужен, чтобы подписать
 # исходящие сообщения именем чат-менеджера, меняется редко, а стоит вызова API.
 _OPERATORS_CACHE = {'names': None, 'at': None}
+_CHANNELS_CACHE = {'names': None, 'at': None}
 _OPERATORS_TTL = timedelta(hours=6)
 
 
@@ -256,6 +257,40 @@ def fetch_window_messages(client_id, date_from, date_to):
     return rows, total
 
 
+def channel_names():
+    """id канала -> название таксопарка. Кешируется в процессе на 6 часов.
+
+    ЗАПАСНОЙ путь: основной справочник берётся бесплатно из своей базы
+    (`c2d_requests`, 14 парков за 45 дней — покрывает весь живой трафик). Сюда
+    доходим только за парком, которого в нашей базе ещё нет, — то есть за
+    новым, подключённым сегодня.
+
+    `offset` вендор игнорирует и здесь: отдаёт 15 каналов из 23 и на второй
+    странице ноль. Долистать нечем, поэтому недостающие имена и остаются за
+    локальным справочником, а не наоборот.
+    """
+    cached_at = _CHANNELS_CACHE.get('at')
+    if _CHANNELS_CACHE.get('names') is not None and cached_at:
+        if datetime.utcnow() - cached_at < _OPERATORS_TTL:
+            return _CHANNELS_CACHE['names']
+    names = {}
+    try:
+        payload = _request('GET', '/v1/channels', params={'limit': MESSAGES_PAGE_LIMIT})
+        for row in (payload.get('data') or []):
+            if not isinstance(row, dict) or row.get('id') is None:
+                continue
+            name = str(row.get('name') or '').strip()
+            if name:
+                names[int(row['id'])] = name
+    except Chat2DeskError:
+        logging.warning('driver_chats: справочник каналов Chat2Desk недоступен',
+                        exc_info=True)
+        return _CHANNELS_CACHE.get('names') or {}
+    _CHANNELS_CACHE['names'] = names
+    _CHANNELS_CACHE['at'] = datetime.utcnow()
+    return names
+
+
 def operator_names():
     """id оператора Chat2Desk -> имя. Кешируется в процессе на 6 часов.
 
@@ -353,6 +388,10 @@ def normalize_message(msg, names=None):
         'status': msg.get('status'),
         'requestId': msg.get('request_id'),
         'dialogId': msg.get('dialog_id'),
+        # Канал = таксопарк, на чей номер написал водитель. Берём из САМОГО
+        # сообщения: в ночном срезе заявок канал есть только за вчера, а
+        # оператору чаще нужен сегодняшний чат — и парк у него не показывался.
+        'channelId': msg.get('channel_id'),
     }
     # Подпись автора — только там, где она осмысленна: у ответа чат-менеджера и
     # у внутренней заметки. У реплики клиента автор — сам водитель.
@@ -381,10 +420,13 @@ def group_chats(messages):
         bucket = buckets.setdefault(key, {
             'request_id': msg.get('requestId'),
             'dialog_id': msg.get('dialogId'),
+            'channel_id': msg.get('channelId'),
             'messages': [],
         })
         if bucket['dialog_id'] is None:
             bucket['dialog_id'] = msg.get('dialogId')
+        if bucket['channel_id'] is None:
+            bucket['channel_id'] = msg.get('channelId')
         bucket['messages'].append(msg)
 
     chats = []
@@ -405,6 +447,7 @@ def group_chats(messages):
         chats.append({
             'request_id': bucket['request_id'],
             'dialog_id': bucket['dialog_id'],
+            'channel_id': bucket['channel_id'],
             'messages': items,
             'messages_count': len(items),
             'incoming_count': len(incoming),
@@ -435,6 +478,11 @@ def group_chats(messages):
 def build_handoff_text(operator_name, note=''):
     """Текст заметки, которая уйдёт в чат.
 
+    Форма короткая — «Комментарий от оператора {Имя}: {сообщение}» (требование
+    владельца 03.09.2026). Длинная преамбула про скриншот занимала в ленте
+    Chat2Desk две строки и повторяла то, что и так очевидно из места, где
+    заметка появилась.
+
     Имя оператора идёт В ТЕКСТ, а не в operator_id: учёток Chat2Desk у линейных
     операторов нет, и без operator_id вендор припишет заметку оператору текущего
     диалога — то есть самому чат-менеджеру. Он увидел бы «свой» комментарий,
@@ -442,11 +490,8 @@ def build_handoff_text(operator_name, note=''):
     автоматически).
     """
     who = str(operator_name or '').strip() or 'оператор OTP'
-    parts = [f"Скриншот переписки передан чат-менеджеру. Забрал: {who}."]
-    note = str(note or '').strip()
-    if note:
-        parts.append(note)
-    return ' '.join(parts)[:MAX_COMMENT_LENGTH]
+    note = str(note or '').strip() or 'скриншот чата передан'
+    return f"Комментарий от оператора {who}: {note}"[:MAX_COMMENT_LENGTH]
 
 
 def send_internal_comment(client_id, text):

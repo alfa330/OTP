@@ -1829,8 +1829,15 @@ const isDriverChatsChatManager = (userLike) => (
         === DRIVER_CHATS_SECTION_DEPARTMENT_CODE
 );
 
+/* Стадия выката: пока true — пункт меню виден ТОЛЬКО супер-админу (решение
+   владельца 03.09.2026, на время обкатки). Двойник на бэкенде —
+   `ROLLOUT_SUPER_ADMIN_ONLY` в driver_chats/access.py, и снимать флаг нужно в
+   обоих местах: здесь он прячет пункт, там закрывает сами ручки. */
+const DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY = true;
+
 const canAccessDriverChatsSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
+    if (DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY) return role === 'super_admin';
     if (role === 'super_admin') return true;
     if (role === 'trainer') return false;
     if (isDriverChatsChatManager(userLike)) return false;

@@ -52,6 +52,18 @@ _QR_GATED_ROLES = ('operator', 'trainee')
 
 _ADMIN_ROLES = ('super_admin', 'admin')
 
+# ─── Стадия выката ────────────────────────────────────────────────────────────
+#
+# Пока True — раздел видит ТОЛЬКО супер-админ (решение владельца 03.09.2026,
+# на время обкатки). Периметр ниже при этом описан целиком и покрыт тестами:
+# открыть раздел отделу СЗоВ — это снять флаг здесь и такой же во фронте
+# (`DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY` в src/App.jsx), а не восстанавливать
+# по памяти, кому раздел предназначался.
+#
+# Флаг, а не удаление правил: раздел уже стоит на проде, и «временно закрыть»
+# не должно означать «потерять периметр».
+ROLLOUT_SUPER_ADMIN_ONLY = True
+
 
 def normalize_role(role):
     value = str(role or '').strip().lower()
@@ -107,8 +119,8 @@ def is_chat_manager(ctx):
     return _own_code(ctx) == SECTION_DEPARTMENT_CODE
 
 
-def can_open_section(ctx):
-    """Пускать ли пользователя в раздел вообще.
+def section_perimeter_allows(ctx):
+    """Полное правило периметра — БЕЗ учёта стадии выката.
 
     Проверяется на КАЖДОМ роуте, а не только в меню: спрятанный пункт — это не
     доступ, раздел открывается и прямым адресом ?view=driver_chats.
@@ -125,6 +137,20 @@ def can_open_section(ctx):
     if is_chat_manager(ctx):
         return False
     return belongs_to_section_department(ctx)
+
+
+def can_open_section(ctx):
+    """Пускать ли пользователя в раздел СЕЙЧАС.
+
+    Это периметр плюс стадия выката. Пока `ROLLOUT_SUPER_ADMIN_ONLY` включён,
+    раздел видит только супер-админ — решение владельца 03.09.2026 на время
+    обкатки. Правило периметра при этом живое и проверенное тестами: открыть
+    раздел отделу — это снять один флаг здесь и такой же во фронте, а не
+    вспоминать через месяц, кому он вообще предназначался.
+    """
+    if ROLLOUT_SUPER_ADMIN_ONLY:
+        return normalize_role(ctx.get('role')) == 'super_admin'
+    return section_perimeter_allows(ctx)
 
 
 def can_view_journal(ctx):
