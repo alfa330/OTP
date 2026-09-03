@@ -14658,11 +14658,28 @@ def get_call_evaluations():
         operator = db.get_user(id=operator_id)
         supervisor = db.get_user(id=operator[6]) if operator and operator[6] else None
 
+        # Чат-менеджеру план проверок («Прослушано / нужно», «Осталось прослушать»)
+        # не показываем — решение заказчика по задаче #272. Модель берём на конец
+        # выбранного месяца, как это делает /api/my/low_rating_reviews: у перешедшего
+        # посреди месяца человека раздел должен вести себя по его модели за месяц,
+        # а не по сегодняшней.
+        try:
+            _eval_year, _eval_mon = map(int, str(month or datetime.now().strftime('%Y-%m')).split('-'))
+            _eval_period_end = dt_date(_eval_year, _eval_mon, calendar.monthrange(_eval_year, _eval_mon)[1])
+            _eval_model_code = (db.get_operator_calculation_models_as_of([operator_id], _eval_period_end) or {}).get(int(operator_id))
+            is_chat_manager = str(_eval_model_code or '').strip().lower() == 'chat_manager'
+        except Exception:
+            # Модель — украшение ответа, а не его суть: не удалось определить —
+            # ведём себя как раньше (план проверок показываем).
+            logging.warning("call_evaluations: не удалось определить модель расчёта", exc_info=True)
+            is_chat_manager = False
+
         # Просто возвращаем массивы из базы, не пересоздаём их из комментариев
         return jsonify({
-            "status": "success", 
+            "status": "success",
             "evaluations": evaluations,
             "evaluation_target": evaluation_target,
+            "is_chat_manager": is_chat_manager,
             "supervisor": {
                 "id": supervisor[0] if supervisor else None,
                 "name": supervisor[2] if supervisor else None

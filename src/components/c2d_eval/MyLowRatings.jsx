@@ -15,7 +15,11 @@ import { iosCard } from '../ui/ios';
  * часов», но строго свои чаты и без возможности вынести вердикт.
  *
  * Цвета согласованы с проверяющей стороной и намеренно «перевёрнуты»:
- * обоснованно (оценка остаётся) — красный, необоснованно (снята) — зелёный. */
+ * обоснованно (оценка остаётся) — красный, необоснованно (снята) — зелёный.
+ *
+ * Количества здесь НЕ показываем (задача #272, Сабыр Азана): ни сводки
+ * «всего / снято / обоснованно / на проверке», ни числа оценок в шапке журнала.
+ * Чат-менеджер видит сами обращения и решения по ним, а сколько их — нет. */
 
 const VERDICTS = {
     invalid: { short: 'Необоснованно', label: 'Необоснованно · снята', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
@@ -39,13 +43,6 @@ const formatDay = (value) => {
     const [yyyy, mm, dd] = String(value || '').slice(0, 10).split('-');
     return dd ? `${dd}.${mm}.${yyyy}` : '';
 };
-
-const Stat = ({ value, label, tone }) => (
-    <div className="min-w-0 rounded-2xl bg-slate-50 px-3 py-2.5 text-center ring-1 ring-slate-200/70">
-        <div className={`text-[19px] font-semibold leading-tight ${tone}`}>{value}</div>
-        <div className="mt-0.5 truncate text-[11px] text-slate-500">{label}</div>
-    </div>
-);
 
 export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId, month, granted }) {
     const [data, setData] = useState(null);
@@ -174,16 +171,9 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
                     )}
                 </div>
 
-                {total === 0 ? (
+                {total === 0 && (
                     <div className="mt-3 rounded-2xl bg-slate-50 px-3 py-2.5 text-[13px] text-slate-500 ring-1 ring-slate-200/70">
                         За этот месяц низких оценок нет.
-                    </div>
-                ) : (
-                    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                        <Stat value={total} label="Всего" tone="text-slate-900" />
-                        <Stat value={Number(summary.invalid || 0)} label="Снято" tone="text-emerald-600" />
-                        <Stat value={Number(summary.valid || 0)} label="Обоснованно" tone="text-rose-600" />
-                        <Stat value={Number(summary.pending || 0)} label="На проверке" tone="text-slate-500" />
                     </div>
                 )}
 
@@ -225,7 +215,7 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
                                 <div className="border-b border-slate-200 px-4 py-2.5">
                                     <div className="text-sm font-semibold text-slate-900">Журнал</div>
                                     <div className="truncate text-[11px] text-slate-500">
-                                        <span>{`${formatDay(data.start)} — ${formatDay(data.end)} · ${total} оценок`}</span>
+                                        <span>{`${formatDay(data.start)} — ${formatDay(data.end)}`}</span>
                                     </div>
                                 </div>
                                 <div className="min-h-0 flex-1 overflow-y-scroll overscroll-contain p-2.5 ios-modal-scroll">
