@@ -551,10 +551,24 @@ class KnowledgeTestJournalFrontendTests(unittest.TestCase):
     def setUp(self):
         self.src = _read(APP_JSX_PATH)
 
-    def test_plan_progress_ignores_knowledge_tests(self):
-        self.assertIn("const listenedEvalsForCalc = evalsForCalc.filter(ev => !ev?.knowledge_test);", self.src)
-        self.assertIn("const evaluationCount = listenedEvalsForCalc.length;", self.src)
-        self.assertIn("const listenedEvals = evalsFiltered.filter(ev => !ev?.knowledge_test);", self.src)
+    def test_employee_has_no_listening_plan_anymore(self):
+        """Плана прослушки у сотрудника на экране больше нет.
+
+        Решение владельца 03.09.2026 (задача #272): сколько звонков и чатов
+        должны проверить — мерка проверяющих, а не показатель сотрудника.
+        Поэтому делить его оценки на «прослушанные» и тестовые на фронте больше
+        незачем — вычисления плана убраны вместе с карточкой
+        (сторожит tests/test_review_counts_hidden_from_operators.py).
+        Само правило «тест не закрывает план» живёт там, где план ещё считается:
+        на экране СВ (по данным сервера) и в отчётах бэкенда.
+        """
+        self.assertNotIn("const listenedEvalsForCalc", self.src)
+        self.assertNotIn("Осталось прослушать", self.src)
+        self.assertIn("const planMeta = getEvaluationPlanMeta(op);", self.src)
+
+    def test_backend_keeps_knowledge_tests_out_of_the_count(self):
+        # Отчёты и выгрузки по-прежнему не считают тест прослушанным звонком.
+        self.assertIn("if not row.get('is_knowledge_test')", _read(APP_PATH))
 
     def test_average_score_includes_knowledge_tests(self):
         # Средний балл считается по всем оценкам, включая тест.
