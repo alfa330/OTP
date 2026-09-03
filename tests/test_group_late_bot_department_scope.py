@@ -301,18 +301,46 @@ class FrontendAccessTests(unittest.TestCase):
         # Глава ЧУЖОГО отдела с базовой admin-ролью по-прежнему не проходит.
         self.assertIn("return role === 'admin' && !isDepartmentHead(userLike);", block)
 
-    def test_menu_item_reaches_the_sidebar_branch_of_the_head(self):
-        # Глава отдела — «суженный» админ: isAdminLikeRole у него false (см.
-        # isScopedDepartmentHead), и сайдбар ему рисует ветка isDepartmentManager.
-        # Пункт, объявленный только в админской ветке, до главы не доезжает: доступ
-        # есть, раздел открывается прямым URL, а в меню его нет — так и было.
-        head_branch = APP_SRC.split("{isDepartmentManager && !isAdminLikeRole && (", 1)[1]
-        head_branch = head_branch.split("{(currentUserRole === 'operator'", 1)[0]
-        self.assertIn("{canAccessGroupLateBotSection && (", head_branch)
-        self.assertIn("handleSidebarViewNavigation(e, 'group_late_bot')", head_branch)
-        # И в админской ветке пункт остался: у пункта ровно две точки рендера,
-        # как у «Табло СЗоВ».
-        self.assertEqual(APP_SRC.count("handleSidebarViewNavigation(e, 'group_late_bot')"), 2)
+    def test_menu_item_lives_in_the_common_part_of_the_sidebar(self):
+        # Раздел выдаётся разнородной аудитории: глобальные админы, глава фронт-офисов
+        # и ВЕСЬ отдел кадрового учёта. Ветки роли их все не покрывают — у роли
+        # hr_manager своей ветки в сайдбаре нет вовсе (isDepartmentManager это СВ или
+        # суженный глава), и пункт из ветки админа или главы до кадровика не доезжает:
+        # доступ есть, раздел открывается прямым URL, а в меню его нет.
+        # Поэтому пункт объявлен ОДИН раз в общей части списка, до первой ветки роли.
+        self.assertEqual(APP_SRC.count("handleSidebarViewNavigation(e, 'group_late_bot')"), 1)
+        menu = APP_SRC.split("<ul ref={sidebarMenuScrollRef}", 1)[1]
+        self.assertLess(
+            menu.index("handleSidebarViewNavigation(e, 'group_late_bot')"),
+            menu.index("{isAdminLikeRole && ("),
+            "пункт раздела обязан стоять до первой ветки роли, иначе его не увидит кадровик",
+        )
+
+    def test_full_access_department_is_mirrored_on_both_sides(self):
+        # Отдел кадрового учёта видит раздел целиком, без границы отдела Workpace:
+        # кадровый учёт ведётся по всей компании (задача #273). Сверка по КОДУ, а не
+        # по id: id засеян миграцией и в разных окружениях разный.
+        self.assertIn("const GROUP_LATE_BOT_FULL_DEPARTMENT_CODES = new Set(['hr']);", APP_SRC)
+        self.assertIn("GROUP_LATE_BOT_FULL_DEPARTMENT_CODE = 'hr'", BOT_SOURCE)
+        block = APP_SRC.split("const canAccessGroupLateBotForUser = (userLike) => {", 1)[1]
+        block = block.split("};", 1)[0]
+        self.assertIn("if (isGroupLateBotFullAccessDepartment(userLike)) return true;", block)
+
+    def test_guard_gives_the_hr_department_full_scope(self):
+        # Полный доступ = scope None, как у глобального админа: иначе каждый эндпоинт
+        # начал бы резать выборку по отделу Workpace, которого у HR нет.
+        guard = BOT_SOURCE.split("def _group_late_bot_guard():", 1)[1]
+        guard = guard.split("\ndef ", 1)[0]
+        self.assertIn("if _group_late_bot_has_full_access(requester_id, role):", guard)
+        self.assertLess(
+            guard.index("_group_late_bot_has_full_access"),
+            guard.index("_group_late_bot_department_scope"),
+            "полный доступ проверяется до сужения по отделу, иначе HR получит scope",
+        )
+        # Роль в предикате намеренно не проверяется: у кадровика уровень как у оператора.
+        predicate = BOT_SOURCE.split("def _group_late_bot_has_full_access(", 1)[1]
+        predicate = predicate.split("\ndef ", 1)[0]
+        self.assertIn("db.get_user_department_id(requester_id) == department_id", predicate)
 
     def test_allowlist_guard_does_not_redirect_the_head_away(self):
         # У front_office список разделов ограничен; раздел гейтится своим предикатом,

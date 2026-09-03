@@ -25,8 +25,10 @@ from group_late.helpers import (
     employee_id as _employee_id,
     employee_name as _employee_name,
     is_archived as _is_archived,
+    lunch_seconds as _lunch_seconds,
     mark_date as _mark_date,
     mark_type as _mark_type,
+    net_work_seconds as _net_work_seconds,
     parse_dt as _parse_dt,
 )
 from group_late.workpace import workpace_client
@@ -226,7 +228,7 @@ def generate_report(
             "Отдел", "ФИО сотрудника", "График", "Все отметки за день",
             "Время прихода (план)", "Время прихода (факт)", "Опоздание (мин)",
             "Время ухода (план)", "Время ухода (факт)", "Ранний уход (мин)",
-            "Отработано (факт)", "Отклонение (HH:MM)", "Статус"
+            "Отработано (без обеда)", "Отклонение (HH:MM)", "Статус"
         ]
         ws.append(headers)
         ws.row_dimensions[3].height = 25
@@ -370,14 +372,18 @@ def generate_report(
                         status_fill = fill_red
                         total_absent_count += 1
 
+                # Время в работе — за вычетом обеда (ТЗ #273). Считаем от отрезка
+                # «приход → уход»; на коротком отрезке обеда нет, см. lunch_seconds.
                 work_time_str = "—"
                 work_seconds = 0
+                lunch_sec = 0
                 if fact_in_dt and fact_out_dt:
-                    diff_sec = (fact_out_dt - fact_in_dt).total_seconds()
-                    if diff_sec > 0:
-                        work_seconds = diff_sec
-                        h = int(diff_sec // 3600)
-                        m = int((diff_sec % 3600) // 60)
+                    span_sec = (fact_out_dt - fact_in_dt).total_seconds()
+                    if span_sec > 0:
+                        lunch_sec = _lunch_seconds(span_sec)
+                        work_seconds = _net_work_seconds(span_sec)
+                        h = int(work_seconds // 3600)
+                        m = int((work_seconds % 3600) // 60)
                         work_time_str = f"{h:02d}:{m:02d}"
 
                 deviation_str = "—"
@@ -385,7 +391,10 @@ def generate_report(
                     plan_in_dt = _parse_dt(span.get("workTimeStart"))
                     plan_out_dt = _parse_dt(span.get("workTimeEnd"))
                     if plan_in_dt and plan_out_dt:
-                        norm_sec = (plan_out_dt - plan_in_dt).total_seconds()
+                        # Норму берём тоже без обеда: план смены его включает, и
+                        # сравнение «факт без обеда» с «планом с обедом» давало бы
+                        # минус час у всех, кто отработал ровно по графику.
+                        norm_sec = (plan_out_dt - plan_in_dt).total_seconds() - lunch_sec
                         if norm_sec > 0:
                             diff_sec = work_seconds - norm_sec
                             sign = "+" if diff_sec >= 0 else "-"
@@ -484,7 +493,7 @@ def generate_report(
         sum_headers = [
             "Отдел", "ФИО сотрудника", "Дней по графику", "Дней отработано", "Дней вовремя",
             "Опозданий (кол-во)", "Опозданий (всего мин)", "Ранних уходов (кол-во)", "Ранних уходов (всего мин)",
-            "Прогулов/Неявок (кол-во)", "Всего отработано (HH:MM)", "Среднее время работы (HH:MM)"
+            "Прогулов/Неявок (кол-во)", "Всего отработано без обеда (HH:MM)", "Среднее время работы (HH:MM)"
         ]
         sum_ws.append(sum_headers)
         sum_ws.row_dimensions[3].height = 25

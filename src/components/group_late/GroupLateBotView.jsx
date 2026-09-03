@@ -1917,12 +1917,12 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">
-                        Бот опозданий{scoped ? ` · ${departmentScope}` : ''}
+                        Отметки{scoped ? ` · ${departmentScope}` : ''}
                     </h2>
                     <p className="text-xs text-slate-500">
                         {scoped
-                            ? `Контроль отметок Workpace в Telegram по отделу «${departmentScope}»: отбивки, отчёты и чаты отдела`
-                            : 'Контроль отметок Workpace в Telegram: отбивки, отчёты и связки чатов с отделами'}
+                            ? `Отметки прихода и ухода по отделу «${departmentScope}»: опоздания, отчёты и чаты отдела`
+                            : 'Отметки прихода и ухода: опоздания, отчёты и связки чатов с отделами'}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">

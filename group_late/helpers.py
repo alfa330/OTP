@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
+from group_late import config
 from group_late.config import TZ
 
 DATE_FORMATS = (
@@ -50,6 +51,26 @@ def mark_date(mark: dict) -> Optional[str]:
 
 def mark_type(mark: dict):
     return mark.get("markType") if mark.get("markType") is not None else mark.get("type")
+
+
+def lunch_seconds(span_seconds: float) -> int:
+    """Сколько обеда вычесть из отрезка «приход → уход».
+
+    Отрезок короче порога обеда не содержит — так же считают и правила перерывов
+    проекта. Вычитаем не больше самого отрезка: иначе время в работе уходит в минус
+    и в отчёте появляется отрицательный час, которого не было."""
+    if span_seconds <= 0:
+        return 0
+    if span_seconds < config.LUNCH_BREAK_MIN_WORK_MINUTES * 60:
+        return 0
+    return int(min(config.LUNCH_BREAK_MINUTES * 60, span_seconds))
+
+
+def net_work_seconds(span_seconds: float) -> int:
+    """Время в работе за вычетом обеда — то, что просит ТЗ #273."""
+    if span_seconds <= 0:
+        return 0
+    return max(0, int(span_seconds) - lunch_seconds(span_seconds))
 
 
 def employee_name(item: dict) -> str:
