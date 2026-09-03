@@ -1742,6 +1742,14 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                     </td>
                                                     <td className="px-3 py-2.5 text-slate-600">
                                                         {report.department_filter || 'Все отделы'}
+                                                        {/* Иначе выгрузка по трём людям читается как выгрузка
+                                                            по всему отделу — и по ней делают выводы. */}
+                                                        {(report.employee_filter || []).length > 0 && (
+                                                            <div className="text-[11px] text-slate-500"
+                                                                 title={(report.employee_filter || []).join(', ')}>
+                                                                только {fmtInt(report.employee_filter.length)} чел.
+                                                            </div>
+                                                        )}
                                                     </td>
                                                     <td className="px-3 py-2.5 text-slate-500">
                                                         {report.source === 'web'
@@ -2217,6 +2225,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 date_to: reportModal.to,
                 department: reportModal.department || null,
                 send_to_chat_id: reportModal.chatId || null,
+                employees: reportModal.employees || [],
             }, { headers: headers() });
             setReportModal(null);
             loadReports();
@@ -2539,6 +2548,74 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                     searchPlaceholder="Поиск отдела…"
                                     ariaLabel="Отдел отчёта"
                                 />
+                            )}
+                        </div>
+                        {/* Выбор людей спрятан за кнопкой: по умолчанию отчёт собирается
+                            по всему отделу, и постоянно висящий список из сотни ФИО был бы
+                            лишним шумом в форме. */}
+                        <div>
+                            {!reportModal.pickEmployees ? (
+                                <button type="button" className={iosBtnSecondary}
+                                        onClick={() => {
+                                            setReportModal({ ...reportModal, pickEmployees: true });
+                                            if (employees === null) {
+                                                loadEmployees({
+                                                    from: reportModal.from, to: reportModal.to,
+                                                    department: reportModal.department, q: '',
+                                                });
+                                            }
+                                        }}>
+                                    <Users className="h-4 w-4" /> Выбрать сотрудников
+                                </button>
+                            ) : (
+                                <div>
+                                    <div className="mb-1 flex items-center justify-between px-1">
+                                        <label className="text-[12px] font-medium text-slate-500">
+                                            Сотрудники{(reportModal.employees || []).length > 0
+                                                ? ` · выбрано ${(reportModal.employees || []).length}`
+                                                : ' · весь отдел'}
+                                        </label>
+                                        <button type="button" className={iosBtnGhost}
+                                                onClick={() => setReportModal({
+                                                    ...reportModal, pickEmployees: false, employees: [],
+                                                })}>
+                                            Сбросить
+                                        </button>
+                                    </div>
+                                    {employees === null ? (
+                                        <div className="flex items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-3 text-[12.5px] text-slate-500">
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загружаем список…
+                                        </div>
+                                    ) : (
+                                        <div className="max-h-52 overflow-y-auto rounded-xl ring-1 ring-slate-200/70">
+                                            {(employees || []).length === 0 && (
+                                                <div className="px-3.5 py-3 text-[12.5px] text-slate-500">
+                                                    За выбранный период сотрудников не нашлось
+                                                </div>
+                                            )}
+                                            {(employees || []).map((person) => {
+                                                const name = person.employee_name;
+                                                const picked = (reportModal.employees || []).includes(name);
+                                                return (
+                                                    <label key={name}
+                                                           className="flex cursor-pointer items-center gap-2.5 border-b border-slate-100 px-3.5 py-2 text-[13px] last:border-0 hover:bg-slate-50">
+                                                        <input type="checkbox" checked={picked}
+                                                               onChange={() => setReportModal({
+                                                                   ...reportModal,
+                                                                   employees: picked
+                                                                       ? (reportModal.employees || []).filter((x) => x !== name)
+                                                                       : [...(reportModal.employees || []), name],
+                                                               })} />
+                                                        <span className="text-slate-800">{name}</span>
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                    <div className="mt-1 px-1 text-[11px] text-slate-500">
+                                        Никого не отметили — отчёт соберётся по всему отделу
+                                    </div>
+                                </div>
                             )}
                         </div>
                         <div>

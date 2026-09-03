@@ -7764,6 +7764,9 @@ class Database:
                 duration_ms       INTEGER,
                 created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            -- Отчёт по конкретным людям, а не по всему отделу (задача #273):
+            -- список ФИО через перевод строки. Пустое значение = весь отдел.
+            ALTER TABLE glb_reports ADD COLUMN IF NOT EXISTS employee_filter TEXT;
             CREATE INDEX IF NOT EXISTS idx_glb_reports_created ON glb_reports(created_at DESC);
 
             -- Тело Excel-файла отдельно от карточки: список отчётов читается часто,
@@ -57104,7 +57107,7 @@ class Database:
             total = int(cursor.fetchone()[0] or 0)
             cursor.execute(f"""
                 SELECT r.id, r.source, r.requested_chat_id, r.requested_by, r.date_from, r.date_to,
-                       r.department_filter, r.status, r.error, r.file_name, r.file_size,
+                       r.department_filter, r.employee_filter, r.status, r.error, r.file_name, r.file_size,
                        r.rows_count, r.employees_count, r.late_count, r.absent_count,
                        r.duration_ms, r.created_at, c.title,
                        EXISTS (SELECT 1 FROM glb_report_files f WHERE f.report_id = r.id) AS has_file
@@ -57122,18 +57125,20 @@ class Database:
                 'date_from': r[4].isoformat() if r[4] else None,
                 'date_to': r[5].isoformat() if r[5] else None,
                 'department_filter': r[6],
-                'status': r[7],
-                'error': r[8],
-                'file_name': r[9],
-                'file_size': r[10],
-                'rows_count': r[11],
-                'employees_count': r[12],
-                'late_count': r[13],
-                'absent_count': r[14],
-                'duration_ms': r[15],
-                'created_at': r[16].isoformat() if r[16] else None,
-                'chat_title': r[17],
-                'has_file': bool(r[18]),
+                # Список ФИО, по которым собран отчёт. Пусто — весь отдел.
+                'employee_filter': [x for x in (r[7] or '').splitlines() if x.strip()],
+                'status': r[8],
+                'error': r[9],
+                'file_name': r[10],
+                'file_size': r[11],
+                'rows_count': r[12],
+                'employees_count': r[13],
+                'late_count': r[14],
+                'absent_count': r[15],
+                'duration_ms': r[16],
+                'created_at': r[17].isoformat() if r[17] else None,
+                'chat_title': r[18],
+                'has_file': bool(r[19]),
             } for r in cursor.fetchall()]
         return {'total': total, 'items': items, 'limit': limit_int, 'offset': offset_int}
 
@@ -57577,19 +57582,20 @@ class Database:
                 'is_admin_chat': bool(row[3]), 'departments': list(row[4] or [])}
 
     def glb_create_report(self, date_from, date_to, department=None, source='telegram',
-                          requested_chat_id=None, requested_by=None):
+                          requested_chat_id=None, requested_by=None, employees=None):
         """Карточка отчёта со статусом «формируется»: раздел показывает её сразу,
         не дожидаясь, пока Workpace отдаст все дни периода."""
         with self._get_cursor() as cursor:
             cursor.execute("""
                 INSERT INTO glb_reports (source, requested_chat_id, requested_by, date_from, date_to,
-                                         department_filter, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'running')
+                                         department_filter, employee_filter, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'running')
                 RETURNING id
             """, (source, requested_chat_id, requested_by,
                   self._glb_parse_date(date_from, 'date_from'),
                   self._glb_parse_date(date_to, 'date_to'),
-                  (department or None)))
+                  (department or None),
+                  ("\n".join(employees) if employees else None)))
             return int(cursor.fetchone()[0])
 
     def glb_finish_report(self, report_id, file_bytes=None, file_name=None, stats=None,

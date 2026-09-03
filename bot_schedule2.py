@@ -6972,6 +6972,10 @@ _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL = 600
 # Неделя закрывает «посмотреть, что было», а месяц кадровик берёт выгрузкой.
 GROUP_LATE_ATTENDANCE_MAX_DAYS = 6
 
+# Сколько человек можно выбрать в одну выгрузку. Предел не от базы, а от смысла:
+# длинный список ФИО в фильтре — это уже «весь отдел», и его надо брать отделом.
+GROUP_LATE_REPORT_MAX_EMPLOYEES = 50
+
 
 def _group_late_bot_scope_by_department_id():
     """{id нашего отдела: название отдела Workpace} по GROUP_LATE_BOT_DEPARTMENT_SCOPES."""
@@ -7652,6 +7656,11 @@ def api_group_late_bot_reports():
     # Отчёт «по всем отделам» в границах отдела недоступен: собирается только свой.
     department = scope or str(payload.get('department') or '').strip()
     send_to_chat_id = str(payload.get('send_to_chat_id') or '').strip()
+    # Отчёт по конкретным людям (ТЗ #273). Пустой список = весь отдел, как раньше.
+    employees = [str(x).strip() for x in (payload.get('employees') or []) if str(x).strip()]
+    if len(employees) > GROUP_LATE_REPORT_MAX_EMPLOYEES:
+        return jsonify({"error": f"За один раз можно выбрать не больше "
+                                 f"{GROUP_LATE_REPORT_MAX_EMPLOYEES} сотрудников"}), 400
     try:
         if scope and send_to_chat_id and db.glb_chat_department_state(send_to_chat_id, scope) != 'own':
             return _group_late_bot_scope_forbidden(
@@ -7660,6 +7669,7 @@ def api_group_late_bot_reports():
             date_from, date_to, department=department or None, source='web',
             requested_chat_id=send_to_chat_id or None,
             requested_by=_group_late_bot_actor(requester_id),
+            employees=employees or None,
         )
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -7669,6 +7679,7 @@ def api_group_late_bot_reports():
 
     group_late_pool.submit(
         _group_late_generate_report, report_id, date_from, date_to, department, send_to_chat_id,
+        employees or None,
     )
     return jsonify({"status": "success", "report_id": report_id, "report_status": "running"}), 202
 
@@ -57460,7 +57471,8 @@ def _group_late_run_on_bot_loop(coro_factory, timeout=60):
     return future.result(timeout=timeout)
 
 
-def _group_late_generate_report(report_id, date_from, date_to, department, send_to_chat_id=None):
+def _group_late_generate_report(report_id, date_from, date_to, department, send_to_chat_id=None,
+                                employees=None):
     """Собрать отчёт и, если попросили, отправить его в чат. Синхронно — вызывается
     в пуле потоков, потому что Workpace тянет каждый день периода отдельно."""
     started_at = time.time()
@@ -57468,7 +57480,7 @@ def _group_late_generate_report(report_id, date_from, date_to, department, send_
     try:
         file_bytes, filename, text = group_late.generate_report(
             date_from, date_to if date_to != date_from else None, department or None,
-            stats_out=stats, db=db,
+            stats_out=stats, db=db, employees=employees or None,
         )
     except Exception as error:
         logging.exception("group_late: отчёт %s не собрался", report_id)
