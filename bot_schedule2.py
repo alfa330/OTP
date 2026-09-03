@@ -1128,6 +1128,19 @@ def _get_user_payload(user):
                     user_id=user_id)
             except Exception:
                 wiki_enabled = True
+    # Модель расчёта направления. Нужна ровно одному разделу — «Чаты водителей»,
+    # где чат-менеджеру пункт меню не показывается, — поэтому и спрашиваем её
+    # только у СЗоВ: в других отделах чат-менеджеров нет, и лишний запрос на
+    # каждый вход был бы платой ни за что. Отказ базы не должен ронять вход:
+    # без модели раздел просто останется видимым, а обязательную границу всё
+    # равно держит driver_chats/access.py на каждом роуте.
+    direction_model = None
+    if user_id is not None and str(department_code or '').strip().lower() == 'szov':
+        try:
+            direction_model = db.get_user_direction_model(user_id)
+        except Exception:
+            logging.exception("Не удалось определить модель направления пользователя %s", user_id)
+
     return {
         "role": role,
         "id": user_id,
@@ -1137,6 +1150,7 @@ def _get_user_payload(user):
         "gender": gender,
         "department_id": department_id,
         "department_code": department_code,
+        "direction_model": direction_model,
         "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
         "headed_department_ids": headed_department_ids,
@@ -55504,6 +55518,36 @@ except Exception:
     logging.exception("Раздел «Посылки»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Чаты водителей» (задача #271) ────────────────────────────────────
+# Оператор СЗоВ ищет переписку водителя по номеру телефона, открывает нужный
+# чат, снимает скриншот средствами системы и жмёт «Передан» — в этот же чат
+# уходит внутренний комментарий Chat2Desk (водитель его не видит, чат-менеджер
+# видит у себя). Каждое действие попадает в журнал, журнал доступен
+# супервайзерам СЗоВ и суперадминам.
+#
+# Ключ sensitive-access тот же, что у вики, обращений и посылок: переписка
+# живого водителя — те же персональные данные. Чат-менеджерам раздел закрыт
+# (у них эта переписка и так есть в рабочем окне), тренеру — тоже.
+#
+# client_ip передаётся аргументом ради журнала: адрес пишется рядом с событием,
+# как в session_access_events.
+try:
+    from driver_chats.routes import build_driver_chats_blueprint  # noqa: E402
+
+    app.register_blueprint(build_driver_chats_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+        client_ip=_client_ip,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+    ))
+    logging.info("Раздел «Чаты водителей»: Blueprint подключён на /api/driver_chats")
+except Exception:
+    logging.exception("Раздел «Чаты водителей»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Лиды OLX» (робот переноса откликов из чатов OLX в amoCRM) ────────
 # Задача #223. Раздел показывает журнал обращений, сводку за день и состояние
 # девяти кабинетов; сам перенос делает фоновая джоба olx_amo_poll_job ниже.
@@ -56987,9 +57031,22 @@ async def run_c2d_eval_retention_async():
     # Ретеншн раздела «Оценка чатов ЧМ»: заявки 45 дней, снапшоты 180 дней.
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(executor_pool, db.cleanup_c2d_eval_data)
+        result = await loop.run_in_executor(executor_pool, db.cleanup_c2d_eval_data)
     except Exception:
         logging.exception("c2d eval retention failed")
+        result = None
+    # Раздел «Чаты водителей» чистится здесь же, а не своей джобой: данные те же
+    # (Chat2Desk), окно то же ночное, а лишняя запись в расписании — лишнее
+    # место, где ретеншн однажды забудут завести. Свой try: падение чистки
+    # журнала не должно скрыть результат чистки снапшотов.
+    try:
+        removed = await loop.run_in_executor(executor_pool, db.cleanup_driver_chats_data)
+        if removed and (removed.get('events') or removed.get('cache')):
+            logging.info("driver_chats retention: журнал -%s, кеш -%s",
+                         removed.get('events'), removed.get('cache'))
+    except Exception:
+        logging.exception("driver_chats retention failed")
+    return result
 
 
 async def run_wazzup_retention_async():

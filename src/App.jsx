@@ -181,6 +181,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
+const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
 const OlxLeadsView = lazyWithRetry(() => import('./components/olx/OlxLeadsView'));
 const TouchesView = lazyWithRetry(() => import('./components/cdr/TouchesView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
@@ -359,6 +360,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     fleet_edm: 'EDM provider',
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
+    driver_chats: 'Driver chats',
     olx_leads: 'OLX leads',
     touches: 'Sales touches',
     profile: 'Profile',
@@ -1795,6 +1797,51 @@ const canAccessParcelsSectionForUser = (userLike) => {
     return PARCELS_SECTION_DEPARTMENT_CODES.includes(
         normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
     );
+};
+
+/* «Чаты водителей» — поиск переписки водителя и передача её чат-менеджеру
+   (задача #271).
+
+   Периметр у́же, чем у «Посылок»: один отдел, СЗоВ. И два исключения ВНУТРИ
+   него, которых нет у соседних разделов:
+
+   * чат-менеджер сюда не ходит — раздел существует, чтобы оператор линии
+     передал переписку ЕМУ, а сами эти диалоги он видит у себя в Chat2Desk
+     целиком и без посредника (прямое требование постановщика);
+   * тренер — по той же причине, по которой ему закрыты «Обращения» и
+     «Посылки»: переписка живых водителей не его дело.
+
+   Модель направления приходит в профиле (`direction_model`) и спрашивается
+   сервером только у СЗоВ — в других отделах чат-менеджеров нет. Если поле не
+   доехало, пункт меню показывается: обязательную границу всё равно держит
+   driver_chats/access.py на каждом роуте, а спрятанный пункт доступом не
+   является.
+
+   Здесь решается только «показывать ли пункт меню». */
+const DRIVER_CHATS_SECTION_DEPARTMENT_CODE = 'szov';
+const DRIVER_CHATS_EXCLUDED_DIRECTION_MODEL = 'chat_manager';
+
+const isDriverChatsChatManager = (userLike) => (
+    String(userLike?.direction_model ?? userLike?.directionModel ?? '').trim()
+        === DRIVER_CHATS_EXCLUDED_DIRECTION_MODEL
+    && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+        === DRIVER_CHATS_SECTION_DEPARTMENT_CODE
+);
+
+const canAccessDriverChatsSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'trainer') return false;
+    if (isDriverChatsChatManager(userLike)) return false;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: переписка
+    // водителей главам чужих отделов не нужна (глава СЗоВ проходит ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isDepartmentHead(userLike)
+        && aiQaHeadDepartmentCodesOf(userLike).includes(DRIVER_CHATS_SECTION_DEPARTMENT_CODE)) {
+        return true;
+    }
+    return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+        === DRIVER_CHATS_SECTION_DEPARTMENT_CODE;
 };
 
 /* «Касания» — звонки отдела продаж из CDR АТС. Круг у́же, чем у «Посылок»: АТС
@@ -37424,6 +37471,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
+            const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
             // «Касания»: глобальные админы, глава отдела продаж и СВ ОП.
             const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
@@ -45574,6 +45622,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
                 // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
                 if (view === 'parcels' && canAccessParcelsSection) return;
+                // «Чаты водителей» — свой предикат: раздел живёт в одном отделе,
+                // но у СЗоВ allowlist'а разделов нет вовсе, а внутри отдела есть
+                // исключение (чат-менеджеры), которого карта отдела не выразит.
+                if (view === 'driver_chats' && canAccessDriverChatsSection) return;
                 // «Лиды OLX» — журнал робота переноса откликов в amoCRM. Свой
                 // предикат по той же причине: раздел общий для «Маркетинга» и
                 // ОП, и в allowlist каждого его пришлось бы вписывать отдельно.
@@ -45650,10 +45702,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
-                // «Обращения», «Вики» и «Посылки» закрыты тем же ключом. Статус
-                // спрашиваем до отрисовки раздела: иначе замок мигнёт тому, кто
-                // доступ уже подтвердил, а сам раздел успеет получить 403.
-                if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels') {
+                // «Обращения», «Вики», «Посылки» и «Чаты водителей» закрыты тем
+                // же ключом. Статус спрашиваем до отрисовки раздела: иначе замок
+                // мигнёт тому, кто доступ уже подтвердил, а сам раздел успеет
+                // получить 403.
+                if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
+                        || view === 'driver_chats') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -46976,6 +47030,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
+                                    {/* «Чаты водителей» — поиск переписки водителя по
+                                        номеру и передача её чат-менеджеру (задача #271).
+                                        Пункт объявлен ОДИН раз здесь, в общей части
+                                        меню, как «Вики», «Обращения» и «Посылки»:
+                                        аудитория одна (СЗоВ), но внутри неё есть и
+                                        операторы, и супервайзеры, и глава отдела, а
+                                        чат-менеджеры исключены — по ролевым ветвям это
+                                        не выражается. Кто что может внутри, считает
+                                        бэкенд. */}
+                                    {canAccessDriverChatsSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'driver_chats')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_chats' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-comments"></FaIcon>
+                                            <span className="sidebar-text">Чаты водителей</span>
+                                        </button>
+                                    </li>
+                                    )}
+
                                     {/* «Лиды OLX» — журнал робота, который переносит
                                         отклики из чатов девяти кабинетов OLX в amoCRM
                                         (задача #223). Пункт объявлен ОДИН раз здесь, в
@@ -47598,6 +47674,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ) : (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка реестра…</div>}>
                                 <ParcelsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        ))}
+                        {view === "driver_chats" && canAccessDriverChatsSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Чаты водителей"
+                                description="В разделе переписка живых водителей. Он открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <DriverChatsView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
