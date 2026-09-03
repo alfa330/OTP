@@ -28,7 +28,7 @@ import {
     IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
+import { absoluteFileUrl, absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
 import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE, TRAINER_TYPE } from './articleTypes';
 import WikiImage from './WikiImageNode';
 import WikiTrainerNode from './trainers/TrainerNode';
@@ -460,8 +460,18 @@ export default function WikiEditor({
         form.append('file', file);
         return axios.post(`${base}/upload`, form, { headers })
             .then((r) => {
-                // Адрес постоянный (/api/wiki/file/<id>), подпись выдаётся при
-                // каждом запросе — картинки в статье не протухают.
+                /* Адрес постоянный (/api/wiki/file/<id>), подпись выдаётся при
+                   каждом запросе — картинки в статье не протухают.
+
+                   В УЗЕЛ адрес идёт РАСКРЫТЫМ до домена API — тем же разворотом,
+                   что и тело уже сохранённой статьи (fileUrls.js). Сервер отдаёт
+                   его относительным, и без разворота свежая картинка вставала
+                   битой: относительный адрес браузер разрешает относительно
+                   СТРАНИЦЫ, а страница отдаётся с Pages, где никакого /api нет.
+                   То есть только что загруженный кадр немедленно получал 404 —
+                   до сохранения статьи его было не видно вообще. Обратно адрес
+                   свернётся при сохранении (relativizeFileUrls). */
+                const src = absoluteFileUrl(r.data.url, base);
                 const chain = editor.chain().focus();
                 if (typeof at === 'number') {
                     chain.setTextSelection(at);
@@ -473,11 +483,11 @@ export default function WikiEditor({
                        заметить — кадров было три, стало три же. Текстовое
                        выделение по-прежнему заменяется, как от вставки и ждут. */
                     chain.insertContentAt(editor.state.selection.to,
-                        { type: 'image', attrs: { src: r.data.url } }).run();
+                        { type: 'image', attrs: { src } }).run();
                     setDirty(true);
                     return;
                 }
-                chain.setImage({ src: r.data.url }).run();
+                chain.setImage({ src }).run();
                 setDirty(true);
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось загрузить картинку'), 'error'));
@@ -493,7 +503,12 @@ export default function WikiEditor({
             const form = new FormData();
             form.append('file', file);
             return axios.post(`${base}/upload`, form, { headers })
-                .then((r) => { editor.chain().addWikiFrame(r.data.url).run(); setDirty(true); })
+                // Тот же разворот адреса, что и в uploadImage: без него кадр
+                // галереи вставал битым до сохранения статьи.
+                .then((r) => {
+                    editor.chain().addWikiFrame(absoluteFileUrl(r.data.url, base)).run();
+                    setDirty(true);
+                })
                 .catch((e) => showToast?.(errText(e, 'Не удалось загрузить кадр'), 'error'));
         }), Promise.resolve());
     });

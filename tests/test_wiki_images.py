@@ -548,6 +548,25 @@ class EditorNodeTest(unittest.TestCase):
         self.assertIn('reduce', block.group(1))
         self.assertNotIn('forEach', block.group(1))
 
+    def test_freshly_uploaded_picture_gets_the_api_domain(self):
+        """Сервер отдаёт адрес файла ОТНОСИТЕЛЬНЫМ (/api/wiki/file/<id>), и в
+        узел его нельзя ставить как есть.
+
+        Страница отдаётся с GitHub Pages, а API живёт на Render: относительный
+        адрес браузер разрешает относительно СТРАНИЦЫ, то есть только что
+        загруженный кадр запрашивался с alfa330.github.io и получал 404. У тела
+        уже сохранённой статьи разворот стоит (absolutizeFileUrls в content и в
+        setContent), а вставку после загрузки правка 0eb51ae8 пропустила: в
+        свежей статье картинка была битой до самого сохранения.
+
+        Проверяем не наличие вызова, а ОТСУТСТВИЕ голого адреса: дописать
+        четвёртое место вставки и забыть про разворот — ровно то, как этот
+        дефект и появился."""
+        self.assertIn('absoluteFileUrl', self.editor)
+        raw = [line for line in self.editor.splitlines()
+               if 'r.data.url' in line and 'absoluteFileUrl(r.data.url' not in line]
+        self.assertEqual(raw, [], 'адрес файла из ответа /upload идёт в узел неразвёрнутым')
+
     def test_there_are_buttons_and_not_only_a_handle(self):
         """Ручку не потянуть ни с клавиатуры, ни толком на тачскрине."""
         for title in ('Уменьшить', 'Увеличить', 'Вернуть исходный размер',
