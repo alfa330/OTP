@@ -50560,6 +50560,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                           // ОП TEZ: качество у них не в выплате и звонки почти не прослушивают,
                                           // поэтому первые две плитки — успешки и выполнение плана.
                                           const profileIsTezOp = resolveWorkHoursMonthModelInfo(hoursOp).modelCode === 'tez_op';
+                                          // Чат-менеджеру план проверок не показываем (задача #272): плитка
+                                          // «Прослушано / нужно» уходит целиком, остаются средний балл, часы
+                                          // и норма — то есть три плитки вместо четырёх.
+                                          const profileHidesEvalPlan = operatorData?.is_chat_manager === true && !profileIsTezOp;
                                           const profileSuccesses = Number(hoursOp?.aggregates?.total_tez_successes ?? 0) || 0;
                                           const profilePlanResult = profileIsTezOp
                                             ? calculateTezOpMonthlyPlan({
@@ -50580,7 +50584,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             : null;
 
                                           return (
-                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                                            <div className={`grid grid-cols-2 ${profileHidesEvalPlan ? 'sm:grid-cols-3' : 'sm:grid-cols-4'} gap-3 sm:gap-4`}>
                                               {profileIsTezOp ? (
                                                 <>
                                               <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
@@ -50605,6 +50609,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </>
                                               ) : (
                                                 <>
+                                              {!profileHidesEvalPlan && (
                                               <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3 sm:p-4 rounded-xl text-center">
                                                 <div className="text-2xl sm:text-3xl font-bold text-blue-600">{evalCount}/{targetEvalCount}</div>
                                                 <div className="text-xs text-gray-600 mt-1">Прослушано / нужно</div>
@@ -50612,6 +50617,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                   {remainingEvalCount > 0 ? `Осталось ${remainingEvalCount}` : 'Норма выполнена'}
                                                 </div>
                                               </div>
+                                              )}
                                               <div className="bg-gradient-to-br from-green-50 to-green-100 p-3 sm:p-4 rounded-xl text-center">
                                                 <div className={`text-2xl sm:text-3xl font-bold ${avgScore >= 90 ? 'text-green-600' : avgScore >= 70 ? 'text-yellow-600' : 'text-red-600'}`}>
                                                   {avgScore > 0 ? avgScore.toFixed(1) : '-'}
@@ -51710,6 +51716,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         const allEvals = operatorData?.evaluations ?? [];
                                         const canAccessSensitiveCallData = !!operatorData?.sensitive_access?.granted;
                                         const evaluationTarget = operatorData?.evaluation_target || null;
+                                        // Чат-менеджеру количество чатов для проверки не показываем
+                                        // (задача #272): карточка «Прослушано / нужно» вместе с остатком,
+                                        // общим числом оценок и раскрытым расчётом плана уходит целиком,
+                                        // средний балл и сами оценки остаются.
+                                        const hidesEvalPlan = operatorData?.is_chat_manager === true;
                                         const evalsForCalc = allEvals.filter(ev => {
                                             // if ev.call?.is_imported === true -> should be excluded from calculations
                                             return !(ev?.call?.is_imported === true || ev?.is_imported === true);
@@ -52134,7 +52145,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             })()}
 
                                             {/* KPI cards */}
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
+                                            <div className={hidesEvalPlan
+                                                ? 'flex justify-center mb-6 sm:mb-8'
+                                                : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8'}>
+                                                {!hidesEvalPlan && (
                                                 <div className="col-span-1 sm:col-span-2">
                                                 <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
                                                     <p className="text-xs uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1">
@@ -52152,8 +52166,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     )}
                                                 </div>
                                                 </div>
+                                                )}
 
-                                                <div className="col-span-1 flex justify-center items-center">
+                                                <div className={hidesEvalPlan ? 'flex justify-center items-center' : 'col-span-1 flex justify-center items-center'}>
                                                 <SemiCircleProgress
                                                     percentage={Math.min(averageScore || 0, 100)}
                                                     label="Средний балл"
