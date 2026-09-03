@@ -46,6 +46,7 @@ import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
 import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/schedule/shiftHistoryFormat';
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
+import AssistantOrb from './components/assistant/AssistantOrb';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSegmented, IosToggle } from './components/ui/ios';
@@ -54369,6 +54370,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         open={showAuthEntranceSplash}
                         onClose={() => setShowAuthEntranceSplash(false)}
                         user={user}
+                    />
+                    {/* Плавающий помощник. Стоит СИБЛИНГОМ main-content, а не
+                        внутри него: там на части разделов висит overflow-hidden,
+                        а у вики на этом поддереве действует zoom (.wiki-scope),
+                        и position: fixed считался бы от масштабированного
+                        предка. Логин и сплэш отсекаются сами — до них дело не
+                        доходит, оба уходят ранним return выше. */}
+                    <AssistantOrb
+                        user={user}
+                        view={view}
+                        apiBaseUrl={API_BASE_URL}
+                        withAccessTokenHeader={withAccessTokenHeader}
+                        showToast={showToast}
+                        wikiEnabled={wikiSectionEnabled}
+                        locked={sensitiveSectionsLocked}
+                        lockChecking={sensitiveSectionsChecking}
+                        onRequestQr={requestSensitiveQrAccess}
+                        onOpenWikiArticle={(slug) => {
+                            // Тот же плумбинг, что у колокола: слаг кладём в
+                            // состояние, раздел переключаем, дальше WikiView
+                            // сам откроет статью и погасит просьбу.
+                            setWikiInitialSlug(String(slug));
+                            navigateToView('wiki');
+                        }}
+                        onOpenWikiAssistant={() => navigateToView('wiki')}
                     />
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>

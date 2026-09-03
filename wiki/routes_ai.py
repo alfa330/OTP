@@ -26,6 +26,9 @@ can_manage_structure по всему индексу» — выглядит бе�
 from flask import jsonify, request
 
 from . import perimeter as wiki_perimeter
+from . import queries
+from . import schema
+from . import structure
 from .ai import answer as ai_answer
 from .ai import embed as ai_embed
 from .ai import index as ai_index
@@ -47,9 +50,12 @@ def _space_id():
 
     У GET приходит строкой запроса, у POST — телом: помощник спрашивается и
     так, и так, а знать он обязан ровно ту вику, что открыта на экране.
-    Мусор гасим в None, а не в 400: неизвестное пространство означает «не
-    сужать», и сузить его всё равно нечем — периметр уже отсечён границей
-    отдела, и чужой вики в нём нет.
+
+    Это ПРОСЬБА, а не решение: разбор строки и ничего больше. Мусор гасим в
+    None, а не в 400 — сюда приезжает запомненное значение из localStorage, и
+    отвечать ошибкой на устаревшую память незачем. Что из просьбы выйдет,
+    решает effective_space(): раньше None означал «не сужать вовсе», теперь —
+    «выбери сам», и разница описана там же.
     """
     raw = request.args.get('space_id')
     if raw is None:
@@ -61,12 +67,78 @@ def _space_id():
     return value if value > 0 else None
 
 
+def assistant_spaces(cursor, ctx):
+    """Пространства, в которых этому человеку вообще положен помощник.
+
+    Два условия, и оба обязательны:
+      * пространство ему доступно (граница отдела либо гостевая выдача);
+      * в нём НЕ выключена вкладка «Помощник» (features.assistant).
+
+    Тумблер здесь не косметика. У клиентской вики (Тез КЦ) помощник выключен
+    намеренно — комментарий в schema.py говорит об этом прямо, — и раньше это
+    решение держалось одной лишь вкладкой во фронте. Пока помощник жил только
+    внутри раздела, этого хватало. Шарику не хватает: он приходит в пространство
+    не через вкладку, и выключенный владельцем помощник вернулся бы через окно.
+
+    Порядок — тот же, что в переключателе (sp.position, sp.id): «первое
+    доступное» обязано означать одно и то же на всех экранах.
+    """
+    allowed = set(queries.spaces_for_user(cursor, ctx))
+    return [
+        {'id': sp['id'], 'name': sp['name']}
+        for sp in structure.list_spaces(cursor)
+        if sp['id'] in allowed and schema.space_features(sp['features'])['assistant']
+    ]
+
+
+def effective_space(cursor, ctx, requested):
+    """Пространство, по которому помощник будет отвечать НА САМОМ ДЕЛЕ.
+
+    Раньше сюда приходило то, что прислал фронт, и не проверялось ничем. Пока
+    спрашивали из вкладки, это было безопасно: переключатель присылал только то
+    пространство, которое сам же и открыл. Шарик живёт вне вики и берёт
+    последнее выбранное из localStorage — значение, которое человек может
+    поменять руками, а может просто унести с собой из пространства, доступ к
+    которому у него уже отозвали.
+
+    Отсюда два правила.
+
+    ЧУЖОЕ ИЛИ УСТАРЕВШЕЕ ЗНАЧЕНИЕ НЕ ВЕДЁТ К None. Соблазн «не понял — не
+    сужаю» выглядит безобидно, но None означает «отвечать по ОБЪЕДИНЕНИЮ всех
+    пространств» (perimeter.read_perimeter), и человек, спросив про «Тез»,
+    получил бы абзац из «Таксопарков» без всякого признака, что база знаний
+    другая. Прав это не расширяет — границу отдела периметр держит и без нас, —
+    но ответ портит именно там, где ему верят. Поэтому непонятное значение
+    заменяется первым доступным, а не пустотой.
+
+    None остаётся ровно для одного случая — доступных пространств нет вовсе.
+    Тогда сужать нечем, и периметр всё равно окажется пустым.
+    """
+    spaces = assistant_spaces(cursor, ctx)
+    if not spaces:
+        return None
+    if requested and any(sp['id'] == requested for sp in spaces):
+        return requested
+    return spaces[0]['id']
+
+
 def register(bp, wiki_route, db, log_ip):
     @wiki_route('/ai/status')
     def wiki_ai_status(cursor, ctx):
-        """Готов ли помощник и что он знает про этого человека."""
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
+        """Готов ли помощник и что он знает про этого человека.
+
+        Отдаёт ещё и РАЗРЕШЁННОЕ пространство со списком доступных. Нужно
+        шарику: он живёт вне вики, помнит последний выбор в localStorage и
+        обязан узнать от сервера, что этот выбор всё ещё действителен — а если
+        нет, то каким он стал. Пустой список означает «помощника здесь нет»:
+        либо пространств не выдано, либо во всех выключен тумблер.
+        """
+        spaces = assistant_spaces(cursor, ctx)
+        space_id = effective_space(cursor, ctx, _space_id())
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, space_id)
         payload = {
+            'space_id': space_id,
+            'spaces': spaces,
             'perimeter': {
                 'articles_for_ai': len(scope['article_ids']),
                 'articles_readable': scope['read_count'],
@@ -120,7 +192,8 @@ def register(bp, wiki_route, db, log_ip):
         limit = _int_arg('limit', 8, 1, 30)
         per_article = _int_arg('per_article', 3, 1, 10)
 
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
+        scope = wiki_perimeter.assistant_perimeter(
+            cursor, ctx, effective_space(cursor, ctx, _space_id()))
         article_ids = scope['article_ids']
 
         query_vector = None
@@ -186,15 +259,17 @@ def register(bp, wiki_route, db, log_ip):
         # читал. Ответу оно и не нужно (периметр сужается на каждом вопросе),
         # а вот отчёту «о чём спрашивают, а в вике нет» без него не отличить
         # вопрос к «Тез» от вопроса к «Таксопаркам».
-        return jsonify({'chat': ai_store.create_chat(cursor, ctx['user_id'],
-                                                     space_id=_space_id())})
+        return jsonify({'chat': ai_store.create_chat(
+            cursor, ctx['user_id'],
+            space_id=effective_space(cursor, ctx, _space_id()))})
 
     @wiki_route('/ai/chats/<int:chat_id>')
     def wiki_ai_chat_read(cursor, ctx, chat_id):
         chat = ai_store.owned_chat(cursor, ctx['user_id'], chat_id)
         if not chat:
             return jsonify({'error': 'чат не найден'}), 404
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
+        scope = wiki_perimeter.assistant_perimeter(
+            cursor, ctx, effective_space(cursor, ctx, _space_id()))
         messages = ai_store.chat_messages(
             cursor, chat_id, visible_article_ids=scope['article_ids'])
         return jsonify({'chat': chat, 'messages': messages})
@@ -229,7 +304,8 @@ def register(bp, wiki_route, db, log_ip):
         if not chat:
             return jsonify({'error': 'чат не найден'}), 404
 
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
+        scope = wiki_perimeter.assistant_perimeter(
+            cursor, ctx, effective_space(cursor, ctx, _space_id()))
         if not scope['article_ids']:
             return jsonify({'error': 'нет доступных статей',
                             'detail': 'помощнику не выдан доступ ни к одной статье'
