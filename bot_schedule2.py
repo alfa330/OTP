@@ -59,6 +59,7 @@ from database import (
     SHIFT_BREAK_EVEN_WINDOW_SHARE,
     SHIFT_BREAK_LAYOUT_PASSES,
     TECHNICAL_ISSUE_REASONS,
+    technical_issue_comment_rules_payload,
     IT_TICKET_CATALOG,
     IT_TICKET_DEFAULT_PROFILE,
     resolve_it_ticket_profile,
@@ -28113,7 +28114,8 @@ def technical_issue_reasons():
 
         return jsonify({
             "status": "success",
-            "reasons": list(TECHNICAL_ISSUE_REASONS)
+            "reasons": list(TECHNICAL_ISSUE_REASONS),
+            "comment_required_reasons": technical_issue_comment_rules_payload()
         }), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -28311,7 +28313,8 @@ def list_technical_issues():
             "status": "success",
             "total": int(result.get('total') or 0),
             "items": result.get('items') or [],
-            "reasons": list(TECHNICAL_ISSUE_REASONS)
+            "reasons": list(TECHNICAL_ISSUE_REASONS),
+            "comment_required_reasons": technical_issue_comment_rules_payload()
         }), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

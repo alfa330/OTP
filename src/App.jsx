@@ -25,6 +25,12 @@ import { emitNewsPoke } from './components/news/newsShared';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
+import {
+    FALLBACK_COMMENT_REQUIRED_REASONS,
+    normalizeCommentRules,
+    findCommentRule,
+    commentRequiredMessage,
+} from './components/technical/commentRules';
 import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
 import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
@@ -14283,6 +14289,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerTechStatusActionLoading, setPlannerTechStatusActionLoading] = useState(false);
             const [plannerTechStatusModalError, setPlannerTechStatusModalError] = useState('');
             const [plannerTechReasonOptions, setPlannerTechReasonOptions] = useState([]);
+            // Причины, где комментарий обязателен: справочник из API, резерв — общий модуль.
+            const [plannerTechCommentRules, setPlannerTechCommentRules] = useState(FALLBACK_COMMENT_REQUIRED_REASONS);
             const [plannerOfflineActivityModalState, setPlannerOfflineActivityModalState] = useState({
                 open: false,
                 operatorId: null,
@@ -19913,6 +19921,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             setPlannerOfflineActivityModalError('Выберите причину тех.причины.');
                             return;
                         }
+                        const technicalCommentRule = findCommentRule(plannerTechCommentRules, reason);
+                        if (technicalCommentRule && !comment) {
+                            setPlannerOfflineActivityModalError(commentRequiredMessage(technicalCommentRule));
+                            return;
+                        }
                         if (String(workplaceRaw || '').trim() && workplaceNumber === null) {
                             setPlannerOfflineActivityModalError('Укажите корректный номер РМ (1-30).');
                             return;
@@ -20095,12 +20108,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const unique = Array.from(new Set(normalized));
                     const next = unique.length > 0 ? unique : plannerFallbackTechReasonOptions;
                     setPlannerTechReasonOptions(next);
+                    const nextCommentRules = normalizeCommentRules(payload?.comment_required_reasons);
+                    if (nextCommentRules.length > 0) setPlannerTechCommentRules(nextCommentRules);
                     return next;
                 } catch (error) {
                     setPlannerTechReasonOptions(plannerFallbackTechReasonOptions);
                     return plannerFallbackTechReasonOptions;
                 }
             }, [API_BASE_URL, plannerFallbackTechReasonOptions, plannerTechReasonOptions, withAccessTokenHeader]);
+
+            // Правило обязательного комментария для причины, выбранной в окне подтверждения тех.причины.
+            const plannerTechStatusCommentRule = useMemo(
+                () => findCommentRule(plannerTechCommentRules, plannerTechStatusModalState?.reason),
+                [plannerTechCommentRules, plannerTechStatusModalState?.reason]
+            );
 
             useEffect(() => {
                 if (!plannerOfflineActivityModalState?.open) return;
@@ -20485,6 +20506,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if (!reason) {
                     setPlannerTechStatusModalError('Выберите причину тех.сбоя.');
+                    return;
+                }
+                const techStatusCommentRule = findCommentRule(plannerTechCommentRules, reason);
+                if (techStatusCommentRule && !comment) {
+                    setPlannerTechStatusModalError(commentRequiredMessage(techStatusCommentRule));
                     return;
                 }
                 if (String(workplaceRaw || '').trim() && workplaceNumber === null) {
@@ -30007,14 +30033,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
 
                             <div>
-                                <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                <label className="block text-xs font-medium text-slate-600 mb-1">
+                                    Комментарий
+                                    {plannerTechStatusCommentRule && (
+                                        <span className="ml-1.5 font-semibold text-rose-600">обязательно</span>
+                                    )}
+                                </label>
                                 <textarea
                                     rows={3}
                                     value={plannerTechStatusModalState.comment || ''}
                                     onChange={(e) => updatePlannerTechStatusDraftField('comment', e.target.value)}
                                     className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500 resize-y"
-                                    placeholder="Комментарий (необязательно)"
+                                    placeholder={plannerTechStatusCommentRule?.example
+                                        ? `Например: ${plannerTechStatusCommentRule.example}`
+                                        : 'Комментарий (необязательно)'}
                                 />
+                                {plannerTechStatusCommentRule?.hint && (
+                                    <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
+                                        {plannerTechStatusCommentRule.hint}
+                                    </div>
+                                )}
                             </div>
 
                             {plannerTechStatusModalError && (
@@ -30053,6 +30091,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const technicalReasonOptions = plannerTechReasonOptions.length > 0
                         ? plannerTechReasonOptions
                         : plannerFallbackTechReasonOptions;
+                    // Комментарий обязателен только у тех.причины и только у отдельных причин.
+                    const technicalCommentRule = isTechnical
+                        ? findCommentRule(plannerTechCommentRules, plannerOfflineActivityModalState?.technicalReason)
+                        : null;
                     const technicalDirectionValues = plannerToUniquePositiveIntList(
                         plannerOfflineActivityModalState?.technicalDirectionIds
                     );
@@ -30275,14 +30317,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
 
                                 <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Комментарий</label>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                                        Комментарий
+                                        {technicalCommentRule && (
+                                            <span className="ml-1.5 font-semibold text-rose-600">обязательно</span>
+                                        )}
+                                    </label>
                                     <textarea
                                         rows={3}
                                         value={plannerOfflineActivityModalState.comment || ''}
                                         onChange={(e) => updatePlannerOfflineActivityDraftField('comment', e.target.value)}
                                         className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass} resize-y`}
-                                        placeholder="Комментарий (необязательно)"
+                                        placeholder={technicalCommentRule?.example
+                                            ? `Например: ${technicalCommentRule.example}`
+                                            : 'Комментарий (необязательно)'}
                                     />
+                                    {technicalCommentRule?.hint && (
+                                        <div className="mt-1.5 rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
+                                            {technicalCommentRule.hint}
+                                        </div>
+                                    )}
                                 </div>
 
                                 {plannerOfflineActivityModalError && (
