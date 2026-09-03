@@ -1,0 +1,238 @@
+/* Шарик помощника — мыльный пузырь, который живёт поверх всех разделов.
+ *
+ * Почему СЛОИ ГРАДИЕНТОВ, а не картинка и не canvas.
+ *
+ * Картинка (PNG/WebP) отпадает из-за перелива: он обязан медленно ползти по
+ * кромке, а спрайт-лист на 14 секунд движения — это либо рывки, либо сотни
+ * килобайт на каждой странице портала. SVG-фильтры (feTurbulence) дают
+ * настоящую радужную плёнку, но пересчитываются на КАЖДОМ кадре и на процессоре:
+ * при постоянно висящем виджете это заметная доля батареи ноутбука. Canvas —
+ * свой rAF-цикл, который надо гасить руками при уходе вкладки в фон.
+ *
+ * Слои градиентов растеризуются ОДИН раз, а дальше двигаются только transform'ом,
+ * то есть работой композитора на видеокарте, мимо основного потока. Вкладку в
+ * фоне браузер тормозит сам, и цикла, который надо останавливать, здесь нет.
+ *
+ * Ключ к тому, что это работает: маска у кольца РАДИАЛЬНО СИММЕТРИЧНА. Вращая
+ * слой, мы вращаем вместе с ним и маску, но кольцо от поворота не меняется —
+ * видно только, как под ним едет конический градиент. Поэтому маску можно
+ * растеризовать однажды, а не пересчитывать покадрово.
+ *
+ * Цвета сняты пипеткой с референса владельца (видео 26.08.2026): пастель низкой
+ * насыщенности — мята, лаванда, персик, розовый; тело почти прозрачное, фон
+ * сквозь пузырь виден. Насыщенный вариант проверялся и отклонён: на светлой
+ * панели он читается как леденец, а не как пузырь.
+ */
+
+.aorb {
+    --aorb-size: 56px;
+
+    position: relative;
+    display: block;
+    width: var(--aorb-size);
+    height: var(--aorb-size);
+    flex: none;
+}
+
+/* Обёртки покачивания и нажатия обязаны быть КОРОБКАМИ во всю величину шарика,
+   а не пустыми span'ами: transform считает точку отсчёта от размеров элемента,
+   и у схлопнутой в ноль обёртки scale(1.06) поехал бы из угла, а не из центра
+   пузыря. */
+.aorb-bob,
+.aorb-shell {
+    position: absolute;
+    inset: 0;
+    display: block;
+}
+
+/* Кнопка, внутри которой живёт пузырь: она ловит нажатие и тащится мышью. */
+.aorb-button {
+    position: fixed;
+    border: 0;
+    padding: 0;
+    background: none;
+    line-height: 0;
+    cursor: grab;
+    /* touch-action: none обязателен — без него браузер на тачскрине забирает
+       жест себе под прокрутку страницы, и pointermove до нас не доходит. */
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.aorb-button:active { cursor: grabbing; }
+
+.aorb-button:focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 3px;
+    border-radius: 50%;
+}
+
+/* Слои. Все — потомки одного круга, все pointer-events: none: ловит нажатие
+   сама кнопка, иначе перетаскивание срывалось бы при переходе курсора с одного
+   слоя на другой. */
+.aorb__layer {
+    position: absolute;
+    inset: 0;
+    display: block;
+    border-radius: 50%;
+    pointer-events: none;
+}
+
+/* Ореол. Отдельным слоем, а не тенью на корне: тень на корне росла бы вместе с
+   масштабом при наведении и «дышала» бы вместе с пузырём. */
+.aorb__halo {
+    box-shadow:
+        0 0 18px 3px rgba(196, 186, 228, 0.16),
+        0 6px 16px rgba(140, 150, 195, 0.10);
+}
+
+/* Тело: мятное пятно справа сверху, тёплое персиковое слева по центру,
+   сиреневое внизу и общее молочное ядро. Прозрачность высокая намеренно —
+   сквозь пузырь обязан просвечивать интерфейс. */
+.aorb__body {
+    background:
+        radial-gradient(44% 38% at 68% 30%, rgba(140, 222, 220, 0.34), rgba(140, 222, 220, 0) 70%),
+        radial-gradient(42% 38% at 36% 52%, rgba(242, 188, 176, 0.32), rgba(242, 188, 176, 0) 72%),
+        radial-gradient(36% 32% at 30% 76%, rgba(200, 172, 238, 0.20), rgba(200, 172, 238, 0) 72%),
+        radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08) 72%, rgba(255, 255, 255, 0) 94%);
+    animation: aorb-drift 11s ease-in-out infinite;
+}
+
+/* Кромка — плёнка пузыря. Кольцо шириной около 6% радиуса: тоньше пропадает на
+   не-retina экране, толще превращается в обод и убивает лёгкость. */
+.aorb__rim {
+    background: conic-gradient(from 195deg,
+        #7fcedb 0deg, #9cb9e8 48deg, #c49fe3 100deg, #e48fc0 150deg,
+        #efa4b8 198deg, #bc9fe9 250deg, #86c3e2 302deg, #7fcedb 360deg);
+    -webkit-mask: radial-gradient(closest-side, transparent 0 88%, #000 94%, #000 99.2%, transparent 100%);
+            mask: radial-gradient(closest-side, transparent 0 88%, #000 94%, #000 99.2%, transparent 100%);
+    opacity: 0.85;
+    filter: blur(0.5px);
+    animation: aorb-spin 14s linear infinite;
+}
+
+/* Внутренняя дуга — блик плёнки с обратной стороны пузыря. Именно она делает
+   шар шаром: без неё пузырь читается плоским кружком. Крутится в обратную
+   сторону и втрое медленнее кромки, поэтому рисунок никогда не повторяется. */
+.aorb__arc {
+    background: conic-gradient(from 135deg,
+        rgba(158, 124, 226, 0) 0deg, rgba(158, 124, 226, 0.80) 32deg,
+        rgba(192, 142, 216, 0.5) 66deg, rgba(158, 124, 226, 0) 100deg,
+        rgba(158, 124, 226, 0) 360deg);
+    -webkit-mask: radial-gradient(closest-side, transparent 0 72%, #000 79%, #000 90%, transparent 95%);
+            mask: radial-gradient(closest-side, transparent 0 72%, #000 79%, #000 90%, transparent 95%);
+    filter: blur(1.8px);
+    animation: aorb-spin-back 19s linear infinite;
+}
+
+/* Блик источника света. Не крутится: солнце над экраном стоит на месте. */
+.aorb__spec {
+    background: radial-gradient(24% 16% at 33% 20%, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0) 70%);
+}
+
+/* Покачивание — на обёртке, а не на самом шарике: у шарика transform занят
+   прижиманием к краю, и складывать в одно свойство два независимых движения
+   значит пересчитывать их вместе в JS. */
+.aorb-bob {
+    animation: aorb-bob 5.5s ease-in-out infinite;
+    will-change: transform;
+}
+
+@keyframes aorb-spin { to { transform: rotate(360deg); } }
+@keyframes aorb-spin-back { to { transform: rotate(-360deg); } }
+
+@keyframes aorb-bob {
+    0%, 100% { transform: translateY(-2.5px); }
+    50%      { transform: translateY(2.5px); }
+}
+
+/* Тело не вращается, а ПЕРЕТЕКАЕТ: вращение молочных пятен выдало бы, что это
+   плоская картинка, а масштаб со сдвигом читается как движение жидкости. */
+@keyframes aorb-drift {
+    0%, 100% { transform: scale(1) translate(0, 0); }
+    33%      { transform: scale(1.04) translate(1.5%, -1.5%); }
+    66%      { transform: scale(0.98) translate(-1.5%, 1%); }
+}
+
+/* Наведение и нажатие. Реакция сдержанная: шарик и так живой, и подпрыгивать
+   ему на курсор незачем. */
+.aorb-shell {
+    transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.aorb-button:hover .aorb-shell { transform: scale(1.06); }
+.aorb-button:active .aorb-shell { transform: scale(0.97); }
+
+/* Прижатый к краю шарик выцветает наполовину: спрятанный за край, но всё ещё
+   яркий, он выглядит поломкой вёрстки, а не убранным виджетом. */
+.aorb-button.aorb-dock { opacity: 0.55; }
+.aorb-button.aorb-dock:hover { opacity: 1; }
+
+/* Пока шарик тащат, покачивание и переливы выключены: движение мыши и
+   собственная анимация складываются в дрожь. */
+.aorb-dragging .aorb-bob,
+.aorb-dragging .aorb__body,
+.aorb-dragging .aorb__rim,
+.aorb-dragging .aorb__arc {
+    animation-play-state: paused;
+}
+
+.aorb-dragging .aorb-shell { transition: none; }
+
+/* Вкладка в фоне: браузер тормозит анимации сам, но не везде и не сразу.
+   Класс ставит компонент по Page Visibility API — на слабой машине это разница
+   между «виджет ничего не стоит» и «виджет греет процессор в свёрнутом окне». */
+.aorb-idle .aorb-bob,
+.aorb-idle .aorb__body,
+.aorb-idle .aorb__rim,
+.aorb-idle .aorb__arc {
+    animation-play-state: paused;
+}
+
+/* ── Мини-шарик в шапке панели ──────────────────────────────────────────────
+   Тот же пузырь, но размером с аватар: панель обязана быть узнаваемо «его». */
+.aorb--mini { --aorb-size: 26px; }
+.aorb--mini .aorb__halo { box-shadow: none; }
+
+/* ── Крупный шарик на пустом экране панели ─────────────────────────────────── */
+.aorb--hero { --aorb-size: 64px; margin: 0 auto; }
+
+/* ── Тёмная тема ────────────────────────────────────────────────────────────
+   Правила живут здесь, а не в scripts/dark_theme_chrome.css, по той же причине,
+   по которой там лежит «хром»: тот файл перекрывает УЖЕ СОБРАННЫЕ утилиты
+   Tailwind, а это собственный CSS компонента, и перекрывать в нём нечего —
+   проще и честнее объявить оба состояния рядом.
+   Молочное ядро на тёмном фоне даёт серое пятно, а белый блик — грязную
+   царапину (проверено снимками). Поэтому на тёмном ядра и блика НЕТ вовсе:
+   пузырь остаётся тёмным, а держит его светящаяся кромка — ровно так мыльный
+   пузырь и выглядит в темноте. */
+html[data-otp-theme="dark"] .aorb__body {
+    background:
+        radial-gradient(48% 42% at 66% 30%, rgba(118, 228, 222, 0.32), rgba(118, 228, 222, 0) 72%),
+        radial-gradient(44% 40% at 36% 54%, rgba(240, 164, 190, 0.26), rgba(240, 164, 190, 0) 74%),
+        radial-gradient(40% 36% at 32% 76%, rgba(178, 150, 246, 0.28), rgba(178, 150, 246, 0) 74%);
+}
+
+html[data-otp-theme="dark"] .aorb__spec { background: none; }
+
+html[data-otp-theme="dark"] .aorb__rim { opacity: 1; }
+
+html[data-otp-theme="dark"] .aorb__halo {
+    box-shadow:
+        0 0 22px 5px rgba(150, 180, 235, 0.22),
+        0 6px 18px rgba(0, 0, 0, 0.40);
+}
+
+/* ── Уважение к настройке «меньше движения» ─────────────────────────────────
+   Шарик остаётся ровно тем же: гасится только движение. Человеку, который
+   выключил анимации, виджет не должен становиться другим виджетом. */
+@media (prefers-reduced-motion: reduce) {
+    .aorb-bob,
+    .aorb__body,
+    .aorb__rim,
+    .aorb__arc {
+        animation: none;
+    }
+
+    .aorb-shell { transition: none; }
+}
