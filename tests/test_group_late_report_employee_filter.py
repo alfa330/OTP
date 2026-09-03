@@ -123,6 +123,23 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Выбрать сотрудников", VIEW_SRC)
         self.assertIn("reportModal.pickEmployees", VIEW_SRC)
 
+    def test_picker_reads_the_roster_by_departments(self):
+        # Сводка приходит НЕ плоским списком, а отделами: {departments:[{employees:[…]}]}.
+        # Обход её как массива уронил весь раздел в «Ошибка приложения»
+        # («(C || []).map is not a function», 03.09.2026) — сторожим форму.
+        self.assertIn("const reportEmployeeNames = useMemo(", VIEW_SRC)
+        self.assertIn("asArray(employees?.departments)", VIEW_SRC)
+        self.assertIn("asArray(department?.employees)", VIEW_SRC)
+        self.assertIn("{reportEmployeeNames.map((name) => {", VIEW_SRC)
+
+    def test_no_raw_array_assumptions_left_in_the_new_code(self):
+        # Любой ответ сервера, пришедший не той формы, обязан гаситься asArray,
+        # а не ронять раздел целиком.
+        for risky in ("(employees || []).map", "(report.employee_filter || []).",
+                      "(row.marks || [])."):
+            self.assertNotIn(risky, VIEW_SRC, risky)
+        self.assertIn("const asArray = (value) => (Array.isArray(value) ? value : []);", VIEW_SRC)
+
     def test_selection_is_sent(self):
         self.assertIn("employees: reportModal.employees || []", VIEW_SRC)
 

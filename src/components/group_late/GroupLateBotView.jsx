@@ -213,6 +213,12 @@ const sortEmployees = (rows, { key, dir }) => {
 
 const errText = (error, fallback) => error?.response?.data?.error || error?.message || fallback;
 
+/* Ответ сервера может прийти не той формы, что ждёт разметка: старый кеш бандла,
+   промежуточный деплой, ошибка вместо данных. Без этого `(что-то || []).map`
+   роняет ВЕСЬ раздел в «Ошибка приложения» — так уже случилось со списком
+   сотрудников в окне отчёта, который приходит отделами, а не плоским списком. */
+const asArray = (value) => (Array.isArray(value) ? value : []);
+
 const SegButton = ({ active, onClick, icon: Icon, children }) => (
     <button onClick={onClick}
             className={`flex items-center gap-1.5 rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
@@ -643,6 +649,20 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const reportPoll = useRef(null);
 
     const scoped = Boolean(departmentScope);
+    /* Список для выбора людей в отчёт. Сводка приходит НЕ плоским списком, а
+       отделами: {departments: [{department_name, employees: [...]}], totals}.
+       Разворачиваем и склеиваем тёзок из разных отделов в одну строку — отбор в
+       отчёте всё равно идёт по ФИО, и две одинаковые галочки сбивали бы с толку. */
+    const reportEmployeeNames = useMemo(() => {
+        const names = new Set();
+        for (const department of asArray(employees?.departments)) {
+            for (const person of asArray(department?.employees)) {
+                const name = String(person?.employee_name || '').trim();
+                if (name) names.add(name);
+            }
+        }
+        return [...names].sort((a, b) => a.localeCompare(b, 'ru'));
+    }, [employees]);
     /* {отдел Workpace: сколько людей без карточки и карточек без человека} —
        считаем один раз, а не в каждой карточке отдела. */
     const planInfoByDepartment = useMemo(() => {
@@ -1343,7 +1363,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                 <td className="px-3 py-2.5">
                                                     <div className="flex items-center gap-2">
                                                         <IosBadge tone={tone}>{row.status_label}</IosBadge>
-                                                        {(row.marks || []).length > 0 && (
+                                                        {asArray(row.marks).length > 0 && (
                                                             <button type="button" onClick={() => toggleMarks(key)}
                                                                     className={iosBtnGhost}
                                                                     title="Все отметки за день">
@@ -1357,7 +1377,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                 <tr className="border-b border-slate-100 bg-slate-50/60">
                                                     <td colSpan={9} className="px-4 py-2.5">
                                                         <div className="flex flex-wrap gap-1.5">
-                                                            {(row.marks || []).map((mark, i) => (
+                                                            {asArray(row.marks).map((mark, i) => (
                                                                 <span key={i}
                                                                       className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-xs text-slate-600 ring-1 ring-slate-200/70">
                                                                     {mark.kind === 'in'
@@ -1744,9 +1764,9 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                         {report.department_filter || 'Все отделы'}
                                                         {/* Иначе выгрузка по трём людям читается как выгрузка
                                                             по всему отделу — и по ней делают выводы. */}
-                                                        {(report.employee_filter || []).length > 0 && (
+                                                        {asArray(report.employee_filter).length > 0 && (
                                                             <div className="text-[11px] text-slate-500"
-                                                                 title={(report.employee_filter || []).join(', ')}>
+                                                                 title={asArray(report.employee_filter).join(', ')}>
                                                                 только {fmtInt(report.employee_filter.length)} чел.
                                                             </div>
                                                         )}
@@ -2588,13 +2608,12 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                         </div>
                                     ) : (
                                         <div className="max-h-52 overflow-y-auto rounded-xl ring-1 ring-slate-200/70">
-                                            {(employees || []).length === 0 && (
+                                            {reportEmployeeNames.length === 0 && (
                                                 <div className="px-3.5 py-3 text-[12.5px] text-slate-500">
                                                     За выбранный период сотрудников не нашлось
                                                 </div>
                                             )}
-                                            {(employees || []).map((person) => {
-                                                const name = person.employee_name;
+                                            {reportEmployeeNames.map((name) => {
                                                 const picked = (reportModal.employees || []).includes(name);
                                                 return (
                                                     <label key={name}
