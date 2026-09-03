@@ -10,6 +10,13 @@ import {
     CabinetMap,
 } from './workplaceLayout';
 import {
+    FALLBACK_COMMENT_REQUIRED_REASONS,
+    normalizeCommentRules,
+    areCommentRuleListsEqual,
+    findCommentRule,
+    commentRequiredMessage,
+} from './commentRules';
+import {
     normalizeRole,
     isAdminLikeRole,
     isSupervisorRole,
@@ -816,6 +823,7 @@ const AddIssueModal = memo(function AddIssueModal({
     createWorkplaceForSupervisor,
     createReason, setCreateReason,
     createComment, setCreateComment,
+    commentRule,
     createOperatorIds, setCreateOperatorIds,
     createDirectionIds, setCreateDirectionIds,
     isMassive, setIsMassive,
@@ -983,16 +991,25 @@ const AddIssueModal = memo(function AddIssueModal({
                             </div>
                         </div>
 
-                        {/* Comment */}
+                        {/* Comment — для отдельных причин обязателен (правило приходит из API) */}
                         <label className="block">
-                            <span className={LABEL_CLASS}>Комментарий (необязательно)</span>
+                            <span className={LABEL_CLASS}>Комментарий</span>
+                            <span className={`ml-1.5 text-[11px] font-semibold ${commentRule ? 'text-rose-600' : 'text-gray-400 font-normal'}`}>
+                                {commentRule ? 'обязательно' : 'необязательно'}
+                            </span>
                             <textarea
                                 value={createComment}
                                 onChange={(e) => setCreateComment(e.target.value)}
-                                rows={2}
+                                rows={commentRule ? 3 : 2}
                                 className={INPUT_CLASS}
-                                placeholder="Дополнительное описание проблемы"
+                                required={Boolean(commentRule)}
+                                placeholder={commentRule?.example ? `Например: ${commentRule.example}` : 'Дополнительное описание проблемы'}
                             />
+                            {commentRule?.hint && (
+                                <span className="mt-1.5 block rounded-lg border border-rose-100 bg-rose-50/60 px-3 py-2 text-[11px] leading-snug text-rose-800">
+                                    {commentRule.hint}
+                                </span>
+                            )}
                         </label>
                     </form>
                 </div>
@@ -1593,7 +1610,10 @@ const TechnicalIssueRow = memo(function TechnicalIssueRow({ item, canEdit, canDe
                 </div>
             </td>
             <td className="px-3 py-2.5 text-xs text-gray-500" style={{ maxWidth: 160 }}>
-                <span className="line-clamp-2 leading-snug">{item?.comment || <span className="text-gray-300">—</span>}</span>
+                {/* Комментарий бывает длинным (для части причин он обязателен) — полный текст в подсказке */}
+                <span className="line-clamp-2 leading-snug" title={item?.comment || ''}>
+                    {item?.comment || <span className="text-gray-300">—</span>}
+                </span>
             </td>
             <td className="px-3 py-2.5 text-xs text-gray-500" style={{ maxWidth: 140 }}>
                 <span className="line-clamp-2 leading-snug">
@@ -1737,6 +1757,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
 
     // ── state ──
     const [reasons, setReasons]           = useState(FALLBACK_TECHNICAL_REASONS);
+    const [commentRules, setCommentRules] = useState(FALLBACK_COMMENT_REQUIRED_REASONS);
     const [rows, setRows]                 = useState([]);
     const [total, setTotal]               = useState(0);
     const [loading, setLoading]           = useState(false);
@@ -1773,11 +1794,21 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         return Boolean(workplaceSettingsMap.get(workplaceNumber)?.forSupervisor);
     }, [createWorkplaceNumber, workplaceSettingsMap]);
     const journalEntries = useMemo(() => buildJournalEntries(rows), [rows]);
+    // Правило обязательного комментария для выбранной причины (или null).
+    const createCommentRule = useMemo(() => findCommentRule(commentRules, createReason), [commentRules, createReason]);
 
     const latestReqId    = useRef(0);
     const lastQueryRef   = useRef('');
 
     useEffect(() => { lastQueryRef.current = ''; }, [apiBaseUrl, user?.id, canView]);
+
+    // Справочник «где комментарий обязателен» приходит и с /reasons, и со списком:
+    // берём его из любого ответа, а при пустом — оставляем что было.
+    const applyCommentRules = useCallback((raw) => {
+        const next = normalizeCommentRules(raw);
+        if (next.length === 0) return;
+        setCommentRules((prev) => areCommentRuleListsEqual(prev, next) ? prev : next);
+    }, []);
 
     // ── fetch reasons ──
     const fetchReasons = useCallback(async () => {
@@ -1787,10 +1818,11 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
             const next = Array.isArray(res?.data?.reasons) ? res.data.reasons : [];
             if (next.length > 0) setReasons((p) => areStringListsEqual(p, next) ? p : next);
             else setReasons((p) => areStringListsEqual(p, FALLBACK_TECHNICAL_REASONS) ? p : FALLBACK_TECHNICAL_REASONS);
+            applyCommentRules(res?.data?.comment_required_reasons);
         } catch {
             setReasons((p) => areStringListsEqual(p, FALLBACK_TECHNICAL_REASONS) ? p : FALLBACK_TECHNICAL_REASONS);
         }
-    }, [apiBaseUrl, buildHeaders, canView]);
+    }, [apiBaseUrl, applyCommentRules, buildHeaders, canView]);
 
     // ── fetch rows ──
     const fetchRows = useCallback(async (filters, { force = false } = {}) => {
@@ -1809,13 +1841,14 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
             setTotal(Number(res?.data?.total || items.length || 0));
             const nextReasons = Array.isArray(res?.data?.reasons) ? res.data.reasons : [];
             if (nextReasons.length > 0) setReasons((p) => areStringListsEqual(p, nextReasons) ? p : nextReasons);
+            applyCommentRules(res?.data?.comment_required_reasons);
         } catch (err) {
             if (reqId !== latestReqId.current) return;
             notify(err?.response?.data?.error || 'Не удалось загрузить список технических причин', 'error');
         } finally {
             if (reqId === latestReqId.current) setLoading(false);
         }
-    }, [apiBaseUrl, buildHeaders, canView, notify]);
+    }, [apiBaseUrl, applyCommentRules, buildHeaders, canView, notify]);
 
     const fetchWorkplaceSettings = useCallback(async () => {
         if (!canView) return;
@@ -1925,6 +1958,10 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         if (!createStartTime || !createEndTime) { notify('Укажите время начала и окончания', 'error'); return; }
         if (createStartTime === createEndTime) { notify('Время начала и окончания не должно совпадать', 'error'); return; }
         if (!createReason) { notify('Выберите техническую причину', 'error'); return; }
+        if (createCommentRule && !String(createComment || '').trim()) {
+            notify(commentRequiredMessage(createCommentRule), 'error');
+            return;
+        }
         const workplaceNumber = normalizeWorkplaceNumber(createWorkplaceNumber);
         if (String(createWorkplaceNumber || '').trim() && workplaceNumber === null) {
             notify('Номер рабочего места должен быть от 1 до 30', 'error');
@@ -1964,7 +2001,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
         } finally {
             setSubmitting(false);
         }
-    }, [apiBaseUrl, appliedFilters, buildHeaders, canCreate, createComment, createDate, createDirectionIds, createEndTime, createOperatorIds, createReason, createStartTime, createWorkplaceNumber, editingIssue, fetchRows, notify]);
+    }, [apiBaseUrl, appliedFilters, buildHeaders, canCreate, createComment, createCommentRule, createDate, createDirectionIds, createEndTime, createOperatorIds, createReason, createStartTime, createWorkplaceNumber, editingIssue, fetchRows, notify]);
 
     // ── export ──
     const handleExport = useCallback(async () => {
@@ -2052,6 +2089,7 @@ const TechnicalIssuesView = ({ user, operators = [], directions = [], showToast,
                 createWorkplaceForSupervisor={createWorkplaceForSupervisor}
                 createReason={createReason}       setCreateReason={setCreateReason}
                 createComment={createComment}     setCreateComment={setCreateComment}
+                commentRule={createCommentRule}
                 createOperatorIds={createOperatorIds} setCreateOperatorIds={setCreateOperatorIds}
                 createDirectionIds={createDirectionIds} setCreateDirectionIds={setCreateDirectionIds}
                 isMassive={isMassive}             setIsMassive={setIsMassive}

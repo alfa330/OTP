@@ -1000,6 +1000,41 @@ TECHNICAL_ISSUE_REASONS: List[str] = [
 ]
 TECHNICAL_ISSUE_REASONS_SET = set(TECHNICAL_ISSUE_REASONS)
 
+# Причины, для которых одного пункта из списка мало: без подробностей инцидент
+# потом не разобрать. У таких причин комментарий обязателен, а подсказка о том,
+# что именно писать, живёт здесь — форма получает её из API и не дублирует текст.
+TECHNICAL_ISSUE_REASON_COMMENT_RULES: Dict[str, Dict[str, str]] = {
+    'Не работал рабочий сайт': {
+        'hint': 'Укажите название сайта, что именно не работало и какая ошибка отображалась.',
+        'example': 'Не открывался сайт CRM, при входе отображалась ошибка 502',
+    },
+}
+
+
+def technical_issue_comment_rule(reason) -> Optional[Dict[str, str]]:
+    """Правило обязательного комментария для причины (или None, если его нет)."""
+    return TECHNICAL_ISSUE_REASON_COMMENT_RULES.get(str(reason or '').strip())
+
+
+def technical_issue_comment_rules_payload() -> List[Dict[str, str]]:
+    """Справочник правил для фронта: причина + подсказка + пример."""
+    return [
+        {
+            'reason': reason,
+            'hint': str(rule.get('hint') or ''),
+            'example': str(rule.get('example') or ''),
+        }
+        for reason, rule in TECHNICAL_ISSUE_REASON_COMMENT_RULES.items()
+    ]
+
+
+def technical_issue_comment_required_error(reason) -> str:
+    rule = technical_issue_comment_rule(reason) or {}
+    hint = str(rule.get('hint') or '').strip()
+    reason_text = str(reason or '').strip()
+    message = f'Комментарий обязателен для причины «{reason_text}»'
+    return f'{message}. {hint}' if hint else f'{message}.'
+
 # Верхняя граница номера РМ. Раньше было 30 (раскладка тех-поддержки 1–30);
 # расширено до 200, т.к. у отдела продаж РМ нумеруются до 97 (3 кабинета, 28–97).
 TECHNICAL_ISSUE_WORKPLACE_MAX = 200
@@ -33303,6 +33338,8 @@ class Database:
         if start_time_obj == end_time_obj:
             raise ValueError("start_time and end_time cannot be equal")
         comment_text = str(comment or '').strip() or None
+        if comment_text is None and technical_issue_comment_rule(reason_text):
+            raise ValueError(technical_issue_comment_required_error(reason_text))
         workplace_number_int = self._parse_technical_issue_workplace_number(
             workplace_number,
             field_name='workplace_number',
@@ -33452,6 +33489,8 @@ class Database:
             raise ValueError("Select at least one direction for a massive technical issue")
 
         comment_text = str(comment or '').strip() or None
+        if comment_text is None and technical_issue_comment_rule(reason_text):
+            raise ValueError(technical_issue_comment_required_error(reason_text))
         workplace_number_int = self._parse_technical_issue_workplace_number(
             workplace_number,
             field_name='workplace_number',
