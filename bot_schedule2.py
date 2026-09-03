@@ -6958,6 +6958,15 @@ GROUP_LATE_BOT_DEPARTMENT_SCOPES = {'front_office': 'Регионы'}
 _GROUP_LATE_BOT_SCOPE_CACHE = {'ts': 0.0, 'by_department_id': None}
 _GROUP_LATE_BOT_SCOPE_CACHE_TTL = 600  # отделы меняются раз в никогда
 
+# Отдел, которому раздел открыт ЦЕЛИКОМ, без границы отдела Workpace: кадровый учёт
+# ведётся по всей компании, поэтому сужать HR до одного отдела бессмысленно (задача
+# #273, решение владельца). Сверяем по КОДУ, а не по id: id засеян миграцией и в
+# разных окружениях разный. Зеркало на фронте — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES
+# в src/App.jsx.
+GROUP_LATE_BOT_FULL_DEPARTMENT_CODE = 'hr'
+_GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
+_GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL = 600
+
 
 def _group_late_bot_scope_by_department_id():
     """{id нашего отдела: название отдела Workpace} по GROUP_LATE_BOT_DEPARTMENT_SCOPES."""
@@ -6989,19 +6998,57 @@ def _group_late_bot_department_scope(requester_id, role):
     return _group_late_bot_scope_by_department_id().get(int(headed_id))
 
 
+def _group_late_bot_full_department_id():
+    """id отдела, которому раздел открыт целиком (по коду, с кэшем)."""
+    now = time.time()
+    cache = _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE
+    if cache['id'] is not None and now - cache['ts'] < _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL:
+        return cache['id']
+    found = None
+    try:
+        for department in (db.get_departments() or []):
+            if str(department.get('code') or '').strip().lower() == GROUP_LATE_BOT_FULL_DEPARTMENT_CODE:
+                found = int(department['id'])
+                break
+    except Exception:
+        logging.exception("group_late: не удалось определить отдел полного доступа")
+        return cache['id']
+    cache.update(ts=now, id=found)
+    return found
+
+
+def _group_late_bot_has_full_access(requester_id, role):
+    """Член отдела кадрового учёта видит раздел целиком, как глобальный админ.
+
+    Роль тут не при чём намеренно: кадровый учёт ведут рядовые сотрудники отдела
+    (у постановщика задачи #273 роль hr_manager, уровень как у оператора), а
+    признак доступа — членство в отделе."""
+    department_id = _group_late_bot_full_department_id()
+    if department_id is None:
+        return False
+    try:
+        return db.get_user_department_id(requester_id) == department_id
+    except Exception:
+        logging.exception("group_late: не удалось прочитать отдел пользователя %s", requester_id)
+        return False
+
+
 def _group_late_bot_guard():
     """(requester_id, department_scope, err).
 
     department_scope — название отдела Workpace, которым ограничен запрашивающий:
-    у глобального админа None (видит весь раздел), у главы отдела из
-    GROUP_LATE_BOT_DEPARTMENT_SCOPES — его отдел. Каждый эндпоинт обязан
-    протащить это значение в db-вызов: там на нём и держится граница."""
+    у глобального админа None (видит весь раздел), у члена отдела кадрового учёта
+    тоже None, у главы отдела из GROUP_LATE_BOT_DEPARTMENT_SCOPES — его отдел.
+    Каждый эндпоинт обязан протащить это значение в db-вызов: там на нём и
+    держится граница."""
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
         message, status_code = auth_error
         return None, None, (jsonify({"error": message}), status_code)
     role = _normalize_user_role(requester[3])
     if _is_global_admin_requester(role, requester_id):
+        return requester_id, None, None
+    if _group_late_bot_has_full_access(requester_id, role):
         return requester_id, None, None
     scope = _group_late_bot_department_scope(requester_id, role)
     if scope:

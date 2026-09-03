@@ -1645,14 +1645,26 @@ const canAccessChatAppForUser = (userLike) => {
 // Ту же проверку делает _group_late_bot_guard (GROUP_LATE_BOT_DEPARTMENT_SCOPES).
 const GROUP_LATE_BOT_HEAD_DEPARTMENT_CODES = new Set(['front_office']);
 
+// Отделы, которым раздел открыт ЦЕЛИКОМ, без границы отдела Workpace: кадровый учёт
+// ведётся по всей компании (задача #273). Роль здесь не проверяется намеренно —
+// признак доступа это членство в отделе, а не уровень роли: у кадровиков роль
+// hr_manager с уровнем как у оператора. Зеркало на бэкенде —
+// GROUP_LATE_BOT_FULL_DEPARTMENT_CODE в bot_schedule2.py.
+const GROUP_LATE_BOT_FULL_DEPARTMENT_CODES = new Set(['hr']);
+
 const isGroupLateBotDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
     && aiQaHeadDepartmentCodesOf(userLike).some((code) => GROUP_LATE_BOT_HEAD_DEPARTMENT_CODES.has(code))
 );
 
+const isGroupLateBotFullAccessDepartment = (userLike) => GROUP_LATE_BOT_FULL_DEPARTMENT_CODES.has(
+    normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+);
+
 const canAccessGroupLateBotForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
+    if (isGroupLateBotFullAccessDepartment(userLike)) return true;
     if (isGroupLateBotDepartmentHead(userLike)) return true;
     // Глава отдела с базовой admin-ролью — не глобальный админ.
     return role === 'admin' && !isDepartmentHead(userLike);
@@ -27907,6 +27919,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 : (labelList.length > 0);
                                             const cellScheduleStatus = getPlannerScheduleStatusForDate(op, d);
                                             const cellScheduleStatusTone = cellScheduleStatus ? getScheduleStatusTone(cellScheduleStatus.statusCode) : null;
+                                            // Смену за уже отработанный день статус не снимает, но в ячейке её
+                                            // закрывает название статуса — время остаётся хотя бы в подсказке.
+                                            const cellScheduleStatusShiftLabels = cellScheduleStatus
+                                                ? labelList.map(item => item?.text).filter(Boolean).join(', ')
+                                                : '';
+                                            const cellScheduleStatusTooltip = [
+                                                cellScheduleStatus?.label || 'Статус',
+                                                cellScheduleStatusShiftLabels ? `Смена ${cellScheduleStatusShiftLabels}` : ''
+                                            ].filter(Boolean).join('\n');
                                             const isDayOff = op.daysOff?.includes(d) ?? false;
                                             const hasCarryShiftPart = parts.length > 0;
                                             const showCarryDayOffBadge = (viewMode === 'day') && isDayOff && hasCarryShiftPart && !cellScheduleStatus;
@@ -28039,7 +28060,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 >
                                                     {cellScheduleStatus ? (
                                                         <div className="flex items-center justify-center h-full px-1">
-                                                            <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} data-schedule-tooltip={cellScheduleStatus.label || 'Статус'}>
+                                                            <div className={`text-sm font-semibold truncate ${cellScheduleStatusTone?.text || 'text-slate-700'}`} data-schedule-tooltip={cellScheduleStatusTooltip}>
                                                                 {cellScheduleStatus.label || 'Статус'}
                                                             </div>
                                                         </div>
@@ -28407,7 +28428,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 читается в подсказке, а не ломает таблицу. */}
                                                             <div
                                                                 className={`w-full text-xs font-semibold text-center leading-tight whitespace-normal break-words line-clamp-2 ${cellScheduleStatusTone?.text || 'text-slate-700'}`}
-                                                                data-schedule-tooltip={cellScheduleStatus.label || 'Статус'}
+                                                                data-schedule-tooltip={cellScheduleStatusTooltip}
                                                             >
                                                                 {cellScheduleStatus.label || 'Статус'}
                                                             </div>
@@ -46132,6 +46153,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
+                                    {/* «Отметки» стоят в ОБЩЕЙ части меню, а не в ветке роли: раздел выдаётся
+                                        разнородной аудитории (глобальные админы, глава фронт-офисов, весь отдел
+                                        кадрового учёта), и ни одна ветка сайдбара их всех не покрывает — у роли
+                                        hr_manager своей ветки нет вовсе, и пункт просто не отрисовался бы.
+                                        Правило «пункт в двух ветках» относится к разделам одной роли. */}
+                                    {canAccessGroupLateBotSection && (
+                                        <li>
+                                            <button
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
+                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Отметки</span>
+                                            </button>
+                                        </li>
+                                    )}
                                     {isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && renderSidebarDividerInner()}
@@ -46307,16 +46343,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
                                                     >
                                                         <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
-                                                    </button>
-                                                </li>
-                                            )}
-                                            {canAccessGroupLateBotSection && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Бот опозданий</span>
                                                     </button>
                                                 </li>
                                             )}
@@ -46636,19 +46662,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {/* «Бот опозданий»: глава отдела из GROUP_LATE_BOT_HEAD_DEPARTMENT_CODES —
-                                                админы видят этот пункт в своей ветке выше. Границу отдела Workpace
-                                                держит бэкенд, здесь только видимость пункта. */}
-                                            {canAccessGroupLateBotSection && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Бот опозданий</span>
                                                 </button>
                                             </li>
                                             )}
