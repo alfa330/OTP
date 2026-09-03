@@ -255,23 +255,25 @@ const ChatThread = forwardRef(function ChatThread({
                 const out = m.type === 'to_client';
                 const auto = m.type === 'autoreply';
                 // Внутренний комментарий оператора (Chat2Desk type='comment'):
-                // клиент его не видит, поэтому это НЕ его реплика — рисуем на
-                // стороне оператора отдельным стилем, иначе заметка вроде
-                // «нет ответа/обед» читается как сообщение клиента.
+                // клиент его не видит, поэтому это НЕ его реплика. Рисуем ПО
+                // ЦЕНТРУ ленты и без «хвоста» пузыря — ровно как показывает сам
+                // Chat2Desk (требование владельца 03.09.2026). Раньше заметка
+                // стояла у правого края и читалась как ответ оператора, хотя
+                // это служебная пометка, адресованная коллегам.
                 const note = m.type === 'comment';
                 const hasMedia = Boolean(m.photo || m.video || m.audio || m.pdf || (m.attachments || []).length);
                 const isFlashing = flashId != null && String(m.id) === flashId;
                 const bubbleClass = out
                     ? 'rounded-br-md bg-blue-500 text-white'
                     : note
-                        ? 'rounded-br-md border border-dashed border-amber-300 bg-amber-50 text-amber-900'
+                        ? 'border border-dashed border-amber-300 bg-amber-50 text-amber-900'
                         : auto
                             ? 'rounded-br-md bg-slate-200 text-slate-600'
                             : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60';
                 return (
-                    <div key={m.id} className={`flex ${(out || auto || note) ? 'justify-end' : 'justify-start'} px-4 py-0.5`}>
+                    <div key={m.id} className={`flex ${note ? 'justify-center' : (out || auto) ? 'justify-end' : 'justify-start'} px-4 py-0.5`}>
                         <div data-mid={m.id}
-                             className={`max-w-[78%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] transition-shadow duration-300 ${bubbleClass} ${
+                             className={`${note ? 'max-w-[86%]' : 'max-w-[78%]'} rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] transition-shadow duration-300 ${bubbleClass} ${
                                  isFlashing ? 'ring-4 ring-amber-400/80' : ''}`}>
                             {/* Автор исходящего. У Wazzup он свой у каждого сообщения
                                 (эпизод могли вести несколько операторов), поэтому там
@@ -289,7 +291,7 @@ const ChatThread = forwardRef(function ChatThread({
                                 </div>
                             )}
                             {note && (
-                                <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold text-amber-700">
+                                <div className="mb-0.5 flex items-center justify-center gap-1 text-[11px] font-semibold text-amber-700">
                                     <Lock size={11} /> Внутренний комментарий{m.author ? ` · ${m.author}` : ''}
                                 </div>
                             )}
@@ -301,7 +303,7 @@ const ChatThread = forwardRef(function ChatThread({
                                 </div>
                             )}
                             {!m.text && !hasMedia && <div className={`italic ${out ? 'text-blue-100' : 'text-slate-400'}`}>[сообщение]</div>}
-                            <div className={`mt-0.5 text-right text-[10px] ${out ? 'text-blue-100/90' : note ? 'text-amber-700/70' : 'text-slate-400'}`}>{fmtTime(m.created)}</div>
+                            <div className={`mt-0.5 text-[10px] ${note ? 'text-center text-amber-700/70' : 'text-right'} ${out ? 'text-blue-100/90' : note ? '' : 'text-slate-400'}`}>{fmtTime(m.created)}</div>
                         </div>
                     </div>
                 );

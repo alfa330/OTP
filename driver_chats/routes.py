@@ -252,12 +252,26 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
 
         # Обогащение метаданными заявок — бесплатное и НЕОБЯЗАТЕЛЬНОЕ: сегодняшних
         # заявок в c2d_requests ещё нет (синк идёт в 04:10 за вчера), и чат
-        # прекрасно показывается без названия канала.
+        # прекрасно показывается без оценки водителя.
+        #
+        # А вот ТАКСОПАРК обязателен: по одному телефону приходят чаты разных
+        # парков, и без названия оператор не понимает, что перед ним. Поэтому
+        # парк берётся из самого сообщения (channel_id) через справочник, а
+        # ночной срез заявок остаётся лишь третьим запасным вариантом.
         with db._get_cursor() as cursor:
             meta = queries.request_meta(cursor, [c['request_id'] for c in chats])
+            channels = queries.channel_names(cursor)
+        unknown = [c['channel_id'] for c in chats
+                   if c.get('channel_id') and int(c['channel_id']) not in channels]
+        if unknown:
+            # Парк подключили сегодня — в нашей базе его ещё нет. Один вызов на
+            # весь справочник, дальше он живёт в кеше процесса 6 часов.
+            channels = {**chat2desk.channel_names(), **channels}
         for chat in chats:
             extra = meta.get(chat['request_id']) or {}
-            chat['channel_name'] = extra.get('channel_name')
+            channel_id = chat.get('channel_id')
+            chat['channel_name'] = (channels.get(int(channel_id)) if channel_id else None) \
+                or extra.get('channel_name')
             # Кто отвечал — из САМИХ сообщений, а имя из ночного среза заявок
             # только как запасное. Срез хранит одного оператора на заявку, а
             # лента подписывает каждое сообщение своим автором: разойдись они,
@@ -329,7 +343,12 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # Запись в журнал — ПОСЛЕ успешной отправки и обязательно: заметку
         # отозвать нельзя, и «передал, но в журнале нет» — ровно та дыра, ради
         # закрытия которой журнал и просили.
+        #
+        # Здесь же сбрасываем кеш переписки: заметка уже в чате у вендора, но
+        # наш снимок ей на пять минут старше, и повторный поиск показал бы ленту
+        # БЕЗ только что отправленного комментария.
         with db._get_cursor() as cursor:
+            queries.drop_cached_messages(cursor, client_id)
             event = queries.log_event(
                 cursor, ctx, 'handoff',
                 phone=phone, client_id=client_id,

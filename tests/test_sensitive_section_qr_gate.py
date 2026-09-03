@@ -190,9 +190,14 @@ class ParcelsGateHarness(_Harness):
 
 
 class DriverChatsGateHarness(_Harness):
-    def build(self, context, granted=False):
+    def build(self, context, granted=False, rollout_super_admin_only=False):
         _cursor, db = self._cursor_and_db()
         self._patch(dch_queries, 'load_access_context', lambda _c, _uid: dict(context))
+        # По умолчанию проверяем ПЕРИМЕТР, а не стадию выката: этот файл про то,
+        # кого раздел спрашивает про QR, и правила обязаны быть проверены
+        # заранее — иначе в день, когда флаг снимут, они окажутся непроверенными.
+        # Сам флаг проверяется отдельным тестом ниже.
+        self._patch(dch_access, 'ROLLOUT_SUPER_ADMIN_ONLY', rollout_super_admin_only)
 
         gate = _GateRecorder(granted)
         app = Flask(__name__)
@@ -526,6 +531,30 @@ class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
                     '/api/driver_chats/journal'):
             self.assertEqual(client.options(url).status_code, 204, url)
         self.assertEqual(gate.calls, [])
+
+    def test_rollout_closes_the_section_to_everyone_but_super_admin(self):
+        """Стадия выката (решение владельца 03.09.2026): раздел пока виден
+        ТОЛЬКО супер-админу, даже тем, кого пускает периметр.
+
+        Отказ при этом «раздел вам не открыт», а не «покажите QR»: подтверждать
+        доступ к тому, что ещё не выкатили, — тупик."""
+        for context in (driver_chats_ctx(),
+                        driver_chats_ctx(role='trainee'),
+                        driver_chats_ctx(role='sv'),
+                        driver_chats_ctx(role='admin', department_code='szov', headed=[1])):
+            with self.subTest(role=context['role']):
+                client, _gate = self.build(context, granted=True,
+                                           rollout_super_admin_only=True)
+                response = client.get('/api/driver_chats/context')
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.get_json().get('code'),
+                                 'DRIVER_CHATS_SECTION_CLOSED')
+
+    def test_rollout_still_lets_the_super_admin_in(self):
+        client, gate = self.build(driver_chats_ctx(role='super_admin', department_code=''),
+                                  granted=False, rollout_super_admin_only=True)
+        self.assertEqual(client.get('/api/driver_chats/ping').status_code, 200)
+        self.assertEqual(gate.calls, [], 'супер-админа QR не спрашивают')
 
 
 class GatePolicyTest(unittest.TestCase):

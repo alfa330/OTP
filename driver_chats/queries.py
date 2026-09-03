@@ -111,6 +111,29 @@ def local_client_id(cursor, variants):
     return int(row[0]) if row and row[0] is not None else None
 
 
+# Справочник таксопарков. Канал в Chat2Desk = парк, на чей номер написал
+# водитель, и оператору он нужен первым делом: по одному и тому же телефону
+# приходят чаты разных парков.
+#
+# Берём из своей базы, а не из вендора: `c2d_requests` наполняется ночным синком
+# метрик бесплатно и держит 45 дней, а это 14 парков — весь живой трафик.
+# Вендорский `/v1/channels` остаётся запасным (и неполным: 15 записей из 23,
+# offset он игнорирует).
+_CHANNELS_SQL = """
+    SELECT channel_id, max(channel_name)
+      FROM c2d_requests
+     WHERE channel_id IS NOT NULL
+       AND COALESCE(NULLIF(TRIM(channel_name), ''), '') <> ''
+     GROUP BY channel_id
+"""
+
+
+def channel_names(cursor):
+    """id канала -> название таксопарка. Ноль вызовов API."""
+    cursor.execute(_CHANNELS_SQL)
+    return {int(row[0]): row[1] for row in cursor.fetchall() if row[0] is not None}
+
+
 # Метаданные заявок — канал, чат-менеджер, оценка водителя. Живут в той же
 # бесплатной таблице. Сегодняшних заявок в ней нет (синк идёт в 04:10 за вчера),
 # поэтому обогащение НЕОБЯЗАТЕЛЬНОЕ: чат показывается и без него, просто без
@@ -189,6 +212,19 @@ def cached_messages(cursor, client_id, window_from, window_to, ttl_seconds):
     if (now_almaty() - fetched_at).total_seconds() > max(0, int(ttl_seconds)):
         return None
     return messages or []
+
+
+def drop_cached_messages(cursor, client_id):
+    """Сбросить кеш переписки клиента.
+
+    Зовётся сразу после «Передан»: заметка уже лежит в чате у вендора, но наш
+    снимок ей на пять минут старше. Без сброса оператор жмёт «Найти» и НЕ видит
+    собственный комментарий — выглядит это как «кнопка не сработала», и человек
+    жмёт её второй раз, а отозвать лишнюю заметку через API нельзя.
+    """
+    cursor.execute("DELETE FROM dch_message_cache WHERE client_id = %(client_id)s",
+                   {'client_id': int(client_id)})
+    return cursor.rowcount or 0
 
 
 def store_messages(cursor, client_id, phone, messages, window_from, window_to):

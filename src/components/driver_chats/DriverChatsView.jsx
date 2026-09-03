@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, Loader2, AlertCircle, Send, Check, Lock, Info,
-    MessageSquare, Download, ChevronLeft, Phone, Clock, ImageIcon,
+    MessageSquare, Download, ChevronLeft, Phone, Clock, ImageIcon, Building2,
 } from 'lucide-react';
 
 import ChatThread from '../c2d_eval/ChatThread';
@@ -412,22 +412,28 @@ const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone,
                         }`}
                     >
                         <div className="flex items-center gap-2">
-                            <span className="text-[12.5px] font-medium tabular-nums text-slate-500">
-                                {formatDayShort(chat.last_at)} · {formatTime(chat.last_at)}
+                            {/* Таксопарк — первым и заметно: по одному номеру
+                                приходят чаты разных парков, и оператору важно
+                                сразу видеть, чей это чат. Так же его показывает
+                                и сам Chat2Desk. */}
+                            <span className="truncate rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
+                                {chat.channel_name || 'Парк не определён'}
                             </span>
                             {handedOff[key] && (
-                                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600">
+                                <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-emerald-600">
                                     <Check size={11} /> передан
                                 </span>
                             )}
-                            {chat.has_media && <ImageIcon size={12} className="text-slate-400" />}
                         </div>
                         <div className="mt-1 line-clamp-2 text-[13px] leading-snug text-slate-700">
                             {chat.preview || 'Без текста'}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11.5px] text-slate-400">
+                            <span className="tabular-nums">
+                                {formatDayShort(chat.last_at)} · {formatTime(chat.last_at)}
+                            </span>
                             <span className="tabular-nums">{chat.messages_count} сообщ.</span>
-                            {chat.channel_name && <span className="truncate">{chat.channel_name}</span>}
+                            {chat.has_media && <ImageIcon size={12} />}
                             {chat.is_service && <span>служебное</span>}
                         </div>
                     </button>
@@ -481,14 +487,20 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff, on
                     <ChevronLeft size={16} />
                 </button>
                 <div className="min-w-0 flex-1">
-                    <div className="truncate text-[14.5px] font-semibold text-slate-900">
-                        {driverName || formatPhone(phone)}
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="truncate text-[14.5px] font-semibold text-slate-900">
+                            {driverName || formatPhone(phone)}
+                        </span>
+                        {/* Таксопарк — рядом с именем водителя, а не в подписи
+                            мелким: это первое, что спрашивают по чужому чату. */}
+                        <span className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-0.5 text-[11.5px] font-medium text-blue-700">
+                            <Building2 size={11} /> {chat.channel_name || 'Парк не определён'}
+                        </span>
                     </div>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[12px] text-slate-500">
                         <span className="inline-flex items-center gap-1 tabular-nums">
                             <Clock size={11} /> {formatDateTime(chat.started_at)}
                         </span>
-                        {chat.channel_name && <span className="truncate">{chat.channel_name}</span>}
                         {chat.operator_name && <span className="truncate">Отвечал: {chat.operator_name}</span>}
                     </div>
                 </div>
@@ -735,6 +747,7 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
                                     <th className="px-4 py-2.5 font-medium">Сотрудник</th>
                                     <th className="px-4 py-2.5 font-medium">Действие</th>
                                     <th className="px-4 py-2.5 font-medium">Водитель</th>
+                                    <th className="px-4 py-2.5 font-medium">Таксопарк</th>
                                     <th className="px-4 py-2.5 font-medium">Чат</th>
                                     <th className="px-4 py-2.5 font-medium">Комментарий</th>
                                 </tr>
@@ -759,11 +772,13 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
                                         <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600">
                                             {formatPhone(item.phone)}
                                         </td>
-                                        <td className="px-4 py-2.5 text-[12px] text-slate-500">
-                                            {item.channel_name && <div className="truncate">{item.channel_name}</div>}
-                                            {item.request_id && (
-                                                <div className="tabular-nums text-slate-400">№ {item.request_id}</div>
-                                            )}
+                                        <td className="px-4 py-2.5 text-[12.5px] text-slate-600">
+                                            <span className="truncate">{item.channel_name || '—'}</span>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-[12px] text-slate-400">
+                                            {item.request_id ? (
+                                                <span className="tabular-nums">№ {item.request_id}</span>
+                                            ) : ''}
                                         </td>
                                         <td className="max-w-[280px] px-4 py-2.5 text-[12.5px] text-slate-600">
                                             {item.comment_text || ''}
