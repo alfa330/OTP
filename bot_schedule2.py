@@ -78,6 +78,7 @@ from database import (
     normalize_proxy_status_value,
     normalize_role_value,
     normalize_sip_provider,
+    SIP_AUTO_ANSWER_DELAY_DEFAULT,
     CALCULATION_MODEL_TEZ_OP,
     get_calculation_model_catalog,
     get_calculation_model_metrics,
@@ -25675,6 +25676,14 @@ def operator_sip_settings_endpoint():
                 # Режима автодозвона не касается: у его АТС свой FOP2, без него
                 # режим не работает вообще. Нет записи у сотрудника → True.
                 "fop2_enabled": bool(account.get("fop2_enabled", True)),
+                # Автопринятие входящего: телефон показывает окно звонка
+                # auto_answer_delay секунд без возможности отклонить и отвечает
+                # сам. Настройка персональная («Настройки SIP» → сотрудник) и от
+                # провайдера не зависит — окно и таймер целиком в телефоне.
+                # Нет записи у сотрудника → выключено.
+                "auto_answer": bool(account.get("auto_answer", False)),
+                "auto_answer_delay": int(account.get(
+                    "auto_answer_delay", SIP_AUTO_ANSWER_DELAY_DEFAULT)),
             }
         }), 200
     except Exception as e:
