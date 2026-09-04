@@ -42,11 +42,11 @@ class SupervisorDirectoryPayloadTests(unittest.TestCase):
     def test_add_user_accepts_supervisor_role(self):
         source = _function_source("add_user")
 
-        # Список ролей вырос вместе с бэк-офисом (hr_manager,
-        # accounting_manager) и переехал на две строки.
+        # Список ролей вырос вместе с отделами без линии (hr_manager,
+        # accounting_manager, marketing_manager) и переехал на две строки.
         self.assertIn(
             "role not in ('operator', 'trainee', 'trainer', 'sv', 'admin',\n"
-            "                        'hr_manager', 'accounting_manager')",
+            "                        'hr_manager', 'accounting_manager', 'marketing_manager')",
             source,
         )
         self.assertIn("elif role in ('trainer', 'sv')", source)

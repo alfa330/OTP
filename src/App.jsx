@@ -1520,6 +1520,27 @@ const RateChangeReportToggle = ({ user, showToast }) => {
     );
 };
 
+/* Разделы качества обслуживания, открытые рядовому сотруднику «Маркетинга»
+   (решение владельца 04.09.2026): «Курсы», «Журнал оценок», «Деление звонков»,
+   «ИИ-оценка», «Лиды OLX». Признак доступа — ЧЛЕНСТВО В ОТДЕЛЕ, а не роль:
+   у маркетолога роль marketing_manager с уровнем как у оператора, и проверка
+   по роли открыла бы разделы человеку, которого перевели в другой отдел.
+   Тот же приём, что у «Отметок» (GROUP_LATE_BOT_FULL_DEPARTMENT_CODES ниже).
+
+   Периметр читается как «наблюдатель»: те же данные, что уже видит глава
+   «Маркетинга» (ему «ИИ-оценка» и «Лиды OLX» открыты с 06.08.2026), но без
+   права что-либо менять. Право на действия каждый раздел проверяет отдельно —
+   см. зеркала на бэкенде: _is_marketing_observer в bot_schedule2.py и
+   is_marketing_observer в olx_amo/access.py. */
+const MARKETING_OBSERVER_DEPARTMENT_CODE = 'marketing';
+
+const isMarketingObserver = (userLike) => (
+    !isDepartmentHead(userLike)
+    && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+        === MARKETING_OBSERVER_DEPARTMENT_CODE
+    && normalizeRole(userLike?.role) === 'marketing_manager'
+);
+
 const canAccessLmsSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     const userId = Number(userLike?.id);
@@ -1528,6 +1549,7 @@ const canAccessLmsSectionForUser = (userLike) => {
         role === 'trainer' ||
         isAdminLikeRoleFn(role) ||
         isSupervisorRole(role) ||
+        isMarketingObserver(userLike) ||
         (role === 'super_admin' && userId === 2) ||
         (role === 'operator' && userId === 56)
     );
@@ -1594,6 +1616,7 @@ const canAccessAiQaForUser = (userLike) => (
     normalizeRole(userLike?.role) === 'super_admin' ||
     isAiQaDepartmentHead(userLike) ||
     isOpSalesSupervisorForAiQa(userLike) ||
+    isMarketingObserver(userLike) ||
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
@@ -1604,6 +1627,11 @@ const canAccessAiQaForUser = (userLike) => (
    и оценки операторов чужих отделов, и кнопки переоценки.
    Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py. */
 const canAccessVerifierChatsForUser = (userLike) => {
+    // Наблюдатель «Маркетинга» — ЕДИНСТВЕННОЕ вычитание из аудитории «ИИ-оценки»:
+    // разбор звонков ему открыт, а переписка Верификаторов в выданный ему
+    // перечень разделов не входит. Проверка стоит ПЕРВОЙ: строкой ниже он
+    // прошёл бы по canAccessAiQaForUser и получил бы раздел молча.
+    if (isMarketingObserver(userLike)) return false;
     if (canAccessAiQaForUser(userLike)) return true;
     // Глава отдела с базовой admin-ролью — не глобальный админ: чужая переписка
     // ему не нужна (главы ОП/СЗоВ/маркетинга уже прошли проверкой выше).
@@ -1630,6 +1658,10 @@ const canAccessOlxLeadsForUser = (userLike) => {
     // главой заменяет роль и режет периметр своим отделом (те же правила, что
     // у «Посылок» и «Оценок ИИ»).
     if ((role === 'super_admin' || role === 'admin') && !isDepartmentHead(userLike)) return true;
+    // Рядовой маркетолог: ровно тот, о ком написана шапка olx_amo/access.py —
+    // работу, которую забрал робот, он делал руками и первым заметит, что
+    // робот замолчал. Ту же ветку добавили в can_view на бэкенде.
+    if (isMarketingObserver(userLike)) return true;
     return isOlxLeadsDepartmentHead(userLike);
 };
 
@@ -37523,6 +37555,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // «Чаты Верификаторов» открыты шире «ИИ-оценки» — см.
             // canAccessVerifierChatsForUser: в раздел допущены и глобальные админы.
             const canAccessVerifierChatsSection = canAccessVerifierChatsForUser(user);
+            const isMarketingObserverUser = isMarketingObserver(user);
             const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
@@ -43314,7 +43347,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const fetchSurveysPendingBadgeCount = async () => {
                 const role = String(user?.role || '').trim().toLowerCase();
-                const roleHasSurveyAccess = ['super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator'].includes(role);
+                // Зеркало кортежа ролей в _surveys_route_guard (bot_schedule2.py):
+                // при расхождении бейдж либо молчит, либо просит счёт и ловит 403.
+                const roleHasSurveyAccess = ['super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'marketing_manager'].includes(role);
                 if (!user?.id || !roleHasSurveyAccess) {
                     if (isMounted.current) setPendingSurveysBadgeCount(0);
                     return;
@@ -45809,8 +45844,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fetchUsers();
             }, [user?.id, currentUserRole, isScopedDepartmentHead, view]);
 
+            /* Бейдж «Опросы» у рядового. Предикат, а не список ['operator','trainee']:
+               раздел «Опросы» выдан и рядовому маркетологу, и без бейджа он узнавал бы
+               о новом опросе, только зайдя руками.
+               Соседний эффект выше на литерале ОСТАВЛЕН намеренно: он зовёт
+               fetchUsers(), а /api/admin/users открыт по литералу role == 'operator'
+               и отдал бы marketing_manager'у 403 с красным тостом на весь экран. */
             useEffect(() => {
-                if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;
+                if (!user || !user.id || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;
                 fetchSurveysPendingBadgeCount();
             }, [user?.id, currentUserRole, isScopedDepartmentHead, view]);
 
@@ -47015,6 +47056,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
                                             )}
+                                            {/* «Журнал оценок» и «Деление звонков» у рядового: до отдела
+                                                «Маркетинг» эти два пункта жили только в ветках админа и
+                                                руководителя. Условие двойное, и departmentRestrictsViews
+                                                стоит ПЕРВЫМ: у отделов без карты разделов (СЗоВ)
+                                                departmentAllowsView отвечает true на любой ключ, и без
+                                                него оба пункта появились бы у каждого оператора линии. */}
+                                            {departmentRestrictsViews(user) && departmentAllowsView(user, 'call_evaluation') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'call_evaluation')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentRestrictsViews(user) && departmentAllowsView(user, 'call_division') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'call_division')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {departmentAllowsView(user, 'contests') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
@@ -47576,8 +47637,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                адресе; сборка журнала по ней подгружает тот же слой. */
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html${darkThemeActive ? '?theme=dark' : ''}`;
             const callEvaluationCanvas = darkThemeActive ? '#17191e' : '#f7f7f5';
-            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRole || isDepartmentManager);
-            const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager;
+            /* «Журнал оценок» открыт ещё и рядовому маркетологу — наблюдателем.
+               Обе константы обязаны меняться вместе: первая решает, считать ли
+               вид активным (подсветка пункта и адрес), вторая — монтировать ли
+               iframe. Правка одной даёт либо подсвеченный пункт без
+               содержимого, либо содержимое без синхронизации адреса.
+               Что наблюдатель увидит ВНУТРИ сборки — решает она сама по роли
+               (src/call_evaluation/main.jsx), а какие данные отдать — бэкенд. */
+            const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRole || isDepartmentManager || isMarketingObserverUser);
+            const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager || isMarketingObserverUser;
             const manageOperatorsBirthdaysCaption = isDepartmentManager ? 'Все операторы' : 'Мои сотрудники';
 
             const renderUpcomingBirthdaysCard = (items, caption) => {
@@ -50672,6 +50740,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
+                                {/* «Деление звонков»: пункт меню у рядового есть (ветка выше), а
+                                    экран до сих пор был объявлен только в блоках админа и
+                                    руководителя. Без этой строки раздел открывался бы в пустую
+                                    область — ни ошибки, ни заглушки. */}
+                                {( view === "call_division" && (<AdminCallsUploadView user={user}/>))}
                                 {( view === "events" && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <EventsView

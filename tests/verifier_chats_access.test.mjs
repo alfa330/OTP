@@ -46,6 +46,8 @@ const NAMES = [
     'aiQaHeadDepartmentCodesOf',
     'isAiQaDepartmentHead',
     'canAccessAiQaForUser',
+    'MARKETING_OBSERVER_DEPARTMENT_CODE',
+    'isMarketingObserver',
     'canAccessVerifierChatsForUser',
 ];
 
@@ -84,6 +86,15 @@ const PEOPLE = [
     ['оператор', { id: 10, role: 'operator' }, false, false],
     ['оператор из whitelist ИИ-оценки', { id: 183, role: 'operator' }, true, true],
     ['бухгалтер', { id: 11, role: 'accounting_manager' }, false, false],
+    // ЕДИНСТВЕННЫЙ, у кого разборы есть, а переписки нет: рядовой сотрудник
+    // «Маркетинга». Разборы звонков ему выдал владелец (04.09.2026), чаты
+    // Верификаторов в его перечень разделов не входят.
+    ['рядовой маркетолог', {
+        id: 12, role: 'marketing_manager', department_code: 'marketing',
+    }, false, true],
+    ['маркетолог, переведённый в ОП', {
+        id: 13, role: 'marketing_manager', department_code: 'op',
+    }, false, false],
     ['никто (нет сессии)', null, false, false],
 ];
 
@@ -95,15 +106,35 @@ test('чаты верификаторов открыты глобальным а
     }
 });
 
-test('доступ к чатам — надмножество доступа к ИИ-оценке', () => {
-    // Обратное отношение было бы дефектом молчаливым: раздел «ИИ-оценка» ведёт
-    // на записи чатов, и человек с разборами, но без переписки, упирался бы в 403.
+test('доступ к чатам — надмножество доступа к ИИ-оценке, кроме маркетинга', () => {
+    /* Обратное отношение было бы дефектом молчаливым: человек с разборами, но
+       без переписки, упирался бы в 403 внутри раздела.
+
+       У рядового маркетолога исключение, и оно проверено по коду, а не принято
+       на веру: экран «ИИ-оценки» (src/components/call_qa/CallQaView.jsx) ходит
+       ТОЛЬКО в /api/ai-qa/* и ни одной ручки /api/wazzup/* не зовёт — значит
+       закрытые чаты Верификаторов его не ломают. Появится в CallQaView запрос к
+       /api/wazzup/* — исключение придётся снимать, и упадёт этот тест. */
     const { canAccessAiQaForUser, canAccessVerifierChatsForUser } = predicates();
     for (const [who, user] of PEOPLE) {
+        if (who === 'рядовой маркетолог') continue;
         if (canAccessAiQaForUser(user)) {
             assert.ok(canAccessVerifierChatsForUser(user), `у «${who}» есть разборы, но нет чатов`);
         }
     }
+});
+
+test('страж ловит потерю вычета наблюдателя «Маркетинга»', () => {
+    // Без подделки «зелено» ничего не значит: таблица прошла бы и на предикате,
+    // который отдаёт маркетологу переписку вместе с разборами.
+    const tampered = predicates({
+        canAccessVerifierChatsForUser:
+            'const canAccessVerifierChatsForUser = (userLike) => canAccessAiQaForUser(userLike)'
+            + " || (normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike));",
+    });
+    const marketer = PEOPLE.find(([who]) => who === 'рядовой маркетолог')[1];
+    assert.equal(tampered.canAccessVerifierChatsForUser(marketer), true,
+        'подделка обязана открывать чаты маркетологу — иначе тест ничего не сторожит');
 });
 
 test('страж ловит потерю проверки «не глава отдела»', () => {

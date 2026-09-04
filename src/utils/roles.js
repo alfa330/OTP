@@ -1,12 +1,14 @@
 export const ROLE_HIERARCHY = Object.freeze({
     operator: 10,
     trainee: 10,
-    // Рядовые сотрудники бэк-офиса (Бухгалтерия, HR). Уровень тот же, что у
-    // оператора: они не на линии, но и не начальство. Зеркало ROLE_HIERARCHY в
-    // bot_schedule2.py и database.py, а также ROLE_LEVELS в wiki/access.py —
-    // там от уровня зависит, попадёт ли человек под правила вики вообще.
+    // Рядовые сотрудники отделов без линии (Бухгалтерия, HR, Маркетинг).
+    // Уровень тот же, что у оператора: они не на линии, но и не начальство.
+    // Зеркало ROLE_HIERARCHY в bot_schedule2.py и database.py, а также
+    // ROLE_LEVELS в wiki/access.py — там от уровня зависит, попадёт ли человек
+    // под правила вики вообще.
     hr_manager: 10,
     accounting_manager: 10,
+    marketing_manager: 10,
     trainer: 20,
     sv: 30,
     admin: 40,

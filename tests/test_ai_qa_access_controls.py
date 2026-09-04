@@ -79,7 +79,7 @@ class AiQaAccessControlTests(unittest.TestCase):
     def test_frontend_opens_verifier_chats_to_global_admins(self):
         """«Чаты Верификаторов» — глобальным админам, «ИИ-оценка» — нет."""
         self.assertIn(
-            "const canAccessVerifierChatsForUser = (userLike) => {\n"
+            "    if (isMarketingObserver(userLike)) return false;\n"
             "    if (canAccessAiQaForUser(userLike)) return true;",
             self.app_source,
         )
@@ -227,10 +227,12 @@ class AiQaAccessControlTests(unittest.TestCase):
             5: (5, None, "Оператор", "operator"),
             6: (6, None, "СВ ОП", "sv"),
             7: (7, None, "Тренер", "trainer"),
+            8: (8, None, "Маркетолог", "marketing_manager"),
         }
         headed = {3: 777, 4: 501}          # id отдела, которым человек назначен главой
         ai_qa_heads = {4}                  # СЗоВ — в AI_QA_HEAD_DEPARTMENT_CODES
-        departments_of = {6: 367}          # отдел сотрудника (для СВ ОП)
+        departments_of = {6: 367, 8: 888}  # отдел сотрудника (для СВ ОП и маркетолога)
+        department_codes = {888: "marketing"}
 
         class _Db:
             @staticmethod
@@ -240,6 +242,11 @@ class AiQaAccessControlTests(unittest.TestCase):
             @staticmethod
             def get_user_department_id(user_id):
                 return departments_of.get(user_id)
+
+            @staticmethod
+            def get_department_by_id(department_id):
+                code = department_codes.get(department_id)
+                return {"id": department_id, "code": code} if code else None
 
         namespace = {
             "db": _Db(),
@@ -252,9 +259,13 @@ class AiQaAccessControlTests(unittest.TestCase):
             "_is_ai_qa_department_head": lambda user_id: user_id in ai_qa_heads,
         }
         _load_assignment(self.api_source, "ROLE_HIERARCHY", namespace)
+        namespace["request"] = SimpleNamespace(method="GET")
+        _load_assignment(self.api_source, "MARKETING_OBSERVER_ROLE", namespace)
+        _load_assignment(self.api_source, "MARKETING_OBSERVER_DEPARTMENT_CODE", namespace)
         for helper in ("_normalize_user_role", "_get_role_level", "_has_min_role",
                        "_is_super_admin_role", "_is_admin_role",
-                       "_is_global_admin_requester", "_ai_qa_guard"):
+                       "_is_global_admin_requester", "_request_is_read_only",
+                       "_is_marketing_observer", "_ai_qa_guard"):
             _load_function(self.api_source, helper, namespace)
         guard = _load_function(self.api_source, "_verifier_chats_guard", namespace)
 
@@ -269,11 +280,18 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertEqual(verdict(183), (183, None), "whitelist ИИ-оценки")
 
         for user_id, who in ((3, "глава ТЭЗ с ролью admin"), (5, "оператор"),
-                             (7, "тренер"), (None, "без сессии")):
+                             (7, "тренер"), (8, "рядовой маркетолог"), (None, "без сессии")):
             with self.subTest(who=who):
                 requester, err = verdict(user_id)
                 self.assertIsNone(requester, who)
                 self.assertEqual(err, ({"error": "forbidden"}, 403), who)
+
+        # Маркетолога отсекает ИМЕННО этот гард, а не общий: в «ИИ-оценку» он
+        # проходит. Без проверки различие было бы недоказанным — оба ответа
+        # «forbidden» могли бы приходить из одного и того же места.
+        namespace["g"] = SimpleNamespace(user_id=8)
+        self.assertEqual(namespace["_ai_qa_guard"](), (8, None),
+                         "разборы ИИ маркетологу открыты — закрыта только переписка")
 
     def test_backend_grants_full_scope_to_allowed_department_heads(self):
         guard_source = ast.get_source_segment(

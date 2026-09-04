@@ -62,15 +62,33 @@ ALL_OPTIONS = [SZOV, TEZ, OP, FRONT]
 class DepartmentResolutionTests(unittest.TestCase):
     """Кто какой отдел видит: админ переключается, глава и СВ прибиты к своему."""
 
-    def _resolver(self, *, global_admin, own_department_id=None):
+    def _resolver(self, *, global_admin, own_department_id=None, marketing_observer=False):
         ns = {
             "_is_global_admin_requester": lambda role, requester_id=None: global_admin,
             "_department_scope_id_for_requester": lambda requester_id: own_department_id,
             "_call_distribution_department_id_by_code": lambda code: 1 if code == "szov" else None,
+            "_is_marketing_observer": lambda requester_id, role=None: marketing_observer,
             "OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE": "szov",
         }
         _load_functions({"_call_distribution_resolve_department"}, ns)
         return ns["_call_distribution_resolve_department"]
+
+    def test_marketing_observer_gets_the_admin_selector(self):
+        """Наблюдатель «Маркетинга» идёт по ветке селектора, а не «свой отдел».
+
+        Своего отдела в списке нет и быть не может: он отфильтровывается как
+        отдел без телефонии и без оценок. Ветка «свой отдел» отдала бы ему
+        пустой экран при каждом входе. Запускать распределение он всё равно не
+        может — /api/call_distribution/run проверяет админа или главу отдельно.
+        """
+        resolve = self._resolver(global_admin=False, own_department_id=888,
+                                 marketing_observer=True)
+        dept_id, options = resolve(7, "marketing_manager", None, list(ALL_OPTIONS))
+        self.assertEqual(dept_id, 1)
+        self.assertEqual([o["code"] for o in options], ["szov", "tez", "op"])
+        # Отдел из адреса он тоже вправе открыть — селектор у него настоящий.
+        dept_id, _ = resolve(7, "marketing_manager", 560, list(ALL_OPTIONS))
+        self.assertEqual(dept_id, 560)
 
     def test_admin_defaults_to_szov(self):
         resolve = self._resolver(global_admin=True)

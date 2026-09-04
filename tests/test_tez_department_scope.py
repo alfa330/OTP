@@ -178,7 +178,11 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("const isAdminRole = isBaseAdminRole || isDepartmentHead;", source)
         self.assertIn("const isGlobalAdminRole = isBaseAdminRole && !isScopedDepartmentHead;", source)
         self.assertIn("const canManageFeedbackReportSetting = isGlobalAdminRole || isDepartmentHead;", source)
-        self.assertIn("isAdminRole && (!isScopedDepartmentHead || selectedSupervisor)", source)
+        # Скоуп главы отдела считает isEvaluationViewer, а не isAdminRole:
+        # с появлением наблюдателя «Маркетинга» право СМОТРЕТЬ журнал и право
+        # МЕНЯТЬ оценки разведены на два флага. Глава отдела входит в оба.
+        self.assertIn("const isEvaluationViewer = isAdminRole || isMarketingObserver;", source)
+        self.assertIn("isEvaluationViewer && (!isScopedDepartmentHead || selectedSupervisor)", source)
         self.assertIn("const scopeId = shouldUseSelectedSupervisor ? selectedSupervisor : userId;", source)
 
 
@@ -525,7 +529,13 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
             "own_dept_id = _department_scope_id_for_requester(requester_id)",
             resolver,
         )
-        self.assertIn("if not _is_global_admin_requester(role, requester_id):", resolver)
+        # Наблюдатель «Маркетинга» — второе исключение из «прибит к своему
+        # отделу»: своего отдела в списке нет вовсе. Глава и СВ прибиты как были.
+        self.assertIn(
+            "if not (_is_global_admin_requester(role, requester_id)\n"
+            "            or _is_marketing_observer(requester_id, role)):",
+            resolver,
+        )
         self.assertIn("_call_distribution_resolve_department(", run_endpoint)
         self.assertIn("department_id=scope_dept", sync_endpoint)
         self.assertIn("def sync_oktell_evaluation_calls(", worker)

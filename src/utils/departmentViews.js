@@ -84,6 +84,37 @@ const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile', 'tasks'];
 const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks'];
 const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];
 
+// Маркетинг. Отдел устроен как бэк-офис (ни линии, ни направлений, ни групп),
+// но разделы у него свои — по решению владельца 04.09.2026 рядовой маркетолог
+// смотрит качество обслуживания наравне с главой своего отдела, которому
+// «ИИ-оценка» и «Лиды OLX» открыты с 06.08.2026.
+//
+// СОБСТВЕННАЯ константа, а не BACK_OFFICE_EMPLOYEE_VIEWS: расширив общую, мы
+// молча выдали бы те же шесть разделов Бухгалтерии и HR.
+//
+// Из десяти пунктов, названных владельцем, здесь ШЕСТЬ. Остальные четыре
+// картой разделов не выдаются вовсе, и дублировать их сюда — значит завести
+// вторую, молча расходящуюся проверку:
+//   «Уведомление» — это колокол (NotificationsBell), у него нет view-ключа;
+//   «Ивенты»      — UNIVERSAL_VIEWS ниже, раздел общий для всех ролей;
+//   «Вики»        — тумблер departments.wiki_enabled плюс пространство вики;
+//   «Лиды OLX»    — свой предикат canAccessOlxLeadsForUser в App.jsx.
+//
+// 'profile' обязан остаться ПЕРВЫМ по двум причинам. Во-первых, firstAllowedView
+// берёт allow[0], и это раздел по умолчанию; из шести только 'profile' и
+// 'tasks' реально отрисованы в ветке рядового, остальные четыре дали бы пустой
+// экран при каждом входе. Во-вторых, «Должность», ради которой отдел и заведён
+// как бэк-офисный, сам сотрудник видит именно в «Профиле» — без этой строки
+// поле завели бы для человека, который его никогда не увидит.
+const MARKETING_EMPLOYEE_VIEWS = [
+    'profile',
+    'tasks',
+    'surveys',
+    'lms',
+    'call_evaluation',
+    'call_division',
+];
+
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
     manage_users: 'manage_operators',
@@ -146,6 +177,15 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
         head: BACK_OFFICE_HEAD_VIEWS,
         sv: BACK_OFFICE_MANAGER_VIEWS,
     },
+    // Маркетинг: ограничена ТОЛЬКО собственная должность отдела — решение
+    // владельца 04.09.2026. Ключей 'operator'/'trainee' здесь намеренно нет,
+    // в отличие от бэк-офиса: людей, заведённых в отделе до появления
+    // должности, ограничение не касается, и портал у них не меняется.
+    // Ключа 'head' нет по той же причине — глава отдела остаётся без
+    // ограничений (роль отсутствует в конфиге => allowlistFor вернёт null).
+    marketing: {
+        marketing_manager: MARKETING_EMPLOYEE_VIEWS,
+    },
 };
 
 export const departmentCodeOf = (user) => {
@@ -193,7 +233,7 @@ export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCi
 // различают людей на линии, там не заведены вовсе (см.
 // OPERATOR_FIELDS_HIDDEN_DEPARTMENTS — те же коды с другой стороны).
 // В базе колонка называется job_title: position — ключевое слово Postgres.
-const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr']);
+const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);
 
 export const departmentCodeUsesEmployeeJobTitle = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -228,7 +268,7 @@ export const departmentHidesFrontOfficeTraining = (user) => departmentCodeHidesF
 //
 // Уже сохранённые значения (сотрудника перевели из отдела с линией) остаются
 // как есть: поле не показываем, но и не затираем.
-const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr']);
+const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);
 
 export const departmentCodeHidesOperatorFields = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -246,6 +286,7 @@ export const departmentHidesOperatorFields = (user) => departmentCodeHidesOperat
 const BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT = {
     accounting: 'accounting_manager',
     hr: 'hr_manager',
+    marketing: 'marketing_manager',
 };
 
 export const BACK_OFFICE_EMPLOYEE_ROLES = Object.freeze(

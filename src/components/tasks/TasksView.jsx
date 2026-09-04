@@ -2835,6 +2835,7 @@ const ROLE_LABELS = {
   sv: 'СВ',
   hr_manager: 'HR',
   accounting_manager: 'Бухгалтерия',
+  marketing_manager: 'Маркетинг',
 };
 const TASKS_PAGE_SIZE = 20;
 

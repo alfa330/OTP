@@ -130,7 +130,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
     def test_operator_line_fields_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
             source,
         )
         self.assertIn("export const departmentCodeHidesOperatorFields = (code) => {", source)
@@ -411,7 +411,7 @@ class EmployeeJobTitleFieldTests(unittest.TestCase):
     def test_frontend_helper_and_card(self):
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr']);",
+            "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
             views,
         )
         self.assertIn("export const departmentCodeUsesEmployeeJobTitle = (code) => {", views)
@@ -532,12 +532,12 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
     def test_helper_matches_the_frontend_set(self):
         source = _read(BOT_PATH)
         self.assertIn(
-            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})",
+            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})",
             source,
         )
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
             views,
         )
 
@@ -552,7 +552,7 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
                 return departments.get(department_id)
 
         namespace = {'db': _Db()}
-        exec("OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})", namespace)
+        exec("OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})", namespace)
         exec(_function_source(BOT_PATH, "_department_hides_operator_line_fields"), namespace)
         hides = namespace["_department_hides_operator_line_fields"]
 
@@ -601,7 +601,7 @@ class BackOfficeEmployeeRoleTests(unittest.TestCase):
 
     def test_backend_lets_the_head_create_the_role(self):
         endpoint = _function_source(BOT_PATH, "add_user")
-        self.assertIn("'hr_manager', 'accounting_manager'):", endpoint)
+        self.assertIn("'hr_manager', 'accounting_manager', 'marketing_manager'):", endpoint)
         # Прежняя формулировка пускала главу только к операторам и стажёрам —
         # то есть ни к кому из тех, кто у него есть.
         self.assertNotIn(
@@ -644,7 +644,7 @@ class BackOfficeEmployeeRoleTests(unittest.TestCase):
         # для «Вики» им требовалось. Переименование должности не повод снять его.
         wiki = _read(WIKI_ACCESS_PATH)
         self.assertIn(
-            "QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager'})",
+            "QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager', 'marketing_manager'})",
             wiki,
         )
         self.assertIn("return normalize_role(otp_role) in QR_GATED_ROLES", wiki)
@@ -894,7 +894,7 @@ class SensitiveQrRolesSingleSourceTests(unittest.TestCase):
         import sys as _sys
         module = importlib.import_module("wiki.access")
         self.assertEqual(
-            {"operator", "hr_manager", "accounting_manager"},
+            {"operator", "hr_manager", "accounting_manager", "marketing_manager"},
             set(module.QR_GATED_ROLES),
         )
         self.assertNotIn("bot_schedule2", _sys.modules)
@@ -1019,14 +1019,16 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
             line = next(row for row in source.splitlines() if row.startswith(f"{name} = "))
             exec(line, namespace)
 
-        self.assertEqual({"hr_manager", "accounting_manager"},
+        self.assertEqual({"hr_manager", "accounting_manager", "marketing_manager"},
                          set(namespace["BACK_OFFICE_EMPLOYEE_ROLES"]))
         # Охват личный: постановщик / поручитель / исполнитель — тот же, что у СВ.
-        self.assertEqual({"sv", "trainer", "hr_manager", "accounting_manager"},
+        self.assertEqual({"sv", "trainer", "hr_manager", "accounting_manager", "marketing_manager"},
                          set(namespace["TASK_PERSONAL_SCOPE_ROLES"]))
-        # Рядовой бэк-офиса обязан быть и в ПОЛУЧАТЕЛЯХ: иначе задачу ему не
-        # поручит ни глава отдела, ни админ, и раздел покажет только своё.
-        self.assertEqual(("super_admin", "admin", "sv", "accounting_manager", "hr_manager"),
+        # Рядовой отдела без линии обязан быть и в ПОЛУЧАТЕЛЯХ: иначе задачу ему
+        # не поручит ни глава отдела, ни админ, и раздел покажет только своё.
+        # Порядок значим — он попадает в SQL-литерал _TASK_RECIPIENT_ROLES_SQL.
+        self.assertEqual(("super_admin", "admin", "sv", "accounting_manager",
+                          "hr_manager", "marketing_manager"),
                          tuple(namespace["TASK_RECIPIENT_ROLES"]))
 
         # Три места, где список ролей раньше был переписан заново.

@@ -1670,8 +1670,9 @@ def _normalize_user_role(role) -> str:
     return role_norm
 
 
-# hr_manager / accounting_manager — рядовые сотрудники бэк-офиса (Бухгалтерия,
-# HR). Уровень тот же, что у оператора: они не на линии, но и не начальство.
+# hr_manager / accounting_manager / marketing_manager — рядовые сотрудники
+# отделов без линии (Бухгалтерия, HR, Маркетинг). Уровень тот же, что у
+# оператора: они не на линии, но и не начальство.
 # Уровень читает не только _has_min_role: wiki/access.py::expand_otp_roles
 # раздаёт человеку все роли не выше его уровня, поэтому на десятке новые роли
 # подпадают под уже написанные правила вики на 'operator'.
@@ -1680,6 +1681,7 @@ ROLE_HIERARCHY = {
     'trainee': 10,
     'hr_manager': 10,
     'accounting_manager': 10,
+    'marketing_manager': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
@@ -1704,6 +1706,93 @@ def _has_any_role(role, allowed_roles) -> bool:
         return False
     normalized_allowed = {_normalize_user_role(item) for item in (allowed_roles or [])}
     return role_norm in normalized_allowed
+
+
+# Отдел «Маркетинг»: рядовой сотрудник — НАБЛЮДАТЕЛЬ качества обслуживания.
+#
+# Решение владельца 04.09.2026. Ему открыты «Курсы», «Журнал оценок», «Деление
+# звонков», «ИИ-оценка» и «Лиды OLX» — те же данные, что уже видит глава его
+# отдела («ИИ-оценка» и «Лиды OLX» открыты главе «Маркетинга» с 06.08.2026), но
+# без права что-либо менять: оценивать, запускать распределение, отвечать
+# кандидату в OLX и подключать кабинеты наблюдатель не может. Право на действие
+# каждый раздел проверяет отдельно — здесь только «пускать ли смотреть».
+#
+# Признак — ЧЛЕНСТВО В ОТДЕЛЕ вместе с должностью, а не одна должность: тот же
+# приём, что у «Отметок» (GROUP_LATE_BOT_FULL_DEPARTMENT_CODE). Проверка по
+# одной должности открыла бы разделы человеку, которого перевели из маркетинга
+# в другой отдел, — должность у него осталась бы прежней до правки карточки.
+#
+# Главу отдела эта функция НЕ покрывает намеренно: у него свои, более широкие
+# двери (_is_ai_qa_department_head, olx_amo.access.heads_section_department), и
+# смешивать их значило бы дать наблюдателю права руководителя.
+# Зеркало на фронте — isMarketingObserver в src/App.jsx.
+MARKETING_OBSERVER_DEPARTMENT_CODE = 'marketing'
+MARKETING_OBSERVER_ROLE = 'marketing_manager'
+
+
+def _request_is_read_only():
+    """Текущий HTTP-запрос ничего не меняет.
+
+    Нужен наблюдателю «Маркетинга»: разделы ему открыты на просмотр, а часть
+    проверок доступа (_authorize_operator_scope, _ensure_call_access_for_requester)
+    общая для чтения и записи и зовётся из двух десятков мест. Граница по методу
+    запроса — одно место вместо перечня ручек, который разошёлся бы при первой
+    новой. Вне запроса (фоновые задачи) отвечаем False: неизвестный контекст —
+    не повод считать вызов безопасным.
+    """
+    try:
+        return bool(request) and request.method in ('GET', 'HEAD', 'OPTIONS')
+    except Exception:
+        return False
+
+
+def _is_marketing_observer(requester_id, role=None):
+    """Рядовой сотрудник отдела «Маркетинг». role — если он уже под рукой.
+
+    Должность проверяется ПЕРВОЙ и без обращения к базе: функция стоит на общих
+    проверках доступа к звонку, а те зовутся в цикле по списку — для всех
+    остальных ролей выход отсюда бесплатный. Самому наблюдателю ответ
+    запоминается на время запроса (flask.g): отдел за один запрос не меняется.
+    Вне контекста запроса кеша нет, и это нормально — там и вызовов нет.
+    """
+    if requester_id is None:
+        return False
+    if role is None:
+        try:
+            user = db.get_user(id=requester_id)
+        except Exception:
+            return False
+        role = user[3] if user else None
+    if _normalize_user_role(role) != MARKETING_OBSERVER_ROLE:
+        return False
+
+    cache_key = ('_marketing_observer_cache', int(requester_id))
+    try:
+        cached = getattr(g, '_marketing_observer_cache', None)
+    except Exception:
+        cached = None
+    if isinstance(cached, dict) and cache_key[1] in cached:
+        return cached[cache_key[1]]
+
+    if _headed_department_id(requester_id) is not None:
+        verdict = False
+    else:
+        try:
+            department_id = db.get_user_department_id(requester_id)
+            department = (db.get_department_by_id(int(department_id)) or {}) if department_id is not None else {}
+        except Exception:
+            department = {}
+        verdict = (str(department.get('code') or '').strip().lower()
+                   == MARKETING_OBSERVER_DEPARTMENT_CODE)
+
+    try:
+        if not isinstance(cached, dict):
+            cached = {}
+            g._marketing_observer_cache = cached
+        cached[cache_key[1]] = verdict
+    except Exception:
+        pass
+    return verdict
 
 
 def _is_super_admin_role(role) -> bool:
@@ -2032,6 +2121,12 @@ def _authorize_operator_scope(requester, requester_id, operator_id):
             return False
     if _is_global_admin_requester(role, requester_id) or role == 'trainer':
         return True
+    # Наблюдатель «Маркетинга»: «Журнал оценок» выдан ему по всем отделам —
+    # оценивают звонки СЗоВ и ОП, а своих операторов у «Маркетинга» нет.
+    # Только на чтение: через эту же проверку ходят ручки, которые оценку
+    # ставят и правят.
+    if _is_marketing_observer(requester_id, role):
+        return _request_is_read_only()
     if role == 'operator':
         return requester_id == operator_id
     # Супервайзер / глава отдела — только операторы СВОЕГО отдела
@@ -2264,6 +2359,10 @@ def _ensure_call_access_for_requester(call_operator_id, requester, requester_id)
             return False
     if _is_global_admin_requester(role, requester_id):
         return True
+    # Наблюдатель «Маркетинга»: та же граница, что у _authorize_operator_scope —
+    # звонок он открывает по всем отделам, но только на прослушивание и чтение.
+    if _is_marketing_observer(requester_id, role):
+        return _request_is_read_only()
     if role == 'operator':
         return requester_id == call_operator_id
     if role == 'sv':
@@ -2840,7 +2939,8 @@ SENSITIVE_ACCESS_ROLE_LABELS = {
     'trainee': 'Стажер',
     'trainer': 'Тренер',
     'hr_manager': 'HR-менеджер',
-    'accounting_manager': 'Менеджер бухгалтерии'
+    'accounting_manager': 'Менеджер бухгалтерии',
+    'marketing_manager': 'Менеджер маркетинга'
 }
 try:
     SENSITIVE_ACCESS_NOTIFICATION_TZ = ZoneInfo('Asia/Almaty')
@@ -4527,8 +4627,9 @@ def _resolve_requester():
 def _back_office_task_employee_role(requester_id, role):
     """Роль бэк-офиса, если «Задачи» выданы человеку как РЯДОВОМУ своего отдела.
 
-    Возвращает 'hr_manager'/'accounting_manager' — ту роль, под которой слой
-    данных знает рядового сотрудника Бухгалтерии и HR, — либо None.
+    Возвращает 'hr_manager'/'accounting_manager'/'marketing_manager' — ту роль,
+    под которой слой данных знает рядового сотрудника Бухгалтерии, HR или
+    Маркетинга, — либо None.
 
     Проверяем ОТДЕЛ, а не только роль: остатки на 'operator' и 'trainee' (их
     успели завести до появления собственных ролей) по роли неотличимы от
@@ -4599,8 +4700,12 @@ def _surveys_route_guard():
     headed_dept_id = _headed_department_id(requester_id)
     if headed_dept_id is not None and not _is_super_admin_role(role):
         role = 'sv'
-    if not _has_any_role(role, ('operator', 'trainer', 'sv', 'admin', 'super_admin')):
-        return None, None, None, jsonify({"error": "Only admin, sv, trainer and operator can access surveys"}), 403
+    # Проверка ТОЧНАЯ, не по уровню: _has_any_role сверяет членство в кортеже,
+    # и десятка в ROLE_HIERARCHY сюда роль не проводит. Отсюда 'marketing_manager'
+    # отдельной строкой — раздел выдан ему картой разделов отдела.
+    if not _has_any_role(role, ('operator', 'trainer', 'sv', 'admin', 'super_admin',
+                                MARKETING_OBSERVER_ROLE)):
+        return None, None, None, jsonify({"error": "Only admin, sv, trainer, operator and marketing employees can access surveys"}), 403
 
     g.survey_scope_department_id = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)
     return requester_id, requester, role, None, None
@@ -4948,7 +5053,13 @@ def _ai_qa_guard():
     """Возвращает (requester_id, error_response|None). Доступ: супер-админ, главы
     отделов из AI_QA_HEAD_DEPARTMENT_CODES (ОП, СЗоВ, маркетинг), whitelist,
     а также СВ отдела продаж (данные ему режет _ai_qa_direction_scope —
-    только собственные направления)."""
+    только собственные направления).
+
+    Рядовой сотрудник «Маркетинга» проходит сюда НАБЛЮДАТЕЛЕМ — только на
+    чтение. Через этот же гард ходят разбор (POST /adjudicate), его уточнение и
+    запись настроек критериев: разбор влияет на все будущие оценки, и отдавать
+    его наблюдателю нельзя. Поэтому граница не по роутам, а по методу запроса —
+    одно место вместо перечня ручек, который разошёлся бы при первой новой."""
     requester_id = getattr(g, 'user_id', None)
     if requester_id is not None and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
         return requester_id, None
@@ -4963,6 +5074,10 @@ def _ai_qa_guard():
             dept_id = db.get_user_department_id(requester_id)
             if dept_id is not None and int(dept_id) == AI_QA_OP_DEPARTMENT_ID:
                 return requester_id, None
+        if _is_marketing_observer(requester_id, role):
+            if _request_is_read_only():
+                return requester_id, None
+            return None, (jsonify({"error": "Раздел открыт вам только на просмотр"}), 403)
     return None, (jsonify({"error": "forbidden"}), 403)
 
 
@@ -4978,6 +5093,10 @@ def _verifier_chats_guard():
     базовой admin-ролью область строго его отдел (_is_global_admin_requester),
     и чужая переписка ему не нужна. Зеркало на фронте —
     canAccessVerifierChatsForUser в src/App.jsx.
+
+    Единственное ВЫЧИТАНИЕ из аудитории «ИИ-оценки» — наблюдатель «Маркетинга»:
+    разборы звонков ему открыты, переписка Верификаторов в выданный ему перечень
+    разделов не входит. Без явного вычета он прошёл бы через _ai_qa_guard ниже.
     """
     requester_id = getattr(g, 'user_id', None)
     if requester_id is not None:
@@ -4985,6 +5104,8 @@ def _verifier_chats_guard():
         role = _normalize_user_role(user[3]) if user else None
         if _is_global_admin_requester(role, requester_id):
             return requester_id, None
+        if _is_marketing_observer(requester_id, role):
+            return None, (jsonify({"error": "forbidden"}), 403)
     return _ai_qa_guard()
 
 
@@ -5002,6 +5123,12 @@ def _ai_qa_direction_scope(requester_id):
     if _is_super_admin_role(role):
         return None
     if _is_ai_qa_department_head(requester_id):
+        return None
+    # Наблюдатель «Маркетинга» смотрит те же разборы, что глава его отдела, —
+    # по направлениям его не режем: своих направлений у отдела нет вовсе, и
+    # get_supervisor_direction_ids вернул бы ему пустой список, то есть пустой
+    # раздел вместо отказа.
+    if _is_marketing_observer(requester_id):
         return None
     try:
         return db.get_supervisor_direction_ids(requester_id, department_id=AI_QA_OP_DEPARTMENT_ID)
@@ -13008,7 +13135,11 @@ def api_admin_departments():
                 ]
                 return jsonify({"status": "success", "departments": departments}), 200
             # Список отделов доступен админам (для назначения главы и т.п.)
-            if not (_is_admin_role(requester_role) or requester_role == 'trainer'):
+            # и наблюдателю «Маркетинга»: «Журнал оценок» и «Деление звонков»
+            # рисуют по нему селектор отдела. Это справочник имён отделов —
+            # данных сотрудников в нём нет.
+            if not (_is_admin_role(requester_role) or requester_role == 'trainer'
+                    or _is_marketing_observer(requester_id, requester_role)):
                 return jsonify({"error": "Forbidden"}), 403
             departments = db.get_departments()
             return jsonify({"status": "success", "departments": departments}), 200
@@ -14331,7 +14462,10 @@ def get_sv_list():
             return jsonify({"error": message}), status_code
         requester_role = _normalize_user_role(requester[3])
         headed_dept_ids = _headed_department_ids(requester_id)
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_ids):
+        # Наблюдатель «Маркетинга»: список СВ нужен «Журналу оценок», чтобы
+        # выбрать, чьи оценки смотреть. Ручка только на чтение.
+        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)
+                or headed_dept_ids or _is_marketing_observer(requester_id, requester_role)):
             return jsonify({"error": "Only admins, supervisors or department heads can access supervisors list"}), 403
 
         is_global_admin = _is_global_admin_requester(requester_role, requester_id)
@@ -18025,8 +18159,8 @@ def add_user():
 
         role = _normalize_user_role(data.get('role') or 'operator')
         if role not in ('operator', 'trainee', 'trainer', 'sv', 'admin',
-                        'hr_manager', 'accounting_manager'):
-            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, sv, admin, hr_manager, accounting_manager"}), 400
+                        'hr_manager', 'accounting_manager', 'marketing_manager'):
+            return jsonify({"error": "Unsupported role. Allowed: operator, trainee, trainer, sv, admin, hr_manager, accounting_manager, marketing_manager"}), 400
         if role == 'admin' and requester_role != 'super_admin':
             return jsonify({"error": "Only super admins can create admins"}), 403
         if role == 'sv' and not _is_admin_role(requester_role):
@@ -18438,6 +18572,11 @@ def add_user():
             role_label = 'Супервайзер'
         elif role == 'trainee':
             role_label = 'Стажер'
+        elif role in SENSITIVE_ACCESS_ROLE_LABELS:
+            # Роли отделов без линии (HR, бухгалтерия, маркетинг). Фолбэк
+            # 'Оператор' врал бы про них: «Оператор Иван добавлен» вместо
+            # «Менеджер маркетинга Иван добавлен».
+            role_label = SENSITIVE_ACCESS_ROLE_LABELS[role]
         else:
             role_label = 'Оператор'
         return jsonify({
@@ -18463,7 +18602,13 @@ def get_directions():
             return jsonify({"error": message}), status_code
         role = _normalize_user_role(requester[3])
         headed_dept_ids = _headed_department_ids(requester_id)
-        if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator' or headed_dept_ids):
+        # 'operator' здесь означает «рядовой»: справочник направлений нужен
+        # рядовому в «Опросах» и «Конкурсах», а наблюдателю «Маркетинга» — ещё
+        # и в «Журнале оценок». Литерал не расширяем до всех рядовых ролей:
+        # кадровику и бухгалтеру направления не нужны, а лишний список — лишние
+        # данные.
+        if not (_is_admin_role(role) or _is_supervisor_role(role) or role == 'operator'
+                or headed_dept_ids or _is_marketing_observer(requester_id, role)):
             return jsonify({"error": "Only admins, supervisors, department heads and operators can access directions"}), 403
 
         # Скоуп по отделу: админ/супер-админ видят все направления (опц. фильтр
@@ -18662,6 +18807,16 @@ def _scoped_groups_for_requester(
             return db.list_groups(include_archived=include_archived, department_id=sv_dept), None
         my_ids = set(db.get_supervisor_group_ids(requester_id))
         return [g for g in db.list_groups(include_archived=include_archived) if g['id'] in my_ids], None
+    # Наблюдатель «Маркетинга» смотрит «Журнал оценок» по группам ЧУЖИХ отделов:
+    # своих групп у «Маркетинга» нет вовсе, и ветка «свой отдел» отдала бы ему
+    # пустой список. Выбор отдела остаётся за параметром запроса — как у админа.
+    if _is_marketing_observer(requester_id, role):
+        department_id = (
+            int(department_id_arg)
+            if department_id_arg and str(department_id_arg).isdigit()
+            else None
+        )
+        return db.list_groups(include_archived=include_archived, department_id=department_id), None
     return [], (jsonify({"error": "Forbidden"}), 403)
 
 
@@ -19255,7 +19410,13 @@ def get_sv_data():
 
         requester_role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
-        if not (_is_admin_role(requester_role) or requester_role == 'sv' or headed_dept_id is not None):
+        # Наблюдатель «Маркетинга» читает журнал наравне с главой своего отдела
+        # (тому он открыт как главе — headed_dept_id). Раздел ему выдан на
+        # просмотр: оценивать, править и отвечать на заявки он не может — это
+        # решают отдельные ручки, каждая со своей проверкой.
+        marketing_observer = _is_marketing_observer(requester_id, requester_role)
+        if not (_is_admin_role(requester_role) or requester_role == 'sv'
+                or headed_dept_id is not None or marketing_observer):
             return jsonify({"error": "Forbidden"}), 403
 
         department_head_self_scope = False
@@ -19312,7 +19473,11 @@ def get_sv_data():
                 operators = []
         else:
             # Изоляция отделов: супервайзер и глава отдела видят данные только своего отдела.
-            if not _is_global_admin_requester(requester_role, requester_id):
+            # Наблюдатель «Маркетинга» из этой изоляции выведен: журнал он смотрит
+            # по ЧУЖИМ отделам (оценивают звонки СЗоВ и ОП), а своего отдела в
+            # выборе нет вовсе — граница по своему отделу дала бы ему 403 на
+            # каждого супервайзера.
+            if not (_is_global_admin_requester(requester_role, requester_id) or marketing_observer):
                 scope_dept = _department_scope_id_for_requester(requester_id)
                 target_dept = db.get_user_department_id(user_id)
                 is_department_head_self_scope = headed_dept_id is not None and user_id == requester_id
@@ -24966,7 +25131,10 @@ def call_distribution_settings_endpoint():
         is_admin = _is_admin_role(role)
         is_head = _headed_department_id(requester_id) is not None
         is_sv = _is_supervisor_role(role)
-        if not (is_admin or is_head or is_sv):
+        # Наблюдатель «Маркетинга» — только на чтение: can_edit ниже считается
+        # через _is_global_admin_requester и для него всегда False, так что PUT
+        # он не пройдёт даже войдя сюда.
+        if not (is_admin or is_head or is_sv or _is_marketing_observer(requester_id, role)):
             return jsonify({"error": "Forbidden"}), 403
         # Настройки распределения — глобальный синглтон (общий для всех отделов),
         # поэтому менять их может только глобальный админ/супер-админ, не глава отдела.
@@ -25008,21 +25176,27 @@ SIP_BINOTEL_DEPARTMENT_CODES = frozenset({'tez'})
 
 
 # Отделы без операторских полей: ни направлений, ни групп, ни SIP-номера.
+# «Маркетинг» здесь по решению владельца (04.09.2026): его сотрудники на линии
+# не сидят, направлений и групп у отдела нет, а вместо них человека определяет
+# «Должность» — ровно как в Бухгалтерии и HR.
 # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
-OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr'})
+OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})
 
-# Рядовой сотрудник бэк-офиса заводится не оператором: 'operator' в этой
+# Рядовой сотрудник отдела без линии заводится не оператором: 'operator' в этой
 # системе означает человека на линии — с направлением, группой, часами и
-# оценками. Зеркалит BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT в
+# оценками. «Маркетинг» добавлен по решению владельца (04.09.2026) — отдел
+# устроен как бэк-офис: ни направлений, ни групп, ни телефонии.
+# Зеркалит BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT в
 # src/utils/departmentViews.js.
 BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE = {
     'accounting': 'accounting_manager',
     'hr': 'hr_manager',
+    'marketing': 'marketing_manager',
 }
 BACK_OFFICE_EMPLOYEE_ROLES = frozenset(BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.values())
 
-# Роли, которые в отделах бэк-офиса означают рядового сотрудника. Кроме двух
-# собственных ролей сюда входят 'operator' и 'trainee': на них успели завести
+# Роли, которые в отделах без линии означают рядового сотрудника. Кроме
+# собственных ролей отделов сюда входят 'operator' и 'trainee': на них успели завести
 # людей до появления своих должностей, и карта разделов
 # (DEPARTMENT_VIEW_ALLOWLIST) до сих пор держит для них те же самые разделы.
 # Пропуск в раздел «Задачи» такой роли даёт только вместе с отделом — см.
@@ -26189,8 +26363,15 @@ def _call_distribution_resolve_department(requester_id, role, requested_departme
     было до появления селектора). Глава отдела и СВ видят ТОЛЬКО свой отдел:
     параметр запроса игнорируется, а не отдаёт 403, — селектора у них нет, и
     ссылка с чужим department_id должна открывать их собственный отдел.
+
+    Наблюдатель «Маркетинга» идёт по ветке селектора, а не «свой отдел»: своего
+    отдела в списке нет и быть не может — он же ниже и отфильтровывается как
+    отдел без телефонии и без оценок. Ветка «свой отдел» отдала бы ему пустой
+    экран при каждом входе. Запускать распределение он всё равно не может:
+    /api/call_distribution/run проверяет админа или главу отдельно.
     """
-    if not _is_global_admin_requester(role, requester_id):
+    if not (_is_global_admin_requester(role, requester_id)
+            or _is_marketing_observer(requester_id, role)):
         own_dept_id = _department_scope_id_for_requester(requester_id)
         return own_dept_id, [o for o in options if o['id'] == own_dept_id]
 
@@ -26227,7 +26408,9 @@ def call_distribution_status():
         is_admin = _is_admin_role(role)
         is_head = _headed_department_id(requester_id) is not None
         is_sv = _is_supervisor_role(role)
-        if not (is_admin or is_head or is_sv):
+        # Наблюдатель «Маркетинга»: раздел на просмотр. Отдел ему выбирает
+        # _call_distribution_resolve_department — тот же селектор, что у админа.
+        if not (is_admin or is_head or is_sv or _is_marketing_observer(requester_id, role)):
             return jsonify({"error": "Forbidden"}), 403
 
         month = request.args.get('month') or datetime.now().strftime('%Y-%m')
@@ -48050,7 +48233,10 @@ async def show_operator_evaluations(message: types.Message):
 # Остальной код остается аналогичным предыдущей версии, но с использованием базы данных
 # ... (код для удаления СВ, изменения таблиц, просмотра оценок и т.д.) ...
 
-LMS_LEARNER_ROLES = ('operator', 'trainee')
+# Рядовой маркетолог — УЧЕНИК: раздел «Курсы» он проходит, а не ведёт.
+# Побочный эффект осознанный: вместе с доступом он появляется в списках
+# учеников у СВ, тренеров и админов — иначе его прохождение никто бы не видел.
+LMS_LEARNER_ROLES = ('operator', 'trainee', 'marketing_manager')
 LMS_MANAGER_ROLES = ('sv', 'trainer', 'admin', 'super_admin')
 LMS_FULL_ADMIN_ROLES = ('admin', 'super_admin')
 LMS_ALLOWED_ACCOUNTS = (
@@ -48064,6 +48250,12 @@ def _lms_is_allowed_account(user_id, role):
     # Managers (sv/trainer/admin/super_admin) should have LMS access by role.
     # Keep per-account allowlist for learner-side pilot accounts.
     if role_norm in LMS_MANAGER_ROLES:
+        return True
+    # Отдел «Маркетинг»: раздел выдан отделу целиком, а не отдельным аккаунтам,
+    # поэтому здесь проверка по отделу, а не строка в LMS_ALLOWED_ACCOUNTS.
+    # Без этой ветки роль упиралась бы в 403 ещё до разбора scope, и «Курсы»
+    # открывались бы пустыми при верном LMS_LEARNER_ROLES.
+    if role_norm == MARKETING_OBSERVER_ROLE and _is_marketing_observer(user_id, role_norm):
         return True
     try:
         uid = int(user_id)
