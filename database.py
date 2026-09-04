@@ -27459,6 +27459,10 @@ class Database:
                     LEFT JOIN user_sip_settings s ON s.user_id = u.id
                     LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                     WHERE NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
+                      -- Уволенный номер за собой не держит: иначе освободившийся
+                      -- добавочный не выдать новому сотруднику, а список раздела
+                      -- ушедших и так не показывает.
+                      AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
                     UNION ALL
                     -- У автодозвона может быть своя АТС: его домен отдела,
                     -- иначе домен основного аккаунта того же отдела.
@@ -27473,12 +27477,14 @@ class Database:
                     JOIN users u ON u.id = s.user_id
                     LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                     WHERE NULLIF(TRIM(COALESCE(s.autodial_number, '')), '') IS NOT NULL
+                      AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
                 )
                 SELECT w.num, w.dom, t.id, t.name, t.kind
                 FROM wanted w
                 JOIN taken t ON t.num = w.num AND t.dom = w.dom
                 WHERE w.dom <> '' AND t.id <> ALL(%s)
-            """, (numbers, domains, exclude))
+            """, (numbers, domains, list(self._SIP_INACTIVE_STATUSES),
+                  list(self._SIP_INACTIVE_STATUSES), exclude))
             rows = cur.fetchall()
         owners = {}
         for number, domain, owner_id, owner_name, kind in rows:

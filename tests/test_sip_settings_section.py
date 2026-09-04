@@ -995,7 +995,23 @@ class FindSipNumberOwnersTests(unittest.TestCase):
         self.assertIn("JOIN taken t ON t.num = w.num AND t.dom = w.dom", sql)
         self.assertEqual(['1024', '2024'], params[0])
         self.assertEqual(['pbx.other', ''], params[1])   # регистр снят
-        self.assertEqual([41], params[2])
+        # Между доменами и exclude приехали статусы уволенных: номер ушедшего
+        # сотрудника не считается занятым, иначе его не выдать новому.
+        self.assertEqual(['fired', 'dismissal'], params[2])
+        self.assertEqual(['fired', 'dismissal'], params[3])
+        self.assertEqual([41], params[4])
+
+    def test_a_fired_employee_no_longer_holds_a_number(self):
+        """Уволенный не должен занимать добавочный.
+
+        В Тез КЦ на ушедших висели 902, 908, 910, 911, 914, 922, 924, 925, 926,
+        927, и живому сотруднику нельзя было выдать освободившийся номер: раздел
+        уволенных не показывает, а проверка занятости их учитывала — конфликт
+        приходил из-за человека, которого в списке нет.
+        """
+        sql, params = self._call([('924', 'sip52.binotel.com')])
+        self.assertEqual(2, sql.count("LOWER(COALESCE(u.status, '')) <> ALL(%s)"))
+        self.assertEqual(['fired', 'dismissal'], params[2])
 
     def test_domain_resolves_personal_then_department(self):
         """Цепочка укоротилась до двух звеньев: персональное → отдела.
