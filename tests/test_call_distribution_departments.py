@@ -9,6 +9,7 @@ import ast
 import textwrap
 import unittest
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from tests import source_cache
 
@@ -174,10 +175,14 @@ class BinotelCandidateFilterTests(unittest.TestCase):
 
     def test_future_days_are_not_requested(self):
         """Будущие дни — пустой ответ и лишняя секунда лимита Binotel."""
-        current = datetime.now().strftime("%Y-%m")
-        days = self.ns["_binotel_eval_month_days"](current)
+        # «Сегодня» функция считает по Asia/Almaty — там работают операторы,
+        # и по их дате Binotel отдаёт звонки. Сверяться с часами раннера нельзя:
+        # в CI они в UTC, и каждый день с 19:00 UTC (полночь в Алматы) тест
+        # падал на ровном месте, хотя код вёл себя правильно.
+        today_almaty = datetime.now(ZoneInfo("Asia/Almaty")).date()
+        days = self.ns["_binotel_eval_month_days"](today_almaty.strftime("%Y-%m"))
         self.assertTrue(days)
-        self.assertLessEqual(days[-1], date.today())
+        self.assertLessEqual(days[-1], today_almaty)
 
 
 class CallDistributionBackendWiringTests(unittest.TestCase):
