@@ -49,7 +49,7 @@ import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import AssistantOrb from './components/assistant/AssistantOrb';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSegmented, IosToggle } from './components/ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
 // Только сам пикер: minutesToTime/timeToMinutes у модуля свои, а в App.jsx
 // функции с такими именами уже есть — импорт «звёздочкой» их бы перекрыл.
 import { IosTimePicker } from './components/ui/TimePicker';
@@ -53986,67 +53986,80 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             </SimpleModal>
                         )}
-                        {/* Понижение СВ до оператора. Группа обязательна: без неё
-                            у человека не будет ни супервайзера, ни учёта часов. */}
-                        {demotionTarget && (
-                        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50 p-4">
-                            <div className="bg-white w-full max-w-md p-6 rounded-2xl shadow-lg ring-1 ring-slate-200/70">
-                            <h2 className="text-lg font-semibold text-slate-900">
-                                Перевести в операторы
-                            </h2>
-                            <p className="mt-1 text-sm text-slate-500">
-                                {demotionTarget.name}
-                            </p>
-
-                            {demotionGroupImpact.length > 0 && (
-                            <div className="mt-4 rounded-xl bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
-                                {demotionGroupImpact.map((group) => (
-                                <div key={group.id} className="py-1 first:pt-0 last:pb-0">
-                                    <div className="text-slate-700">{group.name}</div>
-                                    <div className={group.successor ? 'text-slate-500' : 'text-amber-600'}>
-                                        {group.successor
-                                            ? `перейдёт к ${group.successor.name}`
-                                            : 'останется без супервайзера'}
-                                    </div>
-                                </div>
-                                ))}
-                            </div>
+                        {/* Перевод СВ в операторы. Группа обязательна: без неё у
+                            человека не будет ни супервайзера, ни учёта часов. */}
+                        <IosModal
+                            open={!!demotionTarget}
+                            onClose={isDemoting ? undefined : closeDemotionModal}
+                            title="Перевести в операторы"
+                            subtitle={demotionTarget?.name || ''}
+                            maxWidth="max-w-md"
+                            footer={(
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={closeDemotionModal}
+                                        disabled={isDemoting}
+                                        className={iosBtnSecondary}
+                                    >
+                                        Отмена
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={demoteSupervisorToOperator}
+                                        disabled={isDemoting || !demotionGroupId}
+                                        className={iosBtnPrimary}
+                                    >
+                                        {isDemoting && <FaIcon className="fas fa-spinner fa-spin"></FaIcon>}
+                                        {isDemoting ? 'Перевожу…' : 'Перевести'}
+                                    </button>
+                                </>
                             )}
+                        >
+                            <div className="space-y-4">
+                                {demotionGroupImpact.length > 0 && (
+                                    <IosSection
+                                        title="Его группы после перевода"
+                                        hint={demotionGroupImpact.some((group) => !group.successor)
+                                            ? 'Группе без супервайзера назначьте нового в разделе «Группы».'
+                                            : null}
+                                    >
+                                        {demotionGroupImpact.map((group) => (
+                                            <div key={group.id} className="flex items-center justify-between gap-3">
+                                                <span className="min-w-0 flex-1 truncate text-[14px] text-slate-900">
+                                                    {group.name}
+                                                </span>
+                                                <IosBadge tone={group.successor ? 'slate' : 'amber'}>
+                                                    {group.successor ? group.successor.name : 'без супервайзера'}
+                                                </IosBadge>
+                                            </div>
+                                        ))}
+                                    </IosSection>
+                                )}
 
-                            <label className="mt-4 block text-sm font-medium text-slate-700">
-                                Группа, в которой он станет оператором
-                            </label>
-                            <select
-                                value={demotionGroupId}
-                                onChange={(e) => setDemotionGroupId(e.target.value)}
-                                disabled={isDemoting}
-                                className="mt-1.5 w-full p-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                                <option value="">Выберите группу</option>
-                                {demotionGroupOptions.map((group) => (
-                                    <option key={group.id} value={group.id}>{group.name}</option>
-                                ))}
-                            </select>
-
-                            <div className="mt-6 flex justify-end gap-2">
-                                <button
-                                    onClick={closeDemotionModal}
-                                    disabled={isDemoting}
-                                    className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 active:scale-[0.98] transition disabled:opacity-60"
+                                <IosSection
+                                    title="Группа, в которой он станет оператором"
+                                    hint={demotionGroupImpact.some((group) => !group.successor
+                                        && String(group.id) === String(demotionGroupId))
+                                        ? 'Это его собственная группа: пока в ней не появится супервайзер, его не будет и у него самого.'
+                                        : null}
                                 >
-                                    Отмена
-                                </button>
-                                <button
-                                    onClick={demoteSupervisorToOperator}
-                                    disabled={isDemoting || !demotionGroupId}
-                                    className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition disabled:cursor-not-allowed disabled:opacity-60"
-                                >
-                                    {isDemoting ? 'Перевод...' : 'Перевести'}
-                                </button>
+                                    <CustomSelect
+                                        value={demotionGroupId}
+                                        onChange={(value) => setDemotionGroupId(value)}
+                                        options={demotionGroupOptions.map((group) => ({
+                                            value: String(group.id),
+                                            label: group.name,
+                                        }))}
+                                        placeholder={demotionGroupOptions.length
+                                            ? 'Выберите группу'
+                                            : 'Активных групп в отделе нет'}
+                                        disabled={isDemoting || !demotionGroupOptions.length}
+                                        searchable={demotionGroupOptions.length > 6}
+                                    />
+                                </IosSection>
                             </div>
-                            </div>
-                        </div>
-                        )}
+                        </IosModal>
                         {showUserEditModal && (
                             <Suspense fallback={null}>
                                 <UserEditModal
