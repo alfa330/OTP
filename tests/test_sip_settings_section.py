@@ -126,7 +126,7 @@ def _database_namespace(method_names):
             exec(_source_of(node, DATABASE_SOURCE), ns)
         if isinstance(node, ast.FunctionDef) and node.name in (
             "normalize_sip_identifier", "build_sip_password", "parse_sip_flag",
-            "normalize_sip_provider",
+            "normalize_sip_provider", "parse_sip_delay",
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
     for node in DATABASE_CLASS.body:
@@ -204,6 +204,12 @@ OPERATOR_STATE = {
     "department_autodial_server": "", "department_autodial_base_password": "",
     # Вход в FOP2 включён у всех, кому его отдельно не выключали.
     "fop2_enabled": True,
+    # Автопринятие звонка — наоборот: выключено у всех, кому его не включали.
+    # Асимметрия с соседним флагом намеренная и держит половину проверок ниже:
+    # строку в user_sip_settings у FOP2 оправдывает выключение, у автопринятия —
+    # включение.
+    "auto_answer": False,
+    "auto_answer_delay": 2,
     # Провайдер отдела: локальная АТС по умолчанию, Binotel — только у Тез КЦ.
     "department_provider": "asterisk",
     "sip_login": "",
@@ -430,6 +436,99 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         snapshot = json.loads(params[2])
         self.assertIs(False, snapshot["fop2_enabled"])
 
+    # ── Автопринятие звонка ──────────────────────────────────────────────
+    # Дефолт у него ОБРАТНЫЙ фопешному (выключено), поэтому четвёрка проверок
+    # ниже зеркалит четвёрку про FOP2 с перевёрнутыми условиями. Скопировать
+    # условие «строку держит выключенный флаг» сюда как есть — значит удалить
+    # строку всем, кто автопринятие включил, и молча вернуть их к дефолту.
+
+    def test_enabling_the_auto_answer_alone_keeps_the_row(self):
+        """Включённое автопринятие — само по себе повод хранить строку.
+
+        У FOP2 строку оправдывает выключение (дефолт колонки TRUE), здесь —
+        включение (дефолт FALSE). Иначе запись с одним лишь auto_answer=TRUE
+        ушла бы в DELETE, и оператор снова получал бы обычные звонки.
+        """
+        self._save({"auto_answer": True})
+        calls = self.db.cursor.calls
+        self.assertFalse(any("DELETE FROM user_sip_settings" in s for s, _ in calls))
+        sql, params = next(
+            (s, p) for s, p in calls if "INSERT INTO user_sip_settings" in s
+        )
+        self.assertIn("auto_answer", sql)
+        # Автопринятие и задержка встали сразу за флагом FOP2 (params[7]) и до
+        # changed_by — так все прежние позиционные проверки остались валидными.
+        self.assertIs(True, params[8])
+        self.assertEqual(2, params[9])
+
+    def test_only_the_auto_answer_change_is_not_treated_as_no_op(self):
+        """PUT, где поменялось только автопринятие, обязан дойти до базы."""
+        self._save({"auto_answer": True})
+        self.assertNotEqual([], self.db.cursor.calls)
+
+    def test_turning_the_auto_answer_off_releases_the_row(self):
+        """Автопринятие выключили, других персональных настроек нет — строка не нужна."""
+        self.current["auto_answer"] = True
+        self._save({"auto_answer": False})
+        self.assertTrue(any("DELETE FROM user_sip_settings" in s for s in self._sql()))
+
+    def test_a_personal_delay_keeps_the_row_even_with_the_flag_off(self):
+        """Выключили автопринятие — персональная задержка не должна пропасть.
+
+        Строку держит отличие задержки от дефолта, а не сам флаг: иначе
+        временное выключение стирало бы настроенные секунды, и при повторном
+        включении оператор получал бы дефолтные два.
+        """
+        self.current["auto_answer"] = True
+        self.current["auto_answer_delay"] = 5
+        self._save({"auto_answer": False})
+        calls = self.db.cursor.calls
+        self.assertFalse(any("DELETE FROM user_sip_settings" in s for s, _ in calls))
+        _, params = next(
+            (s, p) for s, p in calls if "INSERT INTO user_sip_settings" in s
+        )
+        self.assertIs(False, params[8])
+        self.assertEqual(5, params[9])
+
+    def test_the_delay_from_the_form_arrives_as_a_number(self):
+        """Форма присылает строку, в SMALLINT-колонку обязано уехать число.
+
+        Через _field() задержку гонять нельзя: сравнение '5' != 5 в блоке
+        «что-то поменялось» давало бы «поменялось» всегда, а в снимке истории
+        появилась бы строка вместо числа.
+        """
+        self._save({"auto_answer": True, "auto_answer_delay": " 5 "})
+        _, params = next(
+            (s, p) for s, p in self.db.cursor.calls if "INSERT INTO user_sip_settings" in s
+        )
+        self.assertEqual(5, params[9])
+        self.assertIsInstance(params[9], int)
+
+    def test_an_absurd_delay_is_clamped_instead_of_refused(self):
+        """Опечатка в секундах не должна давать «минуту окна без кнопок».
+
+        Верх зажимаем потолком, низ — нулём (ноль легален: «отвечать сразу»).
+        """
+        self._save({"auto_answer": True, "auto_answer_delay": 9999})
+        _, params = next(
+            (s, p) for s, p in self.db.cursor.calls if "INSERT INTO user_sip_settings" in s
+        )
+        self.assertEqual(self.ns["SIP_AUTO_ANSWER_DELAY_MAX"], params[9])
+
+    def test_the_auto_answer_is_written_to_history(self):
+        """Настройка меняет поведение телефона на глазах у клиента.
+
+        «Кто включил» спрашивают первым делом, поэтому и флаг, и секунды идут
+        в снимок как есть — и секунды именно числом (историю читают json'ом).
+        """
+        self._save({"auto_answer": True, "auto_answer_delay": "3"})
+        _, params = next(
+            (s, p) for s, p in self.db.cursor.calls if "INSERT INTO sip_config_history" in s
+        )
+        snapshot = json.loads(params[2])
+        self.assertIs(True, snapshot["auto_answer"])
+        self.assertEqual(3, snapshot["auto_answer_delay"])
+
     def test_new_columns_are_appended_and_never_wedged_into_the_middle(self):
         """_sip_operator_row читает row по индексам — порядок колонок и есть контракт.
 
@@ -447,6 +546,10 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self.assertTrue(columns[21].endswith("AS fop2_enabled"), columns[21])
         self.assertTrue(columns[22].endswith("AS department_provider"), columns[22])
         self.assertTrue(columns[23].endswith("AS sip_login"), columns[23])
+        # Автопринятие дописано перед признаком пароля кабинета: тот обязан
+        # остаться последним (это же требует комментарий в самом SQL).
+        self.assertTrue(columns[27].endswith("AS auto_answer"), columns[27])
+        self.assertTrue(columns[28].endswith("AS auto_answer_delay"), columns[28])
         self.assertTrue(
             columns[-1].endswith("AS has_binotel_cabinet_password"), columns[-1])
 
@@ -583,6 +686,21 @@ class SaveUserSipSettingsBinotelTests(unittest.TestCase):
         self.assertEqual(("", "", ""), (params[4], params[5], params[6]))
         self.assertIs(False, params[7])
 
+    def test_the_auto_answer_is_not_wiped_for_binotel(self):
+        """А вот автопринятие у Binotel гасить НЕЛЬЗЯ, в отличие от соседей выше.
+
+        Автодозвон и FOP2 — механика локальной АТС, и у Тез их нет физически.
+        Автопринятие же живёт целиком в телефоне (окно входящего и таймер
+        ответа), АТС о нём не знает — значит оно и в Тез КЦ обязано работать.
+        Поэтому разбор стоит ВНЕ ветки провайдера; правка «по аналогии» с
+        соседним тестом выключила бы настройку всему отделу.
+        """
+        self._save({"sip_login": "68m77pnw", "auto_answer": True,
+                    "auto_answer_delay": "3"})
+        _, params = self._call("INSERT INTO user_sip_settings")
+        self.assertIs(True, params[8])
+        self.assertEqual(3, params[9])
+
     def test_a_login_taken_by_someone_else_is_refused(self):
         """Логин уникален глобально: двое с одним отбирают регистрацию друг у друга."""
         self.login_owner = {"user_id": 9, "name": "Чужой"}
@@ -665,13 +783,14 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         })
         # (id, name, sip_password, sip_domain, autodial_number, autodial_password,
         #  autodial_domain, sip_number, department_sip_server, department_autodial_server,
-        #  fop2_enabled, sip_login)
+        #  fop2_enabled, sip_login, auto_answer, auto_answer_delay)
         # sip_login массовая правка не меняет, но обязана дотащить до апсерта —
         # иначе чистка пароля посчитает строку пустой и удалит учётку Binotel.
+        # Автопринятие и его задержка — по той же причине в конце строки.
         rows = [
-            (1, 'Иван', '', '', '2024', '', '', '1024', '', '', True, ''),        # автодозвон есть, персональных нет
-            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', '', '', True, ''),  # были персональные значения
-            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', '', '', True, ''),    # уже с нужным доменом — не трогаем
+            (1, 'Иван', '', '', '2024', '', '', '1024', '', '', True, '', False, 2),        # автодозвон есть, персональных нет
+            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', '', '', True, '', False, 2),  # были персональные значения
+            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', '', '', True, '', False, 2),    # уже с нужным доменом — не трогаем
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -732,7 +851,7 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def test_department_domain_is_the_default_in_bulk_too(self):
         """Сотрудник отдела с своей АТС считается на её домене, а не на общем."""
-        rows = [(1, 'Иван', '', '', '', '', '', '1024', 'pbx.sales', '', True, '')]
+        rows = [(1, 'Иван', '', '', '', '', '', '1024', 'pbx.sales', '', True, '', False, 2)]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
         self.db.get_sip_config = _no_common_tier
@@ -745,8 +864,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def test_two_selected_landing_on_one_number_and_domain_are_refused(self):
         rows = [
-            (1, 'Иван', '', '', '', '', '', '1024', '', '', True, ''),
-            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', '', True, ''),   # тот же номер, но другая АТС
+            (1, 'Иван', '', '', '', '', '', '1024', '', '', True, '', False, 2),
+            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', '', True, '', False, 2),   # тот же номер, но другая АТС
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -763,8 +882,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         поэтому переезжающий вставал ровно на номер того выбранного, кто с места
         не двинулся, — молча и с 200 в ответ. Стоящие занимают свои пары."""
         rows = [
-            (1, 'Иван', '', 'pbx.new', '', '', '', '1024', '', '', True, ''),   # уже там — не двинется
-            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', '', True, ''),   # переезжает на pbx.new
+            (1, 'Иван', '', 'pbx.new', '', '', '', '1024', '', '', True, '', False, 2),   # уже там — не двинется
+            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', '', True, '', False, 2),   # переезжает на pbx.new
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -781,8 +900,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         """Задвоенная пара сама по себе пачку не валит: если оба выбранных с места
         не двигаются, спорить не о чем — было так и осталось."""
         rows = [
-            (1, 'Иван', '', '', '', '', '', '1024', '', '', True, ''),
-            (2, 'Пётр', '', '', '', '', '', '1024', '', '', True, ''),
+            (1, 'Иван', '', '', '', '', '', '1024', '', '', True, '', False, 2),
+            (2, 'Пётр', '', '', '', '', '', '1024', '', '', True, '', False, 2),
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -829,7 +948,7 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def _only_fop2_off(self, sip_password='', sip_domain=''):
         """Подменяет выборку на одного Петра с выключенным FOP2."""
-        rows = [(2, 'Пётр', sip_password, sip_domain, '', '', '', '1088', '', '', False, '')]
+        rows = [(2, 'Пётр', sip_password, sip_domain, '', '', '', '1088', '', '', False, '', False, 2)]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
         self.db.get_sip_config = _no_common_tier
@@ -857,8 +976,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         """Два выбранных с одним номером на одной АТС — не повод отказать в
         выключении FOP2: пара как была задвоена, так и останется."""
         rows = [
-            (1, 'Иван', '', '', '', '', '', '1024', '', '', True, ''),
-            (2, 'Пётр', '', '', '', '', '', '1024', '', '', True, ''),
+            (1, 'Иван', '', '', '', '', '', '1024', '', '', True, '', False, 2),
+            (2, 'Пётр', '', '', '', '', '', '1024', '', '', True, '', False, 2),
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -913,7 +1032,11 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         массовая правка пароля возвращала бы FOP2 всем, кому его выключали."""
         self._bulk({"fop2_enabled": False}, ids=(1,))
         sql, values, template = self._batched("INSERT INTO user_sip_settings")
-        self.assertIn("fop2_enabled, updated_by, updated_at", sql)
+        # Подстрока с соседями, а не одинокий «fop2_enabled»: она заодно ловит
+        # порядок колонок в INSERT. Между флагом и updated_by с тех пор въехало
+        # автопринятие — если оно пропадёт, ассёрт упадёт вместе с ним.
+        self.assertIn("fop2_enabled, auto_answer, auto_answer_delay, "
+                      "updated_by, updated_at", sql)
         self.assertIn("fop2_enabled = EXCLUDED.fop2_enabled", sql)
         # Плейсхолдеров ровно столько же, сколько полей в кортеже.
         self.assertEqual(len(values[0]), template.count("%s"))
@@ -937,7 +1060,7 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         Если логин Binotel не учитывать, оператор Тез потеряет учётку у
         провайдера — и телефон перестанет регистрироваться вообще.
         """
-        rows = [(2, 'Пётр', 'own', 'pbx.old', '', '', '', '6715', '', '', True, '68m77pnw')]
+        rows = [(2, 'Пётр', 'own', 'pbx.old', '', '', '', '6715', '', '', True, '68m77pnw', False, 2)]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
         self.db.get_sip_config = _no_common_tier
@@ -947,6 +1070,121 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
         _, values, _ = self._batched("INSERT INTO user_sip_settings")
         self.assertEqual("68m77pnw", values[0][3])
+
+    # ── Автопринятие мультивыбором ───────────────────────────────────────────
+    # Включают его обычно всей линии сразу, поэтому массовая правка нужна ему не
+    # меньше, чем FOP2. Условия зеркальны фопешным: там строку держит снятый
+    # флаг, здесь — поднятый, а задержку — отличие от дефолта.
+
+    def _with_auto_answer_on(self, sip_password='', sip_domain='', delay=2):
+        """Подменяет выборку на одного Петра с включённым автопринятием."""
+        rows = [(2, 'Пётр', sip_password, sip_domain, '', '', '', '1088', '', '',
+                 True, '', True, delay)]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = _no_common_tier
+        self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+
+    def test_the_auto_answer_is_switched_for_the_whole_selection(self):
+        """Флаг уходит всем выбранным, остальные их поля остаются своими."""
+        self._bulk({"auto_answer": True})
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual({1, 2, 3}, {row[0] for row in values})
+        self.assertEqual([True, True, True], [row[8] for row in values])
+        by_id = {row[0]: row for row in values}
+        self.assertEqual("own", by_id[2][1])
+
+    def test_an_auto_answer_only_change_does_not_recheck_the_numbers(self):
+        """Автопринятие номеров не касается — сверять занятость нечего.
+
+        Стоило бы положить ключ в _SIP_OVERRIDE_FIELDS, и невинное включение
+        начало бы валиться с «номер уже занят» на давно задвоенной паре.
+        """
+        self._bulk({"auto_answer": True})
+        self.assertEqual([], self.checked)
+
+    def test_a_delay_only_change_does_not_recheck_the_numbers(self):
+        """То же и для числа: это не переезд на другую АТС."""
+        self._bulk({"auto_answer_delay": "5"})
+        self.assertEqual([], self.checked)
+
+    def test_a_delay_from_the_form_arrives_as_a_number_in_bulk_too(self):
+        """Модалка присылает строку — в колонку обязано уехать число."""
+        self._bulk({"auto_answer_delay": " 5 "}, ids=(1,))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual(5, values[0][9])
+        self.assertIsInstance(values[0][9], int)
+
+    def test_an_unchanged_auto_answer_writes_nothing(self):
+        """Автопринятия ни у кого нет — повторное «выключить» ничего не пишет."""
+        self._bulk({"auto_answer": False})
+        self.assertIsNone(self._batched("INSERT INTO user_sip_settings"))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        self.assertIsNone(self._batched("INSERT INTO sip_config_history"))
+
+    def test_clearing_overrides_keeps_the_row_of_someone_with_auto_answer(self):
+        """Чистка пароля не должна выключать автопринятие тем, кому его включили."""
+        self._with_auto_answer_on(sip_password='own', sip_domain='pbx.old')
+        self._bulk({"sip_password": "", "sip_domain": ""}, ids=(2,))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertIs(True, values[0][8])
+
+    def test_a_personal_delay_survives_a_password_cleanup(self):
+        """И настроенные секунды тоже: строку держит отличие от дефолта."""
+        self._with_auto_answer_on(sip_password='own', delay=5)
+        self._bulk({"sip_password": ""}, ids=(2,))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual(5, values[0][9])
+
+    def test_turning_the_auto_answer_back_off_releases_the_row(self):
+        """Автопринятие было единственным персональным значением — строка не нужна."""
+        self._with_auto_answer_on()
+        self._bulk({"auto_answer": False}, ids=(2,))
+        deletes = [c for c in self.db.cursor.calls if "DELETE FROM user_sip_settings" in c[0]]
+        self.assertEqual(1, len(deletes))
+        self.assertEqual(([2],), deletes[0][1])
+
+    def test_the_auto_answer_is_written_to_history(self):
+        """Кто включил автопринятие — видно и после массовой правки."""
+        self._bulk({"auto_answer": True, "auto_answer_delay": "3"}, ids=(1,))
+        _, values, _ = self._batched("INSERT INTO sip_config_history")
+        snapshot = json.loads(values[0][2])
+        self.assertIs(True, snapshot["auto_answer"])
+        self.assertEqual(3, snapshot["auto_answer_delay"])
+        self.assertTrue(snapshot["bulk"])
+
+    def test_the_upsert_carries_the_auto_answer_columns(self):
+        """Обе колонки — и в INSERT, и в DO UPDATE.
+
+        Массовая правка перезаписывает строку целиком: без колонки в INSERT
+        задержка уедет в дефолт, а без «= EXCLUDED.» потеряется при любом
+        апсерте пароля — то есть автопринятие само собой выключится.
+        """
+        self._bulk({"auto_answer": True}, ids=(1,))
+        sql, values, template = self._batched("INSERT INTO user_sip_settings")
+        head = sql.split("VALUES", 1)[0]
+        self.assertIn("auto_answer", head)
+        self.assertIn("auto_answer_delay", head)
+        self.assertIn("auto_answer = EXCLUDED.auto_answer", sql)
+        self.assertIn("auto_answer_delay = EXCLUDED.auto_answer_delay", sql)
+        # Арность кортежа и шаблона обязаны сходиться: psycopg2 узнал бы об
+        # этом только на проде, юнит-тест с фейковым курсором — нет.
+        self.assertEqual(len(values[0]), template.count("%s"))
+
+    def test_an_untouched_delay_reaches_the_upsert_from_the_current_state(self):
+        """Ключа в payload'е нет — значение обязано доехать из current.
+
+        Тот же урок, что с sip_login: строка перезаписывается целиком, и
+        «не меняем» превратилось бы в «сбросить к дефолту».
+        """
+        self._with_auto_answer_on(sip_password='own', delay=7)
+        self._bulk({"sip_domain": "pbx.new"}, ids=(2,))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertIs(True, values[0][8])
+        self.assertEqual(7, values[0][9])
 
 
 class ParseSipFlagTests(unittest.TestCase):
@@ -968,6 +1206,58 @@ class ParseSipFlagTests(unittest.TestCase):
             self.assertIs(False, self.parse(value), value)
         for value in ('1', 'true', 'on', 'yes'):
             self.assertIs(True, self.parse(value), value)
+
+
+class ParseSipDelayTests(unittest.TestCase):
+    """Разбор задержки автопринятия — число, а не флаг.
+
+    Отдельная функция нужна именно из-за пустоты: parse_sip_flag считает ''
+    выключением, а здесь '' — это «поле не заполнили, оставить как было», тогда
+    как '0' — осмысленное «отвечать сразу, без окна».
+    """
+
+    def setUp(self):
+        ns = _database_namespace(set())
+        self.parse = ns["parse_sip_delay"]
+        self.default = ns["SIP_AUTO_ANSWER_DELAY_DEFAULT"]
+        self.maximum = ns["SIP_AUTO_ANSWER_DELAY_MAX"]
+
+    def test_absent_value_keeps_the_default(self):
+        self.assertEqual(self.default, self.parse(None))
+        self.assertEqual(7, self.parse(None, 7))
+
+    def test_an_empty_field_is_not_zero(self):
+        """Пустое поле формы — «не заполнили», а не «отвечать мгновенно»."""
+        self.assertEqual(5, self.parse('', 5))
+        self.assertEqual(5, self.parse('   ', 5))
+
+    def test_zero_is_a_legal_value(self):
+        """Ноль документирован: телефон отвечает сразу, окна нет вовсе."""
+        self.assertEqual(0, self.parse('0', 5))
+        self.assertEqual(0, self.parse(0, 5))
+
+    def test_a_form_string_becomes_an_int(self):
+        """В SMALLINT-колонку и в снимок истории обязано уехать число."""
+        value = self.parse(' 5 ')
+        self.assertEqual(5, value)
+        self.assertIsInstance(value, int)
+
+    def test_the_range_is_clamped_on_both_ends(self):
+        self.assertEqual(0, self.parse('-3'))
+        self.assertEqual(self.maximum, self.parse('9999'))
+
+    def test_garbage_keeps_the_previous_value(self):
+        """Сорванная валидация на фронте — не повод выставить оператору ноль."""
+        self.assertEqual(5, self.parse('ерунда', 5))
+        self.assertEqual(5, self.parse([], 5))
+
+    def test_a_float_is_truncated(self):
+        self.assertEqual(5, self.parse(5.7))
+
+    def test_a_bool_is_not_a_number_of_seconds(self):
+        """isinstance(True, int) истинно — без явной проверки true стало бы «1 с»."""
+        self.assertEqual(self.default, self.parse(True))
+        self.assertEqual(self.default, self.parse(False))
 
 
 class FindSipNumberOwnersTests(unittest.TestCase):
@@ -1394,6 +1684,24 @@ class UserSipAccountTests(unittest.TestCase):
         self.assertEqual("pbx.own", main["server"])
         self.assertEqual("own", main["password"])
 
+    def test_the_auto_answer_travels_to_the_phone(self):
+        """Настройку применяет сам телефон — значит она обязана до него доехать.
+
+        У get_user_sip_account два независимых return'а (по провайдеру), и
+        забыть поле в одном из них легко: тогда у половины отделов включённый
+        в панели флаг просто ничего не делал бы.
+        """
+        self.row.update({"auto_answer": True, "auto_answer_delay": 3})
+        account = self._account()
+        self.assertIs(True, account["auto_answer"])
+        self.assertEqual(3, account["auto_answer_delay"])
+
+    def test_the_auto_answer_defaults_to_off(self):
+        """Строки в user_sip_settings у большинства нет — и это «выключено»."""
+        account = self._account()
+        self.assertIs(False, account["auto_answer"])
+        self.assertEqual(2, account["auto_answer_delay"])
+
     def test_the_answer_carries_no_common_config_block(self):
         """Ключ «config» убран из ответа вместе с общим ярусом.
 
@@ -1470,6 +1778,18 @@ class UserSipAccountBinotelTests(unittest.TestCase):
         self.assertIsNone(account["autodial"])
         self.assertEqual("", account["autodial_code"])
         self.assertIs(False, account["fop2_enabled"])
+
+    def test_the_auto_answer_survives_where_autodial_and_fop2_do_not(self):
+        """Автопринятие — единственное из трёх, что у Binotel остаётся.
+
+        Оно ничего не спрашивает у АТС: окно входящего и таймер ответа целиком
+        в телефоне. Продуктовое решение — Тезу настройка нужна так же, как
+        таксопаркам, поэтому гасить её вместе с соседями нельзя.
+        """
+        self.row.update({"auto_answer": True, "auto_answer_delay": 3})
+        account = self._account()
+        self.assertIs(True, account["auto_answer"])
+        self.assertEqual(3, account["auto_answer_delay"])
 
     def test_the_cabinet_block_travels_with_the_account(self):
         """Статус в Binotel телефон меняет через веб-кабинет, а не через SIP,
@@ -1722,6 +2042,20 @@ class SipEndpointTests(unittest.TestCase):
         # Учётка кабинета — только самому оператору: он сам поднимает сессию.
         self.assertIn('"binotel": account.get("binotel")', body)
 
+    def test_operator_endpoint_carries_the_auto_answer_to_the_phone(self):
+        """Ответ телефону собирается отдельным dict-литералом.
+
+        get_user_sip_account уже отдаёт оба поля, но здесь они не «просочатся»
+        сами: ручка перечисляет ключи руками, и незаписанное поле телефон
+        просто не увидит — включённый в панели флаг ничего не сделает.
+        """
+        body = self._function("operator_sip_settings_endpoint")
+        self.assertIn('"auto_answer": bool(account.get("auto_answer", False))', body)
+        self.assertIn('"auto_answer_delay"', body)
+        # Дефолт обязан быть выключенным: телефон применяет настройку сам, и
+        # «включено по умолчанию» означало бы окно без «Отклонить» у всех.
+        self.assertIn('account.get("auto_answer", False)', body)
+
     def test_the_409_names_the_field_the_operator_actually_has(self):
         """Текст «проверьте SIP-номер» тезовца отправляет чинить не то поле.
 
@@ -1907,6 +2241,52 @@ class SipSectionFrontendTests(unittest.TestCase):
         self.assertIn("перестанут вставать в очереди Asterisk", view)
         # Массовая правка номеров не касается: в истории не должно быть «номер снят».
         self.assertIn("(s.bulk ? null : 'номер снят')", view)
+
+    def test_the_auto_answer_is_offered_in_both_provider_sections(self):
+        """Настройка нужна и таксопаркам, и Тезу — она про телефон, не про АТС.
+
+        Карточка сотрудника раздвоена по провайдеру, и поле, положенное в одну
+        ветку, во второй просто не существует. Поэтому секция одна, а вставлена
+        дважды: две копии разметки разъехались бы при первой же правке.
+        """
+        view = _read(VIEW_PATH)
+        self.assertIn("const autoAnswerSection = (", view)
+        self.assertEqual(2, view.count("{autoAnswerSection}"))
+        self.assertEqual(2, view.count("...autoAnswerPayload(),"))
+        # Дефолт — выключено, и «ключа нет» в ответе сервера читается так же:
+        # у fop2_enabled семантика обратная (!== false), скопировать её нельзя.
+        self.assertIn("auto_answer: false,", view)
+        self.assertIn("auto_answer: op?.auto_answer === true,", view)
+        # Руководитель обязан понимать, что покупает: отклонить будет нельзя.
+        self.assertIn("отклонить звонок не сможет", view)
+
+    def test_the_auto_answer_has_its_own_bulk_labels_and_warning(self):
+        """У второго флага в модалке не должно быть подписей первого.
+
+        BULK_FLAG_CHOICES и амбер-плашка были общими и написаны под FOP2: без
+        своих choices напротив автопринятия стояло бы «Входит/Не входит», а
+        предупреждение рассказывало бы про очереди Asterisk. И опасное значение
+        у полей разное: у FOP2 — выключение, у автопринятия — включение.
+        """
+        view = _read(VIEW_PATH)
+        bulk_fields = view.split("const BULK_FIELDS = [", 1)[1].split("];", 1)[0]
+        self.assertIn("key: 'auto_answer'", bulk_fields)
+        self.assertIn("key: 'auto_answer_delay'", bulk_fields)
+        self.assertIn("number: true", bulk_fields)
+        self.assertIn("label: 'Включить'", bulk_fields)
+        self.assertIn("warnOn: true", bulk_fields)
+        self.assertIn("(field.choices || BULK_FLAG_CHOICES)", view)
+        self.assertIn("state.on && state.value === Boolean(field.warnOn)", view)
+        self.assertIn("field.warning", view)
+
+    def test_the_list_and_the_history_show_who_has_the_auto_answer(self):
+        """Кто принимает звонки автоматически — видно из списка и из истории."""
+        view = _read(VIEW_PATH)
+        self.assertIn("const autoAnswerOn = (op) => op?.auto_answer === true;", view)
+        self.assertIn("autoAnswerOn(op) && (", view)
+        # Снимок истории — это состояние, а не дифф: помечаем только включённое,
+        # иначе строка «автопринятие выключено» появилась бы у каждой правки.
+        self.assertIn("s.auto_answer === true", view)
 
 
 if __name__ == "__main__":

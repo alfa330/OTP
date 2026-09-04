@@ -65,10 +65,20 @@ const SECTION_TITLE = {
 // (BINOTEL_CABINET_URL_DEFAULT): пустое поле у сотрудника значит именно его.
 const BINOTEL_CABINET_URL_DEFAULT = 'https://my.binotel.kz';
 
+// Автопринятие: столько секунд телефон показывает окно звонка до ответа.
+// Совпадает с SIP_AUTO_ANSWER_DELAY_DEFAULT в database.py — менять вместе.
+const AUTO_ANSWER_DELAY_DEFAULT = 2;
+const AUTO_ANSWER_DELAY_MAX = 30;
+
 const EMPTY_FORM = {
     sip_number: '', sip_password: '', sip_domain: '',
     autodial_number: '', autodial_password: '', autodial_domain: '',
     fop2_enabled: true,
+    // Автопринятие звонка выключено у всех, кому его отдельно не включили.
+    // Задержка живёт в форме строкой: у пустого числового input значение '',
+    // и Number('') дал бы NaN в самом поле.
+    auto_answer: false,
+    auto_answer_delay: String(AUTO_ANSWER_DELAY_DEFAULT),
     // Поля Binotel: логин у провайдера и учётка кабинета my.binotel.kz.
     sip_login: '', binotel_cabinet_login: '', binotel_cabinet_password: '',
     binotel_employee_id: '', binotel_cabinet_url: '',
@@ -83,6 +93,22 @@ const BULK_FIELDS = [
     // Не текст, а состояние: у выключателя нет «общего» значения, к которому
     // возвращает пустая строка, — поэтому и выбор из двух вариантов, а не поле.
     { key: 'fop2_enabled', label: 'Вход в FOP2', flag: true },
+    // Автопринятие включают целой линии сразу, поэтому оно и здесь. Подписи и
+    // предупреждение — свои: общие «Входит/Не входит» читались бы как FOP2.
+    {
+        key: 'auto_answer', label: 'Автопринятие звонка', flag: true,
+        choices: [
+            { on: false, value: false, label: 'Не менять' },
+            { on: true, value: true, label: 'Включить' },
+            { on: true, value: false, label: 'Выключить' },
+        ],
+        warnOn: true,
+        warning: 'Выбранные больше не смогут отклонять входящие: окно звонка '
+            + 'показывается заданные секунды и звонок принимается сам.',
+    },
+    // Число, а не «пусто — вернуть настройки отдела»: у задержки нет яруса
+    // отдела, пустое поле сервер прочитает как значение по умолчанию.
+    { key: 'auto_answer_delay', label: 'Задержка автопринятия, сек', number: true },
 ];
 
 // Выключатель — не текст: «пусто» для него ничего не возвращает, зато нужно
@@ -112,6 +138,13 @@ const formFromOperator = (op) => ({
     // Вход в FOP2 включён у всех, кому его отдельно не выключили: у записей,
     // созданных до появления флага, поля просто нет — это не «выключено».
     fop2_enabled: op?.fop2_enabled !== false,
+    // У автопринятия семантика обратная: включают единицам, поэтому «нет ключа»
+    // (старый ответ сервера) читается как выключено, а не как включено.
+    auto_answer: op?.auto_answer === true,
+    auto_answer_delay: String(
+        typeof op?.auto_answer_delay === 'number'
+            ? op.auto_answer_delay
+            : AUTO_ANSWER_DELAY_DEFAULT),
     sip_login: op?.sip_login || '',
     binotel_cabinet_login: op?.binotel_cabinet_login || '',
     // Пароля кабинета в ответе нет никогда — только признак «задан». Пустое поле
@@ -126,6 +159,11 @@ const hasPersonalPassword = (op) => Boolean(op?.sip_password || op?.autodial_pas
 // Интересно только выключенное состояние: включённый FOP2 — норма, и помечать
 // им весь список нечего.
 const fop2Disabled = (op) => op?.fop2_enabled === false;
+
+// У автопринятия наоборот: норма — выключено, помечаем включивших.
+const autoAnswerOn = (op) => op?.auto_answer === true;
+const autoAnswerDelayOf = (op) => (typeof op?.auto_answer_delay === 'number'
+    ? op.auto_answer_delay : AUTO_ANSWER_DELAY_DEFAULT);
 
 const hasPersonalParams = (op) => Boolean(
     op?.sip_password || op?.sip_domain || op?.autodial_password || op?.autodial_domain
@@ -603,12 +641,78 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     // Отправляем только те поля, которые у провайдера вообще есть. Лишние бэкенд
     // вычистил бы сам, но тогда карточка Тез слала бы автодозвон и FOP2, а
     // карточка Таксопарков — учётку кабинета: в истории это выглядит как правка.
+    // Автопринятие — единственная настройка карточки, общая для обоих
+    // провайдеров: окно звонка и таймер ответа живут в самом телефоне, АТС о них
+    // не знает. Поэтому пара ключей уходит в оба payload'а.
+    const autoAnswerPayload = () => ({
+        auto_answer: form.auto_answer,
+        // Строкой: пустое поле сервер прочитает как «оставить как было»
+        // (parse_sip_delay), а не как ноль.
+        auto_answer_delay: form.auto_answer_delay,
+    });
+
+    // Сама секция — тоже одна на два раздела, а не копия в каждой ветке карточки:
+    // разъехавшиеся копии и есть самый простой способ потерять настройку в одном
+    // из разделов (как это уже случалось с полями payload'а).
+    const autoAnswerSection = (
+        <section className="space-y-1.5">
+            <div className={iosGroupLabel}>Автопринятие звонка</div>
+            <div className={`${iosCard} space-y-2 p-4`}>
+                <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
+                    <span className="text-[13px] text-slate-700">Принимать входящие автоматически</span>
+                    <IosToggle
+                        checked={form.auto_answer}
+                        onChange={(v) => setForm((f) => ({ ...f, auto_answer: v }))}
+                        disabled={!canEdit}
+                    />
+                </div>
+                {form.auto_answer && (
+                    <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
+                        <span className="text-[13px] text-slate-700">Показывать окно звонка, сек</span>
+                        <input
+                            type="number"
+                            min="0"
+                            max={AUTO_ANSWER_DELAY_MAX}
+                            value={form.auto_answer_delay}
+                            onChange={(e) => setForm((f) => ({ ...f, auto_answer_delay: e.target.value }))}
+                            placeholder={String(AUTO_ANSWER_DELAY_DEFAULT)}
+                            disabled={!canEdit}
+                            className={`${iosInput} w-20 text-center font-mono`}
+                        />
+                    </div>
+                )}
+                <p className="mt-1 text-[11.5px] leading-relaxed text-slate-500">
+                    Оператор увидит, кто звонит, но отклонить звонок не сможет — через
+                    заданные секунды телефон ответит сам. Ноль — отвечать сразу, без окна.
+                    Пустое поле — {AUTO_ANSWER_DELAY_DEFAULT} с. Настройка доезжает до
+                    телефона в течение 10 минут, перезапускать его не нужно.
+                </p>
+                <p className="text-[11.5px] leading-relaxed text-slate-500">
+                    Касается только статуса «Активный»: в «Исходе», «Перерыве», «Тренинге»
+                    и «Технической паузе» телефон и так отбивает входящие, и автопринятию
+                    там нечего принимать.
+                </p>
+                {form.auto_answer && (
+                    <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-700">
+                        <FaIcon className="fas fa-triangle-exclamation mt-0.5 shrink-0" style={{ width: 11, height: 11 }} />
+                        <span>
+                            Звонок примется и тогда, когда сотрудник отошёл от места. Пока
+                            он в разговоре, следующий входящий автопринят не будет: такое
+                            окно останется обычным, с «Отклонить».
+                        </span>
+                    </p>
+                )}
+            </div>
+        </section>
+    );
+
     const operatorPayload = () => (isBinotel
         ? {
             sip_number: form.sip_number,
             sip_login: form.sip_login,
             sip_password: form.sip_password,
             sip_domain: form.sip_domain,
+            ...autoAnswerPayload(),
             binotel_cabinet_login: form.binotel_cabinet_login,
             // Пусто = «не менять»: пароль кабинета наружу не отдаётся, и стереть
             // его случайной пересохранкой карточки нельзя.
@@ -624,6 +728,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             autodial_password: form.autodial_password,
             autodial_domain: form.autodial_domain,
             fop2_enabled: form.fop2_enabled,
+            ...autoAnswerPayload(),
         });
 
     const saveOperator = async () => {
@@ -1095,6 +1200,16 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                                 )}
                                             </>
                                         )}
+                                        {/* Автопринятие — вне ветки провайдера: настройка живёт в
+                                            телефоне и одинаково видна в обоих разделах. */}
+                                        {autoAnswerOn(op) && (
+                                            <span
+                                                className="hidden h-6 w-6 place-items-center rounded-full bg-blue-50 text-blue-600 sm:grid"
+                                                title={`Автопринятие звонка: окно ${autoAnswerDelayOf(op)} с, отклонить нельзя`}
+                                            >
+                                                <FaIcon className="fas fa-bolt" style={{ width: 11, height: 11 }} />
+                                            </span>
+                                        )}
                                     </div>
                                     <FaIcon className="fas fa-chevron-right shrink-0 text-slate-300" style={{ width: 12, height: 12 }} />
                                 </button>
@@ -1305,6 +1420,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         // Флаг меняет, доходят ли до сотрудника звонки из
                                         // очередей, — в истории он обязан быть виден.
                                         s.fop2_enabled === false ? 'FOP2 выключен' : null,
+                                        // Автопринятие меняет поведение телефона на глазах у
+                                        // клиента — «кто включил» спрашивают первым делом.
+                                        s.auto_answer === true
+                                            ? `автопринятие через ${s.auto_answer_delay ?? AUTO_ANSWER_DELAY_DEFAULT} с`
+                                            : null,
                                         s.bulk ? 'массово' : null,
                                     ]
                                     : [
@@ -1501,7 +1621,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                                             <span className="text-[13.5px] font-medium text-slate-700">{field.label}</span>
                                             <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1">
-                                                {BULK_FLAG_CHOICES.map((choice) => (
+                                                {(field.choices || BULK_FLAG_CHOICES).map((choice) => (
                                                     <button
                                                         key={choice.label}
                                                         type="button"
@@ -1522,14 +1642,22 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                             </div>
                                         </div>
                                         {/* Предупреждение то же, что в карточке сотрудника: без него
-                                            массовое выключение выглядит безобиднее, чем оно есть. */}
-                                        {state.on && !state.value && (
+                                            массовая правка выглядит безобиднее, чем она есть. Условие
+                                            привязано к полю: warnOn — это то значение, которое опасно.
+                                            У FOP2 опасно выключение (по умолчанию false), у автопринятия
+                                            наоборот включение, и общее !state.value показывало бы текст
+                                            про очереди Asterisk напротив автопринятия. */}
+                                        {state.on && state.value === Boolean(field.warnOn) && (
                                             <p className="mt-2 flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-700">
                                                 <FaIcon className="fas fa-triangle-exclamation mt-0.5 shrink-0" style={{ width: 11, height: 11 }} />
                                                 <span>
-                                                    Выбранные перестанут вставать в очереди Asterisk: статусы
-                                                    «Перерыв», «Тренинг» и «Техническая пауза» больше не будут
-                                                    снимать их с очередей. Режим автодозвона не затрагивается.
+                                                    {field.warning || (
+                                                        <>
+                                                            Выбранные перестанут вставать в очереди Asterisk: статусы
+                                                            «Перерыв», «Тренинг» и «Техническая пауза» больше не будут
+                                                            снимать их с очередей. Режим автодозвона не затрагивается.
+                                                        </>
+                                                    )}
                                                 </span>
                                             </p>
                                         )}
@@ -1555,6 +1683,19 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                                     placeholder="пусто — вернуть настройки отдела"
                                                     disabled={!canEdit}
                                                 />
+                                            ) : field.number ? (
+                                                // У числа нет яруса отдела, поэтому и подсказка другая:
+                                                // пустое поле сервер прочитает как значение по умолчанию.
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max={AUTO_ANSWER_DELAY_MAX}
+                                                    value={state.value}
+                                                    onChange={(e) => setBulkForm((f) => ({ ...f, [field.key]: { ...f[field.key], value: e.target.value } }))}
+                                                    placeholder={`пусто — ${AUTO_ANSWER_DELAY_DEFAULT} с`}
+                                                    disabled={!canEdit}
+                                                    className={iosInput}
+                                                />
                                             ) : (
                                                 <input
                                                     type="text"
@@ -1575,6 +1716,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         Меняются только включённые поля, остальное у каждого остаётся своим.
                         Пустой пароль или домен возвращает настройки отдела: домен АТС
                         и пароль «база + номер». Номера массово не меняются — они у каждого свои.
+                        У задержки автопринятия яруса отдела нет: пустое поле означает
+                        {' '}{AUTO_ANSWER_DELAY_DEFAULT} с.
                     </p>
 
                     <section className="space-y-1.5">
@@ -1783,6 +1926,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </div>
                         </section>
 
+                        {autoAnswerSection}
+
                         {/* Что реально уйдёт в телефон. Превью пароля-шаблона здесь нет:
                             у Binotel всё персональное, база пароля отдела не работает. */}
                         {(form.sip_login.trim() || form.sip_number.trim()) && (
@@ -1793,6 +1938,12 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     <EffectiveRow label="Логин" value={form.sip_login.trim()} hint="укажите SIP-логин выше" />
                                     <EffectiveRow label="Пароль" value={form.sip_password} secret hint="задайте SIP-пароль выше" />
                                     <EffectiveRow label="Внутренний номер" value={form.sip_number.trim()} hint="нужен для привязки звонков" />
+                                    <EffectiveRow
+                                        label="Автопринятие"
+                                        value={form.auto_answer
+                                            ? `через ${form.auto_answer_delay.trim() || AUTO_ANSWER_DELAY_DEFAULT} с`
+                                            : 'выключено'}
+                                    />
                                 </div>
                             </section>
                         )}
@@ -1898,6 +2049,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </div>
                         </section>
 
+                        {autoAnswerSection}
+
                         {/* Персональные пароль/домен нужны редко — держим под кнопкой */}
                         <section className="space-y-1.5">
                             <button
@@ -1978,6 +2131,12 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     <EffectiveRow label="Домен" value={effective.domain} hint="задайте домен в карточке отдела" />
                                     <EffectiveRow label="Логин" value={form.sip_number.trim()} />
                                     <EffectiveRow label="Пароль" value={effective.password} secret hint="задайте базу пароля в карточке отдела" />
+                                    <EffectiveRow
+                                        label="Автопринятие"
+                                        value={form.auto_answer
+                                            ? `через ${form.auto_answer_delay.trim() || AUTO_ANSWER_DELAY_DEFAULT} с`
+                                            : 'выключено'}
+                                    />
                                     {form.autodial_number.trim() && (
                                         <>
                                             <EffectiveRow label="Логин автодозвона" value={form.autodial_number.trim()} />
