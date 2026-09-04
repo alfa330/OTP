@@ -1597,6 +1597,19 @@ const canAccessAiQaForUser = (userLike) => (
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
 
+/* «Чаты Верификаторов» — аудитория ШИРЕ, чем у «ИИ-оценки», поэтому предикат
+   отдельный, а не расширение canAccessAiQaForUser. Раздел показывает саму
+   переписку Wazzup, и по решению владельца её читают все глобальные админы;
+   разборы ИИ им при этом не нужны и остаются закрытыми — иначе админ увидел бы
+   и оценки операторов чужих отделов, и кнопки переоценки.
+   Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py. */
+const canAccessVerifierChatsForUser = (userLike) => {
+    if (canAccessAiQaForUser(userLike)) return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: чужая переписка
+    // ему не нужна (главы ОП/СЗоВ/маркетинга уже прошли проверкой выше).
+    return normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike);
+};
+
 /* «Лиды OLX» — что сделал робот переноса откликов из чатов OLX в amoCRM
    (задача #223). Аудитория узкая и очевидная: работу, которую забрал робот,
    делал маркетолог руками, а заведённые сделки разбирает отдел продаж.
@@ -37507,6 +37520,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
+            // «Чаты Верификаторов» открыты шире «ИИ-оценки» — см.
+            // canAccessVerifierChatsForUser: в раздел допущены и глобальные админы.
+            const canAccessVerifierChatsSection = canAccessVerifierChatsForUser(user);
             const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
@@ -40477,7 +40493,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'lms' || canAccessLmsSection) &&
                     ((requestedViewFromUrl !== 'resource_fte' && requestedViewFromUrl !== 'resource_fte_chat') || canAccessResourceFteSection) &&
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
-                    (requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection) &&
+                    (requestedViewFromUrl !== 'wazzup_chats' || canAccessVerifierChatsSection) &&
                     (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
                     (requestedViewFromUrl !== 'group_late_bot' || canAccessGroupLateBotSection) &&
                     (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
@@ -40498,7 +40514,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTouchesSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTouchesSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -40562,7 +40578,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-                if ((view === 'ai_qa' || view === 'wazzup_chats') && !canAccessAiQaSection) {
+                if (view === 'ai_qa' && !canAccessAiQaSection) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else if (isPlainTrainer) setView('surveys');
+                    else setView('hours');
+                }
+                // Отдельной проверкой, а не вместе с 'ai_qa': у чатов свой,
+                // более широкий предикат, и общее условие выкидывало бы админа
+                // из раздела сразу после входа.
+                if (view === 'wazzup_chats' && !canAccessVerifierChatsSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                     else if (isSupervisorRole(user?.role)) setView('operators');
@@ -40591,7 +40617,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -45659,7 +45685,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');
                     return;
                 }
-                if ((view === 'ai_qa' || view === 'wazzup_chats') && canAccessAiQaSection) return;
+                if (view === 'ai_qa' && canAccessAiQaSection) return;
+                if (view === 'wazzup_chats' && canAccessVerifierChatsSection) return;
                 if (view === 'chatapp_chats' && canAccessChatAppSection) return;
                 // «Табло СЗоВ» гейтится своим предикатом (глава/СВ СЗоВ), а не allowlist'ом отдела.
                 if (view === 'szov_wallboard' && canAccessSzovWallboardSection) return;
@@ -45701,7 +45728,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -46441,7 +46468,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
-                                            {canAccessAiQaSection && (
+                                            {canAccessVerifierChatsSection && (
                                                 <li>
                                                     <button
                                                         onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
@@ -47191,7 +47218,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                     )}
-                                    {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
+                                    {canAccessVerifierChatsSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
                                                 type="button"
@@ -47348,6 +47375,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessLmsSection,
                 canAccessResourceFteSection,
                 canAccessAiQaSection,
+                canAccessVerifierChatsSection,
                 canAccessSzovWallboardSection,
                 canAccessFourYouSection,
                 canManageFourYouSection,
@@ -47666,7 +47694,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
-                        {view === "wazzup_chats" && canAccessAiQaSection && (
+                        {view === "wazzup_chats" && canAccessVerifierChatsSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка чатов…</div>}>
                                 <WazzupChatsView
                                     user={user}
