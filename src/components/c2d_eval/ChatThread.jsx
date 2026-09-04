@@ -156,6 +156,11 @@ const ChatThread = forwardRef(function ChatThread({
     quotes = [],
     hideService = false,
     focusMessageId = null,
+    // Куда встать при открытии: 'start' — к началу переписки (так открываются
+    // оценки: разбирают чат с первой реплики), 'end' — к свежему хвосту (так
+    // открываются мессенджеры). По умолчанию прежнее поведение — компонент
+    // используется в пяти местах, и менять их молча нельзя.
+    initialScroll = 'start',
     emptyText = 'В этом чате нет сообщений',
     loadingText = 'Загрузка переписки…',
     placeholder = null,
@@ -186,13 +191,36 @@ const ChatThread = forwardRef(function ChatThread({
         if (!snapshot) return;
         const target = focusMessageId ?? (quotes?.[0]?.messageId ?? null);
         if (target == null) {
-            if (threadRef.current) threadRef.current.scrollTop = 0;
-            return;
+            const host = threadRef.current;
+            if (!host) return;
+            if (initialScroll !== 'end') {
+                host.scrollTop = 0;
+                return;
+            }
+            // Прижимаем низ не один раз, а пока лента «дорастает»: картинки идут
+            // с loading="lazy" и без размеров, их высота узнаётся уже после
+            // первой установки — иначе двухсуточная переписка открывается
+            // «почти в конце» и уползает вверх на глазах у человека.
+            const stick = () => { host.scrollTop = host.scrollHeight; };
+            stick();
+            const observer = typeof ResizeObserver === 'function'
+                ? new ResizeObserver(stick) : null;
+            observer?.observe(host);
+            const timer = setTimeout(() => observer?.disconnect(), 3000);
+            const stopOnUserScroll = () => { observer?.disconnect(); };
+            host.addEventListener('wheel', stopOnUserScroll, { once: true, passive: true });
+            host.addEventListener('touchstart', stopOnUserScroll, { once: true, passive: true });
+            return () => {
+                clearTimeout(timer);
+                observer?.disconnect();
+                host.removeEventListener('wheel', stopOnUserScroll);
+                host.removeEventListener('touchstart', stopOnUserScroll);
+            };
         }
         const timer = setTimeout(() => scrollToMessage(target, 'auto'), 120);
         return () => clearTimeout(timer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [snapshot, focusMessageId]);
+    }, [snapshot, focusMessageId, initialScroll]);
 
     const quotesByMessage = useMemo(() => {
         const map = {};

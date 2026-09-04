@@ -245,12 +245,13 @@ def store_messages(cursor, client_id, phone, messages, window_from, window_to):
 _EVENT_INSERT_SQL = """
     INSERT INTO dch_events
         (kind, user_id, user_name, user_role, department_id, phone, client_id,
-         dialog_id, request_id, channel_name, comment_text, c2d_message_id,
-         messages_count, ip_address, user_agent)
+         channel_id, dialog_id, request_id, channel_name, comment_text,
+         c2d_message_id, messages_count, ip_address, user_agent)
     VALUES
         (%(kind)s, %(user_id)s, %(user_name)s, %(user_role)s, %(department_id)s,
-         %(phone)s, %(client_id)s, %(dialog_id)s, %(request_id)s, %(channel_name)s,
-         %(comment_text)s, %(c2d_message_id)s, %(messages_count)s, %(ip)s, %(ua)s)
+         %(phone)s, %(client_id)s, %(channel_id)s, %(dialog_id)s, %(request_id)s,
+         %(channel_name)s, %(comment_text)s, %(c2d_message_id)s, %(messages_count)s,
+         %(ip)s, %(ua)s)
     RETURNING id, created_at
 """
 
@@ -270,6 +271,7 @@ def log_event(cursor, ctx, kind, **fields):
         'department_id': ctx.get('department_id'),
         'phone': fields.get('phone'),
         'client_id': fields.get('client_id'),
+        'channel_id': fields.get('channel_id'),
         'dialog_id': fields.get('dialog_id'),
         'request_id': fields.get('request_id'),
         'channel_name': fields.get('channel_name'),
@@ -293,7 +295,7 @@ _JOURNAL_WHERE = """
 
 _JOURNAL_PAGE_SQL = """
     SELECT e.id, e.kind, e.user_id, e.user_name, e.user_role, e.phone,
-           e.client_id, e.dialog_id, e.request_id, e.channel_name,
+           e.client_id, e.channel_id, e.dialog_id, e.request_id, e.channel_name,
            e.comment_text, e.c2d_message_id, e.messages_count,
            e.ip_address, e.created_at
       FROM dch_events e
@@ -335,14 +337,15 @@ def _event_row(row):
         'user_role': row[4],
         'phone': row[5],
         'client_id': row[6],
-        'dialog_id': row[7],
-        'request_id': row[8],
-        'channel_name': row[9],
-        'comment_text': row[10],
-        'c2d_message_id': row[11],
-        'messages_count': row[12],
-        'ip_address': row[13],
-        'created_at': row[14].isoformat() if row[14] else None,
+        'channel_id': row[7],
+        'dialog_id': row[8],
+        'request_id': row[9],
+        'channel_name': row[10],
+        'comment_text': row[11],
+        'c2d_message_id': row[12],
+        'messages_count': row[13],
+        'ip_address': row[14],
+        'created_at': row[15].isoformat() if row[15] else None,
     }
 
 

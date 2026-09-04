@@ -192,6 +192,19 @@ def api_info():
 # Клиент по номеру
 # ─────────────────────────────────────────────────────────────────────────────
 
+def clean_client_name(value):
+    """Имя водителя или None.
+
+    Вендор отдаёт «unknown» буквальной строкой, когда имени у клиента нет, — и
+    в шапке чата это выглядело как имя водителя. Пустое имя честнее: раздел
+    подставит вместо него телефон.
+    """
+    name = str(value or '').strip()
+    if not name or name.lower() in {'unknown', 'no name', 'без имени'}:
+        return None
+    return name
+
+
 def find_client(phone):
     """{'id', 'name', 'phone'} или None. Один вызов API.
 
@@ -209,7 +222,7 @@ def find_client(phone):
     row = rows[0] or {}
     return {
         'id': row.get('id'),
-        'name': row.get('name'),
+        'name': clean_client_name(row.get('name')),
         'phone': normalized,
     }
 
@@ -374,7 +387,17 @@ def normalize_message(msg, names=None):
         for att in (msg.get('attachments') or [])
         if isinstance(att, dict) and att.get('link')
     ]
-    kind = str(msg.get('type') or '').strip()
+    # Тип сообщения. Вендор регулярно присылает его ПУСТЫМ (`type: null`) —
+    # так приходит автоопрос «Оператордың жұмысын қалай бағалайсыз?», который
+    # парк шлёт водителю после закрытия чата (проверено живьём 03.09.2026).
+    # Пустой тип нельзя оставлять как есть: в ленте у него нет своей ветки, и
+    # ChatThread рисует его белым пузырём СЛЕВА — то есть выдаёт вопрос парка за
+    # слова водителя. Пока чаты резались по обращению, опрос жил отдельной
+    # служебной карточкой и на глаза не попадался; после склейки по парку он
+    # оказывается внутри живой ленты, и оператор унёс бы его на скриншоте.
+    # Считаем неизвестный тип автоответом: это ближе всего к правде (сообщение
+    # шлёт робот парка) и ставит его на нужную сторону ленты.
+    kind = str(msg.get('type') or '').strip() or 'autoreply'
     item = {
         'id': msg.get('id'),
         'type': kind,
@@ -404,23 +427,51 @@ def normalize_message(msg, names=None):
     return item
 
 
+def chat_key(channel_id=None, dialog_id=None):
+    """Ключ чата. Двойник во фронте — chatKey в DriverChatsView.jsx.
+
+    Порядок обязан совпадать с фронтовым: на этом ключе держатся выбранный чат,
+    отметка «передан» и защита от повторной записи в журнал.
+    """
+    if channel_id:
+        return 'c%s' % int(channel_id)
+    if dialog_id:
+        return 'd%s' % int(dialog_id)
+    return 'x0'
+
+
 def group_chats(messages):
     """Сообщения окна -> список чатов, свежий сверху.
 
-    Чат = заявка (`request_id`): именно её видит чат-менеджер как «обращение», и
-    именно к ней привязаны его метрики. Сообщения без заявки собираются по
-    `dialog_id` — так в списке не пропадают автоответы и системные строки,
-    пришедшие до открытия обращения.
+    ЧАТ = ТАКСОПАРК (`channel_id`), а вся история окна лежит внутри него.
+    Формулировка владельца 04.09.2026: «один чат один таксопарк, но с историей в
+    два последних дня».
+
+    Раньше чат резался по `request_id` (обращению), и один разговор с одним
+    парком распадался на несколько карточек. Это не редкость, а норма: за двое
+    суток 88,8 % пар (клиент, парк) имеют больше одного обращения, в среднем
+    2,7, максимум 25 — на живых данных один водитель давал десять «чатов» при
+    одном парке и одном диалоге.
+
+    Почему ключ — канал, а не диалог. Связь у вендора один-к-одному: из 1585 пар
+    (клиент, канал) ни одна не держит двух диалогов, и ни один диалог не
+    охватывает двух каналов; диалог живёт до 39 суток, то есть окно в двое суток
+    он и так не разорвал бы. Диалог точности не добавляет, зато добавляет способ
+    разрезать чат, если вендор однажды заведёт второй. Канал же — это ровно то,
+    что владелец называет таксопарком, и он есть у каждого сообщения (0 пустых
+    на 85 735 строк). Фолбэк на диалог оставлен на случай, которого пока не
+    видели.
+
+    `request_id` у склеенного чата больше не адрес, а справка: обращений внутри
+    несколько, и все они лежат в `request_ids`.
     """
     buckets = {}
     for msg in messages:
-        key = ('r', msg.get('requestId')) if msg.get('requestId') else ('d', msg.get('dialogId'))
-        if key[1] is None:
-            key = ('d', 0)
+        key = chat_key(msg.get('channelId'), msg.get('dialogId'))
         bucket = buckets.setdefault(key, {
-            'request_id': msg.get('requestId'),
-            'dialog_id': msg.get('dialogId'),
+            'key': key,
             'channel_id': msg.get('channelId'),
+            'dialog_id': msg.get('dialogId'),
             'messages': [],
         })
         if bucket['dialog_id'] is None:
@@ -444,20 +495,40 @@ def group_chats(messages):
 
         preview = _last_text(('from_client', 'to_client')) or _last_text(
             ('comment', 'autoreply', 'system'))
+        # Все обращения окна — по ним обогащаемся метаданными. Свежие сверху,
+        # как и сами сообщения.
+        request_ids = []
+        for m in reversed(items):
+            rid = m.get('requestId')
+            if rid is not None and rid not in request_ids:
+                request_ids.append(rid)
+        # «Справочное» обращение — последнее ЖИВОЕ, а не первое попавшееся:
+        # самое свежее сообщение окна часто оказывается автоопросом после
+        # закрытия чата, и наследовать его номер значило бы подписать живой
+        # разговор служебной заявкой.
+        live_request = next((m.get('requestId') for m in reversed(items)
+                             if m.get('type') in ('from_client', 'to_client')
+                             and m.get('requestId') is not None), None)
         chats.append({
-            'request_id': bucket['request_id'],
-            'dialog_id': bucket['dialog_id'],
+            'key': bucket['key'],
             'channel_id': bucket['channel_id'],
+            'dialog_id': bucket['dialog_id'],
+            'request_id': live_request if live_request is not None else (
+                request_ids[0] if request_ids else None),
+            'request_ids': request_ids,
             'messages': items,
             'messages_count': len(items),
             'incoming_count': len(incoming),
             'outgoing_count': len(outgoing),
-            # Служебная «заявка» — автоопрос «оцените работу оператора» и
-            # системные строки закрытия чата: живой переписки в ней нет ни с
-            # одной стороны. В c2d_requests это половина строк (request_type =
-            # 'rating', 40 737 из 85 222), и в списке чатов водителя они дают
-            # ровно столько же шума. Не выбрасываем — прячем за тумблером:
-            # иногда спрашивают именно про оценку, которую водитель поставил.
+            # Служебный чат — тот, где за двое суток не было ни одной живой
+            # реплики: только автоопрос «оцените работу оператора» и системные
+            # строки. После склейки таких почти не остаётся (живая реплика в
+            # парке за двое суток есть почти всегда), и это правильно: прятать
+            # теперь надо служебные СООБЩЕНИЯ внутри ленты, а не карточки.
+            #
+            # Считаем строго по содержимому. Признак «тип заявки = rating» для
+            # этого больше не годится: у склеенного чата обращений несколько, и
+            # одно служебное среди них спрятало бы живой разговор целиком.
             'is_service': not incoming and not outgoing,
             'started_at': items[0].get('created') if items else None,
             'last_at': items[-1].get('created') if items else None,
@@ -467,7 +538,7 @@ def group_chats(messages):
             'authors': sorted({m['author'] for m in items
                                if m.get('type') == 'to_client' and m.get('author')}),
         })
-    chats.sort(key=lambda c: (c.get('last_at') or '', c.get('request_id') or 0), reverse=True)
+    chats.sort(key=lambda c: (c.get('last_at') or '', c.get('channel_id') or 0), reverse=True)
     return chats
 
 
