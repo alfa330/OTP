@@ -431,6 +431,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         instagram: base.instagram ?? "",
         telegram_nick: base.telegram_nick ?? "",
         study_place: base.study_place ?? "",
+        study_specialty: base.study_specialty ?? "",
         study_course: base.study_course ?? "",
         study_completed: !!base.study_completed,
         study_completion_year: base.study_completion_year ?? "",
@@ -472,6 +473,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.instagram = String(defaults.instagram ?? '').trim();
         defaults.telegram_nick = String(defaults.telegram_nick ?? '').trim();
         defaults.study_place = String(defaults.study_place ?? '').trim();
+        // Специальность — уточнение к месту учёбы: без места учёбы поля нет
+        // на экране, поэтому и в форму его не поднимаем.
+        defaults.study_specialty = defaults.study_place
+            ? String(defaults.study_specialty ?? '').trim()
+            : '';
         defaults.study_course = String(defaults.study_course ?? '').trim();
         defaults.study_completed = !!defaults.study_completed;
         defaults.study_completion_year = String(defaults.study_completion_year ?? '').trim();
@@ -702,6 +708,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         instagram: "",
         telegram_nick: "",
         study_place: "",
+        study_specialty: "",
         study_course: "",
         study_completed: false,
         study_completion_year: "",
@@ -864,6 +871,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             instagram: String(editedUser?.instagram || '').trim(),
             telegram_nick: String(editedUser?.telegram_nick || '').trim(),
             study_place: String(editedUser?.study_place || '').trim(),
+            study_specialty: String(editedUser?.study_place || '').trim()
+                ? String(editedUser?.study_specialty || '').trim()
+                : '',
             study_course: String(editedUser?.study_course || '').trim(),
             study_completed: !!editedUser?.study_completed,
             study_completion_year: studyCompletionYear,
@@ -938,6 +948,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     if (!isOpen) return null;
 
     const isCreateMode = !editedUser?.id;
+    // «Наименование специальности» показываем только при заполненном месте
+    // учёбы: без места учёбы спрашивать специальность не о чем (задача #279).
+    const hasStudyPlace = String(editedUser?.study_place || '').trim().length > 0;
     const tabs = [
         { id: "general", label: "Общее" },
         { id: "data", label: "Данные" },
@@ -1165,11 +1178,29 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <input
                         type="text"
                         value={editedUser?.study_place || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, study_place: e.target.value })}
+                        onChange={(e) => setEditedUser({
+                            ...editedUser,
+                            study_place: e.target.value,
+                            // Стёрли место учёбы — специальность уходит вместе с ним
+                            study_specialty: e.target.value.trim() ? (editedUser?.study_specialty || "") : ""
+                        })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
+
+                    {hasStudyPlace && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование специальности</label>
+                        <input
+                        type="text"
+                        value={editedUser?.study_specialty || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, study_specialty: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+                    )}
 
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Курс</label>
@@ -1847,11 +1878,29 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <input
                             type="text"
                             value={editedUser?.study_place || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, study_place: e.target.value })}
+                            onChange={(e) => setEditedUser({
+                                ...editedUser,
+                                study_place: e.target.value,
+                                // Стёрли место учёбы — специальность уходит вместе с ним
+                                study_specialty: e.target.value.trim() ? (editedUser?.study_specialty || "") : ""
+                            })}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                             disabled={isLoading}
                             />
                         </div>
+
+                        {hasStudyPlace && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование специальности</label>
+                            <input
+                            type="text"
+                            value={editedUser?.study_specialty || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, study_specialty: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+                        )}
 
                         <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Курс</label>

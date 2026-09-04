@@ -12522,7 +12522,11 @@ def get_admin_users():
                         -- «Город» и «Должность» дописаны в конец, чтобы не
                         -- сдвигать индексы выше
                         u.city,
-                        u.job_title
+                        u.job_title,
+                        -- «Наименование специальности» дописано в конец по той же
+                        -- причине, что «Город» и «Должность»: ответ читается по
+                        -- позиционным индексам row[N]
+                        u.study_specialty
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -12620,7 +12624,8 @@ def get_admin_users():
                         "group_id": row[49],
                         "group_name": row[50] or "",
                         "city": row[51] or "",
-                        "job_title": row[52] or ""
+                        "job_title": row[52] or "",
+                        "study_specialty": row[53] or ""
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
@@ -12740,6 +12745,7 @@ def admin_update_user():
             'proxy_card_number',
             'sip_number',
             'study_place',
+            'study_specialty',
             'study_course',
             'close_contact_1_relation',
             'close_contact_1_full_name',
@@ -14518,7 +14524,10 @@ def get_sv_list():
                         -- department_id (39) уже используется фильтром
                         -- возглавляемых отделов ниже
                         city,
-                        job_title
+                        job_title,
+                        -- «Наименование специальности» — в конец: индексы выше
+                        -- уже заняты фильтром отделов и сборкой ответа
+                        study_specialty
                     FROM users
                     WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                     ORDER BY name
@@ -14573,7 +14582,8 @@ def get_sv_list():
                         "supervisor_id": sv[38],
                         "department_id": sv[39],
                         "city": sv[40] or "",
-                        "job_title": sv[41] or ""
+                        "job_title": sv[41] or "",
+                        "study_specialty": sv[42] or ""
                     })
             else:
                 # Супервайзер видит только супервайзеров СВОЕГО отдела
@@ -18324,6 +18334,7 @@ def add_user():
         telegram_nick = str(data.get('telegram_nick') or '').strip() or None
         company_name = str(data.get('company_name') or '').strip() or None
         study_place = str(data.get('study_place') or '').strip() or None
+        study_specialty = str(data.get('study_specialty') or '').strip() or None
         study_course = str(data.get('study_course') or '').strip() or None
         study_completion_year_raw = data.get('study_completion_year')
         if study_completion_year_raw in [None, '']:
@@ -18532,6 +18543,7 @@ def add_user():
             has_driver_license=has_driver_license,
             sip_number=sip_number,
             study_place=study_place,
+            study_specialty=study_specialty,
             study_course=study_course,
             study_completed=study_completed,
             study_completion_year=study_completion_year,

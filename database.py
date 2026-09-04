@@ -1565,6 +1565,7 @@ class Database:
                     has_driver_license BOOLEAN NOT NULL DEFAULT FALSE,
                     sip_number VARCHAR(64),
                     study_place VARCHAR(255),
+                    study_specialty VARCHAR(255),
                     study_course VARCHAR(100),
                     study_completed BOOLEAN NOT NULL DEFAULT FALSE,
                     study_completion_year INTEGER,
@@ -1661,6 +1662,13 @@ class Database:
             cursor.execute("""
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS rate_change_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            # Наименование специальности (задача #279). Уточнение к «Месту учебы»,
+            # поэтому отдельной таблицы не заводим: значение имеет смысл только
+            # вместе с местом учёбы и хранится рядом с ним.
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS study_specialty VARCHAR(255);
             """)
             # Приватная фотолента "4 You". В таблице храним только ссылки на
             # оптимизированные варианты; сами изображения остаются в закрытом GCS.
@@ -5751,6 +5759,7 @@ class Database:
                     company_name VARCHAR(255),
                     employment_type VARCHAR(10) CHECK (employment_type IN ('gph', 'of', 'smz') OR employment_type IS NULL),
                     study_place VARCHAR(255),
+                    study_specialty VARCHAR(255),
                     study_course VARCHAR(100),
                     study_completed BOOLEAN NOT NULL DEFAULT FALSE,
                     study_completion_year INTEGER,
@@ -5853,6 +5862,9 @@ class Database:
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS internship_in_company BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS front_office_training BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS front_office_training_date DATE;
+
+                -- Наименование специальности (задача #279): уточнение к «Месту учебы»
+                ALTER TABLE user_hr_profiles ADD COLUMN IF NOT EXISTS study_specialty VARCHAR(255);
 
                 -- JSONB-масштабируемость (гибрид): уникальные поля конкретного отдела
                 ALTER TABLE operator_profiles ADD COLUMN IF NOT EXISTS attributes JSONB NOT NULL DEFAULT '{}'::jsonb;
@@ -8530,6 +8542,7 @@ class Database:
         has_driver_license=None,
         sip_number=None,
         study_place=None,
+        study_specialty=None,
         study_course=None,
         study_completed=None,
         study_completion_year=None,
@@ -8574,6 +8587,7 @@ class Database:
         proxy_status = normalize_proxy_status_value(proxy_status)
         sip_number = str(sip_number).strip() if sip_number is not None else ""
         study_place = str(study_place).strip() if study_place is not None else ""
+        study_specialty = str(study_specialty).strip() if study_specialty is not None else ""
         study_course = str(study_course).strip() if study_course is not None else ""
         study_completion_year_raw = str(study_completion_year).strip() if study_completion_year is not None else ""
         close_contact_1_relation = str(close_contact_1_relation).strip() if close_contact_1_relation is not None else ""
@@ -8597,6 +8611,12 @@ class Database:
         proxy_card_number = proxy_card_number or None
         sip_number = sip_number or None
         study_place = study_place or None
+        study_specialty = study_specialty or None
+        # Специальность — уточнение к месту учёбы: без места учёбы её не храним,
+        # иначе значение осталось бы висеть в базе и в выгрузках, не показываясь
+        # в карточке (поле там появляется только при заполненном месте учёбы).
+        if not study_place:
+            study_specialty = None
         study_course = study_course or None
         if study_completion_year_raw:
             if not study_completion_year_raw.isdigit():
@@ -8658,11 +8678,11 @@ class Database:
                     INSERT INTO user_hr_profiles (
                         user_id, phone, email, personal_email, instagram, telegram_nick,
                         company_name, employment_type,
-                        study_place, study_course, study_completed, study_completion_year,
+                        study_place, study_specialty, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, city, job_title
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (user_id) DO UPDATE SET
                         phone = COALESCE(EXCLUDED.phone, user_hr_profiles.phone),
                         email = COALESCE(EXCLUDED.email, user_hr_profiles.email),
@@ -8672,6 +8692,7 @@ class Database:
                         company_name = COALESCE(EXCLUDED.company_name, user_hr_profiles.company_name),
                         employment_type = COALESCE(EXCLUDED.employment_type, user_hr_profiles.employment_type),
                         study_place = COALESCE(EXCLUDED.study_place, user_hr_profiles.study_place),
+                        study_specialty = COALESCE(EXCLUDED.study_specialty, user_hr_profiles.study_specialty),
                         study_course = COALESCE(EXCLUDED.study_course, user_hr_profiles.study_course),
                         study_completed = EXCLUDED.study_completed,
                         study_completion_year = COALESCE(EXCLUDED.study_completion_year, user_hr_profiles.study_completion_year),
@@ -8687,7 +8708,7 @@ class Database:
                 """, (
                     uid, phone, email, personal_email, instagram, telegram_nick,
                     company_name, employment_type,
-                    study_place, study_course,
+                    study_place, study_specialty, study_course,
                     (study_completed_value if study_completed_value is not None else False),
                     study_completion_year,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
@@ -8743,12 +8764,12 @@ class Database:
                         telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
                         login, password_hash, hours_table_url, gender, birth_date, phone, email, personal_email,
                         instagram, telegram_nick, company_name, employment_type, has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
-                        study_place, study_course, study_completed, study_completion_year,
+                        study_place, study_specialty, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, city, job_title, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
@@ -8759,7 +8780,7 @@ class Database:
                     proxy_status,
                     (has_driver_license_value if has_driver_license_value is not None else False),
                     sip_number,
-                    study_place, study_course,
+                    study_place, study_specialty, study_course,
                     (study_completed_value if study_completed_value is not None else False),
                     study_completion_year,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
@@ -8799,6 +8820,7 @@ class Database:
                             has_driver_license = COALESCE(%s, has_driver_license),
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
+                            study_specialty = COALESCE(%s, study_specialty),
                             study_course = COALESCE(%s, study_course),
                             study_completed = COALESCE(%s, study_completed),
                             study_completion_year = COALESCE(%s, study_completion_year),
@@ -8820,7 +8842,7 @@ class Database:
                     """, (
                         direction_id, supervisor_id, hours_table_url, gender, birth_date,
                         phone, email, personal_email, instagram, telegram_nick, company_name, employment_type, has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
-                        study_place, study_course, study_completed_value, study_completion_year,
+                        study_place, study_specialty, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, city, job_title, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
@@ -8860,6 +8882,7 @@ class Database:
                             has_driver_license = COALESCE(%s, has_driver_license),
                             sip_number = COALESCE(%s, sip_number),
                             study_place = COALESCE(%s, study_place),
+                            study_specialty = COALESCE(%s, study_specialty),
                             study_course = COALESCE(%s, study_course),
                             study_completed = COALESCE(%s, study_completed),
                             study_completion_year = COALESCE(%s, study_completion_year),
@@ -8882,7 +8905,7 @@ class Database:
                         name, role, direction_id, hire_date, supervisor_id, login, password_hash, hours_table_url,
                         gender, birth_date, phone, email, personal_email, instagram, telegram_nick, company_name, employment_type,
                         has_proxy_value, proxy_card_number, proxy_status, has_driver_license_value, sip_number,
-                        study_place, study_course, study_completed_value, study_completion_year,
+                        study_place, study_specialty, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                         card_number, city, job_title, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
@@ -31715,7 +31738,7 @@ class Database:
     _HR_PROFILE_FIELDS = frozenset([
         'phone', 'email', 'personal_email', 'instagram', 'telegram_nick',
         'company_name', 'employment_type',
-        'study_place', 'study_course', 'study_completed', 'study_completion_year',
+        'study_place', 'study_specialty', 'study_course', 'study_completed', 'study_completion_year',
         'close_contact_1_relation', 'close_contact_1_full_name', 'close_contact_1_phone',
         'close_contact_2_relation', 'close_contact_2_full_name', 'close_contact_2_phone',
         'card_number', 'city', 'job_title'
@@ -31745,6 +31768,7 @@ class Database:
             'has_driver_license',
             'sip_number',
             'study_place',
+            'study_specialty',
             'study_course',
             'study_completed',
             'study_completion_year',
@@ -31827,6 +31851,25 @@ class Database:
                     INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (user_id, changed_by, field, old_value, str(value)))
+
+            # Специальность живёт только вместе с местом учёбы (задача #279).
+            # Стёрли место учёбы — стираем и специальность: в карточке поле
+            # специальности скрывается, и оставленное значение было бы невидимым
+            # для человека, но продолжало бы попадать в выгрузку.
+            if updated and field == 'study_place' and not value:
+                cursor.execute("SELECT study_specialty FROM users WHERE id = %s", (user_id,))
+                specialty_row = cursor.fetchone()
+                old_specialty = specialty_row[0] if specialty_row else None
+                if old_specialty:
+                    cursor.execute("UPDATE users SET study_specialty = NULL WHERE id = %s", (user_id,))
+                    cursor.execute(
+                        "UPDATE user_hr_profiles SET study_specialty = NULL WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    cursor.execute("""
+                        INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                        VALUES (%s, %s, 'study_specialty', %s, %s)
+                    """, (user_id, changed_by, str(old_specialty), None))
 
             # При смене ставки фиксируем помесячную ставку (work_hours.rate):
             #  - прошлые месяцы без явной ставки «замораживаем» на прежнем значении,
@@ -35230,6 +35273,7 @@ class Database:
                         u.instagram,
                         u.telegram_nick,
                         u.study_place,
+                        u.study_specialty,
                         u.study_course,
                         u.company_name,
                         u.employment_type,
@@ -35394,6 +35438,7 @@ class Database:
                 "Инстаграм",
                 "Ник Telegram",
                 "Место учебы",
+                "Наименование специальности",
                 "Курс",
                 "Номер карты",
                 "Наименование ТОО/ИП",
@@ -35431,7 +35476,7 @@ class Database:
                 (
                     name, login, role, department_name, direction, supervisor, status, rate, hire_date,
                     phone, email, personal_email, instagram, telegram_nick,
-                    study_place, study_course, company_name, employment_type,
+                    study_place, study_specialty, study_course, company_name, employment_type,
                     has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
@@ -35462,6 +35507,7 @@ class Database:
                     instagram or "",
                     telegram_nick or "",
                     study_place or "",
+                    study_specialty or "",
                     study_course or "",
                     card_number or "",
                     company_name or "",
