@@ -1578,7 +1578,7 @@ class SipEndpointTests(unittest.TestCase):
             self.source,
         )
 
-    def test_phone_download_is_limited_to_sales_and_admins(self):
+    def test_phone_download_is_limited_to_sales_tez_and_admins(self):
         """Ограничение обязано жить на сервере, а не только в спрятанной кнопке.
 
         За подписанной ссылкой приходят и кнопка в iCORE, и автообновление самого
@@ -1591,8 +1591,28 @@ class SipEndpointTests(unittest.TestCase):
         gate = self._function('_can_download_icore_phone')
         self.assertIn('_is_admin_role', gate)
         self.assertIn('ICORE_PHONE_DEPARTMENT_IDS', gate)
-        # Отдел продаж; расширяется добавлением id, а не правкой условий.
-        self.assertIn('ICORE_PHONE_DEPARTMENT_IDS = (367,)', self.source)
+        # Отдел продаж (367) и Тез КЦ (560); расширяется добавлением id, а не
+        # правкой условий — потому список и сверяется здесь литералом.
+        self.assertIn('ICORE_PHONE_DEPARTMENT_IDS = (367, 560)', self.source)
+
+    def test_phone_department_ids_are_the_same_on_both_sides(self):
+        """Список отделов продублирован на фронте, и разъехаться он не имеет права.
+
+        Половинчатая правка даёт ровно два исхода: кнопки нет, хотя доступ есть,
+        либо кнопка есть, а ручка отвечает 403 — и второй случай на проде даже
+        не всплывает тостом. В поддержку оба приходят одинаково: «скачайте
+        телефон — не скачивается».
+        """
+        back = re.search(r'ICORE_PHONE_DEPARTMENT_IDS = \(([^)]*)\)', self.source)
+        front = re.search(
+            r'ICORE_PHONE_DEPARTMENT_IDS = new Set\(\[([^\]]*)\]\)', _read(APP_PATH)
+        )
+        self.assertIsNotNone(back, 'константа отделов пропала из bot_schedule2.py')
+        self.assertIsNotNone(front, 'константа отделов пропала из src/App.jsx')
+        self.assertEqual(
+            {int(x) for x in re.findall(r'\d+', back.group(1))},
+            {int(x) for x in re.findall(r'\d+', front.group(1))},
+        )
 
     def test_phone_version_manifest_stays_public(self):
         """Манифест версии закрывать нельзя: истёкшая сессия иначе запирает парк
