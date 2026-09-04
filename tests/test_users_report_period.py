@@ -83,7 +83,8 @@ class _FakeColumn:
 REPORT_COLUMN_NAMES = (
     "name", "login", "role", "department_name", "direction", "supervisor",
     "status", "rate", "hire_date", "phone", "email", "personal_email",
-    "instagram", "telegram_nick", "study_place", "study_course", "company_name",
+    "instagram", "telegram_nick", "study_place", "study_specialty", "study_course",
+    "company_name",
     "employment_type", "has_proxy", "proxy_card_number", "proxy_status",
     "has_driver_license", "sip_number",
     "close_contact_1_relation", "close_contact_1_full_name", "close_contact_1_phone",

@@ -38959,6 +38959,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             render: (employee) => renderEmployeeStudyCell(employee)
                         },
                         {
+                            key: 'study_specialty',
+                            label: 'Специальность',
+                            render: (employee) => employee?.study_specialty || '-'
+                        },
+                        {
                             key: 'study_course',
                             label: 'Курс',
                             render: (employee) => employee?.study_course || '-'
@@ -42725,6 +42730,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             instagram: normalizeTextForApi(editedUser.instagram),
                             telegram_nick: normalizeTextForApi(editedUser.telegram_nick),
                             study_place: normalizeTextForApi(editedUser.study_place),
+                            study_specialty: normalizeTextForApi(editedUser.study_specialty),
                             study_course: normalizeTextForApi(editedUser.study_course),
                             study_completed: normalizeBoolForApi(editedUser.study_completed),
                             study_completion_year: normalizeStudyCompletionYearForApi(editedUser.study_completion_year),
@@ -43031,6 +43037,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'study_place',
                             value: nextStudyPlace
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextStudySpecialty = normalizeTextForApi(editedUser?.study_specialty);
+                    const prevStudySpecialty = normalizeTextForApi(userToEdit?.study_specialty);
+                    if (nextStudySpecialty !== prevStudySpecialty) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'study_specialty',
+                            value: nextStudySpecialty
                         }, {
                             headers: { 'X-User-Id': user.id }
                         });
