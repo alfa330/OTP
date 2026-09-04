@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import { normalizeRole, isAdminLikeRole, roleIsAny } from '../../utils/roles';
+import { isBackOfficeEmployeeRole } from '../../utils/departmentViews';
 import {
     APPLE_FONT,
     IosHint,
@@ -42,6 +43,15 @@ const LIST_PAGE_SIZE = 20;
 const LIST_SEARCH_DEBOUNCE_MS = 300;
 
 const isManagerRole = (role) => isAdminLikeRole(role) || roleIsAny(role, ['sv', 'trainer']);
+
+/* Кто ПРОХОДИТ опрос, а не составляет его. Раньше здесь стоял литерал
+   role === 'operator', и это был не тот же вопрос: стажёр и рядовой сотрудник
+   отдела без линии (HR, бухгалтерия, маркетинг) не операторы, но и не
+   руководители — они проваливались в менеджерскую ветку вопросов, где у
+   теста видны правильные ответы. */
+const isRespondentRole = (role) => (
+    roleIsAny(role, ['operator', 'trainee']) || isBackOfficeEmployeeRole(role)
+);
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
 const parseWeeksInput = (value) => {
     if (value === '' || value == null) return null;
@@ -523,7 +533,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
 
     const canManage = isManagerRole(user?.role);
-    const isOperator = normalizeRole(user?.role) === 'operator';
+    const isOperator = isRespondentRole(user?.role);
     const isRepeatMode = repeatSourceSurveyId != null;
     const isEditMode = editingSurveyId != null;
     const departmentOptions = useMemo(

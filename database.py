@@ -387,8 +387,9 @@ ROLE_ALIASES = {
     'super admin': 'super_admin'
 }
 
-# hr_manager / accounting_manager — рядовые сотрудники бэк-офиса (Бухгалтерия,
-# HR). Уровень тот же, что у оператора: они не на линии, но и не начальство.
+# hr_manager / accounting_manager / marketing_manager — рядовые сотрудники
+# отделов без линии (Бухгалтерия, HR, Маркетинг). Уровень тот же, что у
+# оператора: они не на линии, но и не начальство.
 # Уровень читает не только _has_min_role: wiki/access.py::expand_otp_roles
 # раздаёт человеку все роли не выше его уровня, поэтому на десятке новые роли
 # подпадают под уже написанные правила вики на 'operator'.
@@ -397,16 +398,23 @@ ROLE_HIERARCHY = {
     'trainee': 10,
     'hr_manager': 10,
     'accounting_manager': 10,
+    'marketing_manager': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
     'super_admin': 50
 }
 
-# Рядовые сотрудники бэк-офиса (Бухгалтерия, HR). Зеркалит
+# Рядовые сотрудники отделов без линии (Бухгалтерия, HR, Маркетинг). Зеркалит
 # BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT в src/utils/departmentViews.js и
 # одноимённый набор в bot_schedule2.py.
-BACK_OFFICE_EMPLOYEE_ROLES = frozenset({'hr_manager', 'accounting_manager'})
+#
+# «Бэк-офис» в имени набора читается как «отдел без линии»: у Маркетинга, как у
+# Бухгалтерии и HR, нет ни направлений, ни групп, ни телефонии, и рядовой его
+# сотрудник заводится своей ролью, а не 'operator'. Имя оставлено прежним
+# намеренно — набор сторожится дословными assertIn в тестах, и переименование
+# стоило бы правки десятка мест ради одного слова.
+BACK_OFFICE_EMPLOYEE_ROLES = frozenset({'hr_manager', 'accounting_manager', 'marketing_manager'})
 
 # Роли с ЛИЧНЫМ охватом задач: человек видит только то, где он сам постановщик,
 # поручитель или исполнитель, и не принимает работу за других. Набор один на три
@@ -1524,7 +1532,7 @@ class Database:
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
                     name VARCHAR(255) NOT NULL,
-                    role VARCHAR(32) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee', 'hr_manager', 'accounting_manager')),
+                    role VARCHAR(32) NOT NULL CHECK(role IN ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee', 'hr_manager', 'accounting_manager', 'marketing_manager')),
                     hire_date DATE,
                     login VARCHAR(255) UNIQUE,
                     password_hash VARCHAR(255),
@@ -1612,6 +1620,9 @@ class Database:
             # «дополнить», а DROP IF EXISTS + ADD идемпотентен и повторный
             # старт переживает. Колонку заодно расширяем: 'accounting_manager'
             # — 18 символов, в прежние VARCHAR(20) влезало впритык.
+            # 'marketing_manager' — 17 символов, в VARCHAR(32) укладывается с
+            # запасом: условие ниже (character_maximum_length < 32) для него не
+            # срабатывает и не должно, колонка уже расширена.
             # Расширение колонки — под условием, в отличие от соседних ALTER'ов:
             # у ALTER COLUMN ... TYPE нет формы IF NEEDED, а безусловный вызов
             # на каждом старте берёт ACCESS EXCLUSIVE и перестраивает индексы по
@@ -1632,7 +1643,8 @@ class Database:
                 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
                 ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
                     'super_admin', 'admin', 'sv', 'supervisor', 'trainer',
-                    'operator', 'trainee', 'hr_manager', 'accounting_manager'
+                    'operator', 'trainee', 'hr_manager', 'accounting_manager',
+                    'marketing_manager'
                 ));
             """)
             # Должность сотрудника: у бэк-офиса (Бухгалтерия, HR) человека

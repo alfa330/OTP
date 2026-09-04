@@ -32,12 +32,15 @@ from .schema import CAPABILITY_COLUMNS, PERMISSION_COLUMNS
 ROLE_LEVELS = {
     'operator': 10,
     'trainee': 10,
-    # Бэк-офис (Бухгалтерия, HR). Десятка обязательна: на ней
-    # expand_otp_roles подводит их под уже написанные правила на
+    # Отделы без линии (Бухгалтерия, HR, Маркетинг). Десятка обязательна: на
+    # ней expand_otp_roles подводит их под уже написанные правила на
     # 'operator', а role_level_of перестаёт возвращать 0 — иначе вика у
     # них была бы пустой, не пройдя ни одного min_role_level.
+    # Эту же таблицу читает news/access.py — без строки роль перестала бы
+    # быть адресатом «Новости дня».
     'hr_manager': 10,
     'accounting_manager': 10,
+    'marketing_manager': 10,
     'trainer': 20,
     'sv': 30,
     'admin': 40,
@@ -49,7 +52,12 @@ ROLE_LEVELS = {
 # получать доступ молча, но и запирать по ошибке нового admin'а перечисление не
 # даст. Стажёра здесь намеренно нет — до появления бэк-офиса гейт стоял ровно
 # на 'operator', и расширять его заодно значило бы менять чужое правило.
-QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager'})
+#
+# 'marketing_manager' здесь ОБЯЗАТЕЛЕН, и это не «по аналогии»: сегодня люди
+# «Маркетинга» заведены обычными 'operator' и подтверждение QR проходят.
+# Перевод их на собственную должность без этой строки снял бы подтверждение
+# молча — тот же дефект, что был у 'trainee' в «Посылках».
+QR_GATED_ROLES = frozenset({'operator', 'hr_manager', 'accounting_manager', 'marketing_manager'})
 
 
 def role_level_of(role):

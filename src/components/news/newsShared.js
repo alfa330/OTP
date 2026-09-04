@@ -16,6 +16,7 @@ export const ROLE_TITLES = {
     trainee: 'стажёр',
     hr_manager: 'HR',
     accounting_manager: 'бухгалтерия',
+    marketing_manager: 'маркетинг',
 };
 
 export const roleTitle = (role) => ROLE_TITLES[String(role || '').toLowerCase()] || '';

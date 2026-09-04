@@ -183,7 +183,7 @@ test('роль бэк-офиса не даёт прав в чужом отдел
 });
 
 test('роли отделов не пересекаются', () => {
-    const roles = BACK_OFFICE_CODES.map(ownRole);
+    const roles = [...BACK_OFFICE_CODES, MARKETING_CODE].map(ownRole);
     assert.equal(new Set(roles).size, roles.length, 'у каждого отдела своя роль');
     assert.deepEqual([...BACK_OFFICE_EMPLOYEE_ROLES].sort(), [...roles].sort());
 });
@@ -191,7 +191,7 @@ test('роли отделов не пересекаются', () => {
 test('бэк-офис не задел остальные отделы', () => {
     assert.deepEqual(
         Object.keys(DEPARTMENT_VIEW_ALLOWLIST),
-        ['tez', 'op', 'front_office', 'accounting', 'hr'],
+        ['tez', 'op', 'front_office', 'accounting', 'hr', 'marketing'],
     );
     // Упрощённый учёт — у бэк-офиса и фронт-офисов; у ОП и ТЭЗ выпадашка
     // со «Супервайзерами» и «Тренерами» остаётся.
@@ -207,4 +207,58 @@ test('бэк-офис не задел остальные отделы', () => {
         assert.equal(departmentCodeHidesOperatorFields(code), false, code);
         assert.equal(departmentCodeUsesEmployeeJobTitle(code), false, code);
     }
+});
+
+/* ─── Маркетинг ───────────────────────────────────────────────────────────
+   Отдел устроен как бэк-офис (нет линии, есть «Должность»), но набор разделов
+   у него свой, и в цикл BACK_OFFICE_CODES он не входит намеренно: тот цикл
+   проверяет ОТКАЗ в «Опросах», «Журнале оценок», «Делении звонков» и
+   «ИИ-оценке» — ровно в тех разделах, которые маркетингу и открыты. */
+
+const MARKETING_CODE = 'marketing';
+const MARKETING_VIEWS = ['profile', 'tasks', 'surveys', 'lms', 'call_evaluation', 'call_division'];
+
+test('маркетинг: рядовому открыты ровно шесть разделов', () => {
+    const user = employee(MARKETING_CODE, ownRole(MARKETING_CODE));
+    assert.equal(ownRole(MARKETING_CODE), 'marketing_manager');
+    assert.equal(departmentRestrictsViews(user), true);
+    for (const viewKey of MARKETING_VIEWS) {
+        assert.equal(departmentAllowsView(user, viewKey), true, viewKey);
+    }
+    // Разделы соседних отделов остались закрыты.
+    for (const viewKey of ['manage_operators', 'qr_access', 'hours', 'work_schedules',
+                           'salary', 'contests', 'monitoring_scale', 'trainings']) {
+        assert.equal(departmentAllowsView(user, viewKey), false, viewKey);
+    }
+    // «Профиль» первым: firstAllowedView берёт allow[0], и это раздел по
+    // умолчанию. Только в нём сотрудник видит собственную «Должность».
+    assert.equal(firstAllowedView(user, []), 'profile');
+});
+
+test('маркетинг: «Вики», «Ивенты» и «Лиды OLX» выдаются не этой картой', () => {
+    const user = employee(MARKETING_CODE, ownRole(MARKETING_CODE));
+    // «Ивенты» — UNIVERSAL_VIEWS: раздел общий для всех ролей.
+    assert.equal(departmentAllowsView(user, 'events'), true);
+    // «Вики» — тумблер departments.wiki_enabled, «Лиды OLX» и «ИИ-оценка» —
+    // свои предикаты в App.jsx. Карта разделов о них знать не должна.
+    for (const viewKey of ['wiki', 'olx_leads', 'ai_qa']) {
+        assert.equal(departmentAllowsView(user, viewKey), false, viewKey);
+    }
+});
+
+test('маркетинг: ограничение легло ТОЛЬКО на свою должность', () => {
+    // Решение владельца: людей, заведённых в отделе до появления должности,
+    // ограничение не касается, и глава отдела остаётся без ограничений.
+    for (const role of ['operator', 'trainee', 'sv']) {
+        assert.equal(departmentRestrictsViews(employee(MARKETING_CODE, role)), false, role);
+    }
+    assert.equal(departmentRestrictsViews(head(MARKETING_CODE)), false, 'глава');
+});
+
+test('маркетинг: карточка сотрудника как у бэк-офиса', () => {
+    assert.equal(departmentCodeUsesEmployeeJobTitle(MARKETING_CODE), true);
+    assert.equal(departmentCodeHidesOperatorFields(MARKETING_CODE), true);
+    assert.equal(departmentHidesOperatorFields(employee(MARKETING_CODE, 'marketing_manager')), true);
+    // «Город» — признак фронт-офисов, маркетингу он не нужен.
+    assert.equal(departmentCodeUsesEmployeeCity(MARKETING_CODE), false);
 });

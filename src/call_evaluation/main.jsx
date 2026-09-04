@@ -4645,14 +4645,25 @@ const App = ({ user, initialSelection }) => {
     const isDepartmentHead = headedDepartmentId !== null && headedDepartmentId !== undefined && String(headedDepartmentId) !== '';
     const isBaseAdminRole = canonicalRole === 'admin' || canonicalRole === 'super_admin';
     const isScopedDepartmentHead = isDepartmentHead && canonicalRole !== 'super_admin';
+    /* Наблюдатель «Маркетинга» — рядовой сотрудник отдела (решение владельца
+       04.09.2026). Журнал ему открыт на ПРОСМОТР: те же экраны и фильтры, что
+       у админа, но ни одной кнопки действия. Поэтому «смотреть» и «менять»
+       разведены на два флага: isEvaluationViewer открывает списки, фильтры и
+       аналитику, isAdminRole остаётся правом оценивать, удалять и решать
+       заявки. Смешав их, мы бы отдали наблюдателю окно оценки, и он упёрся бы
+       в 403 от сервера уже после заполнения формы.
+       Зеркала: isMarketingObserver в src/App.jsx (кому монтировать iframe) и
+       _is_marketing_observer в bot_schedule2.py (какие данные отдать). */
+    const isMarketingObserver = canonicalRole === 'marketing_manager' && !isDepartmentHead;
     const isAdminRole = isBaseAdminRole || isDepartmentHead;
+    const isEvaluationViewer = isAdminRole || isMarketingObserver;
     const isGlobalAdminRole = isBaseAdminRole && !isScopedDepartmentHead;
     const canManageFeedbackReportSetting = isGlobalAdminRole || isDepartmentHead;
     const canUseRequests = isAdminRole || isSupervisorRole || isDepartmentHead;
     const canDecideReevaluationRequests = isAdminRole || isDepartmentHead;
     const canUseCalibration = isGlobalAdminRole || isSupervisorRole;
     const canManageCalibrationRooms = isGlobalAdminRole || isSupervisorRole;
-    const canUseAnalytics = isAdminRole || isSupervisorRole;
+    const canUseAnalytics = isEvaluationViewer || isSupervisorRole;
     const canManageEvaluationNotifications = isAdminRole || isDepartmentHead;
     /* Раздел «Контроль» — тот же круг, что ставит обратную связь: админ,
        супервайзер, глава отдела. Повторяет серверный _can_manage_checkpoints;
@@ -5121,7 +5132,7 @@ const App = ({ user, initialSelection }) => {
 
     // Supervisors
     useEffect(() => {
-        if (!(isAdminRole || isSupervisorRole || isDepartmentHead) || !userId) return;
+        if (!(isEvaluationViewer || isSupervisorRole || isDepartmentHead) || !userId) return;
         let isCancelled = false;
 
         authFetch(`${API_BASE_URL}/api/admin/sv_list`, { headers:{'X-User-Id':userId} })
@@ -5142,7 +5153,7 @@ const App = ({ user, initialSelection }) => {
             });
 
         return () => { isCancelled = true; };
-    }, [isAdminRole, isSupervisorRole, isDepartmentHead, userId, normalizeSupervisorList]);
+    }, [isEvaluationViewer, isSupervisorRole, isDepartmentHead, userId, normalizeSupervisorList]);
 
     /* Группы для селектора «Аналитики». include_archived=1 намеренно: у архивных
        групп есть месяцы, когда они жили, и без них аналитика за прошлый месяц
@@ -5322,7 +5333,7 @@ const App = ({ user, initialSelection }) => {
         if (!userId) return;
         const shouldUseSelectedSupervisor =
             isSupervisorRole ||
-            (isAdminRole && (!isScopedDepartmentHead || selectedSupervisor));
+            (isEvaluationViewer && (!isScopedDepartmentHead || selectedSupervisor));
         const scopeId = shouldUseSelectedSupervisor ? selectedSupervisor : userId;
         if (!scopeId) {
             setOperators([]);
@@ -5371,7 +5382,7 @@ const App = ({ user, initialSelection }) => {
             });
 
         return () => { isCancelled = true; };
-    }, [userId, isAdminRole, isSupervisorRole, isScopedDepartmentHead, selectedSupervisor, getOperatorsCacheKey]);
+    }, [userId, isEvaluationViewer, isSupervisorRole, isScopedDepartmentHead, selectedSupervisor, getOperatorsCacheKey]);
 
     // Evaluations fetch
     const fetchEvaluations = useCallback(async ({ force = false } = {}) => {
@@ -6817,7 +6828,7 @@ const App = ({ user, initialSelection }) => {
                         <span className="panel-title">{sectionTitle}</span>
                     </div>
                     <div className="filters">
-                        {(isAdminRole || isSupervisorRole) && activeSection !== 'requests' && activeSection !== 'checkpoints' && (
+                        {(isEvaluationViewer || isSupervisorRole) && activeSection !== 'requests' && activeSection !== 'checkpoints' && (
                             <div className="filter-group">
                                 <label className="label">Супервайзер</label>
                                 <select className="select" value={selectedSupervisor||''} style={selectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined} onChange={e => { setSelectedSupervisor(parseInt(e.target.value)||null); setSelectedOperator(null); setCalls([]); setExpandedId(null); }}>
@@ -6881,7 +6892,7 @@ const App = ({ user, initialSelection }) => {
                                 />
                             </div>
                         )}
-                        {isAdminRole && activeSection === 'journal' && (() => {
+                        {isEvaluationViewer && activeSection === 'journal' && (() => {
                             const lastDay = new Date(parseInt(selectedMonth.slice(0,4)), parseInt(selectedMonth.slice(5,7)), 0).getDate();
                             return <DateRangePicker minDate={`${selectedMonth}-01`} maxDate={`${selectedMonth}-${String(lastDay).padStart(2,'0')}`} setFromDate={setFromDate} setToDate={setToDate} />;
                         })()}
@@ -7262,7 +7273,7 @@ const App = ({ user, initialSelection }) => {
                         {selectedOperator ? `${displayedCalls.length} записей · ${selectedOperator.name} · ${months.find(m=>m.value===selectedMonth)?.label}` : 'Выберите оператора'}
                     </span>
                     <div style={{display:'flex',gap:8}}>
-                        {isAdminRole && (viewMode==='extra'||hasExtra) && (
+                        {isEvaluationViewer && (viewMode==='extra'||hasExtra) && (
                             <button className="btn btn-secondary btn-sm" onClick={() => setViewMode(v=>v==='normal'?'extra':'normal')}>
                                 <FaIcon className={`fas fa-${viewMode==='normal'?'filter':'list'}`} /> {viewMode==='normal' ? 'Доп. оценки' : 'Основные'}
                             </button>
