@@ -33,6 +33,15 @@ const PROVIDER_CHOICES = [
     { id: 'binotel', label: 'Binotel', icon: 'fas fa-cloud' },
 ];
 
+// Разделы одного экрана «Настройки SIP». Провайдер выбирается здесь, а не
+// отдельным пунктом сайдбара: админу нужно сравнивать отделы, а не прыгать.
+const PROVIDER_SECTIONS = [
+    { id: 'asterisk', label: 'Таксопарки', icon: 'fas fa-headset',
+      hint: 'Отделы на локальной АТС: общий сервер и база пароля' },
+    { id: 'binotel', label: 'Тез', icon: 'fas fa-phone-volume',
+      hint: 'Отдел на Binotel: у каждого свой сервер, логин и пароль' },
+];
+
 const TABS_BY_PROVIDER = {
     asterisk: [
         { id: 'operators', label: 'Сотрудники' },
@@ -191,10 +200,15 @@ const SecretInput = ({ value, onChange, placeholder, disabled }) => {
 // canDownloadPhone — программа iCORE Phone положена отделу продаж и админам, а раздел
 // «Настройки SIP» ведут главы любых отделов. Поэтому право на скачивание приходит
 // отдельным пропом, а не выводится из canEdit.
-// provider — какой раздел открыт: 'asterisk' (Таксопарки) или 'binotel' (Tez).
+// allowedProviders — разделы, доступные этому человеку: у главы отдела он один,
+// у админа оба. Открытый раздел живёт в состоянии, а не в пропе, потому что
+// переключается прямо здесь, без ухода из раздела.
 const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canEdit = true,
-                           canDownloadPhone = false, provider = 'asterisk',
-                           canSwitchProvider = false }) => {
+                           canDownloadPhone = false, allowedProviders = ['asterisk'],
+                           initialProvider = '', canSwitchProvider = false }) => {
+    const [provider, setProvider] = useState(() => (
+        allowedProviders.includes(initialProvider) ? initialProvider : (allowedProviders[0] || 'asterisk')
+    ));
     const isBinotel = provider === 'binotel';
     const tabs = TABS_BY_PROVIDER[provider] || TABS_BY_PROVIDER.asterisk;
     const [tab, setTab] = useState('operators');
@@ -254,6 +268,29 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
 
     /* ─── загрузка ─── */
     // Список и настройки отделов приходят одним запросом — второй вызов не нужен.
+    // Переезд в другой раздел: списки, фильтры и выделение к нему не относятся,
+    // а вкладки у провайдеров разные — «Общие» в Tez нет вообще.
+    const switchProvider = (next) => {
+        if (next === provider || !allowedProviders.includes(next)) return;
+        setProvider(next);
+        setTab('operators');
+        setSearch('');
+        setDepartmentFilter('');
+        setDomainFilter('');
+        setSelected(new Set());
+        setEditing(null);
+        setDeptEditing(null);
+        historyLoadedRef.current = false;
+    };
+
+    // Переход из карточки сотрудника просит открыть раздел его отдела.
+    useEffect(() => {
+        if (initialProvider && allowedProviders.includes(initialProvider)) {
+            setProvider(initialProvider);
+            setTab('operators');
+        }
+    }, [initialProvider]);   // eslint-disable-line react-hooks/exhaustive-deps
+
     const fetchOperators = useCallback(async () => {
         setLoading(true);
         try {
@@ -621,7 +658,14 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 method: 'POST',
                 credentials: 'include',
                 headers: authHeaders({ 'Content-Type': 'application/json' }),
-                body: JSON.stringify({ user_ids: [editing.id] }),
+                // Учётку шлём из формы: кнопку жмут до сохранения карточки, и в
+                // базе её ещё нет. Пустой пароль там означает «взять сохранённый».
+                body: JSON.stringify({
+                    user_ids: [editing.id],
+                    cabinet_login: form.binotel_cabinet_login,
+                    cabinet_password: form.binotel_cabinet_password,
+                    cabinet_url: form.binotel_cabinet_url,
+                }),
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
@@ -796,6 +840,31 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </p>
                         </div>
                     </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                    {/* Переключатель раздела. Показываем только тем, кому доступен
+                        не один провайдер: главе отдела выбирать не из чего, а
+                        админу прыгать за этим по сайдбару незачем. */}
+                    {allowedProviders.length > 1 && (
+                        <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1">
+                            {PROVIDER_SECTIONS.filter((s) => allowedProviders.includes(s.id)).map((s) => (
+                                <button
+                                    key={s.id}
+                                    type="button"
+                                    onClick={() => switchProvider(s.id)}
+                                    aria-pressed={provider === s.id}
+                                    title={s.hint}
+                                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+                                        provider === s.id
+                                            ? 'bg-white text-slate-900 shadow-sm'
+                                            : 'text-slate-500 hover:text-slate-800'
+                                    }`}
+                                >
+                                    <FaIcon className={s.icon} />
+                                    {s.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                     <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1">
                         {tabs.map((t) => (
                             <button
@@ -812,6 +881,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 {t.label}
                             </button>
                         ))}
+                    </div>
                     </div>
                 </div>
 

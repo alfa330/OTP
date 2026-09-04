@@ -25511,7 +25511,20 @@ def sip_config_binotel_resolve_employee_ids_endpoint():
         # знает про прогрев cookie и про признак «остались на форме логина».
         import tez_status_sync
 
+        # Кнопку «Определить автоматически» жмут в карточке ДО сохранения:
+        # в binotel_user_accounts ещё пусто, а введённая рядом учётка уже есть.
+        # Поэтому для одного сотрудника принимаем её из тела запроса; для
+        # массового определения источником остаётся только база.
         credentials = _binotel_cabinet_credentials(user_ids)
+        if len(user_ids) == 1:
+            target_id = user_ids[0]
+            saved_url, saved_login, saved_password = credentials.get(target_id, ('', '', ''))
+            login = str(payload.get('cabinet_login') or '').strip() or saved_login
+            # Пустое поле пароля означает «оставить сохранённый» — ровно как при
+            # сохранении карточки, поэтому им не затираем учётку из базы.
+            password = str(payload.get('cabinet_password') or '') or saved_password
+            url = str(payload.get('cabinet_url') or '').strip() or saved_url
+            credentials[target_id] = (url or 'https://my.binotel.kz', login, password)
         operators = []
         resolved = 0
         for user_id in user_ids:
