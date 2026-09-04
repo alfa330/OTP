@@ -33,15 +33,6 @@ import Orb from './Orb.jsx';
 
 const PANEL_TITLE = 'Помощник';
 
-/* Подсказки на пустом экране. Общие намеренно: список «частых вопросов» надо
-   было бы считать по журналу и держать в актуальном состоянии, а устаревшая
-   подсказка хуже отсутствующей — она обещает ответ, которого в вике уже нет. */
-const HINTS = [
-    'Как оформить возврат депозита водителю?',
-    'Что делать, если водитель не прошёл фотоконтроль?',
-    'Какие документы нужны для подключения к парку?',
-];
-
 const LockScreen = ({ checking, onRequestQr }) => (
     <div className="flex flex-1 flex-col items-center justify-center gap-2.5 px-7 text-center">
         {checking ? (
@@ -137,7 +128,8 @@ export default function AssistantPanel({
     locked = false, lockChecking = false, onRequestQr,
     onOpenArticle, onOpenFullAssistant, onClose, showToast,
 }) {
-    const chat = useAssistantChat({ base, headers, spaceId, enabled: !locked });
+    const chat = useAssistantChat({ base, headers, spaceId, enabled: !locked,
+                                    withSuggestions: true });
     const { boxRef, onScroll } = useThreadAutoScroll(chat.messages);
     const [screen, setScreen] = useState('thread');
     const [pendingDelete, setPendingDelete] = useState(null);
@@ -276,9 +268,16 @@ export default function AssistantPanel({
                                     Отвечаю только по статьям, которые вам разрешено
                                     читать, и всегда показываю источник.
                                 </p>
-                                {chat.canAsk && (
+                                {/* Подсказки приходят с сервера и собраны из статей
+                                    ЭТОГО человека (wiki/ai/suggest.py). Зашитый
+                                    список был одинаков для всех и у половины людей
+                                    вёл в отказ «в доступных вам статьях этого нет» —
+                                    подсказка, ведущая в отказ, учит, что помощник не
+                                    работает. Пустой список означает, что предложить
+                                    нечего: тогда блока нет вовсе, а не заглушка. */}
+                                {chat.canAsk && !!chat.suggestions.length && (
                                     <div className="mt-1.5 flex w-full flex-col gap-1.5">
-                                        {HINTS.map((hint) => (
+                                        {chat.suggestions.map((hint) => (
                                             <button
                                                 key={hint}
                                                 type="button"

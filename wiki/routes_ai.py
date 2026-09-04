@@ -23,6 +23,8 @@ can_manage_structure по всему индексу» — выглядит бе�
 порциями, отдельным вызовом.
 """
 
+from datetime import date
+
 from flask import jsonify, request
 
 from . import perimeter as wiki_perimeter
@@ -35,6 +37,7 @@ from .ai import index as ai_index
 from .ai import providers as ai_providers
 from .ai import retrieve as ai_retrieve
 from .ai import store as ai_store
+from .ai import suggest as ai_suggest
 
 
 def _int_arg(name, default, low, high):
@@ -139,6 +142,16 @@ def register(bp, wiki_route, db, log_ip):
         payload = {
             'space_id': space_id,
             'spaces': spaces,
+            # Подсказки считаются ТОЛЬКО по просьбе. Этот же роут дёргает шарик
+            # на каждой загрузке портала, чтобы решить, показываться ли ему, и
+            # платить за них лишним запросом там незачем: пустой экран чата он
+            # не рисует. Просит их тот, кто его рисует.
+            'suggestions': (ai_suggest.build(
+                cursor, scope['article_ids'],
+                # Один набор на человека на день: подсказки, меняющиеся в момент
+                # закрытия панели, читаются как случайные и доверия не вызывают.
+                seed=ctx['user_id'] * 1000 + date.today().timetuple().tm_yday)
+                if str(request.args.get('suggest') or '') in ('1', 'true') else []),
             'perimeter': {
                 'articles_for_ai': len(scope['article_ids']),
                 'articles_readable': scope['read_count'],
