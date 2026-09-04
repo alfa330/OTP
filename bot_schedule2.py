@@ -57853,6 +57853,40 @@ async def run_user_sessions_retention_async():
         logging.exception("user sessions retention failed")
 
 
+def oktell_guard_patrol_job(hours_back: int = 2):
+    """Сверка «кто пересидел в «Перезвоне», а выброса нет».
+
+    Правило ограничителя живёт в окне браузера на машине человека, и мимо него
+    есть законные пути: открыть Oktell в своём браузере, закрыть наше окно,
+    снять программу. 04.09.2026 нашёлся и четвёртый: правило стояло в странице
+    слепым — оно не перехватило сокет клиента и не считало вообще ничего.
+    Снаружи это выглядело как исправный ограничитель с пустым отчётом.
+
+    Поэтому сверка смотрит не на агентов, а на результат: история самой АТС
+    против нашего журнала. Причина в неё не заложена — она фиксирует факт.
+    Окно с запасом (два часа при получасовом прогоне): отрезок засчитывается
+    только закрытым, и тот, что шёл через границу прогона, иначе потерялся бы.
+    """
+    from datetime import timedelta as _timedelta
+
+    from oktell_guard import patrol
+
+    if not _oktell_api_ready():
+        logging.info("Ограничитель Перезвона: сверка пропущена — нет доступа к Oktell")
+        return None
+    until = datetime.now(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+    since = until - _timedelta(hours=max(1, int(hours_back)))
+    return patrol.run_patrol(db, _oktell_query, since, until)
+
+
+async def run_oktell_guard_patrol_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, oktell_guard_patrol_job)
+    except Exception:
+        logging.exception("Ограничитель Перезвона: сверка не выполнилась")
+
+
 async def run_wazzup_episodes_async():
     # Ночная сборка эпизодов Wazzup (04:00 Алматы — затишье 02:00–08:00).
     loop = asyncio.get_event_loop()
@@ -58746,6 +58780,18 @@ if __name__ == '__main__':
         CronTrigger(hour=3, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='wazzup_retention_daily',
         misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Сверка ограничителя «Перезвона» каждые полчаса: смотрит историю самой АТС
+    # и записывает пересиженное, о котором программа не доложила. Это и есть
+    # страховка на все случаи, когда правило до человека не доехало.
+    scheduler.add_job(
+        run_oktell_guard_patrol_async,
+        CronTrigger(minute='12,42', timezone=ZoneInfo('Asia/Almaty')),
+        id='oktell_guard_patrol_half_hourly',
+        misfire_grace_time=900,
         max_instances=1,
         coalesce=True
     )

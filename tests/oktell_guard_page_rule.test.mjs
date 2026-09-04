@@ -294,3 +294,138 @@ test('разговор распознаётся и по числовому ко�
   env.advanceSeconds(100);
   assert.equal(rule.fired, false, 'смена названия у вендора не должна ломать обнуление');
 });
+
+// --- сокет, созданный РАНЬШЕ правила ------------------------------------------
+//
+// Ровно этим 04.09.2026 оператор просидел в «Перезвоне» 334 с при пороге 180 и
+// остался на месте. Правило слышит статусы только через сокеты, созданные уже
+// подменённым window.WebSocket; сокет, открытый клиентом Oktell до подмены,
+// остаётся родным, и кадры по нему идут мимо. Код в странице при этом есть,
+// счётчик стоит на нуле, отчёт пуст — снаружи выглядит исправным.
+//
+// Починить это внутри страницы нельзя (ретроспективно обернуть чужой сокет
+// нечем), поэтому тест закрепляет не «работает», а ПРИЗНАК, по которому агент
+// обязан такую вкладку опознать и перезагрузить: перехваченных сокетов ноль.
+
+test('сокет, открытый до правила, остаётся неперехваченным — правило слепое', () => {
+  const env = makeEnv();
+  // Клиент Oktell поднял сокет ДО того, как в страницу попал хук.
+  const Native = env.window.WebSocket;
+  const early = new Native('ws://oktell.example.local/');
+
+  const src = hookSource();
+  const fn = new Function(
+    'window', 'document', 'localStorage', 'sessionStorage', 'location',
+    'setInterval', 'clearInterval', 'setTimeout', 'Date', 'JSON',
+    src,
+  );
+  fn(
+    env.window, env.window.document, env.window.localStorage, env.window.sessionStorage,
+    env.window.location, env.window.setInterval, env.window.clearInterval,
+    env.window.setTimeout, env.window.Date, JSON,
+  );
+
+  assert.equal(env.window.__oktellGuardHooked, true, 'хук в странице есть');
+  assert.equal(env.window.__oktellGuardSockets.length, 0,
+    'признак слепоты: ни одного перехваченного сокета');
+
+  // Кадры по «раннему» сокету до правила не доходят, сколько ни жди.
+  early.emit(frame(recall));
+  env.advanceSeconds(300);
+  const rule = env.window.__oktellGuardRule;
+  assert.equal(rule.since, null, 'счётчик даже не начинался');
+  assert.equal(rule.fired, false, 'человека не выбросило — та самая дыра');
+  assert.equal(env.reloads, 0);
+});
+
+test('после перезагрузки правило встаёт раньше сокета и снова считает', () => {
+  // Что происходит после починки: документ создан заново, хук отработал в
+  // самом начале, клиент поднял сокет уже через подмену.
+  const env = makeEnv();
+  const { ws, rule } = runHook(env);
+  assert.equal(env.window.__oktellGuardSockets.length, 1, 'сокет клиента перехвачен');
+  ws.emit(frame(recall));
+  env.advanceSeconds(181);
+  assert.equal(rule.fired, true, 'правило снова доводит до выброса');
+});
+
+// --- чей это кадр --------------------------------------------------------------
+//
+// Клиент Oktell может получать статусы не только про себя. Такой кадр раньше
+// правил НАШ счётчик: разговор коллеги обнулял накопленное (onCall), а его
+// выход из «Перезвона» парковал отсчёт. Свой логин берём из cookie
+// __oktelllogin, свой GUID — из кадра, где есть и логин, и userid, потому что
+// часть кадров (userstatechanged) логина не несёт вовсе.
+
+const colleagueTalking = {
+  userlogin: '9999', onlunch: false, lunchreasonid: null,
+  userstate: 5, userstatestr: 'usFullbusy',
+};
+
+test('разговор коллеги НЕ обнуляет наше накопленное', () => {
+  const env = makeEnv();
+  env.window.document.cookie = '__oktelllogin=6612';
+  const { ws, rule } = runHook(env, { callStateIds: [5], callStateStrings: ['fullbusy'] });
+  assert.equal(rule.login, '6612', 'свой логин известен ещё до первого кадра');
+
+  ws.emit(frame(recall));
+  env.advanceSeconds(170);
+  ws.emit(frame(colleagueTalking));   // сосед взял трубку
+  env.advanceSeconds(12);
+  assert.equal(rule.fired, true, 'счётчик коллега сбивать не должен');
+});
+
+test('свой разговор по-прежнему обнуляет накопленное', () => {
+  const env = makeEnv();
+  env.window.document.cookie = '__oktelllogin=6612';
+  const { ws, rule } = runHook(env, { callStateIds: [5], callStateStrings: ['fullbusy'] });
+  ws.emit(frame(recall));
+  env.advanceSeconds(170);
+  ws.emit(frame({ ...recall, onlunch: false, userstate: 5, userstatestr: 'usFullbusy' }));
+  env.advanceSeconds(12);
+  assert.equal(rule.fired, false, 'после своего звонка отсчёт начинается заново');
+});
+
+test('кадр без логина, но с чужим GUID, пропускается', () => {
+  const env = makeEnv();
+  env.window.document.cookie = '__oktelllogin=6612';
+  const { ws, rule } = runHook(env);
+  // Наш GUID узнаётся из кадра, где есть и логин, и userid.
+  ws.emit(frame({ ...recall, userid: 'наш-guid' }));
+  env.advanceSeconds(170);
+  // userstatechanged коллеги: логина нет, GUID чужой.
+  ws.emit(JSON.stringify(['userstatechanged', {
+    userid: 'чужой-guid', onlunch: false, lunchreasonid: null, userstate: 1,
+  }]));
+  env.advanceSeconds(12);
+  assert.equal(rule.fired, true, 'чужой userstatechanged не должен парковать отсчёт');
+});
+
+test('накопленное предыдущего оператора не достаётся следующему', () => {
+  // На машине, где смены работают по очереди, ключ накопленного один. Пока
+  // логин узнавался только из кадра, loadBudget читал бюджет предшественника.
+  const day = new Date(1_700_000_000_000);
+  const key = `${day.getFullYear()}-${day.getMonth() + 1}-${day.getDate()}`;
+  const storage = new Map([['__oktell_guard_budget', JSON.stringify({
+    day: key, login: '9999', budget: 175, at: 1_700_000_000_000,
+  })]]);
+  const env = makeEnv(storage);
+  env.window.document.cookie = '__oktelllogin=6612';
+  const { rule } = runHook(env);
+  assert.equal(rule.budget, 0, 'чужой бюджет подхватывать нельзя');
+});
+
+test('своё накопленное после F5 подхватывается', () => {
+  const day = new Date(1_700_000_000_000);
+  const key = `${day.getFullYear()}-${day.getMonth() + 1}-${day.getDate()}`;
+  const storage = new Map([['__oktell_guard_budget', JSON.stringify({
+    day: key, login: '6612', budget: 175, at: 1_700_000_000_000,
+  })]]);
+  const env = makeEnv(storage);
+  env.window.document.cookie = '__oktelllogin=6612';
+  const { ws, rule } = runHook(env);
+  assert.equal(rule.budget, 175);
+  ws.emit(frame(recall));
+  env.advanceSeconds(6);
+  assert.equal(rule.fired, true, 'обход через F5 закрыт');
+});

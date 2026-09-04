@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.13"
+VERSION = "1.0.14"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -100,6 +100,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Сотрудник скачивает файл один раз, поэтому новые версии агент ставит сам.
     "auto_update": True,
     "update_check_hours": 6,
+    # Как часто перечитывать настройки раздела (порог, обкатка, вкл/выкл).
+    # Раньше они читались один раз за запуск процесса, и правка порога могла
+    # не доехать до работающего агента за всю смену.
+    "config_refresh_minutes": 10,
 
     # --- Oktell ---
     # Пусто — значит «не настроено»: адрес приезжает с сервера (или из
@@ -454,12 +458,17 @@ def wait_for_configuration(cfg: dict, retry_s: float = 60.0) -> dict:
     return cfg
 
 
-def fetch_server_config(cfg: dict) -> dict:
+def fetch_server_config(cfg: dict, login: str = "") -> dict:
     """Забрать настройки с сервера; при недоступности — из кэша.
 
     Смысл: сотрудник скачивает один exe и ничего не настраивает. Порог,
     адрес клиента и пин сертификата приезжают с сервера, а кэш нужен, чтобы
     агент пережил недоступность сервера и не остался без правила.
+
+    `login` — SIP-номер оператора из открытой вкладки. Без него сервер отдаёт
+    общее правило, и личный порог из раздела «Сотрудники» не применялся НИКОГДА:
+    на старте процесса вкладки ещё нет, а другого места, где спрашивают
+    настройки, не было. Поэтому логин передаём, как только он становится известен.
     """
     url = str(cfg.get("config_url") or "")
     if not url:
@@ -471,6 +480,7 @@ def fetch_server_config(cfg: dict) -> dict:
 
             response = requests.get(
                 url,
+                params={"login": login} if login else None,
                 timeout=float(cfg.get("request_timeout_s", 10)),
                 verify=bool(cfg.get("verify_tls", True)),
                 headers={"X-Agent-Token": str(cfg.get("agent_token") or ""),
@@ -641,7 +651,7 @@ def is_installed_copy() -> bool:
 
 
 def _register_autostart(target: Path) -> bool:
-    """Автозапуск через HKCU\...\Run.
+    r"""Автозапуск через HKCU\...\Run.
 
     Именно Run, а не задача с триггером ONLOGON: создание такой задачи требует
     прав администратора, а сотрудник их не имеет — это и есть причина, по
@@ -1098,9 +1108,23 @@ HOOK_JS_TEMPLATE = r"""
     since: null,        // когда начался текущий заход в «Перезвон»
     budget: 0,          // накопленные секунды «Перезвона» с последнего звонка
     callSeen: false,    // был ли звонок после последнего накопления
-    warned: false, fired: false, login: null, seconds: 0,
+    warned: false, fired: false, login: null, userid: null, seconds: 0,
     lastState: null, lastCallState: null, seenStates: []
   };
+
+  // Свой логин известен ДО первого кадра: он лежит в cookie __oktelllogin.
+  // Это важно для ключа накопленного — иначе на машине, где смены работают по
+  // очереди, loadBudget подхватывал бюджет предыдущего оператора за этот день.
+  function ownLogin() {
+    try {
+      var m = document.cookie.match(/(?:^|;\s*)__oktelllogin=([^;]*)/);
+      if (!m) { return null; }
+      var value = decodeURIComponent(m[1]);
+      // Страховка: если вендор однажды положит сюда токен — не берём.
+      if (!value || value.length >= 40 || /^[0-9a-f-]{30,}$/i.test(value)) { return null; }
+      return value;
+    } catch (e) { return null; }
+  }
 
   function today() {
     var d = new Date();
@@ -1179,7 +1203,19 @@ HOOK_JS_TEMPLATE = r"""
 
   function onState(payload) {
     if (!payload || typeof payload !== 'object') { return; }
-    if (payload.userlogin) { rule.login = String(payload.userlogin); }
+    // Кадр может быть про КОЛЛЕГУ, а не про нас. Такой кадр раньше правил наш
+    // счётчик: разговор соседа обнулял накопленное, его выход из «Перезвона»
+    // парковал отсчёт. Свой логин берём из cookie __oktelllogin (это логин, а
+    // не токен), а свой GUID узнаём из кадра, где есть и логин, и userid —
+    // потому что часть кадров (userstatechanged) логина не несёт вовсе.
+    if (payload.userlogin) {
+      var who = String(payload.userlogin);
+      if (rule.login && who !== rule.login) { return; }
+      rule.login = who;
+      if (payload.userid) { rule.userid = String(payload.userid); }
+    } else if (payload.userid && rule.userid && String(payload.userid) !== rule.userid) {
+      return;
+    }
     if (payload.userstatestr && rule.seenStates.indexOf(payload.userstatestr) < 0) {
       // Небольшой словарь встреченных состояний: по нему настраивается
       // распознавание звонка, значений разговоров тут нет.
@@ -1316,6 +1352,7 @@ HOOK_JS_TEMPLATE = r"""
   window.WebSocket = Guarded;
 
   if (cfg.enabled) {
+    rule.login = ownLogin();
     loadBudget();
     setInterval(function () {
       if (rule.since === null || rule.fired) { return; }
@@ -1395,7 +1432,7 @@ def build_probe_js(session_keys: Iterable[str]) -> str:
     Содержимое страницы (разговоры, клиенты, номера) не читается и не передаётся.
     """
     keys = json.dumps(list(session_keys))
-    return f"""
+    return rf"""
 (function () {{
   var keys = {keys};
   var out = {{ session: false, loginForm: false, login: null, url: location.href, title: document.title }};
@@ -1436,6 +1473,46 @@ def build_probe_js(session_keys: Iterable[str]) -> str:
         }}
       }};
       walk(root, 0);
+    }}
+  }} catch (e) {{}}
+  return out;
+}})();
+""".strip()
+
+
+def build_hook_health_js(session_keys: Iterable[str]) -> str:
+    """Живо ли правило в странице — или оно есть, но ничего не видит.
+
+    Одного факта «хук стоит» мало. Правило слышит статусы только через сокеты,
+    которые создал уже подменённый `window.WebSocket`. Сокет, открытый клиентом
+    Oktell РАНЬШЕ подмены, остаётся родным, и кадры по нему мимо правила: код в
+    странице есть, счётчик стоит на нуле, человека не выбрасывает никогда.
+    Отличить это можно только по одному признаку — сессия есть, а перехваченных
+    сокетов ноль. Его и снимаем.
+    """
+    keys = json.dumps(list(session_keys))
+    return f"""
+(function () {{
+  var keys = {keys};
+  var cfg = window.__oktellGuardRuleConfig || {{}};
+  var rule = window.__oktellGuardRule || {{}};
+  var out = {{
+    hooked: !!window.__oktellGuardHooked,
+    ruleVersion: cfg.ruleVersion || null,
+    enabled: !!cfg.enabled,
+    thresholdS: cfg.thresholdS || 0,
+    sockets: (window.__oktellGuardSockets || []).length,
+    frames: (window.__oktellGuardStateFrames || []).length,
+    session: false,
+    login: rule.login || null,
+    seconds: Number(rule.seconds) || 0,
+    counting: rule.since !== undefined && rule.since !== null
+  }};
+  try {{
+    for (var i = 0; i < keys.length; i++) {{
+      var k = keys[i];
+      try {{ if (localStorage.getItem(k)) {{ out.session = true; }} }} catch (e) {{}}
+      if (!out.session && document.cookie.indexOf(k + '=') >= 0) {{ out.session = true; }}
     }}
   }} catch (e) {{}}
   return out;
@@ -1670,11 +1747,17 @@ class CdpPage:
 class ManagedBrowser:
     """Chrome, которым владеем мы: свой профиль + порт отладки на loopback."""
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, heal: bool = True):
         self.cfg = cfg
         self.browser_cfg = cfg.get("browser", {}) or {}
         self.url = str(cfg.get("oktell_url") or "")
         self.origin = origin_of(self.url)
+        # Чинить слепое правило перезагрузкой имеет право только долгоживущий
+        # процесс: регистрация скрипта живёт ровно столько, сколько подключение,
+        # и после ухода клиента новый документ остался бы вовсе без правила.
+        self.heal = heal
+        self._hook_health: dict = {}
+        self._script_registered = False
         profile_cfg = str(self.browser_cfg.get("profile_dir") or "").strip()
         self.profile_dir = Path(expand_env(profile_cfg)) if profile_cfg else app_dir() / "chrome-profile"
         self.process: Optional[subprocess.Popen] = None
@@ -1867,20 +1950,58 @@ class ManagedBrowser:
         self.install_hook(page)
         return page
 
+    def apply_new_rule(self) -> None:
+        """Правило изменилось — донести его до уже открытой вкладки.
+
+        Сам хук идемпотентен, поэтому новое правило доходит только вместе с
+        перезагрузкой документа: её и назначит install_hook, увидев в странице
+        чужой отпечаток версии.
+        """
+        page = self._page
+        if page is None or not getattr(page, "connected", False):
+            return
+        self.install_hook(page)
+
     def close_page(self) -> None:
         if self._page is not None:
             self._page.close()
         self._page = None
         self._page_target_id = ""
+        # Chrome снимает скрипты ушедшего клиента — значит и наша отметка
+        # «зарегистрировано» вместе с подключением обнуляется.
+        self._script_registered = False
+
+    def hook_health(self, page: CdpPage) -> dict:
+        """Снимок «живо ли правило» из страницы. Пустой словарь — не смогли спросить."""
+        try:
+            data = page.evaluate(build_hook_health_js(self.cfg.get("session_keys", DEFAULT_SESSION_KEYS)))
+        except CdpError:
+            logging.debug("Не удалось снять состояние правила", exc_info=True)
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def install_hook(self, page: CdpPage) -> None:
-        """Хук на будущие документы + тот же код в текущий.
+        """Хук на будущие документы + починка страницы, где правило слепое.
 
         `Page.enable` обязателен: проверено на стенде — без него
         `addScriptToEvaluateOnNewDocument` возвращает identifier, но скрипт
         в новый документ не попадает (после reload хука в странице нет).
         А `Page.disable` звать нельзя: в Chromium он очищает список добавленных
         скриптов, то есть «включить и выключить» стёрло бы хук.
+
+        Почему нельзя просто впрыснуть код в текущий документ. Правило слышит
+        статусы только через сокеты, созданные уже подменённым `window.WebSocket`.
+        Если документ загрузился и вошёл в Oktell РАНЬШЕ, чем появилась наша
+        регистрация (окно открыто со вчера; короткий процесс `--open` поставил
+        скрипт и вышел, унеся регистрацию с собой; клиент сам перезагрузил
+        страницу при разлогине), то сокет у клиента уже свой. Впрыск в такой
+        документ ставит флаг `__oktellGuardHooked` и печать нужной версии — и
+        этим ЗАКРЫВАЕТ единственную проверку, по которой раньше назначалась
+        перезагрузка. Снаружи всё выглядит исправным: сессия видна, правило
+        «стоит», отчёт пуст. Проверено живьём 04.09.2026: оператор просидел в
+        «Перезвоне» 334 с при пороге 180 — ноль кадров, ноль выбросов.
+        Поэтому решение о перезагрузке принимается по факту перехвата сокета,
+        а не по версии правила.
         """
         rule_cfg = dict(self.cfg.get("in_window_rule") or {})
         rule_cfg.setdefault("session_keys", self.cfg.get("session_keys", DEFAULT_SESSION_KEYS))
@@ -1890,43 +2011,90 @@ class ManagedBrowser:
         rule_cfg.setdefault("dry_run", bool(self.cfg.get("dry_run")))
         source = build_hook_js(rule_cfg)
         expected = rule_version(rule_cfg)
-        try:
-            page.call("Page.enable")
-            page.call("Page.addScriptToEvaluateOnNewDocument", {"source": source})
-        except CdpError:
-            logging.debug("addScriptToEvaluateOnNewDocument не прошёл", exc_info=True)
-        try:
-            page.evaluate(source)
-        except CdpError:
-            logging.debug("Хук не выполнился в текущем документе", exc_info=True)
-
-        # Если в странице живёт правило прежней версии — обновить его можно
-        # только перезагрузкой: повторный запуск хука блокируется его же
-        # флагом идемпотентности. Перезагружаем ровно один раз на вкладку.
-        try:
-            actual = page.evaluate("(window.__oktellGuardRuleConfig || {}).ruleVersion || null")
-        except CdpError:
-            actual = None
-        if actual != expected and self._page_target_id not in self._reloaded_for_rule:
-            self._reloaded_for_rule.add(self._page_target_id)
-            logging.info("В окне правило версии %s, нужно %s — перезагружаю страницу", actual, expected)
+        # Регистрируем один раз на подключение: метод не заменяет прежний скрипт,
+        # а добавляет ещё один, и вызов на каждом опросе копил бы их сотнями.
+        if not self._script_registered:
             try:
-                page.call("Page.reload", {"ignoreCache": False})
+                page.call("Page.enable")
+                page.call("Page.addScriptToEvaluateOnNewDocument", {"source": source})
+                self._script_registered = True
             except CdpError:
-                logging.debug("Перезагрузка ради обновления правила не удалась", exc_info=True)
+                logging.debug("addScriptToEvaluateOnNewDocument не прошёл", exc_info=True)
+
+        health = self.hook_health(page)
+        self._hook_health = health
+        session = bool(health.get("session"))
+        hooked = bool(health.get("hooked"))
+        sockets = int(health.get("sockets") or 0)
+        stale = hooked and health.get("ruleVersion") not in (None, expected)
+        # Сессии ещё нет (экран входа) — сокета тоже нет. Достаточно впрыска:
+        # он и перехватит сокет, который клиент создаст после входа. Этот путь
+        # проверен живьём: после входа sockets=1 и кадры доходят.
+        if not session:
+            if not hooked or stale:
+                try:
+                    page.evaluate(source)
+                    self._hook_health = self.hook_health(page)
+                except CdpError:
+                    logging.debug("Хук не выполнился в текущем документе", exc_info=True)
+            return
+
+        if hooked and not stale and sockets > 0:
+            # Правило считает — снимаем отметку о перезагрузке, чтобы вкладка,
+            # ослепшая ещё раз, снова получила право на одну починку.
+            self._reloaded_for_rule.discard(f"{self._page_target_id}|{expected}")
+            return
+
+        # Дальше — документ с живой сессией, которому впрыск уже не поможет:
+        # либо правила нет, либо оно слепое, либо старой версии. Лечится только
+        # перезагрузкой, причём регистрация должна пережить её — то есть чинит
+        # долгоживущий агент, а не короткий `--open` (он отключится раньше, чем
+        # новый документ стартует, и оставит страницу вовсе без правила).
+        reason = "правила нет" if not hooked else ("устарело" if stale else "не видит сокетов клиента")
+        if not self.heal:
+            logging.warning("В окне правило %s, но перезагружать не мой режим — починит агент", reason)
+            return
+        marker = f"{self._page_target_id}|{expected}"
+        if marker in self._reloaded_for_rule:
+            # Перезагружали и не помогло: молчать нельзя — снаружи это выглядит
+            # как исправно работающий ограничитель, который просто никого не ловит.
+            logging.error(
+                "Правило в окне не работает (%s) даже после перезагрузки: сессия есть, "
+                "перехваченных сокетов %s. Оператор сейчас без ограничителя.", reason, sockets
+            )
+            return
+        self._reloaded_for_rule.add(marker)
+        logging.info("В окне правило %s — перезагружаю страницу, чтобы оно встало до сокета", reason)
+        try:
+            page.call("Page.reload", {"ignoreCache": False})
+        except CdpError:
+            logging.debug("Перезагрузка ради обновления правила не удалась", exc_info=True)
 
     def probe(self) -> dict:
-        """Снимок состояния вкладки Oktell для heartbeat."""
-        state = {"window": False, "session": False, "login_form": False, "login": None, "url": None}
+        """Снимок состояния вкладки Oktell для heartbeat.
+
+        Вместе с сессией снимаем и здоровье правила. Раньше heartbeat говорил
+        только «окно есть, сессия есть» — и ровно так выглядела машина, где
+        правило стояло слепым и не считало ничего. Отличить одно от другого
+        снаружи было нечем, поэтому дыра прожила две недели незамеченной.
+        """
+        state = {"window": False, "session": False, "login_form": False, "login": None,
+                 "url": None, "rule": {}}
         target = self.oktell_target()
         if not target:
             self.close_page()
+            self._hook_health = {}
             return state
         state["window"] = True
         state["url"] = target.get("url")
+        previous = self._page
         page = self.page(target)
         if not page:
             return state
+        # Свежее подключение уже прошло через install_hook внутри page():
+        # повторять его в этом же проходе незачем — перезагрузка ещё не успела
+        # случиться, и вторая попытка лишь напишет в лог пугающую ошибку.
+        fresh_connection = page is not previous
         try:
             data = page.evaluate(build_probe_js(self.cfg.get("session_keys", DEFAULT_SESSION_KEYS)))
         except Exception:  # noqa: BLE001
@@ -1938,6 +2106,17 @@ class ManagedBrowser:
             state["login_form"] = bool(data.get("loginForm"))
             state["login"] = data.get("login") or None
             state["url"] = data.get("url") or state["url"]
+        # Здоровье снимаем всегда: install_hook его считает только в момент
+        # подключения, а вкладка живёт между опросами и может «ослепнуть» после
+        # того, как клиент сам перезагрузит страницу.
+        health = self.hook_health(page)
+        if health:
+            self._hook_health = health
+            if state["session"] and not int(health.get("sockets") or 0) and not fresh_connection:
+                # Правило ослепло уже после подключения — чиним тем же путём.
+                self.install_hook(page)
+                self._hook_health = self.hook_health(page) or self._hook_health
+        state["rule"] = dict(self._hook_health or {})
         return state
 
     def ensure_window_visible(self, bring_to_front: bool = True) -> bool:
@@ -2133,9 +2312,27 @@ class AgentState:
     last_command: Optional[dict] = None
 
 
+def rule_alive(browser: dict) -> Optional[bool]:
+    """Считает ли правило прямо сейчас. None — сказать нечего (нет сессии/окна).
+
+    Живым считается только правило, перехватившее хотя бы один сокет клиента:
+    без этого кадры статуса до него не доходят, и «стоит» оно лишь на словах.
+    """
+    browser = browser or {}
+    if not browser.get("window") or not browser.get("session"):
+        return None
+    rule = browser.get("rule") or {}
+    if not rule:
+        return None
+    if not rule.get("enabled"):
+        return False
+    return bool(rule.get("hooked")) and int(rule.get("sockets") or 0) > 0
+
+
 def build_heartbeat_payload(state: AgentState, cfg: dict, now_iso: str) -> dict:
     """Наружу уходит минимум: кто, где, есть ли управляемая сессия, что с командой."""
     browser = state.browser or {}
+    rule = browser.get("rule") or {}
     return {
         "agent_id": state.identity.agent_id,
         "hostname": state.identity.hostname,
@@ -2149,6 +2346,16 @@ def build_heartbeat_payload(state: AgentState, cfg: dict, now_iso: str) -> dict:
             "session_present": bool(browser.get("session")),
             "login_form": bool(browser.get("login_form")),
             "url": browser.get("url"),
+        },
+        # Отдельно от browser: «сессия есть» и «правило считает» — разные вещи,
+        # и раздел обязан их различать, иначе слепое правило выглядит рабочим.
+        "rule": {
+            "alive": rule_alive(browser),
+            "enabled": bool(rule.get("enabled")) if rule else None,
+            "sockets": int(rule.get("sockets") or 0),
+            "seconds": int(rule.get("seconds") or 0),
+            "threshold_s": int(rule.get("thresholdS") or 0),
+            "version": rule.get("ruleVersion"),
         },
         "unmanaged_windows": list(state.unmanaged or []),
         "last_command": state.last_command,
@@ -2263,6 +2470,18 @@ def run_agent(cfg: dict) -> int:
     last_command_report: Optional[dict] = None
     update_every_s = max(600.0, float(cfg.get("update_check_hours", 6)) * 3600.0)
     next_update_check = time.time()
+    # Настройки раздела (порог, обкатка, вкл/выкл) раньше читались РОВНО один
+    # раз — при старте процесса. Правка порога доезжала до работающего агента
+    # только после перезахода в Windows или самообновления, то есть могла не
+    # доехать вовсе за смену.
+    config_every_s = max(60.0, float(cfg.get("config_refresh_minutes", 10)) * 60.0)
+    next_config_refresh = time.time() + config_every_s
+    last_config_login = ""
+
+    def rule_print(current: dict) -> str:
+        """Отпечаток того, что реально уедет в окно: правило плюс обкатка."""
+        return rule_version({**(current.get("in_window_rule") or {}),
+                             "dry_run": bool(current.get("dry_run"))})
 
     try:
         while True:
@@ -2292,6 +2511,24 @@ def run_agent(cfg: dict) -> int:
                         list_window_titles(), unmanaged_cfg.get("window_title_patterns", [])
                     )
                 state.last_command = last_command_report
+
+                # Логин оператора известен только из живой вкладки, а личный
+                # порог сервер отдаёт только по логину. Поэтому спрашиваем
+                # настройки заново, как только логин появился или сменился
+                # (посменная работа на одной машине), и повторяем по таймеру.
+                login_now = str(state.browser.get("login") or "")
+                if (login_now and login_now != last_config_login) or time.time() >= next_config_refresh:
+                    next_config_refresh = time.time() + config_every_s
+                    was = rule_print(cfg)
+                    cfg = fetch_server_config(cfg, login_now)
+                    last_config_login = login_now
+                    if rule_print(cfg) != was:
+                        rule_now = cfg.get("in_window_rule") or {}
+                        logging.info(
+                            "Правило изменилось (порог %s с, обкатка %s) — доношу до вкладки",
+                            rule_now.get("threshold_s"), bool(cfg.get("dry_run")),
+                        )
+                        browser.apply_new_rule()
 
                 payload = build_heartbeat_payload(state, cfg, now_iso())
                 data = link.heartbeat(payload)
@@ -2412,7 +2649,10 @@ def run_open(cfg: dict) -> int:
     if not is_configured(cfg):
         logging.error("Нет настроек (адрес Oktell не задан) — окно не открываю")
         return 2
-    browser = ManagedBrowser(cfg)
+    # heal=False: этот процесс сейчас же завершится, а вместе с ним уйдёт и
+    # регистрация скрипта. Перезагрузи он страницу — новый документ остался бы
+    # вовсе без правила. Слепую вкладку починит долгоживущий агент.
+    browser = ManagedBrowser(cfg, heal=False)
     ok = browser.ensure_running()
     if ok:
         browser.wait_for_page()

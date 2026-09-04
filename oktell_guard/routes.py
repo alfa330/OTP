@@ -288,7 +288,13 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     def oktell_guard_agent_heartbeat():
         data = request.get_json(silent=True) or {}
         browser = data.get('browser') or {}
+        rule = data.get('rule') or {}
         sip = str(data.get('operator_login') or '').strip()
+        # rule_alive намеренно трёхзначен: True — правило считает, False — оно
+        # в окне есть, но кадры до него не доходят (или выключено), None —
+        # спросить было не у кого. Старые агенты поля не шлют и остаются None:
+        # сводить их к False нельзя, иначе раздел покажет поломку там, где её нет.
+        alive = rule.get('alive')
         with db._get_cursor() as cursor:
             personal = queries.personal_rule_by_sip(cursor, sip) if sip else None
             queries.upsert_agent(cursor, {
@@ -301,6 +307,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 'managed_window': bool(browser.get('managed_window')),
                 'session_present': bool(browser.get('session_present')),
                 'unmanaged_count': len(data.get('unmanaged_windows') or []),
+                'rule_alive': None if alive is None else bool(alive),
+                'rule_sockets': int(rule.get('sockets') or 0),
+                'rule_seconds': int(rule.get('seconds') or 0),
+                'rule_version': str(rule.get('version') or '')[:64],
             })
             # Пометка «в этот день человек работал в Oktell через наше
             # приложение». Пока это только отметка в разделе; засчитывать по
