@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, Loader2, AlertCircle, Send, Check, Lock, Info,
-    MessageSquare, Download, ChevronLeft, Phone, Clock, ImageIcon, Building2,
+    MessageSquare, Download, Phone, Clock, ImageIcon, Building2,
 } from 'lucide-react';
 
 import ChatThread from '../c2d_eval/ChatThread';
 import {
-    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
+    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
     IosModal, IosSegmented, IosBadge, IosToggle,
 } from '../ui/ios';
 import {
@@ -143,14 +143,20 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     }, [apiBaseUrl, headers, query, searching]);
 
     const chats = result.chats || [];
-    const visibleChats = useMemo(
-        () => (hideService ? chats.filter((chat) => !chat.is_service) : chats),
-        [chats, hideService]);
-    const serviceCount = chats.length - chats.filter((chat) => !chat.is_service).length;
 
     const activeChat = useMemo(
-        () => chats.find((chat) => chatKey(chat) === activeKey) || null,
+        () => chats.find((chat) => chatKey(chat) === activeKey) || chats[0] || null,
         [chats, activeKey]);
+
+    /* Служебное прячем на уровне СООБЩЕНИЙ, а не чатов. Пока чат был обращением,
+       автоопрос «оцените работу оператора» приходил отдельной карточкой и
+       фильтровался списком; после склейки «один чат — один парк» он лежит внутри
+       живой переписки, вместе с приветственным меню парка на пол-экрана.
+       Считаем их здесь, чтобы подпись тумблера говорила, сколько именно скрыто. */
+    const serviceCount = useMemo(
+        () => (activeChat?.messages || []).filter(
+            (m) => m.type === 'system' || m.type === 'autoreply').length,
+        [activeChat]);
 
     /* Открытие чата пишется в журнал — это и есть ответ на вопрос «кто смотрел
        переписку». Отправляем «в фон»: ответ сервера экрану не нужен, а ждать
@@ -165,7 +171,10 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             body: JSON.stringify({
                 phone: result.phone,
                 client_id: result.clientId,
-                request_id: chat.request_id,
+                // Адрес просмотра — парк, а не обращение: после склейки
+                // обращений внутри чата несколько, и любое присланное было бы
+                // произвольным.
+                channel_id: chat.channel_id,
                 dialog_id: chat.dialog_id,
                 channel_name: chat.channel_name,
                 messages_count: chat.messages_count,
@@ -173,16 +182,14 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }).catch(() => { /* журнал не должен мешать работе оператора */ });
     }, [apiBaseUrl, headers, result.phone, result.clientId]);
 
-    const openChat = useCallback((chat) => {
-        setActiveKey(chatKey(chat));
-        logOpen(chat);
-    }, [logOpen]);
-
-    /* Первый чат раскрывается сам после поиска — значит и он должен попасть в
-       журнал, иначе «открыл переписку» не увидит самый частый случай. */
+    /* Запись «открыл переписку» — ОДНА на чат, и делает её эффект ниже.
+       Раньше клик по чату логировал напрямую И будил этот же эффект сменой
+       activeChat, отчего в журнале появлялись пары строк с разницей в
+       миллисекунды (видно в проде 04.09: 10:06:43.525 и 10:06:43.620) и врал
+       счётчик «действий» в сводке. */
     const autoLogged = useRef(null);
     useEffect(() => {
-        if (!activeChat) return;
+        if (!activeChat || !result.phone) return;
         const key = `${result.phone}:${chatKey(activeChat)}`;
         if (autoLogged.current === key) return;
         autoLogged.current = key;
@@ -201,7 +208,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 body: JSON.stringify({
                     phone: result.phone,
                     client_id: result.clientId,
-                    request_id: activeChat.request_id,
+                    channel_id: activeChat.channel_id,
                     dialog_id: activeChat.dialog_id,
                     channel_name: activeChat.channel_name,
                     note: handoffNote.trim(),
@@ -290,29 +297,21 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     )}
 
                     {Boolean(chats.length) && (
-                        <div className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)]">
-                            <ChatList
-                                chats={visibleChats}
-                                activeKey={activeKey}
-                                onPick={openChat}
-                                handedOff={handedOff}
-                                driverName={result.clientName}
-                                phone={result.phone}
-                                serviceCount={serviceCount}
-                                hideService={hideService}
-                                onToggleService={setHideService}
-                                truncated={result.truncated}
-                            />
-                            <ChatPanel
-                                chat={activeChat}
-                                snapshot={snapshot}
-                                phone={result.phone}
-                                driverName={result.clientName}
-                                handedOff={activeChat ? handedOff[chatKey(activeChat)] : false}
-                                onHandoff={() => setHandoffOpen(true)}
-                                onBack={() => setActiveKey(null)}
-                            />
-                        </div>
+                        <ChatPanel
+                            chat={activeChat}
+                            chats={chats}
+                            activeKey={chatKey(activeChat)}
+                            onPickPark={(key) => setActiveKey(key)}
+                            snapshot={snapshot}
+                            phone={result.phone}
+                            driverName={result.clientName}
+                            handedOff={activeChat ? handedOff[chatKey(activeChat)] : false}
+                            onHandoff={() => setHandoffOpen(true)}
+                            truncated={result.truncated}
+                            serviceCount={serviceCount}
+                            hideService={hideService}
+                            onToggleService={setHideService}
+                        />
                     )}
                 </>
             )}
@@ -331,9 +330,14 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     );
 };
 
-/* Ключ чата: заявка, а если её нет — диалог. Тот же порядок, что на бэкенде. */
+/* Ключ чата — таксопарк (канал), а если его нет — диалог. Тот же порядок, что в
+   chat2desk.chat_key на бэкенде: на этом ключе держатся выбранный чат, отметка
+   «передан» и защита от повторной записи в журнал, и разъехавшись, они пометят
+   переданным чужой чат. */
 function chatKey(chat) {
-    return chat?.request_id ? `r${chat.request_id}` : `d${chat?.dialog_id || 0}`;
+    if (chat?.channel_id) return `c${chat.channel_id}`;
+    if (chat?.dialog_id) return `d${chat.dialog_id}`;
+    return 'x0';
 }
 
 // ── Поисковая строка ────────────────────────────────────────────────────────
@@ -386,109 +390,28 @@ const StartHint = () => (
     </div>
 );
 
-// ── Список чатов ────────────────────────────────────────────────────────────
-
-const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone,
-                    serviceCount, hideService, onToggleService, truncated }) => (
-    <div className={`${iosCard} flex max-h-[72vh] flex-col overflow-hidden`}>
-        <div className="border-b border-slate-200/70 px-4 py-3">
-            <div className="text-[15px] font-semibold text-slate-900">
-                {driverName || 'Водитель'}
-            </div>
-            <div className="mt-0.5 text-[12.5px] tabular-nums text-slate-500">{formatPhone(phone)}</div>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-2">
-            {chats.map((chat) => {
-                const key = chatKey(chat);
-                const active = key === activeKey;
-                return (
-                    <button
-                        key={key}
-                        type="button"
-                        onClick={() => onPick(chat)}
-                        className={`mb-1.5 w-full rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] ${
-                            active ? 'bg-blue-500/10 ring-1 ring-blue-500/30' : 'hover:bg-slate-500/5'
-                        }`}
-                    >
-                        <div className="flex items-center gap-2">
-                            {/* Таксопарк — первым и заметно: по одному номеру
-                                приходят чаты разных парков, и оператору важно
-                                сразу видеть, чей это чат. Так же его показывает
-                                и сам Chat2Desk. */}
-                            <span className="truncate rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
-                                {chat.channel_name || 'Парк не определён'}
-                            </span>
-                            {handedOff[key] && (
-                                <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] font-medium text-emerald-600">
-                                    <Check size={11} /> передан
-                                </span>
-                            )}
-                        </div>
-                        <div className="mt-1 line-clamp-2 text-[13px] leading-snug text-slate-700">
-                            {chat.preview || 'Без текста'}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11.5px] text-slate-400">
-                            <span className="tabular-nums">
-                                {formatDayShort(chat.last_at)} · {formatTime(chat.last_at)}
-                            </span>
-                            <span className="tabular-nums">{chat.messages_count} сообщ.</span>
-                            {chat.has_media && <ImageIcon size={12} />}
-                            {chat.is_service && <span>служебное</span>}
-                        </div>
-                    </button>
-                );
-            })}
-            {!chats.length && (
-                <div className="px-3 py-8 text-center text-[13px] text-slate-400">
-                    Живой переписки за период нет
-                </div>
-            )}
-        </div>
-
-        {(serviceCount > 0 || truncated) && (
-            <div className="space-y-2 border-t border-slate-200/70 px-4 py-2.5">
-                {serviceCount > 0 && (
-                    <label className="flex items-center justify-between gap-3 text-[12.5px] text-slate-600">
-                        <span>Скрыть служебные ({serviceCount})</span>
-                        <IosToggle checked={hideService} onChange={onToggleService} />
-                    </label>
-                )}
-                {truncated && (
-                    <div className="text-[11.5px] leading-snug text-amber-600">
-                        Сообщений за период больше, чем помещается в один запрос —
-                        показаны самые свежие.
-                    </div>
-                )}
-            </div>
-        )}
-    </div>
-);
-
 // ── Панель чата ─────────────────────────────────────────────────────────────
+//
+// Списка чатов слева больше нет. После склейки «один чат = один таксопарк» у
+// 97,7 % водителей в окне ровно один парк, и колонка в 340 пикселей висела бы
+// ради 2,3 % случаев — это тот самый лишний визуальный шум. Редкий водитель с
+// несколькими парками получает сегментный контрол над лентой: та же идиома, что
+// у переключателя «Поиск чатов / Журнал» выше.
 
-const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff, onBack }) => {
-    if (!chat) {
-        return (
-            <div className={`${iosCard} flex min-h-[320px] items-center justify-center px-6 text-center`}>
-                <div className="text-[13px] text-slate-400">Выберите чат слева</div>
-            </div>
-        );
-    }
+const ChatPanel = ({ chat, chats, activeKey, onPickPark, snapshot, phone, driverName,
+                     handedOff, onHandoff, truncated, serviceCount, hideService,
+                     onToggleService }) => {
+    if (!chat) return null;
+    const parks = chats || [];
     return (
-        <div className={`${iosCard} flex max-h-[72vh] flex-col overflow-hidden`}>
+        <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
             <div className="flex flex-wrap items-center gap-3 border-b border-slate-200/70 px-4 py-3">
-                <button
-                    type="button"
-                    onClick={onBack}
-                    className={`${iosBtnGhost} lg:hidden`}
-                    aria-label="Назад к списку"
-                >
-                    <ChevronLeft size={16} />
-                </button>
                 <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-[14.5px] font-semibold text-slate-900">
+                        {/* Имени у водителя часто нет — тогда заголовком идёт
+                            телефон, а не слово «Водитель»: по нему человека и
+                            ищут, и он же нужен на скриншоте. */}
+                        <span className="truncate text-[15px] font-semibold text-slate-900">
                             {driverName || formatPhone(phone)}
                         </span>
                         {/* Таксопарк — рядом с именем водителя, а не в подписи
@@ -497,34 +420,79 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff, on
                             <Building2 size={11} /> {chat.channel_name || 'Парк не определён'}
                         </span>
                     </div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[12px] text-slate-500">
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 text-[12px] text-slate-500">
+                        {driverName && <span className="tabular-nums">{formatPhone(phone)}</span>}
+                        {/* Свежесть последнего сообщения, а не время начала:
+                            начало после склейки — это граница окна выгрузки, а
+                            оператору надо понять, живой ли перед ним разговор. */}
                         <span className="inline-flex items-center gap-1 tabular-nums">
-                            <Clock size={11} /> {formatDateTime(chat.started_at)}
+                            <Clock size={11} /> {formatDayShort(chat.last_at)} · {formatTime(chat.last_at)}
                         </span>
-                        {chat.operator_name && <span className="truncate">Отвечал: {chat.operator_name}</span>}
+                        <span className="tabular-nums">{chat.messages_count} сообщ. за 2 дня</span>
+                        {chat.has_media && <ImageIcon size={12} />}
                     </div>
                 </div>
-                {handedOff ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[13px] font-medium text-emerald-700">
-                        <Check size={14} /> Передан
-                    </span>
-                ) : (
-                    <button type="button" onClick={onHandoff} className={iosBtnPrimary}>
-                        <Send size={15} /> Передан
+                <div className="flex items-center gap-2">
+                    {handedOff && (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[13px] font-medium text-emerald-700">
+                            <Check size={14} /> Передан
+                        </span>
+                    )}
+                    {/* Кнопку не прячем после передачи: склеенный чат живёт двое
+                        суток и покрывает несколько поводов, а запрет вынуждал бы
+                        искать номер заново и жёг дневной лимит поисков. */}
+                    <button type="button" onClick={onHandoff}
+                            className={handedOff ? iosBtnSecondary : iosBtnPrimary}>
+                        <Send size={15} /> {handedOff ? 'Ещё раз' : 'Передан'}
                     </button>
-                )}
+                </div>
             </div>
+
+            {parks.length > 1 && (
+                <div className="overflow-x-auto border-b border-slate-200/70 px-4 py-2">
+                    <IosSegmented
+                        value={activeKey}
+                        onChange={onPickPark}
+                        ariaLabel="Таксопарки водителя"
+                        options={parks.map((item) => ({
+                            value: chatKey(item),
+                            label: item.channel_name || 'Парк не определён',
+                            count: item.messages_count,
+                        }))}
+                    />
+                </div>
+            )}
+
+            {truncated && (
+                <div className="border-b border-slate-200/70 bg-amber-50 px-4 py-2 text-[11.5px] leading-snug text-amber-700">
+                    Сообщений за период больше, чем вмещает один запрос — показаны самые свежие.
+                </div>
+            )}
 
             <div className="min-h-0 flex-1 overflow-hidden bg-[#f2f2f7]">
-                <ChatThread snapshot={snapshot} className="h-full" />
+                <ChatThread
+                    snapshot={snapshot}
+                    hideService={hideService}
+                    initialScroll="end"
+                    emptyText="За последние 2 дня живой переписки в этом парке нет"
+                    className="h-full"
+                />
             </div>
 
-            <div className="flex items-start gap-2 border-t border-slate-200/70 px-4 py-2.5 text-[11.5px] leading-snug text-slate-500">
-                <Info size={13} className="mt-0.5 shrink-0" />
-                <span>
-                    Снимок экрана делайте средствами системы: на Mac — ⌘⇧4, на Windows — Win+Shift+S.
-                    Кнопка «Передан» отправит чат-менеджеру внутренний комментарий, водителю он не виден.
-                </span>
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-slate-200/70 px-4 py-2.5">
+                <div className="flex items-start gap-2 text-[11.5px] leading-snug text-slate-500">
+                    <Info size={13} className="mt-0.5 shrink-0" />
+                    <span>
+                        Снимок экрана делайте средствами системы: на Mac — ⌘⇧4, на Windows — Win+Shift+S.
+                        Кнопка «Передан» отправит чат-менеджеру внутренний комментарий, водителю он не виден.
+                    </span>
+                </div>
+                {serviceCount > 0 && (
+                    <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600">
+                        <span>Скрыть служебные ({serviceCount})</span>
+                        <IosToggle checked={hideService} onChange={onToggleService} />
+                    </label>
+                )}
             </div>
         </div>
     );
@@ -748,7 +716,7 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
                                     <th className="px-4 py-2.5 font-medium">Действие</th>
                                     <th className="px-4 py-2.5 font-medium">Водитель</th>
                                     <th className="px-4 py-2.5 font-medium">Таксопарк</th>
-                                    <th className="px-4 py-2.5 font-medium">Чат</th>
+                                    <th className="px-4 py-2.5 font-medium">Заметка</th>
                                     <th className="px-4 py-2.5 font-medium">Комментарий</th>
                                 </tr>
                             </thead>
@@ -775,8 +743,12 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
                                         <td className="px-4 py-2.5 text-[12.5px] text-slate-600">
                                             <span className="truncate">{item.channel_name || '—'}</span>
                                         </td>
+                                        {/* Номер обращения есть только у передачи:
+                                            это заявка, куда вендор реально положил
+                                            заметку. У просмотра его нет — чат склеен
+                                            по парку, и обращений внутри несколько. */}
                                         <td className="px-4 py-2.5 text-[12px] text-slate-400">
-                                            {item.request_id ? (
+                                            {item.kind === 'handoff' && item.request_id ? (
                                                 <span className="tabular-nums">№ {item.request_id}</span>
                                             ) : ''}
                                         </td>

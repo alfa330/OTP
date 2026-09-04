@@ -259,7 +259,11 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # парк берётся из самого сообщения (channel_id) через справочник, а
         # ночной срез заявок остаётся лишь третьим запасным вариантом.
         with db._get_cursor() as cursor:
-            meta = queries.request_meta(cursor, [c['request_id'] for c in chats])
+            # Обогащаемся по ВСЕМ обращениям чата, а не по одному: после склейки
+            # по парку их внутри несколько, и любое выбранное было бы
+            # произвольным.
+            meta = queries.request_meta(
+                cursor, [rid for c in chats for rid in c.get('request_ids') or []])
             channels = queries.channel_names(cursor)
         unknown = [c['channel_id'] for c in chats
                    if c.get('channel_id') and int(c['channel_id']) not in channels]
@@ -268,21 +272,27 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             # весь справочник, дальше он живёт в кеше процесса 6 часов.
             channels = {**chat2desk.channel_names(), **channels}
         for chat in chats:
-            extra = meta.get(chat['request_id']) or {}
+            rows = [meta[rid] for rid in (chat.get('request_ids') or []) if rid in meta]
+
+            def _first(field, source=rows):
+                return next((r.get(field) for r in source if r.get(field)), None)
+
             channel_id = chat.get('channel_id')
             chat['channel_name'] = (channels.get(int(channel_id)) if channel_id else None) \
-                or extra.get('channel_name')
+                or _first('channel_name')
             # Кто отвечал — из САМИХ сообщений, а имя из ночного среза заявок
             # только как запасное. Срез хранит одного оператора на заявку, а
             # лента подписывает каждое сообщение своим автором: разойдись они,
             # человек унесёт на скриншоте одно имя, а в тексте увидит другое.
             chat['operator_name'] = (', '.join(chat['authors']) if chat['authors']
-                                     else extra.get('operator_name'))
-            chat['rating_score'] = extra.get('rating_score')
-            if extra.get('request_type') == 'rating':
-                chat['is_service'] = True
+                                     else _first('operator_name'))
+            # Оценка водителя лежит только в обычных обращениях: у 40 987 заявок
+            # типа 'rating' поле rating_score не заполнено НИ РАЗУ, хотя именно
+            # они называются «оценкой». Берём первую непустую среди обычных.
+            chat['rating_score'] = _first(
+                'rating_score', [r for r in rows if r.get('request_type') != 'rating'])
             if not client_name:
-                client_name = extra.get('client_name')
+                client_name = chat2desk.clean_client_name(_first('client_name'))
 
         with db._get_cursor() as cursor:
             queries.log_event(cursor, ctx, 'search', phone=phone, client_id=client_id,
@@ -313,8 +323,12 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 cursor, ctx, 'open',
                 phone=phone,
                 client_id=_int_or_none(data.get('client_id')),
+                channel_id=_int_or_none(data.get('channel_id')),
                 dialog_id=_int_or_none(data.get('dialog_id')),
-                request_id=_int_or_none(data.get('request_id')),
+                # request_id у открытия НЕ пишем: после склейки по парку у чата
+                # нет одного обращения — их внутри несколько, и любое
+                # записанное было бы неправдой о том, что именно смотрел
+                # человек. Адрес просмотра — клиент и парк.
                 channel_name=(data.get('channel_name') or None),
                 messages_count=_int_or_none(data.get('messages_count')),
                 ip_address=_ip(), user_agent=_ua())
@@ -352,8 +366,12 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             event = queries.log_event(
                 cursor, ctx, 'handoff',
                 phone=phone, client_id=client_id,
+                channel_id=_int_or_none(data.get('channel_id')),
                 dialog_id=sent.get('dialog_id') or _int_or_none(data.get('dialog_id')),
-                request_id=sent.get('request_id') or _int_or_none(data.get('request_id')),
+                # Обращение берём ТОЛЬКО у вендора: это то, куда заметка реально
+                # легла. Значение с фронта было бы догадкой — у склеенного чата
+                # обращений несколько.
+                request_id=sent.get('request_id'),
                 channel_name=(data.get('channel_name') or None),
                 comment_text=text,
                 c2d_message_id=_int_or_none(sent.get('message_id')),

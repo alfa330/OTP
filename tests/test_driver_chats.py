@@ -270,16 +270,52 @@ def msg(mid, kind, created, text='', request_id=1, dialog_id=7, **extra):
 
 
 class ChatGroupingTests(unittest.TestCase):
-    def test_chats_are_grouped_by_request_and_sorted_fresh_first(self):
+    def test_two_days_of_one_park_are_one_chat(self):
+        """Главное требование владельца 04.09.2026: «один чат один таксопарк, но
+        с историей в два последних дня».
+
+        Раньше эти же три сообщения давали ДВА чата — по числу обращений, — и
+        один разговор с одним парком выглядел как два разных.
+        """
         chats = chat2desk.group_chats([
-            msg(1, 'from_client', '2026-09-02T10:00:00', 'первое', request_id=100),
-            msg(2, 'to_client', '2026-09-02T10:05:00', 'ответ', request_id=100),
-            msg(3, 'from_client', '2026-09-03T09:00:00', 'сегодня', request_id=200),
+            msg(1, 'from_client', '2026-09-02T10:00:00', 'первое',
+                request_id=100, channelId=2137),
+            msg(2, 'to_client', '2026-09-02T10:05:00', 'ответ',
+                request_id=100, channelId=2137),
+            msg(3, 'from_client', '2026-09-03T09:00:00', 'сегодня',
+                request_id=200, channelId=2137),
         ])
-        self.assertEqual([c['request_id'] for c in chats], [200, 100])
-        self.assertEqual(chats[1]['messages_count'], 2)
-        self.assertEqual(chats[1]['incoming_count'], 1)
-        self.assertEqual(chats[1]['outgoing_count'], 1)
+        self.assertEqual(len(chats), 1)
+        self.assertEqual(chats[0]['channel_id'], 2137)
+        self.assertEqual(chats[0]['messages_count'], 3)
+        self.assertEqual(chats[0]['incoming_count'], 2)
+        self.assertEqual(chats[0]['outgoing_count'], 1)
+        self.assertEqual(chats[0]['request_ids'], [200, 100],
+                         'все обращения окна остаются справочно, свежие сверху')
+
+    def test_different_parks_stay_different_chats(self):
+        """«Один чат один таксопарк» — значит два парка это два чата, и свежий
+        сверху. Так пишут 2,3 % водителей окна."""
+        chats = chat2desk.group_chats([
+            msg(1, 'from_client', '2026-09-02T10:00:00', 'в первый парк',
+                request_id=100, channelId=2137),
+            msg(2, 'from_client', '2026-09-03T09:00:00', 'во второй парк',
+                request_id=200, channelId=3624),
+        ])
+        self.assertEqual([c['channel_id'] for c in chats], [3624, 2137])
+
+    def test_reference_request_is_the_last_live_one(self):
+        """Самое свежее сообщение окна часто и есть автоопрос после закрытия
+        чата. Наследовать ЕГО номер значило бы подписать живой разговор
+        служебной заявкой — и в журнале, и в выгрузке."""
+        chats = chat2desk.group_chats([
+            msg(1, 'from_client', '2026-09-03T10:00:00', 'помогите',
+                request_id=100, channelId=2137),
+            msg(2, None, '2026-09-03T12:00:00', 'Оцените работу оператора',
+                request_id=999, channelId=2137),
+        ])
+        self.assertEqual(chats[0]['request_id'], 100)
+        self.assertIn(999, chats[0]['request_ids'])
 
     def test_messages_without_request_fall_back_to_dialog(self):
         """Автоответы и системные строки приходят до открытия обращения — без
@@ -429,6 +465,117 @@ class HandoffTextTests(unittest.TestCase):
         удаления у вендора нет. Ограничение стоит на входе."""
         text = chat2desk.build_handoff_text('Оператор', 'я' * 5000)
         self.assertLessEqual(len(text), chat2desk.MAX_COMMENT_LENGTH)
+
+
+class ServiceMessageTests(unittest.TestCase):
+    """Сообщения без типа. Склейка делает этот дефект видимым."""
+
+    def test_empty_type_becomes_service_not_a_driver_reply(self):
+        """Вендор шлёт автоопрос «Оператордың жұмысын қалай бағалайсыз?» с
+        type: null (проверено живьём 03.09.2026). У пустого типа в ленте нет
+        своей ветки, и ChatThread рисует его белым пузырём СЛЕВА — то есть
+        выдаёт вопрос парка за слова водителя. Пока чаты резались по обращению,
+        опрос жил отдельной карточкой; после склейки он внутри живой ленты, и
+        оператор унёс бы его на скриншоте чат-менеджеру.
+        """
+        for raw in (None, '', '   '):
+            with self.subTest(raw=raw):
+                out = chat2desk.normalize_message({'id': 1, 'type': raw, 'text': 'Оцените'}, {})
+                self.assertEqual(out['type'], 'autoreply')
+
+    def test_known_types_are_untouched(self):
+        for kind in ('from_client', 'to_client', 'system', 'comment', 'autoreply'):
+            with self.subTest(kind=kind):
+                out = chat2desk.normalize_message({'id': 1, 'type': kind}, {})
+                self.assertEqual(out['type'], kind)
+
+    def test_survey_does_not_count_as_a_live_reply(self):
+        """Чат из одного автоопроса остаётся служебным — иначе он выглядел бы
+        как живой разговор с парком."""
+        chats = chat2desk.group_chats([
+            msg(1, None, '2026-09-03T12:00:00', 'Оцените работу', request_id=1, channelId=2137),
+        ])
+        self.assertTrue(chats[0]['is_service'])
+
+
+class ClientNameTests(unittest.TestCase):
+    def test_unknown_is_not_a_name(self):
+        """Вендор отдаёт «unknown» буквальной строкой, когда имени нет, и в
+        шапке чата это выглядело как имя водителя (видно на живом прогоне
+        04.09.2026). Пустое имя честнее: раздел подставит телефон."""
+        for raw in ('unknown', 'UNKNOWN', ' Unknown ', 'no name', '', None, '   '):
+            with self.subTest(raw=raw):
+                self.assertIsNone(chat2desk.clean_client_name(raw))
+
+    def test_real_name_survives(self):
+        self.assertEqual(chat2desk.clean_client_name('  Асхат  '), 'Асхат')
+
+    def test_header_falls_back_to_the_phone(self):
+        source = VIEW_JSX.read_text(encoding='utf-8')
+        self.assertIn('{driverName || formatPhone(phone)}', source)
+
+
+class ChatKeyTwinTests(unittest.TestCase):
+    """Ключ чата живёт на бэке и во фронте. Разъедутся — «передан» встанет на
+    чужом чате, а журнал получит повторные записи."""
+
+    def test_backend_key_prefers_channel(self):
+        self.assertEqual(chat2desk.chat_key(2137, 999), 'c2137')
+        self.assertEqual(chat2desk.chat_key(None, 999), 'd999')
+        self.assertEqual(chat2desk.chat_key(None, None), 'x0')
+
+    def test_frontend_twin_has_the_same_order(self):
+        source = VIEW_JSX.read_text(encoding='utf-8')
+        body = source.split('function chatKey(chat)')[1].split('\n}')[0]
+        self.assertIn('channel_id', body)
+        self.assertLess(body.index('channel_id'), body.index('dialog_id'),
+                        'канал проверяется раньше диалога — как на бэкенде')
+        self.assertIn("'x0'", body)
+
+
+class JournalAddressTests(unittest.TestCase):
+    """После склейки адрес чата — парк, а не обращение."""
+
+    def test_schema_has_channel_id(self):
+        joined = '\n'.join(schema.DDL)
+        self.assertIn('channel_id', joined)
+
+    def test_channel_column_is_added_by_alter_not_create(self):
+        """Таблица уже живёт на проде: CREATE TABLE IF NOT EXISTS её не тронет,
+        и колонка молча не появилась бы."""
+        alters = [s for s in schema.DDL if s.strip().upper().startswith('ALTER TABLE')]
+        self.assertTrue(any('channel_id' in s for s in alters))
+
+    def test_open_event_carries_no_request_id(self):
+        """У просмотра одного обращения больше не существует — лучше пустая
+        колонка, чем произвольный номер."""
+        source = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        body = source.split('def driver_chats_open')[1].split('def ')[0]
+        self.assertIn('channel_id', body)
+        self.assertNotIn("request_id=_int_or_none(data.get('request_id'))", body)
+
+    def test_handoff_takes_request_id_only_from_the_vendor(self):
+        source = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        body = source.split('def driver_chats_handoff')[1].split('def ')[0]
+        self.assertIn("request_id=sent.get('request_id')", body)
+        self.assertNotIn("or _int_or_none(data.get('request_id'))", body)
+
+
+class ThreadScrollTests(unittest.TestCase):
+    """Двухсуточная лента должна открываться на свежем, а не на самом старом."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.thread = (ROOT / 'src' / 'components' / 'c2d_eval' / 'ChatThread.jsx'
+                      ).read_text(encoding='utf-8')
+        cls.view = VIEW_JSX.read_text(encoding='utf-8')
+
+    def test_prop_exists_and_defaults_to_old_behaviour(self):
+        """Лента используется в пяти местах — менять их молча нельзя."""
+        self.assertIn("initialScroll = 'start'", self.thread)
+
+    def test_section_opens_at_the_end(self):
+        self.assertIn('initialScroll="end"', self.view)
 
 
 class HandoffFlowTests(unittest.TestCase):
@@ -627,10 +774,14 @@ class ViewContractTests(unittest.TestCase):
     def test_taxi_park_is_shown_on_every_chat(self):
         """По одному номеру приходят чаты разных парков. Без названия оператор
         не понимает, чей это чат, — на это указал владелец 03.09.2026."""
-        # Два места показа: строка списка и шапка открытого чата. Третье
-        # вхождение — отправка канала в журнал, оно к показу не относится.
-        self.assertEqual(self.source.count("chat.channel_name || 'Парк не определён'"), 2,
-                         'парк показывается и в списке чатов, и в шапке чата')
+        # Одно место показа: шапка чата. Списка слева больше нет — после
+        # склейки «один чат = один парк» у 97,7 % водителей в окне ровно один
+        # парк, и колонка висела бы ради 2,3 % случаев.
+        self.assertIn("chat.channel_name || 'Парк не определён'", self.source,
+                      'парк стоит в шапке чата')
+        self.assertEqual(self.source.count("'Парк не определён'"), 2,
+                         'парк показывается в шапке чата и в переключателе парков')
+        self.assertNotIn('const ChatList', self.source, 'список чатов больше не нужен')
 
 
 class ThreadNoteRenderingTests(unittest.TestCase):
