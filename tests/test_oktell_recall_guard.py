@@ -853,3 +853,200 @@ def test_no_periodic_relaunch_task():
     assert "def _remove_task" in source
     body = source[source.index("def run_install("):source.index("def run_uninstall(")]
     assert "_remove_task()" in body, "установка должна снимать прежнюю задачу"
+
+
+# --------------------------------------------------------------------------- #
+# Слепое правило: код в окне есть, а кадры до него не доходят
+# --------------------------------------------------------------------------- #
+#
+# 04.09.2026 оператор просидел в «Перезвоне» 334 с при пороге 180 и остался на
+# месте. Правило слышит статусы только через сокеты, созданные уже подменённым
+# window.WebSocket. Документ, загрузившийся раньше нашей регистрации, отдаёт
+# клиенту родной сокет — кадры идут мимо правила навсегда.
+#
+# Смертельной дыру делало не это, а то, что install_hook ВПРЫСКИВАЛ код в такой
+# документ. Впрыск ставил флаг и печать нужной версии, тем самым закрывая
+# единственную проверку, по которой назначалась перезагрузка. Ограничитель
+# выглядел исправным при пустом отчёте.
+
+
+class _FakePage:
+    """Вкладка на CDP: помнит вызовы и отвечает заранее заданным здоровьем."""
+
+    def __init__(self, health, on_reload=None):
+        self.health = dict(health)
+        self.calls = []
+        self.evaluated = []
+        self.on_reload = on_reload
+
+    def call(self, method, params=None, timeout=None):
+        self.calls.append(method)
+        if method == "Page.reload" and self.on_reload:
+            self.health = dict(self.on_reload)
+        return {}
+
+    def evaluate(self, expression, timeout=None):
+        self.evaluated.append(expression)
+        if "__oktellGuardSockets" in expression and "hooked" in expression:
+            return dict(self.health)
+        return None
+
+
+def _browser(**over):
+    cfg = agent.load_config(Path("нет-такого.json"))
+    cfg["oktell_url"] = "https://oktell.example.local/"
+    cfg["in_window_rule"] = {"enabled": True, "threshold_s": 180}
+    cfg.update(over)
+    browser = agent.ManagedBrowser(cfg)
+    browser._page_target_id = "T1"
+    return browser
+
+
+BLIND = {"hooked": True, "ruleVersion": None, "enabled": True, "sockets": 0,
+         "frames": 0, "session": True, "login": "6612", "seconds": 0}
+HEALTHY = {"hooked": True, "ruleVersion": None, "enabled": True, "sockets": 1,
+           "frames": 3, "session": True, "login": "6612", "seconds": 0}
+LOGIN_SCREEN = {"hooked": False, "ruleVersion": None, "enabled": False, "sockets": 0,
+                "frames": 0, "session": False, "login": None, "seconds": 0}
+
+
+def test_blind_rule_is_healed_by_reload_not_masked_by_injection():
+    browser = _browser()
+    page = _FakePage(BLIND)
+    browser.install_hook(page)
+    assert "Page.reload" in page.calls, (
+        "страницу с живой сессией и нулём перехваченных сокетов обязаны перезагрузить"
+    )
+
+
+def test_blind_rule_is_not_papered_over_by_evaluating_the_hook():
+    """Впрыск в такую страницу — та самая маскировка: он ставит печать нужной
+    версии и навсегда закрывает единственный признак поломки."""
+    browser = _browser()
+    page = _FakePage(BLIND)
+    browser.install_hook(page)
+    injected = [e for e in page.evaluated if "__oktellGuardHooked = true" in e]
+    assert not injected, "в документ с живой сессией хук впрыскивать нельзя"
+
+
+def test_login_screen_gets_the_hook_without_reload():
+    """До входа сокета ещё нет: обычного впрыска достаточно, и он перехватит
+    сокет, который клиент создаст после входа. Перезагружать экран входа — зря
+    злить человека."""
+    browser = _browser()
+    page = _FakePage(LOGIN_SCREEN)
+    browser.install_hook(page)
+    assert "Page.reload" not in page.calls
+    assert any("__oktellGuardHooked = true" in e for e in page.evaluated)
+
+
+def test_working_rule_is_left_alone():
+    browser = _browser()
+    page = _FakePage(HEALTHY)
+    browser.install_hook(page)
+    assert "Page.reload" not in page.calls
+    assert not any("__oktellGuardHooked = true" in e for e in page.evaluated)
+
+
+def test_reload_happens_once_then_the_agent_shouts():
+    """Перезагрузка ровно одна: если и она не помогла, надо не крутить вкладку
+    в цикле, а сказать об этом — человек сейчас без ограничителя."""
+    browser = _browser()
+    page = _FakePage(BLIND)
+    browser.install_hook(page)
+    page.calls.clear()
+    browser.install_hook(page)
+    assert "Page.reload" not in page.calls
+
+
+def test_healed_page_earns_the_right_to_be_fixed_again():
+    """Ослепла второй раз (клиент сам перезагрузил страницу) — снова чиним.
+    Иначе одна успешная починка за смену исчерпывала бы лимит."""
+    browser = _browser()
+    page = _FakePage(BLIND, on_reload=HEALTHY)
+    browser.install_hook(page)
+    assert "Page.reload" in page.calls
+    browser.install_hook(page)          # теперь здорова — отметка снимается
+    page.health = dict(BLIND)
+    page.calls.clear()
+    browser.install_hook(page)
+    assert "Page.reload" in page.calls
+
+
+def test_short_lived_open_does_not_reload():
+    """Процесс `--open` завершится сразу, унеся регистрацию скрипта. Перезагрузи
+    он страницу — новый документ остался бы вовсе без правила."""
+    cfg = agent.load_config(Path("нет-такого.json"))
+    cfg["oktell_url"] = "https://oktell.example.local/"
+    browser = agent.ManagedBrowser(cfg, heal=False)
+    browser._page_target_id = "T1"
+    page = _FakePage(BLIND)
+    browser.install_hook(page)
+    assert "Page.reload" not in page.calls
+
+
+def test_run_open_creates_browser_without_healing():
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_open("):source.index("def run_status(")]
+    assert "ManagedBrowser(cfg, heal=False)" in body
+
+
+def test_script_registered_once_per_connection():
+    """addScriptToEvaluateOnNewDocument не заменяет прежний скрипт, а добавляет
+    ещё один: вызов на каждом опросе копил бы их сотнями за смену."""
+    browser = _browser()
+    page = _FakePage(HEALTHY)
+    browser.install_hook(page)
+    browser.install_hook(page)
+    assert page.calls.count("Page.addScriptToEvaluateOnNewDocument") == 1
+
+
+def test_page_disable_is_never_called():
+    """В Chromium Page.disable очищает список добавленных скриптов — вызвать
+    его значит стереть хук. Упоминание в комментарии как раз объясняет запрет,
+    поэтому ищем именно ВЫЗОВ."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    assert 'call("Page.disable' not in source
+    assert "call('Page.disable" not in source
+
+
+# --- как это выглядит снаружи ------------------------------------------------
+
+def test_rule_alive_needs_a_captured_socket():
+    assert agent.rule_alive({"window": True, "session": True,
+                             "rule": {"enabled": True, "hooked": True, "sockets": 0}}) is False
+    assert agent.rule_alive({"window": True, "session": True,
+                             "rule": {"enabled": True, "hooked": True, "sockets": 2}}) is True
+
+
+def test_rule_alive_is_unknown_without_session():
+    """Нет сессии — сказать нечего. Ложное «сломано» на пустом окне заставило бы
+    искать поломку там, где человек просто не вошёл."""
+    assert agent.rule_alive({"window": True, "session": False, "rule": {}}) is None
+    assert agent.rule_alive({}) is None
+
+
+def test_rule_alive_false_when_rule_switched_off():
+    assert agent.rule_alive({"window": True, "session": True,
+                             "rule": {"enabled": False, "hooked": True, "sockets": 1}}) is False
+
+
+def test_heartbeat_reports_rule_health_separately_from_session():
+    """Раздел обязан различать «человек в Oktell» и «правило его считает»:
+    именно неразличимость двух недель выдавала слепое правило за рабочее."""
+    cfg = agent.load_config(Path("нет-такого.json"))
+    payload = agent.build_heartbeat_payload(
+        _state(window=True, session=True, login="6612",
+               rule={"hooked": True, "enabled": True, "sockets": 0, "seconds": 0,
+                     "thresholdS": 180, "ruleVersion": "1.0.14-abc"}),
+        cfg, "2026-09-04T15:30:00+0500",
+    )
+    assert payload["browser"]["session_present"] is True
+    assert payload["rule"]["alive"] is False
+    assert payload["rule"]["threshold_s"] == 180
+
+
+def test_heartbeat_rule_alive_unknown_for_old_agents_state():
+    cfg = agent.load_config(Path("нет-такого.json"))
+    payload = agent.build_heartbeat_payload(_state(), cfg, "2026-09-04T15:30:00+0500")
+    assert payload["rule"]["alive"] is None

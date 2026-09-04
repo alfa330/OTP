@@ -175,7 +175,17 @@ _EMPLOYEES_SQL = """
            a.last_seen_at                        AS agent_seen_at,
            a.agent_version                       AS agent_version,
            a.managed_window                      AS agent_window,
+           a.session_present                     AS agent_session,
+           a.unmanaged_count                     AS unmanaged_count,
+           -- «Правило считает» — не то же самое, что «агент жив»: правило
+           -- живёт в окне и может стоять там слепым. Без этой колонки раздел
+           -- показывал зелёного агента у человека, которого ничто не ограничивает.
+           a.rule_alive                          AS rule_alive,
+           a.rule_seconds                        AS rule_seconds,
            COALESCE(v.kicks, 0)                  AS kicks_30d,
+           -- Пересидел, а ограничитель не сработал: число, ради которого
+           -- серверная сверка и написана. С выбросами не складывается.
+           COALESCE(v.missed, 0)                 AS missed_30d,
            (m.day IS NOT NULL)                   AS managed_today
       FROM users u
       LEFT JOIN departments d ON d.id = u.department_id
@@ -185,7 +195,9 @@ _EMPLOYEES_SQL = """
              ON m.user_id = u.id
             AND m.day = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')::date
       LEFT JOIN (
-            SELECT user_id, COUNT(*) AS kicks
+            SELECT user_id,
+                   COUNT(*) FILTER (WHERE reason <> 'recall_unmanaged') AS kicks,
+                   COUNT(*) FILTER (WHERE reason = 'recall_unmanaged') AS missed
               FROM oktell_guard_violations
              WHERE happened_at >= %(since)s AND NOT dry_run AND verified = 'confirmed'
              GROUP BY user_id
@@ -311,22 +323,102 @@ def upsert_agent(cursor, payload: dict) -> None:
         """
         INSERT INTO oktell_guard_agents
                (agent_id, user_id, sip_number, hostname, windows_user, agent_version,
-                managed_window, session_present, unmanaged_count, last_seen_at)
+                managed_window, session_present, unmanaged_count,
+                rule_alive, rule_sockets, rule_seconds, rule_version, last_seen_at)
         VALUES (%(agent_id)s, %(user_id)s, %(sip_number)s, %(hostname)s, %(windows_user)s,
                 %(agent_version)s, %(managed_window)s, %(session_present)s,
-                %(unmanaged_count)s, """ + _NOW + """)
+                %(unmanaged_count)s, %(rule_alive)s, %(rule_sockets)s, %(rule_seconds)s,
+                %(rule_version)s, """ + _NOW + """)
         ON CONFLICT (agent_id) DO UPDATE SET
-               user_id = EXCLUDED.user_id,
-               sip_number = EXCLUDED.sip_number,
+               -- Логин агент знает только из живой вкладки. Закрыл человек окно —
+               -- heartbeat приходит без логина, и прежняя запись затиралась в NULL:
+               -- раздел показывал «Не установлен» у машины, которая отмечается
+               -- каждую минуту (именно это и было видно в проде 04.09).
+               -- Держим последнее известное, пока не придёт новое.
+               user_id = COALESCE(EXCLUDED.user_id, oktell_guard_agents.user_id),
+               sip_number = CASE WHEN COALESCE(EXCLUDED.sip_number, '') = ''
+                                 THEN oktell_guard_agents.sip_number
+                                 ELSE EXCLUDED.sip_number END,
                hostname = EXCLUDED.hostname,
                windows_user = EXCLUDED.windows_user,
                agent_version = EXCLUDED.agent_version,
                managed_window = EXCLUDED.managed_window,
                session_present = EXCLUDED.session_present,
                unmanaged_count = EXCLUDED.unmanaged_count,
+               rule_alive = EXCLUDED.rule_alive,
+               rule_sockets = EXCLUDED.rule_sockets,
+               rule_seconds = EXCLUDED.rule_seconds,
+               rule_version = EXCLUDED.rule_version,
                last_seen_at = """ + _NOW,
         payload,
     )
+
+
+def thresholds_by_sip(cursor, department_code=None):
+    """Кого касается правило: ({sip: {user_id, threshold_s}}, {спорный sip: [id]}).
+
+    В первый словарь попадают только те, кого правило касается: действующие
+    операторы нужного отдела с заполненным номером и не выключенные лично.
+    Остальные из сверки выпадают целиком — иначе она нашла бы «нарушения» у тех,
+    к кому ограничитель не применяется вовсе.
+
+    Второй словарь — номера, висящие сразу на нескольких действующих людях.
+    Это не ошибка сверки, а расхождение в справочнике, и чинить его надо там.
+    """
+    cursor.execute(
+        """
+        SELECT COALESCE(u.sip_number, '')                    AS sip_number,
+               u.id                                          AS user_id,
+               COALESCE(r.threshold_s, s.threshold_s, 180)   AS threshold_s,
+               (COALESCE(r.enabled, TRUE) AND s.enabled)     AS enabled
+          FROM users u
+          LEFT JOIN departments d ON d.id = u.department_id
+          LEFT JOIN oktell_guard_user_rules r ON r.user_id = u.id
+          CROSS JOIN oktell_guard_settings s
+         WHERE s.id = 1
+           AND LOWER(COALESCE(u.role, '')) = ANY(%(roles)s)
+           AND LOWER(COALESCE(u.status, '')) <> ALL(%(inactive)s)
+           AND COALESCE(u.sip_number, '') <> ''
+           AND (%(department_code)s IS NULL OR d.code = %(department_code)s)
+        """,
+        {'roles': list(EMPLOYEE_ROLES), 'inactive': list(INACTIVE_STATUSES),
+         'department_code': department_code},
+    )
+    out, seen = {}, {}
+    for row in fetch_all(cursor):
+        sip = str(row['sip_number'])
+        seen.setdefault(sip, []).append(row['user_id'])
+        if not row.get('enabled'):
+            continue
+        out[sip] = {
+            'user_id': row['user_id'],
+            'threshold_s': int(row['threshold_s'] or 180),
+        }
+    # Один SIP-номер на двух действующих сотрудников — в проде такое есть
+    # (04.09.2026: 6684, 6674, 6648, 6638). По номеру человека тогда не
+    # опознать, а записать выброс наугад значит обвинить, может быть, невиновного.
+    # Такие номера из сверки исключаем целиком и говорим о них вслух.
+    ambiguous = {sip: sorted(ids) for sip, ids in seen.items() if len(ids) > 1}
+    for sip in ambiguous:
+        out.pop(sip, None)
+    return out, ambiguous
+
+
+def violations_between(cursor, since, until):
+    """Уже записанные выбросы за период — чтобы сверка не удвоила отчёт.
+
+    Берём и подтверждённые, и отклонённые: отклонённый факт всё равно означает,
+    что программа в тот момент работала и о человеке доложила.
+    """
+    cursor.execute(
+        """
+        SELECT sip_number, happened_at, reason
+          FROM oktell_guard_violations
+         WHERE happened_at >= %(since)s AND happened_at < %(until)s
+        """,
+        {'since': since, 'until': until},
+    )
+    return fetch_all(cursor)
 
 
 def rejected_count(cursor, date_from, date_to, department_code=None) -> int:
@@ -356,6 +448,11 @@ def report(cursor, date_from, date_to, department_code=None):
 
     Только подтверждённые историей Oktell записи: программа стоит на компьютере
     сотрудника, и непроверенным её словам в отчёте не место.
+
+    Выбросы и пересиженное считаются РАЗДЕЛЬНО. Записи серверной сверки
+    (reason='recall_unmanaged') означают ровно обратное выбросу: человек
+    пересидел, а ограничитель до него не доехал. Сложить их в одно число
+    значило бы отчитываться о работе ограничителя его же неудачами.
     """
     cursor.execute(
         """
@@ -364,7 +461,8 @@ def report(cursor, date_from, date_to, department_code=None):
                v.sip_number,
                d.code AS department_code,
                v.happened_at::date AS day,
-               COUNT(*) AS kicks,
+               COUNT(*) FILTER (WHERE v.reason <> 'recall_unmanaged') AS kicks,
+               COUNT(*) FILTER (WHERE v.reason = 'recall_unmanaged') AS missed,
                MAX(v.seconds) AS max_seconds,
                BOOL_OR(v.dry_run) AS had_dry_run
           FROM oktell_guard_violations v

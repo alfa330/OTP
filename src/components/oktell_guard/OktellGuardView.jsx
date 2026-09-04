@@ -38,10 +38,27 @@ const fmtMinutes = (seconds) => {
     return `${Math.floor(value / 60)} мин ${value % 60} с`;
 };
 
+/**
+ * Время из базы приходит МЕСТНЫМ (Алматы), а Flask отдаёт его строкой с
+ * пометкой GMT. Браузер читает такую строку как UTC и уводит момент на +5 часов
+ * вперёд. Последствия были не косметические: «Молчит с …» не загоралось вообще
+ * никогда (возраст отметки получался отрицательным, порог 15 минут не
+ * срабатывал), то есть намертво замолчавший агент выглядел живым.
+ */
+const parseServerTime = (raw) => {
+    if (!raw) return null;
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return null;
+    if (!/GMT|UTC|Z$|\+00:?00$/i.test(String(raw))) return parsed;
+    // Возвращаем момент туда, где он был записан: пометку GMT поставил
+    // сериализатор, а не база.
+    return new Date(parsed.getTime() + parsed.getTimezoneOffset() * 60000);
+};
+
 const fmtDateTime = (raw) => {
     if (!raw) return '';
-    const parsed = new Date(raw);
-    if (Number.isNaN(parsed.getTime())) return String(raw).slice(0, 16).replace('T', ' ');
+    const parsed = parseServerTime(raw);
+    if (!parsed) return String(raw).slice(0, 16).replace('T', ' ');
     return parsed.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 };
 
@@ -73,12 +90,28 @@ const isoDaysAgo = (days) => {
  */
 const agentState = (row) => {
     if (!row.agent_seen_at) return { tone: 'slate', text: 'Не установлен' };
-    const seen = new Date(row.agent_seen_at);
-    const minutesAgo = (Date.now() - seen.getTime()) / 60000;
+    const seen = parseServerTime(row.agent_seen_at);
+    const minutesAgo = seen ? (Date.now() - seen.getTime()) / 60000 : NaN;
     if (Number.isNaN(minutesAgo) || minutesAgo > 15) {
         return { tone: 'red', text: `Молчит с ${fmtDateTime(row.agent_seen_at)}` };
     }
+    // Программа жива, своего окна нет, а чужое окно Oktell она видит — это и
+    // есть обход, ради ловли которого всё писалось. Раньше число уезжало в
+    // базу и там умирало: раздел о нём не говорил ни слова.
+    if (!row.agent_window && Number(row.unmanaged_count || 0) > 0) {
+        return { tone: 'red', text: 'Oktell мимо программы' };
+    }
     if (!row.agent_window) return { tone: 'amber', text: 'Окно Oktell закрыто' };
+    // «Агент на связи» ещё не значит «человек под ограничителем»: правило живёт
+    // внутри окна и может стоять там слепым — тогда время в «Перезвоне» не
+    // считается вовсе. Показывать такую машину зелёной нельзя: именно так
+    // ограничитель две недели выглядел рабочим при пустом отчёте.
+    if (row.agent_session && row.rule_alive === false) {
+        return { tone: 'red', text: 'Правило не считает' };
+    }
+    if (row.agent_session && row.rule_alive === true) {
+        return { tone: 'green', text: 'Считает' };
+    }
     return { tone: 'green', text: 'На связи' };
 };
 
@@ -273,6 +306,10 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
         withAgent: employees.filter((row) => row.agent_seen_at).length,
         kicks: employees.reduce((sum, row) => sum + Number(row.kicks_30d || 0), 0),
         personal: employees.filter((row) => row.personal_threshold_s).length,
+        // Считаем от тех, кто сейчас В Oktell: сравнивать с общим списком
+        // бессмысленно — половина смены просто не на работе.
+        inOktell: employees.filter((row) => row.agent_session).length,
+        counting: employees.filter((row) => row.rule_alive === true).length,
     }), [employees]);
 
     const toggleRow = (id) => setSelected((prev) => {
@@ -345,7 +382,9 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                     {[
                         { label: 'Сотрудников', value: stats.total },
                         { label: 'С агентом', value: `${stats.withAgent} из ${stats.total}` },
-                        { label: 'Личный порог', value: stats.personal },
+                        // Главное число раздела: сколько человек ограничитель
+                        // СЕЙЧАС реально считает. «С агентом» этого не говорит.
+                        { label: 'Под правилом', value: `${stats.counting} из ${stats.inOktell}` },
                         { label: 'Выбросов за 30 дней', value: stats.kicks },
                     ].map((item) => (
                         <div key={item.label} className="rounded-xl bg-slate-50 px-3 py-2">
@@ -627,12 +666,16 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                         </div>
                     ) : (
                         <div className="overflow-x-auto">
-                            <table className="w-full min-w-[520px] border-separate border-spacing-y-1">
+                            <table className="w-full min-w-[600px] border-separate border-spacing-y-1">
                                 <thead>
                                     <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500">
                                         <th className="px-2 py-1">Дата</th>
                                         <th className="px-2 py-1">Сотрудник</th>
-                                        <th className="px-2 py-1 text-right">Раз</th>
+                                        <th className="px-2 py-1 text-right">Выбросов</th>
+                                        {/* Пересиженное — не выброс, а его отсутствие: по истории
+                                            АТС человек просидел дольше нормы, а ограничитель до
+                                            него не доехал. Складывать с выбросами нельзя. */}
+                                        <th className="px-2 py-1 text-right">Пересидел без выброса</th>
                                         <th className="px-2 py-1 text-right">Дольше всего</th>
                                     </tr>
                                 </thead>
@@ -647,7 +690,12 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                                                     <IosBadge tone="slate" className="ml-2">обкатка</IosBadge>
                                                 )}
                                             </td>
-                                            <td className="px-2 py-2 text-right tabular-nums font-semibold text-slate-900">{row.kicks}</td>
+                                            <td className="px-2 py-2 text-right tabular-nums font-semibold text-slate-900">{row.kicks || 0}</td>
+                                            <td className="px-2 py-2 text-right tabular-nums font-semibold">
+                                                {row.missed
+                                                    ? <span className="text-amber-600">{row.missed}</span>
+                                                    : <span className="text-slate-300">—</span>}
+                                            </td>
                                             <td className="rounded-r-xl px-2 py-2 text-right tabular-nums text-slate-600">
                                                 {fmtMinutes(row.max_seconds)}
                                             </td>

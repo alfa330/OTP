@@ -154,6 +154,30 @@ def init_oktell_guard_schema(cursor) -> None:
         ON oktell_guard_agents (last_seen_at DESC);
     """)
 
+    # rule_alive: считает ли правило ПРЯМО СЕЙЧАС, а не «стоит ли оно».
+    # Разница стоила двух недель тишины: правило живёт в окне и слышит статусы
+    # только через сокеты, созданные уже подменённым WebSocket. Если документ
+    # загрузился раньше нашей регистрации, код в странице есть, а кадры мимо —
+    # счётчик стоит на нуле. Снаружи это выглядело как исправный ограничитель
+    # с пустым отчётом (04.09.2026: 334 с в «Перезвоне» при пороге 180 — ноль).
+    # NULL = сказать нечего (нет окна или сессии).
+    cursor.execute("""
+        ALTER TABLE oktell_guard_agents
+        ADD COLUMN IF NOT EXISTS rule_alive BOOLEAN;
+    """)
+    cursor.execute("""
+        ALTER TABLE oktell_guard_agents
+        ADD COLUMN IF NOT EXISTS rule_sockets INTEGER NOT NULL DEFAULT 0;
+    """)
+    cursor.execute("""
+        ALTER TABLE oktell_guard_agents
+        ADD COLUMN IF NOT EXISTS rule_seconds INTEGER NOT NULL DEFAULT 0;
+    """)
+    cursor.execute("""
+        ALTER TABLE oktell_guard_agents
+        ADD COLUMN IF NOT EXISTS rule_version VARCHAR(64) NOT NULL DEFAULT '';
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS oktell_guard_releases (
             id          SERIAL PRIMARY KEY,
