@@ -62,6 +62,9 @@ import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
+/* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
+   импорт компонента ради двух функций утащил бы его в основной бандл. */
+import { WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
@@ -2027,6 +2030,15 @@ const readWikiArticleSlugFromUrl = (locationLike = null) => {
     return readArticleSlugFromSearch(search);
 };
 
+/* Чат Wazzup, открытый прямой ссылкой: её копируют кнопкой «Ссылка» в шапке
+   чата, а «руками» присылают одним номером телефона. Разбор обеих форм живёт в
+   components/wazzup/chatLink.js — там же адрес и собирают. */
+const readWazzupChatTargetFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return null;
+    const search = locationLike?.search ?? window.location.search;
+    return readWazzupChatTargetFromSearch(search);
+};
+
 const buildAppViewUrl = (nextView) => {
     if (typeof window === 'undefined') return APP_BASE_URL;
     try {
@@ -2049,6 +2061,11 @@ const buildAppViewUrl = (nextView) => {
         }
         if (nextView !== 'wiki') {
             url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
+        }
+        /* Та же история с меткой чата Wazzup: без снятия Ctrl-клик по любому
+           пункту меню унёс бы чужой chat= в новую вкладку. */
+        if (nextView !== 'wazzup_chats') {
+            url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
         }
         return url.toString();
     } catch (error) {
@@ -2085,6 +2102,13 @@ const syncAppViewWithUrl = (nextView) => {
            «задач» унёс бы с собой чужой слаг. */
         if (nextView !== 'wiki') {
             url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
+        }
+        /* Метку чата — так же (chatLink.js). Условие обязано быть именно
+           «не wazzup_chats»: снятие без него стёрло бы диплинк сразу после
+           входа в раздел, ещё до того, как раздел его отработал, и
+           перезагрузка теряла бы открытый чат. */
+        if (nextView !== 'wazzup_chats') {
+            url.searchParams.delete(WAZZUP_CHAT_QUERY_PARAM);
         }
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
@@ -37414,6 +37438,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => readWikiArticleSlugFromUrl(location),
                 [location.search]
             );
+            /* Цель перехода в чат Wazzup. Раздел переписывает адрес через
+               history.replaceState в обход роутера, поэтому location.search
+               остаётся значением на момент входа — ровно то, что нужно:
+               диплинк читается один раз. */
+            const requestedWazzupChatFromLocation = useMemo(
+                () => readWazzupChatTargetFromUrl(location),
+                [location.search]
+            );
             const currentMonth = new Date().toISOString().slice(0, 7);
             const getStoredValue = (key, fallback) => {
                 try {
@@ -37599,6 +37631,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                в раздел снова открывал бы ту же статью. */
             const [wikiInitialSlug, setWikiInitialSlug] = useState(null);
             const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
+            /* Чат Wazzup, который надо открыть сразу при входе в «Чаты
+               Верификаторов» — приходит ссылкой из переписки. Гасится так же,
+               как слаг статьи: иначе следующий обычный вход в раздел снова
+               открывал бы тот же чат. */
+            const [wazzupInitialChat, setWazzupInitialChat] = useState(null);
+            const clearWazzupInitialChat = useCallback(() => setWazzupInitialChat(null), []);
 
             /* Раздел прочитан — колокол обязан узнать об этом сам.
                Связь была односторонней: заход в «Ивенты» гасил бейдж в сайдбаре,
@@ -40489,6 +40527,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     || !requestedWikiSlugFromLocation) return;
                 setWikiInitialSlug(requestedWikiSlugFromLocation);
             }, [user?.id, requestedViewFromLocation, requestedWikiSlugFromLocation]);
+
+            /* И так же — чат Верификаторов: ссылку на диалог присылают в
+               переписке, поэтому раздел обязан открыть его сразу, а не
+               показать список из тысячи чатов. */
+            useEffect(() => {
+                if (!user?.id || requestedViewFromLocation !== 'wazzup_chats'
+                    || !requestedWazzupChatFromLocation) return;
+                setWazzupInitialChat(requestedWazzupChatFromLocation);
+            }, [user?.id, requestedViewFromLocation, requestedWazzupChatFromLocation]);
 
             useEffect(() => {
                 // Do not touch view while authentication is still initializing
@@ -45775,6 +45822,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view !== 'wiki') setWikiInitialSlug(null);
             }, [view]);
 
+            /* Чатам Верификаторов — тот же сброс, по той же причине: иначе
+               следующий обычный заход в раздел открыл бы чат, по ссылке на
+               который однажды кликнули. */
+            useEffect(() => {
+                if (view !== 'wazzup_chats') setWazzupInitialChat(null);
+            }, [view]);
+
             /* Задачам — тот же сброс, что и вики. Дедупликация фокус-запроса
                (handledFocusRequestRef) живёт внутри TasksView и обнуляется при
                размонтировании раздела, а запрос — в состоянии App: без сброса
@@ -47619,6 +47673,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    initialChat={wazzupInitialChat}
+                                    onInitialChatConsumed={clearWazzupInitialChat}
                                 />
                             </Suspense>
                         )}

@@ -5523,8 +5523,15 @@ def api_wazzup_chats():
         where.append("channel_id = %s")
         params.append(channel_id)
     if q:
-        where.append("(contact_name ILIKE %s OR contact_phone ILIKE %s OR chat_id ILIKE %s)")
-        like = f"%{q}%"
+        # Экранируем метасимволы LIKE. Без этого '_' в запросе означал «любой
+        # один символ», а '%' — «что угодно»: поиск «7_78423714» притягивал
+        # чужие чаты, и переход по ссылке на такой чат решал «не найден» по
+        # разбавленной первой странице. Инъекции здесь не было (значение всегда
+        # шло параметром), а вот выдача врала.
+        where.append("(contact_name ILIKE %s ESCAPE '\\' OR contact_phone ILIKE %s ESCAPE '\\'"
+                     " OR chat_id ILIKE %s ESCAPE '\\')")
+        escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        like = f"%{escaped}%"
         params.extend([like, like, like])
     try:
         with db._get_cursor() as cursor:
