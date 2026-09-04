@@ -43043,7 +43043,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                     const nextStudySpecialty = normalizeTextForApi(editedUser?.study_specialty);
                     const prevStudySpecialty = normalizeTextForApi(userToEdit?.study_specialty);
-                    if (nextStudySpecialty !== prevStudySpecialty) {
+                    // Место учёбы стёрли прямо сейчас — специальность уже погашена
+                    // сервером тем же запросом. Второй запрос дал бы лишнюю строку
+                    // «— → —» в журнале изменений.
+                    const studyPlaceJustCleared = !nextStudyPlace && !!prevStudyPlace;
+                    if (!studyPlaceJustCleared && nextStudySpecialty !== prevStudySpecialty) {
                         await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                             user_id: editedUser.id,
                             field: 'study_specialty',
