@@ -4965,6 +4965,28 @@ def _ai_qa_guard():
     return None, (jsonify({"error": "forbidden"}), 403)
 
 
+def _verifier_chats_guard():
+    """Доступ к разделу «Чаты Верификаторов» (/api/wazzup/*, кроме эпизодов).
+
+    Аудитория ШИРЕ, чем у «ИИ-оценки»: сверх её списка (супер-админ, главы
+    ОП/СЗоВ/маркетинга, whitelist, СВ ОП) переписку читают ГЛОБАЛЬНЫЕ админы —
+    решение владельца. Разборы ИИ им при этом не открываются: у /api/ai-qa/* и
+    у эпизодов остаётся _ai_qa_guard.
+
+    «Глобальный» — это админ, который не назначен главой отдела: у главы с
+    базовой admin-ролью область строго его отдел (_is_global_admin_requester),
+    и чужая переписка ему не нужна. Зеркало на фронте —
+    canAccessVerifierChatsForUser в src/App.jsx.
+    """
+    requester_id = getattr(g, 'user_id', None)
+    if requester_id is not None:
+        user = db.get_user(id=requester_id)
+        role = _normalize_user_role(user[3]) if user else None
+        if _is_global_admin_requester(role, requester_id):
+            return requester_id, None
+    return _ai_qa_guard()
+
+
 def _ai_qa_direction_scope(requester_id):
     """Скоуп данных раздела ИИ-оценки. None — без ограничений (супер-админ / главы
     отделов из AI_QA_HEAD_DEPARTMENT_CODES / whitelist); список канонических id
@@ -5436,8 +5458,11 @@ def wazzup_webhook(token):
     return jsonify({"ok": True, "messages": stored, "statuses": updated}), 200
 
 
-# Просмотр чатов Wazzup (Верификаторы = направление 71 отдела продаж 367) —
-# доступ тот же, что у раздела ИИ-оценки: _ai_qa_guard.
+# Просмотр чатов Wazzup (Верификаторы = направление 71 отдела продаж 367).
+# Гард здесь НЕ один на все ручки: сама переписка (каналы, чаты, сообщения,
+# авторы, показатели) идёт под _verifier_chats_guard — он шире и пускает
+# глобальных админов, а эпизоды ниже остаются под _ai_qa_guard: эпизод — единица
+# ИИ-оценки, и админу он не открывается. Сводить их обратно в один нельзя.
 WAZZUP_API_KEY = (os.getenv('WAZZUP_OP_API_KEY') or '').strip()
 _WAZZUP_CHANNELS_CACHE = {'ts': 0.0, 'items': None}
 _WAZZUP_CHANNELS_CACHE_TTL = 600  # имена каналов меняются редко
@@ -5469,7 +5494,7 @@ def _wazzup_channels_from_api():
 def api_wazzup_channels():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _verifier_chats_guard()
     if err:
         return err
     try:
@@ -5505,7 +5530,7 @@ def api_wazzup_channels():
 def api_wazzup_chats():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _verifier_chats_guard()
     if err:
         return err
     channel_id = (request.args.get('channel_id') or '').strip() or None
@@ -5562,7 +5587,7 @@ def api_wazzup_chats():
 def api_wazzup_chat_messages():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _verifier_chats_guard()
     if err:
         return err
     channel_id = (request.args.get('channel_id') or '').strip()
@@ -5637,7 +5662,7 @@ def _wazzup_suggest_user(author_name, operators):
 def api_wazzup_authors():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _verifier_chats_guard()
     if err:
         return err
     try:
@@ -5668,7 +5693,7 @@ def api_wazzup_authors():
 def api_wazzup_authors_map():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _ai_qa_guard()
+    requester_id, err = _verifier_chats_guard()
     if err:
         return err
     data = request.get_json(silent=True) or {}
@@ -5709,7 +5734,7 @@ def api_wazzup_analytics():
     """Показатели менеджеров Wazzup за период: диалоги, сообщения, время ответа."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _verifier_chats_guard()
     if err:
         return err
     try:

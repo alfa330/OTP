@@ -20,6 +20,25 @@ def _load_function(source, function_name, namespace):
     return namespace[function_name]
 
 
+def _load_assignment(source, name, namespace):
+    """Присваивание уровня модуля (например ROLE_HIERARCHY) — как оно в исходнике.
+
+    Нужно ровно затем, чтобы не переписывать таблицу ролей в тест: подмена
+    сделала бы проверку прав тавтологией, а изменение уровня 'admin' в
+    bot_schedule2.py прошло бы мимо теста.
+    """
+    tree = source_cache.parse(source)
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == name for t in item.targets)
+    )
+    module = ast.Module(body=[node], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, "<ai-qa-access>", "exec"), namespace)
+    return namespace[name]
+
+
 class _DepartmentDb:
     def __init__(self, departments):
         self.departments = departments
@@ -54,8 +73,59 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertIn("userLike?.headed_department_codes ?? userLike?.headedDepartmentCodes", self.app_source)
         self.assertIn("isAiQaDepartmentHead(userLike) ||", self.app_source)
         self.assertIn('(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (', self.app_source)
-        self.assertIn("requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection", self.app_source)
-        self.assertIn('view === "wazzup_chats" && canAccessAiQaSection', self.app_source)
+        self.assertIn("requestedViewFromUrl !== 'wazzup_chats' || canAccessVerifierChatsSection", self.app_source)
+        self.assertIn('view === "wazzup_chats" && canAccessVerifierChatsSection', self.app_source)
+
+    def test_frontend_opens_verifier_chats_to_global_admins(self):
+        """«Чаты Верификаторов» — глобальным админам, «ИИ-оценка» — нет."""
+        self.assertIn(
+            "const canAccessVerifierChatsForUser = (userLike) => {\n"
+            "    if (canAccessAiQaForUser(userLike)) return true;",
+            self.app_source,
+        )
+        # Глава отдела с базовой admin-ролью — не глобальный админ. Без этой
+        # половины условия раздел открылся бы главам бухгалтерии, HR и ТЭЗ.
+        self.assertIn(
+            "    return normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike);\n"
+            "};",
+            self.app_source,
+        )
+        self.assertIn(
+            "const canAccessVerifierChatsSection = canAccessVerifierChatsForUser(user);",
+            self.app_source,
+        )
+        # Предикат «ИИ-оценки» админов НЕ пускает: разделы разъехались правами.
+        self.assertNotIn("canAccessAiQaSection = canAccessVerifierChats", self.app_source)
+        self.assertIn("normalizeRole(userLike?.role) === 'super_admin' ||\n"
+                      "    isAiQaDepartmentHead(userLike) ||", self.app_source)
+        # Пункт меню — по новому флагу, и так в КАЖДОЙ ветке сайдбара: пункт
+        # продублирован по ролям (админы, СВ/главы, общий хвост), и ветка,
+        # забытая на старом флаге, оставила бы раздел достижимым только по URL.
+        # Проверяем условие над каждым пунктом, а не отступы: разметку
+        # переформатируют, и тест на пробелах ловил бы форматирование, а не права.
+        blocks = []
+        marker = "handleSidebarViewNavigation(e, 'wazzup_chats')"
+        at = self.app_source.find(marker)
+        while at >= 0:
+            head = self.app_source.rfind("&& (", 0, at)
+            blocks.append(self.app_source[self.app_source.rfind("{", 0, head):at])
+            at = self.app_source.find(marker, at + 1)
+        self.assertGreaterEqual(len(blocks), 3, "ветки сайдбара изменились — проверь тест")
+        for block in blocks:
+            with self.subTest(block=block.strip()[:80]):
+                self.assertNotIn("canAccessAiQaSection", block)
+                self.assertTrue(
+                    "canAccessVerifierChatsSection" in block
+                    or "isAiQaDepartmentHead(user)" in block,
+                    block,
+                )
+        # Ключевая ловушка: общее условие на два раздела выкидывало бы админа
+        # из чатов сразу после входа (и гасило бы переход по ссылке на чат).
+        self.assertNotIn("(view === 'ai_qa' || view === 'wazzup_chats')", self.app_source)
+        self.assertIn("if (view === 'wazzup_chats' && !canAccessVerifierChatsSection) {", self.app_source)
+        self.assertIn("if (view === 'wazzup_chats' && canAccessVerifierChatsSection) return;", self.app_source)
+        self.assertIn("if (view === 'ai_qa' && !canAccessAiQaSection) {", self.app_source)
+        self.assertIn("if (view === 'ai_qa' && canAccessAiQaSection) return;", self.app_source)
 
     def test_backend_allows_moldir_user_id(self):
         self.assertIn("AI_QA_EXTRA_ACCESS_USER_IDS = {183}", self.api_source)
@@ -109,22 +179,101 @@ class AiQaAccessControlTests(unittest.TestCase):
             self.call_qa_view_source,
         )
 
-    def test_verifier_chat_routes_share_ai_qa_access_guard(self):
-        target_names = {
+    def test_verifier_chat_routes_use_verifier_chats_guard(self):
+        """Ручки раздела «Чаты Верификаторов» — под своим, более широким гардом.
+
+        Эпизоды в этот список не входят: эпизод — единица ИИ-оценки, и админу он
+        не открывается. Гард у них остаётся _ai_qa_guard.
+        """
+        section_names = {
             "api_wazzup_channels",
             "api_wazzup_chats",
             "api_wazzup_chat_messages",
             "api_wazzup_authors",
             "api_wazzup_authors_map",
+            "api_wazzup_analytics",
+        }
+        ai_qa_only_names = {
+            "api_wazzup_episodes",
+            "api_wazzup_episode",
+            "api_wazzup_episodes_rebuild",
         }
         functions = {
             node.name: ast.get_source_segment(self.api_source, node)
             for node in source_cache.parse(self.api_source).body
-            if isinstance(node, ast.FunctionDef) and node.name in target_names
+            if isinstance(node, ast.FunctionDef)
+            and node.name in (section_names | ai_qa_only_names)
         }
-        for function_name in target_names:
+        for function_name in section_names:
+            with self.subTest(function_name=function_name):
+                self.assertIn("_verifier_chats_guard()", functions[function_name])
+        for function_name in ai_qa_only_names:
             with self.subTest(function_name=function_name):
                 self.assertIn("_ai_qa_guard()", functions[function_name])
+                self.assertNotIn("_verifier_chats_guard()", functions[function_name])
+
+    def test_backend_verifier_chats_guard_admits_global_admins_only(self):
+        """Гард чатов: глобальный админ проходит, глава чужого отдела — нет.
+
+        Проверяем не текст, а поведение, и на настоящих helper'ах роли: подмена
+        _is_global_admin_requester сделала бы тест тавтологией, а именно там и
+        живёт разница между «админом» и «главой отдела с ролью admin».
+        """
+        users = {
+            1: (1, None, "Супер-админ", "super_admin"),
+            2: (2, None, "Админ", "admin"),
+            3: (3, None, "Глава ТЭЗ", "admin"),
+            4: (4, None, "Глава СЗоВ", "admin"),
+            5: (5, None, "Оператор", "operator"),
+            6: (6, None, "СВ ОП", "sv"),
+            7: (7, None, "Тренер", "trainer"),
+        }
+        headed = {3: 777, 4: 501}          # id отдела, которым человек назначен главой
+        ai_qa_heads = {4}                  # СЗоВ — в AI_QA_HEAD_DEPARTMENT_CODES
+        departments_of = {6: 367}          # отдел сотрудника (для СВ ОП)
+
+        class _Db:
+            @staticmethod
+            def get_user(id=None):
+                return users.get(id)
+
+            @staticmethod
+            def get_user_department_id(user_id):
+                return departments_of.get(user_id)
+
+        namespace = {
+            "db": _Db(),
+            "g": SimpleNamespace(user_id=None),
+            "jsonify": lambda payload: payload,
+            "logging": SimpleNamespace(exception=lambda *_a, **_kw: None),
+            "AI_QA_EXTRA_ACCESS_USER_IDS": {183},
+            "AI_QA_OP_DEPARTMENT_ID": 367,
+            "_headed_department_id": lambda user_id: headed.get(user_id),
+            "_is_ai_qa_department_head": lambda user_id: user_id in ai_qa_heads,
+        }
+        _load_assignment(self.api_source, "ROLE_HIERARCHY", namespace)
+        for helper in ("_normalize_user_role", "_get_role_level", "_has_min_role",
+                       "_is_super_admin_role", "_is_admin_role",
+                       "_is_global_admin_requester", "_ai_qa_guard"):
+            _load_function(self.api_source, helper, namespace)
+        guard = _load_function(self.api_source, "_verifier_chats_guard", namespace)
+
+        def verdict(user_id):
+            namespace["g"] = SimpleNamespace(user_id=user_id)
+            return guard()
+
+        self.assertEqual(verdict(1), (1, None), "Супер-админ")
+        self.assertEqual(verdict(2), (2, None), "Глобальный админ — тот, ради кого раздел открыли")
+        self.assertEqual(verdict(4), (4, None), "Глава СЗоВ проходил и до правки")
+        self.assertEqual(verdict(6), (6, None), "СВ отдела продаж проходил и до правки")
+        self.assertEqual(verdict(183), (183, None), "whitelist ИИ-оценки")
+
+        for user_id, who in ((3, "глава ТЭЗ с ролью admin"), (5, "оператор"),
+                             (7, "тренер"), (None, "без сессии")):
+            with self.subTest(who=who):
+                requester, err = verdict(user_id)
+                self.assertIsNone(requester, who)
+                self.assertEqual(err, ({"error": "forbidden"}, 403), who)
 
     def test_backend_grants_full_scope_to_allowed_department_heads(self):
         guard_source = ast.get_source_segment(
