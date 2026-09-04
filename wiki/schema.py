@@ -1161,6 +1161,8 @@ def _scope_audit_to_space(cursor):
         + audit_space_sql('a.entity_type', 'a.entity_id', 'a.details') +
         ') WHERE a.space_id IS NULL')
 
+    _restore_audit_space_by_session(cursor)
+
     if not first_run:
         return
 
@@ -1183,6 +1185,67 @@ def _scope_audit_to_space(cursor):
                  'infinity'::timestamp)
         """,
         {'space': row[0]})
+
+
+def _restore_audit_space_by_session(cursor):
+    """Разбор по РАБОЧЕЙ СЕССИИ: то, что не выводится из объекта.
+
+    Разбор по объекту (audit_space_sql) бессилен там, где объекта нет и не
+    было: разбор страницы Яндекс Про, черновик из документа, правка ещё не
+    сохранённого текста. На 04.09.2026 таких записей на проде 46 при 99 своих у
+    «Теза» — то есть треть его ленты приходила из чужой вики.
+
+    Правило: ТОТ ЖЕ человек, ±30 минут, и среди его соседних записей ровно ОДНО
+    пространство. Это не догадка о том, «где он обычно работает»: человек в эти
+    полчаса открыт в одной вике и делает в ней одну работу — разбирает
+    страницу, тут же заводит из неё статью, тут же правит. Сомнительный случай
+    отсекается сам: два пространства среди соседей — count(DISTINCT) = 2, и
+    запись остаётся неразобранной. На проде таких не нашлось ни одной, а
+    разобралось 44 записи из 46.
+
+    ОСНОВАНИЕ ПИШЕМ В САМУ ЗАПИСЬ (details.space_restored). Журнал, который
+    молча проставил себе хозяина, — это журнал, которому больше нельзя верить:
+    по записи должно быть видно, знает она своё пространство по объекту или
+    восстановила по соседям. Ключ показывается в подробностях строки
+    (src/components/wiki/auditEvents.js).
+
+    На каждом запуске, а не разово: правило детерминированное и само себя не
+    расширяет — уже разобранную запись оно не трогает (space_id IS NULL), а
+    новую разберёт только при том же единственном соседе. Источник при этом
+    закрыт в роутах (routes_structure.log_space), и новых «ничьих» записей
+    появляться не должно вовсе; это починка того, что уже записано.
+    """
+    cursor.execute(
+        """
+        UPDATE wiki_audit_log a
+           SET space_id = win.space_id,
+               details = COALESCE(a.details, '{}'::jsonb)
+                         || jsonb_build_object('space_restored', 'session')
+          FROM (
+              SELECT pair.id, min(pair.space_id) AS space_id
+                FROM (
+                    SELECT orphan.id, neighbour.space_id
+                      FROM wiki_audit_log orphan
+                      JOIN wiki_audit_log neighbour
+                        ON neighbour.actor_id = orphan.actor_id
+                       AND neighbour.space_id IS NOT NULL
+                       -- Соседом считается только запись, знающая своё
+                       -- пространство ПО ОБЪЕКТУ. Иначе разбор перестаёт быть
+                       -- неподвижной точкой: восстановленная запись становится
+                       -- соседом следующего прогона, и разметка расползается от
+                       -- деплоя к деплою — по цепочке, а не по доказательству.
+                       AND NOT (neighbour.details ? 'space_restored')
+                       AND neighbour.created_at
+                           BETWEEN orphan.created_at - INTERVAL '30 minutes'
+                               AND orphan.created_at + INTERVAL '30 minutes'
+                     WHERE orphan.space_id IS NULL
+                       AND orphan.actor_id IS NOT NULL
+                ) pair
+               GROUP BY pair.id
+              HAVING count(DISTINCT pair.space_id) = 1
+          ) win
+         WHERE a.id = win.id AND a.space_id IS NULL
+        """)
 
 
 def _regenerate_folded_columns(cursor):

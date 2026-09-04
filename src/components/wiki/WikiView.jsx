@@ -1116,6 +1116,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                            25.08.2026): у «Таксопарков» и «Теза» он был общим, и
                            каждый видел, кто что правил в чужой вике. */
                         spaceId={activeSpace?.id}
+                        /* Имя — в шапку журнала: чей он, должно читаться сразу,
+                           а не выводиться из того, какая вкладка была выбрана. */
+                        spaceName={activeSpace?.name || ''}
                         onOpenArticle={(slug) => {
                             setTab('library');
                             setSearchTarget({ slug, from: returnDoor('audit') });
@@ -1151,6 +1154,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 base={base}
                 headers={headers}
                 structure={scopedStructure}
+                /* Пространство — не для выборки, а для ЖУРНАЛА: разбор
+                   страницы пишется до того, как появится статья, и без
+                   явного пространства такая запись видна в журнале обеих
+                   вик (wiki/routes_structure.py: log_space). */
+                spaceId={activeSpace?.id || null}
                 showToast={showToast}
                 onClose={() => setYandexImport(null)}
                 onOpenArticle={(slug) => {

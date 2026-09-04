@@ -219,8 +219,17 @@ const LinkedRow = ({ item, busy, onSync, onForce, onToggleSync, onOpen }) => {
 };
 
 export default function WikiYandexImport({
-    open, base, headers, structure, showToast, onClose, onDone, onOpenArticle,
+    open, base, headers, structure, spaceId, showToast, onClose, onDone, onOpenArticle,
 }) {
+    /* Пространство уходит на сервер ПАРАМЕТРОМ, а не в теле: сервер читает его
+       одной функцией (routes_structure.log_space) и кладёт в запись журнала.
+       Без него разбор страницы и любой отказ источника остаются «ничьими», а
+       ничья запись видна в журнале И «Таксопарков», И «Теза» — 01.09.2026 так
+       туда уехали 36 разборов. Параметром, потому что тело у этих дверей своё
+       у каждой, а строка запроса одна на все. */
+    const spaceParams = useMemo(
+        () => ({ headers, params: { space_id: spaceId || undefined } }),
+        [headers, spaceId]);
     const [tab, setTab] = useState('import');
     const [url, setUrl] = useState('');
     const [preview, setPreview] = useState(null);
@@ -264,7 +273,7 @@ export default function WikiYandexImport({
         setBusy('preview');
         setPreview(null);
         axios.post(`${base}/yandex/preview`, { url: url.trim(), ai_format: aiFormat },
-                   { headers })
+                   spaceParams)
             .then((r) => setPreview(r.data))
             .catch((e) => toast(errText(e, 'Страница не разобралась'), 'error'))
             .finally(() => setBusy(null));
@@ -278,7 +287,7 @@ export default function WikiYandexImport({
             section_ids: sectionId ? [sectionId] : [],
             ai_format: aiFormat,
             auto_sync: autoSync,
-        }, { headers })
+        }, spaceParams)
             .then((r) => {
                 const body = r.data || {};
                 if (body.created) {
@@ -307,7 +316,7 @@ export default function WikiYandexImport({
         setBusy(`link-${item.article_id}`);
         axios.post(`${base}/yandex/${item.article_id}/link`, {
             url: url.trim(), auto_sync: autoSync, ai_format: aiFormat,
-        }, { headers })
+        }, spaceParams)
             .then(() => {
                 toast(`«${item.title}» связана с источником — текст не изменён`,
                       'success');
@@ -322,7 +331,7 @@ export default function WikiYandexImport({
     const syncRow = (item, force) => {
         setRowBusy(item.article_id);
         axios.post(`${base}/yandex/${item.article_id}/sync`, { force: !!force },
-                   { headers })
+                   spaceParams)
             .then((r) => {
                 const status = r.data?.status;
                 const view = STATUS_VIEW[status] || STATUS_VIEW.ok;

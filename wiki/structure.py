@@ -894,21 +894,33 @@ _AUDIT_KEYS = ('id', 'actor_id', 'actor_name', 'action', 'entity_type', 'entity_
 # вещи — текст статьи против доступа к ней. Действие, не попавшее ни в одну
 # группу, остаётся видно во вкладке «Все»: фильтр не должен прятать событие
 # только потому, что о нём здесь забыли.
+# Действие, не попавшее ни в одну группу, теряется молча: чип его не считает и
+# не показывает, а сумма чипов перестаёт сходиться с «Все». На 04.09.2026 так
+# терялся 341 запись из 1390 — почти четверть журнала, и больше всех
+# article.migrate (247). Новое действие обязано попадать сюда же, где ему
+# дают русскую подпись (src/components/wiki/auditEvents.js: ACTION_META);
+# страж на это стоит в tests/test_wiki_audit_space.py.
 AUDIT_GROUPS = {
     'access': ('rule.upsert', 'rule.delete',
                'article_rule.grant', 'article_rule.deny', 'article_rule.delete',
-               'article.strict_bypass'),
+               'article.strict_bypass',
+               'guest.grant', 'guest.extend', 'guest.revoke'),
     'structure': ('space.create', 'space.update', 'space.archive',
                   'section.create', 'section.update', 'section.archive',
                   'section.move'),
     'articles': ('article.create', 'article.update', 'article.archive',
                  'article.restore', 'article.adopt', 'article.fork',
                  'article.import', 'article.ai_draft', 'article.ai_update',
-                 'article.ai_edit'),
-    'places': ('park.create', 'park.update', 'park.archive',
+                 'article.ai_edit',
+                 'article.migrate', 'article.migrate_review',
+                 'article.yandex_preview', 'article.yandex_import',
+                 'article.yandex_link', 'article.yandex_unlink',
+                 'article.yandex_sync'),
+    'places': ('park.create', 'park.update', 'park.archive', 'park.logo_upload',
                'promotion.create', 'promotion.update', 'promotion.archive',
                'office.create', 'office.update', 'office.archive',
-               'office.day.set', 'office.day.clear'),
+               'office.day.set', 'office.day.clear',
+               'office.closure.set', 'office.closure.clear'),
     'ack': ('ack.assign', 'ack.confirm'),
 }
 
@@ -964,16 +976,26 @@ def _audit_filters(group=None, query=None, date_from=None, date_to=None,
     дают «показано 20 из 3» и чипы с чужими числами.
 
     space_id — граница пространства, и она же первая: журнал у «Таксопарков» и
-    «Теза» свой, а не общий на двоих. Запись БЕЗ пространства видна в любом
-    журнале — так живут записи об объектах, которых уже нет, и о действиях,
-    сделанных раньше, чем появился объект (см. schema.AUDIT_SPACE_SQL).
-    Спрятать их везде значило бы вычеркнуть из аудита то, что аудит и должен
-    помнить.
+    «Теза» свой, а не общий на двоих.
+
+    ГРАНИЦА СТРОГАЯ. До 04.09.2026 здесь стояло «a.space_id = %s OR a.space_id
+    IS NULL»: запись без пространства показывалась в ЛЮБОМ журнале, чтобы не
+    вычеркнуть из аудита то, у чего объекта нет. Замысел был честный, а вышло
+    ровно то, от чего лечились: у «Теза» на 99 своих записей приходилось 46
+    ничьих, то есть треть ленты приезжала из чужой вики. Владелец это и назвал
+    «журналы смешаны».
+
+    Поэтому ничьих записей теперь не должно быть вовсе — их закрыли с двух
+    сторон: на записи пространство называют сами роуты
+    (routes_structure.log_space), а уже записанное разбирает миграция
+    (schema._restore_audit_space_by_session). А чтобы строгая граница ничего не
+    прятала МОЛЧА, остаток считается отдельно (count_audit_outside) и виден в
+    подвале журнала.
     """
     where, params = [], []
 
     if space_id:
-        where.append('(a.space_id = %s OR a.space_id IS NULL)')
+        where.append('a.space_id = %s')
         params.append(int(space_id))
 
     actions = AUDIT_GROUPS.get(group)
@@ -1008,6 +1030,27 @@ def count_audit(cursor, **filters):
     закончиться, а подпись могла назвать общее число."""
     clause, params = _audit_filters(**filters)
     cursor.execute('SELECT count(*) ' + _AUDIT_FROM + clause, params)
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_audit_outside(cursor, **filters):
+    """Сколько записей под этим фильтром не отнесено ни к одному пространству.
+
+    Страховка строгой границы. Граница отсекает чужое — и она же отсекла бы
+    запись, у которой пространства не оказалось совсем: та не попала бы НИКУДА,
+    и аудит потерял бы её беззвучно. Пересчитывать её тут дешевле, чем однажды
+    искать пропажу: пока число ноль, в интерфейсе ничего не появляется, а если
+    оно не ноль — в подвале журнала стоит строка, и есть с чего начать разбор.
+
+    Фильтр тот же, что у выборки, но БЕЗ пространства: вопрос ровно в том,
+    сколько записей остались вне пространств, а не вне текущего.
+    """
+    filters.pop('space_id', None)
+    clause, params = _audit_filters(**filters)
+    clause = (clause + ' AND ') if clause else 'WHERE '
+    cursor.execute('SELECT count(*) ' + _AUDIT_FROM + clause
+                   + 'a.space_id IS NULL', params)
     row = cursor.fetchone()
     return int(row[0]) if row else 0
 

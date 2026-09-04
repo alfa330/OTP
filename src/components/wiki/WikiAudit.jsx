@@ -204,12 +204,17 @@ const AuditRow = ({ item, nameOf, onOpenArticle }) => {
     );
 };
 
-export default function WikiAudit({ base, headers, showToast, structure, spaceId, onOpenArticle }) {
+export default function WikiAudit({ base, headers, showToast, structure, spaceId,
+                                    spaceName, onOpenArticle }) {
     const toast = useStableCallback(showToast);
 
     const [items, setItems] = useState(null);
     const [total, setTotal] = useState(0);
     const [counts, setCounts] = useState(null);
+    /* Записи, не отнесённые ни к одному пространству. Граница журнала строгая,
+       и такая запись не попадает НИКУДА — молча потерянную запись аудит себе
+       позволить не может. В норме здесь ноль, и подвал о них не говорит. */
+    const [outside, setOutside] = useState(0);
     const [error, setError] = useState(null);
     const [busy, setBusy] = useState(false);
     const [appending, setAppending] = useState(false);
@@ -266,6 +271,7 @@ export default function WikiAudit({ base, headers, showToast, structure, spaceId
                 if (!append) {
                     setTotal(r.data?.total ?? batch.length);
                     setCounts(r.data?.counts || null);
+                    setOutside(r.data?.outside || 0);
                 }
                 setError(null);
             })
@@ -308,7 +314,15 @@ export default function WikiAudit({ base, headers, showToast, structure, spaceId
     return (
         <section className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className={iosGroupLabel}>Журнал изменений</h2>
+                <div className="flex min-w-0 items-center gap-2">
+                    <h2 className={iosGroupLabel}>Журнал изменений</h2>
+                    {/* Чей это журнал — одним словом и ОДИН раз. У «Таксопарков»
+                        и «Теза» он свой, и до 04.09.2026 записи двух вик
+                        перемешивались; после починки признак нужен ровно затем,
+                        чтобы это было видно, не листая. На каждой строке то же
+                        слово было бы шумом: чужих записей здесь больше нет. */}
+                    {spaceName && <IosBadge tone="slate">{spaceName}</IosBadge>}
+                </div>
                 <button type="button" className={iosBtnSecondary} onClick={() => load(false)}
                         disabled={busy}>
                     <RefreshCw size={14} className={busy ? 'animate-spin' : ''} /> Обновить
@@ -449,6 +463,16 @@ export default function WikiAudit({ base, headers, showToast, structure, spaceId
                         </button>
                     )}
                 </div>
+            )}
+
+            {/* Записи вне пространств. В норме их ноль, и строки нет вовсе.
+                Появилась — значит завелась дверь, которая снова пишет в журнал
+                не называя пространства: такая запись не видна ни в одном
+                журнале, и узнать о ней больше неоткуда. */}
+            {!error && items !== null && outside > 0 && (
+                <p className="px-1 text-[11.5px] text-slate-400">
+                    Вне пространств: {outside} — {outside === 1 ? 'эта запись не показана' : 'эти записи не показаны'} ни в одном журнале.
+                </p>
             )}
         </section>
     );

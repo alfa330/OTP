@@ -39,7 +39,7 @@ from . import migration as wiki_migration
 from . import queries
 from . import yandex_pro
 from . import yandex_sync
-from .routes_structure import _int_or_none
+from .routes_structure import _int_or_none, log_space
 
 # Ключ занятости, по которому фронт понимает, что делать с ответом. Держим
 # рядом с роутами: строка ходит между сервером и экраном, и второе её написание
@@ -77,6 +77,12 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
             queries.log_action(cursor, actor_id=ctx['user_id'], action=action,
                                entity_type='article', entity_id=None,
                                details=dict(details or {}, error=str(error)[:300]),
+                               # Объекта у отказа нет — ни у превью, ни даже у
+                               # сорвавшейся сверки (entity_id здесь всегда
+                               # None). Пространство поэтому называем сами:
+                               # иначе запись об ошибке легла бы в журнал ОБОИХ
+                               # вик (см. routes_structure.log_space).
+                               space_id=log_space(cursor, ctx),
                                ip_address=log_ip())
         except Exception:                                  # noqa: BLE001
             # Журнал не смеет мешать ответу: человеку нужна причина, а не 500.
@@ -122,6 +128,11 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers, gcs):
                            entity_type='article', entity_id=None,
                            details={'url': result['source']['url'],
                                     'images': result['images']},
+                           # Статьи ещё нет: разбор страницы её не создаёт.
+                           # Пространство считать не по чему, и до 04.09.2026
+                           # каждый такой разбор попадал в журнал обеих вик —
+                           # 36 записей, треть ленты «Теза».
+                           space_id=log_space(cursor, ctx),
                            ip_address=log_ip())
         return jsonify(result)
 

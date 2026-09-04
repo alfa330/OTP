@@ -101,6 +101,44 @@ def request_space(cursor, ctx):
     return space_id, None
 
 
+def log_space(cursor, ctx):
+    """Пространство, в котором сделан запрос, — ДЛЯ ЖУРНАЛА, и только.
+
+    Не request_space: та отвечает за ДОСТУП и при двух пространствах без
+    параметра отказывает 400. Здесь отказывать нельзя — импорт документа,
+    черновик и разбор чужой страницы никакого пространства не проверяют, они
+    просто должны попасть в правильный журнал. Нет параметра — вернём None,
+    запись останется как была.
+
+    Зачем вообще: пока статьи нет (черновик из документа, превью страницы
+    Яндекс Про) или она не сохранена (правка по указанию), пространство записи
+    вывести НЕ ИЗ ЧЕГО — schema.AUDIT_SPACE_SQL считает его по объекту. Такая
+    запись остаётся без пространства, а «ничья» запись видна в журнале И
+    «Таксопарков», И «Теза» (structure._audit_filters). Именно так журналы двух
+    вик и перемешались: 25.08.2026 в журнале «Таксопарков» лежали черновики
+    Теза, а 01.09.2026 — 36 разборов страниц Яндекс Про в журнале «Теза».
+
+    Живёт здесь, а не в routes_import, где написана впервые: дверей, которые
+    пишут в журнал раньше объекта, оказалось больше одной, и вторая копия этой
+    функции разошлась бы с первой на первой же правке. Ровно по этой причине
+    рядом лежит request_space.
+
+    Чужой id не принимаем: пространство проверяется по выданным человеку, иначе
+    запись о его действии уехала бы в чужой журнал по одному параметру строки.
+    """
+    raw = request.args.get('space_id')
+    if raw is None:
+        body = request.get_json(silent=True) or {}
+        raw = body.get('space_id') if isinstance(body, dict) else None
+    if raw is None:
+        raw = request.form.get('space_id')
+    space_id = _int_or_none(raw)
+    if space_id is None:
+        return None
+    allowed = queries.spaces_for_user(cursor, ctx, include_guest=False)
+    return space_id if space_id in allowed else None
+
+
 def _slugify(value):
     """Слаг из названия: латиница/цифры/дефис. Кириллица транслитерируется.
 
@@ -1424,4 +1462,9 @@ def register(bp, wiki_route, db, log_ip):
         if offset == 0:
             payload["total"] = structure.count_audit(cursor, **filters)
             payload["counts"] = structure.audit_group_counts(cursor, **filters)
+            # Записи вне пространств. В норме ноль, и тогда экран о них молчит.
+            # Отдаём всегда: граница журнала строгая, и запись без пространства
+            # не попала бы ни в один — молча потерянная запись хуже строки в
+            # подвале (structure.count_audit_outside).
+            payload["outside"] = structure.count_audit_outside(cursor, **filters)
         return jsonify(payload)
