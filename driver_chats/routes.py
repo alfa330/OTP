@@ -191,8 +191,8 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         phone = chat2desk.normalize_phone(raw_phone)
         if not phone:
             return jsonify({
-                "error": "Непохоже на номер телефона. Введите казахстанский "
-                         "номер — например, 87071234567",
+                "error": "Непохоже на номер телефона. Введите номер целиком — "
+                         "например, 87071234567 или 79161234567",
                 "code": "BAD_PHONE",
             }), 400
 

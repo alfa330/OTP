@@ -297,21 +297,28 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     )}
 
                     {Boolean(chats.length) && (
-                        <ChatPanel
-                            chat={activeChat}
-                            chats={chats}
-                            activeKey={chatKey(activeChat)}
-                            onPickPark={(key) => setActiveKey(key)}
-                            snapshot={snapshot}
-                            phone={result.phone}
-                            driverName={result.clientName}
-                            handedOff={activeChat ? handedOff[chatKey(activeChat)] : false}
-                            onHandoff={() => setHandoffOpen(true)}
-                            truncated={result.truncated}
-                            serviceCount={serviceCount}
-                            hideService={hideService}
-                            onToggleService={setHideService}
-                        />
+                        <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+                            <ChatList
+                                chats={chats}
+                                activeKey={chatKey(activeChat)}
+                                onPick={(chat) => setActiveKey(chatKey(chat))}
+                                handedOff={handedOff}
+                                driverName={result.clientName}
+                                phone={result.phone}
+                                truncated={result.truncated}
+                            />
+                            <ChatPanel
+                                chat={activeChat}
+                                snapshot={snapshot}
+                                phone={result.phone}
+                                driverName={result.clientName}
+                                handedOff={activeChat ? handedOff[chatKey(activeChat)] : false}
+                                onHandoff={() => setHandoffOpen(true)}
+                                serviceCount={serviceCount}
+                                hideService={hideService}
+                                onToggleService={setHideService}
+                            />
+                        </div>
                     )}
                 </>
             )}
@@ -390,19 +397,75 @@ const StartHint = () => (
     </div>
 );
 
-// ── Панель чата ─────────────────────────────────────────────────────────────
+// ── Список чатов и панель ───────────────────────────────────────────────────
 //
-// Списка чатов слева больше нет. После склейки «один чат = один таксопарк» у
-// 97,7 % водителей в окне ровно один парк, и колонка в 340 пикселей висела бы
-// ради 2,3 % случаев — это тот самый лишний визуальный шум. Редкий водитель с
-// несколькими парками получает сегментный контрол над лентой: та же идиома, что
-// у переключателя «Поиск чатов / Журнал» выше.
+// Чат = таксопарк, поэтому строка списка — это парк, а не обращение. Раньше
+// список резал переписку по обращениям, и один разговор с одним парком выглядел
+// как несколько разных чатов; теперь строка ровно одна на парк, а вся история
+// двух суток лежит внутри.
 
-const ChatPanel = ({ chat, chats, activeKey, onPickPark, snapshot, phone, driverName,
-                     handedOff, onHandoff, truncated, serviceCount, hideService,
-                     onToggleService }) => {
+const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, truncated }) => (
+    <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
+        <div className="border-b border-slate-200/70 px-4 py-3">
+            <div className="truncate text-[15px] font-semibold text-slate-900">
+                {driverName || formatPhone(phone)}
+            </div>
+            <div className="mt-0.5 flex items-center gap-2 text-[12px] text-slate-500">
+                {driverName && <span className="tabular-nums">{formatPhone(phone)}</span>}
+                <span>{chats.length === 1 ? '1 чат' : `${chats.length} чата`}</span>
+            </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            {chats.map((chat) => {
+                const key = chatKey(chat);
+                const active = key === activeKey;
+                return (
+                    <button
+                        key={key}
+                        type="button"
+                        onClick={() => onPick(chat)}
+                        className={`mb-1 w-full rounded-xl px-3 py-2.5 text-left transition-all active:scale-[0.98] ${
+                            active ? 'bg-blue-500/10 ring-1 ring-blue-500/25' : 'hover:bg-slate-500/5'
+                        }`}
+                    >
+                        <div className="flex items-baseline gap-2">
+                            <span className={`min-w-0 flex-1 truncate text-[13.5px] font-semibold ${
+                                active ? 'text-blue-900' : 'text-slate-800'}`}>
+                                {chat.channel_name || 'Парк не определён'}
+                            </span>
+                            <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">
+                                {formatDayShort(chat.last_at)} · {formatTime(chat.last_at)}
+                            </span>
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-[12.5px] leading-snug text-slate-500">
+                            {chat.preview || 'Без текста'}
+                        </div>
+                        <div className="mt-1 flex items-center gap-2 text-[11.5px] text-slate-400">
+                            <span className="tabular-nums">{chat.messages_count} сообщ. за 2 дня</span>
+                            {chat.has_media && <ImageIcon size={12} />}
+                            {handedOff[key] && (
+                                <span className="ml-auto inline-flex shrink-0 items-center gap-1 font-medium text-emerald-600">
+                                    <Check size={11} /> передан
+                                </span>
+                            )}
+                        </div>
+                    </button>
+                );
+            })}
+        </div>
+
+        {truncated && (
+            <div className="border-t border-slate-200/70 px-4 py-2.5 text-[11.5px] leading-snug text-amber-600">
+                Сообщений за период больше, чем вмещает один запрос — показаны самые свежие.
+            </div>
+        )}
+    </div>
+);
+
+const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
+                     serviceCount, hideService, onToggleService }) => {
     if (!chat) return null;
-    const parks = chats || [];
     return (
         <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
             <div className="flex flex-wrap items-center gap-3 border-b border-slate-200/70 px-4 py-3">
@@ -429,7 +492,6 @@ const ChatPanel = ({ chat, chats, activeKey, onPickPark, snapshot, phone, driver
                             <Clock size={11} /> {formatDayShort(chat.last_at)} · {formatTime(chat.last_at)}
                         </span>
                         <span className="tabular-nums">{chat.messages_count} сообщ. за 2 дня</span>
-                        {chat.has_media && <ImageIcon size={12} />}
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -447,27 +509,6 @@ const ChatPanel = ({ chat, chats, activeKey, onPickPark, snapshot, phone, driver
                     </button>
                 </div>
             </div>
-
-            {parks.length > 1 && (
-                <div className="overflow-x-auto border-b border-slate-200/70 px-4 py-2">
-                    <IosSegmented
-                        value={activeKey}
-                        onChange={onPickPark}
-                        ariaLabel="Таксопарки водителя"
-                        options={parks.map((item) => ({
-                            value: chatKey(item),
-                            label: item.channel_name || 'Парк не определён',
-                            count: item.messages_count,
-                        }))}
-                    />
-                </div>
-            )}
-
-            {truncated && (
-                <div className="border-b border-slate-200/70 bg-amber-50 px-4 py-2 text-[11.5px] leading-snug text-amber-700">
-                    Сообщений за период больше, чем вмещает один запрос — показаны самые свежие.
-                </div>
-            )}
 
             <div className="min-h-0 flex-1 overflow-hidden bg-[#f2f2f7]">
                 <ChatThread
