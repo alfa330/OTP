@@ -267,6 +267,42 @@ _STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_operator
         ON operator_checkpoints (operator_id, due_date DESC)
     """,
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ЖУРНАЛ ОТПРАВОК АВТООТЧЁТА (задача #261)
+    #
+    # Одна строка = «этому человеку сводка за этот период уже ушла». Ключ
+    # держит и период, и его начало, и получателя, а вставка с ON CONFLICT DO
+    # NOTHING делает заявку на отправку атомарной.
+    #
+    # Зачем вообще. `max_instances=1` защищает от двух запусков ОДНОГО
+    # планировщика, но не от двух планировщиков. Render поднимает новый
+    # процесс до остановки старого, и если это окно накрыло 09:30, оба
+    # процесса разошлют дневную сводку — получатель увидит два одинаковых
+    # письма. Для недельной и месячной это случайность раз в год, для
+    # ежедневной — 365 попыток в год.
+    #
+    # Ключ по НАЧАЛУ периода, а не по дате отправки: пересланная позже
+    # (misfire) сводка за то же вчера обязана считаться той же самой.
+    #
+    # Получатель в ключе, а не только период: сбой отправки одному не должен
+    # закрывать рассылку остальным, а подписавшийся в обед всё ещё получит
+    # свою сводку вечерним прогоном.
+    """
+    CREATE TABLE IF NOT EXISTS training_report_sends (
+        period       VARCHAR(8) NOT NULL,
+        period_start DATE       NOT NULL,
+        user_id      INTEGER    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        sent_at      TIMESTAMP  NOT NULL DEFAULT %(now)s,
+        PRIMARY KEY (period, period_start, user_id)
+    )
+    """ % {'now': _NOW},
+
+    # Чистка старых заявок и ответ на «а сводка вообще уходила?».
+    """
+    CREATE INDEX IF NOT EXISTS idx_training_report_sends_sent_at
+        ON training_report_sends (sent_at DESC)
+    """,
 ]
 
 
