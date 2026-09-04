@@ -88,6 +88,7 @@ def build_trainings_blueprint(*, db, require_api_key, build_cors_preflight_respo
                         'own_department_id': own_dept,
                         'can_manage': access.can_manage_topics(role, headed_dept),
                         'unscoped': access.is_unscoped(role, headed_dept),
+                        'can_subscribe_reports': access.can_subscribe_reports(role, headed_dept),
                     }
                     return handler(*args, ctx=ctx, **kwargs)
                 except Exception as exc:  # noqa: BLE001
@@ -147,6 +148,12 @@ def build_trainings_blueprint(*, db, require_api_key, build_cors_preflight_respo
             "schema_ready": True,
             "can_manage": ctx['can_manage'],
             "unscoped": ctx['unscoped'],
+            # Показывать ли кнопку «Отчёты в Telegram». Флаг едет вместе со
+            # справочником, а не отдельным запросом: раздел и без того делает
+            # ровно два обращения, и третье ради одного булева было бы платой
+            # ни за что. Сам роут подписки права проверяет заново — спрятанная
+            # кнопка доступом не является.
+            "can_subscribe_reports": ctx['can_subscribe_reports'],
             "scope_department_id": (
                 ctx['headed_department_id']
                 if ctx['headed_department_id'] is not None else ctx['own_department_id']

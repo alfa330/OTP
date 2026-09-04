@@ -5728,6 +5728,17 @@ class Database:
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS call_evaluation_notify_enabled BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS call_evaluation_notify_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;
 
+                -- Подписка на автоотчёт по проведённым тренингам (задача #261).
+                -- Три независимых флага, а не один: «за день», «за неделю» и «за
+                -- месяц» отвечают на разные вопросы, и человек вправе взять
+                -- только недельную сводку, не получая письма каждое утро.
+                -- Периодичностей ровно три — их назвала постановка, — поэтому
+                -- колонки, а не таблица подписок: она добавила бы JOIN и
+                -- вторую точку правды к четырём уже живущим здесь флагам.
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS training_report_daily_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS training_report_weekly_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS training_report_monthly_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
                 -- Indexes for new tables
                 CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
                 CREATE INDEX IF NOT EXISTS idx_departments_slug ON departments(slug);
@@ -9134,6 +9145,242 @@ class Database:
                     "department_id": int(row[3]), "department_name": row[4] or "",
                 })
         return recipients
+
+    # ── Автоотчёт по проведённым тренингам (задача #261) ────────────────────
+    #
+    # Кому вообще можно подписаться: админ, супер-админ и глава активного
+    # отдела. Условие выписано один раз и переиспользуется тремя методами —
+    # разойдясь, они дали бы «настройка сохранилась, а отчёт не приходит».
+    TRAINING_REPORT_SUBSCRIBER_SQL = """
+        LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+        OR EXISTS (
+            SELECT 1 FROM departments d
+             WHERE d.head_user_id = u.id
+               AND COALESCE(d.is_active, TRUE) = TRUE
+        )
+    """
+
+    # Периодичность -> колонка. Ключи совпадают с trainings.reports.PERIODS;
+    # неизвестный ключ до SQL не доходит.
+    TRAINING_REPORT_COLUMNS = {
+        'daily': 'training_report_daily_enabled',
+        'weekly': 'training_report_weekly_enabled',
+        'monthly': 'training_report_monthly_enabled',
+    }
+
+    def get_training_report_subscription(self, user_id) -> Optional[Dict[str, bool]]:
+        """Какие сводки по тренингам получает пользователь.
+
+        None — пользователя нет или подписываться ему нельзя (не админ и не
+        глава отдела). Пустого профиля достаточно: LEFT JOIN и COALESCE дают
+        «ничего не включено», строку в admin_profiles заводит только запись.
+        """
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(ap.training_report_daily_enabled, FALSE),
+                       COALESCE(ap.training_report_weekly_enabled, FALSE),
+                       COALESCE(ap.training_report_monthly_enabled, FALSE)
+                  FROM users u
+                  LEFT JOIN admin_profiles ap ON ap.user_id = u.id
+                 WHERE u.id = %%s
+                   AND (%s)
+                 LIMIT 1
+            """ % self.TRAINING_REPORT_SUBSCRIBER_SQL, (uid,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {'daily': bool(row[0]), 'weekly': bool(row[1]), 'monthly': bool(row[2])}
+
+    def set_training_report_subscription(self, user_id, periods: Dict[str, bool]) -> Optional[Dict[str, bool]]:
+        """Включить/выключить сводки. periods — только те периодичности, что
+        пришли в запросе; остальные остаются как были.
+
+        Право проверяется тем же условием, что и на чтение: UPDATE молча ничего
+        не изменил бы, но INSERT в admin_profiles прошёл бы — и настройка
+        появилась бы у того, кому она не положена.
+        """
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        columns = {}
+        for period, value in (periods or {}).items():
+            column = self.TRAINING_REPORT_COLUMNS.get(str(period or '').strip().lower())
+            if column:
+                columns[column] = bool(value)
+        if not columns:
+            return self.get_training_report_subscription(uid)
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT 1 FROM users u
+                 WHERE u.id = %%s AND (%s) LIMIT 1
+            """ % self.TRAINING_REPORT_SUBSCRIBER_SQL, (uid,))
+            if not cursor.fetchone():
+                return None
+
+            names = list(columns.keys())
+            cursor.execute(
+                """
+                INSERT INTO admin_profiles (user_id, %(cols)s)
+                VALUES (%%s, %(placeholders)s)
+                ON CONFLICT (user_id) DO UPDATE SET %(updates)s
+                RETURNING training_report_daily_enabled,
+                          training_report_weekly_enabled,
+                          training_report_monthly_enabled
+                """ % {
+                    'cols': ', '.join(names),
+                    'placeholders': ', '.join(['%s'] * len(names)),
+                    'updates': ', '.join('%s = EXCLUDED.%s' % (name, name) for name in names),
+                },
+                [uid] + [columns[name] for name in names],
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {'daily': bool(row[0]), 'weekly': bool(row[1]), 'monthly': bool(row[2])}
+
+    def get_training_report_recipients(self, period) -> List[Dict[str, Any]]:
+        """Кому уходит сводка по тренингам этой периодичности.
+
+        Область — как у остальных Telegram-отчётов портала: админ и
+        супер-админ получают все отделы (`department_ids = None`), глава
+        отдела — только свои. Если человек и админ, и глава, остаётся
+        глобальная область: так же решено в отчёте о сменах ставок.
+
+        Без привязанного Telegram получателя в списке нет — отправлять некуда.
+        """
+        column = self.TRAINING_REPORT_COLUMNS.get(str(period or '').strip().lower())
+        if not column:
+            return []
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.telegram_id,
+                    LOWER(COALESCE(u.role, '')) AS role_norm,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT d.id ORDER BY d.id) FILTER (WHERE d.id IS NOT NULL),
+                        ARRAY[]::INTEGER[]
+                    ) AS headed_ids,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT d.name) FILTER (WHERE d.name IS NOT NULL),
+                        ARRAY[]::VARCHAR[]
+                    ) AS headed_names
+                  FROM users u
+                  LEFT JOIN admin_profiles ap ON ap.user_id = u.id
+                  LEFT JOIN departments d
+                    ON d.head_user_id = u.id
+                   AND COALESCE(d.is_active, TRUE) = TRUE
+                 WHERE u.telegram_id IS NOT NULL
+                   -- Увольнение не снимает ни telegram_id, ни роль 'admin':
+                   -- уволенный админ продолжал бы получать сводку по отделу,
+                   -- из которого ушёл. Тот же фильтр стоит в рассылке
+                   -- напоминаний по задачам.
+                   AND COALESCE(u.status, 'working') <> 'fired'
+                   AND (
+                       LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
+                       OR d.id IS NOT NULL
+                   )
+                   AND COALESCE(ap.{column}, FALSE) = TRUE
+                 GROUP BY u.id, u.name, u.telegram_id, u.role
+                 ORDER BY u.name
+            """.format(column=column))
+            rows = cursor.fetchall() or []
+
+        recipients = []
+        for row in rows:
+            is_admin = str(row[3] or '').strip().lower() in ('admin', 'super_admin')
+            department_ids = [int(value) for value in (row[4] or []) if value is not None]
+            department_names = sorted(str(value) for value in (row[5] or []) if value)
+            recipients.append({
+                'id': int(row[0]),
+                'name': row[1] or '',
+                'telegram_id': int(row[2]),
+                'scope': 'global' if is_admin else 'department',
+                'department_ids': None if is_admin else department_ids,
+                'department_names': [] if is_admin else department_names,
+                'scope_label': 'Все отделы' if is_admin else (
+                    ', '.join(department_names) or 'Отдел главы'),
+            })
+        return recipients
+
+    def claim_training_report_send(self, period, period_start, user_id) -> bool:
+        """Занять отправку сводки: True — отправляем, False — уже отправлена.
+
+        Атомарно на уровне базы: INSERT ... ON CONFLICT DO NOTHING RETURNING.
+        Два процесса портала (Render поднимает новый до остановки старого) на
+        одном и том же периоде получат True ровно один раз, и получатель не
+        увидит две одинаковых сводки.
+
+        Заявка берётся ДО отправки, а не отмечается после: «отмечу потом»
+        оставляет между проверкой и отправкой окно, ради которого всё это и
+        делается. Провалившуюся отправку заявка не съедает —
+        release_training_report_send снимает её обратно.
+        """
+        column = self.TRAINING_REPORT_COLUMNS.get(str(period or '').strip().lower())
+        if not column:
+            return False
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return False
+
+        with self._get_cursor() as cursor:
+            # Таблица разворачивается схемой раздела под SAVEPOINT и на
+            # свежем проде может не успеть появиться. Без неё рассылка обязана
+            # работать (просто без защиты от дубля), а не молчать совсем.
+            cursor.execute("SELECT to_regclass('public.training_report_sends') IS NOT NULL")
+            row = cursor.fetchone()
+            if not (row and row[0]):
+                logging.warning("training_report_sends отсутствует — отправка без защиты от дубля")
+                return True
+
+            cursor.execute("""
+                INSERT INTO training_report_sends (period, period_start, user_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (period, period_start, user_id) DO NOTHING
+                RETURNING user_id
+            """, (str(period).strip().lower(), period_start, uid))
+            return cursor.fetchone() is not None
+
+    def release_training_report_send(self, period, period_start, user_id) -> None:
+        """Снять заявку — отправка не удалась, следующий прогон попробует снова."""
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM training_report_sends
+                     WHERE period = %s AND period_start = %s AND user_id = %s
+                """, (str(period or '').strip().lower(), period_start, uid))
+        except Exception:
+            # Не смогли снять — хуже пропущенной сводки только упавшая джоба.
+            logging.exception("Не удалось снять заявку на сводку по тренингам")
+
+    def prune_training_report_sends(self, keep_days: int = 400) -> int:
+        """Подчистить журнал заявок. Год с запасом: он нужен только чтобы
+        отличить «уже отправляли» от «ещё нет», и расти вечно ему незачем."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT to_regclass('public.training_report_sends') IS NOT NULL")
+            row = cursor.fetchone()
+            if not (row and row[0]):
+                return 0
+            cursor.execute("""
+                DELETE FROM training_report_sends
+                 WHERE period_start < (CURRENT_DATE - %s::INTEGER)
+            """, (int(keep_days),))
+            return cursor.rowcount or 0
 
     def get_rate_change_report_data(self, window_start, window_end, department_id=None) -> Dict[str, Any]:
         """Данные для отчёта о сменах ставок за окно [window_start, window_end).

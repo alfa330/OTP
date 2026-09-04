@@ -39,6 +39,11 @@ import html
 from concurrent.futures import ThreadPoolExecutor
 import group_late
 import amo_leads
+# Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
+# выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
+# модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
+# только stdlib, — и уронить старт приложения ему нечем.
+from trainings import reports as training_reports
 import reg_contest
 import front_office_calls
 from database import (
@@ -56832,6 +56837,386 @@ async def send_monthly_rate_change_report():
     await loop.run_in_executor(executor_pool, sync_send_monthly_rate_change_report)
 
 
+# ── Автоотчёт по проведённым тренингам (задача #261) ────────────────────────
+#
+# Постановка (Omarova Aru): сводка по проведённым тренингам ежедневно,
+# еженедельно и ежемесячно, с датой, темой, тем, кто проводил, количеством
+# участников и ФИО каждого участника. Куда отправлять — «в мой Бот, куда
+# приходят все отбивки», то есть в личный чат с ботом портала.
+#
+# Вся логика (границы периода, выборка, текст, книга Excel) живёт в
+# trainings/reports.py и проверяется тестами без базы. Здесь только доставка:
+# получатели, Telegram и планировщик.
+
+def _training_report_scope_key(department_ids):
+    """Ключ кеша области видимости. None — «все отделы»."""
+    if department_ids is None:
+        return None
+    return tuple(sorted(int(value) for value in department_ids))
+
+
+def _build_training_report_payload(period, date_from, date_to, period_label,
+                                   scope_label, department_ids, generated_label):
+    """Собрать сводку для одной области видимости: (занятия, текст, книга).
+
+    Книга собирается здесь же, а не при отправке, потому что кеш в рассылке
+    хранит именно готовый payload: у двенадцати админов область одна и та же
+    («все отделы»), и без кеша портал двенадцать раз выполнил бы один запрос и
+    двенадцать раз собрал бы один и тот же xlsx. Ровно так же устроена
+    рассылка отчёта по обратной связи (report_cache).
+    """
+    with db._get_cursor() as cursor:
+        sessions = training_reports.fetch_sessions(
+            cursor, date_from, date_to, department_ids=department_ids)
+
+    # Книгу прикладываем, когда занятия были: поимённый список за месяц в
+    # сообщение не влезает по определению (потолок Telegram — 4096 символов),
+    # а половина списка хуже, чем файл целиком.
+    attach = bool(sessions)
+    text = training_reports.build_digest(
+        period=period,
+        period_label=period_label,
+        sessions=sessions,
+        scope_label=scope_label,
+        generated_label=generated_label,
+        escape=_escape_telegram_html,
+        attached=attach,
+    )
+
+    xlsx_bytes = None
+    if attach:
+        try:
+            xlsx_bytes = training_reports.build_xlsx(
+                xlsxwriter=xlsxwriter,
+                period=period,
+                period_label=period_label,
+                sessions=sessions,
+                scope_label=scope_label,
+                generated_label=generated_label,
+            )
+        except Exception:
+            # Текст сводки от этого не страдает: получатель увидит цифры и
+            # разбивки, просто без файла. Ронять рассылку из-за книги нельзя.
+            logging.exception("Training report: не удалось собрать книгу (%s, %s)",
+                              period, scope_label)
+
+    return sessions, text, xlsx_bytes
+
+
+def _send_training_report_to(recipient, period, date_from, date_to, period_label,
+                             now_dt, force=False, cache=None):
+    """Отправить одному получателю сводку по тренингам.
+
+    force=True — разовая отправка из окна настроек: тогда отчёт уходит даже за
+    пустой период, потому что человек нажал кнопку и обязан увидеть ответ.
+
+    cache — словарь «область -> payload» на один прогон рассылки.
+
+    Возвращает (sent, reason): sent=False с reason='empty' это не ошибка, а
+    штатное «за день занятий не было, молчим».
+    """
+    chat_id = recipient.get('telegram_id')
+    if not chat_id:
+        return False, 'no_telegram'
+
+    department_ids = recipient.get('department_ids')
+    scope_label = recipient.get('scope_label') or 'Все отделы'
+    generated_label = now_dt.strftime('%d.%m.%Y %H:%M')
+
+    key = _training_report_scope_key(department_ids)
+    if cache is not None and key in cache:
+        sessions, text, xlsx_bytes = cache[key]
+    else:
+        sessions, text, xlsx_bytes = _build_training_report_payload(
+            period, date_from, date_to, period_label, scope_label,
+            department_ids, generated_label)
+        if cache is not None:
+            cache[key] = (sessions, text, xlsx_bytes)
+
+    if not sessions and not force and not training_reports.PERIOD_SENDS_WHEN_EMPTY.get(period, True):
+        return False, 'empty'
+
+    _, error = _tg_send_message(chat_id, text)
+    if error:
+        logging.warning("Training report: не отправлено сообщение получателю %s: %s",
+                        recipient.get('id'), error)
+        return False, 'send_failed'
+
+    if xlsx_bytes:
+        try:
+            files = {'document': (
+                training_reports.report_filename(period, date_from, date_to),
+                xlsx_bytes,
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )}
+            response = requests.post(
+                f"https://api.telegram.org/bot{API_TOKEN}/sendDocument",
+                files=files,
+                data={'chat_id': chat_id,
+                      'caption': f"🎓 {training_reports.PERIOD_TITLES.get(period, 'Тренинги')}: "
+                                 f"{period_label} · {scope_label}"},
+                timeout=60,
+            )
+            if response.status_code != 200:
+                logging.warning("Training report: файл не ушёл получателю %s: %s",
+                                recipient.get('id'), _get_telegram_error_text(response))
+        except Exception:
+            # Текст сводки уже доставлен — падать из-за книги нельзя, иначе
+            # получатель не узнает ни цифр, ни того, что отчёт вообще был.
+            logging.exception("Training report: не удалось отправить книгу для %s",
+                              recipient.get('id'))
+
+    return True, 'sent'
+
+
+def sync_send_training_report(period):
+    """Рассылка сводки по тренингам всем подписанным на эту периодичность."""
+    try:
+        try:
+            now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            now_dt = datetime.now()
+
+        recipients = db.get_training_report_recipients(period) or []
+        if not recipients:
+            logging.info("Training report (%s) skipped: подписанных нет", period)
+            return True
+
+        date_from, date_to, period_label = training_reports.period_bounds(period, now_dt.date())
+
+        # Один отчёт на область видимости, а не на получателя.
+        cache = {}
+        sent = 0
+        empty = 0
+        already = 0
+        for recipient in recipients:
+            user_id = recipient.get('id')
+            # Заявка на отправку — ДО сборки отчёта: если сводка за этот период
+            # этому человеку уже уходила (второй процесс на деплое, повтор
+            # после misfire), второй раз он её не получит.
+            if not db.claim_training_report_send(period, date_from, user_id):
+                already += 1
+                continue
+            try:
+                ok, reason = _send_training_report_to(
+                    recipient, period, date_from, date_to, period_label, now_dt,
+                    cache=cache)
+                if ok:
+                    sent += 1
+                else:
+                    # Ни отправки, ни причины её не делать — заявку снимаем,
+                    # чтобы следующий прогон попробовал снова. Пустой период
+                    # это НЕ провал: сводки за него не будет и завтра, и
+                    # заявку надо оставить, иначе джоба каждый час решала бы
+                    # заново, что за то же вчера писать нечего.
+                    if reason == 'empty':
+                        empty += 1
+                    else:
+                        db.release_training_report_send(period, date_from, user_id)
+            except Exception:
+                db.release_training_report_send(period, date_from, user_id)
+                logging.exception("Training report (%s): сбой у получателя %s",
+                                  period, user_id)
+
+        logging.info("Training report (%s, %s): отправлено %s из %s, пустых %s, "
+                     "уже отправлялось %s",
+                     period, period_label, sent, len(recipients), empty, already)
+
+        # Журнал заявок подчищаем раз в месяц, вместе с месячной сводкой:
+        # отдельная джоба ради одного DELETE в год — лишняя строка в расписании.
+        if period == 'monthly':
+            try:
+                removed = db.prune_training_report_sends()
+                if removed:
+                    logging.info("Training report: подчищено %s старых заявок", removed)
+            except Exception:
+                logging.exception("Training report: не удалось подчистить журнал заявок")
+        return True
+    except Exception:
+        logging.exception("Critical error in training report job (%s)", period)
+        return False
+    finally:
+        _trim_process_memory('training_report', force=True)
+
+
+async def send_daily_training_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, lambda: sync_send_training_report('daily'))
+
+
+async def send_weekly_training_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, lambda: sync_send_training_report('weekly'))
+
+
+async def send_monthly_training_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, lambda: sync_send_training_report('monthly'))
+
+
+def _training_report_scope(requester_id, requester):
+    """Область отчёта для пользователя: (можно ли подписаться, описание области).
+
+    Те же правила, что в получателях: админ и супер-админ — все отделы, глава
+    активного отдела — свои. Правило выписано здесь второй раз намеренно: в
+    получателях оно на SQL по всей таблице, здесь — по одному человеку, и
+    сводить их в один запрос значило бы тянуть весь список ради одной строки.
+    """
+    from trainings import access as trainings_access
+
+    role = _normalize_user_role(requester[3]) if requester else ''
+    headed = db.get_headed_departments_for_user(requester_id) or []
+    headed_id = int(headed[0]['id']) if headed else None
+    if not trainings_access.can_subscribe_reports(role, headed_id):
+        return False, None, None, []
+    if _is_admin_role(role):
+        return True, 'global', 'Все отделы', []
+    names = sorted(str(item.get('name') or '') for item in headed if item.get('name'))
+    return True, 'department', (', '.join(names) or 'Отдел главы'), names
+
+
+@app.route('/api/trainings/report_subscription', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def training_report_subscription():
+    """Переключатель Telegram-сводок по тренингам (раздел «Тренинги»)."""
+    if request.method == 'OPTIONS':
+        return build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        allowed, scope, scope_label, department_names = _training_report_scope(requester_id, requester)
+        if not allowed:
+            return jsonify({
+                "error": "Сводки по тренингам доступны админам и главам отделов",
+                "code": "TRAINING_REPORT_FORBIDDEN",
+            }), 403
+
+        def payload(periods):
+            return jsonify({
+                "status": "success",
+                "periods": periods,
+                "telegram_connected": bool(requester[1]),
+                "scope": scope,
+                "scope_label": scope_label,
+                "department_names": department_names,
+                "period_meta": [
+                    {
+                        "value": value,
+                        "label": training_reports.PERIOD_LABELS[value],
+                        "hint": training_reports.PERIOD_HINTS[value],
+                    }
+                    for value in training_reports.PERIODS
+                ],
+            }), 200
+
+        if request.method == 'GET':
+            periods = db.get_training_report_subscription(requester_id)
+            if periods is None:
+                return jsonify({"error": "Пользователь не найден"}), 404
+            return payload(periods)
+
+        data = request.get_json(silent=True) or {}
+        requested = data.get('periods')
+        if not isinstance(requested, dict):
+            # Одиночная форма: {"period": "daily", "enabled": true}. Нужна
+            # переключателю в интерфейсе — он меняет ровно одну периодичность.
+            period = training_reports.normalize_period(data.get('period'))
+            if not period:
+                return jsonify({"error": "Укажите periods или period"}), 400
+            enabled, flag_error = _parse_boolean_setting(data.get('enabled'))
+            if flag_error:
+                return jsonify({"error": "Некорректное значение enabled"}), 400
+            requested = {period: enabled}
+        else:
+            normalized = {}
+            for key, value in requested.items():
+                period = training_reports.normalize_period(key)
+                if not period:
+                    return jsonify({"error": "Неизвестная периодичность: %s" % key}), 400
+                flag, flag_error = _parse_boolean_setting(value)
+                if flag_error:
+                    return jsonify({"error": "Некорректное значение для «%s»" % key}), 400
+                normalized[period] = flag
+            if not normalized:
+                return jsonify({"error": "Нечего менять"}), 400
+            requested = normalized
+
+        periods = db.set_training_report_subscription(requester_id, requested)
+        if periods is None:
+            return jsonify({"error": "Пользователь не найден"}), 404
+        logging.info("Тренинги: подписка на сводки у %s -> %s", requester_id, periods)
+        return payload(periods)
+    except Exception:
+        logging.exception("Error in /api/trainings/report_subscription")
+        return jsonify({"error": "Внутренняя ошибка"}), 500
+
+
+@app.route('/api/trainings/report_preview', methods=['POST', 'OPTIONS'])
+@require_api_key
+def training_report_preview():
+    """Разово прислать сводку себе в Telegram — не дожидаясь расписания.
+
+    Без этой кнопки проверить настройку можно было бы только на следующее утро,
+    а «пришло или нет» — единственный вопрос, который задают о рассылке.
+    """
+    if request.method == 'OPTIONS':
+        return build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        allowed, scope, scope_label, _names = _training_report_scope(requester_id, requester)
+        if not allowed:
+            return jsonify({
+                "error": "Сводки по тренингам доступны админам и главам отделов",
+                "code": "TRAINING_REPORT_FORBIDDEN",
+            }), 403
+        if not requester[1]:
+            return jsonify({
+                "error": "К вашей учётной записи не привязан Telegram — отправлять некуда",
+                "code": "TELEGRAM_NOT_CONNECTED",
+            }), 409
+
+        data = request.get_json(silent=True) or {}
+        period = training_reports.normalize_period(data.get('period')) or 'daily'
+        try:
+            now_dt = datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            now_dt = datetime.now()
+        date_from, date_to, period_label = training_reports.period_bounds(period, now_dt.date())
+
+        recipient = {
+            'id': requester_id,
+            'name': requester[2] if len(requester) > 2 else '',
+            'telegram_id': requester[1],
+            'department_ids': None if scope == 'global' else [
+                int(item['id']) for item in (db.get_headed_departments_for_user(requester_id) or [])
+            ],
+            'scope_label': scope_label,
+        }
+        ok, reason = _send_training_report_to(
+            recipient, period, date_from, date_to, period_label, now_dt, force=True)
+        if not ok:
+            return jsonify({
+                "error": "Не удалось отправить сводку в Telegram",
+                "code": reason,
+            }), 502
+        return jsonify({
+            "status": "success",
+            "period": period,
+            "period_label": period_label,
+            "scope_label": scope_label,
+        }), 200
+    except Exception:
+        logging.exception("Error in /api/trainings/report_preview")
+        return jsonify({"error": "Внутренняя ошибка"}), 500
+
+
 def sync_schedule_statuses_to_user_statuses_job():
     """Background job: sync users.status with active schedule status periods."""
     try:
@@ -58232,6 +58617,39 @@ if __name__ == '__main__':
         send_monthly_rate_change_report,
         CronTrigger(day='2', hour=0, minute=5, timezone=ZoneInfo('Asia/Almaty')),
         id='monthly_rate_change_report',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Автоотчёт по проведённым тренингам (задача #261). Все три сводки — про
+    # ЗАКРЫТЫЙ период: утренняя про вчера, недельная в понедельник про
+    # прошлую неделю, месячная 1-го числа про прошлый месяц. Время подписано в
+    # trainings.reports.PERIOD_HINTS — окно настроек обещает ровно эти минуты,
+    # так что расписание и подпись меняются только вместе.
+    #
+    # Часовой пояс задан явно: без него APScheduler берёт локальный пояс
+    # процесса, а на Render это UTC — сводка «за день» ушла бы в 03:30 ночи.
+    scheduler.add_job(
+        send_daily_training_report,
+        CronTrigger(hour=9, minute=30, timezone=ZoneInfo('Asia/Almaty')),
+        id='training_report_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+    scheduler.add_job(
+        send_weekly_training_report,
+        CronTrigger(day_of_week='mon', hour=9, minute=35, timezone=ZoneInfo('Asia/Almaty')),
+        id='training_report_weekly',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+    scheduler.add_job(
+        send_monthly_training_report,
+        CronTrigger(day='1', hour=9, minute=40, timezone=ZoneInfo('Asia/Almaty')),
+        id='training_report_monthly',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

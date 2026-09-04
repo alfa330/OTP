@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { BookOpen, Users2, Plus } from 'lucide-react';
+import { BookOpen, Users2, Plus, BellRing } from 'lucide-react';
 import { APPLE_FONT, iosBtnSecondary, IosModal, IosBadge } from '../ui/ios';
 import useStableCallback from '../wiki/useStableCallback';
 import MonthPicker from './MonthPicker';
@@ -10,6 +10,7 @@ import SessionModal from './SessionModal';
 import TopicModal from './TopicModal';
 import RolloutSheet from './RolloutSheet';
 import SessionList from './SessionList';
+import ReportSubscriptionModal from './ReportSubscriptionModal';
 import { ErrorBlock } from './pieces';
 import {
     TAB_TOPICS, TAB_GROUPS, FAMILY_CORPORATE, TOPIC_KIND_LABELS,
@@ -67,6 +68,10 @@ export default function TrainingsView({
      * тренингов обновлялся, сводки пересчитывались, а в state лежал прежний
      * объект. */
     const [openTopicKey, setOpenTopicKey] = useState(null);
+    /* Подписка на Telegram-сводки. Своих данных раздел под неё не грузит:
+     * окно запрашивает настройку само при открытии, а показывать кнопку или
+     * нет — говорит флаг в справочнике тем. */
+    const [reportsOpen, setReportsOpen] = useState(false);
 
     const headers = useMemo(
         () => ({ headers: withAccessTokenHeader({ 'X-User-Id': user?.id }) }),
@@ -160,6 +165,7 @@ export default function TrainingsView({
         () => (Array.isArray(catalog?.archived_reasons) ? catalog.archived_reasons : []), [catalog]);
     const canManage = Boolean(catalog?.can_manage);
     const canChooseDepartment = Boolean(catalog?.unscoped);
+    const canSubscribeReports = Boolean(catalog?.can_subscribe_reports);
 
     /* Сводки по темам считаются ЗДЕСЬ, а не во вкладке: их нужно и списку
      * карточек, и раскрытой теме. Два независимых расчёта одного и того же
@@ -345,6 +351,20 @@ export default function TrainingsView({
                     в одну строку не влезают, и без переноса подпись «По группам»
                     ломалась на два слова и уезжала за край. */}
                 <div className="flex flex-wrap items-center gap-2">
+                    {/* Отчёты в Telegram — иконкой, а не строкой-настройкой в
+                        шапке: настройку открывают раз в жизни, а видеть её
+                        каждый день над списком занятий незачем. */}
+                    {canSubscribeReports && (
+                        <button
+                            type="button"
+                            onClick={() => setReportsOpen(true)}
+                            title="Отчёты по тренингам в Telegram"
+                            aria-label="Отчёты по тренингам в Telegram"
+                            className="grid h-[34px] w-[34px] place-items-center rounded-xl bg-slate-100 text-slate-500 transition-all hover:bg-slate-200 hover:text-slate-700 active:scale-[0.98]"
+                        >
+                            <BellRing size={15} />
+                        </button>
+                    )}
                     <MonthPicker value={month} onChange={setMonth} />
                     <div className="flex rounded-xl bg-slate-100 p-1">
                         {tabs.map((item) => (
@@ -436,6 +456,14 @@ export default function TrainingsView({
                 loadError={rollout.error}
                 onReload={() => rolloutTopic && openRollout(rolloutTopic)}
                 onSubmit={submitRollout}
+            />
+
+            <ReportSubscriptionModal
+                open={reportsOpen}
+                onClose={() => setReportsOpen(false)}
+                apiBaseUrl={apiBaseUrl}
+                headers={headers}
+                onToast={toast}
             />
 
             <IosModal
