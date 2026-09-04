@@ -42,6 +42,7 @@ import csv
 import io
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -176,7 +177,18 @@ class BinotelClient:
         body = resp.text or ""
         # Признак успеха: ушли с формы логина (редирект в /f/pbx/...).
         if "logining[email]" in body and "/f/pbx/" not in (resp.url or ""):
-            raise RuntimeError("Binotel: вход не выполнен (проверьте логин/пароль)")
+            # Причину кабинет пишет в редиректе: /?action=badPassword&email=...
+            # Её стоит донести дословно: «пароль не тот» и «нет такого
+            # сотрудника» руководитель чинит по-разному, а одинаковое
+            # сообщение на оба случая выглядит как поломка автоопределения.
+            marker = re.search(r"action=([A-Za-z]+)", resp.url or "")
+            reason = marker.group(1) if marker else ""
+            if reason == "badPassword":
+                raise RuntimeError(
+                    "Binotel: логин принят, а пароль кабинета не подошёл")
+            raise RuntimeError(
+                "Binotel: вход не выполнен (проверьте логин/пароль)"
+                + (" [%s]" % reason if reason else ""))
         self._logged_in = True
         return self
 
