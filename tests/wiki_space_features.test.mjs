@@ -81,7 +81,10 @@ test('ключи совпадают с SPACE_FEATURES на сервере', () =
     // Разъехавшись, списки дают тумблер, выключающий то, чего сервер не знает,
     // и наоборот — вкладку, которую сервер уже считает выключенной.
     const python = readFileSync(new URL('../wiki/schema.py', import.meta.url), 'utf8');
-    const block = /SPACE_FEATURES = \(([\s\S]*?)\)\n/.exec(python);
+    // \r?\n, а не \n: репозиторий ведут две машины, и на Windows файлы лежат с
+    // CRLF — с одним \n регулярка не находила блок вовсе, и тест падал словами
+    // «SPACE_FEATURES не найден», хотя список на месте.
+    const block = /SPACE_FEATURES = \(([\s\S]*?)\)\r?\n/.exec(python);
     assert.ok(block, 'SPACE_FEATURES не найден в wiki/schema.py');
     const serverKeys = [...block[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
     assert.deepEqual([...FEATURE_KEYS].sort(), [...serverKeys].sort());

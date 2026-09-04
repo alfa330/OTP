@@ -146,7 +146,9 @@ test('кнопка настроек молчит, пока всё в поряд�
 });
 
 test('в беду записываем и сломанные кабинеты, и замолчавшие', () => {
-  const troubled = /^const troubled = [\s\S]*?;\n/m.exec(SOURCE)[0];
+  // \r?\n: на Windows-машине исходник лежит с CRLF, и с одним \n exec отдавал
+  // null — тест падал не на утверждении, а на чтении [0] у null.
+  const troubled = /^const troubled = [\s\S]*?;\r?\n/m.exec(SOURCE)[0];
   assert.match(troubled, /is_enabled/);      // выключенный кабинет не проблема
   assert.match(troubled, /state !== 'ok'/);  // потерян доступ или была ошибка
   assert.match(troubled, /is_stale/);        // «тихий» простой из ТЗ
