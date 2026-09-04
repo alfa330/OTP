@@ -25,7 +25,8 @@ import { errText } from './assistantThread.jsx';
 
 const CHATS_LIMIT = 30;
 
-export default function useAssistantChat({ base, headers, spaceId = null, enabled = true }) {
+export default function useAssistantChat({ base, headers, spaceId = null, enabled = true,
+                                          withSuggestions = false }) {
     const [status, setStatus] = useState(null);
     const [statusError, setStatusError] = useState(null);
     const [chats, setChats] = useState([]);
@@ -40,7 +41,13 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
 
     const loadStatus = useCallback(() => {
         if (!enabled) return Promise.resolve();
-        return axios.get(`${base}/ai/status`, { headers, params: { space_id: spaceId } })
+        return axios.get(`${base}/ai/status`, {
+            headers,
+            // suggest=1 просим только когда есть кому показать подсказки: этот
+            // же роут дёргает шарик на каждой загрузке портала ради решения
+            // «показываться ли», и лишний запрос к базе там ни к чему.
+            params: { space_id: spaceId, suggest: withSuggestions ? 1 : undefined },
+        })
             .then((r) => { setStatus(r.data); setStatusError(null); })
             // Ошибку статуса сохраняем, а не гасим в null: по её коду вызывающий
             // отличает «отдел без вики» и «нужен QR» от «сервер прилёг», и
@@ -53,7 +60,7 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
                     text: errText(e, 'Помощник недоступен'),
                 });
             });
-    }, [base, headers, spaceId, enabled]);
+    }, [base, headers, spaceId, enabled, withSuggestions]);
 
     const loadChats = useCallback(() => {
         if (!enabled) return Promise.resolve();
@@ -149,11 +156,12 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
     ), [activeId, base, headers, startNewChat]);
 
     const perimeter = status?.perimeter;
+    const suggestions = status?.suggestions || [];
     const indexReady = (status?.index?.chunks || 0) > 0;
     const noAccess = !!perimeter && perimeter.articles_for_ai === 0;
 
     return {
-        status, statusError, perimeter, indexReady, noAccess,
+        status, statusError, perimeter, indexReady, noAccess, suggestions,
         canAsk: !noAccess && indexReady,
         chats, chatsLoading, activeId, messages, draft, busy, error,
         setDraft, setError, setMessages,
