@@ -25660,13 +25660,13 @@ ICORE_PHONE_BUCKET_ENV = ('GOOGLE_CLOUD_STORAGE_BUCKET_AGENTS',
                           'GOOGLE_CLOUD_STORAGE_BUCKET_TASKS',
                           'GOOGLE_CLOUD_STORAGE_BUCKET')
 ICORE_PHONE_PREFIX = 'icore_phone'
-# Кому доступен дистрибутив: отдел продаж (367) и администраторы.
-# СЗоВ (1) и Тез КЦ (560) тоже держат SIP-номера, поэтому если телефон поедет и к
-# ним, достаточно добавить id сюда И в ICORE_PHONE_DEPARTMENT_IDS на фронте — иначе
-# либо кнопки не будет, либо кнопка будет, а ручка ответит 403.
+# Кому доступен дистрибутив: отдел продаж (367), Тез КЦ (560) и администраторы.
+# СЗоВ (1) тоже держит SIP-номера, поэтому если телефон поедет и туда, достаточно
+# добавить id сюда И в ICORE_PHONE_DEPARTMENT_IDS на фронте — иначе либо кнопки не
+# будет, либо кнопка будет, а ручка ответит 403.
 # Ограничение обязано жить на сервере, а не только в интерфейсе: спрятанная кнопка
 # ничего не ограничивает, подписанную ссылку можно было бы запросить напрямую.
-ICORE_PHONE_DEPARTMENT_IDS = (367,)
+ICORE_PHONE_DEPARTMENT_IDS = (367, 560)
 # Час, а не 15 минут как у аватаров: телефон может проснуться на медленной машине,
 # и протухшая на полпути ссылка означала бы, что обновление не доедет.
 ICORE_PHONE_URL_TTL_MINUTES = 60
@@ -25689,7 +25689,7 @@ def _icore_phone_bucket_name() -> str:
 
 
 def _can_download_icore_phone(requester_id, role) -> bool:
-    """Дистрибутив телефона: администраторы и отдел продаж (см. ICORE_PHONE_DEPARTMENT_IDS).
+    """Дистрибутив телефона: администраторы, отдел продаж и Тез КЦ (см. ICORE_PHONE_DEPARTMENT_IDS).
 
     Глава разрешённого отдела проходит даже если его собственный department_id пуст —
     у глав он не всегда заполнен, а отдел за ними закреплён отдельно.
@@ -25799,7 +25799,7 @@ def icore_phone_download_endpoint():
         # Та же проверка закрывает и кнопку в iCORE, и автообновление телефона:
         # за ссылкой оба приходят сюда.
         if not _can_download_icore_phone(requester_id, requester[3]):
-            return jsonify({"error": "iCORE Phone доступен отделу продаж и администраторам"}), 403
+            return jsonify({"error": "iCORE Phone доступен отделам продаж и Тез КЦ, а также администраторам"}), 403
         variant = db.normalize_icore_phone_variant(request.args.get('variant'))
         release = db.get_icore_phone_release(variant)
         if not release:

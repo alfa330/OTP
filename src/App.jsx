@@ -232,11 +232,11 @@ const ADMIN_SESSIONS_DEFAULT_VIEW = Object.freeze({
 const FOUR_YOU_ADMIN_USER_ID = 2;
 const FOUR_YOU_VIEWER_USER_ID = 241;
 const AI_QA_OP_DEPARTMENT_ID = 367;
-// Кому доступна программа iCORE Phone: отдел продаж (367) и админы. Та же
-// константа на бэкенде (ICORE_PHONE_DEPARTMENT_IDS в bot_schedule2.py) — она там
-// главная, потому что решает не только видимость кнопки, но и доступ к ссылке.
+// Кому доступна программа iCORE Phone: отдел продаж (367), Тез КЦ (560) и админы.
+// Та же константа на бэкенде (ICORE_PHONE_DEPARTMENT_IDS в bot_schedule2.py) — она
+// там главная, потому что решает не только видимость кнопки, но и доступ к ссылке.
 // Поедет телефон в другой отдел — добавить id в оба места.
-const ICORE_PHONE_DEPARTMENT_IDS = new Set([367]);
+const ICORE_PHONE_DEPARTMENT_IDS = new Set([367, 560]);
 // Главы этих отделов видят раздел «ИИ-оценка» и «Чаты Верификаторов» целиком.
 // Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES в bot_schedule2.py).
 const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
@@ -37508,7 +37508,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 ...(canAccessSipSettingsFleet ? ['asterisk'] : []),
                 ...(canAccessSipSettingsTez ? ['binotel'] : []),
             ];
-            // Программа iCORE Phone: отдел продаж и админы (решение владельца).
+            // Программа iCORE Phone: отдел продаж, Тез КЦ и админы (решение владельца).
             // Правило дублируется на бэкенде, и там оно решающее: за подписанной
             // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.
             const canDownloadIcorePhone = isAdminLikeRole
@@ -47108,7 +47108,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {/* «Скачать телефон» — программа iCORE Phone сотруднику.
-                                        Только отдел продаж и админы: телефон раздаётся там.
+                                        Только отделы продаж и ТЭЗ, а также админы: раздаётся он там.
                                         Объявлен ОДИН раз в общей части меню, а не по ролевым
                                         ветвям. Это не переход в раздел, а действие: ссылка на
                                         файл в GCS подписана на час, поэтому берётся свежей по
