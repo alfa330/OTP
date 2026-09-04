@@ -1722,12 +1722,49 @@ class SipSectionFrontendTests(unittest.TestCase):
             self.app.count("view === 'sip_settings' ? 'bg-blue-700' : ''"), 2)
 
     def test_section_renders_behind_the_access_flag(self):
-        self.assertIn('view === "sip_settings" && canAccessSipSettingsFleet', self.app)
-        self.assertIn("view === 'sip_settings_tez' && canAccessSipSettingsTez", self.app)
+        """Раздел один, и открыт он тому, кому доступен хотя бы один провайдер."""
+        self.assertIn(
+            'view === "sip_settings" && (canAccessSipSettingsFleet || canAccessSipSettingsTez)',
+            self.app)
+        # Отдельного вида под Tez больше нет: провайдер выбирается внутри раздела,
+        # иначе админу пришлось бы прыгать по сайдбару, чтобы сравнить отделы.
+        self.assertNotIn('sip_settings_tez', self.app)
 
     def test_department_allowlist_guard_lets_the_section_through(self):
-        self.assertIn("if (view === 'sip_settings' && canAccessSipSettingsFleet) return;", self.app)
-        self.assertIn("if (view === 'sip_settings_tez' && canAccessSipSettingsTez) return;", self.app)
+        self.assertIn(
+            "if (view === 'sip_settings'\n"
+            "                    && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;",
+            self.app)
+
+    def test_the_section_gets_only_the_providers_the_person_may_open(self):
+        """Переключатель показывает не все разделы, а только доступные человеку.
+
+        Список собирается в App.jsx и уходит пропом: глава отдела не должен даже
+        видеть чужой раздел, а не только получать отказ при попытке открыть.
+        """
+        self.assertIn('const sipSettingsProviders = [', self.app)
+        self.assertIn("...(canAccessSipSettingsFleet ? ['asterisk'] : []),", self.app)
+        self.assertIn("...(canAccessSipSettingsTez ? ['binotel'] : []),", self.app)
+        self.assertIn('allowedProviders={sipSettingsProviders}', self.app)
+
+    def test_the_switch_is_rendered_only_when_there_is_a_choice(self):
+        """Главе отдела переключать нечего — сегмент ему не показываем."""
+        view = _read(VIEW_PATH)
+        self.assertIn('const PROVIDER_SECTIONS = [', view)
+        self.assertIn('allowedProviders.length > 1 && (', view)
+        self.assertIn('switchProvider(s.id)', view)
+
+    def test_switching_the_provider_drops_filters_and_selection(self):
+        """Списки, фильтры и выделение относятся к покинутому разделу.
+
+        Без сброса выделение из «Таксопарков» уехало бы в массовую правку по
+        сотрудникам Тез, которых пользователь даже не видел.
+        """
+        view = _read(VIEW_PATH)
+        switch = view.split('const switchProvider = (next) => {', 1)[1].split('};', 1)[0]
+        for reset in ("setTab('operators')", "setSearch('')", "setDepartmentFilter('')",
+                      "setDomainFilter('')", 'setSelected(new Set())', 'setEditing(null)'):
+            self.assertIn(reset, switch)
 
     def test_view_is_built_from_shared_ios_primitives(self):
         view = _read(VIEW_PATH)
