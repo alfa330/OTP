@@ -44307,10 +44307,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }));
             }, [demotionTarget, userModalGroups]);
 
-            const demotionGroupOptions = useMemo(() => (
-                (Array.isArray(userModalGroups) ? userModalGroups : [])
+            // Только активные группы отдела самого СВ: группу из чужого отдела
+            // сервер всё равно отклонит, показывать её в списке — сбивать с толку.
+            const demotionGroupOptions = useMemo(() => {
+                const departmentId = demotionTarget?.department_id ?? demotionTarget?.departmentId;
+                return (Array.isArray(userModalGroups) ? userModalGroups : [])
                     .filter((group) => group?.status !== 'archived')
-            ), [userModalGroups]);
+                    .filter((group) => departmentId == null
+                        || Number(group?.department_id) === Number(departmentId));
+            }, [demotionTarget, userModalGroups]);
 
             const closeDemotionModal = useCallback(() => {
                 setDemotionTarget(null);
@@ -45018,6 +45023,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 countLabel,
                 canAdd = true,
                 canRemoveSupervisor = false,
+                canDemoteSupervisor = false,
                 canDismissAdmin = false,
                 departmentFilter = '',
                 setDepartmentFilter = null,
@@ -45041,7 +45047,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="relative inline-block text-left">
                                 <button
                                     type="button"
-                                    onClick={(event) => openRowActionMenu(event, menuId, { width: 208, height: canDismissAdmin || canRemoveSupervisor ? 176 : 132 })}
+                                    onClick={(event) => openRowActionMenu(event, menuId, { width: 208, height: canDemoteSupervisor ? 220 : (canDismissAdmin || canRemoveSupervisor ? 176 : 132) })}
                                     className="p-2 rounded-full hover:bg-gray-100"
                                 >
                                     <FaIcon className="fas fa-ellipsis-v"></FaIcon>
@@ -45090,6 +45096,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </>
                                             )}
                                         </button>
+
+                                        {canDemoteSupervisor && !isDismissed && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    setDemotionTarget(employee);
+                                                    setDemotionGroupId('');
+                                                }}
+                                                className="block w-full text-left px-4 py-2 hover:bg-gray-100"
+                                            >
+                                                <FaIcon className="fas fa-user-minus mr-2"></FaIcon>В операторы
+                                            </button>
+                                        )}
 
                                         {(canRemoveSupervisor || canDismissAdmin) && <div className="border-t border-gray-200" />}
 
@@ -45883,8 +45903,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Группы нужны в модалке (селект группы оператора) и в списках
                 // сотрудников (массовый перевод в группу). У СВ карточка сотрудника
                 // тоже меняет группу, поэтому список греем при входе в его раздел —
-                // иначе селект секунду стоит пустым.
+                // иначе селект секунду стоит пустым. В разделе супервайзеров группы
+                // нужны переводу СВ в операторы: там выбирают его будущую группу.
                 if (showUserEditModal || view === 'manage_users' || view === 'employees'
+                    || view === 'sv_list'
                     || (view === 'manage_operators' && isDepartmentManager)) {
                     fetchUserModalGroups();
                 }
@@ -48258,6 +48280,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 emptySearchText: 'Супервайзеры по запросу не найдены.',
                                 countLabel: 'супервайзеров',
                                 canRemoveSupervisor: true,
+                                canDemoteSupervisor: true,
                                 departmentFilter: svListDeptFilter,
                                 setDepartmentFilter: isAdminLikeRole ? setSvListDeptFilter : null,
                                 departmentOptions: departments,
@@ -48427,19 +48450,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     >
                                                     <FaIcon className="fas fa-history mr-2"></FaIcon>История
                                                     </button>
-                                                    {isAdminLikeRole && sv.status !== 'fired' && (
-                                                    <button
-                                                    onClick={() => {
-                                                        setDemotionTarget(sv);
-                                                        setDemotionGroupId('');
-                                                        setOpenMenuId(null);
-                                                    }}
-                                                    className="block w-full text-left px-4 py-2 hover:bg-gray-100"
-                                                    >
-                                                    <FaIcon className="fas fa-user-minus mr-2"></FaIcon>В операторы
-                                                    </button>
-                                                    )}
-
                                                     <div className="border-t border-gray-200" />
 
                                                     <button
@@ -48461,69 +48471,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 )}
                             </div>
                             )}
-
-                                {/* Понижение СВ до оператора. Группа обязательна: без неё
-                                    у человека не будет ни супервайзера, ни учёта часов. */}
-                                {demotionTarget && (
-                                <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50 p-4">
-                                    <div className="bg-white w-full max-w-md p-6 rounded-2xl shadow-lg ring-1 ring-slate-200/70">
-                                    <h2 className="text-lg font-semibold text-slate-900">
-                                        Перевести в операторы
-                                    </h2>
-                                    <p className="mt-1 text-sm text-slate-500">
-                                        {demotionTarget.name}
-                                    </p>
-
-                                    {demotionGroupImpact.length > 0 && (
-                                    <div className="mt-4 rounded-xl bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
-                                        {demotionGroupImpact.map((group) => (
-                                        <div key={group.id} className="flex items-baseline gap-1.5">
-                                            <span className="truncate">{group.name}</span>
-                                            <span className="text-slate-400">—</span>
-                                            <span className={group.successor ? '' : 'text-amber-600'}>
-                                                {group.successor
-                                                    ? `перейдёт к ${group.successor.name}`
-                                                    : 'останется без супервайзера'}
-                                            </span>
-                                        </div>
-                                        ))}
-                                    </div>
-                                    )}
-
-                                    <label className="mt-4 block text-sm font-medium text-slate-700">
-                                        Группа, в которой он станет оператором
-                                    </label>
-                                    <select
-                                        value={demotionGroupId}
-                                        onChange={(e) => setDemotionGroupId(e.target.value)}
-                                        disabled={isDemoting}
-                                        className="mt-1.5 w-full p-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                    >
-                                        <option value="">Выберите группу</option>
-                                        {demotionGroupOptions.map((group) => (
-                                            <option key={group.id} value={group.id}>{group.name}</option>
-                                        ))}
-                                    </select>
-
-                                    <div className="mt-6 flex justify-end gap-2">
-                                        <button
-                                            onClick={closeDemotionModal}
-                                            disabled={isDemoting}
-                                            className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 active:scale-[0.98] transition disabled:opacity-60"
-                                        >
-                                            Отмена
-                                        </button>
-                                        <button
-                                            onClick={demoteSupervisorToOperator}
-                                            disabled={isDemoting || !demotionGroupId}
-                                            className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition disabled:cursor-not-allowed disabled:opacity-60"
-                                        >
-                                            {isDemoting ? 'Перевод...' : 'Перевести'}
-                                        </button>
-                                    </div>
-                                    </div>
-                                </div>
-                                )}
 
                                 {/* Модалка Add Supervisor */}
                                 {false && showAddSvModal && (
@@ -54038,6 +53985,67 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 </div>
                             </SimpleModal>
+                        )}
+                        {/* Понижение СВ до оператора. Группа обязательна: без неё
+                            у человека не будет ни супервайзера, ни учёта часов. */}
+                        {demotionTarget && (
+                        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50 p-4">
+                            <div className="bg-white w-full max-w-md p-6 rounded-2xl shadow-lg ring-1 ring-slate-200/70">
+                            <h2 className="text-lg font-semibold text-slate-900">
+                                Перевести в операторы
+                            </h2>
+                            <p className="mt-1 text-sm text-slate-500">
+                                {demotionTarget.name}
+                            </p>
+
+                            {demotionGroupImpact.length > 0 && (
+                            <div className="mt-4 rounded-xl bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
+                                {demotionGroupImpact.map((group) => (
+                                <div key={group.id} className="py-1 first:pt-0 last:pb-0">
+                                    <div className="text-slate-700">{group.name}</div>
+                                    <div className={group.successor ? 'text-slate-500' : 'text-amber-600'}>
+                                        {group.successor
+                                            ? `перейдёт к ${group.successor.name}`
+                                            : 'останется без супервайзера'}
+                                    </div>
+                                </div>
+                                ))}
+                            </div>
+                            )}
+
+                            <label className="mt-4 block text-sm font-medium text-slate-700">
+                                Группа, в которой он станет оператором
+                            </label>
+                            <select
+                                value={demotionGroupId}
+                                onChange={(e) => setDemotionGroupId(e.target.value)}
+                                disabled={isDemoting}
+                                className="mt-1.5 w-full p-2.5 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            >
+                                <option value="">Выберите группу</option>
+                                {demotionGroupOptions.map((group) => (
+                                    <option key={group.id} value={group.id}>{group.name}</option>
+                                ))}
+                            </select>
+
+                            <div className="mt-6 flex justify-end gap-2">
+                                <button
+                                    onClick={closeDemotionModal}
+                                    disabled={isDemoting}
+                                    className="px-4 py-2 rounded-xl text-slate-600 hover:bg-slate-100 active:scale-[0.98] transition disabled:opacity-60"
+                                >
+                                    Отмена
+                                </button>
+                                <button
+                                    onClick={demoteSupervisorToOperator}
+                                    disabled={isDemoting || !demotionGroupId}
+                                    className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] transition disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                    {isDemoting ? 'Перевод...' : 'Перевести'}
+                                </button>
+                            </div>
+                            </div>
+                        </div>
                         )}
                         {showUserEditModal && (
                             <Suspense fallback={null}>
