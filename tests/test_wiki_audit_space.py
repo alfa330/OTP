@@ -13,6 +13,7 @@
 
 import ast
 import io
+import re
 import unittest
 from pathlib import Path
 
@@ -45,12 +46,16 @@ class FakeCursor(object):
 class AuditFilterTest(unittest.TestCase):
     """Условие пространства в WHERE."""
 
-    def test_space_adds_clause_with_null(self):
+    def test_space_boundary_is_strict(self):
         clause, params = wiki_structure._audit_filters(space_id=12)
-        # Запись без пространства видна в любом журнале: у части действий
-        # объекта уже нет, и спрятать их везде значило бы вычеркнуть из аудита
-        # ровно то, ради чего он ведётся.
-        self.assertIn('a.space_id = %s OR a.space_id IS NULL', clause)
+        # СТРОГО. Пока «ничья» запись показывалась в любом журнале, у «Теза» на
+        # 99 своих записей приходилось 46 чужих — треть ленты. Ничьих записей
+        # больше быть не должно (routes_structure.log_space на записи,
+        # schema._restore_audit_space_by_session на уже записанном), а остаток
+        # считается отдельно и виден в подвале — не прячется молча.
+        self.assertIn('a.space_id = %s', clause)
+        self.assertNotIn('IS NULL', clause,
+                         'ничья запись снова попадёт в журнал обеих вик')
         self.assertEqual(params, [12])
 
     def test_without_space_no_clause(self):
@@ -63,7 +68,7 @@ class AuditFilterTest(unittest.TestCase):
         # отсекает чужое до всех остальных условий.
         clause, params = wiki_structure._audit_filters(
             space_id=12, group='articles', date_from='2026-08-01')
-        self.assertTrue(clause.startswith('WHERE (a.space_id'))
+        self.assertTrue(clause.startswith('WHERE a.space_id'))
         self.assertEqual(params[0], 12)
 
     def test_space_id_is_cast_to_int(self):
@@ -172,31 +177,118 @@ class AuditSpaceGuardTest(unittest.TestCase):
         """Запись, у которой объекта ещё нет, обязана назвать пространство САМА.
 
         Пространство записи считается ПО ОБЪЕКТУ (AUDIT_SPACE_SQL). Пока статьи
-        нет — черновик из документа, импорт, правка несохранённого текста —
-        считать не по чему, и запись остаётся ничьей. А ничья запись видна в
-        журнале ОБОИХ пространств (structure._audit_filters): 25.08.2026 в
-        журнале «Таксопарков» лежали черновики Теза, и владелец это увидел.
+        нет — черновик из документа, разбор страницы Яндекс Про, правка
+        несохранённого текста — считать не по чему, и запись остаётся ничьей.
+        А ничья запись при строгой границе (structure._audit_filters) не попадёт
+        уже никуда: раньше она была видна в обоих журналах, теперь — ни в одном.
 
-        Поэтому в routes_import каждая запись обязана передавать space_id.
+        Проверка идёт по ВСЕМУ пакету, и это правка от 04.09.2026. Прежде она
+        читала один routes_import.py — именно поэтому мимо неё прошёл
+        routes_yandex_pro.py, и 36 разборов страниц утекли в журнал «Теза» уже
+        ПОСЛЕ того, как болезнь считалась вылеченной. Страж, знающий один файл,
+        сторожит не правило, а тот файл.
+
+        Опасны два вида entity_id: литеральный None (объекта нет заведомо) и
+        вычисленный вызовом — `_int_or_none(request.form.get('article_id'))`
+        возвращает None ровно тогда, когда статью ещё не сохранили. Обоим нужен
+        либо space_id аргументом, либо 'space_id' в details: формула читает и
+        то, и другое.
         """
-        source = io.open(str(WIKI / 'routes_import.py'), encoding='utf-8').read()
-        tree = ast.parse(source)
         missing = []
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == 'log_action'):
-                continue
-            kwargs = {kw.arg for kw in node.keywords}
-            action = next((ast.literal_eval(kw.value) for kw in node.keywords
-                           if kw.arg == 'action'
-                           and isinstance(kw.value, ast.Constant)), '?')
-            if 'space_id' not in kwargs:
-                missing.append('%s (строка %s)' % (action, node.lineno))
-        self.assertEqual(missing, [],
-                         'без space_id запись уйдёт в журнал обоих пространств: %s'
-                         % ', '.join(missing))
-        self.assertTrue(source.count('_log_space(cursor, ctx)') >= 4,
-                        'пространство берётся одной функцией на все записи')
+        for path in sorted(WIKI.glob('*.py')):
+            source = io.open(str(path), encoding='utf-8').read()
+            for node in ast.walk(ast.parse(source)):
+                if not (isinstance(node, ast.Call)
+                        and getattr(node.func, 'attr', None) == 'log_action'):
+                    continue
+                kwargs = {kw.arg: kw.value for kw in node.keywords}
+                entity = kwargs.get('entity_id')
+                objectless = (entity is None
+                              or (isinstance(entity, ast.Constant)
+                                  and entity.value is None)
+                              or isinstance(entity, ast.Call))
+                if not objectless:
+                    continue
+                details = kwargs.get('details')
+                named = 'space_id' in kwargs or (
+                    isinstance(details, ast.Dict)
+                    and any(isinstance(key, ast.Constant) and key.value == 'space_id'
+                            for key in details.keys))
+                if named:
+                    continue
+                action = next((kw.value.value for kw in node.keywords
+                               if kw.arg == 'action'
+                               and isinstance(kw.value, ast.Constant)), '?')
+                missing.append('%s:%s (%s)' % (path.name, node.lineno, action))
+        self.assertEqual(
+            missing, [],
+            'запись без объекта обязана назвать пространство, иначе она не '
+            'попадёт ни в один журнал: %s' % ', '.join(missing))
+
+    def test_every_action_is_readable_and_filterable(self):
+        """У каждого действия есть русская подпись и группа-чип.
+
+        Молчит такая дыра совершенно одинаково с дырой про пространство: запись
+        пишется, читается и выглядит рабочей — только подпись у неё английский
+        ключ, а под фильтром её нет вовсе. На 04.09.2026 без подписи было 336
+        записей из 1390, без группы — 341; больше всех молчал article.migrate
+        (247 записей), то есть основная работа «Переноса».
+
+        Шапка самого словаря (auditEvents.js) обещает ровно это: «остальные 28
+        выводились сырым ключом» — как описание прошлого, а не порядка вещей.
+        """
+        actions = set()
+        for path in sorted(WIKI.glob('*.py')):
+            source = io.open(str(path), encoding='utf-8').read()
+            for node in ast.walk(ast.parse(source)):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, 'attr', None) or getattr(node.func, 'id', None)
+                if name == 'log_action':
+                    for kw in node.keywords:
+                        if kw.arg == 'action' and isinstance(kw.value, ast.Constant):
+                            actions.add(kw.value.value)
+                # Отказ источника пишет в журнал через свою обёртку, и действие
+                # приезжает туда позиционным аргументом: без этой ветки пять
+                # действий Яндекс Про страж бы не увидел.
+                elif name == '_fail':
+                    for arg in node.args:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                                and re.match(r'^[a-z_]+\.[a-z_.]+$', arg.value):
+                            actions.add(arg.value)
+        self.assertGreater(len(actions), 25, 'действия не нашлись — проверь страж')
+
+        meta = io.open(str(ROOT / 'src/components/wiki/auditEvents.js'),
+                       encoding='utf-8').read()
+        labelled = set(re.findall(r"'([a-z_]+\.[a-z_.]+)':\s*\{\s*label:", meta))
+        self.assertEqual(
+            sorted(actions - labelled), [],
+            'действие показывается сырым английским ключом (ACTION_META)')
+
+        grouped = set()
+        for group in wiki_structure.AUDIT_GROUPS.values():
+            grouped |= set(group)
+        self.assertEqual(
+            sorted(actions - grouped), [],
+            'действие не попадает ни под один чип фильтра (structure.AUDIT_GROUPS)')
+
+    def test_log_space_lives_in_one_place(self):
+        """Помощник один на все двери.
+
+        Он был написан в routes_import.py как приватный `_log_space`, и когда
+        та же дыра открылась в routes_yandex_pro.py, второй файл про него
+        просто не знал. Копия помощника разошлась бы с оригиналом на первой же
+        правке, поэтому он лежит рядом с request_space — там же, откуда его
+        берут справочники парков и офисов.
+        """
+        shared = io.open(str(WIKI / 'routes_structure.py'), encoding='utf-8').read()
+        self.assertIn('def log_space(cursor, ctx):', shared,
+                      'общий помощник обязан жить рядом с request_space')
+        for name in ('routes_import.py', 'routes_yandex_pro.py'):
+            source = io.open(str(WIKI / name), encoding='utf-8').read()
+            self.assertIn('log_space', source, '%s обязан звать общий помощник' % name)
+            self.assertNotIn('def _log_space', source,
+                             '%s завёл вторую копию помощника' % name)
 
     def test_article_create_names_the_space_of_its_section(self):
         """Создание статьи называет пространство разделом, а не связью статьи.
@@ -237,6 +329,92 @@ class AuditSpaceGuardTest(unittest.TestCase):
         self.assertLess(backfill, guard,
                         'разбор по объекту обязан идти ДО возврата: иначе запись, '
                         'у которой пространство появилось позже, останется ничьей')
+
+    def test_session_restore_runs_every_start(self):
+        """Разбор по сессии повторяется вместе с разбором по объекту.
+
+        Он детерминированный и сам себя не расширяет: трогает только записи без
+        пространства и только там, где среди соседей ровно одно пространство.
+        Уехав под `if not first_run`, он на боевой базе не отработал бы вовсе —
+        колонка там появилась ещё 25.08.2026.
+        """
+        source = io.open(str(WIKI / 'schema.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        migration = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and 'first_run = ' in (
+                    ast.get_source_segment(source, node) or ''):
+                migration = ast.get_source_segment(source, node)
+        self.assertIsNotNone(migration, 'миграция журнала не найдена — проверь тест')
+        self.assertIn('_restore_audit_space_by_session(cursor)', migration,
+                      'разбор по сессии обязан вызываться из миграции')
+        self.assertLess(migration.index('_restore_audit_space_by_session(cursor)'),
+                        migration.index('if not first_run:'),
+                        'разбор по сессии обязан идти ДО возврата: иначе на '
+                        'боевой базе он не отработает никогда')
+
+    def test_session_restore_is_unambiguous_and_signed(self):
+        """Правило разбора: ровно одно пространство у соседей, и след в записи.
+
+        Без HAVING count(DISTINCT ...) = 1 правило превратилось бы в догадку
+        «где человек обычно работает», а без пометки в details журнал молча
+        назначил бы себе хозяина — и отличить восстановленное от известного по
+        объекту стало бы нечем.
+        """
+        source = io.open(str(WIKI / 'schema.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        restore = None
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == '_restore_audit_space_by_session'):
+                restore = ast.get_source_segment(source, node)
+        self.assertIsNotNone(restore, 'разбор по сессии не найден')
+        self.assertIn('HAVING count(DISTINCT pair.space_id) = 1', restore,
+                      'без единственного пространства это догадка, а не разбор')
+        self.assertIn("'space_restored'", restore,
+                      'восстановленная запись обязана сказать, откуда узнала')
+        self.assertIn('a.space_id IS NULL', restore,
+                      'разбор не смеет переписывать уже известное пространство')
+        # Соседом считается только запись, знающая пространство ПО ОБЪЕКТУ.
+        # Иначе разбор перестаёт быть неподвижной точкой: восстановленная
+        # запись становится соседом следующего прогона, и на ВТОРОМ деплое
+        # пространство получает уже тот, у кого своих соседей не было, — по
+        # цепочке, а не по доказательству. Проверено на Postgres: без этой
+        # строки второй прогон размечает запись, до которой от якоря 55 минут.
+        self.assertIn("NOT (neighbour.details ? 'space_restored')", restore,
+                      'восстановленная запись не может быть основанием для другой')
+
+    def test_audit_route_reports_records_outside_spaces(self):
+        """Строгая граница не имеет права терять записи молча.
+
+        Ничья запись раньше была видна везде, теперь — нигде. Значит её
+        существование обязано быть видно хотя бы числом, иначе первый же новый
+        источник ничьих записей пройдёт незамеченным.
+        """
+        source = io.open(str(WIKI / 'routes_structure.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        route = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == 'wiki_audit':
+                route = ast.get_source_segment(source, node)
+        self.assertIsNotNone(route, 'роут журнала не найден')
+        self.assertIn('count_audit_outside', route,
+                      'роут обязан считать записи вне пространств')
+        screen = io.open(str(ROOT / 'src/components/wiki/WikiAudit.jsx'),
+                         encoding='utf-8').read()
+        self.assertIn('outside', screen,
+                      'экран обязан показывать число записей вне пространств')
+
+    def test_outside_count_ignores_the_space_filter(self):
+        """Вопрос «сколько записей вне пространств» не сужается пространством.
+
+        Передай space_id в этот счётчик — и он ответит нулём всегда: записи без
+        пространства не проходят условие своей же границы.
+        """
+        cursor = FakeCursor(rows=[(0,)])
+        wiki_structure.count_audit_outside(cursor, space_id=12, group='articles')
+        self.assertIn('a.space_id IS NULL', cursor.sql)
+        self.assertNotIn(12, cursor.params or [])
 
     def test_audit_route_asks_for_space(self):
         source = io.open(str(WIKI / 'routes_structure.py'), encoding='utf-8').read()
@@ -291,7 +469,7 @@ class LogSpaceTest(unittest.TestCase):
     def _space(self, args=None, form=None, body=None, allowed=(11, 12)):
         from flask import Flask
         from wiki import queries as wiki_queries
-        from wiki import routes_import
+        from wiki import routes_structure
 
         original = wiki_queries.spaces_for_user
         wiki_queries.spaces_for_user = lambda _c, _ctx, **_k: list(allowed)
@@ -300,7 +478,7 @@ class LogSpaceTest(unittest.TestCase):
         app = Flask(__name__)
         with app.test_request_context('/?' + (args or ''), data=form,
                                       json=body if body is not None else None):
-            return routes_import._log_space(object(), {'user_id': 1})
+            return routes_structure.log_space(object(), {'user_id': 1})
 
     def test_query_parameter_wins(self):
         self.assertEqual(self._space(args='space_id=12'), 12)

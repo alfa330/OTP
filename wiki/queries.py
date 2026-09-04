@@ -731,8 +731,18 @@ def log_action(cursor, *, actor_id, action, entity_type=None, entity_id=None,
     формулой (schema.AUDIT_SPACE_SQL) прямо в INSERT: второго рейса в базу это
     не стоит, а расходиться с разбором истории не может.
 
-    space_id аргументом — для тех, кто пространство точно знает, а объекта ещё
-    нет (импорт документа заводит статью позже, чем пишет о нём в журнал).
+    space_id аргументом — для тех, у кого объекта ЕЩЁ НЕТ: импорт документа
+    заводит статью позже, чем пишет о нём в журнал.
+
+    Аргумент идёт ВТОРОЙ ступенью, а не первой (правка 04.09.2026). Он приходит
+    из переключателя пространств (routes_structure.log_space), то есть это
+    догадка «человек сейчас смотрит сюда», а объект — факт. Пока аргумент стоял
+    выше, правка сохранённой статьи через ИИ (routes_import: article.ai_update
+    и article.ai_edit передают space_id ПРИ ЖИВОМ article_id) писалась в журнал
+    того пространства, что выбрано в шапке, а не того, где статья лежит: то же
+    смешивание журналов, из-за которого всё и затевалось, только с другой
+    стороны. Ступень аргумента при этом не потеряна — она срабатывает ровно
+    тогда, когда формуле нечего считать.
     """
     import json
 
@@ -743,9 +753,9 @@ def log_action(cursor, *, actor_id, action, entity_type=None, entity_id=None,
         SELECT %(actor)s, %(action)s, %(etype)s, %(eid)s, %(target)s,
                %(details)s::jsonb, %(ip)s,
                COALESCE(
-                   (SELECT s.id FROM wiki_spaces s WHERE s.id = %(space)s::int),
                    (""" + wiki_schema.audit_space_sql(
-                       '%(etype)s', '%(eid)s', '%(details)s') + """))
+                       '%(etype)s', '%(eid)s', '%(details)s') + """),
+                   (SELECT s.id FROM wiki_spaces s WHERE s.id = %(space)s::int))
         """,
         {'actor': actor_id, 'action': action, 'etype': entity_type,
          'eid': entity_id, 'target': target_user_id, 'ip': ip_address,

@@ -17,8 +17,8 @@
 
 import {
     Archive, ArrowRightLeft, Building2, CalendarClock, CheckCircle2, Copy, FileDown,
-    FilePlus2, FileText, FolderPlus, KeyRound, Layers, MapPin, PenLine, RotateCcw,
-    ShieldAlert, ShieldOff, Sparkles, Star, UserCheck, UserPlus,
+    FilePlus2, FileText, FolderPlus, Globe, KeyRound, Layers, MapPin, PenLine,
+    RefreshCw, RotateCcw, ShieldAlert, ShieldOff, Sparkles, Star, UserCheck, UserPlus,
 } from 'lucide-react';
 
 /* Тон несёт смысл, а не украшает: зелёный — появилось, янтарный — убрали или
@@ -67,9 +67,26 @@ export const ACTION_META = {
     'article.ai_update': { label: 'ИИ сверил статью с файлом', tone: CHANGED, icon: Sparkles },
     'article.ai_edit': { label: 'Правка статьи через ИИ', tone: CHANGED, icon: Sparkles },
 
+    /* Перенос из внешней вики и разбор страниц Яндекс Про. Десять действий
+       этого файла оставались без подписи и выводились сырым ключом — на проде
+       это 336 записей из 1390, то есть каждая четвёртая строка журнала. Больше
+       всех молчал `article.migrate` (247 записей): на экране он читался как
+       «article.migrate», хотя это и есть основная работа «Переноса». */
+    'article.migrate': { label: 'Статья перенесена из внешней вики', tone: CREATED, icon: FileDown },
+    'article.migrate_review': { label: 'Решение по переносу', tone: CHANGED, icon: CheckCircle2 },
+    /* Разбор страницы статью НЕ создаёт — как и загрузка файла, он отдаёт текст
+       в редактор. Подпись обязана это говорить, иначе запись читается как
+       «перенёс статью», а её в вики нет. */
+    'article.yandex_preview': { label: 'Разобрана страница Яндекс Про', tone: CHANGED, icon: Globe },
+    'article.yandex_import': { label: 'Статья заведена из Яндекс Про', tone: CREATED, icon: Globe },
+    'article.yandex_link': { label: 'Статья связана с Яндекс Про', tone: CHANGED, icon: Globe },
+    'article.yandex_unlink': { label: 'Статья отвязана от Яндекс Про', tone: REMOVED, icon: Globe },
+    'article.yandex_sync': { label: 'Статья сверена с Яндекс Про', tone: CHANGED, icon: RefreshCw },
+
     // ── Парки, акции, офисы ─────────────────────────────────────────────
     'park.create': { label: 'Создан таксопарк', tone: CREATED, icon: Building2 },
     'park.update': { label: 'Изменён таксопарк', tone: CHANGED, icon: Building2 },
+    'park.logo_upload': { label: 'Загружен логотип парка', tone: CHANGED, icon: Building2 },
     'park.archive': { label: 'Таксопарк в архиве', tone: REMOVED, icon: Archive },
     'promotion.create': { label: 'Создана акция', tone: CREATED, icon: Star },
     'promotion.update': { label: 'Изменена акция', tone: CHANGED, icon: Star },
@@ -79,6 +96,8 @@ export const ACTION_META = {
     'office.archive': { label: 'Офис в архиве', tone: REMOVED, icon: Archive },
     'office.day.set': { label: 'Отметка по офису на день', tone: CHANGED, icon: MapPin },
     'office.day.clear': { label: 'Отметка по офису снята', tone: REMOVED, icon: MapPin },
+    'office.closure.set': { label: 'Офис закрыт на период', tone: REMOVED, icon: CalendarClock },
+    'office.closure.clear': { label: 'Закрытие офиса отменено', tone: CREATED, icon: CalendarClock },
 
     // ── Ознакомление ────────────────────────────────────────────────────
     'ack.assign': { label: 'Назначено ознакомление', tone: GRANTED, icon: UserCheck },
@@ -144,9 +163,16 @@ const FIELD_TITLE = {
     cross_department: 'доступ другим отделам', copy_protected: 'защита от копирования',
     parent_section_id: 'родительский раздел',
     department_id: 'отдел', section_kind: 'тип ветки', space_id: 'пространство',
+    space_restored: 'пространство восстановлено',
     city: 'город', address: 'адрес', address_note: 'как найти', phone: 'телефон',
     website: 'сайт', commission: 'комиссия', map_url: 'карта', lat: 'широта',
     lon: 'долгота', kind: 'тип', head_office_id: 'главный офис',
+    /* Подробности переноса и сверки с Яндекс Про. Без перевода строка читалась
+       «source: wikijs · source_id: №84 · dedup: new» — подпись уже русская, а
+       под ней снова английский. */
+    url: 'адрес страницы', source: 'источник', source_id: 'номер в источнике',
+    dedup: 'проверка на дубль', dedup_score: 'схожесть', decision: 'решение',
+    force: 'принудительно', until: 'до', from: 'с',
     logo_file_id: 'логотип', banner_file_id: 'баннер', starts_at: 'начало',
     ends_at: 'окончание', state: 'состояние', day: 'дата',
     ai_index: 'индекс помощника', provider: 'поставщик ИИ', model: 'модель',
@@ -166,6 +192,9 @@ const VALUE_TITLE = {
         draft: 'черновик', published: 'опубликована', archived: 'в архиве',
         on_approval: 'на согласовании', requires_verification: 'требует проверки',
         expired: 'просрочена', active: 'активно',
+        ok: 'без изменений', changed: 'источник изменился',
+        conflict: 'источник изменился, статью правили руками',
+        error: 'сверка не удалась',
     },
     visibility_scope: { restricted: 'по правилам доступа', public: 'всем сотрудникам' },
     visibility_mode: { inherit: 'как у раздела', restricted: 'только по правилам' },
@@ -173,7 +202,19 @@ const VALUE_TITLE = {
     state: { open: 'открыт', closed: 'закрыт' },
     kind: { park: 'офис парка', partner: 'офис партнёра' },
     mode: { grant: 'выдача', deny: 'запрет' },
+    /* Значения переноса и сверки. status делит словарь со статусом статьи —
+       пересечений нет: у статьи draft/published/…, у сверки ok/changed/… */
+    source: { wikijs: 'старая вика', yandex_pro: 'Яндекс Про' },
+    dedup: { unique: 'совпадений нет', duplicate: 'дубль', similar: 'похожая есть' },
+    decision: { published: 'опубликована', kept: 'оставлена как была',
+                discarded: 'отклонена' },
     ai_index: { indexed: 'обновлён', unchanged: 'без изменений', removed: 'убран' },
+    /* Пометка миграции schema._restore_audit_space_by_session. Запись,
+       у которой объекта не было (разбор страницы, черновик из документа),
+       пространство не знала и потому висела в журнале ОБЕИХ вик. Его
+       восстановили по рабочей сессии автора — и говорим об этом прямо:
+       журнал, молча назначивший себе хозяина, доверия не заслуживает. */
+    space_restored: { session: 'по соседним записям автора' },
 };
 
 /* Ключи, которые уже показаны отдельной фразой либо служебные: в подробностях
@@ -187,7 +228,10 @@ const HIDDEN_KEYS = new Set([
 /* Обновление индекса помощника — побочный эффект сохранения, а не действие
    человека. В строке это шум, в подробностях — ответ на вопрос «почему статья
    пропала из помощника». */
-const ROW_ONLY_HIDDEN = new Set(['ai_index']);
+/* Пометка миграции о том, что пространство записи восстановлено по соседним
+   записям автора. В подробностях это ответ на вопрос «почему запись здесь», а
+   в строке — четвёртый факт подряд, вытесняющий то, ради чего строку читают. */
+const ROW_ONLY_HIDDEN = new Set(['ai_index', 'space_restored']);
 
 /* Что уже сказано фразой в строке. Повторять это в подробностях незачем: тогда
    раскрытие есть у каждой записи и не значит ничего. Ключи, которых здесь нет,
