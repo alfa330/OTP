@@ -10,10 +10,14 @@ import {
     IosBadge, IosToggle, IosModal,
 } from '../ui/ios';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
+import {
+    buildWazzupChatLink, findWazzupChatExact, matchWazzupChatsByPhone, syncWazzupChatDeepLink,
+} from './chatLink';
 
 /* Чаты Wazzup (Верификаторы): просмотр переписки «как в мессенджере» +
  * вкладка «Операторы» (привязка авторов Wazzup к нашим операторам).
- * Данные копятся вебхуком с 2026-07-17, ретеншн 45 дней — более ранняя
+ * Данные копятся вебхуком с 2026-07-17, ретеншн 30 дней (database.py:
+ * cleanup_wazzup_messages, джоба зовёт её без аргументов) — более ранняя
  * история доступна только в самом Wazzup (кнопка «Открыть в Wazzup»). */
 
 const PAGE_SIZE = 30;
@@ -667,7 +671,10 @@ function OperatorsTab({ apiBaseUrl, headers, showToast }) {
 }
 
 export default function WazzupChatsView(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
+    /* initialChat — цель перехода по ссылке (chatLink.js): либо пара
+       «канал/чат», либо один номер телефона. Гасим её через
+       onInitialChatConsumed, как это делает витрина вики со слагом статьи. */
+    const { apiBaseUrl, withAccessTokenHeader, showToast, initialChat, onInitialChatConsumed } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [mainTab, setMainTab] = useState('chats');
 
@@ -682,6 +689,22 @@ export default function WazzupChatsView(props) {
     const [thread, setThread] = useState(null);
     const [threadHasMore, setThreadHasMore] = useState(false);
     const [threadLoadingMore, setThreadLoadingMore] = useState(false);
+    /* Переход по ссылке: пока номер разрешается в чат, лента не имеет права
+       показывать «Выберите чат слева» — человек пришёл по ссылке и решил бы,
+       что она не сработала. deepLinkMiss — то, что найти не удалось. */
+    const [deepLinkResolving, setDeepLinkResolving] = useState(false);
+    const [deepLinkMiss, setDeepLinkMiss] = useState('');
+    // Номер подошёл нескольким чатам: выбор за человеком, но сказать об этом
+    // надо словами — иначе экран не отличить от обычного входа без ссылки.
+    const [deepLinkMany, setDeepLinkMany] = useState('');
+    /* Адрес того же чата в самом Wazzup — для промаха по ТОЧНОЙ паре: пара
+       известна, и отправлять человека в корень воркспейса, когда можно открыть
+       конкретный диалог, незачем. Для формы-номера канал неизвестен, и здесь
+       остаётся пусто. */
+    const [deepLinkChatUrl, setDeepLinkChatUrl] = useState('');
+    const initialChatDone = useRef('');
+    // Цель ссылки ещё не разрешена — эффект синхронизации адреса ждёт.
+    const deepLinkPending = useRef(false);
     const chatsRequest = useRef({ id: 0, controller: null });
     const threadRequest = useRef({ id: 0, controller: null });
     const threadBox = useRef(null);
@@ -699,6 +722,16 @@ export default function WazzupChatsView(props) {
             .catch(() => { setChannels([]); showToast?.('Не удалось загрузить каналы', 'error'); });
     };
 
+    /* Отдаёт промис со строками ответа: тем же запросом переход по ссылке
+       разрешает свою цель. Заводить для него отдельный axios нельзя — соседняя
+       строка отменяет предыдущий запрос по общему chatsRequest, и одна из двух
+       загрузок молча пропала бы вместе с открытием чата.
+
+       МАССИВ — это ответ сервера, и только он. Отмена, устаревший ответ и
+       ошибка отдают null: пустой массив в этих ветках означал бы «чатов нет»,
+       и переход по ссылке на нём закрывал бы уже открытую переписку и вешал
+       ложную плашку «чат не найден» — достаточно было соседнему запросу
+       отменить наш или токену истечь. */
     const loadChats = ({ reset = true, channel = channelId, q = appliedSearch } = {}) => {
         chatsRequest.current.controller?.abort();
         const controller = new AbortController();
@@ -706,18 +739,20 @@ export default function WazzupChatsView(props) {
         chatsRequest.current = { id: requestId, controller };
         const offset = reset ? 0 : (chats?.length || 0);
         if (reset) { setChats(null); setChatsError(null); }
-        axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
+        return axios.get(`${apiBaseUrl}/api/wazzup/chats`, {
             headers: headers(), signal: controller.signal,
             params: { channel_id: channel || undefined, q: q || undefined, limit: PAGE_SIZE, offset },
         }).then((r) => {
-            if (requestId !== chatsRequest.current.id) return;
+            if (requestId !== chatsRequest.current.id) return null;
             setChatsTotal(r.data.total || 0);
             setChats((prev) => reset ? (r.data.items || []) : [...(prev || []), ...(r.data.items || [])]);
+            return r.data.items || [];
         }).catch((e) => {
-            if (axios.isCancel?.(e) || e.name === 'CanceledError') return;
-            if (requestId !== chatsRequest.current.id) return;
+            if (axios.isCancel?.(e) || e.name === 'CanceledError') return null;
+            if (requestId !== chatsRequest.current.id) return null;
             setChats((prev) => prev || []);
             setChatsError('Не удалось загрузить чаты');
+            return null;
         });
     };
 
@@ -763,11 +798,16 @@ export default function WazzupChatsView(props) {
     const pickChannel = (cid) => {
         setChannelId(cid);
         setSelected(null); setThread(null);
+        setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
+        deepLinkPending.current = false;
         loadChats({ channel: cid });
     };
 
     const onSearchInput = (value) => {
         setSearch(value);
+        // Человек взялся искать сам — плашки про ссылку больше не про него.
+        setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
+        deepLinkPending.current = false;
         clearTimeout(searchDebounce.current);
         searchDebounce.current = setTimeout(() => {
             setAppliedSearch(value.trim());
@@ -778,7 +818,145 @@ export default function WazzupChatsView(props) {
     const openChat = (chat) => {
         setSelected(chat);
         setThreadHasMore(false);
+        setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
+        deepLinkPending.current = false;
         loadThread(chat);
+    };
+
+    /* Переход по ссылке на чат (?view=wazzup_chats&chat=…).
+     *
+     * Две формы. Точная пара «канал/чат» открывается СРАЗУ: переписку отдаёт
+     * /api/wazzup/chat-messages, которому кроме пары ничего не нужно, и ждать
+     * список незачем; настоящую строку чата (имя, номер, счётчики для шапки)
+     * подставляем, когда придёт ответ списка. Форма «только номер» сначала
+     * разрешается тем же поиском, которым человек ищет чат руками.
+     *
+     * Поиск предзаполняем намеренно: строка найденного чата оказывается в
+     * списке и подсвечивается, а человек одним стиранием возвращает полный
+     * список. Подмешивать строку в chats руками нельзя — offset следующей
+     * страницы считается как chats.length, и синтетическая строка молча
+     * спрятала бы один настоящий чат за «Показать ещё».
+     *
+     * Гвард — по строковому КЛЮЧУ цели, а не по идентичности объекта: App
+     * пересоздаёт объект на каждое изменение адреса. В зависимостях только
+     * initialChat: loadChats и openChat пересоздаются на каждый рендер, и с
+     * ними в deps получилась бы бесконечная очередь запросов.
+     */
+    useEffect(() => {
+        const target = initialChat;
+        if (!target) return;
+        const key = target.channelId ? `${target.channelId}/${target.chatId}` : target.phone;
+        if (!key || initialChatDone.current === key) return;
+        initialChatDone.current = key;
+        // Карточка чатов не размонтируется, а скрывается display:none: придя на
+        // вкладке «Операторы», ссылка выставила бы чат невидимо.
+        setMainTab('chats');
+        setDeepLinkMiss(''); setDeepLinkMany(''); setDeepLinkChatUrl('');
+        /* Фильтр по каналу НЕ ставим даже для точной пары. Поиска по chatId
+           достаточно, чтобы строка нашлась, а выставленный канал потом нечем
+           снять: колонка каналов — единственный способ вернуться к «Все
+           каналы» — на узком экране скрыта (hidden md:flex). */
+        const q = target.channelId ? target.chatId : target.phone;
+        setChannelId('');
+        setSearch(q);
+        setAppliedSearch(q);
+        if (target.channelId) openChat({ channelId: target.channelId, chatId: target.chatId });
+        else setDeepLinkResolving(true);
+        /* Флаг поднимаем ПОСЛЕ openChat: она его снимает (открытие чата руками
+           — это уже разрешённая цель), и поднятый раньше он тут же гаснул бы,
+           а промах по точной паре терял метку chat= из адреса. */
+        deepLinkPending.current = true;
+        loadChats({ reset: true, channel: '', q }).then((items) => {
+            setDeepLinkResolving(false);
+            /* null — это «не знаем»: запрос отменили, он устарел или сервер
+               ответил ошибкой. Пустого списка тут нет, и трактовать это как
+               «чата нет» нельзя: так закрывалась уже открытая переписка и
+               вешалась плашка про срок хранения на ровном месте. */
+            if (!items) { deepLinkPending.current = false; return; }
+            /* Флаг «цель не разрешена» снимает openChat — то есть только
+               успешный исход. При промахе и при нескольких совпадениях он
+               остаётся поднятым, и метка chat= держится в адресе: перезагрузка
+               обязана воспроизводить то же состояние, а не отправлять человека
+               к полному списку, будто ссылки и не было. Снимут его первые
+               действия человека — выбор канала, поиск или открытие чата. */
+            if (target.channelId) {
+                const row = findWazzupChatExact(items, target);
+                if (row) {
+                    // Строка ответа заменяет заглушку: шапке нужны имя, номер и счётчики.
+                    setSelected((prev) => (prev && prev.channelId === row.channelId
+                        && prev.chatId === row.chatId ? row : prev));
+                    return;
+                }
+                // Чата нет ни в списке, ни в сообщениях: ретеншн чистит обе
+                // таблицы одним правилом (database.cleanup_wazzup_messages).
+                setSelected(null); setThread(null);
+                setDeepLinkMiss(target.chatId);
+                setDeepLinkChatUrl(wazzupChatUrl(target));
+                return;
+            }
+            const matches = matchWazzupChatsByPhone(items, target.phone);
+            // Один номер мог писать в два канала — тогда выбор за человеком,
+            // список уже отфильтрован по этому номеру. Но сказать об этом надо
+            // словами: без плашки экран не отличается от обычного входа, и
+            // ссылка читается как нерабочая.
+            if (matches.length === 1) openChat(matches[0]);
+            else if (matches.length) setDeepLinkMany(target.phone);
+            else setDeepLinkMiss(target.phone);
+        });
+        onInitialChatConsumed?.();
+        /* eslint-disable-next-line */
+    }, [initialChat]);
+
+    /* Открытый чат живёт в адресной строке: ?view=wazzup_chats&chat=<канал>/<чат>.
+       Это и есть «ссылка на чат» — её копирует кнопка «Ссылка» в шапке, и по ней
+       же перезагрузка возвращает человека в чат, а не в список. Побочная польза:
+       ссылка-по-номеру после разрешения переписывается в точную форму. Метку
+       снимаем при закрытии чата и при уходе из раздела — иначе она осталась бы
+       в адресе показывать то, чего на экране нет.
+
+       Пока цель ссылки не разрешена — адрес не трогаем вовсе. Этот эффект
+       объявлен ПОСЛЕ диплинк-эффекта, но на первом коммите видит selected из
+       того же рендера, то есть null: без гварда первым же действием раздела
+       была бы очистка chat= — до того, как раздел его отработал. Перезагрузка
+       после этого теряла и чат, и состояния «не найден» / «несколько». */
+    useEffect(() => {
+        if (!selected && deepLinkPending.current) return undefined;
+        syncWazzupChatDeepLink(selected);
+        return () => {
+            /* Уборку тоже держим за флагом. Она срабатывает не только при
+               размонтировании, но и перед КАЖДЫМ следующим прогоном эффекта —
+               в том числе когда промах по точной паре закрывает чат-заглушку.
+               Без этой проверки метка chat= стиралась там, где перезагрузка
+               обязана воспроизвести тот же экран «чат не найден». Уход из
+               раздела метку снимает сам App (syncAppViewWithUrl). */
+            if (!deepLinkPending.current) syncWazzupChatDeepLink(null);
+        };
+    }, [selected?.channelId, selected?.chatId]);
+
+    /* Ссылка на этот чат. Кладём в буфер: адресную строку человек не открывает,
+       а ссылку надо отправить в переписке. Запасной путь через execCommand
+       нужен не для красоты — clipboard.writeText есть только в защищённом
+       контексте, и в старом вебвью кнопка иначе молча ничего не делала бы. */
+    const copyChatLink = () => {
+        const link = buildWazzupChatLink(selected);
+        if (!link) { showToast?.('Не удалось собрать ссылку на чат', 'error'); return; }
+        const ok = () => showToast?.('Ссылка на чат скопирована', 'success');
+        const fallback = () => {
+            const field = document.createElement('textarea');
+            field.value = link;
+            field.setAttribute('readonly', '');
+            field.style.position = 'fixed';
+            field.style.opacity = '0';
+            document.body.appendChild(field);
+            field.select();
+            let copied = false;
+            try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+            document.body.removeChild(field);
+            if (copied) ok();
+            else showToast?.('Не удалось скопировать — адрес чата есть в адресной строке', 'error');
+        };
+        if (!navigator.clipboard?.writeText) { fallback(); return; }
+        navigator.clipboard.writeText(link).then(ok).catch(fallback);
     };
 
     const refreshAll = () => {
@@ -814,7 +992,7 @@ export default function WazzupChatsView(props) {
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Чаты Верификаторов</h2>
                     <p className="text-xs text-slate-500">
-                        Переписка Wazzup; история хранится 45 дней, более ранняя — в самом Wazzup
+                        Переписка Wazzup; история хранится 30 дней, более ранняя — в самом Wazzup
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -897,7 +1075,12 @@ export default function WazzupChatsView(props) {
                         )}
                         {chats !== null && chats.length === 0 && !chatsError && (
                             <div className="px-4 py-8 text-center text-sm text-slate-400">
-                                Чатов пока нет — сбор идёт с 17.07.2026
+                                {/* «База пуста» и «фильтр ничего не нашёл» — разные вещи.
+                                    Раньше в эту строку попадали только руками через
+                                    поиск, а с переходом по ссылке это штатный экран. */}
+                                {appliedSearch || channelId
+                                    ? 'Ничего не нашлось по этому фильтру'
+                                    : 'Чатов пока нет — сбор идёт с 17.07.2026'}
                             </div>
                         )}
                         {(chats || []).map((chat) => {
@@ -940,7 +1123,48 @@ export default function WazzupChatsView(props) {
 
                 {/* Лента переписки */}
                 <div className="flex min-w-0 flex-1 flex-col bg-[#f2f2f7]">
-                    {!selected && (
+                    {/* Пришли по ссылке с одним номером: пока он разрешается в чат,
+                        «Выберите чат слева» читалось бы как «ссылка не работает». */}
+                    {!selected && deepLinkResolving && (
+                        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-slate-400">
+                            <Loader2 size={26} className="animate-spin" strokeWidth={1.5} />
+                            <span className="text-sm">Открываем чат по ссылке…</span>
+                        </div>
+                    )}
+                    {/* Номер подошёл нескольким чатам. Без этой плашки экран
+                        совпадал с обычным входом, и ссылка читалась как битая. */}
+                    {!selected && !deepLinkResolving && deepLinkMany && (
+                        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
+                            <MessageSquare size={28} strokeWidth={1.5} className="text-blue-500" />
+                            <span className="text-sm font-semibold text-slate-700">
+                                Номер {deepLinkMany} писал в несколько каналов
+                            </span>
+                            <span className="max-w-sm text-[12.5px] text-slate-500">
+                                Список слева уже отфильтрован по этому номеру — выберите нужный чат.
+                            </span>
+                        </div>
+                    )}
+                    {!selected && !deepLinkResolving && !deepLinkMany && deepLinkMiss && (
+                        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                            <AlertCircle size={28} strokeWidth={1.5} className="text-amber-500" />
+                            <span className="text-sm font-semibold text-slate-700">
+                                Чат {deepLinkMiss} не найден
+                            </span>
+                            {/* Причин две, и назвать одну как единственную нельзя:
+                                человек с опечаткой в номере уходил искать в Wazzup
+                                переписку, которой там тоже нет. */}
+                            <span className="max-w-md text-[12.5px] text-slate-500">
+                                Либо переписки с этим номером не было, либо она старше срока
+                                хранения в портале и осталась только в самом Wazzup. Стоит
+                                проверить номер и поискать вручную.
+                            </span>
+                            <a href={deepLinkChatUrl || WAZZUP_APP_BASE} target="_blank" rel="noopener noreferrer"
+                               className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
+                                <ExternalLink size={12} /> {deepLinkChatUrl ? 'Открыть чат в Wazzup' : 'Открыть Wazzup'}
+                            </a>
+                        </div>
+                    )}
+                    {!selected && !deepLinkResolving && !deepLinkMiss && !deepLinkMany && (
                         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-slate-400">
                             <MessageSquare size={32} strokeWidth={1.5} />
                             <span className="text-sm">Выберите чат слева</span>
@@ -962,14 +1186,31 @@ export default function WazzupChatsView(props) {
                                     </div>
                                 </div>
                                 <div className="flex shrink-0 items-center gap-2">
-                                    <IosBadge tone="slate">
-                                        {selected.inboundCount ?? 0} вх. · {selected.outboundCount ?? 0} исх.
-                                    </IosBadge>
-                                    <a href={wazzupChatUrl(selected)} target="_blank" rel="noopener noreferrer"
-                                       title="Открыть этот чат в Wazzup (там доступна и история старше 45 дней)"
-                                       className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
-                                        <ExternalLink size={12} /> В Wazzup
-                                    </a>
+                                    {/* Пока не пришла строка списка, счётчиков у чата нет.
+                                        «0 вх. · 0 исх.» здесь было бы не «нет данных», а
+                                        конкретной неправдой — ссылка открывает переписку
+                                        раньше, чем отвечает список. */}
+                                    {selected.messagesCount != null && (
+                                        <IosBadge tone="slate">
+                                            {selected.inboundCount ?? 0} вх. · {selected.outboundCount ?? 0} исх.
+                                        </IosBadge>
+                                    )}
+                                    <button type="button" onClick={copyChatLink}
+                                            title="Скопировать ссылку на этот чат"
+                                            className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
+                                        <Link2 size={12} /> Ссылка
+                                    </button>
+                                    {/* Пока строка списка не пришла, транспорт чата
+                                        неизвестен, а он стоит в адресе Wazzup: ссылка
+                                        собралась бы наугад «как whatsapp» и у чата
+                                        другого транспорта вела бы в пустоту. */}
+                                    {selected.chatType && (
+                                        <a href={wazzupChatUrl(selected)} target="_blank" rel="noopener noreferrer"
+                                           title="Открыть этот чат в Wazzup (там доступна и история старше 30 дней)"
+                                           className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
+                                            <ExternalLink size={12} /> В Wazzup
+                                        </a>
+                                    )}
                                 </div>
                             </div>
                             <div ref={threadBox} className="flex-1 space-y-1.5 overflow-y-auto py-3">
