@@ -13115,7 +13115,142 @@ def admin_promote_to_supervisor():
             return jsonify({"error": "Cannot promote user: a supervisor with this name already exists"}), 409
         logging.error(f"Error promoting user to supervisor: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
-    
+
+
+# Понижение — обратная операция к повышению, но не симметричная ему по риску:
+# СВ держит группы и через них супервайзера у 7-33 операторов, поэтому ручка
+# требует ЯВНО указать группу, в которую человек уходит оператором.
+_DEMOTE_ERROR_RESPONSES = {
+    db.DEMOTE_USER_NOT_FOUND: ("Сотрудник не найден", 404),
+    db.DEMOTE_NOT_A_SUPERVISOR: ("Понизить можно только супервайзера", 400),
+    db.DEMOTE_GROUP_NOT_FOUND: ("Группа не найдена", 404),
+    db.DEMOTE_GROUP_ARCHIVED: ("Группа архивная — выберите активную", 400),
+    db.DEMOTE_GROUP_OTHER_DEPARTMENT: ("Группа из другого отдела", 400),
+    db.DEMOTE_DIRECTION_REQUIRED: (
+        "У оператора должно быть направление — укажите его или выберите группу с направлением", 400
+    ),
+    db.DEMOTE_NAME_TAKEN: ("Оператор с таким именем уже существует", 409),
+}
+
+
+@app.route('/api/admin/demote_to_operator', methods=['POST'])
+@require_api_key
+def admin_demote_to_operator():
+    """Понижает супервайзера до оператора: снимает его с групп, передаёт их
+    операторов следующему СВ и заводит человека оператором в выбранную группу."""
+    try:
+        data = request.get_json() or {}
+
+        user_id_raw = data.get('user_id')
+        if user_id_raw in [None, '']:
+            return jsonify({"error": "Не указан сотрудник"}), 400
+        try:
+            target_user_id = int(user_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Некорректный сотрудник"}), 400
+
+        group_id_raw = data.get('group_id')
+        if group_id_raw in [None, '']:
+            return jsonify({
+                "error": "Выберите группу, в которую сотрудник переходит оператором: "
+                         "без группы у него не будет ни супервайзера, ни учёта часов"
+            }), 400
+        try:
+            group_id = int(group_id_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Некорректная группа"}), 400
+
+        direction_id_raw = data.get('direction_id')
+        direction_id = None
+        if direction_id_raw not in [None, '']:
+            try:
+                direction_id = int(direction_id_raw)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Некорректное направление"}), 400
+
+        effective_date = (str(data.get('effective_date') or '').strip() or None)
+        if effective_date:
+            try:
+                datetime.strptime(effective_date, '%Y-%m-%d')
+            except ValueError:
+                return jsonify({"error": "Некорректная дата. Формат YYYY-MM-DD"}), 400
+
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        requester_role = _normalize_user_role(requester[3]) if requester else ''
+        if not _is_admin_role(requester_role):
+            return jsonify({"error": "Понижать сотрудников может только администратор"}), 403
+
+        target_user = db.get_user(id=target_user_id)
+        if not target_user:
+            return jsonify({"error": "Сотрудник не найден"}), 404
+
+        # Глава отдела правит только свой отдел (см. _requester_can_access_target_user).
+        if not _is_global_admin_requester(requester_role, requester_id):
+            if not _requester_can_access_target_user(
+                requester, requester_id, target_user,
+                allow_self=False, supervisor_target_roles=('operator', 'trainee', 'trainer', 'sv'),
+            ):
+                return jsonify({"error": "Этот сотрудник не в вашем отделе"}), 403
+
+        _, target_department_code = db.get_user_department(target_user_id)
+        if str(target_department_code or '').strip().lower() not in CALL_CENTER_DEPARTMENT_CODES:
+            return jsonify({
+                "error": "Понижение до оператора доступно только в отделах контакт-центра"
+            }), 400
+
+        demoted_user = db.demote_supervisor_to_operator(
+            target_user_id,
+            group_id,
+            direction_id=direction_id,
+            changed_by=requester_id,
+            effective_date=effective_date,
+        )
+        # Роль бэкенд перечитывает на каждый запрос, так что прав у человека уже
+        # нет — но SPA держит role из своей копии профиля и до перезагрузки рисует
+        # меню супервайзера, отвечая 403 без объяснений. Триггер БД тут не поможет:
+        # он отзывает сессии по смене СТАТУСА, а статус не менялся.
+        try:
+            db.revoke_all_user_sessions(user_id=target_user_id)
+        except Exception as session_error:
+            logging.warning(
+                "Demote: failed to revoke sessions for user %s: %s", target_user_id, session_error
+            )
+
+        return jsonify({
+            "status": "success",
+            "message": "Сотрудник понижен до оператора",
+            "user": demoted_user,
+        }), 200
+    except ValueError as e:
+        error_message = str(e)
+        if error_message.startswith(db.DEMOTE_HEADS_DEPARTMENT):
+            _, _, departments = error_message.partition(':')
+            return jsonify({
+                "error": "Сотрудник — глава отдела ({}). Сначала назначьте другого главу: "
+                         "права главы не зависят от роли, иначе оператор сохранит их."
+                         .format(departments or 'отдел не определён')
+            }), 409
+        if error_message.startswith(db.DEMOTE_ACTIVE_STATUS_PERIOD):
+            _, _, status_label = error_message.partition(':')
+            return jsonify({
+                "error": "В графике сотрудника открыт период «{}». Сначала закройте его: "
+                         "у операторов статус подтягивается из графика, и после перевода "
+                         "он молча сменится на статус периода."
+                         .format(status_label or 'статус')
+            }), 409
+        message, status_code = _DEMOTE_ERROR_RESPONSES.get(error_message, (error_message, 400))
+        return jsonify({"error": message}), status_code
+    except Exception as e:
+        if 'unique_name_role' in str(e):
+            return jsonify({"error": "Оператор с таким именем уже существует"}), 409
+        logging.error(f"Error demoting supervisor to operator: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/departments', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def api_admin_departments():
@@ -25178,6 +25313,14 @@ def call_distribution_settings_endpoint():
 # users.sip_number — у СЗоВ, ОП и ТЭЗ. Зеркало на фронте —
 # SIP_SETTINGS_DEPARTMENT_CODES в src/App.jsx.
 SIP_SETTINGS_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})
+
+# Отделы контакт-центра: люди на линии, у которых есть направления, группы,
+# супервайзеры и учёт часов. Именно здесь роль «супервайзер» означает
+# руководителя группы операторов, поэтому понижение до оператора имеет смысл
+# только тут. Фронт-офисы в список не входят: групп там всего одна и своих СВ
+# у них нет; бэк-офис (Бухгалтерия, HR) и маркетинг операторов не держат вовсе.
+# Зеркало на фронте — CALL_CENTER_DEPARTMENT_CODES в src/App.jsx.
+CALL_CENTER_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})
 
 # Внутри раздела два подраздела: «Таксопарки» (локальная АТС) и «Tez» (Binotel).
 # Отдельно от SIP_SETTINGS_DEPARTMENT_CODES: та отвечает на вопрос «кому раздел

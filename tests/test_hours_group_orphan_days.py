@@ -157,8 +157,14 @@ class OrphanDayStampingTests(unittest.TestCase):
         self.assertIn("SAVEPOINT sp_null_group_backfill", DATABASE_SOURCE)
 
     def test_enrollment_picks_up_earlier_days_without_waiting_for_restart(self):
+        # Тело заведения в группу живёт в _tx-хелпере: его переиспользует понижение
+        # СВ до оператора, которому нужен общий коммит с остальным каскадом.
         self.assertIn(
             "_stamp_orphan_group_ids_tx(cursor, operator_id)",
+            _method_source("_add_operator_to_group_tx"),
+        )
+        self.assertIn(
+            "_add_operator_to_group_tx(",
             _method_source("add_operator_to_group"),
         )
 
