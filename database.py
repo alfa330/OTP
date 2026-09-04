@@ -31957,6 +31957,219 @@ class Database:
                 "name": updated[1] or target_name
             }
 
+    # Коды ошибок понижения: ручка переводит их в понятный текст и свой HTTP-код.
+    DEMOTE_USER_NOT_FOUND = "DEMOTE_USER_NOT_FOUND"
+    DEMOTE_NOT_A_SUPERVISOR = "DEMOTE_NOT_A_SUPERVISOR"
+    DEMOTE_HEADS_DEPARTMENT = "DEMOTE_HEADS_DEPARTMENT"
+    DEMOTE_ACTIVE_STATUS_PERIOD = "DEMOTE_ACTIVE_STATUS_PERIOD"
+    DEMOTE_GROUP_NOT_FOUND = "DEMOTE_GROUP_NOT_FOUND"
+    DEMOTE_GROUP_ARCHIVED = "DEMOTE_GROUP_ARCHIVED"
+    DEMOTE_GROUP_OTHER_DEPARTMENT = "DEMOTE_GROUP_OTHER_DEPARTMENT"
+    DEMOTE_DIRECTION_REQUIRED = "DEMOTE_DIRECTION_REQUIRED"
+    DEMOTE_NAME_TAKEN = "DEMOTE_NAME_TAKEN"
+
+    def demote_supervisor_to_operator(
+        self,
+        user_id,
+        group_id,
+        direction_id=None,
+        changed_by=None,
+        effective_date=None,
+    ):
+        """Понижает супервайзера до оператора — обратная операция к
+        promote_operator_to_supervisor.
+
+        Образец каскада — archive_group, а НЕ увольнение: увольнение сегодня
+        членство в группе не закрывает вовсе, поэтому уволенный СВ так и остаётся
+        «активным СВ группы». Здесь членства не удаляем, а закрываем датой, и всё
+        делаем одной транзакцией.
+
+        Порядок шагов важен:
+          1) закрыть открытые членства СВ (иначе человек остаётся СВ своих групп);
+          2) сменить роль;
+          3) пересинхронизировать группы, которые он вёл, — их операторы наследуют
+             следующего активного СВ или остаются без СВ (осознанный NULL, так же
+             поступает archive_group);
+          4) только теперь завести человека оператором в группу.
+        Если поменять 1 и 4 местами, _group_active_supervisor_id_tx вернёт его же
+        самого и он станет собственным супервайзером.
+
+        Группа обязательна: оператор без группы остаётся и без супервайзера, и без
+        учёта часов (daily_hours/work_hours пишутся с group_id = NULL).
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, name, role, supervisor_id, direction_id, department_id, sip_number
+                FROM users
+                WHERE id = %s
+                FOR UPDATE
+            """, (int(user_id),))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(self.DEMOTE_USER_NOT_FOUND)
+
+            (target_id, target_name, current_role, current_supervisor_id,
+             current_direction_id, department_id, current_sip_number) = row
+            role_value = str(current_role or '').strip().lower()
+            if role_value not in ('sv', 'supervisor'):
+                raise ValueError(self.DEMOTE_NOT_A_SUPERVISOR)
+
+            # Права главы отдела роль не смотрят (departments.head_user_id), поэтому
+            # понижение главы молча оставило бы оператора с правами админа по отделу.
+            cursor.execute("""
+                SELECT name FROM departments
+                WHERE head_user_id = %s AND is_active
+                ORDER BY id
+            """, (target_id,))
+            headed = [r[0] for r in (cursor.fetchall() or [])]
+            if headed:
+                raise ValueError(self.DEMOTE_HEADS_DEPARTMENT + ':' + ', '.join(headed))
+
+            # Незакрытый период статуса графика. Пока человек — СВ, массовая
+            # синхронизация его не видит (она берёт только role='operator'), но
+            # сразу после понижения увидит и перепишет users.status по периоду,
+            # причём в историю это ляжет от «Системы» (changed_by = NULL).
+            # На проде такой период есть у одного из девяти СВ, и он 'dismissal',
+            # то есть человека молча пометило бы уволенным.
+            cursor.execute("""
+                SELECT status_code
+                FROM operator_schedule_status_periods
+                WHERE operator_id = %s
+                  AND start_date <= COALESCE(%s::date, CURRENT_DATE)
+                  AND COALESCE(end_date, DATE '9999-12-31') >= COALESCE(%s::date, CURRENT_DATE)
+                ORDER BY start_date DESC, id DESC
+                LIMIT 1
+            """, (target_id, effective_date, effective_date))
+            active_period = cursor.fetchone()
+            if active_period:
+                status_code = str(active_period[0] or '')
+                label = (SCHEDULE_SPECIAL_STATUS_META.get(status_code) or {}).get('label') or status_code
+                raise ValueError(self.DEMOTE_ACTIVE_STATUS_PERIOD + ':' + label)
+
+            cursor.execute("""
+                SELECT id, department_id, direction_id, status
+                FROM groups
+                WHERE id = %s
+            """, (int(group_id),))
+            group_row = cursor.fetchone()
+            if not group_row:
+                raise ValueError(self.DEMOTE_GROUP_NOT_FOUND)
+            _, group_department_id, group_direction_id, group_status = group_row
+            if str(group_status or '').strip().lower() == 'archived':
+                raise ValueError(self.DEMOTE_GROUP_ARCHIVED)
+            if (department_id is not None and group_department_id is not None
+                    and int(group_department_id) != int(department_id)):
+                raise ValueError(self.DEMOTE_GROUP_OTHER_DEPARTMENT)
+
+            # Направление оператору обязательно: в проде оно заполнено у всех
+            # операторов, и по нему считаются оценки, ЗП и половина отчётов.
+            resolved_direction_id = direction_id
+            if resolved_direction_id in (None, ''):
+                resolved_direction_id = current_direction_id or group_direction_id
+            if resolved_direction_id in (None, ''):
+                raise ValueError(self.DEMOTE_DIRECTION_REQUIRED)
+            resolved_direction_id = int(resolved_direction_id)
+
+            # 1) Закрываем членства СВ — датой, как archive_group.
+            cursor.execute("""
+                SELECT group_id FROM group_supervisor_memberships
+                WHERE supervisor_id = %s AND end_date IS NULL
+            """, (target_id,))
+            led_group_ids = [int(r[0]) for r in (cursor.fetchall() or [])]
+            if led_group_ids:
+                cursor.execute("""
+                    UPDATE group_supervisor_memberships
+                    SET end_date = COALESCE(%s::date, CURRENT_DATE)
+                    WHERE supervisor_id = %s AND end_date IS NULL
+                """, (effective_date, target_id))
+
+            # 2) Роль. SIP-номер снимаем: у СВ он не показывается в «Настройках SIP»
+            # (там только operator/trainee), но занятым числится, и за время в СВ
+            # его могли выдать другому — два оператора с одним добавочным ломают
+            # привязку звонков. Новый номер выдаёт админ осознанно.
+            try:
+                cursor.execute("""
+                    UPDATE users
+                    SET role = 'operator',
+                        supervisor_id = NULL,
+                        direction_id = %s,
+                        sip_number = NULL
+                    WHERE id = %s
+                    RETURNING id, name
+                """, (resolved_direction_id, target_id))
+            except Exception as exc:
+                if 'unique_name_role' in str(exc):
+                    raise ValueError(self.DEMOTE_NAME_TAKEN)
+                raise
+            updated = cursor.fetchone()
+            if not updated:
+                raise ValueError(self.DEMOTE_USER_NOT_FOUND)
+
+            history_rows = [(target_id, changed_by, 'role', role_value, 'operator')]
+            if current_supervisor_id is not None:
+                history_rows.append(
+                    (target_id, changed_by, 'supervisor_id', str(current_supervisor_id), None)
+                )
+            if (current_direction_id or None) != resolved_direction_id:
+                history_rows.append((
+                    target_id, changed_by, 'direction_id',
+                    str(current_direction_id) if current_direction_id is not None else None,
+                    str(resolved_direction_id),
+                ))
+            if current_sip_number:
+                history_rows.append(
+                    (target_id, changed_by, 'sip_number', str(current_sip_number), None)
+                )
+            cursor.executemany("""
+                INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                VALUES (%s, %s, %s, %s, %s)
+            """, history_rows)
+
+            # Профиль оператора: у действующих СВ строки нет вовсе (стартовый
+            # бэкофилл заводит её только для operator/trainee), поэтому именно
+            # создаём, а не «реактивируем».
+            cursor.execute("""
+                INSERT INTO operator_profiles (user_id, direction_id, supervisor_id, is_active, rate, sip_number)
+                SELECT u.id, u.direction_id, NULL, u.is_active, u.rate, NULL
+                FROM users u WHERE u.id = %s
+                ON CONFLICT (user_id) DO UPDATE SET
+                    direction_id = EXCLUDED.direction_id,
+                    supervisor_id = NULL,
+                    is_active = EXCLUDED.is_active,
+                    rate = EXCLUDED.rate,
+                    sip_number = NULL
+            """, (target_id,))
+
+            # 3) Группы, которые он вёл, получают следующего активного СВ (или NULL).
+            orphaned_group_ids = []
+            for led_group_id in led_group_ids:
+                if self._sync_group_operators_supervisor_tx(cursor, led_group_id) is None:
+                    orphaned_group_ids.append(led_group_id)
+
+            # 4) Теперь он сам — оператор этой группы (его СВ-членство уже закрыто,
+            # поэтому собственным супервайзером он стать не может).
+            self._add_operator_to_group_tx(
+                cursor, group_id, target_id,
+                start_date=effective_date, assigned_by=changed_by,
+            )
+
+            cursor.execute("SELECT supervisor_id FROM users WHERE id = %s", (target_id,))
+            new_supervisor_row = cursor.fetchone()
+
+            return {
+                "id": int(updated[0]),
+                "name": updated[1] or target_name,
+                "group_id": int(group_id),
+                "direction_id": resolved_direction_id,
+                "supervisor_id": (
+                    int(new_supervisor_row[0])
+                    if new_supervisor_row and new_supervisor_row[0] is not None else None
+                ),
+                "released_group_ids": led_group_ids,
+                "orphaned_group_ids": orphaned_group_ids,
+                "sip_number_cleared": bool(current_sip_number),
+            }
+
     def get_user_avatar_storage(self, user_id):
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -38462,38 +38675,46 @@ class Database:
         группу (один активный основной membership на оператора). users.supervisor_id
         оператора становится текущим СВ новой группы."""
         with self._get_cursor() as cursor:
+            self._add_operator_to_group_tx(
+                cursor, group_id, operator_id, start_date=start_date, assigned_by=assigned_by
+            )
+
+    def _add_operator_to_group_tx(self, cursor, group_id, operator_id, start_date=None, assigned_by=None):
+        """Тело add_operator_to_group внутри чужой транзакции: нужно операциям,
+        которые заводят оператора в группу вместе с другими правками (понижение
+        СВ до оператора), чтобы всё легло одним коммитом."""
+        cursor.execute(
+            """
+            UPDATE group_operator_memberships
+            SET end_date = (COALESCE(%s::date, CURRENT_DATE) - INTERVAL '1 day')
+            WHERE operator_id = %s AND end_date IS NULL AND group_id <> %s
+            """,
+            (start_date, int(operator_id), int(group_id)),
+        )
+        # Если уже есть открытый membership в этой группе — не дублируем.
+        cursor.execute(
+            """
+            SELECT 1 FROM group_operator_memberships
+            WHERE operator_id = %s AND group_id = %s AND end_date IS NULL
+            """,
+            (int(operator_id), int(group_id)),
+        )
+        if cursor.fetchone() is None:
             cursor.execute(
                 """
-                UPDATE group_operator_memberships
-                SET end_date = (COALESCE(%s::date, CURRENT_DATE) - INTERVAL '1 day')
-                WHERE operator_id = %s AND end_date IS NULL AND group_id <> %s
+                INSERT INTO group_operator_memberships
+                    (group_id, operator_id, start_date, assigned_by, created_at)
+                VALUES (%s, %s, COALESCE(%s::date, CURRENT_DATE), %s, CURRENT_TIMESTAMP)
                 """,
-                (start_date, int(operator_id), int(group_id)),
+                (int(group_id), int(operator_id), start_date, assigned_by),
             )
-            # Если уже есть открытый membership в этой группе — не дублируем.
-            cursor.execute(
-                """
-                SELECT 1 FROM group_operator_memberships
-                WHERE operator_id = %s AND group_id = %s AND end_date IS NULL
-                """,
-                (int(operator_id), int(group_id)),
-            )
-            if cursor.fetchone() is None:
-                cursor.execute(
-                    """
-                    INSERT INTO group_operator_memberships
-                        (group_id, operator_id, start_date, assigned_by, created_at)
-                    VALUES (%s, %s, COALESCE(%s::date, CURRENT_DATE), %s, CURRENT_TIMESTAMP)
-                    """,
-                    (int(group_id), int(operator_id), start_date, assigned_by),
-                )
-            self._set_operators_supervisor_tx(
-                cursor, [operator_id], self._group_active_supervisor_id_tx(cursor, group_id)
-            )
-            # Оператора почти всегда заводят в группу позже, чем он в ней начал
-            # работать: дни до start_date остались бы без группы и не попали бы в
-            # «Учёт часов». Подбираем их сразу, а не до следующего рестарта.
-            self._stamp_orphan_group_ids_tx(cursor, operator_id)
+        self._set_operators_supervisor_tx(
+            cursor, [operator_id], self._group_active_supervisor_id_tx(cursor, group_id)
+        )
+        # Оператора почти всегда заводят в группу позже, чем он в ней начал
+        # работать: дни до start_date остались бы без группы и не попали бы в
+        # «Учёт часов». Подбираем их сразу, а не до следующего рестарта.
+        self._stamp_orphan_group_ids_tx(cursor, operator_id)
 
     def remove_operator_from_group(self, group_id, operator_id, end_date=None):
         with self._get_cursor() as cursor:
