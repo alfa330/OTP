@@ -495,6 +495,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                                  item['id'], park_id, ident)
                     break
 
+        revoked_outside = []
         for item in items:
             sent_total = 0
             read_total = 0
@@ -510,14 +511,29 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                 # Отозвать рассылку можно и мимо портала — прямо в кабинете, и
                 # так уже делали. Наш журнал обязан это показывать, иначе он
                 # утверждает «Ушла» про сообщение, которого у водителей нет.
+                #
+                # Записываем В БАЗУ, а не только в ответ: иначе при недоступном
+                # кабинете журнал снова показал бы «Ушла», и сводный статус
+                # карточки навсегда расходился бы со строками внутри неё.
                 if str(row.get('status') or '').startswith('deleted_') \
                         and target.get('status') == 'sent':
                     target['status'] = 'revoked'
                     target['revoked_in_cabinet'] = True
+                    revoked_outside.append((item, target.get('park_id')))
                 sent_total += int(row.get('sent_to_number') or 0)
                 read_total += int(row.get('read_by_number') or 0)
             item['sent_total'] = sent_total
             item['read_total'] = read_total
+
+        # Отзывы, сделанные мимо портала, доносим до базы и пересчитываем сводный
+        # статус карточки. Без этого в списке стояло бы «Отправлена», а внутри
+        # карточки — «Отозвана» по каждой диспетчерской: одна запись, два разных
+        # ответа на один вопрос.
+        for item, park_id in revoked_outside:
+            with db._get_cursor() as cursor:
+                queries.mark_target_revoked(cursor, item['id'], park_id)
+                item['status'] = queries.finish_mailing(cursor, item['id'])
+
         return items
 
     # ── ручки ────────────────────────────────────────────────────────────────
