@@ -114,6 +114,10 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             direction_id=context['direction_id'],
                             group_ids=context['group_ids'],
                             wiki_role_ids=[r.get('id') for r in context['wiki_roles']],
+                            # .get, а не [...]: контекст собирают ещё и
+                            # тестовые заглушки, а «должности нет» —
+                            # штатное состояние всех, кроме бэк-офиса.
+                            job_title=context.get('job_title'),
                         )
                         # Способности — должность и роли вики ПЛЮС то, что
                         # человеку уже выписали правилами. До 21.08.2026

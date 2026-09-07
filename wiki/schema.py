@@ -340,6 +340,14 @@ _STATEMENTS = [
         -- Здесь, а не только миграцией ниже: на него опирается уникальный
         -- индекс, который создаётся следующим же оператором.
         min_role_level    INTEGER,
+        -- ТРЕТЬЕ измерение: «отдел И вот эта должность» (users.job_title).
+        -- Порогом должности бэк-офис не выражается вовсе: у «Маркетинга»
+        -- видеограф, таргетолог, контекстолог и SMM-менеджер носят ОДНУ роль
+        -- marketing_manager с уровнем 10, то есть на шкале ROLE_LEVELS они
+        -- неразличимы, и четыре строки матрицы схлопнулись бы в одно правило.
+        -- Тоже измерение, а не новый subject_type: адресат по-прежнему отдел,
+        -- меняется лишь то, насколько узко правило внутри него бьёт.
+        job_title         VARCHAR(255),
         created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at        TIMESTAMP NOT NULL DEFAULT %(now)s,
         updated_at        TIMESTAMP NOT NULL DEFAULT %(now)s,
@@ -350,9 +358,10 @@ _STATEMENTS = [
         )
     );
     """,
-    # Для БАЗ, созданных до появления уровня: колонка нужна раньше индекса,
-    # а ALTER в _ORG_STATEMENTS отработает уже вхолостую.
+    # Для БАЗ, созданных до появления уровня и должности: колонки нужны раньше
+    # индекса, а ALTER в _ORG_STATEMENTS отработает уже вхолостую.
     "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS min_role_level INTEGER;",
+    "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS job_title VARCHAR(255);",
     # Уровень должности входит в ключ уникальности С САМОГО НАЧАЛА, а не
     # добавляется миграцией ниже. Раньше здесь создавался ключ БЕЗ уровня, а
     # _ORG_STATEMENTS его дропал и ставил правильный. Пока на разделе не
@@ -362,11 +371,18 @@ _STATEMENTS = [
     # init_wiki_schema идёт одним савпоинтом, и откатывалась схема целиком.
     # Симптом был неочевидный: приложение работает, таблицы на месте, но ни
     # одна новая миграция раздела больше не применяется.
+    #
+    # Тот же урок повторён для job_title: ключ БЕЗ должности склеил бы четыре
+    # правила «Маркетинга» в одно — у всех четырёх subject_id=1041 и уровень 10,
+    # и ON CONFLICT DO UPDATE молча оставлял бы последнее сохранённое. Прежний
+    # ключ снимаем ЗДЕСЬ же, а не отдельной миграцией поверх: оставленный рядом,
+    # он продолжал бы запрещать вторую должность того же отдела.
+    "DROP INDEX IF EXISTS uq_wiki_section_rule_subject_level;",
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject_level
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject_position
         ON wiki_section_access_rules(section_id, subject_type,
                                      COALESCE(subject_id, -1), COALESCE(subject_role, ''),
-                                     COALESCE(min_role_level, -1));
+                                     COALESCE(min_role_level, -1), COALESCE(job_title, ''));
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_section_rules_subject ON wiki_section_access_rules(subject_type, subject_id);",
 
@@ -395,6 +411,13 @@ _STATEMENTS = [
         can_delete   BOOLEAN NOT NULL DEFAULT FALSE,
         can_publish  BOOLEAN NOT NULL DEFAULT FALSE,
         can_approve  BOOLEAN NOT NULL DEFAULT FALSE,
+        -- Должность здесь пока никто не выписывает: колонка нужна, чтобы
+        -- совпадение правила с человеком осталось ОДНИМ определением на весь
+        -- раздел (queries.SUBJECT_MATCH). Тот же текст условия применяется и к
+        -- правилам статьи, и без колонки он падал бы «нет такого столбца».
+        -- Развести два условия значило бы повторить ошибку исходной вики, где
+        -- дерево навигации и список статей считали доступ по-разному.
+        job_title    VARCHAR(255),
         created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at   TIMESTAMP NOT NULL DEFAULT %(now)s,
         updated_at   TIMESTAMP NOT NULL DEFAULT %(now)s,
@@ -1622,20 +1645,33 @@ _ORG_STATEMENTS = [
 
     "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS "
     "min_role_level INTEGER;",
-    # Уровень входит в КЛЮЧ правила, а не просто в его поля. Иначе на одном
-    # разделе нельзя выразить «отдел читает» + «супервайзер того же отдела ещё и
-    # правит»: пара (раздел, субъект) совпадает, и второе правило затирало бы
-    # первое при ON CONFLICT. Старый индекс без уровня снимаем.
+    # Должность (users.job_title) — третье измерение того же правила. Отделы без
+    # линии («Маркетинг», HR, «Бухгалтерия») различают людей не ролью, а ею:
+    # у всех пятерых маркетологов роль одна, marketing_manager, и порогом
+    # видеографа от таргетолога не отделить.
+    "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS "
+    "job_title VARCHAR(255);",
+    # Уровень и должность входят в КЛЮЧ правила, а не просто в его поля. Иначе
+    # на одном разделе нельзя выразить «отдел читает» + «супервайзер того же
+    # отдела ещё и правит» (совпадает пара «раздел, субъект») и «видеограф» +
+    # «таргетолог» (совпадает ещё и уровень): второе правило затирало бы первое
+    # при ON CONFLICT. Оба прежних индекса снимаем.
     "DROP INDEX IF EXISTS uq_wiki_section_rule_subject;",
+    "DROP INDEX IF EXISTS uq_wiki_section_rule_subject_level;",
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject_level
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject_position
         ON wiki_section_access_rules (section_id, subject_type,
                                       COALESCE(subject_id, -1),
                                       COALESCE(subject_role, ''),
-                                      COALESCE(min_role_level, -1));
+                                      COALESCE(min_role_level, -1),
+                                      COALESCE(job_title, ''));
     """,
     "ALTER TABLE wiki_article_access_rules ADD COLUMN IF NOT EXISTS "
     "min_role_level INTEGER;",
+    # Не для выдачи, а ради одного текста SUBJECT_MATCH на оба вида правил —
+    # см. комментарий у колонки в базовом DDL.
+    "ALTER TABLE wiki_article_access_rules ADD COLUMN IF NOT EXISTS "
+    "job_title VARCHAR(255);",
 
     # ПРАВО СТРОИТЬ ДЕРЕВО ВНУТРИ СВОЕЙ ВЕТКИ (решение владельца 27.08.2026).
     #

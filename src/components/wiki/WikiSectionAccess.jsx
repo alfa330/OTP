@@ -21,40 +21,83 @@ import useStableCallback from './useStableCallback';
  * видеть нужные люди. Здесь раздел выбран тем, что человек нажал на его строку.
  *
  * ── Две части формы ───────────────────────────────────────────────────────
- * Наверху — должности: «Оператор», «Супервайзер», «Руководитель группы».
+ * Наверху — должности ЭТОЙ ветки, как они заведены в дереве «Структуры»: у
+ * СЗоВ это «Оператор», «Супервайзер», «Руководитель группы», у «Маркетинга» —
+ * «Видеограф», «Таргетолог», «Контекстолог», «SMM-менеджер», «Руководитель».
  * Это ровно то, что настраивают каждый день, и оно не требует знать слово
  * «субъект». Внизу, свёрнутое, — точечные правила (человек, группа,
  * направление, роль вики): нужны редко, но без них модель прав беднее.
  *
+ * До 04.09.2026 строк было четыре и они были одинаковы во всех ветках. Для
+ * линии это правда, для отделов без линии — нет: форма предлагала выдать
+ * доступ «супервайзеру Маркетинга», которого не существует, и не предлагала
+ * ни одной настоящей должности отдела. Список считает сервер
+ * (structure.branch_positions) — см. FALLBACK_ROWS ниже.
+ *
  * ── Почему у должности два разных смысла ──────────────────────────────────
  * Если раздел лежит внутри ветки отдела (у неё заполнен «Отдел ветки»), правило
- * пишется на ОТДЕЛ с порогом должности: «СЗоВ, не ниже супервайзера». Голая
- * роль 'sv' пробила бы границу отдела — супервайзер продаж увидел бы ОТП.
+ * пишется на ОТДЕЛ, суженный либо порогом должности («СЗоВ, не ниже
+ * супервайзера»), либо самой должностью («Маркетинг, видеограф»). Голая роль
+ * 'sv' пробила бы границу отдела — супервайзер продаж увидел бы ОТП.
  * Если ветки отдела над разделом нет, писать не на что, кроме самой роли, —
  * и тогда правило действует по всей компании, о чём форма прямо предупреждает.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-/* Должности, на которые выдают доступ. Порог «не ниже»: правило действует, если
-   уровень человека не меньше указанного (шкала ROLE_LEVELS, wiki/access.py).
-   Отсюда бесплатно выходит «видит своё и всё, что ниже себя».
+/* Должности, на которые выдают доступ, КОГДА РАЗДЕЛ ВНЕ ВЕТКИ ОТДЕЛА.
+   Внутри ветки строки приезжают с сервера (positions в GET /access/section-rules)
+   и повторяют должности этой ветки: у «СЗоВ» — руководитель группы, супервайзер
+   и оператор, у «Маркетинга» — видеограф, таргетолог, контекстолог, SMM-менеджер
+   и руководитель. Считать их здесь нельзя: список выводится из дерева, из отдела
+   ветки и из кадров отдела, а у формы на руках лишь плоский список разделов —
+   расчёт разошёлся бы с проверкой на записи, всегда в сторону «строку показали,
+   а сервер отказал».
+
+   Здесь остаётся только запасной вариант: над разделом ветки отдела нет вовсе,
+   писать не на что, кроме самой роли, и правило действует по всей компании — о
+   чём форма прямо предупреждает.
+
+   Порог «не ниже»: правило действует, если уровень человека не меньше
+   указанного (шкала ROLE_LEVELS, wiki/access.py). Отсюда бесплатно выходит
+   «видит своё и всё, что ниже себя».
 
    У самой нижней строки порог NULL, а не 10. Разница не косметическая:
    role_level_of отдаёт 0 для роли, которой нет в шкале, и порог 10 отрезал бы
-   таких людей от раздела, открытого «всему отделу». */
-const ROLE_ROWS = [
+   таких людей от раздела, открытого «всему отделу».
+
+   Порог здесь ПУСТОЙ у всех четырёх: правило адресовано самой роли, и второй
+   раз ограничивать уровень нечем. Поэтому «вес» строки (то, с чем сравнивается
+   потолок раздающего) вынесен отдельным полем — иначе строку руководителя
+   раздавал бы кто угодно. */
+const FALLBACK_ROWS = [
     { key: 'operator', label: 'Оператор', hint: 'и все, кто выше — весь отдел',
-      level: null, role: 'operator' },
-    { key: 'trainer', label: 'Тренер', hint: 'и выше', level: 20, role: 'trainer' },
-    { key: 'sv', label: 'Супервайзер', hint: 'и выше', level: 30, role: 'sv' },
-    { key: 'head', label: 'Руководитель группы', hint: 'и выше', level: 40, role: 'admin' },
+      min_role_level: null, weight: 10, subject_type: 'otp_role', subject_role: 'operator' },
+    { key: 'trainer', label: 'Тренер', hint: 'и выше',
+      min_role_level: null, weight: 20, subject_type: 'otp_role', subject_role: 'trainer' },
+    { key: 'sv', label: 'Супервайзер', hint: 'и выше',
+      min_role_level: null, weight: 30, subject_type: 'otp_role', subject_role: 'sv' },
+    { key: 'head', label: 'Руководитель группы', hint: 'и выше',
+      min_role_level: null, weight: 40, subject_type: 'otp_role', subject_role: 'admin' },
 ];
 
 /* Правило без порога открывает раздел всем от оператора и выше — и «весит»
    столько же. Ноль вместо уровня оператора прошёл бы любую проверку. */
 const OPERATOR_LEVEL = 10;
-const rowWeight = (row) => (row.level == null ? OPERATOR_LEVEL : row.level);
+const rowWeight = (row) => (
+    row.weight ?? (row.min_role_level == null ? OPERATOR_LEVEL : row.min_role_level));
+
+/* Совпадает ли правило с этой строкой — по ПОЛНОМУ адресату, а не по одному
+   порогу. Внутри «Маркетинга» у всех четырёх должностей порог одинаковый (10):
+   сравнение по нему одно правило приписало бы сразу нескольким строкам, а
+   остальные показали бы «доступа нет» при фактически выданном доступе. */
+const ruleMatchesRow = (rule, row) => (
+    rule.subject_type === row.subject_type
+    && (row.subject_type === 'otp_role'
+        ? rule.subject_role === row.subject_role
+        : Number(rule.subject_id) === Number(row.subject_id))
+    && (rule.min_role_level ?? null) === (row.min_role_level ?? null)
+    && (rule.job_title || null) === (row.job_title || null));
 
 const PERMISSIONS = [
     { key: 'can_read', label: 'Читать', note: 'видит раздел и его статьи' },
@@ -144,17 +187,8 @@ export function branchDepartment(sections, sectionId) {
     return null;
 }
 
-/** Правило матрицы должностей? Такие рисуются строками, остальные — списком ниже. */
-const matrixKeyOf = (rule, department) => {
-    if (department) {
-        if (rule.subject_type !== 'department'
-            || Number(rule.subject_id) !== Number(department.id)) return null;
-        return ROLE_ROWS.find(
-            (r) => (r.level ?? null) === (rule.min_role_level ?? null))?.key || null;
-    }
-    if (rule.subject_type !== 'otp_role' || rule.min_role_level != null) return null;
-    return ROLE_ROWS.find((r) => r.role === rule.subject_role)?.key || null;
-};
+/** Строка матрицы, которой принадлежит правило. null — оно точечное. */
+const rowOfRule = (rule, rows) => rows.find((row) => ruleMatchesRow(rule, row)) || null;
 
 // ── Строка должности ────────────────────────────────────────────────────────
 const RoleRow = ({ row, draft, expanded, locked, mayGrant, onToggleExpand, onChange }) => {
@@ -178,6 +212,16 @@ const RoleRow = ({ row, draft, expanded, locked, mayGrant, onToggleExpand, onCha
                     <div className="flex flex-wrap items-baseline gap-x-2">
                         <span className="text-[14px] font-medium text-slate-900">{row.label}</span>
                         <span className="text-[11.5px] text-slate-400">{row.hint}</span>
+                        {/* Ноль носителей — почти всегда опечатка в названии
+                            раздела-должности: правило сохранится и не откроет
+                            НИЧЕГО. Без этой подписи такая выдача выглядит
+                            рабочей. Пишем только когда людей нет: счётчик у
+                            каждой строки был бы шумом. */}
+                        {row.people === 0 && (
+                            <span className="text-[11.5px] text-amber-600">
+                                нет таких сотрудников
+                            </span>
+                        )}
                     </div>
                     <div className="mt-1 flex flex-wrap gap-1">
                         {granted.length === 0 ? (
@@ -280,6 +324,10 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     const toast = useStableCallback(showToast);
 
     const [rules, setRules] = useState([]);
+    /* Должности ветки — строки матрицы. Считает сервер (structure.branch_positions):
+       список выводится из дерева разделов, отдела ветки и кадров отдела, а форме
+       из этого доступен только плоский список разделов. */
+    const [positions, setPositions] = useState([]);
     const [ceiling, setCeiling] = useState(null);
     /* Отделы, которым этот человек вправе адресовать правило; null — без
        границы (директор, администратор вики). Считает сервер: граница зависит
@@ -318,6 +366,10 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         axios.get(`${base}/access/section-rules`, { headers, params: { section_id: sectionId } })
             .then((r) => {
                 setRules(r.data?.items || []);
+                // Должности ветки — тем же ответом. Пустой список означает
+                // «раздел вне ветки отдела»: там правило пишется на роль по
+                // всей компании, и строки берутся из FALLBACK_ROWS.
+                setPositions(r.data?.positions || []);
                 // Потолок приезжает вместе со списком: он зависит и от должности,
                 // и от отдела раздела, поэтому считать его на клиенте нельзя.
                 setCeiling(r.data?.grant_ceiling ?? null);
@@ -347,12 +399,19 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             .catch(() => setPeople([]));
     }, [base, headers, spaceId]);
 
+    /* Строки матрицы: должности ветки с сервера, а вне ветки — запасной набор
+       ролей. Не «или пусто»: ветка без единого раздела-должности честно даёт
+       пустую матрицу, и подменять её ролями значило бы вернуть ту же выдумку,
+       из-за которой «Маркетингу» предлагали супервайзера. */
+    const rows = useMemo(
+        () => (department ? positions : FALLBACK_ROWS), [department, positions]);
+
     /* Матрица должностей — производная от загруженных правил, но состояние
        собственное: человек правит несколько строк и сохраняет разом. */
     useEffect(() => {
         const next = {};
-        ROLE_ROWS.forEach((row) => {
-            const rule = rules.find((r) => matrixKeyOf(r, department) === row.key);
+        rows.forEach((row) => {
+            const rule = rules.find((r) => ruleMatchesRow(r, row));
             next[row.key] = {
                 permissions: rule ? permissionsOf(rule) : { ...NO_PERMISSIONS },
                 // Новое правило по умолчанию НЕ уходит вглубь: глубокое правило
@@ -362,10 +421,10 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             };
         });
         setMatrix(next);
-    }, [rules, department]);
+    }, [rules, rows]);
 
     const extraRules = useMemo(
-        () => rules.filter((r) => !matrixKeyOf(r, department)), [rules, department]);
+        () => rules.filter((r) => !rowOfRule(r, rows)), [rules, rows]);
     /* Свёрнутый блок — это правило, которого не видно. Именно так владелец
        21.08.2026 искал выписанное им же точечное правило и видел вместо него
        матрицу должностей. Есть правила — раскрываем; свернуть руками по-прежнему
@@ -374,28 +433,40 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         if (extraRules.length) setShowExtra(true);
     }, [extraRules.length]);
 
-    const dirty = useMemo(() => ROLE_ROWS.some((row) => {
+    /* Заперта ли строка. У должностей ветки ответ считает СЕРВЕР той же
+       функцией, что и отказ на записи (may_grant_with_ceiling): у строки без
+       порога вес равен уровню оператора, и она не заперлась бы никогда, а
+       сервер на неё всё равно ответил бы WIKI_GRANT_CEILING. Вес остаётся
+       запасным расчётом — для строк вне ветки, которых сервер не считает. */
+    const isLocked = (row) => (row.locked != null
+        ? !!row.locked
+        : ceiling == null || rowWeight(row) > ceiling);
+
+    const dirty = useMemo(() => rows.some((row) => {
         const state = matrix[row.key];
-        if (!state || ceiling == null || rowWeight(row) > ceiling) return false;
+        if (!state || isLocked(row)) return false;
         const rule = rules.find((r) => r.id === state.ruleId);
         const before = rule ? permissionsOf(rule) : { ...NO_PERMISSIONS };
         const deepBefore = rule ? !!rule.grant_subsections : false;
         return PERMISSIONS.some((p) => before[p.key] !== state.permissions[p.key])
             || (anyPermission(state.permissions) && deepBefore !== state.grant_subsections);
-    }), [matrix, rules, ceiling]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }), [rows, matrix, rules, ceiling]);
 
-    const ruleBody = (row) => (department
-        ? { subject_type: 'department', subject_id: department.id,
-            min_role_level: row.level }
-        : { subject_type: 'otp_role', subject_role: row.role, min_role_level: null });
-
-    const isLocked = (row) => ceiling == null || rowWeight(row) > ceiling;
+    /* Адресат правила берётся из САМОЙ строки, а не выводится заново из отдела:
+       должность (job_title) порогом не выражается, и вывести её здесь неоткуда. */
+    const ruleBody = (row) => (row.subject_type === 'otp_role'
+        ? { subject_type: 'otp_role', subject_role: row.subject_role,
+            min_role_level: row.min_role_level ?? null }
+        : { subject_type: row.subject_type, subject_id: row.subject_id,
+            min_role_level: row.min_role_level ?? null,
+            job_title: row.job_title || null });
 
     const mayGrant = useMemo(() => grantableCheck(grantable), [grantable]);
 
     const saveMatrix = () => {
         const jobs = [];
-        ROLE_ROWS.forEach((row) => {
+        rows.forEach((row) => {
             const state = matrix[row.key];
             // Запертую строку не отправляем, даже если она как-то оказалась
             // изменена: сервер её всё равно отвергнет, а из-за одного отказа
@@ -440,6 +511,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             subject_id: draft.subject_type === 'otp_role' ? null : Number(draft.subject_id) || null,
             subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
             min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
+            job_title: draft.job_title || null,
             ...draft.permissions,
             grant_subsections: draft.grant_subsections,
             manage_subsections: !!draft.manage_subsections,
@@ -563,7 +635,18 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 <Loader2 size={16} className="animate-spin" />
                                 <span className="text-[13px]">Загружаем…</span>
                             </div>
-                        ) : ROLE_ROWS.map((row) => (
+                        ) : rows.length === 0 ? (
+                            /* Ветка отдела есть, а разделов-должностей внутри
+                               неё нет: выдавать нечему. Подменять это ролями
+                               значило бы предложить «супервайзера маркетинга»,
+                               которого не существует. */
+                            <div className="px-4 py-8 text-center text-[12.5px] leading-relaxed text-slate-400">
+                                В этой ветке ещё нет разделов-должностей.
+                                <br />
+                                Заведите их во вкладке «Структура» — строки ниже
+                                повторяют дерево отдела.
+                            </div>
+                        ) : rows.map((row) => (
                             matrix[row.key] ? (
                                 <RoleRow
                                     mayGrant={mayGrant}
@@ -579,9 +662,9 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                         ))}
                     </div>
                     <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                        Порог «не ниже»: доступ, выданный оператору, автоматически есть и у
-                        супервайзера, и у руководителя — руководитель видит всё, что видит
-                        подчинённый.
+                        Строки повторяют должности этой ветки. Доступ, выданный должности,
+                        автоматически есть и у всех, кто выше неё в отделе — руководитель
+                        видит всё, что видит подчинённый.
                     </p>
                 </section>
 
@@ -617,9 +700,14 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                             <div className="flex flex-wrap items-center gap-1.5">
                                                 <IosBadge tone="slate">
                                                     {SUBJECT_KIND_LABEL[rule.subject_type] || rule.subject_type}
-                                                    {rule.min_role_level
-                                                        ? ` · ${ROLE_LEVEL_LABEL[rule.min_role_level] || rule.min_role_level}`
-                                                        : ''}
+                                                    {/* Должность сужает правило и заменяет порог: без
+                                                        неё правило видеографа и правило таргетолога
+                                                        подписаны здесь одинаково. */}
+                                                    {rule.job_title
+                                                        ? ` · ${rule.job_title}`
+                                                        : (rule.min_role_level
+                                                            ? ` · ${ROLE_LEVEL_LABEL[rule.min_role_level] || rule.min_role_level}`
+                                                            : '')}
                                                 </IosBadge>
                                                 <span className="truncate text-[13.5px] font-medium text-slate-900">
                                                     {rule.subject_label || rule.subject_role || `#${rule.subject_id}`}
@@ -657,6 +745,11 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                                 subject_id: rule.subject_id ?? '',
                                                 subject_role: rule.subject_role || 'operator',
                                                 min_role_level: rule.min_role_level ?? '',
+                                                // Должность — часть КЛЮЧА правила. Не
+                                                // передав её обратно, правка прав завела бы
+                                                // второе правило, а исходное осталось бы
+                                                // висеть с прежними правами.
+                                                job_title: rule.job_title || null,
                                                 grant_subsections: !!rule.grant_subsections,
                                                 manage_subsections: !!rule.manage_subsections,
                                                 permissions: permissionsOf(rule),
@@ -683,7 +776,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 className={iosBtnGhost}
                                 onClick={() => setDraft({
                                     subject_type: 'user', subject_id: '', subject_role: 'operator',
-                                    min_role_level: '', grant_subsections: false,
+                                    min_role_level: '', job_title: null, grant_subsections: false,
                                     manage_subsections: false,
                                     permissions: { ...NO_PERMISSIONS, can_read: true },
                                 })}

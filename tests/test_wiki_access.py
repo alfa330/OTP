@@ -14,6 +14,8 @@
 через ast, потому что его импорт поднимает пул к боевой базе.
 """
 
+import io
+import os
 import re
 import unittest
 
@@ -614,25 +616,53 @@ class RuleUniquenessDDLTest(unittest.TestCase):
     def ddl(self):
         return '\n'.join(schema._STATEMENTS)
 
-    def test_base_ddl_does_not_create_level_less_unique_index(self):
+    def test_base_ddl_creates_only_the_full_unique_index(self):
+        """Базовый DDL заводит ключ СРАЗУ полный — с уровнем и с должностью.
+
+        Оба прежних имени здесь запрещены: любое из них означает, что ключ
+        снова создаётся неполным, а миграция ниже его переставляет — то есть
+        та же ловушка, что 19.08.2026, только следующего поколения.
+        """
         created = re.findall(r'CREATE UNIQUE INDEX IF NOT EXISTS (\w+)', self.ddl())
         self.assertNotIn('uq_wiki_section_rule_subject', created,
                          'ключ без уровня снова создаётся базовым DDL — '
                          'схема начнёт откатываться на каждом старте')
-        self.assertIn('uq_wiki_section_rule_subject_level', created)
+        self.assertNotIn('uq_wiki_section_rule_subject_level', created,
+                         'ключ без должности склеит правила «Видеограф» и '
+                         '«Таргетолог»: у них один отдел и один уровень')
+        self.assertIn('uq_wiki_section_rule_subject_position', created)
 
-    def test_min_role_level_exists_before_the_index_needs_it(self):
-        """Колонка должна появиться раньше индекса по ней, иначе чистая база не встанет."""
+    def test_key_columns_exist_before_the_index_needs_them(self):
+        """Колонки должны появиться раньше индекса по ним, иначе чистая база не встанет."""
         ddl = self.ddl()
-        column = ddl.find('min_role_level')
-        index = ddl.find('uq_wiki_section_rule_subject_level')
-        self.assertGreater(column, -1, 'min_role_level пропал из базового DDL')
-        self.assertLess(column, index, 'индекс по min_role_level стоит раньше самой колонки')
+        index = ddl.find('uq_wiki_section_rule_subject_position')
+        self.assertGreater(index, -1, 'полный ключ пропал из базового DDL')
+        for column in ('min_role_level', 'job_title'):
+            position = ddl.find(column)
+            self.assertGreater(position, -1, column + ' пропал из базового DDL')
+            self.assertLess(position, index,
+                            'индекс по ' + column + ' стоит раньше самой колонки')
 
-    def test_migration_still_drops_the_legacy_index(self):
-        """Базам, где старый ключ уже есть, он по-прежнему снимается."""
-        self.assertIn('DROP INDEX IF EXISTS uq_wiki_section_rule_subject;',
-                      '\n'.join(schema._ORG_STATEMENTS))
+    def test_migration_still_drops_the_legacy_indexes(self):
+        """Базам, где старый ключ уже есть, он по-прежнему снимается.
+
+        Оба: и совсем старый, без уровня, и промежуточный, без должности.
+        Оставленный рядом промежуточный запрещал бы вторую должность отдела.
+        """
+        org = '\n'.join(schema._ORG_STATEMENTS)
+        self.assertIn('DROP INDEX IF EXISTS uq_wiki_section_rule_subject;', org)
+        self.assertIn('DROP INDEX IF EXISTS uq_wiki_section_rule_subject_level;', org)
+
+    def test_upsert_conflict_target_matches_the_index(self):
+        """ON CONFLICT обязан перечислять ТЕ ЖЕ колонки, что и ключ.
+
+        Разойдясь, они дают не ошибку, а молчаливую подмену: постгрес выберет
+        другой уникальный индекс либо откажет на записи второй должности.
+        """
+        source = io.open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), 'wiki', 'structure.py'),
+            encoding='utf-8').read()
+        self.assertIn("COALESCE(min_role_level, -1), COALESCE(job_title, ''))", source)
 
 
 class GrantedCapabilitiesTest(unittest.TestCase):

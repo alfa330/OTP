@@ -39,7 +39,11 @@ wiki_section_access_rules AS (
     SELECT section_id::int, subject_type::text, subject_id::int, subject_role::text,
            can_read::boolean, can_create::boolean, can_edit::boolean,
            can_delete::boolean, can_publish::boolean, can_approve::boolean,
-           grant_subsections::boolean, manage_subsections::boolean, min_role_level::int
+           grant_subsections::boolean, manage_subsections::boolean, min_role_level::int,
+           -- Должности у этих правил нет ни в одном сценарии файла, поэтому
+           -- колонка не выведена в VALUES, а подставлена пустой: боевой текст
+           -- SUBJECT_MATCH её читает, и без неё запрос не скомпилируется.
+           NULL::text AS job_title
       FROM (VALUES {rules}) AS t(
         section_id, subject_type, subject_id, subject_role,
         can_read, can_create, can_edit, can_delete, can_publish, can_approve,

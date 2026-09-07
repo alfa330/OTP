@@ -32,10 +32,11 @@ DEPT_OP, DEPT_OTP = 367, 1
 _STUBS = """
 wiki_section_access_rules AS (
     SELECT section_id::int, subject_type::text, subject_id::int, subject_role::text,
-           can_read::boolean, grant_subsections::boolean, min_role_level::int
+           can_read::boolean, grant_subsections::boolean, min_role_level::int,
+           job_title::text
       FROM (VALUES {rules}) AS t(
         section_id, subject_type, subject_id, subject_role,
-        can_read, grant_subsections, min_role_level)
+        can_read, grant_subsections, min_role_level, job_title)
 ),
 wiki_sections AS (
     SELECT id::int, parent_section_id::int, status::text,
@@ -75,7 +76,7 @@ _EMPTY_GUESTS = ("(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp, "
 # Дерево без единого правила: VALUES не бывает пустым, поэтому «правил нет»
 # выражается строкой из NULL — она не совпадёт ни с одним разделом.
 _EMPTY_RULES = ("(NULL::int, NULL::text, NULL::int, NULL::text, "
-                "NULL::boolean, NULL::boolean, NULL::int)")
+                "NULL::boolean, NULL::boolean, NULL::int, NULL::text)")
 
 # Пустой список отделов у публичных разделов = «виден всем», прежнее поведение.
 _EMPTY_PUBLIC_DEPARTMENTS = "(NULL::int, NULL::int)"
@@ -101,19 +102,19 @@ _TREE = [
 # Правила — те, что выставляются во вкладке «Доступы».
 _RULES = [
     # Коммерческий директор — только по уровню.
-    "(1, 'otp_role', NULL, 'super_admin', true, true, 50)",
+    "(1, 'otp_role', NULL, 'super_admin', true, true, 50, NULL)",
     # Руководитель группы — по назначению главой.
-    "(2, 'department_head', 367, NULL, true, true, NULL)",
-    "(2, 'department_head', 1,   NULL, true, true, NULL)",
+    "(2, 'department_head', 367, NULL, true, true, NULL, NULL)",
+    "(2, 'department_head', 1,   NULL, true, true, NULL, NULL)",
     # Супервайзер — отдел И не ниже уровня СВ.
-    "(3, 'department', 367, NULL, true, true, 30)",
-    "(3, 'department', 1,   NULL, true, true, 30)",
+    "(3, 'department', 367, NULL, true, true, 30, NULL)",
+    "(3, 'department', 1,   NULL, true, true, 30, NULL)",
     # Оператор — узел-родитель, вглубь НЕ раздаёт.
-    "(4, 'department', 367, NULL, true, false, NULL)",
-    "(4, 'department', 1,   NULL, true, false, NULL)",
+    "(4, 'department', 367, NULL, true, false, NULL, NULL)",
+    "(4, 'department', 1,   NULL, true, false, NULL, NULL)",
     # Ветки отделов.
-    "(5, 'department', 367, NULL, true, true, NULL)",
-    "(6, 'department', 1,   NULL, true, true, NULL)",
+    "(5, 'department', 367, NULL, true, true, NULL, NULL)",
+    "(6, 'department', 1,   NULL, true, true, NULL, NULL)",
 ]
 
 
@@ -127,7 +128,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
 
     def sections(self, *, role, department_id=None, headed=(), user_id=10,
                  rules=None, tree=None, guests=(), public_departments=(),
-                 space_departments=()):
+                 space_departments=(), job_title=None):
         stub = _STUBS.format(
             rules=', '.join(rules if rules else (_RULES if rules is None
                                                  else [_EMPTY_RULES])),
@@ -146,7 +147,8 @@ class SectionPerimeterSqlTest(unittest.TestCase):
 
         subjects = collect_subjects(
             user_id=user_id, otp_role=role,
-            department_id=department_id, headed_department_ids=headed)
+            department_id=department_id, headed_department_ids=headed,
+            job_title=job_title)
         cur = self.conn.cursor()
         try:
             cur.execute(sql, subject_params(subjects, user_id))
@@ -428,8 +430,8 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         Если правило на родителе станет глубоким, рекурсивный CTE выдаст ОБЕ
         ветки, и разделение отделов исчезнет молча — тест это ловит.
         """
-        deep = [r.replace("(4, 'department', 367, NULL, true, false, NULL)",
-                          "(4, 'department', 367, NULL, true, true, NULL)")
+        deep = [r.replace("(4, 'department', 367, NULL, true, false, NULL, NULL)",
+                          "(4, 'department', 367, NULL, true, true, NULL, NULL)")
                 for r in _RULES]
         got = self.sections(role='operator', department_id=DEPT_OP, rules=deep)
         self.assertIn(BRANCH_OTP, got,
@@ -441,6 +443,62 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         self.assertIn(SUPERVISOR, got,
                       'уровень 40 обязан проходить порог 30 — иначе «всё, что ниже» не работает')
         self.assertEqual(ROLE_LEVELS['admin'] > ROLE_LEVELS['sv'], True)
+
+    # ── Должность как второе сужение отдела (бэк-офис) ───────────────────
+    #
+    # В отделах без линии («Маркетинг», HR, «Бухгалтерия») роль у всех одна, и
+    # порогом видеографа от таргетолога не отделить: уровень marketing_manager
+    # равен 10 у обоих. Поэтому у правила есть третье измерение — сама
+    # должность. Проверяем на боевом SQL, а не на догадке о том, как он себя
+    # поведёт: клеток ИЛИ в SUBJECT_MATCH стало три, и ошибка в любой из них
+    # означает либо запертый раздел, либо открытый лишним людям.
+    MARKETING = 1041
+
+    def marketing_rules(self):
+        """Раздел 5 открыт видеографу, раздел 6 — таргетологу. Оба в отделе."""
+        return [
+            "(5, 'department', %d, NULL, true, false, 10, 'Видеограф')" % self.MARKETING,
+            "(6, 'department', %d, NULL, true, false, 10, 'Таргетолог')" % self.MARKETING,
+        ]
+
+    def test_job_title_opens_only_its_own_section(self):
+        got = self.sections(role='marketing_manager', department_id=self.MARKETING,
+                            job_title='Видеограф', rules=self.marketing_rules())
+        self.assertIn(BRANCH_OP, got, 'видеограф обязан видеть свой раздел')
+        self.assertNotIn(BRANCH_OTP, got,
+                         'правило на должность не должно открывать раздел соседа '
+                         'с той же ролью и тем же уровнем')
+
+    def test_same_level_colleague_stays_out(self):
+        got = self.sections(role='marketing_manager', department_id=self.MARKETING,
+                            job_title='Таргетолог', rules=self.marketing_rules())
+        self.assertEqual(got & {BRANCH_OP, BRANCH_OTP}, {BRANCH_OTP})
+
+    def test_head_of_department_sees_subordinate_section(self):
+        """«И все, кто выше» — руководитель отдела над должностью, а не рядом."""
+        got = self.sections(role='admin', department_id=self.MARKETING,
+                            rules=self.marketing_rules())
+        self.assertEqual(got & {BRANCH_OP, BRANCH_OTP}, {BRANCH_OP, BRANCH_OTP},
+                         'руководитель обязан видеть всё, что видит подчинённый')
+
+    def test_same_job_title_in_another_department_stays_out(self):
+        """Должность не пробивает границу отдела — иначе это была бы роль."""
+        got = self.sections(role='marketing_manager', department_id=DEPT_OP,
+                            job_title='Видеограф', rules=self.marketing_rules())
+        self.assertNotIn(BRANCH_OP, got)
+
+    def test_person_without_job_title_stays_out(self):
+        """Пустая должность не должна совпасть с правилом на должность."""
+        got = self.sections(role='marketing_manager', department_id=self.MARKETING,
+                            job_title=None, rules=self.marketing_rules())
+        self.assertEqual(got & {BRANCH_OP, BRANCH_OTP}, set())
+
+    def test_rule_without_job_title_still_opens_to_everyone(self):
+        """Правила без должности работают ровно как раньше — иначе это регресс."""
+        plain = ["(5, 'department', %d, NULL, true, false, NULL, NULL)" % self.MARKETING]
+        got = self.sections(role='marketing_manager', department_id=self.MARKETING,
+                            job_title='Контекстолог', rules=plain)
+        self.assertIn(BRANCH_OP, got)
 
 
 if __name__ == '__main__':

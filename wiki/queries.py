@@ -19,6 +19,11 @@ from .access import normalize_role
 _ACCESS_CONTEXT_SQL = """
 WITH me AS (
     SELECT u.id, u.role, u.department_id, u.direction_id,
+           -- Должность в бэк-офисе: в отделах без линии («Маркетинг», HR,
+           -- «Бухгалтерия») человека определяет она, а не роль — роль там у
+           -- всех одна. Правило раздела умеет сузиться до одной должности,
+           -- поэтому она нужна на КАЖДОМ запросе, вместе с отделом.
+           NULLIF(btrim(COALESCE(u.job_title, '')), '') AS job_title,
            -- Тумблер «раздел Вики выдан отделу». У сотрудника без отдела
            -- (админы, служебные учётки) отдела нет — им раздел не закрываем.
            COALESCE(d.wiki_enabled, TRUE) AS wiki_enabled
@@ -72,6 +77,7 @@ SELECT
     (SELECT role          FROM me)                                   AS otp_role,
     (SELECT department_id FROM me)                                   AS department_id,
     (SELECT direction_id  FROM me)                                   AS direction_id,
+    (SELECT job_title     FROM me)                                   AS job_title,
     (SELECT wiki_enabled  FROM me)                                   AS wiki_enabled,
     COALESCE((SELECT array_agg(id)       FROM headed),     '{}')     AS headed_department_ids,
     COALESCE((SELECT array_agg(group_id) FROM my_groups),  '{}')     AS group_ids,
@@ -93,13 +99,14 @@ def load_access_context(cursor, user_id):
     if not row:
         return None
 
-    (otp_role, department_id, direction_id, wiki_enabled,
+    (otp_role, department_id, direction_id, job_title, wiki_enabled,
      headed, groups, wiki_roles, access_mode, has_guest_access) = row
     return {
         'user_id': int(user_id),
         'otp_role': otp_role,
         'department_id': department_id,
         'direction_id': direction_id,
+        'job_title': job_title,
         'wiki_enabled': wiki_enabled is not False,
         'headed_department_ids': list(headed or []),
         'group_ids': list(groups or []),
@@ -120,12 +127,25 @@ def load_access_context(cursor, user_id):
 # продублировано в двух вычислителях, они разошлись, и дерево навигации со
 # списком статей показывали разное. Здесь его импортирует и wiki/articles.py.
 #
-# Две оси, а не одна:
-#   субъект       — под кого выписано правило (отдел, назначение главой, роль…);
-#   min_role_level — ниже какого уровня должности правило не действует.
-# Связка нужна, чтобы выразить «отдел И не ниже супервайзера»: правилом на один
-# лишь department раздел супервайзера открылся бы операторам, а правилом на
-# otp_role='sv' — супервайзерам ЧУЖИХ отделов.
+# Три оси, а не одна:
+#   субъект        — под кого выписано правило (отдел, назначение главой, роль…);
+#   min_role_level — ниже какого уровня должности правило не действует;
+#   job_title      — какая ИМЕННО должность внутри отдела (бэк-офис).
+# Связка первых двух нужна, чтобы выразить «отдел И не ниже супервайзера»:
+# правилом на один лишь department раздел супервайзера открылся бы операторам, а
+# правилом на otp_role='sv' — супервайзерам ЧУЖИХ отделов.
+#
+# Третья ось — для отделов без линии. В «Маркетинге» видеограф, таргетолог,
+# контекстолог и SMM-менеджер носят ОДНУ роль marketing_manager (уровень 10):
+# на шкале ROLE_LEVELS они неразличимы, и разделить их порогом невозможно.
+# Различает их users.job_title, поэтому правило умеет сузиться до одной строки
+# должности. «И все, кто выше» при этом сохраняется третьей веткой ИЛИ: тот, чей
+# уровень СТРОГО выше уровня самой должности (руководитель отдела над
+# маркетологами), видит раздел подчинённого — ровно как на линии.
+#
+# NULL в min_role_level у правила с должностью деградирует БЕЗОПАСНО: сравнение
+# с NULL даёт NULL, «выше» не срабатывает, и правило действует только на точное
+# совпадение должности.
 # ─────────────────────────────────────────────────────────────────────────────
 SUBJECT_MATCH = """
         (
@@ -138,6 +158,9 @@ SUBJECT_MATCH = """
          OR (r.subject_type = 'user'            AND r.subject_id   = %(user_id)s)
         )
         AND (r.min_role_level IS NULL OR %(role_level)s >= r.min_role_level)
+        AND (r.job_title IS NULL
+             OR r.job_title = %(job_title)s
+             OR %(role_level)s > r.min_role_level)
 """
 
 
@@ -158,6 +181,11 @@ def subject_params(subjects, user_id):
     в постгресе не ошибка, но и не совпадение, а вот NULL сравнивать нельзя.
     Уровень роли приезжает готовым из collect_subjects — второй раз выводить
     его из строки роли негде и незачем.
+
+    Должность пустая у всех, кроме бэк-офиса, и подставляется ПУСТОЙ СТРОКОЙ,
+    а не NULL: правило с job_title сравнивается на равенство, и NULL = NULL в
+    постгресе не истина — но пустую строку мы в правило никогда не пишем, так
+    что человек без должности под правило с должностью не подпадёт.
     """
     return {
         'user_id': user_id,
@@ -168,6 +196,7 @@ def subject_params(subjects, user_id):
         'roles': subjects['otp_role'] or [''],
         'wiki_roles': subjects['wiki_role'] or [-1],
         'role_level': subjects['role_level'],
+        'job_title': subjects.get('job_title') or '',
     }
 
 

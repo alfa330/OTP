@@ -391,7 +391,13 @@ export function auditFacts(item, nameOf = null) {
         case 'article_rule.delete': {
             const subject = subjectPhrase(item);
             if (subject) facts.push(subject);
-            if (details.min_role_level != null) {
+            /* Должность сужает правило на отдел и заменяет собой порог: без неё
+               выдача видеографу и выдача таргетологу выглядели бы в журнале
+               одинаково («отдел Маркетинг, от оператора»), то есть журнал
+               перестал бы отвечать на вопрос «кому выдали». */
+            if (details.job_title) {
+                facts.push(`должность «${details.job_title}»`);
+            } else if (details.min_role_level != null) {
                 facts.push(ROLE_LEVEL_LABEL[details.min_role_level]
                     || `от уровня ${details.min_role_level}`);
             }

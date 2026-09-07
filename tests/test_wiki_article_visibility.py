@@ -44,7 +44,11 @@ WITH wiki_articles AS (
 wiki_article_access_rules AS (
     SELECT article_id::int, subject_type::text, subject_id::int,
            subject_role::text, mode::text, can_read::boolean,
-           min_role_level::int
+           min_role_level::int,
+           -- Должности у этих правил нет ни в одном сценарии файла, поэтому
+           -- колонка не выведена в VALUES, а подставлена пустой: боевой текст
+           -- SUBJECT_MATCH её читает, и без неё запрос не скомпилируется.
+           NULL::text AS job_title
       FROM (VALUES {rules}) AS t(
         article_id, subject_type, subject_id, subject_role, mode, can_read,
         min_role_level)

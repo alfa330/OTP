@@ -326,13 +326,17 @@ def expand_otp_roles(role):
 
 
 def collect_subjects(*, user_id, otp_role, department_id=None, headed_department_ids=(),
-                     direction_id=None, group_ids=(), wiki_role_ids=()):
+                     direction_id=None, group_ids=(), wiki_role_ids=(), job_title=None):
     """Все пары (subject_type, ключ), под которые подпадает пользователь.
 
     Возвращает словарь, готовый для подстановки в SQL-запрос правил:
         {'department': [...], 'department_head': [...], 'direction': [...],
          'group': [...], 'otp_role': [...], 'wiki_role': [...], 'user': [...],
-         'role_level': int}
+         'role_level': int, 'job_title': str}
+
+    job_title — не субъект, а СУЖЕНИЕ правила на отдел: в отделах без линии
+    («Маркетинг», HR, «Бухгалтерия») роль у всех одна, и различает людей только
+    должность. Строка, а не список: должность у человека одна.
     """
     departments = set()
     if department_id:
@@ -355,6 +359,7 @@ def collect_subjects(*, user_id, otp_role, department_id=None, headed_department
         'wiki_role': sorted({int(value) for value in (wiki_role_ids or ()) if value}),
         'user': [int(user_id)] if user_id else [],
         'role_level': role_level_of(otp_role),
+        'job_title': (job_title or '').strip(),
     }
 
 

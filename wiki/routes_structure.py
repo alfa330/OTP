@@ -1113,8 +1113,28 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": refusal[0], "code": refusal[1]}), 403
 
         if request.method == 'GET':
+            items = structure.list_section_rules(cursor, section_id=section_id)
+            # Должности ветки — строки матрицы «Кому открыт раздел». Считает
+            # СЕРВЕР, и не ради удобства: список зависит от дерева, от отдела
+            # ветки и от кадров отдела, а у формы на руках лишь плоский список
+            # разделов. Клиентский расчёт разошёлся бы с проверкой на записи —
+            # всегда в сторону «строку показали, а API ответил отказом».
+            #
+            # Пустой список означает «раздел вне ветки отдела»: там правило
+            # писать не на что, кроме роли по всей компании, и форма остаётся
+            # на прежнем поведении.
+            positions = structure.branch_positions(
+                cursor, section_id, existing_rules=items) if section_id else []
+            for row in positions:
+                # Строку выше потолка не прячем, а запираем: спрятанная читается
+                # как «такой должности не бывает», запертая объясняет, что выдача
+                # есть, но не отсюда. Считаем ЗДЕСЬ той же функцией, что и отказ
+                # на записи, — иначе формы и сервер разъедутся.
+                row['locked'] = not wiki_access.may_grant_with_ceiling(
+                    ceiling, row['min_role_level'])
             return jsonify({
-                "items": structure.list_section_rules(cursor, section_id=section_id),
+                "items": items,
+                "positions": positions,
                 # Потолок едет вместе со списком: форме нужно погасить строки
                 # должностей выше него, а второй запрос ради одного числа лишний.
                 "grant_ceiling": ceiling,
@@ -1160,6 +1180,23 @@ def register(bp, wiki_route, db, log_ip):
         min_role_level = _int_or_none(data.get('min_role_level'))
         if min_role_level is not None and min_role_level not in wiki_access.ROLE_LEVELS.values():
             return jsonify({"error": "Неизвестный уровень должности"}), 400
+
+        # ── Должность внутри отдела ──────────────────────────────────
+        # Третье измерение того же правила. Только к отделу: на роль по всей
+        # компании или на конкретного человека сужать нечего, а разрешив это,
+        # мы завели бы правило, которое ничего не значит и молча не работает.
+        job_title = str(data.get('job_title') or '').strip()
+        if job_title and subject_type != 'department':
+            return jsonify({
+                "error": "Должность сужает правило на отдел — выберите отдел",
+            }), 400
+        if len(job_title) > 255:
+            return jsonify({"error": "Слишком длинное название должности"}), 400
+        # «И все, кто выше» у правила с должностью держится сравнением уровня
+        # (queries.SUBJECT_MATCH), а сравнение с NULL истины не даёт. Порог по
+        # умолчанию — оператор: тот же, под которым заведён весь бэк-офис.
+        if job_title and min_role_level is None:
+            min_role_level = wiki_access.ROLE_LEVELS['operator']
 
         # ── Потолок должности ────────────────────────────────────────
         # Роль адресата нужна отдельно от порога: у правила на конкретного
@@ -1261,6 +1298,7 @@ def register(bp, wiki_route, db, log_ip):
             grant_subsections=bool(data.get('grant_subsections', True)),
             manage_subsections=manage_subsections,
             min_role_level=min_role_level,
+            job_title=job_title or None,
             created_by=ctx['user_id'],
         )
         queries.log_action(cursor, actor_id=ctx['user_id'], action='rule.upsert',
@@ -1269,6 +1307,7 @@ def register(bp, wiki_route, db, log_ip):
                            details={'rule_id': rule_id, 'subject_type': subject_type,
                                     'subject_id': subject_id, 'subject_role': subject_role,
                                     'min_role_level': min_role_level,
+                                    'job_title': job_title or None,
                                     'manage_subsections': manage_subsections,
                                     **permissions},
                            ip_address=log_ip())
@@ -1376,6 +1415,7 @@ def register(bp, wiki_route, db, log_ip):
             headed_department_ids=target['headed_department_ids'],
             direction_id=target['direction_id'], group_ids=target['group_ids'],
             wiki_role_ids=[r.get('id') for r in target['wiki_roles']],
+            job_title=target.get('job_title'),
         )
         # Тем же расчётом, что и у самого себя: объяснение прав обязано
         # совпадать с правами. Считать способности здесь отдельно значило бы

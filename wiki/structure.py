@@ -6,7 +6,7 @@
 
 import json
 
-from .access import ROLE_LEVELS
+from .access import ROLE_LEVELS, normalize_role
 from .schema import space_features
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -542,7 +542,7 @@ def move_section_to_space(cursor, section_id, *, space_id, parent_section_id=Non
 _RULE_KEYS = ('id', 'section_id', 'section_name', 'subject_type', 'subject_id',
               'subject_role', 'can_read', 'can_create', 'can_edit', 'can_delete',
               'can_publish', 'can_approve', 'grant_subsections', 'manage_subsections',
-              'min_role_level', 'subject_label')
+              'min_role_level', 'job_title', 'subject_label')
 
 
 def list_section_rules(cursor, section_id=None):
@@ -557,7 +557,7 @@ def list_section_rules(cursor, section_id=None):
         SELECT r.id, r.section_id, s.name AS section_name, r.subject_type, r.subject_id,
                r.subject_role, r.can_read, r.can_create, r.can_edit, r.can_delete,
                r.can_publish, r.can_approve, r.grant_subsections,
-               r.manage_subsections, r.min_role_level,
+               r.manage_subsections, r.min_role_level, r.job_title,
                CASE r.subject_type
                    WHEN 'department'      THEN (SELECT name FROM departments WHERE id = r.subject_id)
                    WHEN 'department_head' THEN (SELECT 'Глава: ' || name FROM departments WHERE id = r.subject_id)
@@ -579,26 +579,33 @@ def list_section_rules(cursor, section_id=None):
 
 def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject_role,
                         permissions, grant_subsections, created_by,
-                        min_role_level=None, manage_subsections=False):
+                        min_role_level=None, manage_subsections=False,
+                        job_title=None):
     """Создать или обновить правило. Уникальность — по паре (раздел, субъект).
 
     manage_subsections — право строить дерево внутри этой ветки. Отдельным
     аргументом, а не седьмым ключом permissions: шесть прав описывают
     содержимое раздела и попадают в capabilities_from_grants, а это — про
     устройство дерева, и в способности оно не превращается никогда.
+
+    job_title входит в ключ конфликта наравне с уровнем: без него четыре
+    должности «Маркетинга» (один отдел, один уровень 10) затирали бы друг друга
+    молча — сохранялась бы последняя. Пустая строка приводится к NULL, иначе
+    «без должности» и «должность ''» разъехались бы двумя разными правилами.
     """
+    job_title = (job_title or '').strip() or None
     cursor.execute(
         """
         INSERT INTO wiki_section_access_rules
             (section_id, subject_type, subject_id, subject_role,
              can_read, can_create, can_edit, can_delete, can_publish, can_approve,
-             grant_subsections, manage_subsections, min_role_level, created_by)
+             grant_subsections, manage_subsections, min_role_level, job_title, created_by)
         VALUES (%(section)s, %(stype)s, %(sid)s, %(srole)s,
                 %(read)s, %(create)s, %(edit)s, %(delete)s, %(publish)s, %(approve)s,
-                %(deep)s, %(manage)s, %(level)s, %(by)s)
+                %(deep)s, %(manage)s, %(level)s, %(job)s, %(by)s)
         ON CONFLICT (section_id, subject_type,
                      COALESCE(subject_id, -1), COALESCE(subject_role, ''),
-                     COALESCE(min_role_level, -1))
+                     COALESCE(min_role_level, -1), COALESCE(job_title, ''))
         DO UPDATE SET can_read          = EXCLUDED.can_read,
                       can_create        = EXCLUDED.can_create,
                       can_edit          = EXCLUDED.can_edit,
@@ -620,7 +627,7 @@ def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject
          'publish': permissions.get('can_publish', False),
          'approve': permissions.get('can_approve', False),
          'deep': grant_subsections, 'manage': bool(manage_subsections),
-         'level': min_role_level, 'by': created_by},
+         'level': min_role_level, 'job': job_title, 'by': created_by},
     )
     return cursor.fetchone()[0]
 
@@ -1110,3 +1117,267 @@ def list_audit(cursor, limit=100, offset=0, **filters):
             item['created_at'] = created.isoformat()
         items.append(item)
     return items
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ДОЛЖНОСТИ ВЕТКИ — из чего собирается матрица «Кому открыт раздел»
+#
+# До 04.09.2026 матрица была КОНСТАНТОЙ из четырёх строк (оператор, тренер,
+# супервайзер, руководитель группы) и рисовалась одинаково во всех ветках.
+# Для линии это правда: в СЗоВ и ОП людей различает роль OTP. Для отделов без
+# линии — нет: в «Маркетинге» роль у всех одна (marketing_manager), а
+# должности разные — видеограф, таргетолог, контекстолог, SMM-менеджер, — и
+# матрица предлагала выдать доступ «супервайзеру маркетинга», которого не
+# существует, при этом не предлагая ни одной настоящей должности отдела.
+#
+# Источник истины — САМО ДЕРЕВО: разделы-должности внутри ветки отдела. Так
+# владелец его и строит во вкладке «Структура», где раздел прямо помечается
+# «Должность» или «Отдел» (section_kind). Второй кандидат — фактические
+# должности сотрудников из базы — отвергнут: у СЗоВ он дал бы строку «Тренер»,
+# которой в дереве отдела нет, то есть матрица разошлась бы с оргструктурой,
+# нарисованной руками.
+#
+# Кого именно обозначает строка, выводим уже из данных:
+#   * имя совпало с названием роли на лестнице — правило пишется порогом
+#     min_role_level, ровно как раньше (ветки линии не меняются вовсе);
+#   * иначе ищем такую должность среди users.job_title этого отдела и пишем
+#     правило на неё. Сравнение НЕЧУВСТВИТЕЛЬНО к регистру, дефисам и ё —
+#     «HR-менеджер» в дереве и «HR менеджер» в кадрах это одна должность, и
+#     расходиться из-за дефиса они не должны.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Названия должностей, которые на самом деле означают роль OTP. Список закрытый
+# и намеренно короткий: это те слова, которыми в дереве подписаны ступени
+# лестницы. Всё остальное — должность бэк-офиса и ищется в users.job_title.
+_LADDER_TITLES = {
+    'руководитель': 'admin',
+    'руководитель группы': 'admin',
+    'руководитель отдела': 'admin',
+    'начальник отдела': 'admin',
+    'глава отдела': 'admin',
+    'директор': 'admin',
+    'супервайзер': 'sv',
+    'тренер': 'trainer',
+    'оператор': 'operator',
+    'стажер': 'trainee',
+}
+
+# Подпись строки, у которой на разделе уже есть правило, но в дереве такой
+# должности нет. Такие строки матрица показывает НАРАВНЕ с должностями ветки —
+# иначе выписанное правило молча уехало бы в свёрнутый блок «Точечные правила»,
+# где владелец его уже однажды не нашёл.
+_LEVEL_TITLES = {
+    10: 'Оператор', 20: 'Тренер', 30: 'Супервайзер',
+    40: 'Руководитель', 50: 'Супер-администратор',
+}
+
+# У самой нижней ступени порог NULL, а не 10, и это не косметика: role_level_of
+# отдаёт 0 для роли вне шкалы, и порог 10 отрезал бы такого человека от раздела,
+# открытого «всему отделу».
+_UNBOUNDED_ROLES = ('operator', 'trainee')
+
+
+def normalize_position_title(name):
+    """Название должности в сравнимый вид: регистр, ё, дефисы и пробелы.
+
+    «HR-менеджер», «HR менеджер» и «hr  Менеджер» — одна должность. Без этого
+    строка матрицы указывала бы на должность, которой ни у кого нет, и выданный
+    доступ не открывал бы ничего — молчаливый отказ ровно того класса, от
+    которого этот раздел лечили уже дважды.
+    """
+    text = (name or '').strip().lower().replace('ё', 'е')
+    cleaned = ''.join(ch if ch.isalnum() else ' ' for ch in text)
+    return ' '.join(cleaned.split())
+
+
+def _branch_anchor(cursor, section_id):
+    """Раздел-отдел над этим разделом: (section_id, department_id) или None.
+
+    То же правило, что и section_branch_department, но нужен ещё и САМ раздел —
+    от него вниз собираются должности ветки. Возвращать только отдел мало:
+    у одного отдела может быть ветка в разных пространствах.
+    """
+    cursor.execute(
+        """
+        WITH RECURSIVE up AS (
+            SELECT id, parent_section_id, department_id, 0 AS depth
+              FROM wiki_sections WHERE id = %s
+            UNION ALL
+            SELECT s.id, s.parent_section_id, s.department_id, up.depth + 1
+              FROM wiki_sections s JOIN up ON s.id = up.parent_section_id
+             -- Ограничитель на случай битого дерева, как в
+             -- section_branch_department: зациклиться тут значит подвесить запрос.
+             WHERE up.depth < 50
+        )
+        SELECT id, department_id FROM up
+         WHERE department_id IS NOT NULL
+         ORDER BY depth LIMIT 1
+        """,
+        (section_id,),
+    )
+    row = cursor.fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def _branch_position_sections(cursor, anchor_id):
+    """Разделы-должности внутри ветки, снизу вверх по подчинённости.
+
+    Порядок — от младших к старшим (сначала самые глубокие), потому что таким
+    матрица была всегда: «Оператор» первой строкой, «Руководитель группы»
+    последней. У «Маркетинга» это даёт видеографа, таргетолога, контекстолога и
+    SMM-менеджера, а руководителя — последним.
+
+    Архивные разделы не берём: архивный дубль «Оператора» дал бы вторую такую же
+    строку, а выключенная должность — строку, которой в отделе больше нет.
+    """
+    cursor.execute(
+        """
+        WITH RECURSIVE down AS (
+            SELECT id, parent_section_id, name, section_kind, position, 1 AS depth
+              FROM wiki_sections
+             WHERE parent_section_id = %s AND status = 'active'
+            UNION ALL
+            SELECT c.id, c.parent_section_id, c.name, c.section_kind, c.position,
+                   down.depth + 1
+              FROM wiki_sections c
+              JOIN down ON c.parent_section_id = down.id
+             WHERE c.status = 'active' AND down.depth < 50
+               -- Вложенная ветка ДРУГОГО отдела — уже не наши должности:
+               -- внутрь неё спускаться нельзя, иначе ОП и СЗоВ слились бы.
+               AND down.section_kind <> 'department'
+        )
+        SELECT id, name, depth, position FROM down
+         WHERE section_kind = 'common'
+         ORDER BY depth DESC, position, id
+        """,
+        (anchor_id,),
+    )
+    return [{'id': row[0], 'name': row[1], 'depth': row[2]} for row in cursor.fetchall()]
+
+
+def _department_job_titles(cursor, department_id):
+    """Должности отдела из кадров: {нормализованное имя: (как в базе, сколько людей)}.
+
+    Только работающие (status='working'): уволенный держал бы за собой строку
+    должности, которой в отделе уже нет. Фильтр по status, а не по is_active —
+    последний снят почти у всех (см. grantable_people).
+    """
+    cursor.execute(
+        """
+        SELECT btrim(u.job_title) AS title, MIN(u.role) AS role, COUNT(*) AS people
+          FROM users u
+         WHERE u.department_id = %s AND u.status = 'working'
+           AND COALESCE(btrim(u.job_title), '') <> ''
+         GROUP BY 1
+        """,
+        (department_id,),
+    )
+    found = {}
+    for title, role, people in cursor.fetchall():
+        found[normalize_position_title(title)] = {
+            'title': title, 'role': role, 'people': int(people)}
+    return found
+
+
+def _role_headcount(cursor, department_id):
+    """Сколько работающих в отделе на каждой роли OTP: {'sv': 4, ...}."""
+    cursor.execute(
+        """
+        SELECT lower(COALESCE(u.role, '')), COUNT(*)
+          FROM users u
+         WHERE u.department_id = %s AND u.status = 'working'
+         GROUP BY 1
+        """,
+        (department_id,),
+    )
+    return {row[0]: int(row[1]) for row in cursor.fetchall()}
+
+
+def branch_positions(cursor, section_id, existing_rules=()):
+    """Строки матрицы «Кому открыт раздел» для ветки этого раздела.
+
+    Пустой список означает «раздел вне ветки отдела» — форма в этом случае
+    остаётся на прежнем поведении (правила на роль по всей компании), и это
+    единственный режим, где строки по-прежнему заданы во фронте.
+
+    existing_rules — уже выписанные правила раздела. Правило на отдел ветки,
+    которому не нашлось должности в дереве, добавляется отдельной строкой:
+    сузив список, мы иначе молча спрятали бы боевую выдачу.
+    """
+    anchor = _branch_anchor(cursor, section_id)
+    if not anchor:
+        return []
+    anchor_id, department_id = anchor
+
+    titles = _department_job_titles(cursor, department_id)
+    headcount = _role_headcount(cursor, department_id)
+
+    rows, seen = [], set()
+
+    def add(*, key, label, level, job_title, people, source):
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append({
+            'key': key, 'label': label, 'min_role_level': level,
+            'job_title': job_title, 'people': people, 'source': source,
+            # Адресат строки — всегда отдел ветки: голая роль пробила бы его
+            # границу (супервайзер продаж увидел бы СЗоВ).
+            'subject_type': 'department', 'subject_id': department_id,
+            'hint': 'и все, кто выше — весь отдел' if level is None else 'и выше',
+        })
+
+    for section in _branch_position_sections(cursor, anchor_id):
+        normalized = normalize_position_title(section['name'])
+        role = _LADDER_TITLES.get(normalized)
+        if role:
+            level = None if role in _UNBOUNDED_ROLES else ROLE_LEVELS[role]
+            add(key=_row_key(level, None), label=section['name'], level=level,
+                job_title=None, people=headcount.get(role, 0), source='ladder')
+            continue
+        match = titles.get(normalized)
+        # Должности нет ни на лестнице, ни в кадрах отдела — строку всё равно
+        # показываем: раздел в дереве есть, и выписанное на него правило начнёт
+        # работать, как только должность появится у человека. Ноль сотрудников
+        # форма показывает прямо, чтобы опечатка не выглядела рабочей выдачей.
+        job_title = match['title'] if match else section['name']
+        level = ROLE_LEVELS.get(
+            normalize_role((match or {}).get('role')), ROLE_LEVELS['operator'])
+        add(key=_row_key(level, job_title), label=section['name'], level=level,
+            job_title=job_title, people=(match or {}).get('people', 0),
+            source='job_title')
+
+    # Правила, которым в дереве должности не нашлось: строка добавляется в
+    # конец, чтобы выдача осталась на виду и её можно было снять оттуда же.
+    for rule in existing_rules or ():
+        if rule.get('subject_type') != 'department':
+            continue
+        if int(rule.get('subject_id') or 0) != int(department_id):
+            continue
+        level, job_title = rule.get('min_role_level'), rule.get('job_title')
+        key = _row_key(level, job_title)
+        if key in seen:
+            continue
+        effective = level or ROLE_LEVELS['operator']
+        label = job_title or _LEVEL_TITLES.get(effective, 'Должность')
+        if job_title:
+            people = titles.get(normalize_position_title(job_title), {}).get('people', 0)
+        else:
+            # Носители ровно этой ступени, а не «все, кто не ниже»: строка
+            # подписана одной должностью, и число рядом обязано означать её же.
+            people = sum(count for role, count in headcount.items()
+                         if ROLE_LEVELS.get(normalize_role(role)) == effective)
+        add(key=key, label=label, level=level, job_title=job_title,
+            people=people, source='rule')
+
+    return rows
+
+
+def _row_key(level, job_title):
+    """Ключ строки матрицы — её АДРЕСАТ, а не место в списке.
+
+    От него зависит, какая строка раскрыта после сохранения, поэтому индекс
+    массива или имя раздела сюда не годятся: первое поедет при добавлении
+    должности, второе — при переименовании.
+    """
+    return '%s|%s' % ('all' if level is None else level, job_title or '')
