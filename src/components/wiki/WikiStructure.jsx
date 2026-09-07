@@ -11,6 +11,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { selectableSections, sectionPathLabel } from './sectionPicker';
+import { plural } from './guestAccess';
 import WikiSectionAccess, { branchDepartment } from './WikiSectionAccess';
 import WikiAccessProbe from './WikiAccessProbe';
 import {
@@ -277,11 +278,16 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
                         hint: orphan ? 'нет правил' : String(section.rules_count),
                         onSelect: () => onAccess(section),
                     },
-                    /* Архив уносит раздел вместе со статьями внутри — решение
-                       владельца 27.08.2026 оставило его у того, кто ветку выдал.
-                       Поэтому пункт остаётся на ГЛОБАЛЬНОЙ способности, а не на
-                       построчном признаке. */
-                    canManageStructure && { key: 'archive', label: 'Убрать в архив', icon: Archive,
+                    /* Архив — такой же построчный признак, как и остальные:
+                       решение владельца 07.09.2026 отдало его держателю ветки
+                       («раз при выдаче есть кнопка заводить подразделы, должен
+                       быть и архив для них»). На глобальной способности пункт
+                       висеть больше не может — она у держателя ветки ложная в
+                       обе стороны: способности нет, а право есть; и наоборот,
+                       носитель одного лишь can_manage_access видел бы кнопку,
+                       которой сервер не даст. */
+                    section.can_archive_section && {
+                      key: 'archive', label: 'Убрать в архив', icon: Archive,
                       danger: true, separatorBefore: true,
                       onSelect: () => onArchive(section) },
                 ]}
@@ -351,11 +357,25 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     /* Архивное пространство до дерева не доходит: его разделы правит не эта
        вкладка, а возврат из архива — шапка раздела. */
     const activeSpaces = useMemo(() => spaces.filter((x) => x.status !== 'archived'), [spaces]);
+    /* Во вкладке — только то, что этот человек вправе вернуть. Признак строки,
+       а не глобальный флаг: с 07.09.2026 архивные разделы приезжают и держателю
+       ветки, но через can_grant_access в ответ могут попасть и архивные разделы
+       соседних веток его отдела. Кнопка «Вернуть» на них ответила бы 403 —
+       поэтому строки без права сюда не доходят вовсе. */
     const archivedSections = useMemo(
-        () => sections.filter((x) => x.status === 'archived'), [sections]);
+        () => sections.filter((x) => x.status === 'archived' && x.can_archive_section),
+        [sections]);
 
     const liveSections = useMemo(
         () => sections.filter((x) => x.status !== 'archived'), [sections]);
+
+    /* Держатель ветки уходит со вкладки сам, когда вернул последний раздел:
+       иначе он остался бы на «Архиве», у которого больше нет кнопки, — экран
+       без выделенной вкладки читается как сбой. */
+    const archiveTabOpen = canManageStructure || archivedSections.length > 0;
+    useEffect(() => {
+        if (tab === 'archive' && !archiveTabOpen) setTab('sections');
+    }, [tab, archiveTabOpen]);
 
     // Дерево строим один раз на изменение списка, а не на каждый рендер строки.
     // Только живые разделы: архивные живут на своей вкладке, а рядом с живым
@@ -443,6 +463,21 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     };
 
     const archiveSection = (section) => {
+        /* Подтверждение — тем же разговором, что и у статьи (WikiCatalog):
+           архив раздела не переводит статьи в «Архив» каталога, а убирает их с
+           витрины у всех, кому раздел был открыт. Число берём из articles_count
+           (общий счётчик раздела), а не из readable_count: уносится всё, а не
+           только то, что видит сам нажимающий. */
+        const count = section.articles_count || 0;
+        if (!window.confirm(`Убрать раздел «${section.name}» в архив?
+
+`
+            + (count
+                ? `${count} ${plural(count, 'статья', 'статьи', 'статей')} внутри `
+                  + `${plural(count, 'пропадёт', 'пропадут', 'пропадут')} из списков `
+                  + 'и из поиска у всех, кому раздел был открыт. '
+                : 'Раздел пропадёт из дерева. ')
+            + 'Вернуть его можно на вкладке «Архив».')) return;
         setBusy(true);
         axios.delete(`${base}/sections/${section.id}`, { headers })
             .then(() => { showToast?.('Раздел убран в архив', 'success'); reload(); })
@@ -494,15 +529,20 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
 
             <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
                 {[
-                    /* Супервайзеру виден только «Архив» без правки: архив — это
-                       правка дерева, которой у него нет.
-                       Вкладки «Пространства» здесь больше нет: пространство
+                    /* Вкладки «Пространства» здесь больше нет: пространство
                        настраивается в шапке раздела, рядом с переключателем, —
                        там же, где его выбирают. Две точки правки одного и того
                        же расходятся, и вторая всегда оказывается забытой. */
                     { key: 'sections', label: 'Разделы', icon: FolderTree,
-                      count: sections.filter((x) => x.status !== 'archived').length },
-                    canManageStructure && { key: 'archive', label: 'Архив', icon: Archive,
+                      count: liveSections.length },
+                    /* «Архив» открыт и держателю ветки: с 07.09.2026 он убирает
+                       туда свои подразделы, и без вкладки это была бы
+                       односторонняя дверь — раздел ушёл, вернуть неоткуда.
+                       Пустую вкладку показываем только тому, кто ведёт структуру:
+                       ему она объясняет, что архив пуст, а держателю ветки
+                       пустой «Архив» — лишний ярлык ни о чём. */
+                    archiveTabOpen && {
+                      key: 'archive', label: 'Архив', icon: Archive,
                       count: archivedSections.length },
                 ].filter(Boolean).map(({ key, label, icon: Icon, count }) => (
                     <button

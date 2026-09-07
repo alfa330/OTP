@@ -523,10 +523,20 @@ class StructureTreeShapeTest(_RouteHarness, unittest.TestCase):
     оргструктура на экране.
     """
 
-    def _stub_tree(self, *, allowed=(), role_levels=None):
+    def _stub_tree(self, *, allowed=(), role_levels=None, extra=()):
         rows = [_section_row(*row) for row in _TREE_ROWS]
+        rows.extend(extra)
+        # Чем ответили на include_archived — под набор про видимость архива:
+        # заглушка обязана уметь и отдать архивные строки, и не отдать их.
+        self.archived_asked = []
+
+        def _list_sections(cursor, **kw):
+            self.archived_asked.append(bool(kw.get('include_archived')))
+            return [dict(r) for r in rows
+                    if kw.get('include_archived') or r['status'] == 'active']
+
         for name, value in (
-            ('list_sections', lambda cursor, **kw: [dict(r) for r in rows]),
+            ('list_sections', _list_sections),
             ('list_spaces', lambda cursor, **kw: [{'id': 11, 'name': 'Таксопарки'}]),
             ('public_departments_by_section', lambda cursor, ids: {}),
             ('article_counts_by_section', lambda cursor, ids: {}),
@@ -613,6 +623,63 @@ class StructureTreeShapeTest(_RouteHarness, unittest.TestCase):
         sections = self._sections(client.get('/api/wiki/structure'))
         self.assertEqual(set(sections), {32, 1, 19, 2, 3, 4})
         self.assertFalse(any(s['context_only'] for s in sections.values()))
+
+    # ── Архивные разделы в ответе ────────────────────────────────────────
+    #
+    # Решение владельца 07.09.2026: держатель ветки убирает свои подразделы в
+    # архив. Без этих строк архив был бы односторонней дверью — раздел уходит,
+    # а вернуть его неоткуда: кнопка «Вернуть» живёт только на архивной строке
+    # ответа. Границу держит can_archive_section, он же и режет чужое.
+    _ARCHIVED_MINE = 5     # под «Супервайзером» (3) — внутри выданной ветки
+    _ARCHIVED_ALIEN = 6    # под «Коммерческим отделом» (32) — вне её
+
+    def _stub_archive(self, **kwargs):
+        mine = _section_row(self._ARCHIVED_MINE, 3, 'Стажёр', None)
+        alien = _section_row(self._ARCHIVED_ALIEN, 32, 'Старая вики', None)
+        mine['status'] = alien['status'] = 'archived'
+        self._stub_tree(extra=(mine, alien), **kwargs)
+
+    def test_branch_holder_sees_his_own_archived_subsection(self):
+        """Он его туда и убрал — значит обязан видеть, что убрал."""
+        self._stub_archive(allowed=())
+        client, _ = self.build(make_context('admin', department_id=1),
+                               manage_sections=(3,))
+        sections = self._sections(client.get('/api/wiki/structure'))
+
+        self.assertEqual(self.archived_asked, [True],
+                         'архивные разделы у держателя ветки не запрошены')
+        self.assertIn(self._ARCHIVED_MINE, sections)
+        self.assertTrue(sections[self._ARCHIVED_MINE]['can_archive_section'])
+        # Заводить подразделы В АРХИВЕ нельзя: признак считается по самому
+        # разделу, а архивный из manage выпал.
+        self.assertFalse(sections[self._ARCHIVED_MINE]['can_add_subsection'])
+
+    def test_branch_holder_does_not_see_a_foreign_archived_section(self):
+        """Иначе на чужой строке встала бы кнопка «Вернуть» с ответом 403."""
+        self._stub_archive(allowed=())
+        client, _ = self.build(make_context('admin', department_id=1),
+                               manage_sections=(3,))
+        sections = self._sections(client.get('/api/wiki/structure'))
+        self.assertNotIn(self._ARCHIVED_ALIEN, sections)
+
+    def test_archive_stays_shut_without_a_branch(self):
+        """Кому дерево строить негде, тому и архивных строк не полагается."""
+        self._stub_archive(allowed=(3, 4), role_levels={2: 40, 3: 30, 4: 20})
+        client, _ = self.build(make_context('sv', department_id=1))
+        sections = self._sections(client.get('/api/wiki/structure'))
+
+        self.assertEqual(self.archived_asked, [False])
+        self.assertNotIn(self._ARCHIVED_MINE, sections)
+        self.assertNotIn(self._ARCHIVED_ALIEN, sections)
+
+    def test_the_anchor_itself_is_not_archivable(self):
+        """Ветку человеку открыл вышестоящий — стереть свою границу нельзя."""
+        self._stub_archive(allowed=())
+        client, _ = self.build(make_context('admin', department_id=1),
+                               manage_sections=(3,))
+        sections = self._sections(client.get('/api/wiki/structure'))
+        self.assertFalse(sections[3]['can_archive_section'])
+        self.assertTrue(sections[4]['can_archive_section'])
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')

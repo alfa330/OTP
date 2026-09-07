@@ -15,11 +15,17 @@ can_manage_structure роли 'admin', мы открыли бы на запис�
 бы решение владельца 21.08.2026 («к другому отделу он не может притронуться»).
 Оно остаётся в силе, и первый набор здесь это сторожит.
 
-Границы права (решение владельца 27.08.2026 — «заводить и править»):
+Границы права (решение владельца 27.08.2026 «заводить и править», расширенное
+07.09.2026 архивом — «при выдаче есть кнопка заводить подразделы, значит у него
+и должен быть доступ отправлять их в архив»):
   * заводить подразделы — внутри выданного раздела и всего, что под ним;
-  * править — сами подразделы, то есть разделы, чей РОДИТЕЛЬ в этой ветке;
-    выданный раздел-якорь не его: его открыл вышестоящий;
-  * архив, публичность, владелец и перенос в другую ветку — не его.
+  * править и убирать в архив (а также возвращать оттуда) — сами подразделы, то
+    есть разделы, чей РОДИТЕЛЬ в этой ветке; выданный раздел-якорь не его: его
+    открыл вышестоящий;
+  * архив раздела с ЖИВЫМИ подразделами — не его: архив не каскадный, и дети
+    остались бы активными под архивным родителем, выпав из его управления
+    целиком;
+  * публичность, владелец и перенос в другую ветку — не его.
 
 Наборы герметичные: боевая база не читается. Распространение права по дереву
 проверяет отдельный набор над настоящим SQL — tests/test_wiki_section_rights.py
@@ -177,14 +183,53 @@ class BranchHolderBuildsTest(_RouteHarness, unittest.TestCase):
         self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_OUTSIDE_BRANCH')
         self.assertEqual(self.updated, [])
 
-    def test_does_not_archive(self):
-        """«Заводить и править» — архив уносит раздел вместе со статьями внутри."""
+    # ── Убирает подразделы в архив ───────────────────────────────────────
+    def test_archives_a_subsection(self):
+        """Решение владельца 07.09.2026, отменяющее «заводить и править».
+
+        Дословно: «при выдаче есть кнопка заводить подразделы — значит у него и
+        должен быть доступ отправлять их в архив».
+        """
         client, cursor = self._client()
-        cursor.fetchone.return_value = section_row(parent=BRANCH)
+        cursor.fetchone.side_effect = [section_row(parent=BRANCH), None]
         response = client.delete('/api/wiki/sections/30')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.get_json(), {'status': 'archived'})
+        self.assertEqual(self.updated, [(30, {'status': 'archived'})])
+
+    def test_does_not_archive_the_anchor(self):
+        """Якорь ветки ему открыл вышестоящий — унести свою границу нельзя.
+
+        Граница у архива та же, что у переименования: проверяется РОДИТЕЛЬ.
+        """
+        client, cursor = self._client()
+        cursor.fetchone.return_value = section_row(parent=32, name='Коммерческий директор')
+        response = client.delete('/api/wiki/sections/%d' % ANCHOR)
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.get_json().get('code'),
-                         'WIKI_SECTION_ARCHIVE_FORBIDDEN')
+        self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_OUTSIDE_BRANCH')
+        self.assertEqual(self.updated, [])
+
+    def test_does_not_archive_a_section_with_live_subsections(self):
+        """Архив не каскадный: живые дети остались бы под архивным родителем.
+
+        Обход прав обрывается на неактивном узле (queries._SECTION_RIGHTS_CTE),
+        поэтому одно нажатие уносило бы из управления ВСЁ поддерево, ни строчки
+        в нём не изменив. Носителя способности это правило не касается.
+        """
+        client, cursor = self._client()
+        # Второй fetchone — ответ section_has_active_children.
+        cursor.fetchone.side_effect = [section_row(parent=BRANCH), (1,)]
+        response = client.delete('/api/wiki/sections/30')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_HAS_SUBSECTIONS')
+        self.assertEqual(self.updated, [])
+
+    def test_archiving_twice_writes_nothing(self):
+        """Строка архивного раздела теперь приезжает и держателю ветки."""
+        client, cursor = self._client()
+        cursor.fetchone.return_value = section_row(parent=BRANCH, status='archived')
+        response = client.delete('/api/wiki/sections/30')
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(self.updated, [])
 
     def test_does_not_make_a_subsection_public(self):
@@ -214,14 +259,19 @@ class BranchHolderBuildsTest(_RouteHarness, unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_OWNER_FORBIDDEN')
 
-    def test_does_not_restore_from_archive(self):
+    def test_restores_from_archive(self):
+        """Архив без возврата был бы односторонней дверью.
+
+        Работает это без правки обхода прав: сам архивный раздел из manage
+        выпал (queries._SECTION_RIGHTS_CTE не берёт неактивный узел), но граница
+        смотрит на его РОДИТЕЛЯ, а тот остался активным и в ветке.
+        """
         client, cursor = self._client()
         cursor.fetchone.return_value = section_row(parent=BRANCH, status='archived')
         response = client.patch('/api/wiki/sections/30',
                                 json={'space_id': 11, 'status': 'active'})
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.get_json().get('code'),
-                         'WIKI_SECTION_ARCHIVE_FORBIDDEN')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(self.updated[0][1]['status'], 'active')
 
     def test_does_not_list_every_section_of_the_space(self):
         """GET /sections — справочник целиком, а не своя ветка."""
@@ -456,10 +506,44 @@ class StructureScreenSourceTest(unittest.TestCase):
         self.assertIn("section.can_add_subsection && {", self.code)
         self.assertIn("section.can_edit_section && {", self.code)
 
-    def test_archive_stays_on_the_global_capability(self):
-        """Архив уносит статьи — он остался у того, кто ветку выдал."""
-        archive = re.search(r"[^\n]*key: 'archive'[^\n]*", self.code).group(0)
-        self.assertIn('canManageStructure', archive)
+    def test_archive_is_per_row(self):
+        """С 07.09.2026 архив подраздела — право держателя ветки.
+
+        Глобальный флаг на этом месте лжёт в обе стороны: у держателя ветки
+        способности нет, а право есть; носитель одного лишь can_manage_access,
+        наоборот, видел бы кнопку, которой сервер не даст.
+
+        Проверяем ПУНКТ МЕНЮ — первое вхождение key: 'archive' в файле. Вкладка
+        со вторым вхождением проверяется отдельно ниже: правка одной из двух
+        строк оставляла бы вторую закрытой при зелёном тесте.
+        """
+        # Флаг стоит перед key — либо в той же строке, либо в предыдущей: у
+        # остальных пунктов меню он живёт отдельной строкой, и архив принял тот
+        # же вид. Тест обязан читать пункт ЦЕЛИКОМ, иначе он поймает только
+        # оформление.
+        archive = re.search(r"[^\n]*(?:\n\s*)?key: 'archive'[^\n]*", self.code).group(0)
+        self.assertIn('section.can_archive_section', archive)
+        self.assertNotIn('canManageStructure', archive)
+
+    def test_archive_tab_opens_for_branch_holders(self):
+        """Иначе архив односторонний: раздел ушёл, вкладки нет, вернуть нечем."""
+        self.assertIn('archiveTabOpen', self.code)
+        self.assertIn('canManageStructure || archivedSections.length > 0', self.code)
+
+    def test_archive_tab_lists_only_what_can_be_restored(self):
+        """Через can_grant_access в ответ доходят и чужие архивные разделы.
+
+        Кнопка «Вернуть» на них ответила бы 403 — строки без права до вкладки
+        доходить не должны вовсе.
+        """
+        self.assertIn("x.status === 'archived' && x.can_archive_section", self.code)
+
+    def test_archiving_a_section_asks_first(self):
+        """Тот же разговор, что и у статьи: архив уносит содержимое с витрины."""
+        archive_fn = re.search(r'const archiveSection = .*?\n    };', self.src,
+                               re.S).group(0)
+        self.assertIn('window.confirm', archive_fn)
+        self.assertIn('articles_count', archive_fn)
 
     def test_top_level_section_button_stays_global(self):
         """«+ Раздел» у пространства заводит НОВУЮ ветку, а не подраздел."""

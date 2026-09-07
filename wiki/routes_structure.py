@@ -364,8 +364,33 @@ def register(bp, wiki_route, db, log_ip):
                                                      master_key=False)
         readable_counts = structure.article_counts_by_section(cursor, readable)
 
+        # Где человек вправе строить дерево. None — без границы (носитель
+        # can_manage_structure). Множество — выданные ему ветки: по нему строка
+        # получает свои can_add_subsection / can_edit_section / can_archive_section,
+        # и фронт не считает границу второй раз. Ровно та же причина, что у
+        # can_grant_access ниже: второй расчёт на клиенте расходится всегда в
+        # сторону «кнопку показали, а API ответил 403».
+        manage = _manage_sections(cursor, ctx)
+
         spaces = structure.list_spaces(cursor, include_archived=can_manage)
-        sections = structure.list_sections(cursor, include_archived=can_manage)
+        # Архивные РАЗДЕЛЫ приезжают и держателю ветки — решение владельца
+        # 07.09.2026 отдало ему архив собственных подразделов, а архив без
+        # возврата был бы односторонней дверью: раздел уходит и исчезает с
+        # экрана бесследно (вкладка «Структура» архивные не рисует), вернуть
+        # его человеку неоткуда. Строку отсеет общий фильтр видимости ниже —
+        # архивный раздел заведомо не в allowed и не в manage, и остаётся он
+        # только по can_edit_here, то есть внутри своей ветки.
+        #
+        # Пространства остаются на can_manage: архивное пространство держателю
+        # ветки не нужно — вернуть его всё равно может только супер-админ.
+        #
+        # Побочный эффект принят сознательно: в by_id теперь попадают архивные
+        # разделы, поэтому подъём за отделом ветки (branch_department) больше не
+        # обрывается на архивном предке. У носителя способности так было всегда;
+        # держателю ветки это может добавить can_grant_access на живом разделе,
+        # чей предок в архиве, — в границах его же отдела.
+        sections = structure.list_sections(
+            cursor, include_archived=can_manage or bool(manage))
         # Кому виден публичный раздел: форме нужно проставить галочки, а списку —
         # показать, что «публичный» здесь не значит «всем».
         public_departments = structure.public_departments_by_section(
@@ -381,13 +406,6 @@ def register(bp, wiki_route, db, log_ip):
         # Раздающему без границы отдела она не нужна вовсе — у мастер-ключа сняты
         # все три, и считать дерево ради ответа «да» незачем.
         role_levels = {} if grant_departments is None else structure.section_role_levels(cursor)
-        # Где человек вправе строить дерево. None — без границы (носитель
-        # can_manage_structure). Множество — выданные ему ветки: по нему строка
-        # получает свои can_add_subsection / can_edit_section, и фронт не считает
-        # границу второй раз. Ровно та же причина, что у can_grant_access ниже:
-        # второй расчёт на клиенте расходится всегда в сторону «кнопку показали,
-        # а API ответил 403».
-        manage = _manage_sections(cursor, ctx)
         by_id = {s['id']: s for s in sections}
         branch_of = {}
 
@@ -427,10 +445,11 @@ def register(bp, wiki_route, db, log_ip):
                              ctx['otp_role'], role_levels.get(section['id']))))
             )
             # Право строить дерево ИМЕННО ТУТ. Заводить подразделы — внутри
-            # выданной ветки и всего, что под ней; править — сами подразделы,
-            # то есть разделы, чей РОДИТЕЛЬ в этой ветке. Якорь ветки человек
-            # не правит: его открыл вышестоящий, и переписывать собственную
-            # границу нельзя (та же граница стоит на PATCH /sections/<id>).
+            # выданной ветки и всего, что под ней; править и убирать в архив —
+            # сами подразделы, то есть разделы, чей РОДИТЕЛЬ в этой ветке. Якорь
+            # ветки человек не правит и не архивирует: его открыл вышестоящий, и
+            # переписывать собственную границу нельзя (та же граница стоит на
+            # PATCH/DELETE /sections/<id>).
             #
             # Считаем по manage, а НЕ по can_manage: can_manage — это «структура
             # ИЛИ мастер-ключ», и носитель одного лишь can_manage_access видел
@@ -440,6 +459,14 @@ def register(bp, wiki_route, db, log_ip):
             # то же одной функцией.
             can_add_here = manage is None or section['id'] in manage
             can_edit_here = manage is None or section['parent_section_id'] in manage
+            # Архив — по той же формуле, что и правка: решение владельца
+            # 07.09.2026 читается «раз он заводит подразделы, он же их и
+            # убирает», а подраздел — это раздел, чей РОДИТЕЛЬ в ветке. Якорь
+            # ветки защищён этим автоматически. Переиспользовать здесь
+            # can_add_here нельзя: он считается по самому разделу, и держатель
+            # получил бы архив собственного якоря — то есть право стереть свою
+            # же границу.
+            can_archive_here = can_edit_here
             # Раздел, которым человек УПРАВЛЯЕТ, остаётся в ответе, даже если он
             # его не читает. Иначе супервайзер не увидел бы во вкладке
             # «Структура» ни одной ветки своего отдела: правило на чтение ему
@@ -448,6 +475,14 @@ def register(bp, wiki_route, db, log_ip):
             # тем же способом, что и чужие разделы у администратора.
             if (section['id'] not in allowed and not can_manage
                     and not can_grant_here and not can_add_here and not can_edit_here):
+                continue
+            # Архивная строка — только тому, кто вправе её вернуть. По
+            # can_grant_here сюда прошли бы имена архивных разделов соседних
+            # веток отдела, и на каждой встала бы кнопка «Вернуть», на которую
+            # сервер ответит 403: та самая расходящаяся с сервером кнопка,
+            # против которой построены все признаки в этом ответе.
+            if (section['status'] == 'archived'
+                    and not can_manage and not can_archive_here):
                 continue
             permissions = wiki_access.resolve_article_permissions(
                 capabilities=ctx['capabilities'],
@@ -466,6 +501,7 @@ def register(bp, wiki_route, db, log_ip):
             section['can_grant_access'] = can_grant_here
             section['can_add_subsection'] = can_add_here
             section['can_edit_section'] = can_edit_here
+            section['can_archive_section'] = can_archive_here
             section['public_department_ids'] = public_departments.get(section['id'], [])
             section['context_only'] = False
             visible.append(section)
@@ -506,6 +542,7 @@ def register(bp, wiki_route, db, log_ip):
                 node['can_grant_access'] = False
                 node['can_add_subsection'] = False
                 node['can_edit_section'] = False
+                node['can_archive_section'] = False
                 node['public_department_ids'] = public_departments.get(node['id'], [])
                 node['context_only'] = True
                 shown.add(node['id'])
@@ -819,16 +856,31 @@ def register(bp, wiki_route, db, log_ip):
                             "code": _OUTSIDE_MY_BRANCH[1]}), 403
 
         if request.method == 'DELETE':
-            # Архив уносит раздел вместе со статьями внутри, и решение владельца
-            # 27.08.2026 — «заводить и править»: снос ветки остаётся у того, кто
-            # её выдал. Отказ отдельным текстом, а не общим «нет прав»: человек
-            # только что переименовал этот же раздел, и «нет прав» выглядело бы
-            # поломкой.
-            if manage is not None:
+            # Архив подраздела — держателю ветки. Решение владельца 07.09.2026,
+            # отменяющее «заводить и править» от 27.08.2026: раз при выдаче есть
+            # тумблер «Может заводить подразделы», у него же должен быть и архив
+            # для них. Граница осталась одна и та же — проверка родителя выше:
+            # свой якорь он по-прежнему не трогает.
+            #
+            # Повторный архив молчит вместо второй записи в журнале: строка
+            # архивного раздела теперь приезжает и держателю ветки, а «убрал в
+            # архив то, что уже в архиве» — не событие, которое стоит хранить.
+            if section_status == 'archived':
+                return jsonify({"status": "archived"})
+            # Но НЕ раздел с живыми подразделами — и только для держателя ветки.
+            # Архив не каскадный: статус меняется у одной строки, а живые дети
+            # остаются активными с архивным родителем. Обход прав обрывается на
+            # неактивном узле (queries._SECTION_RIGHTS_CTE), поэтому одним
+            # нажатием человек терял бы из виду и из управления ВСЁ поддерево, ни
+            # строчки в нём не изменив, — а на экране осиротевшие разделы всплыли
+            # бы в корень пространства. Носителя способности это правило не
+            # касается: у него архив середины ветки был и остаётся его решением.
+            if manage is not None and structure.section_has_active_children(
+                    cursor, section_id):
                 return jsonify({
-                    "error": "Убрать раздел в архив может вышестоящий руководитель",
-                    "code": "WIKI_SECTION_ARCHIVE_FORBIDDEN",
-                }), 403
+                    "error": "Внутри есть подразделы — сначала уберите в архив их",
+                    "code": "WIKI_SECTION_HAS_SUBSECTIONS",
+                }), 400
             structure.update_section(cursor, section_id, {'status': 'archived'})
             queries.log_action(cursor, actor_id=ctx['user_id'], action='section.archive',
                                entity_type='section', entity_id=section_id,
@@ -839,9 +891,10 @@ def register(bp, wiki_route, db, log_ip):
 
         # ── Что именно вправе поменять держатель ветки ───────────────────
         #
-        # Название, описание, значок, порядок и отдел ветки — да. Публичность,
-        # архив, владелец и родитель — нет: первое открывает раздел мимо ветки,
-        # второе уносит статьи, третье и четвёртое двигают сам раздел по дереву.
+        # Название, описание, значок, порядок, отдел ветки и статус (архив и
+        # возврат из него, решение владельца 07.09.2026) — да. Публичность,
+        # владелец и родитель — нет: первое открывает раздел мимо ветки, второе
+        # и третье двигают сам раздел по дереву.
         #
         # Отказ идёт СРАВНЕНИЕМ с текущим значением, а не по наличию ключа:
         # форма шлёт весь набор полей при каждом сохранении, и запрет «по ключу»
@@ -854,12 +907,20 @@ def register(bp, wiki_route, db, log_ip):
                     "error": "Публичным раздел делает вышестоящий руководитель",
                     "code": "WIKI_SECTION_PUBLIC_FORBIDDEN",
                 }), 403
-            if data.get('status') in ('active', 'archived') and data['status'] != section_status:
+            # Статус здесь НЕ запрещён: возврат из архива идёт именно этой
+            # дверью (фронт шлёт PATCH {status:'active'}), а архив без возврата
+            # был бы односторонним. Работает это без правки обхода прав: сам
+            # архивный раздел из manage выпал, но проверка выше смотрит на его
+            # РОДИТЕЛЯ, а тот остался активным и в ветке.
+            #
+            # Тем же путём проходит и архив через PATCH — держателю ветки это
+            # разрешено ровно так же, как через DELETE.
+            if (data.get('status') == 'archived' and section_status != 'archived'
+                    and structure.section_has_active_children(cursor, section_id)):
                 return jsonify({
-                    "error": "Убрать раздел в архив или вернуть из архива может "
-                             "вышестоящий руководитель",
-                    "code": "WIKI_SECTION_ARCHIVE_FORBIDDEN",
-                }), 403
+                    "error": "Внутри есть подразделы — сначала уберите в архив их",
+                    "code": "WIKI_SECTION_HAS_SUBSECTIONS",
+                }), 400
             if 'owner_user_id' in data and _int_or_none(
                     data['owner_user_id']) != section_owner_id:
                 return jsonify({

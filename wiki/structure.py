@@ -461,6 +461,25 @@ def section_exists(cursor, section_id):
     return row[0] if row else None
 
 
+def section_has_active_children(cursor, section_id):
+    """Есть ли под разделом ЖИВЫЕ подразделы.
+
+    Нужен архиву: он меняет статус одной строки и потомков не трогает, поэтому
+    убрать раздел с живыми детьми — значит оставить их активными под архивным
+    родителем. Обход прав на таком узле обрывается (queries._SECTION_RIGHTS_CTE
+    требует status='active' на каждом шаге), и всё поддерево молча уходит из
+    управления. Держателю ветки такой архив закрыт, см. routes_structure.
+
+    Только ПРЯМЫЕ дети: если их нет, нет и внуков — архивировать нечего.
+    """
+    cursor.execute(
+        "SELECT 1 FROM wiki_sections"
+        " WHERE parent_section_id = %s AND status = 'active' LIMIT 1",
+        (section_id,),
+    )
+    return cursor.fetchone() is not None
+
+
 def section_subtree_ids(cursor, section_id):
     """Раздел и все его потомки, от корня вниз.
 
