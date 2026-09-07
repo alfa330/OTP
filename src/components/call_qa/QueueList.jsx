@@ -10,9 +10,11 @@ import { iosCard, IosBadge, scoreTone } from '../ui/ios';
  * Метки отвечают на один вопрос — что открывать первым, поэтому на бейдже
  * короткая подпись, а полная формулировка уходит в подсказку. */
 
-export const SUBJECT_CHAT = 'wz_episode';
-export const isChat = (subject) => subject === SUBJECT_CHAT;
-export const subjectTitle = (subject, id) => (isChat(subject) ? `Чат #${id}` : `Звонок #${id}`);
+// Знание о субъектах — в общем модуле: переписок теперь три вида (Wazzup у ОП,
+// Chat2Desk у СЗоВ, ChatApp у Тез КЦ), и сравнение с одной строкой открывало бы
+// чат как звонок. Реэкспорт оставлен: на эти имена ссылается CallQaView.
+export { SUBJECT_WZ_EPISODE as SUBJECT_CHAT, isChat, subjectTitle } from './subjects';
+import { isChat, subjectTitle, SUBJECT_IMPORTED_CALL, SOURCE_LABEL } from './subjects';
 
 // Порядок ключей повторяет call_qa/review/queue.REASON_PRIORITY: бэкенд отдаёт
 // причины по убыванию серьёзности, поэтому первая метка — главная.
@@ -81,6 +83,12 @@ export default function QueueList({ items, onOpen }) {
                                 <span className="truncate text-[14px] font-semibold text-slate-900">
                                     {subjectTitle(c.subject, c.id)}
                                 </span>
+                                {/* id у calls и imported_calls — независимые последовательности,
+                                    и у СЗоВ/Тез КЦ в одной очереди встречаются оба вида: без
+                                    пометки две соседние строки читались бы как один звонок. */}
+                                {c.subject === SUBJECT_IMPORTED_CALL && (
+                                    <IosBadge tone="blue" title={SOURCE_LABEL[c.subject]}>из АТС</IosBadge>
+                                )}
                                 {c.stale && (
                                     <IosBadge tone="amber" title="Конфигурация ИИ (промпт, критерии или база знаний) изменилась после этой оценки. При открытии показывается прежняя оценка; пересчёт — только кнопкой «Переоценить» в карточке.">
                                         <RotateCcw size={11} aria-hidden="true" />устарела

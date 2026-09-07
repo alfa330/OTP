@@ -638,7 +638,11 @@ class QueueRowTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("label: 'Звонки'", view)
         self.assertIn('subject="call"', view)
-        self.assertIn('subject="wz_episode"', chat)
+        # Источник переписки зависит от отдела (Wazzup у ОП, Chat2Desk у СЗоВ,
+        # ChatApp у Тез КЦ), поэтому вкладка передаёт вид субъекта переменной, а
+        # не литералом. Литерал здесь снова сделал бы вкладку однооотдельной.
+        self.assertIn("const subject = chatSubjectOf(department);", chat)
+        self.assertIn("subject={subject}", chat)
 
 
 class ScoreBreakdownTests(unittest.TestCase):

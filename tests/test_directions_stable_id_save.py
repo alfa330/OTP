@@ -230,13 +230,25 @@ class SchemaAndCallQaLinkageTests(unittest.TestCase):
         self.assertIn("scale_fingerprint(canonical_id", criteria)
 
     def test_call_qa_filters_use_direction_family(self):
+        """Выборки ИИ-оценки фильтруют по СЕМЬЕ направлений (живые + архивные
+        версии шкалы), а не по литеральным id.
+
+        Раздел оценивает три отдела, поэтому семья считается по коду отдела
+        (department_direction_id_family) либо по всем отделам разом
+        (ai_qa_direction_id_family); op_direction_id_family осталась как
+        историческая подпись поверх первой."""
         cfg = _read(ROOT / "call_qa" / "config.py")
         self.assertIn("def op_direction_id_family(cur)", cfg)
+        self.assertIn("def department_direction_id_family(cur, department_code)", cfg)
+        self.assertIn("def ai_qa_direction_id_family(cur, department_codes=None)", cfg)
+        # Семья по-прежнему включает архивные версии шкалы: без canonical_id
+        # историческая оценка выпадала бы из выборок после правки критериев.
+        self.assertIn("OR d.canonical_id IN (SELECT id FROM directions", cfg)
         api = _read(ROOT / "call_qa" / "api.py")
-        self.assertIn("config.op_direction_id_family(cur)", api)
+        self.assertIn("config.ai_qa_direction_id_family(", api)
         self.assertNotIn("(config.OP_DIRECTION_IDS, limit)", api)
         batch = _read(ROOT / "call_qa" / "batch_eval.py")
-        self.assertIn("config.op_direction_id_family(cur)", batch)
+        self.assertIn("config.department_direction_id_family(cur, department)", batch)
 
 
 if __name__ == "__main__":

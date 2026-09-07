@@ -24,7 +24,15 @@ AUTO_COST = _AUTO_COST
 
 
 def is_schema_compat_error(exc: Exception) -> bool:
-    return getattr(exc, "pgcode", None) in {"42P01", "42703", "42883"}
+    """Ошибка «схема ещё/уже не та», а не сбой данных.
+
+    42P10 (invalid_column_reference) добавлен из-за ОКНА РАСКАТКИ: новый инстанс
+    на старте меняет ключ ai_transcript_cache на (subject_kind, …), а старый в
+    это время ещё принимает трафик и делает ON CONFLICT по прежнему составу
+    колонок — Postgres отвечает 42P10. Без этого кода запись транскрипта падала
+    бы 500-й ПОСЛЕ уже оплаченного распознавания; с ним путь честно деградирует
+    (transcript_cache_id=None либо RuntimeSchemaUnavailable)."""
+    return getattr(exc, "pgcode", None) in {"42P01", "42703", "42883", "42P10"}
 
 
 def audio_fingerprint(*, call_id: int, audio_path: str,
@@ -51,7 +59,10 @@ def asr_config() -> dict:
 # чата — независимые последовательности, и лок по «просто числу» заставлял бы
 # их бессмысленно ждать друг друга (а review_payload показывает это как
 # невнятную ошибку «не удалось заблокировать»).
-_LOCK_CLASSID = {config.SUBJECT_CALL: 71623, config.SUBJECT_WZ_EPISODE: 71626}
+_LOCK_CLASSID = {config.SUBJECT_CALL: 71623, config.SUBJECT_WZ_EPISODE: 71626,
+                 config.SUBJECT_IMPORTED_CALL: 71627,
+                 config.SUBJECT_C2D_SNAPSHOT: 71628,
+                 config.SUBJECT_CA_EPISODE: 71629}
 
 
 @contextmanager
@@ -59,7 +70,11 @@ def distributed_call_lock(call_id: int, *, subject_kind: str = config.SUBJECT_CA
     """Cross-worker primary-DB lock; yields False so writers can fail closed."""
     conn = cur = None
     acquired = False
-    classid = _LOCK_CLASSID.get(subject_kind, 71623)
+    # Неизвестный субъект НЕ сваливаем в пространство звонков: молча общий лок
+    # хуже отказа — два разных субъекта с одинаковым id ждали бы друг друга.
+    if subject_kind not in _LOCK_CLASSID:
+        raise ValueError(f"нет пространства advisory-лока для субъекта {subject_kind!r}")
+    classid = _LOCK_CLASSID[subject_kind]
     try:
         # Advisory locks must live on the same primary that stores runs/cases;
         # a read replica would provide a different lock namespace.
@@ -172,7 +187,8 @@ def put_transcript(*, call_id: int, audio_fingerprint_value: str,
                             asr_config_hash,transcript_hash,transcript_text,segments,tokens,
                             payload,languages,asr_mean_conf,asr_low_spans,duration_ms)
                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                         ON CONFLICT (call_id,audio_fingerprint,asr_provider,asr_model,asr_config_hash)
+                         ON CONFLICT (subject_kind,call_id,audio_fingerprint,asr_provider,
+                                      asr_model,asr_config_hash)
                          DO NOTHING RETURNING id""",
                     (subject_kind, int(call_id), audio_fingerprint_value, asr_provider,
                      asr_model, asr_config_hash, transcript_hash, text, Json(segments or []),
@@ -184,10 +200,10 @@ def put_transcript(*, call_id: int, audio_fingerprint_value: str,
                     return int(row[0])
                 cur.execute(
                     """SELECT id FROM ai_transcript_cache
-                        WHERE call_id=%s AND audio_fingerprint=%s AND asr_provider=%s
-                          AND asr_model=%s AND asr_config_hash=%s""",
-                    (int(call_id), audio_fingerprint_value, asr_provider, asr_model,
-                     asr_config_hash),
+                        WHERE subject_kind=%s AND call_id=%s AND audio_fingerprint=%s
+                          AND asr_provider=%s AND asr_model=%s AND asr_config_hash=%s""",
+                    (subject_kind, int(call_id), audio_fingerprint_value, asr_provider,
+                     asr_model, asr_config_hash),
                 )
                 return int(cur.fetchone()[0])
     except Exception as exc:

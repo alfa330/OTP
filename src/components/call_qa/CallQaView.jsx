@@ -5,8 +5,9 @@ import {
     Sparkles, ListChecks, SlidersHorizontal, Database, ChevronLeft, Gauge,
     Loader2, AlertCircle, RotateCcw, CheckCircle2, MessageSquare, PhoneCall,
 } from 'lucide-react';
-import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
+import { canPullCalls } from './subjects';
 import CallReviewCard from './CallReviewCard';
 import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
@@ -15,10 +16,17 @@ import AdjudicationsRag from './AdjudicationsRag';
 import ChatQueue from './ChatQueue';
 import QueueList, { isChat } from './QueueList';
 
-/* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa"; доступ: super_admin,
- * главы ОП/СЗоВ, СВ ОП — последним бэкенд отдаёт только их направления, а вкладки
- * «Критерии»/«База разборов» скрыты). Все данные — реальные с /api/ai-qa/*.
- * Мок-данных нет; при недоступности бэкенда — состояния загрузки / ошибки / пусто. */
+/* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
+ *
+ * Раздел оценивает ТРИ отдела — ОП, СЗоВ и Тез КЦ, — и у каждого своя телефония
+ * и свой источник переписки. Выбранный отдел уходит параметром `department` во
+ * все запросы; что открыто конкретному человеку, решает бэкенд
+ * (/api/ai-qa/departments): супер-админ и глобальный админ видят все три, глава
+ * и СВ — свой отдел, наблюдатель «Маркетинга» — разборы ОП. У СВ данные вдобавок
+ * режутся до его направлений, а вкладки «Критерии»/«База разборов» скрыты.
+ *
+ * Все данные — реальные с /api/ai-qa/*. Мок-данных нет; при недоступности
+ * бэкенда — состояния загрузки / ошибки / пусто. */
 
 const TABS = [
     { key: 'overview',  label: 'Обзор',          Icon: Gauge },
@@ -95,6 +103,16 @@ export default function CallQaView(props) {
         ? TABS.filter((t) => t.key !== 'criteria' && t.key !== 'rag')
         : TABS;
 
+    /* Селектор отдела. Раздел оценивает три отдела (ОП, СЗоВ, Тез КЦ), и у
+     * каждого свои направления, своя телефония и свой источник переписки.
+     * Что открыто именно этому человеку — решает бэкенд (/api/ai-qa/departments):
+     * супер-админ и глобальный админ видят все три, глава и СВ — свой отдел.
+     * До ответа сервера department = null, и запросы уходят БЕЗ параметра —
+     * тогда бэкенд сам подставит единственный доступный отдел. */
+    const [departments, setDepartments] = useState(null);   // null = загрузка
+    const [departmentsErr, setDepartmentsErr] = useState(false);
+    const [department, setDepartment] = useState(null);
+
     const [tab, setTab] = useState('queue');
     const [sectionInteraction, setSectionInteraction] = useState({ editing: false, busy: false });
     const [reviewInteraction, setReviewInteraction] = useState({ dirty: false, busy: false });
@@ -102,12 +120,14 @@ export default function CallQaView(props) {
     const [queueErr, setQueueErr] = useState(false);
     const [queueTotal, setQueueTotal] = useState(0);
     const [queueMoreBusy, setQueueMoreBusy] = useState(false);
+    const [departmentsReload, setDepartmentsReload] = useState(0);
 
     const [selected, setSelected] = useState(null);
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
     const [callErr, setCallErr] = useState(null);
     const callRequest = useRef({ id: 0, controller: null });
+    const queueRequest = useRef({ id: 0, controller: null });
     const returnFocus = useRef(null);
 
     const changeTab = (nextTab) => {
@@ -122,28 +142,92 @@ export default function CallQaView(props) {
         setTab(nextTab);
     };
 
+    /* Пока список отделов не пришёл, НИ ОДНОГО запроса раздела не отправляем:
+     * без параметра `department` бэкенд отдаёт неограниченному зрителю данные
+     * ВСЕХ отделов, а очередь грузится один раз (`queue === null`) и потом сама
+     * не перерисовалась бы — на экране осталась бы смесь отделов. Ошибку тоже
+     * показываем явно: молчаливый откат к запросам без отдела дал бы ту же смесь. */
+    useEffect(() => {
+        if (!apiBaseUrl) { setDepartments([]); setDepartmentsErr(true); return; }
+        let alive = true;
+        setDepartmentsErr(false);
+        axios.get(`${apiBaseUrl}/api/ai-qa/departments`, { headers: headers() })
+            .then((r) => {
+                if (!alive) return;
+                const items = r.data?.items || [];
+                setDepartments(items);
+                setDepartment(r.data?.current || items[0]?.code || null);
+                setDepartmentsErr(!items.length);
+            })
+            .catch(() => { if (alive) { setDepartments([]); setDepartmentsErr(true); } });
+        return () => { alive = false; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [apiBaseUrl, departmentsReload]);
+
+    const changeDepartment = (nextCode) => {
+        if (!nextCode || nextCode === department) return;
+        if (sectionInteraction.busy) {
+            showToast?.('Дождитесь завершения сохранения', 'error');
+            return;
+        }
+        if (sectionInteraction.editing &&
+            !window.confirm('Сменить отдел? Несохранённые изменения будут потеряны.')) return;
+        setSectionInteraction({ editing: false, busy: false });
+        // Открытая карточка и очередь принадлежат ПРЕЖНЕМУ отделу — закрываем и
+        // сбрасываем, иначе после смены отдела на экране осталась бы чужая оценка.
+        // Запрос карточки при этом отменяем: его поздний ответ дорисовал бы её
+        // обратно уже под новым отделом.
+        callRequest.current.controller?.abort();
+        callRequest.current = { id: callRequest.current.id + 1, controller: null };
+        setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
+        setReviewInteraction({ dirty: false, busy: false });
+        setQueue(null);
+        setDepartment(nextCode);
+    };
+
+    const departmentOptions = (departments || []).map((item) => ({
+        value: item.code, label: item.name,
+    }));
+    const canSwitchDepartment = departmentOptions.length > 1;
+    const departmentName = (departments || []).find((item) => item.code === department)?.name || '';
+
     const QUEUE_PAGE = 30;
     const loadQueue = (offset = 0, append = false) => {
         if (append) setQueueMoreBusy(true); else { setQueue(null); setQueueErr(false); }
         if (!apiBaseUrl) { setQueueErr(true); setQueue([]); setQueueMoreBusy(false); return; }
+        // Отмена + сверка номера запроса: при смене отдела в полёте остаётся
+        // запрос прежнего, и его поздний ответ дорисовал бы чужие строки в уже
+        // переключённую очередь. Тот же приём, что у запроса карточки.
+        queueRequest.current.controller?.abort();
+        const controller = new AbortController();
+        const requestId = queueRequest.current.id + 1;
+        queueRequest.current = { id: requestId, controller };
         axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`,
-            { params: { limit: QUEUE_PAGE, offset }, headers: headers() })
+            { params: { limit: QUEUE_PAGE, offset, ...(department ? { department } : {}) },
+              headers: headers(), signal: controller.signal })
             .then((r) => {
+                if (requestId !== queueRequest.current.id) return;
                 const page = r.data.items || [];
                 setQueueTotal(typeof r.data.total === 'number' ? r.data.total : page.length);
                 setQueue((prev) => (append && Array.isArray(prev) ? [...prev, ...page] : page));
             })
-            .catch(() => {
+            .catch((error) => {
+                if (axios.isCancel(error) || requestId !== queueRequest.current.id) return;
                 if (append) showToast?.('Не удалось подгрузить ещё', 'error');
                 else { setQueue([]); setQueueErr(true); }
             })
-            .finally(() => setQueueMoreBusy(false));
+            .finally(() => {
+                if (requestId === queueRequest.current.id) setQueueMoreBusy(false);
+            });
     };
 
     useEffect(() => {
+        // department === null означает «отдел ещё не известен»: запрос без него
+        // вернул бы смесь отделов, и второй раз очередь не грузится.
+        if (department === null) return;
         if (tab === 'queue' && queue === null) loadQueue();
         // eslint-disable-next-line
-    }, [tab, apiBaseUrl]);
+    }, [tab, apiBaseUrl, department]);
 
     const openCall = (c, refresh = false) => {
         if (!selected && typeof document !== 'undefined') returnFocus.current = document.activeElement;
@@ -280,20 +364,35 @@ export default function CallQaView(props) {
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="space-y-4">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
                 <div className="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm">
                     <Sparkles size={20} />
                 </div>
-                <div>
+                <div className="min-w-0">
                     <h1 className="text-[19px] font-semibold text-slate-900">ИИ-оценка</h1>
                     <p className="text-[12.5px] text-slate-400">
                         {isScopedSupervisor
-                            ? 'Звонки и чаты · ваши направления'
-                            : 'Звонки и чаты · отдел продаж'}
+                            ? `Звонки и чаты · ваши направления${departmentName ? ` · ${departmentName}` : ''}`
+                            : `Звонки и чаты${departmentName ? ` · ${departmentName}` : ''}`}
                     </p>
                 </div>
+                {/* Селектор показываем только тем, кому открыт больше одного отдела:
+                    у главы и СВ он был бы одной неактивной кнопкой. */}
+                {canSwitchDepartment && !selected && (
+                    <div className="ml-auto">
+                        <IosSegmented value={department} options={departmentOptions}
+                                      onChange={changeDepartment} ariaLabel="Отдел" />
+                    </div>
+                )}
             </div>
 
+            {departments === null ? (
+                <Spinner text="Загружаю отделы…" />
+            ) : departmentsErr ? (
+                <ErrorCard text="Не удалось получить список отделов — раздел не может определить, чьи данные показывать"
+                           onRetry={() => { setDepartments(null); setDepartmentsReload((n) => n + 1); }} />
+            ) : (
+            <>
             {!selected && <Segmented tabs={visibleTabs} tab={tab} setTab={changeTab} />}
 
             {selected ? (
@@ -347,7 +446,7 @@ export default function CallQaView(props) {
                         <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-14 text-center`}>
                             <CheckCircle2 size={26} className="text-emerald-500" />
                             <div>
-                                <p className="text-[14px] font-semibold text-slate-700">Все звонки проверены</p>
+                                <p className="text-[14px] font-semibold text-slate-700">Всё проверено</p>
                                 <p className="mt-1 text-[12.5px] text-slate-500">В очереди сейчас нет новых карточек для ревью.</p>
                             </div>
                             <button type="button" onClick={loadQueue} className={iosBtnSecondary}>Обновить очередь</button>
@@ -376,22 +475,28 @@ export default function CallQaView(props) {
                     )
             ) : tab === 'chats' ? (
                 <ChatQueue apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                           showToast={showToast} onOpen={openCall} />
+                           showToast={showToast} onOpen={openCall} department={department} />
             ) : tab === 'overview' ? (
-                <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader} />
+                <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                             department={department} />
             ) : tab === 'evals' ? (
                 <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                                 onOpen={openCall} showToast={showToast} subject="call" />
+                                 onOpen={openCall} showToast={showToast} subject="call"
+                                 department={department} canPull={canPullCalls(department)} />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl}
                                         withAccessTokenHeader={withAccessTokenHeader} directions={props.directions}
+                                        department={department}
                                         onInteractionChange={setSectionInteraction} />
             ) : (
                 <AdjudicationsRag apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                                    showToast={showToast} canManage={canManageRag}
+                                   department={department}
                                    onInteractionChange={setSectionInteraction} />
             )}
                 </div>
+            )}
+            </>
             )}
         </div>
     );

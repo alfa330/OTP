@@ -176,7 +176,13 @@ class OktellRecordAudioTests(unittest.TestCase):
         import_pos = endpoint.index("db.import_single_random_call(", fetch_pos)
 
         self.assertLess(fetch_pos, import_pos)
-        self.assertIn('notes=f"random:{requester_id}:oktell"', endpoint)
+        # Маркер источника подтяжки стал параметром: журнальная кнопка пишет
+        # 'random:<id>:oktell' (умолчание), раздел «ИИ-оценка» — 'aiqa:...',
+        # чтобы подтяжки раздела были отличимы в общем пуле imported_calls.
+        self.assertIn('notes=f"{source}:{requester_id}:oktell"', endpoint)
+        self.assertIn("source='random'", endpoint)
+        self.assertNotIn("source=AI_QA_PULL_CALL_SOURCE", endpoint,
+                         "журнальная ручка не должна помечать звонки маркером раздела")
         self.assertIn("audio_path=audio_path", endpoint)
         self.assertIn('"audio_pending": False', endpoint)
 

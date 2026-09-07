@@ -199,7 +199,7 @@ function ReviewedBlock({ r }) {
 }
 
 export default function QaDashboard(props) {
-    const { apiBaseUrl, withAccessTokenHeader } = props;
+    const { apiBaseUrl, withAccessTokenHeader, department } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [s, setS] = useState(null);
     const [error, setError] = useState(null);
@@ -215,7 +215,9 @@ export default function QaDashboard(props) {
             setError('Сервис статистики не настроен');
             return;
         }
-        axios.get(`${apiBaseUrl}/api/ai-qa/stats`, { headers: headers(), signal: controller.signal })
+        axios.get(`${apiBaseUrl}/api/ai-qa/stats`,
+            { params: { ...(department ? { department } : {}) },
+              headers: headers(), signal: controller.signal })
             .then((response) => {
                 if (requestId === requestRef.current.id) setS(response.data);
             })
@@ -230,7 +232,7 @@ export default function QaDashboard(props) {
         load();
         return () => requestRef.current.controller?.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, department]);
 
     if (!s && !error) {
         return (

@@ -40,11 +40,20 @@ def _load_assignment(source, name, namespace):
 
 
 class _DepartmentDb:
-    def __init__(self, departments):
+    def __init__(self, departments, user_departments=None):
         self.departments = departments
+        self.user_departments = user_departments or {}
 
     def get_department_by_id(self, department_id):
         return self.departments.get(int(department_id))
+
+    def get_user_department(self, user_id):
+        department_id = self.user_departments.get(user_id)
+        department = self.departments.get(int(department_id)) if department_id else None
+        return (department_id, (department or {}).get("code"))
+
+    def get_user_department_id(self, user_id):
+        return self.user_departments.get(user_id)
 
 
 class AiQaAccessControlTests(unittest.TestCase):
@@ -65,38 +74,73 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertIn('view === "ai_qa" && canAccessAiQaSection', self.app_source)
 
     def test_frontend_allows_szov_department_head_for_ai_qa_and_verifier_chats(self):
+        # Перечень собирается из отделов раздела и отдела-наблюдателя, а не
+        # выписан одним литералом: список оцениваемых отделов должен совпадать
+        # с call_qa.config.DEPARTMENT_CODES, и на копии литералов здесь уже
+        # ловили «Верификатор».
         self.assertIn(
-            "const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);",
+            "const AI_QA_SUBJECT_DEPARTMENT_CODES = new Set(['op', 'szov', 'tez']);",
+            self.app_source,
+        )
+        self.assertIn(
+            "const AI_QA_OBSERVER_DEPARTMENT_CODES = new Set(['marketing']);",
+            self.app_source,
+        )
+        self.assertIn(
+            "const AI_QA_HEAD_DEPARTMENT_CODES = new Set([\n"
+            "    ...AI_QA_SUBJECT_DEPARTMENT_CODES, ...AI_QA_OBSERVER_DEPARTMENT_CODES,\n"
+            "]);",
             self.app_source,
         )
         self.assertIn("const isAiQaDepartmentHead = (userLike) => (", self.app_source)
         self.assertIn("userLike?.headed_department_codes ?? userLike?.headedDepartmentCodes", self.app_source)
         self.assertIn("isAiQaDepartmentHead(userLike) ||", self.app_source)
+        # «Чаты Верификаторов» — переписка Wazzup отдела продаж, а не общий
+        # раздел: у СВ СЗоВ и Тез КЦ своя переписка, и им этот пункт не нужен.
         self.assertIn('(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (', self.app_source)
+        # А сама «ИИ-оценка» доступна СВ всех трёх отделов раздела.
+        self.assertIn('(isAiQaDepartmentHead(user) || isAiQaSupervisor(user)) && (', self.app_source)
         self.assertIn("requestedViewFromUrl !== 'wazzup_chats' || canAccessVerifierChatsSection", self.app_source)
         self.assertIn('view === "wazzup_chats" && canAccessVerifierChatsSection', self.app_source)
 
     def test_frontend_opens_verifier_chats_to_global_admins(self):
-        """«Чаты Верификаторов» — глобальным админам, «ИИ-оценка» — нет."""
-        self.assertIn(
-            "    if (isMarketingObserver(userLike)) return false;\n"
-            "    if (canAccessAiQaForUser(userLike)) return true;",
-            self.app_source,
-        )
+        """«Чаты Верификаторов» — глобальным админам; периметр ЯВНЫЙ.
+
+        Раньше предикат начинался с canAccessAiQaForUser, то есть наследовал
+        аудиторию «ИИ-оценки». После её расширения на СЗоВ и Тез КЦ это отдало бы
+        переписку Wazzup (раздел ОТДЕЛА ПРОДАЖ) главе Тез КЦ и супервайзерам
+        СЗоВ/Тез, поэтому периметр перечислен по частям.
+        """
+        predicate = self.app_source.split(
+            "const canAccessVerifierChatsForUser = (userLike) => {", 1
+        )[1].split("\n};", 1)[0]
+        self.assertIn("if (isMarketingObserver(userLike)) return false;", predicate)
+        # Именно ВЫЗОВА быть не должно (в комментарии имя упоминается законно).
+        self.assertNotIn("canAccessAiQaForUser(userLike)", predicate)
         # Глава отдела с базовой admin-ролью — не глобальный админ. Без этой
         # половины условия раздел открылся бы главам бухгалтерии, HR и ТЭЗ.
         self.assertIn(
-            "    return normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike);\n"
-            "};",
-            self.app_source,
+            "normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike)",
+            predicate,
         )
+        # Главы — только ОП и СЗоВ; Тез КЦ здесь быть не должно.
+        self.assertIn("VERIFIER_CHATS_HEAD_DEPARTMENT_CODES", predicate)
+        self.assertIn("const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);",
+                      self.app_source)
+        # СВ — только отдела продаж, не «любой СВ раздела ИИ-оценки».
+        self.assertIn("isOpSalesSupervisorForAiQa(userLike)", predicate)
+        self.assertNotIn("isAiQaSupervisor", predicate)
         self.assertIn(
             "const canAccessVerifierChatsSection = canAccessVerifierChatsForUser(user);",
             self.app_source,
         )
-        # Предикат «ИИ-оценки» админов НЕ пускает: разделы разъехались правами.
         self.assertNotIn("canAccessAiQaSection = canAccessVerifierChats", self.app_source)
+        # «ИИ-оценка» пускает и ГЛОБАЛЬНОГО админа — ради него добавлен селектор
+        # отдела (задача про СЗоВ и Тез КЦ). Глава отдела с базовой admin-ролью
+        # глобальным админом не считается и проходит своей проверкой.
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin' ||\n"
+                      "    // Глобальный админ", self.app_source)
+        self.assertIn("(normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike)) ||\n"
                       "    isAiQaDepartmentHead(userLike) ||", self.app_source)
         # Пункт меню — по новому флагу, и так в КАЖДОЙ ветке сайдбара: пункт
         # продублирован по ролям (админы, СВ/главы, общий хвост), и ветка,
@@ -132,39 +176,57 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertIn("int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS", self.api_source)
         self.assertIn("if _is_super_admin_role(role):", self.api_source)
 
-    def test_backend_recognizes_op_szov_and_marketing_department_heads(self):
+    def test_backend_recognizes_heads_of_every_section_department(self):
+        """Главы ОП, СЗоВ и Тез КЦ — свои отделы; глава маркетинга — наблюдатель.
+
+        Тез КЦ раньше отсекался (его в разделе не было). Отдел, которого в
+        разделе нет вовсе (например «Фронт офисы»), не проходит.
+        """
         departments = {
             367: {"id": 367, "code": "op"},
             501: {"id": 501, "code": "SZoV"},
-            777: {"id": 777, "code": "tez"},
+            560: {"id": 560, "code": "tez"},
             888: {"id": 888, "code": "marketing"},
+            909: {"id": 909, "code": "front_office"},
         }
-        headed_by_user = {10: 367, 20: 501, 30: 777, 50: 777, 60: 888}
-        all_headed_by_user = {10: {367}, 20: {501}, 30: {777}, 50: {777, 501}, 60: {888}}
-        fn = _load_function(
-            self.api_source,
-            "_is_ai_qa_department_head",
-            {
-                "db": _DepartmentDb(departments),
-                "_headed_department_id": lambda user_id: headed_by_user.get(user_id),
-                "_headed_department_ids": lambda user_id: frozenset(all_headed_by_user.get(user_id, set())),
-                "AI_QA_OP_DEPARTMENT_ID": 367,
-                "AI_QA_HEAD_DEPARTMENT_CODES": frozenset({"op", "szov", "marketing"}),
-            },
-        )
+        headed_by_user = {10: 367, 20: 501, 30: 560, 40: 909, 50: 560, 60: 888}
+        all_headed_by_user = {10: {367}, 20: {501}, 30: {560}, 40: {909},
+                              50: {560, 501}, 60: {888}}
+        namespace = {
+            "db": _DepartmentDb(departments),
+            "_headed_department_id": lambda user_id: headed_by_user.get(user_id),
+            "_headed_department_ids": lambda user_id: frozenset(all_headed_by_user.get(user_id, set())),
+            "AI_QA_OP_DEPARTMENT_ID": 367,
+            "AI_QA_HEAD_DEPARTMENT_CODES": frozenset({"op", "szov", "tez", "marketing"}),
+        }
+        _load_function(self.api_source, "_headed_department_codes", namespace)
+        fn = _load_function(self.api_source, "_is_ai_qa_department_head", namespace)
 
-        self.assertTrue(fn(10))
-        self.assertTrue(fn(20))
-        self.assertFalse(fn(30))
-        self.assertFalse(fn(40))
+        self.assertTrue(fn(10), "Глава ОП")
+        self.assertTrue(fn(20), "Глава СЗоВ")
+        self.assertTrue(fn(30), "Глава Тез КЦ — отдел вошёл в раздел")
+        self.assertFalse(fn(40), "Глава отдела вне раздела")
+        self.assertFalse(fn(70), "Не глава")
         self.assertTrue(fn(50), "Access must consider every formally headed department")
-        self.assertTrue(fn(60), "Глава маркетинга допущен наравне с главами ОП и СЗоВ")
+        self.assertTrue(fn(60), "Глава маркетинга допущен наблюдателем")
 
-    def test_backend_head_department_codes_include_marketing(self):
+    def test_backend_section_departments_come_from_call_qa_config(self):
+        """Перечень оцениваемых отделов — ОДИН с пакетом оценки, не вторая копия.
+
+        На копии литералов здесь уже ловили «Верификатор»: направление молча
+        выпадало из allowlist, потому что список жил в двух местах.
+        """
+        from call_qa import config as qa_config
+
         self.assertIn(
-            "AI_QA_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov', 'marketing'})",
+            "AI_QA_SUBJECT_DEPARTMENT_CODES = frozenset(call_qa_config.DEPARTMENT_CODES)",
             self.api_source,
         )
+        self.assertEqual(set(qa_config.DEPARTMENT_CODES), {"op", "szov", "tez"})
+        # Наблюдатель остаётся в периметре раздела, но со своей областью данных.
+        self.assertIn("AI_QA_OBSERVER_DEPARTMENT_CODES = frozenset({'marketing'})",
+                      self.api_source)
+        self.assertIn("AI_QA_OBSERVER_SCOPE_DEPARTMENTS = ('op',)", self.api_source)
 
     def test_user_payload_exposes_formal_head_department_codes(self):
         self.assertIn('"headed_department_code": headed_department_code', self.api_source)
@@ -207,9 +269,13 @@ class AiQaAccessControlTests(unittest.TestCase):
         for function_name in section_names:
             with self.subTest(function_name=function_name):
                 self.assertIn("_verifier_chats_guard()", functions[function_name])
+        # Эпизоды — единица ИИ-оценки, поэтому у них СВОЙ гард: аудитория
+        # «ИИ-оценки» И отдел продаж. Раньше хватало _ai_qa_guard, пока в
+        # разделе жил один отдел; после расширения на СЗоВ и Тез КЦ он стал
+        # пропускать к эпизодам Верификаторов их главу и СВ.
         for function_name in ai_qa_only_names:
             with self.subTest(function_name=function_name):
-                self.assertIn("_ai_qa_guard()", functions[function_name])
+                self.assertIn("_op_episodes_guard()", functions[function_name])
                 self.assertNotIn("_verifier_chats_guard()", functions[function_name])
 
     def test_backend_verifier_chats_guard_admits_global_admins_only(self):
@@ -228,11 +294,14 @@ class AiQaAccessControlTests(unittest.TestCase):
             6: (6, None, "СВ ОП", "sv"),
             7: (7, None, "Тренер", "trainer"),
             8: (8, None, "Маркетолог", "marketing_manager"),
+            9: (9, None, "СВ СЗоВ", "sv"),
         }
-        headed = {3: 777, 4: 501}          # id отдела, которым человек назначен главой
-        ai_qa_heads = {4}                  # СЗоВ — в AI_QA_HEAD_DEPARTMENT_CODES
-        departments_of = {6: 367, 8: 888}  # отдел сотрудника (для СВ ОП и маркетолога)
-        department_codes = {888: "marketing"}
+        headed = {3: 560, 4: 501}          # id отдела, которым человек назначен главой
+        ai_qa_heads = {3, 4}               # главы Тез КЦ и СЗоВ — в «ИИ-оценке»
+        departments_of = {6: 367, 8: 888, 9: 1}  # отдел сотрудника (СВ и маркетолог)
+        # Коды нужны целиком: периметр «Чатов Верификаторов» перечислен по кодам,
+        # а не выведен из аудитории «ИИ-оценки».
+        department_codes = {888: "marketing", 501: "szov", 560: "tez", 367: "op", 1: "szov"}
 
         class _Db:
             @staticmethod
@@ -242,6 +311,11 @@ class AiQaAccessControlTests(unittest.TestCase):
             @staticmethod
             def get_user_department_id(user_id):
                 return departments_of.get(user_id)
+
+            @staticmethod
+            def get_user_department(user_id):
+                department_id = departments_of.get(user_id)
+                return (department_id, department_codes.get(department_id))
 
             @staticmethod
             def get_department_by_id(department_id):
@@ -255,7 +329,14 @@ class AiQaAccessControlTests(unittest.TestCase):
             "logging": SimpleNamespace(exception=lambda *_a, **_kw: None),
             "AI_QA_EXTRA_ACCESS_USER_IDS": {183},
             "AI_QA_OP_DEPARTMENT_ID": 367,
+            "AI_QA_SUBJECT_DEPARTMENT_CODES": frozenset({"op", "szov", "tez"}),
+            # «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ: главы ОП и СЗоВ, но
+            # не Тез КЦ, и СВ только продаж. Периметр в гарде перечислен явно,
+            # поэтому в область видимости нужны его собственные имена.
+            "VERIFIER_CHATS_HEAD_DEPARTMENT_CODES": frozenset({"op", "szov"}),
             "_headed_department_id": lambda user_id: headed.get(user_id),
+            "_headed_department_ids": lambda user_id: (
+                frozenset({headed[user_id]}) if user_id in headed else frozenset()),
             "_is_ai_qa_department_head": lambda user_id: user_id in ai_qa_heads,
         }
         _load_assignment(self.api_source, "ROLE_HIERARCHY", namespace)
@@ -265,7 +346,8 @@ class AiQaAccessControlTests(unittest.TestCase):
         for helper in ("_normalize_user_role", "_get_role_level", "_has_min_role",
                        "_is_super_admin_role", "_is_admin_role",
                        "_is_global_admin_requester", "_request_is_read_only",
-                       "_is_marketing_observer", "_ai_qa_guard"):
+                       "_is_marketing_observer", "_headed_department_codes",
+                       "_department_code_of_user", "_ai_qa_guard"):
             _load_function(self.api_source, helper, namespace)
         guard = _load_function(self.api_source, "_verifier_chats_guard", namespace)
 
@@ -276,6 +358,12 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertEqual(verdict(1), (1, None), "Супер-админ")
         self.assertEqual(verdict(2), (2, None), "Глобальный админ — тот, ради кого раздел открыли")
         self.assertEqual(verdict(4), (4, None), "Глава СЗоВ проходил и до правки")
+        # Регресс, который дала бы «аудитория ИИ-оценки»: раздел — переписка
+        # Wazzup отдела продаж, у Тез КЦ своя в «Чатах ChatApp».
+        self.assertEqual(verdict(3), (None, ({"error": "forbidden"}, 403)),
+                         "Глава Тез КЦ в «Чаты Верификаторов» не допущен")
+        self.assertEqual(verdict(9), (None, ({"error": "forbidden"}, 403)),
+                         "СВ СЗоВ в «Чаты Верификаторов» не допущен")
         self.assertEqual(verdict(6), (6, None), "СВ отдела продаж проходил и до правки")
         self.assertEqual(verdict(183), (183, None), "whitelist ИИ-оценки")
 
@@ -327,12 +415,17 @@ class AiQaAccessControlTests(unittest.TestCase):
         namespace = {
             "AI_QA_EXTRA_ACCESS_USER_IDS": set(),
             "AI_QA_OP_DEPARTMENT_ID": 367,
+            "AI_QA_SUBJECT_DEPARTMENT_CODES": frozenset({"op", "szov", "tez"}),
             "db": _AccessDb(),
             "g": SimpleNamespace(user_id=20),
             "jsonify": lambda payload: payload,
             "logging": SimpleNamespace(exception=lambda *_args, **_kwargs: None),
+            "request": SimpleNamespace(method="GET"),
             "_normalize_user_role": lambda role: role,
             "_is_super_admin_role": lambda _role: False,
+            "_is_global_admin_requester": lambda _role, _user_id=None: False,
+            "_is_marketing_observer": lambda _user_id, _role=None: False,
+            "_department_code_of_user": lambda _user_id: "",
             "_is_ai_qa_department_head": lambda user_id: user_id == 20,
         }
         guard = _load_function(self.api_source, "_ai_qa_guard", namespace)

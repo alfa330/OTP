@@ -469,7 +469,8 @@ function Pagination({ page, pageSize, total, onPageChange, disabled }) {
 }
 
 export default function AdjudicationsRag(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast, canManage, onInteractionChange } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, canManage, department,
+            onInteractionChange } = props;
     const [queryInput, setQueryInput] = useState('');
     const [query, setQuery] = useState('');
     const [view, setView] = useState('catalog');
@@ -525,6 +526,9 @@ export default function AdjudicationsRag(props) {
         axios.get(`${apiBaseUrl}/api/ai-qa/adjudications`, {
             params: {
                 page, page_size: pageSize,
+                // Каталог правил — политика оценки НАПРАВЛЕНИЙ отдела: без отдела
+                // глава СЗоВ видел бы правила Тез КЦ (бэкенд режет тем же параметром).
+                ...(department ? { department } : {}),
                 ...(query ? { q: query } : {}),
                 ...(direction !== 'all' ? { direction } : {}),
                 ...(effectiveStatus !== 'all' ? { status: effectiveStatus } : {}),
@@ -546,7 +550,7 @@ export default function AdjudicationsRag(props) {
         return () => controller.abort();
         // Access-token headers are intentionally read at request time.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, query, view, direction, status, indexStatus, page, pageSize, reloadKey]);
+    }, [apiBaseUrl, department, query, view, direction, status, indexStatus, page, pageSize, reloadKey]);
 
     const refresh = () => setReloadKey((value) => value + 1);
     const items = result?.items || [];

@@ -10,14 +10,18 @@ import {
     APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, IosHint, IosSegmented, scoreTone,
 } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
+import { CHAT_SUBJECTS } from './subjects';
 
 /* Карточка ревью одного субъекта оценки — центральный экран взаимодействия с ИИ.
- * Субъект — звонок (аудио + диаризация) либо эпизод переписки Wazzup у
- * Верификаторов (сообщения + содержимое вложений). Форма данных одна: строки
+ * Субъект — звонок (аудио + диаризация; из журнала или подтянутый из АТС) либо
+ * переписка: эпизод Wazzup у Верификаторов ОП, заявка Chat2Desk у СЗоВ, эпизод
+ * ChatApp у Тез КЦ (сообщения + содержимое вложений). Форма данных одна: строки
  * транскрипта, критерии, отпечатки прогона. Данные приходят только с бэкенда
  * (props.call). Мок-данных нет. */
 
-const SUBJECT_CHAT = 'wz_episode';
+// Видов переписки три (Wazzup у ОП, Chat2Desk у СЗоВ, ChatApp у Тез КЦ) —
+// сравнение с одной строкой открывало бы заявку СЗоВ как звонок.
+const isChatSubject = (kind) => CHAT_SUBJECTS.includes(kind || 'call');
 
 // Переписку чата рисуем тем же компонентом, что «Чаты Верификаторов» (ChatThread):
 // строки транскрипта эпизода → сообщения снапшота. Тело строки уже без префикса
@@ -650,7 +654,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
     const hasTranscript = Boolean(call?.transcript?.length);
     const canSubmit = hasCriteria && hasTranscript;
     const chatSnapshot = useMemo(
-        () => (((call?.subject_kind || 'call') === SUBJECT_CHAT) && call?.transcript?.length
+        () => (isChatSubject(call?.subject_kind) && call?.transcript?.length
             ? chatLinesToSnapshot(call.transcript, call.operator) : null),
         [call],
     );
@@ -678,7 +682,7 @@ export default function CallReviewCard({ call, onSave, onSkip, onRefine, onInter
     if (!call) return null;
 
     const pendingCount = (call.criteria || []).filter((c) => c.source !== 'transcript').length;
-    const isChat = (call.subject_kind || 'call') === SUBJECT_CHAT;
+    const isChat = isChatSubject(call.subject_kind);
 
     return (
         <div style={{ fontFamily: APPLE_FONT }} className="grid grid-cols-1 gap-4 lg:grid-cols-[1.05fr_1fr]">

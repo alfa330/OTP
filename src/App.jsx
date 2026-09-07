@@ -241,9 +241,27 @@ const AI_QA_OP_DEPARTMENT_ID = 367;
 // там главная, потому что решает не только видимость кнопки, но и доступ к ссылке.
 // Поедет телефон в другой отдел — добавить id в оба места.
 const ICORE_PHONE_DEPARTMENT_IDS = new Set([367, 560]);
-// Главы этих отделов видят раздел «ИИ-оценка» и «Чаты Верификаторов» целиком.
-// Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES в bot_schedule2.py).
-const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
+// Отделы, которые ОЦЕНИВАЕТ раздел «ИИ-оценка»: у каждого свои направления,
+// своя телефония и свой источник переписки. Та же константа на бэкенде
+// (AI_QA_SUBJECT_DEPARTMENT_CODES в bot_schedule2.py -> call_qa.config).
+// Здесь она решает ТОЛЬКО видимость пункта меню; сам список отделов раздел
+// берёт с сервера (/api/ai-qa/departments). Бэкенд допускает сужение перечня
+// переменной AI_QA_DEPARTMENT_CODES — если ею воспользуются для поэтапной
+// раскатки, этот набор надо сузить тем же составом, иначе СВ убранного отдела
+// увидит пункт меню и получит 403.
+const AI_QA_SUBJECT_DEPARTMENT_CODES = new Set(['op', 'szov', 'tez']);
+// Отдел-наблюдатель: своих оцениваемых направлений нет, смотрит разборы ОП
+// (решение владельца 06.08.2026).
+const AI_QA_OBSERVER_DEPARTMENT_CODES = new Set(['marketing']);
+// «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ он
+// открыт исторически, Тез КЦ — нет: у него своя переписка в «Чатах ChatApp».
+// Та же константа на бэкенде — VERIFIER_CHATS_HEAD_DEPARTMENT_CODES.
+const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);
+// Кому раздел открыт целиком — главам отделов раздела и наблюдателя.
+// Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES).
+const AI_QA_HEAD_DEPARTMENT_CODES = new Set([
+    ...AI_QA_SUBJECT_DEPARTMENT_CODES, ...AI_QA_OBSERVER_DEPARTMENT_CODES,
+]);
 const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
 // Раздел «Рассылки» (задача #166): супер-админы и поимённо названные владельцем
 // люди. Периметр НЕ выводится из роли: одно нажатие отправляет сообщение больше
@@ -1600,10 +1618,24 @@ const canAccessFourYouForUser = (userLike) => (
 );
 
 // СВ отдела продаж: раздел «ИИ-оценка» доступен, данные бэкенд режет до его направлений.
+// ВНИМАНИЕ: предикат переиспользован в «Настройках SIP» и «Касаниях», поэтому
+// расширять его на СЗоВ и Тез КЦ нельзя — для раздела есть отдельный ниже.
 const isOpSalesSupervisorForAiQa = (userLike) => (
     isSupervisorRole(userLike?.role) &&
     Number(userLike?.department_id ?? userLike?.departmentId) === AI_QA_OP_DEPARTMENT_ID
 );
+
+/* СВ любого отдела раздела «ИИ-оценка» (ОП, СЗоВ, Тез КЦ): раздел открыт, а
+   данные бэкенд режет до его направлений (_ai_qa_direction_scope) и его отдела
+   (_ai_qa_department_scope). Сверяем и код отдела, и id: у части профилей
+   приходит только одно из двух, и проверка по одному полю молча теряла бы
+   человека — та же ловушка, что в isSipSettingsTezDepartmentHead. */
+const isAiQaSupervisor = (userLike) => {
+    if (!isSupervisorRole(userLike?.role)) return false;
+    if (isOpSalesSupervisorForAiQa(userLike)) return true;
+    const code = normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode);
+    return AI_QA_SUBJECT_DEPARTMENT_CODES.has(code);
+};
 
 const aiQaHeadDepartmentCodesOf = (userLike) => {
     const codes = userLike?.headed_department_codes ?? userLike?.headedDepartmentCodes;
@@ -1643,8 +1675,12 @@ const isAiQaDepartmentHead = (userLike) => (
 
 const canAccessAiQaForUser = (userLike) => (
     normalizeRole(userLike?.role) === 'super_admin' ||
+    // Глобальный админ — админ, не назначенный главой отдела: ему и предназначен
+    // селектор отдела (все три отдела раздела). У главы с базовой admin-ролью
+    // область строго его отдел, и он проходит проверкой ниже.
+    (normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike)) ||
     isAiQaDepartmentHead(userLike) ||
-    isOpSalesSupervisorForAiQa(userLike) ||
+    isAiQaSupervisor(userLike) ||
     isMarketingObserver(userLike) ||
     AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))
 );
@@ -1656,15 +1692,25 @@ const canAccessAiQaForUser = (userLike) => (
    и оценки операторов чужих отделов, и кнопки переоценки.
    Та же граница на бэкенде — _verifier_chats_guard в bot_schedule2.py. */
 const canAccessVerifierChatsForUser = (userLike) => {
-    // Наблюдатель «Маркетинга» — ЕДИНСТВЕННОЕ вычитание из аудитории «ИИ-оценки»:
-    // разбор звонков ему открыт, а переписка Верификаторов в выданный ему
-    // перечень разделов не входит. Проверка стоит ПЕРВОЙ: строкой ниже он
-    // прошёл бы по canAccessAiQaForUser и получил бы раздел молча.
+    // Наблюдатель «Маркетинга» вычитается ПЕРВЫМ: разбор звонков ему открыт, а
+    // переписка Верификаторов в выданный ему перечень разделов не входит.
     if (isMarketingObserver(userLike)) return false;
-    if (canAccessAiQaForUser(userLike)) return true;
-    // Глава отдела с базовой admin-ролью — не глобальный админ: чужая переписка
-    // ему не нужна (главы ОП/СЗоВ/маркетинга уже прошли проверкой выше).
-    return normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike);
+    if (normalizeRole(userLike?.role) === 'super_admin') return true;
+    // Глобальный админ — админ, не назначенный главой отдела: по решению
+    // владельца переписку читают все такие админы. У главы с базовой
+    // admin-ролью область строго его отдел, он проходит проверкой ниже.
+    if (normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))) return true;
+    // Периметр перечислен ЯВНО, а не выведен из canAccessAiQaForUser: раньше
+    // вывод был верен, пока в «ИИ-оценке» жил один отдел продаж. С её
+    // расширением на СЗоВ и Тез КЦ тот же вывод молча отдал бы переписку Wazzup
+    // главе Тез КЦ и супервайзерам СЗоВ/Тез — а это раздел ОТДЕЛА ПРОДАЖ: у СЗоВ
+    // своя переписка в Chat2Desk, у Тез КЦ — раздел «Чаты ChatApp».
+    if (isDepartmentHead(userLike)
+        && aiQaHeadDepartmentCodesOf(userLike).some((code) => VERIFIER_CHATS_HEAD_DEPARTMENT_CODES.has(code))) {
+        return true;
+    }
+    return isOpSalesSupervisorForAiQa(userLike);
 };
 
 /* «Лиды OLX» — что сделал робот переноса откликов из чатов OLX в amoCRM
@@ -47026,7 +47072,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
+                                            {(isAiQaDepartmentHead(user) || isAiQaSupervisor(user)) && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
@@ -47036,6 +47082,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {/* «Чаты Верификаторов» — раздел отдела продаж (переписка Wazzup),
+                                                а не общий: СВ СЗоВ и Тез КЦ он не нужен, у них своя переписка
+                                                (Chat2Desk и «Чаты ChatApp»). Поэтому здесь остался прежний
+                                                предикат СВ ОП, а не общий по разделу «ИИ-оценка». */}
                                             {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
                                             <li>
                                                 <button
@@ -47507,7 +47557,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
-                                    {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
+                                    {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user) && (
                                         <li>
                                             <button
                                                 type="button"
@@ -47518,6 +47568,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                     )}
+                                    {/* Вычитаем ровно тех, кто увидел пункт в ветке выше — а там у
+                                        «Чатов Верификаторов» условие СВ ОП, не общее по разделу. */}
                                     {canAccessVerifierChatsSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button

@@ -11,10 +11,12 @@ const SOURCES = [
     { key: 'manual',     label: 'Ручная', Icon: User2,    tone: 'slate' },
 ];
 
-// Список направлений берётся из живых данных (?department_id отдела продаж), а не
-// из литералов: раньше здесь были только 72/73/74, и «Верификатор» нельзя было
-// выбрать, хотя сервер его классификацию отдаёт. Литералы остались аварийным
-// значением, если проп directions пуст.
+// Список направлений берётся из живых данных, а не из литералов: раньше здесь
+// были только 72/73/74, и «Верификатор» нельзя было выбрать, хотя сервер его
+// классификацию отдаёт. Отдел приходит из селектора раздела; литералы остались
+// аварийным значением — но ТОЛЬКО для отдела продаж, для которого и были
+// выписаны. Подставлять их СЗоВ или Тез КЦ нельзя: чужие направления в списке
+// хуже пустого списка, потому что по ним можно сохранить настройку.
 const OP_DEPARTMENT_CODE = 'op';
 const FALLBACK_DIRECTIONS = [{ id: 73, name: 'Основа' }, { id: 72, name: 'Яндекс Регистрация' }, { id: 74, name: 'Поток' }];
 
@@ -37,11 +39,13 @@ function SourcePicker({ value, onChange, disabled = false }) {
 }
 
 export default function CriteriaClassification(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast, directions, onInteractionChange } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, directions, department,
+            onInteractionChange } = props;
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
+    const departmentCode = String(department || OP_DEPARTMENT_CODE).toLowerCase();
     const availableDirections = useMemo(() => {
         const live = (directions || []).filter((item) => (
-            String(item?.department_code || '').toLowerCase() === OP_DEPARTMENT_CODE
+            String(item?.department_code || '').toLowerCase() === departmentCode
             && item?.is_active !== false && !item?.canonical_id
         ));
         if (live.length) {
@@ -49,11 +53,12 @@ export default function CriteriaClassification(props) {
                 .map((item) => ({ id: item.id, name: item.name }))
                 .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
         }
+        if (departmentCode !== OP_DEPARTMENT_CODE) return [];
         const liveNames = new Map((directions || []).map((item) => [String(item.id), item.name]));
         return FALLBACK_DIRECTIONS.map((item) => ({
             ...item, name: liveNames.get(String(item.id)) || item.name,
         }));
-    }, [directions]);
+    }, [directions, departmentCode]);
 
     const [dir, setDir] = useState(null);
     const [rows, setRows] = useState(null);   // null = загрузка
@@ -95,8 +100,21 @@ export default function CriteriaClassification(props) {
     useEffect(() => {
         // Первое направление известно только после того, как пришёл список
         // направлений отдела: грузим критерии, когда выбирать уже из чего.
+        //
+        // Условие «dir != null» намеренно проверяет ПРИНАДЛЕЖНОСТЬ, а не просто
+        // «уже что-то выбрано»: при смене отдела в селекторе выбранным осталось
+        // бы направление прежнего отдела, и человек правил бы чужую шкалу,
+        // думая, что смотрит новый отдел.
+        const belongs = dir != null && availableDirections.some((d) => d.id === dir);
         const first = availableDirections[0]?.id;
-        if (first == null || dir != null) return;
+        if (belongs) return;
+        if (first == null) {
+            // Направлений у отдела нет (или справочник ещё не пришёл): rows=null
+            // это «загрузка», и экран крутил бы спиннер вечно. Ставим пустой
+            // список — он рисует честное «нечего настраивать».
+            setDir(null); setRows([]); setErr(null); setDirty(false);
+            return;
+        }
         loadDir(first, { force: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiBaseUrl, availableDirections]);

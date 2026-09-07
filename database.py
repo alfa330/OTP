@@ -23403,8 +23403,25 @@ class Database:
                 "DELETE FROM c2d_requests WHERE day < CURRENT_DATE - %s",
                 (int(requests_days),))
             deleted_requests = cursor.rowcount
+            # Снапшот, который ИИ уже оценил, НЕ удаляем: для переписки СЗоВ он
+            # сам является субъектом оценки (subject_kind='c2d_snapshot'), и его
+            # удаление не обнулило бы ссылку, как у человеческой оценки, а увело
+            # бы оценку из очереди ревью и списка оценок целиком — их выборки
+            # соединяются с таблицей субъекта (см. _SUBJECT_EXISTS в call_qa/api.py).
+            # У человеческих оценок поведение прежнее: snapshot_id -> NULL по FK.
             cursor.execute(
-                "DELETE FROM c2d_chat_snapshots WHERE created_at < now() - make_interval(days => %s)",
+                """DELETE FROM c2d_chat_snapshots s
+                    WHERE s.created_at < now() - make_interval(days => %s)
+                      AND NOT EXISTS (SELECT 1 FROM ai_evaluation_runs r
+                                       WHERE r.subject_kind = 'c2d_snapshot'
+                                         AND r.call_id = s.id
+                                         AND r.status = 'succeeded')
+                      AND NOT EXISTS (SELECT 1 FROM ai_evaluation_meta m
+                                       WHERE m.subject_kind = 'c2d_snapshot'
+                                         AND m.call_id = s.id)
+                      AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
+                                       WHERE rc.subject_kind = 'c2d_snapshot'
+                                         AND rc.call_id = s.id)""",
                 (int(snapshots_days),))
             deleted_snapshots = cursor.rowcount
         if deleted_requests or deleted_snapshots or marked_journal_episodes:

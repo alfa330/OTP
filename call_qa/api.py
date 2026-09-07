@@ -39,13 +39,64 @@ def _scope_family(cur, allowed_direction_ids) -> list[int]:
     return family or ids
 
 
-def _scoped_op_family(cur, allowed_direction_ids) -> list[int]:
-    """Семья направлений ОП, суженная до скоупа (для выборок из calls)."""
-    family = config.op_direction_id_family(cur)
+def _scoped_qa_family(cur, allowed_direction_ids, department=None) -> list[int]:
+    """Семья направлений оцениваемых отделов, суженная до скоупа.
+
+    `department` — код одного отдела (селектор отдела в разделе) либо None =
+    все оцениваемые отделы. Раньше здесь была жёстко семья ОП, из-за чего
+    «Случайный звонок» не мог выбрать звонок СЗоВ/ТЭЗ даже супер-админу."""
+    family = config.ai_qa_direction_id_family(
+        cur, [department] if department else None)
     if allowed_direction_ids is None:
         return family
     allowed = set(_scope_family(cur, allowed_direction_ids))
     return [i for i in family if i in allowed]
+
+
+def _direction_predicate(cur, allowed_direction_ids, department, direction_expr):
+    """Предикат по направлениям: скоуп пользователя ∩ выбранный в селекторе отдел.
+
+    Возвращает (sql, params) либо (None, ()) — «показывать нечего».
+    Когда не задано ни то, ни другое, предикат пустой: так раздел вёл себя всегда
+    для неограниченного зрителя, и добавлять фильтр молча означало бы спрятать у
+    него уже сохранённые оценки."""
+    if allowed_direction_ids is None and not department:
+        return "", ()
+    family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
+    if not family:
+        return None, ()
+    return f" AND {direction_expr} = ANY(%s)", (family,)
+
+
+# Как достать каноническое направление субъекта. У всех, кроме звонка из
+# журнала, направления своего нет — оно берётся у оператора (users.direction_id),
+# так же, как это делает человеческая оценка «Случайного чата»/«Случайного звонка».
+_SCOPE_SQL = {
+    config.SUBJECT_CALL: """SELECT COALESCE(d.canonical_id, d.id)
+                              FROM calls c
+                              LEFT JOIN directions d ON d.id = c.direction_id
+                             WHERE c.id = %s""",
+    config.SUBJECT_WZ_EPISODE: """SELECT COALESCE(d.canonical_id, d.id)
+                                    FROM wazzup_episodes e
+                                    LEFT JOIN users u ON u.id = e.operator_user_id
+                                    LEFT JOIN directions d ON d.id = u.direction_id
+                                   WHERE e.id = %s""",
+    config.SUBJECT_IMPORTED_CALL: """SELECT COALESCE(d.canonical_id, d.id)
+                                       FROM imported_calls ic
+                                       LEFT JOIN users u ON u.id = ic.operator_id
+                                       LEFT JOIN directions d ON d.id = u.direction_id
+                                      WHERE ic.id = %s""",
+    config.SUBJECT_C2D_SNAPSHOT: """SELECT COALESCE(d.canonical_id, d.id)
+                                      FROM c2d_chat_snapshots s
+                                      LEFT JOIN users u ON u.id = s.operator_id
+                                      LEFT JOIN directions d ON d.id = u.direction_id
+                                     WHERE s.id = %s AND s.source = 'chat2desk'""",
+    config.SUBJECT_CA_EPISODE: """SELECT COALESCE(d.canonical_id, d.id)
+                                    FROM chatapp_episodes e
+                                    LEFT JOIN users u ON u.id = e.operator_user_id
+                                    LEFT JOIN directions d ON d.id = u.direction_id
+                                   WHERE e.id = %s""",
+}
 
 
 def call_in_scope(call_id, allowed_direction_ids,
@@ -63,17 +114,12 @@ def call_in_scope(call_id, allowed_direction_ids,
     allowed = {int(x) for x in allowed_direction_ids}
     if not allowed:
         return False
-    if subject_kind == config.SUBJECT_WZ_EPISODE:
-        sql = """SELECT COALESCE(d.canonical_id, d.id)
-                   FROM wazzup_episodes e
-                   LEFT JOIN users u ON u.id = e.operator_user_id
-                   LEFT JOIN directions d ON d.id = u.direction_id
-                  WHERE e.id = %s"""
-    else:
-        sql = """SELECT COALESCE(d.canonical_id, d.id)
-                   FROM calls c
-                   LEFT JOIN directions d ON d.id = c.direction_id
-                  WHERE c.id = %s"""
+    try:
+        sql = _SCOPE_SQL[subject_kind]
+    except KeyError:
+        # Неизвестный субъект не пропускаем «по умолчанию как звонок»: молчаливое
+        # расширение скоупа — это утечка чужого отдела супервайзеру.
+        raise ValueError(f"нет проверки скоупа для субъекта {subject_kind!r}")
     conn = config.connect_ro()
     try:
         cur = conn.cursor()
@@ -82,6 +128,31 @@ def call_in_scope(call_id, allowed_direction_ids,
     finally:
         conn.close()
     return bool(row and row[0] is not None and int(row[0]) in allowed)
+
+
+def subject_direction_id(call_id, subject_kind: str = config.SUBJECT_CALL):
+    """Каноническое направление субъекта (или None).
+
+    Нужно проверке ОТДЕЛА при открытии карточки по id: у главы отдела скоуп по
+    направлениям не ограничен, и без второй оси он открывал бы карточку чужого
+    отдела, подставив её id в адрес."""
+    try:
+        sql = _SCOPE_SQL[subjects_mod.normalise_kind(subject_kind)]
+    except KeyError:
+        raise ValueError(f"нет проверки скоупа для субъекта {subject_kind!r}")
+    try:
+        call_id = int(call_id)
+    except (TypeError, ValueError):
+        return None
+    conn = config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, (call_id,))
+        row = cur.fetchone()
+        cur.close()
+    finally:
+        conn.close()
+    return int(row[0]) if row and row[0] is not None else None
 
 
 def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
@@ -109,28 +180,82 @@ def direction_in_scope(direction_id, allowed_direction_ids) -> bool:
 
 _QUEUE_FETCH_CAP = 3000  # верх глобальной сортировки по критичности до постраничной нарезки
 
-# Один субъект оценки на строку кэша: звонок ИЛИ эпизод чата. Соединения
-# намеренно LEFT + условие по subject_kind — INNER JOIN calls прятал бы эпизоды,
-# а при совпадении числовых id подставлял бы чужого оператора и направление.
+# Один субъект оценки на строку кэша: звонок из журнала, звонок из АТС,
+# эпизод Wazzup/ChatApp или заявка Chat2Desk. Соединения намеренно LEFT +
+# условие по subject_kind — INNER JOIN calls прятал бы всё остальное, а при
+# совпадении числовых id подставлял бы чужого оператора и направление.
+#
+# ВАЖНО: каждый вид субъекта обязан быть перечислен здесь. Раньше вид, забытый
+# в этих строках, проходил все проверки на Python и потом молча исчезал из
+# очереди ревью и списка оценок — его отсекал _SUBJECT_EXISTS.
 _SUBJECT_JOIN = """
                  LEFT JOIN calls c
                         ON rc.subject_kind = 'call' AND c.id = rc.call_id
                  LEFT JOIN wazzup_episodes e
                         ON rc.subject_kind = 'wz_episode' AND e.id = rc.call_id
+                 LEFT JOIN imported_calls ic
+                        ON rc.subject_kind = 'imported_call' AND ic.id = rc.call_id
+                 LEFT JOIN c2d_chat_snapshots cs
+                        ON rc.subject_kind = 'c2d_snapshot' AND cs.id = rc.call_id
+                 LEFT JOIN chatapp_episodes ce
+                        ON rc.subject_kind = 'ca_episode' AND ce.id = rc.call_id
                  LEFT JOIN users uc ON uc.id = c.operator_id
                  LEFT JOIN users ue ON ue.id = e.operator_user_id
+                 LEFT JOIN users ui ON ui.id = ic.operator_id
+                 LEFT JOIN users us ON us.id = cs.operator_id
+                 LEFT JOIN users ua ON ua.id = ce.operator_user_id
                  LEFT JOIN directions d
-                        ON d.id = COALESCE(c.direction_id, ue.direction_id)
+                        ON d.id = COALESCE(c.direction_id, ue.direction_id,
+                                           ui.direction_id, us.direction_id,
+                                           ua.direction_id)
 """
-_SUBJECT_EXISTS = " AND (c.id IS NOT NULL OR e.id IS NOT NULL)"
-_SUBJECT_DIRECTION = "COALESCE(c.direction_id, ue.direction_id)"
-_SUBJECT_OPERATOR = "COALESCE(uc.name, ue.name)"
+_SUBJECT_EXISTS = (" AND (c.id IS NOT NULL OR e.id IS NOT NULL OR ic.id IS NOT NULL"
+                   " OR cs.id IS NOT NULL OR ce.id IS NOT NULL)")
+_SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
+                      " us.direction_id, ua.direction_id)")
+# У звонка из АТС оператор может быть не привязан к учётной записи — тогда
+# остаётся только имя из АТС (так же поступает выборка random_call).
+_SUBJECT_OPERATOR = ("COALESCE(uc.name, ue.name, COALESCE(ui.name, ic.operator_name),"
+                     " COALESCE(us.name, cs.c2d_operator_name), ua.name)")
+# Балл человека у субъекта, которого в журнале может не быть вовсе. У звонка из
+# АТС оценка появляется позже и связывается через calls.imported_call_id — тогда
+# в очереди сразу видно расхождение ИИ и человека; у переписки СЗоВ/ТЭЗ связь
+# идёт через снапшот. NULL здесь значит «человек ещё не оценивал», и фронт это
+# уже умеет показывать (так ведут себя эпизоды Верификаторов с самого начала).
+_SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
+                 (SELECT hc.score FROM calls hc
+                   WHERE rc.subject_kind = 'imported_call' AND hc.imported_call_id = ic.id
+                     AND COALESCE(hc.is_draft, FALSE) = FALSE
+                   ORDER BY hc.created_at DESC LIMIT 1),
+                 (SELECT hc.score FROM calls hc
+                   WHERE rc.subject_kind = 'c2d_snapshot' AND hc.c2d_snapshot_id = cs.id
+                     AND COALESCE(hc.is_draft, FALSE) = FALSE
+                   ORDER BY hc.created_at DESC LIMIT 1),
+                 (SELECT hc.score FROM c2d_chat_snapshots s
+                   JOIN calls hc ON hc.c2d_snapshot_id = s.id
+                  WHERE rc.subject_kind = 'wz_episode' AND s.source = 'wazzup'
+                    AND s.wz_channel_id = e.channel_id AND s.wz_chat_id = e.chat_id
+                    AND s.episode_start = e.started_at
+                    AND COALESCE(hc.is_draft, FALSE) = FALSE
+                  ORDER BY hc.created_at DESC LIMIT 1),
+                 (SELECT hc.score FROM c2d_chat_snapshots s
+                   JOIN calls hc ON hc.c2d_snapshot_id = s.id
+                  WHERE rc.subject_kind = 'ca_episode' AND s.source = 'chatapp'
+                    AND s.wz_channel_id = ce.license_id::text || ':' || ce.messenger_type
+                    AND s.wz_chat_id = ce.chat_id AND s.episode_start = ce.started_at
+                    AND COALESCE(hc.is_draft, FALSE) = FALSE
+                  ORDER BY hc.created_at DESC LIMIT 1))"""
+
+
 _SUBJECT_DATETIME = ("COALESCE(TO_CHAR(c.created_at,'DD.MM HH24:MI'),"
-                     " TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'))")
+                     " TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),"
+                     " TO_CHAR(ic.datetime_raw AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),"
+                     " TO_CHAR(cs.day,'DD.MM'),"
+                     " TO_CHAR(ce.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'))")
 
 
 def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
-                      subject_kind=None) -> list[dict]:
+                      subject_kind=None, department=None) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
     внутри — свежее; постранично (limit/offset) поверх глобального порядка. stale=True —
@@ -144,19 +269,16 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
         limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        scope_sql, scope_params = "", ()
-        if allowed_direction_ids is not None:
-            family = _scope_family(cur, allowed_direction_ids)
-            if not family:
-                cur.close(); conn.close()
-                return []
-            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
-            scope_params = (family,)
+        scope_sql, scope_params = _direction_predicate(
+            cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+        if scope_sql is None:
+            cur.close(); conn.close()
+            return []
         kind_sql, kind_params = "", ()
         if subject_kind:
             kind_sql, kind_params = " AND rc.subject_kind = %s", (subjects_mod.normalise_kind(subject_kind),)
         cur.execute(
-            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, c.score,
+            f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
                       {_SUBJECT_DIRECTION}, run.evaluation_fingerprint::text,
                       run.fingerprint_components, rc.subject_kind, rc.payload->'media',
@@ -206,7 +328,7 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
             logging.warning("ai-qa: очередь работает в режиме совместимости без evaluation meta")
-            return _recent_calls_fallback(limit, allowed_direction_ids)
+            return _recent_calls_fallback(limit, allowed_direction_ids, department)
         logging.exception("ai-qa: очередь ревью недоступна")
         raise
     finally:
@@ -217,20 +339,17 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
                 pass
 
 
-def review_queue_count(allowed_direction_ids=None, subject_kind=None) -> int:
+def review_queue_count(allowed_direction_ids=None, subject_kind=None, department=None) -> int:
     """Сколько всего субъектов в очереди ревью (не проверены человеком) — для пагинации."""
     conn = None
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        scope_sql, scope_params = "", ()
-        if allowed_direction_ids is not None:
-            family = _scope_family(cur, allowed_direction_ids)
-            if not family:
-                cur.close(); conn.close()
-                return 0
-            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
-            scope_params = (family,)
+        scope_sql, scope_params = _direction_predicate(
+            cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+        if scope_sql is None:
+            cur.close(); conn.close()
+            return 0
         kind_sql, kind_params = "", ()
         if subject_kind:
             kind_sql, kind_params = " AND rc.subject_kind = %s", (subjects_mod.normalise_kind(subject_kind),)
@@ -257,11 +376,14 @@ def review_queue_count(allowed_direction_ids=None, subject_kind=None) -> int:
                 pass
 
 
-def _recent_calls_fallback(limit: int, allowed_direction_ids=None) -> list[dict]:
-    """Старое поведение очереди (до появления следа ревью): последние звонки ОП с записью."""
+def _recent_calls_fallback(limit: int, allowed_direction_ids=None, department=None) -> list[dict]:
+    """Старое поведение очереди (до появления следа ревью): последние звонки с записью.
+
+    Отдел здесь тоже нужен: без него режим совместимости показал бы звонки ОП
+    тому, кто смотрит СЗоВ или Тез КЦ."""
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-    family = _scoped_op_family(cur, allowed_direction_ids)
+    family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
     if not family:
         cur.close(); conn.close()
         return []
@@ -289,13 +411,48 @@ def _direction_identity_context(direction_id: int) -> dict | None:
     # rollout ключуется каноническим id (для архивной версии шкалы — id живой строки)
     rollout = _rag_rollout(int(direction["id"]), 0)  # bucket пер-звонковый, здесь не используется
     snapshot_hash = None
+    department_code = None
+    # Одно соединение на весь контекст: очередь строит его на каждое РАЗНОЕ
+    # направление, и второе подключение ради одной строки справочника упиралось
+    # бы в лимит соединений read-only роли.
     conn = config.connect_ro()
     try:
         snapshot_hash = knowledge.peek_knowledge_snapshot_hash(conn, direction=direction)
+        department_code = _direction_department_code(int(direction["id"]), conn=conn)
     finally:
         conn.close()
     return {"direction": direction, "mode": rollout["mode"],
-            "canary_percent": rollout["canary_percent"], "snapshot_hash": snapshot_hash}
+            "canary_percent": rollout["canary_percent"], "snapshot_hash": snapshot_hash,
+            "department_code": department_code}
+
+
+def _direction_department_code(direction_id: int, conn=None) -> str | None:
+    """Код отдела направления. Нужен пометке «устарела»: prompt_hash зависит от
+    отдела, и без него ожидаемый отпечаток не совпал бы ни с одним прогоном
+    СЗоВ и Тез КЦ.
+
+    Архивная версия шкалы сводится к живой строке: отдел живёт у неё, а у
+    архивной копии может быть свой (перевешенный) department_id."""
+    own_conn = conn is None
+    if own_conn:
+        conn = config.connect_ro()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT lower(COALESCE(dep.code, ''))
+                             FROM directions d
+                             LEFT JOIN directions live
+                                    ON live.id = COALESCE(d.canonical_id, d.id)
+                             LEFT JOIN departments dep
+                                    ON dep.id = COALESCE(live.department_id, d.department_id)
+                            WHERE d.id = %s""", (int(direction_id),))
+            row = cur.fetchone()
+        return (row[0] or None) if row else None
+    except Exception:
+        logging.exception("ai-qa: не удалось определить отдел направления %s", direction_id)
+        return None
+    finally:
+        if own_conn:
+            conn.close()
 
 
 def _flag_stale_evaluations(items: list[dict]) -> None:
@@ -320,6 +477,11 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
         direction_id, run_fp = item.get("_direction_id"), item.get("_run_fp")
         if not (run_fp and transcript_identity and direction_id):
             continue
+        # Направление в строке очереди — направление ОПЕРАТОРА, а оценка шла по
+        # чатовой шкале отдела (у ТЭЗ это другое направление). Считаем ожидаемый
+        # отпечаток по тому же направлению, что и _evaluate_and_cache.
+        if (item.get("subject") or config.SUBJECT_CALL) in config.CHAT_SUBJECT_KINDS:
+            direction_id = subjects_mod.criteria_direction_id(direction_id)
         try:
             if direction_id not in contexts:
                 try:
@@ -342,7 +504,9 @@ def _flag_stale_evaluations(items: list[dict]) -> None:
                 continue  # снапшота под текущую шкалу ещё нет — прогон заведомо устарел
             expected, _, _ = _evaluation_identity(
                 transcript_hash=transcript_identity, direction=ctx["direction"],
-                knowledge_snapshot={"content_hash": ctx["snapshot_hash"]}, use_rag=use_rag)
+                knowledge_snapshot={"content_hash": ctx["snapshot_hash"]}, use_rag=use_rag,
+                subject_kind=item.get("subject") or config.SUBJECT_CALL,
+                department=ctx.get("department_code"))
             item["stale"] = expected != run_fp
         except Exception:
             logging.exception(
@@ -562,7 +726,19 @@ def _retrieval_config(*, enabled: bool) -> dict:
 
 
 def _evaluation_identity(*, transcript_hash: str, direction: dict,
-                         knowledge_snapshot: dict, use_rag: bool) -> tuple[str, dict, dict]:
+                         knowledge_snapshot: dict, use_rag: bool,
+                         subject_kind: str = config.SUBJECT_CALL,
+                         department=None) -> tuple[str, dict, dict]:
+    """Отпечаток оценки. prompt_hash считается от ТОГО ЖЕ промпта, который уйдёт
+    в модель, — с видом субъекта и отделом.
+
+    Раньше здесь звался build_system без аргументов, то есть отпечаток любого
+    субъекта записывал промпт ЗВОНКА: воспроизводимость прогонов переписки была
+    подписана чужим промптом. Для звонка отдела продаж значение не меняется
+    (вид субъекта по умолчанию — звонок, отдел ОП даёт тот же текст), поэтому
+    сохранённые оценки ОП остаются свежими; у 21 оценки переписок Верификаторов
+    отпечаток сменится — карточка покажет бейдж «оценка устарела», переоценка
+    по кнопке."""
     transcript_criteria = [c for c in direction["criteria"] if c.get("eval_source") == cc.TRANSCRIPT]
     model_config = {
         "bulk": config.CLAUDE_MODEL_BULK, "hard": config.CLAUDE_MODEL_HARD,
@@ -575,7 +751,8 @@ def _evaluation_identity(*, transcript_hash: str, direction: dict,
     fingerprint, components = build_evaluation_fingerprint(
         transcript_hash=transcript_hash, model=config.CLAUDE_MODEL,
         model_config=model_config,
-        prompt_hash=content_hash(evaluator.build_system(transcript_criteria)),
+        prompt_hash=content_hash(evaluator.build_system(
+            transcript_criteria, subject_kind, department)),
         output_schema_hash=content_hash(evaluator._OUTPUT_SCHEMA),
         scale_hash=direction["scale_hash"],
         criterion_config_hash=content_hash(criterion_cfg),
@@ -673,6 +850,47 @@ def _human_display_verdict(v):
     return _norm_verdict(v)
 
 
+# Где лежит человеческая оценка ЭТОГО субъекта. Ни у одного субъекта, кроме
+# звонка журнала, id не равен calls.id — читать calls «по id субъекта» значит
+# показать чужой звонок. Связь у каждого своя:
+#   imported_call — calls.imported_call_id (звонок оценили после подтяжки);
+#   wz_episode / ca_episode — через снапшот переписки по ключу эпизода;
+#   c2d_snapshot  — calls.c2d_snapshot_id прямо на этот снапшот.
+_HUMAN_REVIEW_SQL = {
+    config.SUBJECT_CALL:
+        "SELECT scores, criterion_comments, score FROM calls WHERE id = %s",
+    config.SUBJECT_IMPORTED_CALL:
+        """SELECT c.scores, c.criterion_comments, c.score
+             FROM calls c
+            WHERE c.imported_call_id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
+            ORDER BY c.created_at DESC LIMIT 1""",
+    config.SUBJECT_WZ_EPISODE:
+        """SELECT c.scores, c.criterion_comments, c.score
+             FROM wazzup_episodes e
+             JOIN c2d_chat_snapshots s
+               ON s.source = 'wazzup' AND s.wz_channel_id = e.channel_id
+                  AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
+             JOIN calls c ON c.c2d_snapshot_id = s.id
+            WHERE e.id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
+            ORDER BY c.created_at DESC LIMIT 1""",
+    config.SUBJECT_CA_EPISODE:
+        """SELECT c.scores, c.criterion_comments, c.score
+             FROM chatapp_episodes e
+             JOIN c2d_chat_snapshots s
+               ON s.source = 'chatapp'
+                  AND s.wz_channel_id = e.license_id::text || ':' || e.messenger_type
+                  AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
+             JOIN calls c ON c.c2d_snapshot_id = s.id
+            WHERE e.id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
+            ORDER BY c.created_at DESC LIMIT 1""",
+    config.SUBJECT_C2D_SNAPSHOT:
+        """SELECT c.scores, c.criterion_comments, c.score
+             FROM calls c
+            WHERE c.c2d_snapshot_id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
+            ORDER BY c.created_at DESC LIMIT 1""",
+}
+
+
 def _attach_human_review(payload: dict) -> dict:
     """Дописывает в карточку пер-критерийную оценку супервайзера (calls.scores /
     calls.criterion_comments) и свежий итоговый балл. Всегда читается из БД на момент
@@ -689,17 +907,10 @@ def _attach_human_review(payload: dict) -> dict:
     if not call_id or not criteria:
         return payload
     scores, comments, human_score = None, None, payload.get("human_score")
-    if subject_kind == config.SUBJECT_WZ_EPISODE:
-        sql = """SELECT c.scores, c.criterion_comments, c.score
-                   FROM wazzup_episodes e
-                   JOIN c2d_chat_snapshots s
-                     ON s.source = 'wazzup' AND s.wz_channel_id = e.channel_id
-                        AND s.wz_chat_id = e.chat_id AND s.episode_start = e.started_at
-                   JOIN calls c ON c.c2d_snapshot_id = s.id
-                  WHERE e.id = %s AND COALESCE(c.is_draft, FALSE) = FALSE
-                  ORDER BY c.created_at DESC LIMIT 1"""
-    else:
-        sql = "SELECT scores, criterion_comments, score FROM calls WHERE id = %s"
+    sql = _HUMAN_REVIEW_SQL.get(subject_kind)
+    if sql is None:
+        logging.warning("ai-qa: нет запроса человеческой оценки для субъекта %s", subject_kind)
+        return payload
     try:
         conn = config.connect_ro()
         try:
@@ -1029,6 +1240,10 @@ def review_payload(call_id: int, refresh: bool = False,
 def _resolve_call_source(subject: dict, model: str) -> dict:
     """Транскрипт звонка: immutable-кэш ASR, иначе GCS → Soniox → кэш."""
     call_id, audio_path = subject["id"], subject["audio_path"]
+    # Вид субъекта — у самого субъекта: тем же путём читается и звонок из АТС
+    # (imported_calls), и он обязан ключевать свой транскрипт своим видом,
+    # иначе поделил бы кэш со звонком журнала того же номера.
+    subject_kind = subject["kind"]
     audio_fp = _audio_object_fingerprint(call_id, audio_path)
     asr_cfg = runtime_store.asr_config()
     asr_cfg_hash = content_hash(asr_cfg)
@@ -1037,7 +1252,7 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
         transcript_record = runtime_store.get_transcript(
             call_id=call_id, audio_fingerprint_value=audio_fp, asr_provider="soniox",
             asr_model=config.SONIOX_MODEL, asr_config_hash=asr_cfg_hash,
-            subject_kind=config.SUBJECT_CALL)
+            subject_kind=subject_kind)
     except runtime_store.RuntimeSchemaUnavailable:
         if config.RAG_TRACE_REQUIRED:
             raise RuntimeError("схема immutable ASR/evaluation cache не применена")
@@ -1053,7 +1268,7 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
     else:
         # Rolling-deploy migration path: reuse the old embedded ASR artifact once,
         # then write it into the dedicated immutable transcript cache.
-        legacy = _cache_get(call_id, model, config.SUBJECT_CALL)
+        legacy = _cache_get(call_id, model, subject_kind)
         legacy_asm = (legacy or {}).get("_asm") if (legacy or {}).get("_audio_path") == audio_path else None
         if legacy_asm and legacy_asm.get("text"):
             asm = legacy_asm
@@ -1085,7 +1300,7 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
                                         "audio_events": asm.get("audio_events")},
                 languages=asm.get("languages"), mean_conf=asm.get("mean_conf"),
                 low_conf_spans=asm.get("low_conf_spans"), duration_ms=duration_ms,
-                subject_kind=config.SUBJECT_CALL)
+                subject_kind=subject_kind)
         except runtime_store.RuntimeSchemaUnavailable:
             if config.RAG_TRACE_REQUIRED:
                 raise RuntimeError("не удалось сохранить immutable ASR artifact")
@@ -1104,7 +1319,40 @@ def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
     Когда сырые сообщения уже удалил 45-дневный ретеншн, переиспользуется ранее
     заморожённый транскрипт (он богаче заглушек эпизода)."""
     episode_id = subject["id"]
-    prepared = subjects_mod.prepare_wz_transcript(subject)
+    subject_kind = subject["kind"]
+    try:
+        prepared = subjects_mod.prepare_wz_transcript(subject)
+    except subjects_mod.SubjectNotEvaluable:
+        # Ни сырых сообщений, ни снапшота. У эпизода Wazzup на этот случай есть
+        # заморожённый транскрипт, у ChatApp и Chat2Desk — нет, и без запаса
+        # УЖЕ ОЦЕНЁННАЯ карточка перестала бы открываться навсегда: сообщения
+        # ChatApp живут 45 дней, а снапшот появляется только если чат брали в
+        # журнал. Запас — immutable-транскрипт: он писался при первой оценке и
+        # переживает любой ретеншн. Ничего не нашли — отказ, как и был.
+        frozen = None
+        try:
+            frozen = runtime_store.get_latest_transcript(
+                call_id=episode_id, subject_kind=subject_kind,
+                asr_provider=subjects_mod.chat_source_provider(subject_kind))
+        except runtime_store.RuntimeSchemaUnavailable:
+            frozen = None
+        if not frozen:
+            raise
+        stored = frozen.get("payload") or {}
+        asm = {"text": frozen["text"], "languages": {}, "mean_conf": None,
+               "low_conf_spans": []}
+        media_stats = stored.get("media_stats") or {"total": 0, "ready": 0, "failed": 0}
+        return {"asm": asm, "lines": frozen.get("segments") or [],
+                "transcript_cache_id": frozen["id"],
+                "transcript_hash": frozen["transcript_hash"],
+                # Идентичность источника берём из ПЕЙЛОАДА прогона: сама строка
+                # кэша её колонкой не отдаёт (_TRANSCRIPT_COLUMNS), а чатовый
+                # писатель кладёт source_identity в payload именно на этот случай.
+                "source_identity": stored.get("source_identity") or frozen["transcript_hash"],
+                "source_model": subjects_mod.WZ_SOURCE_MODEL,
+                "source_config": stored.get("source_config") or {},
+                "extra": {"media": dict(media_stats, source="expired"),
+                          "chat": _chat_extra(subject)}}
     source_identity = prepared["source_identity"]
     cfg, cfg_hash = prepared["source_config"], prepared["source_config_hash"]
     transcript_record = None
@@ -1112,10 +1360,10 @@ def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
         transcript_record = runtime_store.get_transcript(
             call_id=episode_id, audio_fingerprint_value=source_identity,
             asr_provider=prepared["provider"], asr_model=prepared["model"],
-            asr_config_hash=cfg_hash, subject_kind=config.SUBJECT_WZ_EPISODE)
+            asr_config_hash=cfg_hash, subject_kind=subject_kind)
         if transcript_record is None and prepared["media_source"] == "expired":
             transcript_record = runtime_store.get_latest_transcript(
-                call_id=episode_id, subject_kind=config.SUBJECT_WZ_EPISODE,
+                call_id=episode_id, subject_kind=subject_kind,
                 asr_provider=prepared["provider"])
     except runtime_store.RuntimeSchemaUnavailable:
         if config.RAG_TRACE_REQUIRED:
@@ -1144,7 +1392,7 @@ def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
                 payload={"source_config": cfg, "media_source": media_source,
                          "media_stats": media_stats, "source_identity": source_identity},
                 languages=None, mean_conf=None, low_conf_spans=None, duration_ms=None,
-                subject_kind=config.SUBJECT_WZ_EPISODE)
+                subject_kind=subject_kind)
         except runtime_store.RuntimeSchemaUnavailable:
             if config.RAG_TRACE_REQUIRED:
                 raise RuntimeError("не удалось сохранить immutable транскрипт эпизода")
@@ -1155,23 +1403,46 @@ def _resolve_wz_episode_source(subject: dict, model: str) -> dict:
             "transcript_hash": transcript_hash, "source_identity": source_identity,
             "source_model": prepared["model"], "source_config": cfg,
             "extra": {"media": dict(media_stats, source=media_source),
-                      "chat": {"channel_id": subject["channel_id"],
-                               "chat_id": subject["chat_id"],
-                               "chat_type": subject.get("chat_type"),
-                               "contact_name": subject.get("contact_name"),
-                               "contact_phone": subject.get("contact_phone"),
-                               "started_at": subject["started_at"].isoformat(),
-                               "ended_at": subject["ended_at"].isoformat(),
-                               "messages_count": subject.get("messages_count"),
-                               "inbound_count": subject.get("inbound_count"),
-                               "operator_share": subject.get("operator_share"),
-                               "human_outbound_count": subject.get("human_outbound_count"),
-                               "force_closed": subject.get("force_closed"),
-                               "authors": subject.get("authors") or []}}}
+                      "chat": _chat_extra(subject)}}
 
 
+def _chat_extra(subject: dict) -> dict:
+    """Шапка переписки для карточки. У заявки Chat2Desk эпизодных полей нет —
+    ни границ эпизода, ни доли ответов, — поэтому собираем то, что есть, а не
+    падаем на отсутствующем ключе."""
+    started, ended = subject.get("started_at"), subject.get("ended_at")
+    out = {"source": subject["kind"],
+           "channel_id": subject.get("channel_id"),
+           "chat_id": subject.get("chat_id"),
+           "chat_type": subject.get("chat_type") or subject.get("transport"),
+           "contact_name": subject.get("contact_name"),
+           "contact_phone": subject.get("contact_phone"),
+           "started_at": started.isoformat() if started is not None else None,
+           "ended_at": ended.isoformat() if ended is not None else None,
+           "messages_count": subject.get("messages_count"),
+           "inbound_count": subject.get("inbound_count"),
+           "operator_share": subject.get("operator_share"),
+           "human_outbound_count": subject.get("human_outbound_count"),
+           "force_closed": subject.get("force_closed"),
+           "authors": subject.get("authors") or []}
+    if subject["kind"] == config.SUBJECT_C2D_SNAPSHOT:
+        out["request_id"] = subject.get("request_id")
+        out["dialog_id"] = subject.get("dialog_id")
+        out["channel_name"] = subject.get("channel_name")
+        day = subject.get("day")
+        out["day"] = day.isoformat() if day is not None else None
+    return out
+
+
+# Звонок из АТС читается тем же путём, что и звонок из журнала: запись уже лежит
+# в GCS, распознаёт её тот же Soniox. Переписка ChatApp/Chat2Desk — тем же путём,
+# что эпизод Wazzup: отличается только СБОРКА сообщений (см. subjects.chat_messages),
+# а кэш транскрипта, вложения и идентичность общие.
 _SOURCE_RESOLVERS = {config.SUBJECT_CALL: _resolve_call_source,
-                     config.SUBJECT_WZ_EPISODE: _resolve_wz_episode_source}
+                     config.SUBJECT_IMPORTED_CALL: _resolve_call_source,
+                     config.SUBJECT_WZ_EPISODE: _resolve_wz_episode_source,
+                     config.SUBJECT_C2D_SNAPSHOT: _resolve_wz_episode_source,
+                     config.SUBJECT_CA_EPISODE: _resolve_wz_episode_source}
 
 
 def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
@@ -1183,6 +1454,12 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
     direction_id = subject["direction_id"]
     if direction_id is None:
         raise ValueError("у субъекта нет направления — нет мониторинговой шкалы")
+    if subject_kind in config.CHAT_SUBJECT_KINDS:
+        # Шкала переписки может лежать на ДРУГОМ направлении: техменеджеры ТЭЗ
+        # числятся на «ТП линия», а чат оценивается по «ТП чат». То же делает
+        # человеческая оценка «Случайного чата» (CHATAPP_CHAT_DIRECTION_MAP),
+        # поэтому оценки ИИ и человека попадают на одну шкалу и сравнимы.
+        direction_id = subjects_mod.criteria_direction_id(direction_id)
     source = _SOURCE_RESOLVERS[subject_kind](subject, model)
     asm, lines = source["asm"], source["lines"]
     transcript_cache_id = source["transcript_cache_id"]
@@ -1194,6 +1471,11 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
     # может указывать на архивную версию шкалы — критерии берутся из неё (баллы
     # позиционные), а rollout/знания/прогоны ключуются живой строкой направления.
     direction_id = int(direction["id"])
+    # Отдел для промпта считаем ТОЙ ЖЕ функцией, что и пометка «устарела»
+    # (_direction_identity_context), и от КАНОНИЧЕСКОГО направления. Иначе два
+    # места считали бы отдел по-разному — у архивной строки шкалы department_id
+    # может отличаться, — и каждая карточка показывалась бы устаревшей.
+    department_code = _direction_department_code(direction_id) or subject.get("department_code")
     from .rag import knowledge
     knowledge_conn = config.connect_rw()
     try:
@@ -1210,7 +1492,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         asr_config=source["source_config"], transcript=asm["text"])
     fingerprint, fingerprint_components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
-        knowledge_snapshot=snapshot, use_rag=primary_use_rag)
+        knowledge_snapshot=snapshot, use_rag=primary_use_rag,
+        subject_kind=subject_kind, department=department_code)
     audio_path = subject.get("audio_path")
 
     if not refresh:
@@ -1284,7 +1567,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
                     transcript_identity=transcript_identity,
                     scale_revision_id=scale_revision_id, snapshot=snapshot,
                     primary_run_id=cached_run["id"], pair_id=cached_run.get("pair_id"),
-                    refresh=False)
+                    refresh=False, department=department_code)
             # Keep the legacy queue projection available, but adjudication itself
             # is bound only to the immutable run metadata hydrated above.
             if not _cache_get(call_id, model, subject_kind):
@@ -1313,7 +1596,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         result = evaluator.evaluate(
             asm["text"], direction, asr_low_spans=asm["low_conf_spans"],
             use_rag=primary_use_rag, knowledge_snapshot_id=snapshot["id"],
-            subject_kind=subject_kind)
+            subject_kind=subject_kind, department=department_code)
         completed_at = runtime_store.now_utc()
     except Exception as exc:
         completed_at = runtime_store.now_utc()
@@ -1413,7 +1696,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             transcript_cache_id=transcript_cache_id, transcript_hash=transcript_hash,
             transcript_identity=transcript_identity,
             scale_revision_id=scale_revision_id, snapshot=snapshot,
-            primary_run_id=run_id, pair_id=pair_id, refresh=refresh)
+            primary_run_id=run_id, pair_id=pair_id, refresh=refresh,
+            department=department_code)
 
     _cache_put(call_id, model, payload, subject_kind=subject_kind)
     _meta_upsert(call_id, model, payload, subject_kind=subject_kind)
@@ -1427,11 +1711,13 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
                         transcript_cache_id, transcript_hash: str, transcript_identity: str,
                         scale_revision_id: int,
                         snapshot: dict, primary_run_id: str, pair_id: str | None,
-                        refresh: bool, subject_kind: str = config.SUBJECT_CALL):
+                        refresh: bool, subject_kind: str = config.SUBJECT_CALL,
+                        department=None):
     """Best-effort paired RAG-on run; it never changes the user-facing verdict."""
     fingerprint, components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
-        knowledge_snapshot=snapshot, use_rag=True)
+        knowledge_snapshot=snapshot, use_rag=True,
+        subject_kind=subject_kind, department=department)
     if not refresh:
         try:
             if runtime_store.get_cached_evaluation(
@@ -1446,7 +1732,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
         result = evaluator.evaluate(
             asm["text"], direction, asr_low_spans=asm.get("low_conf_spans") or [],
             use_rag=True, knowledge_snapshot_id=snapshot["id"],
-            subject_kind=subject_kind)
+            subject_kind=subject_kind, department=department)
         completed = runtime_store.now_utc()
         shadow_payload = {
             "id": call_id, "subject_kind": subject_kind, "direction_id": direction_id,
@@ -1585,7 +1871,8 @@ def criteria_config_set(direction_id: int, items: list[dict]) -> int:
 
 
 def adjudications_list(direction=None, q=None, *, status=None, index_status=None,
-                       page=1, page_size=20, allowed_direction_ids=None) -> dict:
+                       page=1, page_size=20, allowed_direction_ids=None,
+                       department=None) -> dict:
     """Server-paginated policy catalog with explicit health/degraded states."""
     # Переиндексацию НЕ пинаем из GET-каталога: она дёргается при постановке задачи
     # (queue_reindex_adjudication) и сама себя перезапускает по Timer, пока очередь не
@@ -1601,10 +1888,15 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
         conn = config.connect_ro(); cur = conn.cursor()
         cur.execute("SET client_encoding TO 'UTF8'")
         where, params = ["1=1"], []
-        if allowed_direction_ids is not None:
-            # Правила каталога ключуются каноническим id направления.
+        scope_family = None
+        if allowed_direction_ids is not None or department:
+            # Правила каталога ключуются каноническим id направления. Отдел
+            # сужает так же, как в остальных выборках раздела: правило — это
+            # политика оценки направления, и главе СЗоВ каталог Тез КЦ не нужен.
+            scope_family = [int(x) for x in
+                            _scoped_qa_family(cur, allowed_direction_ids, department=department)]
             where.append("c.direction_id = ANY(%s)")
-            params.append([int(x) for x in allowed_direction_ids] or [-1])
+            params.append(scope_family or [-1])
         if direction and direction != "all":
             if str(direction).isdigit():
                 where.append("c.direction_id=%s"); params.append(int(direction))
@@ -1680,26 +1972,36 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
             "embedding_config_hash": row[25],
         } for row in rows]
 
+        # Скоуп фасетов — только по направлениям (и отделу): фильтр по статусу
+        # или по строке поиска из фасетов вычитать нельзя, иначе счётчики
+        # перестанут показывать, что ещё можно выбрать.
+        facet_predicate, facet_params = "1=1", []
+        if scope_family is not None:
+            facet_predicate = "c.direction_id = ANY(%s)"
+            facet_params = [scope_family or [-1]]
         facets = {}
         for name, column in (("directions", "direction_name"),
                              ("statuses", "rule_status")):
             cur.execute(
-                f"""SELECT {column},COUNT(*) FROM qa_policy_rule_catalog
-                      GROUP BY {column} ORDER BY {column} NULLS LAST""")
+                f"""SELECT c.{column},COUNT(*) FROM qa_policy_rule_catalog c
+                     WHERE {facet_predicate}
+                     GROUP BY c.{column} ORDER BY c.{column} NULLS LAST""",
+                tuple(facet_params))
             facets[name] = [{"value": value or "unknown", "label": value or "—", "count": int(count)}
                             for value, count in cur.fetchall()]
         cur.execute(
-            """SELECT CASE
-                         WHEN index_status='ready' AND embedding_provider=%s
-                          AND embedding_model=%s AND embedding_dim=%s
-                          AND embedding_config_hash=%s THEN 'ready'
-                         WHEN index_status='ready' THEN 'stale'
-                         ELSE coalesce(index_status,'unknown') END AS effective_status,
+            f"""SELECT CASE
+                         WHEN c.index_status='ready' AND c.embedding_provider=%s
+                          AND c.embedding_model=%s AND c.embedding_dim=%s
+                          AND c.embedding_config_hash=%s THEN 'ready'
+                         WHEN c.index_status='ready' THEN 'stale'
+                         ELSE coalesce(c.index_status,'unknown') END AS effective_status,
                       COUNT(*)
-                 FROM qa_policy_rule_catalog
+                 FROM qa_policy_rule_catalog c
+                WHERE {facet_predicate}
                 GROUP BY effective_status ORDER BY effective_status""",
             (embedding_contract["provider"], embedding_contract["model"],
-             embedding_contract["dim"], embedding_contract["config_hash"]))
+             embedding_contract["dim"], embedding_contract["config_hash"], *facet_params))
         facets["index_statuses"] = [
             {"value": value, "label": value, "count": int(count)}
             for value, count in cur.fetchall()]
@@ -1796,16 +2098,18 @@ def _legacy_adjudications_page(*, direction=None, q=None, page=1, page_size=20) 
         conn.close()
 
 
-def _ai_qa_allowed_direction_ids() -> list[int]:
-    """Направления, доступные разделу ИИ-оценки: вся семья направлений ОП.
+def _ai_qa_allowed_direction_ids(department=None) -> list[int]:
+    """Направления, доступные разделу ИИ-оценки: семья ВСЕХ оцениваемых отделов.
 
-    Раньше здесь был литеральный список [72,73,74], из-за которого «Верификатор»
-    (71) получал 400 на сохранении разбора и не появлялся в настройке RAG-rollout.
-    Теперь список выводится из отдела, поэтому новое направление ОП работает сразу."""
+    Это ПИСАТЕЛЬСКИЙ allowlist: по нему отсекается сохранение разбора и настройка
+    RAG-rollout. Раньше здесь был литеральный список [72,73,74], из-за которого
+    «Верификатор» (71) получал 400 на сохранении разбора; после расширения раздела
+    на СЗоВ и Тез КЦ ту же 400 получили бы все их направления."""
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
-            return config.op_direction_id_family(cur)
+            return config.ai_qa_direction_id_family(
+                cur, [department] if department else None)
     except Exception:
         logging.exception("ai-qa: не удалось получить allowlist направлений")
         return list(config.OP_DIRECTION_IDS)
@@ -1813,26 +2117,42 @@ def _ai_qa_allowed_direction_ids() -> list[int]:
         conn.close()
 
 
-def _ai_qa_live_direction_ids() -> list[int]:
-    """Только живые (канонические) направления ОП — для админских списков."""
+def _ai_qa_live_direction_ids(department=None) -> list[int]:
+    """Только живые (канонические) направления оцениваемых отделов — для админских
+    списков (настройка критериев, RAG-rollout)."""
+    codes = [config.normalise_department_code(department)] if department else list(
+        config.DEPARTMENT_CODES)
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
             cur.execute("SET client_encoding TO 'UTF8'")
-            cur.execute("""SELECT id FROM directions
-                            WHERE department_id=%s AND canonical_id IS NULL
-                              AND COALESCE(is_active, TRUE)""",
-                        (config.OP_DEPARTMENT_ID,))
+            cur.execute("""SELECT d.id FROM directions d
+                             JOIN departments dep ON dep.id = d.department_id
+                            WHERE lower(COALESCE(dep.code, '')) = ANY(%s)
+                              AND d.canonical_id IS NULL
+                              AND COALESCE(d.is_active, TRUE)""",
+                        (codes,))
             ids = [int(r[0]) for r in cur.fetchall()]
-        return ids or list(config.OP_DIRECTION_IDS)
+        return ids or _live_directions_fallback(codes)
     except Exception:
         logging.exception("ai-qa: не удалось получить список живых направлений")
-        return list(config.OP_DIRECTION_IDS)
+        return _live_directions_fallback(codes)
     finally:
         conn.close()
 
 
-def rag_rollout_get() -> dict:
+def _live_directions_fallback(codes) -> list[int]:
+    """Аварийный список направлений — ТОЛЬКО для отдела продаж.
+
+    Литералы 72/73/74 выписаны когда-то под ОП, и подставлять их любому другому
+    отделу нельзя: у СЗоВ или Тез КЦ это чужие направления, по которым можно
+    сохранить настройку. Честный пустой список лучше чужого непустого."""
+    if config.OP_DEPARTMENT_CODE in (codes or []):
+        return list(config.OP_DIRECTION_IDS)
+    return []
+
+
+def rag_rollout_get(department=None) -> dict:
     conn = config.connect_ro()
     try:
         with conn.cursor() as cur:
@@ -1843,7 +2163,7 @@ def rag_rollout_get() -> dict:
                      FROM directions d
                      LEFT JOIN qa_rag_rollout_config r ON r.direction_id=d.id
                     WHERE d.id=ANY(%s) ORDER BY d.name""",
-                (config.RAG_MODE, config.RAG_CANARY_PERCENT, _ai_qa_live_direction_ids()))
+                (config.RAG_MODE, config.RAG_CANARY_PERCENT, _ai_qa_live_direction_ids(department)))
             rows = cur.fetchall()
             items = []
             for row in rows:
@@ -2928,71 +3248,139 @@ def refine_adjudication(body: dict) -> dict:
         excerpt=body.get("excerpt"))
 
 
-def random_call(allowed_direction_ids=None) -> dict:
-    """Случайный оценённый человеком звонок ОП с записью — для теста ИИ-оценки.
-    Сначала из ЕЩЁ НЕ оценённых ИИ (каждый вызов = новый сигнал за те же деньги);
-    если все уже оценены — любой."""
-    conn = config.connect_ro()
-    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-    base = """SELECT c.id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score
-                FROM calls c
-                LEFT JOIN directions d ON c.direction_id = d.id
-                LEFT JOIN users u ON c.operator_id = u.id
-               WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL AND c.audio_path <> ''
-                 AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
-    id_family = _scoped_op_family(cur, allowed_direction_ids)
-    if not id_family:
-        cur.close(); conn.close()
-        raise ValueError("нет оценённых звонков ОП с записью по вашим направлениям")
-    cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
-                                            WHERE rc.subject_kind = 'call'
-                                              AND rc.call_id = c.id AND rc.model = %s)
-                           ORDER BY random() LIMIT 1""",
-                (id_family, config.CLAUDE_MODEL))
-    row = cur.fetchone()
-    if not row:
-        cur.execute(base + " ORDER BY random() LIMIT 1", (id_family,))
-        row = cur.fetchone()
-    cur.close(); conn.close()
-    if not row:
-        raise ValueError("нет оценённых звонков ОП с записью")
-    return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
-            "datetime": row[3], "human_score": row[4], "subject": config.SUBJECT_CALL}
+def random_call(allowed_direction_ids=None, department=None) -> dict:
+    """Случайный звонок с записью — для оценки ИИ.
 
+    Два пула, в этом порядке:
 
-def random_chat_episode(allowed_direction_ids=None) -> dict:
-    """Случайный эпизод чата Верификаторов, пригодный для оценки.
+    1. Звонок из АТС, которого НЕТ в журнале оценок (`imported_calls` — то, что
+       подтянула кнопка «Случайный звонок» журнала: СЗоВ через Oktell, Тез КЦ
+       через Binotel). У этих отделов подтяжка возможна и без оценки, и именно
+       неоценённые звонки нужны в первую очередь: оценка ИИ там единственная.
+    2. Звонок, уже оценённый человеком (`calls`) — тогда в карточке сразу видно
+       расхождение ИИ и супервайзера. Для ОП это единственный пул: строк в
+       imported_calls у отдела продаж нет вовсе.
 
-    Пригодный = диалог, атрибутированный одному оператору с долей ответов не
-    ниже порога (config.WZ_MIN_OPERATOR_SHARE) и достаточным числом ответов, из
-    направления Верификаторов. Сначала берём ещё не оценённые ИИ эпизоды —
-    каждый вызов даёт новый сигнал за те же деньги."""
+    Внутри каждого пула сначала берутся ещё не оценённые ИИ — каждый вызов даёт
+    новый сигнал за те же деньги."""
+    # Отдел по умолчанию — продажи, как и у выбора переписки (и как было до
+    # появления трёх отделов): «отдел не задан» не должно молча означать
+    # «смешать все три».
+    code = config.normalise_department_code(department) or config.OP_DEPARTMENT_CODE
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
     try:
-        wz_family = subjects_mod.wz_direction_family(cur)
-        if not wz_family:
-            raise ValueError("не найдено направление Верификаторов "
-                             f"(отдел «{config.WZ_DEPARTMENT_CODE}», маркер "
-                             f"«{config.WZ_DIRECTION_MARKER}» в названии)")
+        id_family = _scoped_qa_family(cur, allowed_direction_ids, department=code)
+        if not id_family:
+            raise ValueError("нет звонков с записью по вашим направлениям")
+
+        # ── пул 1: звонок из АТС без оценки в журнале ──────────────────────────
+        # «Нет в журнале» проверяем И по связи calls.imported_call_id, И по
+        # статусу строки: связь — точный признак, статус — то, что видит журнал,
+        # и расхождение между ними не должно выдавать оценённый звонок за новый.
+        # Условие наличия записи вынесено параметром: последним делом тем же
+        # запросом проверяется ОБРАТНОЕ (звонки без записи), и вырезать условие
+        # из готовой строки было бы миной — молча сломается от любой правки SQL.
+        imported = """SELECT ic.id, d.name, COALESCE(u.name, ic.operator_name),
+                             TO_CHAR(ic.datetime_raw AT TIME ZONE 'Asia/Almaty',
+                                     'DD.MM HH24:MI')
+                        FROM imported_calls ic
+                        JOIN users u ON u.id = ic.operator_id
+                        LEFT JOIN directions d ON d.id = u.direction_id
+                       WHERE u.direction_id = ANY(%s)
+                         AND COALESCE(ic.status, '') <> 'evaluated'
+                         AND NOT EXISTS (SELECT 1 FROM calls c
+                                          WHERE c.imported_call_id = ic.id
+                                            AND COALESCE(c.is_draft, FALSE) = FALSE)"""
+        with_audio = " AND ic.audio_path IS NOT NULL AND ic.audio_path <> ''"
+        without_audio = " AND (ic.audio_path IS NULL OR ic.audio_path = '')"
+        cur.execute(imported + with_audio + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
+                                                    WHERE rc.subject_kind = 'imported_call'
+                                                      AND rc.call_id = ic.id
+                                                      AND rc.model = %s)
+                                   ORDER BY random() LIMIT 1""",
+                    (id_family, config.CLAUDE_MODEL))
+        row = cur.fetchone()
+        if row:
+            return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
+                    "datetime": row[3], "human_score": None,
+                    "subject": config.SUBJECT_IMPORTED_CALL,
+                    "in_journal": False}
+
+        # ── пул 2: звонок, оценённый человеком ────────────────────────────────
+        base = """SELECT c.id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score
+                    FROM calls c
+                    LEFT JOIN directions d ON c.direction_id = d.id
+                    LEFT JOIN users u ON c.operator_id = u.id
+                   WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL
+                     AND c.audio_path <> ''
+                     AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
+        # Оценённый ИИ ищем по ОБОИМ видам субъекта: тот же физический звонок
+        # мог быть оценён как imported_call (до появления оценки в журнале), и
+        # без второго условия он вернулся бы вторым субъектом — две оценки одного
+        # разговора и двойной счёт в метриках.
+        cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
+                                                WHERE rc.subject_kind = 'call'
+                                                  AND rc.call_id = c.id AND rc.model = %s)
+                               AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc2
+                                                WHERE rc2.subject_kind = 'imported_call'
+                                                  AND rc2.call_id = c.imported_call_id
+                                                  AND rc2.model = %s)
+                               ORDER BY random() LIMIT 1""",
+                    (id_family, config.CLAUDE_MODEL, config.CLAUDE_MODEL))
+        row = cur.fetchone()
+        if not row:
+            cur.execute(base + " ORDER BY random() LIMIT 1", (id_family,))
+            row = cur.fetchone()
+        if row:
+            return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
+                    "datetime": row[3], "human_score": row[4],
+                    "subject": config.SUBJECT_CALL, "in_journal": True}
+
+        # Оба пула пусты — но у неоценённого пула ещё оставались строки БЕЗ
+        # записи, и сказать про них честно полезнее, чем «звонков нет».
+        cur.execute(imported + without_audio + " ORDER BY random() LIMIT 1",
+                    (id_family,))
+        if cur.fetchone():
+            raise ValueError("у подтянутых звонков ещё нет аудиозаписи — "
+                             "она докачивается, попробуйте позже")
+        raise ValueError("нет звонков с записью, пригодных для оценки")
+    finally:
+        cur.close(); conn.close()
+
+
+def random_chat_episode(allowed_direction_ids=None, department=None) -> dict:
+    """Случайная переписка, пригодная для оценки, из источника выбранного отдела.
+
+    Источник у отдела ровно один (config.CHAT_SUBJECT_BY_DEPARTMENT): ОП —
+    эпизоды Wazzup (Верификаторы), Тез КЦ — эпизоды ChatApp, СЗоВ — заявки
+    Chat2Desk. «Пригодная» у эпизодных источников значит атрибуцию одному
+    оператору не ниже порога доли ответов; у Chat2Desk доли ответов не бывает
+    (заявка закреплена за одним оператором), и вместо неё отсекается ручная
+    передача чата посреди заявки — см. subjects._c2d_eligibility.
+
+    Сначала берём ещё не оценённые ИИ — каждый вызов даёт новый сигнал за те же
+    деньги."""
+    code = config.normalise_department_code(department) or config.OP_DEPARTMENT_CODE
+    subject_kind = config.chat_subject_kind(code)
+    if not subject_kind:
+        raise ValueError(f"у отдела «{code}» нет источника переписки для оценки")
+    conn = config.connect_ro()
+    cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+    try:
+        family = subjects_mod.chat_direction_family(cur, code)
+        if not family:
+            raise ValueError(f"у отдела «{code}» не найдено чатовых направлений")
         if allowed_direction_ids is not None:
             allowed = set(_scope_family(cur, allowed_direction_ids))
-            wz_family = [i for i in wz_family if i in allowed]
-            if not wz_family:
-                raise ValueError("чаты Верификаторов вне ваших направлений")
-        base = """SELECT e.id, d.name, u.name,
-                         TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),
-                         e.operator_share, e.human_outbound_count
-                    FROM wazzup_episodes e
-                    JOIN users u ON u.id = e.operator_user_id
-                    LEFT JOIN directions d ON d.id = u.direction_id
-                   WHERE e.kind = 'dialog' AND u.direction_id = ANY(%s)
-                     AND e.operator_share >= %s AND e.human_outbound_count >= %s"""
-        params = (wz_family, config.WZ_MIN_OPERATOR_SHARE, config.WZ_MIN_OPERATOR_MESSAGES)
-        cur.execute(base + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
-                                                WHERE rc.subject_kind = 'wz_episode'
-                                                  AND rc.call_id = e.id AND rc.model = %s)
-                               ORDER BY random() LIMIT 1""",
+            family = [i for i in family if i in allowed]
+            if not family:
+                raise ValueError("чаты этого отдела вне ваших направлений")
+        base, params = _CHAT_CANDIDATE_SQL[subject_kind](family)
+        cur.execute(base + f""" AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
+                                                 WHERE rc.subject_kind = '{subject_kind}'
+                                                   AND rc.call_id = t.id AND rc.model = %s)
+                                ORDER BY random() LIMIT 1""",
                     (*params, config.CLAUDE_MODEL))
         row = cur.fetchone()
         if not row:
@@ -3001,80 +3389,267 @@ def random_chat_episode(allowed_direction_ids=None) -> dict:
     finally:
         cur.close(); conn.close()
     if not row:
-        raise ValueError("нет эпизодов чатов, пригодных для оценки "
-                         f"(нужна доля ответов одного оператора ≥ "
-                         f"{round(config.WZ_MIN_OPERATOR_SHARE * 100)}%)")
+        raise ValueError("нет переписок, пригодных для оценки "
+                         "(нужна работа одного оператора и достаточная длина)")
     return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
             "datetime": row[3], "human_score": None,
-            "subject": config.SUBJECT_WZ_EPISODE,
-            "operator_share": row[4], "human_outbound_count": row[5]}
+            "subject": subject_kind,
+            "operator_share": row[4], "human_outbound_count": row[5],
+            "in_journal": False}
 
 
-def chat_eligibility_overview(allowed_direction_ids=None) -> dict:
-    """Сколько эпизодов чатов можно оценить, а сколько отсеивает порог атрибуции.
+def _wz_candidates(family):
+    """Кандидаты-эпизоды Wazzup. Алиас t — общий для всех источников: постфикс
+    запроса (исключение уже оценённых) один на всех."""
+    return ("""SELECT t.id, d.name, u.name,
+                      TO_CHAR(t.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),
+                      t.operator_share, t.human_outbound_count
+                 FROM wazzup_episodes t
+                 JOIN users u ON u.id = t.operator_user_id
+                 LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE t.kind = 'dialog' AND u.direction_id = ANY(%s)
+                  AND t.operator_share >= %s AND t.human_outbound_count >= %s""",
+            (family, config.WZ_MIN_OPERATOR_SHARE, config.WZ_MIN_OPERATOR_MESSAGES))
 
-    Нужно, чтобы порог 90% не выглядел «оценок почему-то нет»: видно, что чаты
-    есть, но в них отвечали несколько операторов."""
+
+# «Текст эпизода ChatApp ещё можно собрать»: сырые сообщения ИЛИ снапшот.
+# Заморожённого транскрипта у chatapp_episodes нет, поэтому предлагать эпизод
+# без источника текста значит выдать ошибку вместо оценки. Фрагмент общий с
+# пакетным прогоном (batch_eval), иначе их гейты разъедутся.
+CA_TEXT_AVAILABLE_SQL = """(EXISTS (SELECT 1 FROM chatapp_messages m
+                                    WHERE m.license_id = {alias}.license_id
+                                      AND m.messenger_type = {alias}.messenger_type
+                                      AND m.chat_id = {alias}.chat_id
+                                      AND m.dt >= {alias}.started_at
+                                      AND m.dt <= {alias}.ended_at)
+                         OR EXISTS (SELECT 1 FROM c2d_chat_snapshots s
+                                     WHERE s.source = 'chatapp'
+                                       AND s.wz_channel_id = {alias}.license_id::text || ':'
+                                                             || {alias}.messenger_type
+                                       AND s.wz_chat_id = {alias}.chat_id
+                                       AND s.episode_start = {alias}.started_at))"""
+
+# «Эпизод ChatApp уже оценён человеком в журнале» — через снапшот эпизода.
+CA_IN_JOURNAL_SQL = """EXISTS (SELECT 1 FROM c2d_chat_snapshots s
+                                JOIN calls c ON c.c2d_snapshot_id = s.id
+                               WHERE s.source = 'chatapp'
+                                 AND s.wz_channel_id = {alias}.license_id::text || ':'
+                                                       || {alias}.messenger_type
+                                 AND s.wz_chat_id = {alias}.chat_id
+                                 AND s.episode_start = {alias}.started_at
+                                 AND COALESCE(c.is_draft, FALSE) = FALSE)"""
+
+
+def _ca_candidates(family):
+    """Кандидаты-эпизоды ChatApp (Тез КЦ).
+
+    Дополнительно требуем, чтобы текст ещё был откуда собрать: сырые сообщения
+    или снапшот. Замороженного транскрипта у chatapp_episodes нет, и эпизод без
+    сообщений оценить нечем — предлагать его значит выдать ошибку вместо оценки."""
+    return ("""SELECT t.id, d.name, u.name,
+                      TO_CHAR(t.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),
+                      t.operator_share, t.human_outbound_count
+                 FROM chatapp_episodes t
+                 JOIN users u ON u.id = t.operator_user_id
+                 LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE t.kind = 'dialog' AND u.direction_id = ANY(%s)
+                  AND t.operator_share >= %s AND t.human_outbound_count >= %s
+                  AND """ + CA_TEXT_AVAILABLE_SQL.format(alias="t") + """
+                  AND NOT """ + CA_IN_JOURNAL_SQL.format(alias="t") + """""",
+            (family, config.CA_MIN_OPERATOR_SHARE, config.CA_MIN_OPERATOR_MESSAGES))
+
+
+def _c2d_candidates(family):
+    """Кандидаты-заявки Chat2Desk (СЗоВ) — только уже скачанные снапшоты.
+
+    Сырых сообщений Chat2Desk локально нет, а месячная квота их API почти
+    выедена, поэтому пул это готовые снапшоты БЕЗ оценки в журнале (на проде
+    07.09.2026 — 1841 штука). Отсекаем заявки, которые вели несколько человек:
+    признак — ответ оператора ДО системной строки «Чат передан…»; строку
+    автоназначения передачей не считаем, это первичная выдача заявки.
+    Тот же гейт повторён в subjects._c2d_eligibility (там он объясняет отказ)."""
+    return ("""SELECT t.id, d.name, COALESCE(u.name, t.c2d_operator_name),
+                      TO_CHAR(t.day,'DD.MM.YYYY'), NULL::double precision,
+                      """ + _C2D_OPERATOR_MESSAGES_SQL + """::int
+                 FROM c2d_chat_snapshots t
+                 JOIN users u ON u.id = t.operator_id
+                 LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE t.source = 'chat2desk' AND u.direction_id = ANY(%s)
+                  AND """ + _C2D_OPERATOR_MESSAGES_SQL + """ >= %s
+                  AND NOT """ + _C2D_SPLIT_SQL + """
+                  AND NOT EXISTS (SELECT 1 FROM calls c
+                                   WHERE c.c2d_snapshot_id = t.id
+                                     AND COALESCE(c.is_draft, FALSE) = FALSE)""",
+            (family, config.C2D_MIN_OPERATOR_MESSAGES))
+
+
+_CHAT_CANDIDATE_SQL = {
+    config.SUBJECT_WZ_EPISODE: _wz_candidates,
+    config.SUBJECT_CA_EPISODE: _ca_candidates,
+    config.SUBJECT_C2D_SNAPSHOT: _c2d_candidates,
+}
+
+
+def chat_eligibility_overview(allowed_direction_ids=None, department=None) -> dict:
+    """Сколько переписок можно оценить, а сколько отсеивает гейт атрибуции.
+
+    Нужно, чтобы гейт не выглядел «оценок почему-то нет»: видно, что чаты есть,
+    но их вели несколько человек. Источник и сам гейт зависят от отдела
+    (config.CHAT_SUBJECT_BY_DEPARTMENT), поэтому и считается по-разному: у
+    эпизодных источников — по доле ответов, у Chat2Desk — по ручной передаче."""
+    code = config.normalise_department_code(department) or config.OP_DEPARTMENT_CODE
+    subject_kind = config.chat_subject_kind(code)
+    if not subject_kind:
+        return {"available": False, "directions": []}
     conn = config.connect_ro()
     cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
     try:
-        wz_family = subjects_mod.wz_direction_family(cur)
+        family = subjects_mod.chat_direction_family(cur, code)
         if allowed_direction_ids is not None:
             allowed = set(_scope_family(cur, allowed_direction_ids))
-            wz_family = [i for i in wz_family if i in allowed]
-        if not wz_family:
+            family = [i for i in family if i in allowed]
+        if not family:
             return {"available": False, "directions": []}
-        cur.execute(
-            """SELECT COUNT(*) AS dialogs,
-                      COUNT(*) FILTER (WHERE e.operator_user_id IS NULL) AS unattributed,
-                      COUNT(*) FILTER (WHERE e.operator_user_id IS NOT NULL
-                                         AND e.operator_share < %s) AS multi_operator,
-                      COUNT(*) FILTER (WHERE e.operator_share >= %s
-                                         AND e.human_outbound_count >= %s) AS evaluable,
-                      COUNT(*) FILTER (WHERE e.operator_share >= %s
-                                         AND e.human_outbound_count >= %s
-                                         AND EXISTS (SELECT 1 FROM ai_review_cache rc
-                                                      WHERE rc.subject_kind='wz_episode'
-                                                        AND rc.call_id=e.id
-                                                        AND rc.model=%s)) AS evaluated
-                 FROM wazzup_episodes e
-                 LEFT JOIN users u ON u.id = e.operator_user_id
-                WHERE e.kind = 'dialog'
-                  AND (u.direction_id = ANY(%s) OR e.operator_user_id IS NULL)""",
-            (config.WZ_MIN_OPERATOR_SHARE, config.WZ_MIN_OPERATOR_SHARE,
-             config.WZ_MIN_OPERATOR_MESSAGES, config.WZ_MIN_OPERATOR_SHARE,
-             config.WZ_MIN_OPERATOR_MESSAGES, config.CLAUDE_MODEL, wz_family))
-        row = cur.fetchone() or (0, 0, 0, 0, 0)
-        cur.execute("SELECT id, name FROM directions WHERE id = ANY(%s) ORDER BY name",
-                    (wz_family,))
+        if subject_kind == config.SUBJECT_C2D_SNAPSHOT:
+            counts = _c2d_eligibility_counts(cur, family)
+        else:
+            counts = _episode_eligibility_counts(cur, family, subject_kind)
+        # Живые направления вперёд: у СЗоВ в семье 23 архивные версии «Чат
+        # менеджера», и списком из них подпись под счётчиками была бы нечитаемой.
+        cur.execute("""SELECT id, name FROM directions
+                        WHERE id = ANY(%s) AND canonical_id IS NULL ORDER BY name""",
+                    (family,))
         directions = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+        if not directions:
+            cur.execute("SELECT id, name FROM directions WHERE id = ANY(%s) ORDER BY name",
+                        (family,))
+            directions = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
     except Exception:
         logging.exception("ai-qa: не удалось посчитать пригодность чатов")
         return {"available": False, "directions": []}
     finally:
         cur.close(); conn.close()
-    return {"available": True, "directions": directions,
-            "min_operator_share_pct": round(config.WZ_MIN_OPERATOR_SHARE * 100),
-            "min_operator_messages": config.WZ_MIN_OPERATOR_MESSAGES,
+    return dict(counts, available=True, directions=directions,
+                department=code, subject=subject_kind)
+
+
+def _episode_eligibility_counts(cur, family, subject_kind) -> dict:
+    """Счётчики пригодности эпизодных источников (Wazzup, ChatApp)."""
+    is_wz = subject_kind == config.SUBJECT_WZ_EPISODE
+    table = "wazzup_episodes" if is_wz else "chatapp_episodes"
+    min_share = config.WZ_MIN_OPERATOR_SHARE if is_wz else config.CA_MIN_OPERATOR_SHARE
+    min_messages = (config.WZ_MIN_OPERATOR_MESSAGES if is_wz
+                    else config.CA_MIN_OPERATOR_MESSAGES)
+    # «Можно оценить» обязано совпадать с пулом, из которого берётся случайная
+    # переписка, иначе сводка обещает больше, чем даёт кнопка. У ChatApp сверх
+    # порога атрибуции пул сужают ещё два условия: текст ещё можно собрать
+    # (заморожённого транскрипта у эпизода нет) и переписки нет в журнале.
+    extra = ""
+    if not is_wz:
+        extra = (" AND " + CA_TEXT_AVAILABLE_SQL.format(alias="e")
+                 + " AND NOT " + CA_IN_JOURNAL_SQL.format(alias="e"))
+    cur.execute(
+        """SELECT COUNT(*) AS dialogs,
+                  COUNT(*) FILTER (WHERE e.operator_user_id IS NULL) AS unattributed,
+                  COUNT(*) FILTER (WHERE e.operator_user_id IS NOT NULL
+                                     AND e.operator_share < %s) AS multi_operator,
+                  COUNT(*) FILTER (WHERE e.operator_share >= %s
+                                     AND e.human_outbound_count >= %s""" + extra + """) AS evaluable,
+                  COUNT(*) FILTER (WHERE e.operator_share >= %s
+                                     AND e.human_outbound_count >= %s
+                                     AND EXISTS (SELECT 1 FROM ai_review_cache rc
+                                                  WHERE rc.subject_kind = %s
+                                                    AND rc.call_id = e.id
+                                                    AND rc.model = %s)) AS evaluated
+             FROM """ + table + """ e
+             LEFT JOIN users u ON u.id = e.operator_user_id
+            WHERE e.kind = 'dialog'
+              AND (u.direction_id = ANY(%s) OR e.operator_user_id IS NULL)""",
+        (min_share, min_share, min_messages, min_share, min_messages,
+         subject_kind, config.CLAUDE_MODEL, family))
+    row = cur.fetchone() or (0, 0, 0, 0, 0)
+    return {"min_operator_share_pct": round(min_share * 100),
+            "min_operator_messages": min_messages,
             "dialogs": int(row[0] or 0), "unattributed": int(row[1] or 0),
             "multi_operator": int(row[2] or 0), "evaluable": int(row[3] or 0),
             "evaluated": int(row[4] or 0)}
 
 
-def evaluations_count(allowed_direction_ids=None, subject_kind=None) -> int:
+# Заявку вели несколько человек, если ответ оператора был ДО системной строки
+# «Чат передан…», не помеченной автоназначением. Автоназначение — первичная
+# выдача заявки, и считать его передачей значило бы отсечь почти весь пул
+# (на проде 07.09.2026 таких строк 1690 из 1877).
+#
+# Проценты в LIKE удвоены (%%): строка склеивается в запрос, который исполняется
+# С параметрами, а psycopg2 в таком запросе считает одиночный % началом
+# подстановки. Оба потребителя — выборка кандидата и счётчики — параметры передают.
+_C2D_SPLIT_SQL = """EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(t.messages) WITH ORDINALITY AS x(m, ord)
+                         WHERE x.m->>'type' = 'system'
+                           AND lower(x.m->>'text') LIKE 'чат передан%%'
+                           AND lower(x.m->>'text') NOT LIKE '%%автоназначен%%'
+                           AND EXISTS (
+                                 SELECT 1
+                                   FROM jsonb_array_elements(t.messages)
+                                        WITH ORDINALITY AS y(m2, ord2)
+                                  WHERE y.m2->>'type' = 'to_client' AND y.ord2 < x.ord))"""
+
+_C2D_OPERATOR_MESSAGES_SQL = """(SELECT COUNT(*) FROM jsonb_array_elements(t.messages) m
+                                  WHERE m->>'type' = 'to_client')"""
+
+
+def _c2d_eligibility_counts(cur, family) -> dict:
+    """Счётчики пригодности заявок Chat2Desk.
+
+    `multi_operator` здесь — заявки с ручной передачей чата после ответов
+    оператора: именно они, а не доля ответов, делают оценку одного человека
+    нечестной. Доли ответов у источника нет вовсе, поэтому
+    min_operator_share_pct не возвращаем — по его отсутствию фронт и понимает,
+    что эту мерку показывать не нужно."""
+    cur.execute(
+        """SELECT COUNT(*) AS chats,
+                  COUNT(*) FILTER (WHERE s.operator_id IS NULL) AS unattributed,
+                  COUNT(*) FILTER (WHERE s.split) AS multi_operator,
+                  COUNT(*) FILTER (WHERE NOT s.split AND s.op_msgs >= %s) AS evaluable,
+                  COUNT(*) FILTER (WHERE NOT s.split AND s.op_msgs >= %s
+                                     AND s.ai_done) AS evaluated,
+                  COUNT(*) FILTER (WHERE NOT s.split AND s.op_msgs >= %s
+                                     AND NOT s.in_journal) AS not_in_journal
+             FROM (
+               SELECT t.id, t.operator_id,
+                      """ + _C2D_OPERATOR_MESSAGES_SQL + """ AS op_msgs,
+                      """ + _C2D_SPLIT_SQL + """ AS split,
+                      EXISTS (SELECT 1 FROM calls c WHERE c.c2d_snapshot_id = t.id
+                                AND COALESCE(c.is_draft, FALSE) = FALSE) AS in_journal,
+                      EXISTS (SELECT 1 FROM ai_review_cache rc
+                               WHERE rc.subject_kind = 'c2d_snapshot'
+                                 AND rc.call_id = t.id AND rc.model = %s) AS ai_done
+                 FROM c2d_chat_snapshots t
+                 LEFT JOIN users u ON u.id = t.operator_id
+                WHERE t.source = 'chat2desk'
+                  AND (u.direction_id = ANY(%s) OR t.operator_id IS NULL)
+             ) s""",
+        (config.C2D_MIN_OPERATOR_MESSAGES, config.C2D_MIN_OPERATOR_MESSAGES,
+         config.C2D_MIN_OPERATOR_MESSAGES, config.CLAUDE_MODEL, family))
+    row = cur.fetchone() or (0, 0, 0, 0, 0, 0)
+    return {"min_operator_messages": config.C2D_MIN_OPERATOR_MESSAGES,
+            "dialogs": int(row[0] or 0), "unattributed": int(row[1] or 0),
+            "multi_operator": int(row[2] or 0), "evaluable": int(row[3] or 0),
+            "evaluated": int(row[4] or 0), "not_in_journal": int(row[5] or 0)}
+
+
+def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=None) -> int:
     """Сколько всего звонков оценено ИИ (в рамках доступных направлений) — для пагинации."""
     conn = None
     try:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        scope_sql, scope_params = "", ()
-        if allowed_direction_ids is not None:
-            family = _scope_family(cur, allowed_direction_ids)
-            if not family:
-                cur.close(); conn.close()
-                return 0
-            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
-            scope_params = (family,)
+        scope_sql, scope_params = _direction_predicate(
+            cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+        if scope_sql is None:
+            cur.close(); conn.close()
+            return 0
         kind_sql, kind_params = "", ()
         if subject_kind:
             kind_sql = " AND rc.subject_kind = %s"
@@ -3099,7 +3674,7 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None) -> int:
 
 
 def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
-                     subject_kind=None) -> list[dict]:
+                     subject_kind=None, department=None) -> list[dict]:
     """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
     Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
     версиями модели, дублировались в списке. Сортировка — сначала новые; поддержана
@@ -3110,21 +3685,18 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
         offset = max(0, int(offset))
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
-        scope_sql, scope_params = "", ()
-        if allowed_direction_ids is not None:
-            family = _scope_family(cur, allowed_direction_ids)
-            if not family:
-                cur.close(); conn.close()
-                return []
-            scope_sql = f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
-            scope_params = (family,)
+        scope_sql, scope_params = _direction_predicate(
+            cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+        if scope_sql is None:
+            cur.close(); conn.close()
+            return []
         kind_sql, kind_params = "", ()
         if subject_kind:
             kind_sql = " AND rc.subject_kind = %s"
             kind_params = (subjects_mod.normalise_kind(subject_kind),)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
-                      TO_CHAR(rc.created_at,'DD.MM HH24:MI'), c.score,
+                      TO_CHAR(rc.created_at,'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},
                       rc.payload->>'ai_score' AS ai, rc.subject_kind
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                               rc.subject_kind, rc.call_id, rc.created_at, rc.payload
@@ -3345,12 +3917,13 @@ def _rag_observability(cur) -> dict:
     return out
 
 
-def stats(allowed_direction_ids=None) -> dict:
+def stats(allowed_direction_ids=None, department=None) -> dict:
     """Метрики доверия для дашборда. Два эталона: «сырой» (человеческие оценки из
     calls.scores — много данных, но Correct в форме — дефолт) и «чистый» (итоги ревью —
     мало, но человек реально смотрел). Пустые места — честно null/[], без выдуманных цифр.
-    При заданном скоупе (СВ ОП) очередь/оценённые/сырой эталон считаются только по его
-    направлениям; операционные метрики reviewed/rag остаются общесистемными."""
+    При заданном скоупе (СВ) или выбранном в селекторе отделе очередь/оценённые/сырой
+    эталон считаются только по их направлениям; операционные метрики reviewed/rag
+    остаются общесистемными."""
     out = {"queue": 0, "evaluated": 0, "agreement": None, "by_criterion": [], "focus": [],
            "alarm_precision": None, "recall": None, "correct_reliability": None,
            "matrix": None, "deficiency": 0, "reviewed": None, "rag": None}
@@ -3359,8 +3932,8 @@ def stats(allowed_direction_ids=None) -> dict:
         conn = config.connect_ro()
         cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         scope_family = None
-        if allowed_direction_ids is not None:
-            scope_family = _scope_family(cur, allowed_direction_ids)
+        if allowed_direction_ids is not None or department:
+            scope_family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
         if scope_family is not None:
             cur.execute("SELECT COUNT(*) FROM ai_review_cache rc" + _SUBJECT_JOIN
                         + f" WHERE TRUE{_SUBJECT_EXISTS} AND {_SUBJECT_DIRECTION} = ANY(%s)",
@@ -3384,7 +3957,7 @@ def stats(allowed_direction_ids=None) -> dict:
                             (config.CLAUDE_MODEL,))
             out["queue"] = cur.fetchone()[0]
         except Exception:
-            family = _scoped_op_family(cur, allowed_direction_ids)
+            family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
             cur.execute(
                 """SELECT COUNT(*) FROM calls
                     WHERE direction_id = ANY(%s) AND audio_path IS NOT NULL AND audio_path <> ''
@@ -3392,9 +3965,17 @@ def stats(allowed_direction_ids=None) -> dict:
                 (family or [-1],))
             out["queue"] = cur.fetchone()[0]
 
-        # Сырой эталон: последняя оценка каждого звонка (без дублей по тегам моделей).
+        # Сырой эталон: последняя оценка каждого субъекта (без дублей по тегам
+        # моделей), сопоставленная с оценкой ЧЕЛОВЕКА.
+        #
+        # Человеческая оценка лежит у каждого вида субъекта в своём месте, и
+        # перечислять надо ВСЕ: вид, забытый здесь, просто не попадает в согласие
+        # ИИ↔человек — молча, без ошибки. Так и было со звонками из АТС и
+        # перепиской СЗоВ/ТЭЗ: оценка человека появлялась позже, но в метрику
+        # не входила никогда.
         cur.execute(
-            """SELECT t.criteria, COALESCE(c.scores, hc.scores), t.direction
+            """SELECT t.criteria, COALESCE(c.scores, hwz.scores, himp.scores,
+                                           hc2d.scores, hca.scores), t.direction
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                               rc.subject_kind, rc.call_id,
                               rc.payload->'criteria' AS criteria,
@@ -3405,7 +3986,16 @@ def stats(allowed_direction_ids=None) -> dict:
                         ON t.subject_kind = 'call' AND c.id = t.call_id
                  LEFT JOIN wazzup_episodes e
                         ON t.subject_kind = 'wz_episode' AND e.id = t.call_id
+                 LEFT JOIN imported_calls ic
+                        ON t.subject_kind = 'imported_call' AND ic.id = t.call_id
+                 LEFT JOIN c2d_chat_snapshots cs
+                        ON t.subject_kind = 'c2d_snapshot' AND cs.id = t.call_id
+                 LEFT JOIN chatapp_episodes ce
+                        ON t.subject_kind = 'ca_episode' AND ce.id = t.call_id
                  LEFT JOIN users ue ON ue.id = e.operator_user_id
+                 LEFT JOIN users ui ON ui.id = ic.operator_id
+                 LEFT JOIN users us ON us.id = cs.operator_id
+                 LEFT JOIN users ua ON ua.id = ce.operator_user_id
                  LEFT JOIN LATERAL (
                      SELECT hcalls.scores
                        FROM c2d_chat_snapshots s
@@ -3415,9 +4005,33 @@ def stats(allowed_direction_ids=None) -> dict:
                         AND s.episode_start = e.started_at
                         AND COALESCE(hcalls.is_draft, FALSE) = FALSE
                       ORDER BY hcalls.created_at DESC LIMIT 1
-                 ) hc ON true
-                WHERE COALESCE(c.scores, hc.scores) IS NOT NULL"""
-            + (" AND COALESCE(c.direction_id, ue.direction_id) = ANY(%s)"
+                 ) hwz ON true
+                 LEFT JOIN LATERAL (
+                     SELECT hcalls.scores FROM calls hcalls
+                      WHERE ic.id IS NOT NULL AND hcalls.imported_call_id = ic.id
+                        AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                      ORDER BY hcalls.created_at DESC LIMIT 1
+                 ) himp ON true
+                 LEFT JOIN LATERAL (
+                     SELECT hcalls.scores FROM calls hcalls
+                      WHERE cs.id IS NOT NULL AND hcalls.c2d_snapshot_id = cs.id
+                        AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                      ORDER BY hcalls.created_at DESC LIMIT 1
+                 ) hc2d ON true
+                 LEFT JOIN LATERAL (
+                     SELECT hcalls.scores
+                       FROM c2d_chat_snapshots s
+                       JOIN calls hcalls ON hcalls.c2d_snapshot_id = s.id
+                      WHERE ce.id IS NOT NULL AND s.source = 'chatapp'
+                        AND s.wz_channel_id = ce.license_id::text || ':' || ce.messenger_type
+                        AND s.wz_chat_id = ce.chat_id AND s.episode_start = ce.started_at
+                        AND COALESCE(hcalls.is_draft, FALSE) = FALSE
+                      ORDER BY hcalls.created_at DESC LIMIT 1
+                 ) hca ON true
+                WHERE COALESCE(c.scores, hwz.scores, himp.scores,
+                               hc2d.scores, hca.scores) IS NOT NULL"""
+            + (" AND COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
+               " us.direction_id, ua.direction_id) = ANY(%s)"
                if scope_family is not None else ""),
             ((scope_family or [-1],) if scope_family is not None else ()))
         m = _verdict_metrics(cur.fetchall())

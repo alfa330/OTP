@@ -393,6 +393,14 @@ TEZ_RANDOM_CALL_MODELS = {'operator', 'tez_line', 'tez_op'}
 TEZ_BINOTEL_SAMPLE_CAP = _env_int('TEZ_BINOTEL_SAMPLE_CAP', 500, minimum=1, maximum=5000)
 # Сколько случайных звонков разрешаем взять за один запрос (СЗоВ и TEZ).
 RANDOM_CALL_MAX_COUNT = _env_int('RANDOM_CALL_MAX_COUNT', 20, minimum=1, maximum=100)
+# Окно подтяжки звонка из АТС в разделе «ИИ-оценка», когда период не задан.
+# Семь дней — предел окна Binotel (tez_binotel_calls.MAX_WINDOW_DAYS), одно
+# значение годится обеим АТС.
+AI_QA_PULL_CALL_DAYS = _env_int('AI_QA_PULL_CALL_DAYS', 7, minimum=1, maximum=30)
+# Маркер в imported_calls.notes: журнальная кнопка пишет 'random:<id>:<атс>',
+# раздел «ИИ-оценка» — 'aiqa:<id>:<атс>'. Разный маркер нужен, чтобы подтяжки
+# раздела были отличимы в пуле (у журнала это план прослушки, у раздела — нет).
+AI_QA_PULL_CALL_SOURCE = 'aiqa'
 
 # «Деление звонков» — раздел общий для всех отделов: норма, пул и оценки считаются
 # по НАШИМ таблицам и от телефонии не зависят, поэтому статус видит каждый отдел
@@ -5016,18 +5024,37 @@ def _resource_fte_error_response(error):
 
 
 # ── ИИ-оценка звонков (раздел call_qa) ────────────────────────────────────────
+# Конфигурацию пакета оценки берём напрямую: перечень оцениваемых отделов должен
+# быть ОДНИМ, а не двумя копиями литералов (на такой копии уже ловили
+# «Верификатор» — см. call_qa/config.py). Модуль тянет только os/json, БД при
+# импорте не трогает, обратной зависимости на bot_schedule2 у него нет.
+from call_qa import config as call_qa_config
+
 AI_QA_OP_DEPARTMENT_ID = 367  # Отдел продаж (call_qa.config.OP_DEPARTMENT_ID)
-# Коды отделов, чьим главам открыт раздел целиком (без среза по направлениям).
-# Оцениваются здесь только звонки/чаты ОП, поэтому список — не «свой отдел», а
-# явный allowlist наблюдателей: 'marketing' добавлен по решению владельца
-# (2026-08-06) — глава маркетинга смотрит те же разборы, что главы ОП и СЗоВ.
-AI_QA_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov', 'marketing'})
+# Отделы, которые раздел ОЦЕНИВАЕТ: у каждого свои направления, своя телефония и
+# свой источник переписки (call_qa.config.DEPARTMENT_CODES). Глава и СВ такого
+# отдела видят СВОЙ отдел — граница отдела в портале строгая.
+AI_QA_SUBJECT_DEPARTMENT_CODES = frozenset(call_qa_config.DEPARTMENT_CODES)
+# Отделы-НАБЛЮДАТЕЛИ: своих оцениваемых направлений у них нет, они смотрят чужие
+# разборы. 'marketing' — по решению владельца (2026-08-06): глава маркетинга
+# смотрит те же разборы звонков продаж, что и глава ОП. Периметр наблюдателя
+# оставлен ровно прежним (только ОП): расширять его на СЗоВ и Тез КЦ вместе с
+# открытием раздела — не та задача, это отдельное решение владельца.
+AI_QA_OBSERVER_DEPARTMENT_CODES = frozenset({'marketing'})
+# «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ он
+# открыт исторически (они смотрели те же разборы), Тез КЦ — нет: у него своя
+# переписка в разделе «Чаты ChatApp».
+VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov'})
+AI_QA_OBSERVER_SCOPE_DEPARTMENTS = ('op',)
+# Совместимость: имя используется тестами и фронтом как «кому открыт раздел».
+AI_QA_HEAD_DEPARTMENT_CODES = frozenset(
+    AI_QA_SUBJECT_DEPARTMENT_CODES | AI_QA_OBSERVER_DEPARTMENT_CODES)
 
 
-def _is_ai_qa_department_head(requester_id):
-    """Глава отдела, которому открыт полный доступ к ИИ-оценке и Wazzup-чатам."""
+def _headed_department_codes(requester_id):
+    """Коды отделов, которые человек возглавляет (в нижнем регистре)."""
     if requester_id is None:
-        return False
+        return []
     headed_ids = set(_headed_department_ids(requester_id))
     headed = _headed_department_id(requester_id)
     if headed is not None:
@@ -5035,18 +5062,126 @@ def _is_ai_qa_department_head(requester_id):
             headed_ids.add(int(headed))
         except (TypeError, ValueError):
             pass
-    if not headed_ids:
-        return False
-    if AI_QA_OP_DEPARTMENT_ID in headed_ids:
-        return True
+    codes = []
     for department_id in headed_ids:
         try:
             department = db.get_department_by_id(department_id) or {}
         except Exception:
             continue
-        if str(department.get('code') or '').strip().lower() in AI_QA_HEAD_DEPARTMENT_CODES:
-            return True
-    return False
+        code = str(department.get('code') or '').strip().lower()
+        if code:
+            codes.append(code)
+    if AI_QA_OP_DEPARTMENT_ID in headed_ids and 'op' not in codes:
+        # Отдел продаж узнаём и по id: у части профилей код в справочнике пуст.
+        codes.append('op')
+    return codes
+
+
+def _ai_qa_department_scope(requester_id):
+    """Отделы раздела, доступные этому человеку. None — все.
+
+    Это ВТОРАЯ ось доступа рядом с направлениями: селектор отдела отдаёт код, и
+    он обязан проверяться, иначе глава СЗоВ читал бы разборы Тез КЦ, подставив
+    ?department=tez. Направления внутри отдела режет _ai_qa_direction_scope."""
+    if requester_id is None:
+        return []
+    if int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
+        return None
+    user = db.get_user(id=requester_id)
+    role = _normalize_user_role(user[3]) if user else None
+    # Супер-админ и ГЛОБАЛЬНЫЙ админ (админ, не возглавляющий отдел) — все отделы:
+    # им и предназначен селектор.
+    if _is_global_admin_requester(role, requester_id):
+        return None
+    headed = [code for code in _headed_department_codes(requester_id)
+              if code in AI_QA_SUBJECT_DEPARTMENT_CODES]
+    if headed:
+        return headed
+    if _is_marketing_observer(requester_id, role):
+        return list(AI_QA_OBSERVER_SCOPE_DEPARTMENTS)
+    if _headed_department_codes(requester_id):
+        # Глава отдела-наблюдателя (маркетинг) без должности наблюдателя.
+        observer = [code for code in _headed_department_codes(requester_id)
+                    if code in AI_QA_OBSERVER_DEPARTMENT_CODES]
+        if observer:
+            return list(AI_QA_OBSERVER_SCOPE_DEPARTMENTS)
+    if role == 'sv':
+        code = _department_code_of_user(requester_id)
+        if code in AI_QA_SUBJECT_DEPARTMENT_CODES:
+            return [code]
+    return []
+
+
+def _department_code_of_user(requester_id):
+    """Код отдела сотрудника. Сверяем и id отдела продаж: код в справочнике
+    заполнен не везде, а по одному полю человек молча терялся бы."""
+    try:
+        _dept_id, code = db.get_user_department(requester_id)
+    except Exception:
+        _dept_id, code = None, None
+    code = str(code or '').strip().lower()
+    if code:
+        return code
+    try:
+        dept_id = db.get_user_department_id(requester_id)
+    except Exception:
+        dept_id = None
+    if dept_id is not None and int(dept_id) == AI_QA_OP_DEPARTMENT_ID:
+        return 'op'
+    return ''
+
+
+def _ai_qa_requested_department(requester_id, value=None):
+    """Отдел из запроса, сверенный с доступными. Возвращает (код|None, ошибка).
+
+    None означает «все доступные отделы» и допустим только тому, у кого доступны
+    все: иначе главе СЗоВ пришёл бы смешанный список с чужими отделами."""
+    allowed = _ai_qa_department_scope(requester_id)
+    raw = str(value if value is not None else (request.args.get('department') or '')).strip().lower()
+    if raw in ('', 'all', 'any'):
+        if allowed is None:
+            return None, None
+        if not allowed:
+            return None, (jsonify({"error": "forbidden"}), 403)
+        # Несколько отделов, но не все (человек формально возглавляет два):
+        # берём первый в ПОРЯДКЕ КОНФИГА, а не первый из множества — иначе
+        # отдел по умолчанию менялся бы от запроса к запросу.
+        ordered = [code for code in call_qa_config.DEPARTMENT_CODES if code in allowed]
+        return (ordered or sorted(allowed))[0], None
+    # Валидация — по ОЦЕНИВАЕМЫМ отделам: 'marketing' это отдел-наблюдатель, у
+    # него нет своих направлений, и ?department=marketing дал бы пустой раздел
+    # вместо честного отказа.
+    if raw not in AI_QA_SUBJECT_DEPARTMENT_CODES:
+        return None, (jsonify({"error": f"неизвестный отдел: {raw}"}), 400)
+    if allowed is not None and raw not in allowed:
+        return None, (jsonify({"error": "Этот отдел вам не открыт"}), 403)
+    return raw, None
+
+
+def _ai_qa_available_departments(requester_id):
+    """Отделы для селектора: код, название и что в них можно оценивать."""
+    allowed = _ai_qa_department_scope(requester_id)
+    codes = list(call_qa_config.DEPARTMENT_CODES) if allowed is None else [
+        code for code in call_qa_config.DEPARTMENT_CODES if code in allowed]
+    names = {}
+    try:
+        for department in (db.get_departments() or []):
+            code = str(department.get('code') or '').strip().lower()
+            if code:
+                names[code] = department.get('name') or code
+    except Exception:
+        logging.exception("ai-qa: не удалось прочитать справочник отделов")
+    return [{'code': code,
+             'name': names.get(code) or code.upper(),
+             'chat_subject': call_qa_config.chat_subject_kind(code)}
+            for code in codes]
+
+
+def _is_ai_qa_department_head(requester_id):
+    """Глава отдела, которому открыт раздел ИИ-оценки (свой отдел либо, для
+    маркетинга, разборы ОП — см. AI_QA_OBSERVER_DEPARTMENT_CODES)."""
+    return any(code in AI_QA_HEAD_DEPARTMENT_CODES
+               for code in _headed_department_codes(requester_id))
 
 
 def _ai_qa_guard():
@@ -5065,15 +5200,15 @@ def _ai_qa_guard():
         return requester_id, None
     user = db.get_user(id=requester_id) if requester_id else None
     role = _normalize_user_role(user[3]) if user else None
-    if _is_super_admin_role(role):
+    # Супер-админ и ГЛОБАЛЬНЫЙ админ (админ, не возглавляющий отдел): им и
+    # предназначен селектор отдела — они видят все три отдела раздела.
+    if _is_global_admin_requester(role, requester_id):
         return requester_id, None
     if requester_id is not None:
         if _is_ai_qa_department_head(requester_id):
             return requester_id, None
-        if role == 'sv':
-            dept_id = db.get_user_department_id(requester_id)
-            if dept_id is not None and int(dept_id) == AI_QA_OP_DEPARTMENT_ID:
-                return requester_id, None
+        if role == 'sv' and _department_code_of_user(requester_id) in AI_QA_SUBJECT_DEPARTMENT_CODES:
+            return requester_id, None
         if _is_marketing_observer(requester_id, role):
             if _request_is_read_only():
                 return requester_id, None
@@ -5084,43 +5219,60 @@ def _ai_qa_guard():
 def _verifier_chats_guard():
     """Доступ к разделу «Чаты Верификаторов» (/api/wazzup/*, кроме эпизодов).
 
-    Аудитория ШИРЕ, чем у «ИИ-оценки»: сверх её списка (супер-админ, главы
-    ОП/СЗоВ/маркетинга, whitelist, СВ ОП) переписку читают ГЛОБАЛЬНЫЕ админы —
-    решение владельца. Разборы ИИ им при этом не открываются: у /api/ai-qa/* и
-    у эпизодов остаётся _ai_qa_guard.
+    Периметр ЗДЕСЬ СВОЙ и перечислен явно, а не выведен из аудитории
+    «ИИ-оценки». Раньше гард заканчивался вызовом _ai_qa_guard(), и это было
+    верно, пока в разделе оценки жил один отдел продаж. С расширением раздела на
+    СЗоВ и Тез КЦ тот же вызов молча отдал бы переписку Wazzup главе Тез КЦ и
+    супервайзерам СЗоВ/Тез — а это раздел ОТДЕЛА ПРОДАЖ: у СЗоВ своя переписка в
+    Chat2Desk, у Тез КЦ — раздел «Чаты ChatApp».
 
-    «Глобальный» — это админ, который не назначен главой отдела: у главы с
-    базовой admin-ролью область строго его отдел (_is_global_admin_requester),
-    и чужая переписка ему не нужна. Зеркало на фронте —
-    canAccessVerifierChatsForUser в src/App.jsx.
+    Кто проходит: супер-админ и ГЛОБАЛЬНЫЙ админ (решение владельца — переписку
+    читают все глобальные админы), главы ОП и СЗоВ, СВ отдела продаж, whitelist.
+    «Глобальный» — админ, не назначенный главой отдела: у главы с базовой
+    admin-ролью область строго его отдел (_is_global_admin_requester).
 
-    Единственное ВЫЧИТАНИЕ из аудитории «ИИ-оценки» — наблюдатель «Маркетинга»:
-    разборы звонков ему открыты, переписка Верификаторов в выданный ему перечень
-    разделов не входит. Без явного вычета он прошёл бы через _ai_qa_guard ниже.
+    Наблюдатель «Маркетинга» ВЫЧИТАЕТСЯ явно: разборы звонков ему открыты, а
+    переписка Верификаторов в выданный ему перечень разделов не входит.
+
+    Разборы ИИ глобальным админам открылись отдельно — см. _ai_qa_guard; здесь
+    это ничего не меняет. Зеркало на фронте — canAccessVerifierChatsForUser.
     """
     requester_id = getattr(g, 'user_id', None)
-    if requester_id is not None:
-        user = db.get_user(id=requester_id)
-        role = _normalize_user_role(user[3]) if user else None
-        if _is_global_admin_requester(role, requester_id):
-            return requester_id, None
-        if _is_marketing_observer(requester_id, role):
-            return None, (jsonify({"error": "forbidden"}), 403)
-    return _ai_qa_guard()
+    if requester_id is None:
+        return None, (jsonify({"error": "forbidden"}), 403)
+    if int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
+        return requester_id, None
+    user = db.get_user(id=requester_id)
+    role = _normalize_user_role(user[3]) if user else None
+    if _is_marketing_observer(requester_id, role):
+        return None, (jsonify({"error": "forbidden"}), 403)
+    if _is_global_admin_requester(role, requester_id):
+        return requester_id, None
+    if any(code in VERIFIER_CHATS_HEAD_DEPARTMENT_CODES
+           for code in _headed_department_codes(requester_id)):
+        return requester_id, None
+    if role == 'sv' and _department_code_of_user(requester_id) == 'op':
+        return requester_id, None
+    return None, (jsonify({"error": "forbidden"}), 403)
 
 
 def _ai_qa_direction_scope(requester_id):
-    """Скоуп данных раздела ИИ-оценки. None — без ограничений (супер-админ / главы
-    отделов из AI_QA_HEAD_DEPARTMENT_CODES / whitelist); список канонических id
-    направлений — СВ ОП видит только их (направления его активных групп +
-    операторов). Пустой список — направлений нет."""
+    """Скоуп данных раздела ИИ-оценки ПО НАПРАВЛЕНИЯМ. None — без ограничений
+    (супер-админ / глобальный админ / глава отдела / whitelist); список
+    канонических id направлений — СВ видит только свои (направления его активных
+    групп + операторов). Пустой список — направлений нет.
+
+    Отдел режет вторая ось — _ai_qa_department_scope: у главы СЗоВ ограничения по
+    направлениям нет (он видит весь свой отдел), а вот отдел ему открыт только
+    свой. Раньше здесь стоял литерал отдела продаж, из-за чего СВ любого другого
+    отдела получал пустой список, то есть пустой раздел вместо отказа."""
     if requester_id is None:
         return None
     if int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
         return None
     user = db.get_user(id=requester_id)
     role = _normalize_user_role(user[3]) if user else None
-    if _is_super_admin_role(role):
+    if _is_global_admin_requester(role, requester_id):
         return None
     if _is_ai_qa_department_head(requester_id):
         return None
@@ -5131,7 +5283,10 @@ def _ai_qa_direction_scope(requester_id):
     if _is_marketing_observer(requester_id):
         return None
     try:
-        return db.get_supervisor_direction_ids(requester_id, department_id=AI_QA_OP_DEPARTMENT_ID)
+        dept_id = db.get_user_department_id(requester_id)
+        if dept_id is None:
+            return []
+        return db.get_supervisor_direction_ids(requester_id, department_id=int(dept_id))
     except Exception:
         logging.exception("ai-qa: не удалось вычислить направления СВ %s", requester_id)
         return []
@@ -5163,14 +5318,19 @@ def api_ai_qa_review_queue():
         return err
     try:
         from call_qa.api import review_queue_list, review_queue_count
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
         scope = _ai_qa_direction_scope(requester_id)
         limit = int(request.args.get('limit', 30))
         offset = int(request.args.get('offset', 0))
         subject = _ai_qa_subject_kind(request.args.get('subject'))
         items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
-                                  subject_kind=subject)
-        total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject)
+                                  subject_kind=subject, department=department)
+        total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject,
+                                   department=department)
         return jsonify({"status": "success", "items": items, "subject": subject,
+                        "department": department,
                         "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa review-queue failed")
@@ -5192,9 +5352,16 @@ def api_ai_qa_call(call_id):
         from call_qa import subjects as _qa_subjects
         subject = _ai_qa_subject_kind(request.args.get('subject'),
                                       default=_qa_config.SUBJECT_CALL)
-        from call_qa.api import call_in_scope, review_payload
+        from call_qa.api import call_in_scope, review_payload, subject_direction_id
         if not call_in_scope(call_id, scope, subject):
             return jsonify({"error": "субъект вне ваших направлений"}), 403
+        # Отдел проверяем ОТДЕЛЬНО: у главы отдела скоуп по направлениям не
+        # ограничен (None = весь свой отдел), и call_in_scope при None пропускает
+        # всё. Без этой проверки глава СЗоВ открывал бы карточку Тез КЦ, подставив
+        # её id в адрес.
+        if not _ai_qa_direction_department_allowed(
+                requester_id, subject_direction_id(call_id, subject)):
+            return jsonify({"error": "субъект вне вашего отдела"}), 403
         return jsonify({"status": "success",
                         "call": review_payload(call_id, refresh=refresh,
                                                subject_kind=subject)}), 200
@@ -5230,6 +5397,10 @@ def api_ai_qa_adjudicate():
                                       default=_qa_config.SUBJECT_CALL)
         if scope is not None and not call_in_scope(body.get('call_id'), scope, subject):
             return jsonify({"error": "субъект вне ваших направлений"}), 403
+        # Разбор влияет на все будущие оценки НАПРАВЛЕНИЯ, поэтому отдел сверяем
+        # отдельно: у главы отдела ось направлений не ограничена.
+        if not _ai_qa_direction_department_allowed(requester_id, body.get('direction_id')):
+            return jsonify({"error": "направление вне вашего доступа"}), 403
         saved = save_adjudications(
             body.get('call_id'), body.get('direction_id'), body.get('items', []),
             reviewer_id=requester_id,
@@ -5258,7 +5429,11 @@ def api_ai_qa_adjudicate_refine():
         from call_qa.api import direction_in_scope, refine_adjudication
         body = request.get_json(force=True) or {}
         scope = _ai_qa_direction_scope(requester_id)
-        if scope is not None and not direction_in_scope(body.get('direction_id'), scope):
+        # Уточнение формулирует ПРАВИЛО направления и тратит платные токены,
+        # поэтому отдел сверяем так же, как у /adjudicate и /criteria-config:
+        # у главы отдела ось направлений не ограничена, и одной проверки скоупа
+        # не хватает.
+        if (scope is not None and not direction_in_scope(body.get('direction_id'), scope)) or                 not _ai_qa_direction_department_allowed(requester_id, body.get('direction_id')):
             return jsonify({"error": "направление вне вашего доступа"}), 403
         proposal = refine_adjudication(body)
         return jsonify({"status": "success", "proposal": proposal}), 200
@@ -5281,7 +5456,8 @@ def api_ai_qa_criteria_config():
         if request.method == 'GET':
             from call_qa.api import criteria_config_get
             direction_id = int(request.args.get('direction_id'))
-            if not direction_in_scope(direction_id, scope):
+            if not direction_in_scope(direction_id, scope) or \
+                    not _ai_qa_direction_department_allowed(requester_id, direction_id):
                 return jsonify({"error": "направление вне вашего доступа"}), 403
             return jsonify({"status": "success", **criteria_config_get(direction_id)}), 200
         if scope is not None:
@@ -5290,6 +5466,10 @@ def api_ai_qa_criteria_config():
             return jsonify({"error": "изменение классификации критериев недоступно супервайзеру"}), 403
         from call_qa.api import criteria_config_set
         body = request.get_json(force=True) or {}
+        # Отдел сверяем и на записи: у главы отдела скоуп по направлениям пуст,
+        # и без этой проверки он правил бы шкалу чужого отдела.
+        if not _ai_qa_direction_department_allowed(requester_id, body.get('direction_id')):
+            return jsonify({"error": "направление вне вашего доступа"}), 403
         n = criteria_config_set(body.get('direction_id'), body.get('items', []))
         return jsonify({"status": "success", "saved": n}), 200
     except Exception as error:
@@ -5307,11 +5487,15 @@ def api_ai_qa_adjudications():
         return err
     try:
         from call_qa.api import adjudications_list
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
         result = adjudications_list(
             direction=request.args.get('direction'), q=request.args.get('q'),
             status=request.args.get('status'), index_status=request.args.get('index_status'),
             page=request.args.get('page', 1), page_size=request.args.get('page_size', 20),
-            allowed_direction_ids=_ai_qa_direction_scope(requester_id))
+            allowed_direction_ids=_ai_qa_direction_scope(requester_id),
+            department=department)
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -5405,7 +5589,11 @@ def api_ai_qa_rag_rollout():
             return err
         try:
             from call_qa.api import rag_rollout_get
-            return jsonify({"status": "success", **rag_rollout_get()}), 200
+            department, dept_err = _ai_qa_requested_department(requester_id)
+            if dept_err:
+                return dept_err
+            return jsonify({"status": "success",
+                            **rag_rollout_get(department=department)}), 200
         except Exception:
             logging.exception("ai-qa rollout read failed")
             return jsonify({"error": "не удалось загрузить RAG rollout"}), 500
@@ -5440,8 +5628,13 @@ def api_ai_qa_random_call():
         return err
     try:
         from call_qa.api import random_call
-        return jsonify({"status": "success",
-                        "call": random_call(allowed_direction_ids=_ai_qa_direction_scope(requester_id))}), 200
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        return jsonify({"status": "success", "department": department,
+                        "call": random_call(
+                            allowed_direction_ids=_ai_qa_direction_scope(requester_id),
+                            department=department)}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 404
     except Exception:
@@ -5452,7 +5645,10 @@ def api_ai_qa_random_call():
 @app.route('/api/ai-qa/random-chat', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_random_chat():
-    """Случайный эпизод переписки Верификаторов, пригодный для оценки ИИ."""
+    """Случайная переписка отдела, пригодная для оценки ИИ.
+
+    Источник зависит от отдела: ОП — эпизоды Wazzup (Верификаторы), СЗоВ —
+    заявки Chat2Desk, Тез КЦ — эпизоды ChatApp."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _ai_qa_guard()
@@ -5460,9 +5656,13 @@ def api_ai_qa_random_chat():
         return err
     try:
         from call_qa.api import random_chat_episode
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
         scope = _ai_qa_direction_scope(requester_id)
-        return jsonify({"status": "success",
-                        "call": random_chat_episode(allowed_direction_ids=scope)}), 200
+        return jsonify({"status": "success", "department": department,
+                        "call": random_chat_episode(allowed_direction_ids=scope,
+                                                    department=department)}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 404
     except Exception:
@@ -5484,38 +5684,297 @@ def api_ai_qa_chat_overview():
         return err
     try:
         from call_qa.api import chat_eligibility_overview
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
         scope = _ai_qa_direction_scope(requester_id)
         return jsonify({"status": "success",
-                        **chat_eligibility_overview(allowed_direction_ids=scope)}), 200
+                        **chat_eligibility_overview(allowed_direction_ids=scope,
+                                                    department=department)}), 200
     except Exception:
         logging.exception("ai-qa chat-overview failed")
         return jsonify({"error": "не удалось получить сводку по чатам"}), 500
 
 
-@app.route('/api/ai-qa/random-binotel-call', methods=['POST', 'OPTIONS'])
+@app.route('/api/ai-qa/pull-call', methods=['POST', 'OPTIONS'])
 @require_api_key
-def api_ai_qa_random_binotel_call():
+def api_ai_qa_pull_call():
+    """Подтянуть в раздел НОВЫЙ звонок прямо из АТС: СЗоВ — Oktell, Тез КЦ — Binotel.
+
+    Пул портала (imported_calls) конечен, а живая подтяжка неограниченна. Работает
+    та же машинерия, что у кнопки «Случайный звонок» в журнале, — ровно те же
+    функции _oktell_random_call/_binotel_random_call: запись уходит в GCS, строка
+    ложится в imported_calls со статусом «не оценён», и раздел сразу может её
+    оценить как субъект imported_call. Оценки в журнале при этом не появляется.
+
+    Заменила мёртвую /api/ai-qa/random-binotel-call: та импортировала
+    call_qa.api.random_binotel_call, которой в репозитории никогда не было, и на
+    каждый вызов отдавала 500.
+
+    Оператор необязателен: без него берём случайного действующего оператора
+    отдела — «случайный звонок отдела» иначе потребовал бы выбирать человека
+    руками, а раздел смотрит на отдел целиком."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _ai_qa_guard()
     if err:
         return err
-    if _ai_qa_direction_scope(requester_id) is not None:
-        # У Binotel-звонков нет направления — СВ работает только со своими направлениями.
-        return jsonify({"error": "forbidden"}), 403
     try:
-        from call_qa.api import random_binotel_call
         body = request.get_json(silent=True) or {}
-        min_d = body.get('min_duration')
-        max_d = body.get('max_duration')
-        call = random_binotel_call(min_duration=min_d, max_duration=max_d)
-        return jsonify({"status": "success", "call": call}), 200
+        department, dept_err = _ai_qa_requested_department(requester_id, body.get('department'))
+        if dept_err:
+            return dept_err
+        if department == call_qa_config.OP_DEPARTMENT_CODE:
+            return jsonify({"error": "У отдела продаж записи загружаются вручную — "
+                                     "подтяжка из АТС доступна СЗоВ и Тез КЦ"}), 400
+        if department not in (OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+                              TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE):
+            return jsonify({"error": f"Для отдела «{department}» подтяжка из АТС не настроена"}), 400
+
+        requester = db.get_user(id=requester_id)
+        incoming = bool(body.get('incoming', True))
+        outgoing = bool(body.get('outgoing', True))
+        if not incoming and not outgoing:
+            return jsonify({"error": "Выберите хотя бы один тип звонка (исходящие или входящие)"}), 400
+        try:
+            count = max(1, min(int(body.get('count', 1) or 1), RANDOM_CALL_MAX_COUNT))
+        except (TypeError, ValueError):
+            count = 1
+
+        operator_id = body.get('operator_id')
+        if operator_id in (None, ''):
+            try:
+                operator_id = _ai_qa_pick_department_operator(requester_id, department)
+            except Exception:
+                # Сбой справочника — это НЕ «в отделе нет операторов»: с таким
+                # текстом дежурный пошёл бы искать проблему в кадрах.
+                logging.exception("ai-qa: не удалось выбрать оператора отдела %s", department)
+                return jsonify({"error": "Справочник сотрудников недоступен, "
+                                         "попробуйте ещё раз"}), 503
+            if operator_id is None:
+                return jsonify({"error": "В отделе нет действующих операторов "
+                                         "звонковых направлений"}), 404
+        try:
+            operator_id = int(operator_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "operator_id должен быть числом"}), 400
+
+        operator = db.get_user(id=operator_id)
+        if not operator:
+            return jsonify({"error": "Оператор не найден"}), 404
+        # АТС выбираем по ОТДЕЛУ ОПЕРАТОРА, как это делает журнал, а не по
+        # параметру запроса: иначе пара «department=tez + оператор СЗоВ» ушла бы
+        # в Binotel за звонками человека, которого там нет, и вернула бы
+        # невнятный отказ вместо понятного.
+        _operator_dept_id, operator_department = db.get_user_department(operator_id)
+        operator_department = str(operator_department or '').strip().lower()
+        if operator_department != department:
+            return jsonify({"error": "Оператор не из выбранного отдела"}), 400
+        # Скоуп раздела: СВ подтягивает только по своим направлениям.
+        scope = _ai_qa_direction_scope(requester_id)
+        if scope is not None:
+            from call_qa.api import direction_in_scope
+            direction_id = _ai_qa_operator_direction_id(operator_id)
+            if direction_id is None or not direction_in_scope(direction_id, scope):
+                return jsonify({"error": "Этот оператор вне ваших направлений"}), 403
+        if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+            return jsonify({"error": "Нет доступа к этому оператору"}), 403
+
+        # Период обязателен обеим АТС, но раздел смотрит «просто на отдел» и не
+        # спрашивает даты. Без умолчания кнопка НИКОГДА не работала бы: обе ветки
+        # отвечают «Укажите период». Семь дней выбраны потому, что это предел
+        # окна Binotel (tez_binotel_calls.MAX_WINDOW_DAYS) — одно значение годится
+        # обеим АТС.
+        date_from = body.get('date_from')
+        date_to = body.get('date_to')
+        if not date_from or not date_to:
+            # По Алматы, а не по UTC: сервер живёт в UTC, и «сегодня» там до
+            # 06:00 местного — это ещё вчера (тот же разбор, что у ночных
+            # падений CI). Иначе окно молча теряло бы последний рабочий день.
+            today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+            date_to = date_to or today.strftime('%Y-%m-%d')
+            date_from = date_from or (today - timedelta(days=AI_QA_PULL_CALL_DAYS)).strftime('%Y-%m-%d')
+
+        # Маркер источника: журнальная кнопка и раздел пишут в ОДИН пул
+        # imported_calls, и без разного notes подтяжки раздела нельзя ни
+        # отличить в разборе, ни вычесть из плана прослушки, если решат вычитать.
+        kwargs = dict(operator_id=operator_id, operator_name=operator[2],
+                      requester_id=requester_id, incoming=incoming, outgoing=outgoing,
+                      date_from=date_from, date_to=date_to, count=count,
+                      source=AI_QA_PULL_CALL_SOURCE)
+        if department == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+            # У Oktell окно длительности берётся из общих настроек «Деления
+            # звонков»; у Binotel такого источника нет, и без умолчания в пул
+            # уезжал бы односекундный «не туда попал» — платный субъект оценки.
+            settings = db.get_call_distribution_settings() or {}
+            return _binotel_random_call(
+                min_duration_sec=body.get('min_duration_sec',
+                                          settings.get('min_duration_sec')),
+                max_duration_sec=body.get('max_duration_sec',
+                                          settings.get('max_duration_sec')), **kwargs)
+        return _oktell_random_call(**kwargs)
     except ValueError as error:
-        # Ожидаемые ситуации (нет подходящего звонка / не настроен API) — 404/400 с текстом.
-        return jsonify({"error": str(error)}), 404
-    except Exception as error:
-        logging.exception("ai-qa random-binotel-call failed")
-        return jsonify({"error": str(error)}), 500
+        return jsonify({"error": str(error)}), 400
+    except Exception:
+        logging.exception("ai-qa pull-call failed")
+        return jsonify({"error": "не удалось подтянуть звонок из АТС (детали в логах)"}), 500
+
+
+def _ai_qa_pick_department_operator(requester_id, department):
+    """Случайный действующий оператор отдела (в пределах скоупа проверяющего).
+
+    Нужен «случайному звонку отдела»: без оператора ни Oktell, ни Binotel список
+    звонков не отдают — у обоих выборка идёт от конкретного сотрудника.
+
+    Берём ТОЛЬКО «звонковые» направления: у СЗоВ 19 из 67 действующих сотрудников
+    сидят на «Чат менеджере», и случайный выбор из всех отдела в четверти случаев
+    возвращал бы человека без записанных звонков — то есть невнятный 404.
+    «Чисто чатовое» определяется МОДЕЛЬЮ расчёта направления, а не «чатовой
+    семьёй» отдела: у Тез КЦ «ТП линия» входит в семью (её переписка оценивается
+    по шкале «ТП чат»), но её же операторы звонят — вычитание по семье убрало бы
+    11 из 18 действующих операторов ТЭЗ.
+
+    Возвращает id либо None. None означает «кандидатов нет»; сбой соединения
+    бросается наружу, чтобы дежурный увидел 503, а не «в отделе нет операторов»."""
+    scope = _ai_qa_direction_scope(requester_id)
+    conn = call_qa_config.connect_ro()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET client_encoding TO 'UTF8'")
+        params = [call_qa_config.normalise_department_code(department)]
+        scope_sql = ""
+        if scope is not None:
+            if not scope:
+                return None
+            scope_sql = " AND COALESCE(d.canonical_id, d.id) = ANY(%s)"
+            params.append([int(x) for x in scope])
+        # Отсекаем ТОЛЬКО чисто чатовые направления — по МОДЕЛИ расчёта, а не по
+        # «чатовой семье» отдела: у Тез КЦ «ТП линия» входит в неё (её чат
+        # оценивается по шкале «ТП чат»), но её же операторы и звонят. Вычитание
+        # по семье убрало бы из подтяжки 11 из 18 действующих операторов ТЭЗ.
+        chat_sql = " AND COALESCE(d.calculation_model_code, '') <> 'chat_manager'"
+        cur.execute(
+            """SELECT u.id FROM users u
+                 JOIN departments dep ON dep.id = u.department_id
+                 JOIN directions d ON d.id = u.direction_id
+                WHERE lower(COALESCE(dep.code, '')) = %s
+                  AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')"""
+            + scope_sql + chat_sql + """
+                ORDER BY random() LIMIT 1""", tuple(params))
+        row = cur.fetchone()
+        cur.close()
+        return int(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def _op_episodes_guard():
+    """Доступ к эпизодам Wazzup: только тем, кому открыт ОТДЕЛ ПРОДАЖ.
+
+    Эпизоды — данные Верификаторов ОП, и по отделу эти ручки не фильтруют вовсе
+    (ни направления, ни отдела в выборке нет). Пока в разделе «ИИ-оценка» жил
+    один отдел, хватало её гарда; после расширения на СЗоВ и Тез КЦ тот же гард
+    пропускает их главу и СВ — им переписка Верификаторов не нужна, у них своя.
+    """
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return None, err
+    allowed = _ai_qa_department_scope(requester_id)
+    if allowed is not None and call_qa_config.OP_DEPARTMENT_CODE not in allowed:
+        return None, (jsonify({"error": "Эпизоды Верификаторов относятся к отделу продаж"}), 403)
+    return requester_id, None
+
+
+def _ai_qa_direction_department_allowed(requester_id, direction_id):
+    """Принадлежит ли направление отделу, открытому этому человеку.
+
+    ВТОРАЯ ось рядом с _ai_qa_direction_scope, и без неё раздел на три отдела
+    протекает: у главы отдела скоуп по направлениям пустой (None — «весь свой
+    отдел»), поэтому на записи — классификация критериев, разбор, rollout —
+    ничто не мешало бы главе СЗоВ править шкалу Тез КЦ, передав чужой
+    direction_id. У СВ ось направлений и так режет, но проверка дешёвая и общая.
+    """
+    allowed = _ai_qa_department_scope(requester_id)
+    if allowed is None:
+        return True
+    if not allowed:
+        return False
+    if direction_id is None:
+        return False
+    code = _ai_qa_direction_department_code(direction_id)
+    return bool(code) and code in allowed
+
+
+def _ai_qa_direction_department_code(direction_id):
+    """Код отдела направления (архивная версия шкалы сводится к живой строке)."""
+    try:
+        conn = call_qa_config.connect_ro()
+    except Exception:
+        logging.exception("ai-qa: нет соединения для проверки отдела направления")
+        return ''
+    try:
+        cur = conn.cursor()
+        cur.execute("SET client_encoding TO 'UTF8'")
+        cur.execute("""SELECT lower(COALESCE(dep.code, ''))
+                         FROM directions d
+                         LEFT JOIN directions live
+                                ON live.id = COALESCE(d.canonical_id, d.id)
+                         LEFT JOIN departments dep
+                                ON dep.id = COALESCE(live.department_id, d.department_id)
+                        WHERE d.id = %s""", (int(direction_id),))
+        row = cur.fetchone()
+        cur.close()
+        return (row[0] or '') if row else ''
+    except Exception:
+        logging.exception("ai-qa: не удалось определить отдел направления %s", direction_id)
+        return ''
+    finally:
+        conn.close()
+
+
+def _ai_qa_operator_direction_id(operator_id):
+    """Направление оператора (users.direction_id) — для проверки скоупа СВ."""
+    try:
+        conn = call_qa_config.connect_ro()
+    except Exception:
+        logging.exception("ai-qa: нет соединения для чтения направления оператора")
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT direction_id FROM users WHERE id = %s", (int(operator_id),))
+        row = cur.fetchone()
+        cur.close()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception:
+        logging.exception("ai-qa: не удалось прочитать направление оператора %s", operator_id)
+        return None
+    finally:
+        conn.close()
+
+
+@app.route('/api/ai-qa/departments', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_departments():
+    """Отделы для селектора раздела: что открыто именно этому человеку.
+
+    Супер-админ и глобальный админ видят все три; глава и СВ — свой отдел;
+    наблюдатель «Маркетинга» — разборы ОП, как и раньше."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        items = _ai_qa_available_departments(requester_id)
+        current, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        return jsonify({"status": "success", "items": items,
+                        "current": current or (items[0]['code'] if items else None),
+                        "can_switch": len(items) > 1}), 200
+    except Exception:
+        logging.exception("ai-qa departments failed")
+        return jsonify({"error": "не удалось получить список отделов"}), 500
 
 
 @app.route('/api/ai-qa/evaluations', methods=['GET', 'OPTIONS'])
@@ -5528,14 +5987,19 @@ def api_ai_qa_evaluations():
         return err
     try:
         from call_qa.api import evaluations_list, evaluations_count
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
         scope = _ai_qa_direction_scope(requester_id)
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         subject = _ai_qa_subject_kind(request.args.get('subject'))
         items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
-                                 subject_kind=subject)
-        total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject)
+                                 subject_kind=subject, department=department)
+        total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject,
+                                  department=department)
         return jsonify({"status": "success", "items": items, "subject": subject,
+                        "department": department,
                         "total": total, "limit": limit, "offset": offset}), 200
     except Exception as error:
         logging.exception("ai-qa evaluations failed")
@@ -5552,8 +6016,12 @@ def api_ai_qa_stats():
         return err
     try:
         from call_qa.api import stats
-        return jsonify({"status": "success",
-                        **stats(allowed_direction_ids=_ai_qa_direction_scope(requester_id))}), 200
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        return jsonify({"status": "success", "department": department,
+                        **stats(allowed_direction_ids=_ai_qa_direction_scope(requester_id),
+                                department=department)}), 200
     except Exception as error:
         logging.exception("ai-qa stats failed")
         return jsonify({"error": str(error)}), 500
@@ -5903,7 +6371,7 @@ WAZZUP_EPISODE_GAP_HOURS = float(os.getenv('WAZZUP_EPISODE_GAP_HOURS', '6'))
 def api_wazzup_episodes():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _op_episodes_guard()
     if err:
         return err
     try:
@@ -5932,7 +6400,7 @@ def api_wazzup_episodes():
 def api_wazzup_episode(episode_id):
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _op_episodes_guard()
     if err:
         return err
     try:
@@ -5952,7 +6420,7 @@ def api_wazzup_episodes_rebuild():
     Идемпотентно: собирает только новые закрытые эпизоды."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _ai_qa_guard()
+    _, err = _op_episodes_guard()
     if err:
         return err
     try:
@@ -24124,6 +24592,27 @@ def delete_draft_evaluation(evaluation_id):
             if status == 'evaluated':
                 return jsonify({"error": "Cannot delete evaluated imported call"}), 400
 
+            # Звонок, который УЖЕ оценил ИИ, тоже не удаляем: для раздела
+            # «ИИ-оценка» эта строка — сам субъект оценки
+            # (subject_kind='imported_call'), и её удаление не обнулило бы
+            # ссылку, а увело бы оценку из очереди и списка целиком (выборки
+            # соединяются с таблицей субъекта). Заодно уносило бы запись из
+            # GCS — переоценить было бы нечего. Тот же запрет, что у снапшотов
+            # переписки в cleanup_c2d_eval_data.
+            cursor.execute("""
+                SELECT 1 FROM ai_review_cache
+                 WHERE subject_kind = 'imported_call' AND call_id = %s
+                 UNION ALL
+                SELECT 1 FROM ai_evaluation_runs
+                 WHERE subject_kind = 'imported_call' AND call_id = %s
+                   AND status = 'succeeded'
+                 LIMIT 1
+            """, (evaluation_id, evaluation_id))
+            if cursor.fetchone():
+                return jsonify({
+                    "error": "Звонок оценён ИИ — удалить его нельзя: "
+                             "оценка ссылается на эту запись"}), 400
+
             # Authorization: global admins can delete any draft; department heads only within their department.
             try:
                 role = _normalize_user_role(requester[3])
@@ -24597,7 +25086,8 @@ def _binotel_store_record_async(imported_id, general_call_id):
 
 
 def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
-                         date_from, date_to, min_duration_sec=None, max_duration_sec=None, count=1):
+                         date_from, date_to, min_duration_sec=None, max_duration_sec=None,
+                         count=1, source='random'):
     """«Случайный звонок» для TEZ через Binotel API 4.0. Возвращает Flask-ответ.
 
     Список звонков берём по sip (internalNumber — это параметр API), но каждый
@@ -24734,7 +25224,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             operator_id=operator_id, operator_name=operator_name,
             external_id=gid, month=month, datetime_raw=dt_raw,
             phone=c['external_number'], duration_sec=c['billsec'],
-            notes=f"random:{requester_id}:binotel",
+            notes=f"{source}:{requester_id}:binotel",
             call_end_party=party,
         )
         existing.add(gid)  # чтобы не выбрать тот же дважды (и на гонке — пропустить)
@@ -24829,10 +25319,29 @@ def fetch_random_evaluation_call():
         if dept_code != OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE:
             return jsonify({"error": "«Случайный звонок» доступен только для операторов СЗоВ и TEZ"}), 400
 
-        # --- Oktell / СЗоВ ---
+        return _oktell_random_call(
+            operator_id=operator_id, operator_name=operator_name, requester_id=requester_id,
+            incoming=incoming, outgoing=outgoing,
+            date_from=data.get('date_from'), date_to=data.get('date_to'),
+            count=count,
+        )
+    except Exception as e:
+        logging.error(f"Error fetching random evaluation call: {e}", exc_info=True)
+        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+
+
+def _oktell_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
+                        date_from, date_to, count=1, source='random'):
+    """«Случайный звонок» для СЗоВ через Oktell. Возвращает Flask-ответ.
+
+    Вынесено из ручки журнала без изменений логики: ту же подтяжку вызывает
+    раздел «ИИ-оценка», и вторая копия неизбежно разошлась бы с этой (у Oktell
+    ловушка с путём к записи, из-за которой исходящие молча терялись).
+    Диапазон длительности берётся из общих настроек «Деления звонков», как и было."""
+    try:
         conn_types = _oktell_eval_connection_types_clause(incoming=incoming, outgoing=outgoing)
         try:
-            mstart, mnext = _oktell_eval_range_bounds(data.get('date_from'), data.get('date_to'))
+            mstart, mnext = _oktell_eval_range_bounds(date_from, date_to)
         except (TypeError, ValueError):
             return jsonify({"error": "Укажите период (date_from, date_to в формате YYYY-MM-DD)"}), 400
 
@@ -24914,7 +25423,7 @@ def fetch_random_evaluation_call():
                 operator_id=operator_id, operator_name=operator_name,
                 external_id=conn_id, month=month, datetime_raw=c.get('dt_raw'),
                 phone=c.get('phone'), duration_sec=c.get('talk_sec'),
-                notes=f"random:{requester_id}:oktell",
+                notes=f"{source}:{requester_id}:oktell",
                 audio_path=audio_path,
                 call_end_party=call_end_party,
             )

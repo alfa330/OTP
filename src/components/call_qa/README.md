@@ -4,23 +4,44 @@
 Точка входа: `view === "ai_qa"` → `<CallQaView/>`. Мок-данных нет: всё приходит с `/api/ai-qa/*`,
 при недоступности бэкенда рисуются состояния загрузки / ошибки / «пусто».
 
-## Два субъекта оценки
+## Три отдела и селектор
 
-Раздел оценивает **звонки** (`subject_kind: 'call'`) и **эпизоды переписки WhatsApp у
-Верификаторов ОП** (`subject_kind: 'wz_episode'`). Форма карточки одна: строки транскрипта +
-критерии + отпечатки прогона. Отличия у чата: нет аудио и языков ASR, есть метаданные
-переписки, вложения в строках и порог атрибуции (эпизод, где отвечали несколько операторов,
-не оценивается — бэкенд отдаёт `409` с причиной, карточка показывает её текстом).
+Раздел оценивает **ОП**, **СЗоВ** и **Тез КЦ**. Список доступных отделов приходит из
+`GET /api/ai-qa/departments`; селектор (`IosSegmented` в шапке) показывается только тем, кому
+открыт больше одного отдела — у главы и СВ он был бы одной неактивной кнопкой. Выбранный код
+уходит параметром `department` во ВСЕ запросы раздела; ручка, забывшая его передать, показала
+бы главе СЗоВ данные всех отделов (сторожит `test_every_scoped_route_resolves_the_department`).
+Смена отдела закрывает открытую карточку и сбрасывает очередь: они принадлежали прежнему отделу.
+
+## Пять субъектов оценки
+
+Субъект — это таблица-источник; знание о них лежит в одном месте — `subjects.js`. Раньше строка
+`'wz_episode'` была вписана в четыре компонента, и с появлением переписки СЗоВ и Тез КЦ каждый
+решал бы по-своему, чат перед ним или звонок.
+
+| `subject_kind` | Что это | Отдел |
+|---|---|---|
+| `call` | звонок, оценённый человеком | все |
+| `imported_call` | звонок из АТС, БЕЗ оценки в журнале | СЗоВ, Тез КЦ |
+| `wz_episode` | эпизод Wazzup | ОП (Верификаторы) |
+| `c2d_snapshot` | заявка Chat2Desk | СЗоВ |
+| `ca_episode` | эпизод ChatApp | Тез КЦ |
+
+Форма карточки одна: строки транскрипта + критерии + отпечатки прогона. Отличия у переписки:
+нет аудио и языков ASR, есть метаданные чата, вложения в строках и гейт атрибуции (переписку,
+которую вели несколько сотрудников, оценить нельзя — бэкенд отдаёт `409` с причиной, карточка
+показывает её текстом). У Chat2Desk единица — ЗАЯВКА, и в подписях стоит это слово.
 
 ## Экраны
 | Файл | Экран |
 |---|---|
 | `CallQaView.jsx` | контейнер + вкладки (Обзор / Очередь ревью / Чаты / Оценки / Критерии / База разборов), открытие карточки, отправка разбора |
-| `ChatQueue.jsx` | вкладка «Чаты»: сводка пригодности эпизодов + очередь по чатам + «Оценить случайный чат» |
+| `ChatQueue.jsx` | вкладка «Чаты»: сводка пригодности + подбор случайной переписки источника отдела |
+| `subjects.js` | виды субъектов, источник переписки отдела, подписи — одно место вместо литералов |
 | `CallReviewCard.jsx` | карточка ревью: транскрипт/переписка, вложения, критерии с вердиктом ИИ, подтверждение/правка → разбор |
 | `QaDashboard.jsx` | метрики доверия (согласие, точность тревог, RAG-observability) |
-| `EvaluationsList.jsx` | уже оценённые ИИ субъекты + «Оценить случайный звонок» |
-| `CriteriaClassification.jsx` | классификация критериев (transcript / system_api / manual) по направлениям ОП |
+| `EvaluationsList.jsx` | уже оценённые ИИ субъекты + «Оценить случайный звонок» + «Из АТС» (СЗоВ, Тез КЦ) |
+| `CriteriaClassification.jsx` | классификация критериев (transcript / system_api / manual) по направлениям выбранного отдела |
 | `AdjudicationsRag.jsx` | каталог правил (база разборов), lifecycle, reindex, rollout |
 
 Вкладки «Критерии» и «База разборов» скрыты у СВ ОП (`isScopedSupervisor`) — бэкенд их тоже
@@ -40,7 +61,12 @@
 
 ## API-контракт
 
-Везде `headers: withAccessTokenHeader()`. `subject` — `call` (по умолчанию) либо `wz_episode`.
+Везде `headers: withAccessTokenHeader()`. `subject` — один из пяти видов (`call` по умолчанию).
+`department` — код отдела из селектора; без него бэкенд подставляет единственный доступный, а
+чужой отдел отвергает (`403`).
+
+- `GET /api/ai-qa/departments` →
+  `{ items:[{ code, name, chat_subject }], current, can_switch }` — что открыто этому человеку.
 
 - `GET /api/ai-qa/review-queue?limit=&offset=&subject=` →
   `{ items: [{ id, subject, direction, operator, datetime, human_score,
@@ -49,13 +75,20 @@
 - `GET /api/ai-qa/call/:id?subject=&refresh=1` → `{ call: … }` (см. ниже).
   `409 { error, reason, detail }` — оценить нельзя по существу (например, доля ответов
   оператора ниже порога); `404` — не найден / нет записи.
-- `GET /api/ai-qa/random-call` → `{ call: { id, subject:'call', … } }` — случайный оценённый
-  человеком звонок с записью.
-- `GET /api/ai-qa/random-chat` → `{ call: { id, subject:'wz_episode', operator_share, … } }` —
-  случайный пригодный эпизод переписки.
-- `GET /api/ai-qa/chat-overview` →
-  `{ available, directions:[{id,name}], min_operator_share_pct, min_operator_messages,
-     dialogs, unattributed, multi_operator, evaluable, evaluated }`
+- `GET /api/ai-qa/random-call?department=` →
+  `{ call: { id, subject:'imported_call'|'call', in_journal, … } }` — сначала звонок из АТС БЕЗ
+  оценки в журнале, и только когда такие кончились — оценённый человеком.
+- `POST /api/ai-qa/pull-call` ← `{ department, date_from, date_to, incoming, outgoing, count }`
+  → `{ calls:[…] }` — подтянуть НОВЫЙ звонок прямо из АТС (СЗоВ — Oktell, Тез КЦ — Binotel).
+  Оценки в журнале не появляется. У ОП кнопки нет: там записи загружают вручную.
+- `GET /api/ai-qa/random-chat?department=` →
+  `{ call: { id, subject, operator_share, human_outbound_count, … } }` — случайная пригодная
+  переписка источника отдела.
+- `GET /api/ai-qa/chat-overview?department=` →
+  `{ available, department, subject, directions:[{id,name}], min_operator_messages,
+     dialogs, unattributed, multi_operator, evaluable, evaluated }`.
+  `min_operator_share_pct` приходит ТОЛЬКО у эпизодных источников: у заявок Chat2Desk доли
+  ответов не бывает, и по отсутствию поля фронт понимает, что эту мерку показывать не нужно.
 - `GET /api/ai-qa/evaluations?limit=&offset=&subject=` →
   `{ items:[{ id, subject, direction, operator, datetime, ai, human }], total }`
 - `POST /api/ai-qa/adjudicate` ←

@@ -62,41 +62,108 @@ def google_sa_info() -> dict | None:
     return json.JSONDecoder().raw_decode(raw[raw.find("{"):])[0]
 
 
-# --- ОП (отдел продаж) ---
+# --- Отделы, которые оценивает ИИ ---
+# Раздел начинался с одного отдела продаж, поэтому отдел был литералом 367.
+# Оцениваются три отдела, и ключом взят КОД отдела (departments.code), а не id:
+# id у отделов разные и в коде их пришлось бы перечислять, а код стабилен и уже
+# служит ключом в остальных местах портала (OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE,
+# CHATAPP_DEPARTMENT_CODE, AI_QA_HEAD_DEPARTMENT_CODES). Переименование отдела
+# кода не меняет — см. [[direction-rename-detaches-operators]].
+OP_DEPARTMENT_CODE = "op"        # Отдел продаж
+SZOV_DEPARTMENT_CODE = "szov"    # СЗоВ — Служба заботы о водителях
+TEZ_DEPARTMENT_CODE = "tez"      # Тез КЦ
+DEPARTMENT_CODES = tuple(
+    code for code in (
+        part.strip().lower()
+        for part in str(env("AI_QA_DEPARTMENT_CODES",
+                            f"{OP_DEPARTMENT_CODE},{SZOV_DEPARTMENT_CODE},"
+                            f"{TEZ_DEPARTMENT_CODE}")).split(","))
+    if code)
+
 OP_DEPARTMENT_ID = 367
 # Канонические (стабильные) id направлений: живая строка направления держит id
 # навсегда (переименования и правки критериев его не меняют — см. save_directions).
 OP_DIRECTION_IDS = [72, 73, 74]  # Яндекс Регистрация / Основа / Поток
 
 
-def op_direction_id_family(cur) -> list[int]:
-    """Все направления отдела продаж: живые строки + архивные версии шкалы.
+def normalise_department_code(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def department_ids_by_code(cur, codes) -> dict:
+    """{код отдела: id} по справочнику departments (только запрошенные коды)."""
+    wanted = [normalise_department_code(c) for c in (codes or []) if str(c or "").strip()]
+    if not wanted:
+        return {}
+    cur.execute(
+        "SELECT lower(COALESCE(code, '')), id FROM departments WHERE lower(COALESCE(code, '')) = ANY(%s)",
+        (wanted,))
+    return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+
+def direction_id_family(cur, department_ids) -> list[int]:
+    """Все направления отделов: живые строки + архивные версии шкалы.
 
     Исторические оценки (calls) при смене критериев перевешиваются на архивные
     строки directions (canonical_id -> живая строка), поэтому выборки должны
-    фильтровать по всей семье id, а не только по каноническим.
+    фильтровать по всей семье id, а не только по каноническим."""
+    ids = [int(x) for x in (department_ids or [])]
+    if not ids:
+        return []
+    cur.execute(
+        """SELECT d.id FROM directions d
+            WHERE d.department_id = ANY(%s)
+               OR d.canonical_id IN (SELECT id FROM directions
+                                      WHERE department_id = ANY(%s))""",
+        (ids, ids))
+    return [int(r[0]) for r in cur.fetchall()]
 
-    Семья выводится из ОТДЕЛА, а не из литерального списка id: раньше здесь были
-    захардкожены 72/73/74, и «Верификатор» (71) молча выпадал из allowlist
-    разборов, rollout и случайной выборки. Список OP_DIRECTION_IDS остался
-    аварийным значением, если запрос не удался."""
+
+def department_direction_id_family(cur, department_code) -> list[int]:
+    """Семья направлений одного отдела по его коду.
+
+    Для отдела продаж сохранено аварийное значение OP_DIRECTION_IDS: раздел
+    начинался с него, и пустой ответ там означал бы «оценивать нечего» вместо
+    «справочник отделов недоступен». Остальным отделам такой подпорки не даём —
+    выдуманный список направлений хуже честного пустого ответа."""
+    code = normalise_department_code(department_code)
     try:
-        cur.execute(
-            """SELECT d.id FROM directions d
-                WHERE d.department_id = %s
-                   OR d.canonical_id IN (SELECT id FROM directions
-                                          WHERE department_id = %s)""",
-            (OP_DEPARTMENT_ID, OP_DEPARTMENT_ID))
-        ids = [int(r[0]) for r in cur.fetchall()]
+        found = department_ids_by_code(cur, [code])
+        ids = direction_id_family(cur, [found[code]]) if code in found else []
     except Exception:
         ids = []
     if ids:
         return ids
+    if code != OP_DEPARTMENT_CODE:
+        return []
     cur.execute(
         "SELECT id FROM directions WHERE id = ANY(%s) OR canonical_id = ANY(%s)",
         (OP_DIRECTION_IDS, OP_DIRECTION_IDS))
     ids = [int(r[0]) for r in cur.fetchall()]
     return ids or list(OP_DIRECTION_IDS)
+
+
+def op_direction_id_family(cur) -> list[int]:
+    """Все направления отдела продаж (историческая подпись; см.
+    department_direction_id_family)."""
+    return department_direction_id_family(cur, OP_DEPARTMENT_CODE)
+
+
+def ai_qa_direction_id_family(cur, department_codes=None) -> list[int]:
+    """Семья направлений ВСЕХ оцениваемых отделов (или перечисленных)."""
+    codes = [normalise_department_code(c) for c in (department_codes or DEPARTMENT_CODES)]
+    codes = [c for c in codes if c]
+    if not codes:
+        return []
+    if len(codes) == 1:
+        return department_direction_id_family(cur, codes[0])
+    seen, out = set(), []
+    for code in codes:
+        for direction_id in department_direction_id_family(cur, code):
+            if direction_id not in seen:
+                seen.add(direction_id)
+                out.append(direction_id)
+    return out
 
 # --- ASR (Soniox) ---
 SONIOX_BASE = "https://api.soniox.com"
@@ -249,9 +316,60 @@ def zai_key():
 # --- Субъекты оценки ---
 # Раздел начинался со звонков; у Верификаторов ОП единица оценки — эпизод
 # переписки Wazzup. Значения совпадают с колонкой subject_kind в schema.sql.
-SUBJECT_CALL = "call"
-SUBJECT_WZ_EPISODE = "wz_episode"
-SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_WZ_EPISODE)
+#
+# Субъект — это ТАБЛИЦА-ИСТОЧНИК, а не «звонок или чат»: id у calls,
+# imported_calls, wazzup_episodes, c2d_chat_snapshots и chatapp_episodes — это
+# независимые последовательности, и они численно пересекаются. Один общий вид
+# «звонок» подставил бы в оценку чужого оператора (тот же разбор, что привёл к
+# появлению subject_kind у эпизодов Wazzup).
+SUBJECT_CALL = "call"                    # calls — звонок, уже оценённый человеком
+SUBJECT_WZ_EPISODE = "wz_episode"        # wazzup_episodes — переписка Верификаторов ОП
+SUBJECT_IMPORTED_CALL = "imported_call"  # imported_calls — звонок из АТС БЕЗ оценки в журнале
+SUBJECT_C2D_SNAPSHOT = "c2d_snapshot"    # c2d_chat_snapshots (source='chat2desk') — переписка СЗоВ
+SUBJECT_CA_EPISODE = "ca_episode"        # chatapp_episodes — переписка Тез КЦ
+SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_WZ_EPISODE, SUBJECT_IMPORTED_CALL,
+                 SUBJECT_C2D_SNAPSHOT, SUBJECT_CA_EPISODE)
+# Телефония против переписки. Разделение нужно и промпту (у звонка транскрипт
+# распознан, у чата набран руками), и вкладкам раздела.
+AUDIO_SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_IMPORTED_CALL)
+CHAT_SUBJECT_KINDS = (SUBJECT_WZ_EPISODE, SUBJECT_C2D_SNAPSHOT, SUBJECT_CA_EPISODE)
+
+# Источник переписки у отдела. У каждого отдела он ровно один: ОП — Wazzup
+# (Верификаторы), СЗоВ — Chat2Desk, Тез КЦ — ChatApp. Обратная карта нужна,
+# чтобы по субъекту понять отдел, не спрашивая направление.
+CHAT_SUBJECT_BY_DEPARTMENT = {
+    OP_DEPARTMENT_CODE: SUBJECT_WZ_EPISODE,
+    SZOV_DEPARTMENT_CODE: SUBJECT_C2D_SNAPSHOT,
+    TEZ_DEPARTMENT_CODE: SUBJECT_CA_EPISODE,
+}
+DEPARTMENT_BY_CHAT_SUBJECT = {v: k for k, v in CHAT_SUBJECT_BY_DEPARTMENT.items()}
+
+
+def chat_subject_kind(department_code) -> str | None:
+    return CHAT_SUBJECT_BY_DEPARTMENT.get(normalise_department_code(department_code))
+
+
+# Направление, из которого берутся КРИТЕРИИ для переписки, когда оператор
+# числится на другом направлении. Техменеджеры ТЭЗ сидят на «ТП линия» (83), а
+# чат положено оценивать по шкале «ТП чат» (84) — та же карта, что у кнопки
+# «Случайный чат» в журнале (CHATAPP_CHAT_DIRECTION_MAP в bot_schedule2.py).
+# Задана id, а не именами, намеренно — см. [[direction-rename-detaches-operators]].
+def _parse_direction_map(raw) -> dict:
+    out = {}
+    for chunk in str(raw or "").replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        left, right = chunk.split(":", 1)
+        try:
+            out[int(left)] = int(right)
+        except ValueError:
+            continue
+    return out
+
+
+CHAT_CRITERIA_DIRECTION_MAP = _parse_direction_map(
+    env("AI_QA_CHAT_CRITERIA_MAP", "83:84"))
 
 # --- Эпизоды чатов Wazzup (Верификаторы) ---
 # Направления Верификаторов не хардкодятся: как и кнопка «Случайный чат», они
@@ -265,6 +383,30 @@ WZ_DIRECTION_MARKER = str(env("WZ_RANDOM_CHAT_DIRECTION_MARKER", "верифик
 WZ_MIN_OPERATOR_SHARE = float(env("WZ_MIN_OPERATOR_SHARE", "0.9"))
 # Минимум сообщений оператора: два «ок» невозможно оценить по 15 критериям.
 WZ_MIN_OPERATOR_MESSAGES = int(env("WZ_MIN_OPERATOR_MESSAGES", "2"))
+
+# --- Эпизоды чатов ChatApp (Тез КЦ) ---
+# chatapp_episodes построены тем же ночным билдером, что и wazzup_episodes
+# (нарезка по паузе, kind/operator_share/human_outbound_count те же колонки),
+# поэтому порог атрибуции по умолчанию тот же. Отдельные переменные заведены не
+# ради другого числа, а чтобы ТЭЗ можно было подкрутить, не задев Верификаторов.
+CA_MIN_OPERATOR_SHARE = float(env("CA_MIN_OPERATOR_SHARE", str(WZ_MIN_OPERATOR_SHARE)))
+CA_MIN_OPERATOR_MESSAGES = int(env("CA_MIN_OPERATOR_MESSAGES", str(WZ_MIN_OPERATOR_MESSAGES)))
+CA_SOURCE_PROVIDER = "chatapp-episode"
+
+# --- Переписка Chat2Desk (СЗоВ) ---
+# Здесь единица другая: у Chat2Desk нет эпизодов, единица — ЗАЯВКА (request), и
+# заявка по построению закреплена за одним оператором (c2d_requests.operator_id),
+# поэтому порога доли ответов нет и быть не может. Ограничение только по объёму:
+# заявка из одного «ок» не оценивается по 16 критериям.
+#
+# Сырых сообщений Chat2Desk локально НЕТ вовсе (таблицы c2d_messages не
+# существует) — единственная местная копия переписки это c2d_chat_snapshots.
+# messages, поэтому субъектом взят СНАПШОТ, а не заявка: пул уже скачанных
+# переписок оценивается без обращения к API, чья месячная квота почти выедена.
+C2D_MIN_OPERATOR_MESSAGES = int(env("C2D_MIN_OPERATOR_MESSAGES",
+                                    str(WZ_MIN_OPERATOR_MESSAGES)))
+C2D_SOURCE_PROVIDER = "chat2desk-snapshot"
+CHAT_SOURCE_MODEL = "episode-transcript-v1"
 
 # --- Вложения чатов: изображения (Claude vision) и голосовые (Soniox) ---
 # Транскрипт эпизода содержит только заглушки ([фото], [голосовое]); без их

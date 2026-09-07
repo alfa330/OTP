@@ -79,11 +79,15 @@ class _FakeGcsClient:
 
 
 class _FakeCursor:
-    def __init__(self, imported_row, events, calls_ref=False, imported_ref=False):
+    def __init__(self, imported_row, events, calls_ref=False, imported_ref=False,
+                 ai_evaluated=False):
         self.imported_row = imported_row
         self.events = events
         self.calls_ref = calls_ref
         self.imported_ref = imported_ref
+        # Звонок из АТС может быть субъектом оценки ИИ (subject_kind='imported_call');
+        # тогда удалять строку нельзя — оценка ссылается на неё.
+        self.ai_evaluated = ai_evaluated
         self.executions = []
         self._result = None
 
@@ -92,6 +96,9 @@ class _FakeCursor:
         self.executions.append((normalized, params))
         if normalized.startswith("SELECT operator_id") and "FROM imported_calls" in normalized:
             self._result = self.imported_row
+        elif "ai_review_cache" in normalized or "ai_evaluation_runs" in normalized:
+            self.events.append("ai-check")
+            self._result = (1,) if self.ai_evaluated else None
         elif normalized.startswith("DELETE FROM imported_calls"):
             self.events.append("row-delete")
             self._result = None
@@ -120,10 +127,12 @@ class _CursorContext:
 
 
 def _call_delete(status="not_evaluated", audio_path=AUDIO_PATH,
-                 calls_ref=False, imported_ref=False, gcs_fails=False):
+                 calls_ref=False, imported_ref=False, gcs_fails=False,
+                 ai_evaluated=False):
     events = []
     cursor = _FakeCursor((7, status, audio_path), events,
-                         calls_ref=calls_ref, imported_ref=imported_ref)
+                         calls_ref=calls_ref, imported_ref=imported_ref,
+                         ai_evaluated=ai_evaluated)
 
     class FakeDb:
         def get_user(self, id=None):
@@ -148,6 +157,9 @@ def _call_delete(status="not_evaluated", audio_path=AUDIO_PATH,
     }
     _load_bot_functions(["delete_draft_evaluation", "_delete_call_record_blob"], namespace)
     response = namespace["delete_draft_evaluation"](42)
+    # Проверка «оценён ли ИИ» — предусловие, а не шаг удаления: из порядка
+    # событий её убираем, чтобы тесты говорили про удаление строки и блоба.
+    events[:] = [event for event in events if event != "ai-check"]
     return response, events, cursor
 
 
@@ -185,9 +197,25 @@ class ImportedCallDeleteAudioCleanupTests(unittest.TestCase):
         _response, events, cursor = _call_delete(audio_path=None)
 
         self.assertEqual(events, ["row-delete", "commit"])
+        # Речь про запросы «а кто ещё ссылается на эту запись»: без пути к записи
+        # их быть не должно. Проверка «оценён ли ИИ» к бакету не относится и
+        # выполняется всегда, поэтому сверяем именно audio_path-запросы.
         self.assertTrue(all(
-            not query.startswith("SELECT 1 FROM") for query, _params in cursor.executions
+            "audio_path = %s" not in query for query, _params in cursor.executions
         ))
+
+    def test_ai_evaluated_call_is_neither_deleted_nor_stripped_of_audio(self):
+        """Для раздела «ИИ-оценка» строка imported_calls — САМ субъект оценки
+        (subject_kind='imported_call'). Её удаление не обнулило бы ссылку, как у
+        человеческой оценки, а увело бы оценку из очереди и списка целиком
+        (выборки соединяются с таблицей субъекта) и унесло бы запись из бакета —
+        переоценить было бы нечего."""
+        response, events, _cursor = _call_delete(ai_evaluated=True)
+
+        self.assertEqual(response[1], 400)
+        self.assertIn("оценён ИИ", response[0]["error"])
+        self.assertNotIn("row-delete", events)
+        self.assertNotIn(f"blob-delete:{AUDIO_PATH}", events)
 
     def test_evaluated_call_is_neither_deleted_nor_stripped_of_audio(self):
         response, events, _cursor = _call_delete(status="evaluated")

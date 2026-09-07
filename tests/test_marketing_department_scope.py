@@ -313,7 +313,10 @@ class FrontendObserverPredicateTests(unittest.TestCase):
     def test_every_section_predicate_is_wired(self):
         # «Курсы», «ИИ-оценка», «Лиды OLX», «Журнал оценок».
         self.assertIn("isMarketingObserver(userLike) ||\n        (role === 'super_admin' && userId === 2)", self.app)
-        self.assertIn("isOpSalesSupervisorForAiQa(userLike) ||\n    isMarketingObserver(userLike) ||", self.app)
+        # СВ отделов раздела проходят своим предикатом: исходный (СВ ОП)
+        # переиспользован в «Настройках SIP» и «Касаниях», и расширять его на
+        # СЗоВ и Тез КЦ значило бы открыть им заодно те разделы.
+        self.assertIn("isAiQaSupervisor(userLike) ||\n    isMarketingObserver(userLike) ||", self.app)
         self.assertIn("if (isMarketingObserver(userLike)) return true;", self.app)
         self.assertIn(
             "const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager || isMarketingObserverUser;",
@@ -330,25 +333,30 @@ class FrontendObserverPredicateTests(unittest.TestCase):
     def test_verifier_chats_stay_closed(self):
         """«Чаты Верификаторов» наблюдателю не положены.
 
-        Раздел ездит на СВОЁМ предикате canAccessVerifierChatsForUser: его
-        аудитория ШИРЕ аудитории «ИИ-оценки» (в раздел допущены и глобальные
-        админы). Наблюдатель «Маркетинга» проходит первую же строку этого
-        предиката — canAccessAiQaForUser, — поэтому вычитать его надо явно,
-        иначе переписка Верификаторов выдаётся молча вместе с разбором звонков.
+        Раздел ездит на СВОЁМ предикате canAccessVerifierChatsForUser, и его
+        периметр перечислен ЯВНО. Раньше он выводился из аудитории «ИИ-оценки»
+        (canAccessAiQaForUser), и вычет наблюдателя обязан был стоять первой
+        строкой. Вывод перестал быть верным, когда «ИИ-оценка» расширилась на
+        СЗоВ и Тез КЦ: он молча отдал бы переписку Wazzup — раздел ОТДЕЛА
+        ПРОДАЖ — главе Тез КЦ и супервайзерам СЗоВ/Тез. Вычет наблюдателя
+        остался на месте и по-прежнему обязан быть первым: он единственный, кого
+        надо отнять у аудитории, которая иначе его включает.
         """
         predicate = self.app.split(
             "const canAccessVerifierChatsForUser = (userLike) => {", 1
         )[1].split("};", 1)[0]
         self.assertIn("if (isMarketingObserver(userLike)) return false;", predicate)
-        # Вычет обязан стоять ДО проверки аудитории «ИИ-оценки»: строкой ниже
-        # наблюдатель прошёл бы по canAccessAiQaForUser и получил бы раздел.
         self.assertLess(
             predicate.index("isMarketingObserver(userLike)"),
-            predicate.index("canAccessAiQaForUser(userLike)"),
+            predicate.index("super_admin"),
+            "вычет наблюдателя обязан стоять до любой допускающей проверки",
         )
-        # Зеркало на бэкенде — тот же вычет в гарде раздела.
+        # Периметр не выводится из «ИИ-оценки»: иначе он снова поедет за ней.
+        self.assertNotIn("canAccessAiQaForUser(userLike)", predicate)
+        # Зеркало на бэкенде — тот же вычет в гарде раздела, и тоже свой периметр.
         guard = _function_source(BOT_PATH, "_verifier_chats_guard")
         self.assertIn("_is_marketing_observer(", guard)
+        self.assertNotIn("return _ai_qa_guard()", guard)
 
 
 class BackendObserverTests(unittest.TestCase):

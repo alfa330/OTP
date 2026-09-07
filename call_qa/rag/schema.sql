@@ -752,27 +752,60 @@ ALTER TABLE qa_gold_labels        ADD COLUMN IF NOT EXISTS subject_kind text NOT
 -- невидимый ни одной выборке класс субъектов.
 ALTER TABLE ai_transcript_cache DROP CONSTRAINT IF EXISTS ai_transcript_cache_subject_kind_check;
 ALTER TABLE ai_transcript_cache ADD CONSTRAINT ai_transcript_cache_subject_kind_check
-    CHECK (subject_kind IN ('call','wz_episode'));
+    CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode'));
 ALTER TABLE ai_evaluation_runs DROP CONSTRAINT IF EXISTS ai_evaluation_runs_subject_kind_check;
 ALTER TABLE ai_evaluation_runs ADD CONSTRAINT ai_evaluation_runs_subject_kind_check
-    CHECK (subject_kind IN ('call','wz_episode'));
+    CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode'));
 ALTER TABLE ai_evaluation_meta DROP CONSTRAINT IF EXISTS ai_evaluation_meta_subject_kind_check;
 ALTER TABLE ai_evaluation_meta ADD CONSTRAINT ai_evaluation_meta_subject_kind_check
-    CHECK (subject_kind IN ('call','wz_episode'));
+    CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode'));
 ALTER TABLE ai_review_cache DROP CONSTRAINT IF EXISTS ai_review_cache_subject_kind_check;
 ALTER TABLE ai_review_cache ADD CONSTRAINT ai_review_cache_subject_kind_check
-    CHECK (subject_kind IN ('call','wz_episode'));
+    CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode'));
 ALTER TABLE qa_adjudication_cases DROP CONSTRAINT IF EXISTS qa_adjudication_cases_subject_kind_check;
 ALTER TABLE qa_adjudication_cases ADD CONSTRAINT qa_adjudication_cases_subject_kind_check
-    CHECK (subject_kind IN ('call','wz_episode'));
+    CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode'));
 ALTER TABLE qa_adjudications DROP CONSTRAINT IF EXISTS qa_adjudications_subject_kind_check;
 ALTER TABLE qa_adjudications ADD CONSTRAINT qa_adjudications_subject_kind_check
-    CHECK (subject_kind IN ('call','wz_episode'));
+    CHECK (subject_kind IN ('call','wz_episode','imported_call','c2d_snapshot','ca_episode'));
 
 -- Уникальность «один субъект + модель», а не «один id + модель».
 CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_eval_subject_model
     ON ai_evaluation_meta (subject_kind, call_id, model);
 DROP INDEX IF EXISTS uq_ai_eval_call_model;
+
+-- Тот же дискриминатор нужен и ключу транскриптов.  Пока субъектов было два,
+-- эпизод чата спасала лишь РАЗНИЦА В ПРОВАЙДЕРЕ ('wazzup-episode' против
+-- 'soniox'), а не ключ.  С появлением subject_kind='imported_call' провайдер у
+-- двух субъектов один и тот же (Soniox), а audio_fingerprint считается от
+-- (id, audio_path): у звонка из АТС и его же человеческой оценки в calls путь к
+-- записи ОДИН, и при совпадении числовых id (calls ~9,4 тыс. строк,
+-- imported_calls ~5,1 тыс. — диапазоны перекрываются) ключ совпал бы целиком.
+-- Читатель при этом фильтрует по subject_kind, поэтому запись «не находилась»
+-- бы вовсе: ON CONFLICT DO NOTHING молча возвращал бы чужую строку, а карточка
+-- заново гоняла бы платный ASR при каждом открытии.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_transcript_subject
+    ON ai_transcript_cache (subject_kind, call_id, audio_fingerprint,
+                            asr_provider, asr_model, asr_config_hash);
+-- Старый ключ снимаем ПО СОСТАВУ КОЛОНОК, а не по имени: имя сгенерировано
+-- Postgres при CREATE TABLE и обрезано до 63 символов
+-- ('..._asr_provider__key' с двойным подчёркиванием), угадывать его нельзя.
+DO $ai_transcript_cache_uq$
+DECLARE
+    victim text;
+BEGIN
+    SELECT conname INTO victim
+      FROM pg_constraint
+     WHERE conrelid = 'ai_transcript_cache'::regclass AND contype = 'u'
+       AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+              FROM unnest(conkey) AS k
+              JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = k)
+           = ARRAY['asr_config_hash','asr_model','asr_provider','audio_fingerprint','call_id']::text[];
+    IF victim IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE ai_transcript_cache DROP CONSTRAINT %I', victim);
+    END IF;
+END
+$ai_transcript_cache_uq$;
 
 -- Смена первичного ключа — ОДНИМ statement: в диагностическом режиме
 -- (ensure_schema strict=False) каждый statement коммитится отдельно, и пара

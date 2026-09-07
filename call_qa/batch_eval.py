@@ -47,9 +47,13 @@ from .evaluation import runtime_store
 from .evaluation.fingerprint import content_hash, transcript_fingerprint
 from .rag import knowledge
 from .api import (_download, _lines_from_tokens, _ai_score, _cache_put, _meta_upsert,
-                  _audio_object_fingerprint, _evaluation_identity, _score_breakdown)
+                  _audio_object_fingerprint, _evaluation_identity, _score_breakdown,
+                  _direction_department_code)
 
-_SUBJECT_PREFIX = {config.SUBJECT_CALL: "call", config.SUBJECT_WZ_EPISODE: "wz"}
+_SUBJECT_PREFIX = {config.SUBJECT_CALL: "call", config.SUBJECT_WZ_EPISODE: "wz",
+                   config.SUBJECT_IMPORTED_CALL: "ic",
+                   config.SUBJECT_C2D_SNAPSHOT: "c2d",
+                   config.SUBJECT_CA_EPISODE: "ca"}
 
 
 def _subject_key(subject: dict) -> str:
@@ -137,9 +141,14 @@ def _month_bounds(month: str) -> tuple[str, str]:
     return f"{month}-01", nxt
 
 
-def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: int | None) -> list[dict]:
-    """Оценённые людьми звонки ОП за месяц, ещё не оценённые ИИ под текущим тегом модели.
-    Если их меньше min_calls — добавляется fallback-месяц."""
+def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: int | None,
+                 department: str = config.OP_DEPARTMENT_CODE) -> list[dict]:
+    """Оценённые людьми звонки отдела за месяц, ещё не оценённые ИИ под текущим тегом.
+    Если их меньше min_calls — добавляется fallback-месяц.
+
+    Отдел ЯВНЫЙ и по умолчанию ОП: пакетный прогон — это платные вызовы модели на
+    весь месяц, и расширять его на СЗоВ и Тез КЦ молча, вместе с открытием
+    раздела, нельзя. Новый отдел включается флагом --department."""
     def q(mon):
         lo, hi = _month_bounds(mon)
         conn = config.connect_ro(); cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
@@ -154,7 +163,7 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
                   AND COALESCE(c.is_draft, FALSE) = FALSE
                   AND c.created_at >= %s AND c.created_at < %s
                 ORDER BY c.created_at""",
-            (config.op_direction_id_family(cur), lo, hi))
+            (config.department_direction_id_family(cur, department), lo, hi))
         rows = cur.fetchall(); cur.close(); conn.close()
         return [{"id": r[0], "subject_kind": config.SUBJECT_CALL,
                  "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
@@ -173,44 +182,48 @@ def select_calls(month: str, fallback_month: str | None, min_calls: int, limit: 
 
 
 def select_episodes(month: str, fallback_month: str | None, min_calls: int,
-                    limit: int | None) -> list[dict]:
-    """Эпизоды чатов Верификаторов за месяц, пригодные для честной оценки.
+                    limit: int | None,
+                    department: str = config.OP_DEPARTMENT_CODE) -> list[dict]:
+    """Переписки отдела за месяц, пригодные для честной оценки.
+
+    Источник зависит от отдела (config.CHAT_SUBJECT_BY_DEPARTMENT), и запрос у
+    каждого свой: у эпизодных источников месяц считается по концу эпизода и
+    отсекается многооператорная переписка (порог доли ответов), у заявок
+    Chat2Desk месяц берётся по дню заявки, а вместо доли ответов отсекается
+    ручная передача чата — см. subjects._c2d_eligibility.
 
     Отсекаются эпизоды, где отвечали несколько операторов: приписать такую
-    переписку одному человеку нельзя (порог config.WZ_MIN_OPERATOR_SHARE)."""
+    переписку одному человеку нельзя."""
+    subject_kind = config.chat_subject_kind(department)
+    if not subject_kind:
+        raise ValueError(f"у отдела «{department}» нет источника переписки")
+
     def q(mon):
         lo, hi = _month_bounds(mon)
         conn = config.connect_ro(); cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
         try:
-            wz_family = subjects_mod.wz_direction_family(cur)
-            if not wz_family:
-                log("не найдено направление Верификаторов — нечего выбирать")
+            family = subjects_mod.chat_direction_family(cur, department)
+            if not family:
+                log(f"у отдела «{department}» не найдено чатовых направлений — нечего выбирать")
                 return []
-            cur.execute(
-                """SELECT e.id, u.direction_id, d.name, u.name,
-                          TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM.YYYY, HH24:MI'),
-                          e.operator_share, e.human_outbound_count
-                     FROM wazzup_episodes e
-                     JOIN users u ON u.id = e.operator_user_id
-                     LEFT JOIN directions d ON d.id = u.direction_id
-                    WHERE e.kind = 'dialog' AND u.direction_id = ANY(%s)
-                      AND e.operator_share >= %s AND e.human_outbound_count >= %s
-                      AND (e.ended_at AT TIME ZONE 'Asia/Almaty') >= %s
-                      AND (e.ended_at AT TIME ZONE 'Asia/Almaty') < %s
-                    ORDER BY e.ended_at""",
-                (wz_family, config.WZ_MIN_OPERATOR_SHARE,
-                 config.WZ_MIN_OPERATOR_MESSAGES, lo, hi))
-            rows = cur.fetchall()
+            if subject_kind == config.SUBJECT_C2D_SNAPSHOT:
+                return _select_c2d_snapshots(cur, family, lo, hi)
+            return _select_episode_rows(cur, family, lo, hi, subject_kind)
         finally:
             cur.close(); conn.close()
-        return [{"id": r[0], "subject_kind": config.SUBJECT_WZ_EPISODE,
-                 "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
-                 "datetime": r[4], "human_score": None, "audio_path": None,
-                 "operator_share": r[5], "human_outbound_count": r[6]} for r in rows]
 
     items = q(month)
-    log(f"выборка {month}: {len(items)} эпизодов чатов "
-        f"(порог доли ответов оператора {round(config.WZ_MIN_OPERATOR_SHARE * 100)}%)")
+    if subject_kind == config.SUBJECT_C2D_SNAPSHOT:
+        gate = "без заявок, переданных другому оператору"
+    else:
+        # Порог у ChatApp свой (CA_*) — ровно затем, чтобы ТЭЗ можно было
+        # подкрутить, не задев Верификаторов. Печатать всегда WZ_* значит врать
+        # в журнале прогона при первой же настройке.
+        share = (config.WZ_MIN_OPERATOR_SHARE
+                 if subject_kind == config.SUBJECT_WZ_EPISODE
+                 else config.CA_MIN_OPERATOR_SHARE)
+        gate = f"порог доли ответов оператора {round(share * 100)}%"
+    log(f"выборка {month}: {len(items)} переписок ({subject_kind}, {gate})")
     if len(items) < min_calls and fallback_month:
         extra = q(fallback_month)
         log(f"мало (<{min_calls}) → добавляю {fallback_month}: +{len(extra)}")
@@ -219,6 +232,64 @@ def select_episodes(month: str, fallback_month: str | None, min_calls: int,
         items = items[:limit]
         log(f"ограничение --limit: берём первые {len(items)}")
     return items
+
+
+def _select_episode_rows(cur, family, lo, hi, subject_kind) -> list[dict]:
+    """Эпизодные источники: wazzup_episodes и chatapp_episodes — одни колонки."""
+    is_wz = subject_kind == config.SUBJECT_WZ_EPISODE
+    table = "wazzup_episodes" if is_wz else "chatapp_episodes"
+    min_share = config.WZ_MIN_OPERATOR_SHARE if is_wz else config.CA_MIN_OPERATOR_SHARE
+    min_messages = (config.WZ_MIN_OPERATOR_MESSAGES if is_wz
+                    else config.CA_MIN_OPERATOR_MESSAGES)
+    # У эпизода ChatApp нет заморожённого транскрипта, поэтому берём только те,
+    # у которых текст ещё есть откуда собрать. Фрагмент ОБЩИЙ с выборкой раздела
+    # (api.CA_TEXT_AVAILABLE_SQL): своя копия приняла бы только сырые сообщения и
+    # молча теряла бы эпизоды, у которых остался лишь снапшот.
+    from .api import CA_TEXT_AVAILABLE_SQL
+    text_available = "" if is_wz else (
+        " AND " + CA_TEXT_AVAILABLE_SQL.format(alias="e"))
+    cur.execute(
+        """SELECT e.id, u.direction_id, d.name, u.name,
+                  TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM.YYYY, HH24:MI'),
+                  e.operator_share, e.human_outbound_count
+             FROM """ + table + """ e
+             JOIN users u ON u.id = e.operator_user_id
+             LEFT JOIN directions d ON d.id = u.direction_id
+            WHERE e.kind = 'dialog' AND u.direction_id = ANY(%s)
+              AND e.operator_share >= %s AND e.human_outbound_count >= %s
+              AND (e.ended_at AT TIME ZONE 'Asia/Almaty') >= %s
+              AND (e.ended_at AT TIME ZONE 'Asia/Almaty') < %s""" + text_available + """
+            ORDER BY e.ended_at""",
+        (family, min_share, min_messages, lo, hi))
+    return [{"id": r[0], "subject_kind": subject_kind,
+             "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
+             "datetime": r[4], "human_score": None, "audio_path": None,
+             "operator_share": r[5], "human_outbound_count": r[6]} for r in cur.fetchall()]
+
+
+def _select_c2d_snapshots(cur, family, lo, hi) -> list[dict]:
+    """Заявки Chat2Desk: пул — уже скачанные снапшоты (сырых сообщений локально нет).
+
+    Гейты те же, что у выборки одной случайной заявки в разделе, — переиспользуем
+    ровно те же куски SQL, чтобы пакетный прогон и кнопка не расходились."""
+    from .api import _C2D_OPERATOR_MESSAGES_SQL, _C2D_SPLIT_SQL
+    cur.execute(
+        """SELECT t.id, u.direction_id, d.name, COALESCE(u.name, t.c2d_operator_name),
+                  TO_CHAR(t.day,'DD.MM.YYYY'),
+                  """ + _C2D_OPERATOR_MESSAGES_SQL + """::int
+             FROM c2d_chat_snapshots t
+             JOIN users u ON u.id = t.operator_id
+             LEFT JOIN directions d ON d.id = u.direction_id
+            WHERE t.source = 'chat2desk' AND u.direction_id = ANY(%s)
+              AND t.day >= %s::date AND t.day < %s::date
+              AND """ + _C2D_OPERATOR_MESSAGES_SQL + """ >= %s
+              AND NOT """ + _C2D_SPLIT_SQL + """
+            ORDER BY t.day""",
+        (family, lo, hi, config.C2D_MIN_OPERATOR_MESSAGES))
+    return [{"id": r[0], "subject_kind": config.SUBJECT_C2D_SNAPSHOT,
+             "direction_id": r[1], "direction": r[2], "operator": r[3] or "—",
+             "datetime": r[4], "human_score": None, "audio_path": None,
+             "operator_share": None, "human_outbound_count": r[5]} for r in cur.fetchall()]
 
 
 def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
@@ -338,7 +409,7 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
     return done
 
 
-def media_batch_stage(episodes: list[dict], workdir: str) -> int:
+def media_batch_stage(episodes: list[dict], workdir: str, *, subject_kind=config.SUBJECT_WZ_EPISODE) -> int:
     """Описывает картинки и PDF выбранных эпизодов пакетно (−50%).
 
     Отдельная стадия и отдельный маркер: смешивать описания вложений с оценками в
@@ -355,8 +426,8 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
     pending, seen = [], set()  # картинки и PDF: их читает Claude, значит есть Batch
     for episode in episodes:
         try:
-            subject = subjects_mod.load(config.SUBJECT_WZ_EPISODE, episode["id"])
-            messages = subjects_mod.fetch_episode_messages(subject)
+            subject = subjects_mod.load(subject_kind, episode["id"])
+            messages, _origin = subjects_mod.chat_messages(subject)
         except Exception as exc:
             log(f"эпизод {episode['id']}: не удалось прочитать сообщения ({exc})")
             continue
@@ -415,7 +486,7 @@ def media_batch_stage(episodes: list[dict], workdir: str) -> int:
     return len(todo)
 
 
-def episode_transcript_stage(episodes: list[dict], workdir: str, workers: int) -> dict:
+def episode_transcript_stage(episodes: list[dict], workdir: str, workers: int, *, subject_kind=config.SUBJECT_WZ_EPISODE) -> dict:
     """Транскрипты эпизодов с содержанием вложений → immutable-кэш.
 
     К этому моменту картинки уже описаны батчем; здесь добираются голосовые
@@ -428,14 +499,14 @@ def episode_transcript_stage(episodes: list[dict], workdir: str, workers: int) -
     lock_write = __import__("threading").Lock()
 
     def one(episode):
-        subject = subjects_mod.load(config.SUBJECT_WZ_EPISODE, episode["id"])
+        subject = subjects_mod.load(subject_kind, episode["id"])
         subjects_mod.require_evaluable(subject)
         prepared = subjects_mod.prepare_wz_transcript(subject)
         cfg_hash = prepared["source_config_hash"]
         cached = runtime_store.get_transcript(
             call_id=episode["id"], audio_fingerprint_value=prepared["source_identity"],
             asr_provider=prepared["provider"], asr_model=prepared["model"],
-            asr_config_hash=cfg_hash, subject_kind=config.SUBJECT_WZ_EPISODE)
+            asr_config_hash=cfg_hash, subject_kind=subject_kind)
         if cached:
             transcript_cache_id = cached["id"]
             transcript_hash = cached["transcript_hash"]
@@ -453,9 +524,9 @@ def episode_transcript_stage(episodes: list[dict], workdir: str, workers: int) -
                          "media_stats": prepared["media_stats"],
                          "source_identity": prepared["source_identity"]},
                 languages=None, mean_conf=None, low_conf_spans=None, duration_ms=None,
-                subject_kind=config.SUBJECT_WZ_EPISODE)
+                subject_kind=subject_kind)
         rec = {
-            "call_id": episode["id"], "subject_kind": config.SUBJECT_WZ_EPISODE,
+            "call_id": episode["id"], "subject_kind": subject_kind,
             "toks": [], "segments": segments,
             "asm": {"text": text, "languages": {}, "mean_conf": None, "low_conf_spans": []},
             "transcript_cache_id": transcript_cache_id,
@@ -644,6 +715,12 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             fingerprint, components, retrieval_cfg = _evaluation_identity(
                 transcript_hash=transcript_identity, direction=info["direction"],
                 knowledge_snapshot=snapshot, use_rag=True,
+                # Вид субъекта и отдел — часть промпта, а значит и отпечатка.
+                # Без них пакетный прогон подписывал бы оценку переписки СЗоВ
+                # промптом ЗВОНКА ОТДЕЛА ПРОДАЖ: воспроизводимость врала бы, а
+                # открытие карточки не нашло бы прогон и оценило заново за деньги.
+                subject_kind=subject_kind,
+                department=_direction_department_code(int(info["direction"]["id"])),
             )
             cached = runtime_store.get_cached_evaluation(
                 call_id=call["id"], evaluation_fingerprint=fingerprint,
@@ -974,6 +1051,9 @@ def main():
     ap.add_argument("--subject", choices=list(config.SUBJECT_KINDS),
                     default=config.SUBJECT_CALL,
                     help="что оцениваем: звонки (call) или эпизоды чатов Верификаторов (wz_episode)")
+    ap.add_argument("--department", choices=list(config.DEPARTMENT_CODES),
+                    default=config.OP_DEPARTMENT_CODE,
+                    help="отдел: op (по умолчанию), szov, tez")
     ap.add_argument("--month", required=True, help="месяц субъектов, напр. 2026-06")
     ap.add_argument("--fallback-month", help="добрать из этого месяца, если мало")
     ap.add_argument("--min-calls", type=int, default=50)
@@ -984,29 +1064,51 @@ def main():
     args = ap.parse_args()
 
     subject_kind = args.subject
+    department = args.department
     suffix = "" if subject_kind == config.SUBJECT_CALL else f"_{subject_kind}"
+    # Отдел в имени папки: иначе перезапуск прогона СЗоВ подхватил бы чекпоинты ОП.
+    if department != config.OP_DEPARTMENT_CODE:
+        suffix += f"_{department}"
     workdir = args.workdir or os.path.join(
         tempfile.gettempdir(), f"call_qa_batch_{args.month}{suffix}")
     os.makedirs(workdir, exist_ok=True)
-    log(f"субъект: {subject_kind} | workdir: {workdir} | модель: {config.CLAUDE_MODEL_BULK} "
-        f"| тег кэша: {config.CLAUDE_MODEL}")
+    log(f"субъект: {subject_kind} | отдел: {department} | workdir: {workdir} "
+        f"| модель: {config.CLAUDE_MODEL_BULK} | тег кэша: {config.CLAUDE_MODEL}")
 
     # fail-fast: без RW-БД результаты некуда класть
     conn = config.connect_rw(); conn.close()
 
-    if subject_kind == config.SUBJECT_WZ_EPISODE:
-        calls = select_episodes(args.month, args.fallback_month, args.min_calls, args.limit)
+    expected_chat = config.chat_subject_kind(department)
+    if subject_kind == config.SUBJECT_IMPORTED_CALL:
+        # argparse его принимает (choices=SUBJECT_KINDS), но выборка звонков
+        # берёт только строки `calls` и подписывает их subject_kind='call' —
+        # прогон молча оценил бы не то, что попросили.
+        ap.error("пакетная оценка звонков из АТС (imported_call) не поддержана: "
+                 "выборка идёт по журнальным звонкам. Оценивайте их в разделе "
+                 "кнопкой «Случайный звонок»")
+    if subject_kind in config.CHAT_SUBJECT_KINDS:
+        if subject_kind != expected_chat:
+            ap.error(f"у отдела «{department}» источник переписки — {expected_chat}, "
+                     f"а не {subject_kind}")
+        calls = select_episodes(args.month, args.fallback_month, args.min_calls,
+                                args.limit, department)
     else:
-        calls = select_calls(args.month, args.fallback_month, args.min_calls, args.limit)
+        calls = select_calls(args.month, args.fallback_month, args.min_calls,
+                             args.limit, department)
     if not calls:
         log("нечего оценивать — всё уже в кэше"); return
     if args.dry_run:
         log(f"dry-run: к оценке {len(calls)} субъектов ({subject_kind})"); return
 
-    if subject_kind == config.SUBJECT_WZ_EPISODE:
-        # Сначала ОДИН батч описаний картинок (−50%), потом транскрипты с их содержанием.
-        media_batch_stage(calls, workdir)
-        transcripts = episode_transcript_stage(calls, workdir, args.asr_workers)
+    if subject_kind in config.CHAT_SUBJECT_KINDS:
+        # Сначала ОДИН батч описаний картинок (−50%), потом транскрипты с их
+        # содержанием. Стадии общие для всех трёх источников переписки: вид
+        # субъекта передаётся параметром, иначе заявки Chat2Desk и эпизоды
+        # ChatApp уехали бы в аудио-стадию (audio_path у них None) и прогон
+        # свалился бы на скачивании записи.
+        media_batch_stage(calls, workdir, subject_kind=subject_kind)
+        transcripts = episode_transcript_stage(calls, workdir, args.asr_workers,
+                                               subject_kind=subject_kind)
     else:
         transcripts = asr_stage(calls, workdir, args.asr_workers)
     bid = submit_batch(calls, transcripts, workdir, get_dir := _dir_cache())
