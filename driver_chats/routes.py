@@ -189,6 +189,11 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
     def driver_chats_search(ctx):
         raw_phone = request.args.get('phone') or ''
         phone = chat2desk.normalize_phone(raw_phone)
+        # «Обновить» на экране — тот же поиск, но мимо кеша. Отдельного роута он
+        # не заслуживает: ответ, лимит и запись в журнал у него ровно те же, а
+        # два почти одинаковых обработчика разъехались бы на первой же правке.
+        force_fresh = str(request.args.get('refresh') or '').strip().lower() \
+            in ('1', 'true', 'yes')
         if not phone:
             return jsonify({
                 "error": "Непохоже на номер телефона. Введите номер целиком — "
@@ -229,21 +234,29 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                     'phone': phone, 'client_id': None, 'chats': [],
                     'window': {'from': window_from.isoformat(), 'to': window_to.isoformat()},
                     'not_found': True,
+                    'fetched_at': chat2desk.now_almaty().isoformat(),
                 }), 200
             client_id = int(found['id'])
             client_name = found.get('name')
 
-        # Переписка: кеш -> вендор.
+        # Переписка: кеш -> вендор. Обновление кеш не читает вовсе: кнопку жмут
+        # ровно тогда, когда пятиминутный снимок не годится — оператор только
+        # что отправил внутренний комментарий или ждёт ответа водителя, который
+        # сейчас на линии. Отдать ему в ответ тот же самый снимок — это
+        # «кнопка не работает», и он нажмёт «Передан» второй раз.
         truncated = False
-        with db._get_cursor() as cursor:
-            messages = queries.cached_messages(cursor, client_id, window_from,
-                                               window_to, CACHE_TTL_SECONDS)
+        messages, fetched_at = None, None
+        if not force_fresh:
+            with db._get_cursor() as cursor:
+                messages, fetched_at = queries.cached_messages(
+                    cursor, client_id, window_from, window_to, CACHE_TTL_SECONDS)
         from_cache = messages is not None
         if not from_cache:
             raw, total = chat2desk.fetch_window_messages(client_id, window_from, window_to)
             names = chat2desk.operator_names()
             messages = [chat2desk.normalize_message(msg, names) for msg in raw]
             truncated = total > len(raw)
+            fetched_at = chat2desk.now_almaty()
             with db._get_cursor() as cursor:
                 queries.store_messages(cursor, client_id, phone, messages,
                                        window_from, window_to)
@@ -307,6 +320,9 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             'window': {'from': window_from.isoformat(), 'to': window_to.isoformat()},
             'truncated': truncated,
             'from_cache': from_cache,
+            # Возраст ленты — с сервера, а не с часов браузера: на кеше они
+            # расходятся на его возраст, и подпись «обновлено» врала бы.
+            'fetched_at': fetched_at.isoformat() if fetched_at else None,
             'searches_left': max(0, DAILY_SEARCH_LIMIT - used_today - 1),
         }), 200
 

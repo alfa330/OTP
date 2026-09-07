@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, Loader2, AlertCircle, Send, Check, Lock, Info,
-    MessageSquare, Download, Phone, Clock, ImageIcon, Building2,
+    MessageSquare, Download, Phone, Clock, ImageIcon, Building2, RefreshCw,
 } from 'lucide-react';
 
 import ChatThread from '../c2d_eval/ChatThread';
@@ -30,6 +30,10 @@ import {
  * * Поиска «по мере ввода». Каждый поиск может стоить обращения к вендору, чей
  *   месячный лимит общий с ночным синком метрик отдела. Поиск — явное действие
  *   по Enter или кнопке, а не побочный эффект набора текста.
+ * * Автообновления ленты. По той же причине: «Обновить» — кнопка, а не таймер.
+ *   Она идёт мимо пятиминутного кеша и потому тратит поиск из дневного лимита,
+ *   так что жать её должен человек, которому переписка нужна свежей прямо
+ *   сейчас, — после «Передан» или пока водитель отвечает на линии.
  *
  * Лента переписки — общий ChatThread из «Журнала оценок»: он уже разбирает
  * внутренние заметки, автоответы и системные строки, рисует фото с лайтбоксом и
@@ -38,7 +42,8 @@ import {
 
 const WINDOW_HINT = 'Показываем переписку за последние 2 дня';
 
-const emptyResult = { chats: [], phone: '', clientId: null, clientName: '', notFound: false };
+const emptyResult = { chats: [], phone: '', clientId: null, clientName: '',
+                      notFound: false, fetchedAt: null };
 
 const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const headers = useCallback(
@@ -60,6 +65,7 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const [query, setQuery] = useState('');
     const [searching, setSearching] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);
     const [searchError, setSearchError] = useState('');
     const [result, setResult] = useState(emptyResult);
     const [activeKey, setActiveKey] = useState(null);
@@ -98,23 +104,36 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const canViewJournal = Boolean(context?.capabilities?.can_view_journal);
 
-    // ── Поиск ───────────────────────────────────────────────────────────────
-    const runSearch = useCallback(async () => {
-        const phone = query.trim();
-        if (!phone || searching) return;
-        setSearching(true);
-        setSearchError('');
+    // ── Поиск и обновление ──────────────────────────────────────────────────
+    //
+    // Загрузчик один на обе кнопки: запрос, разбор ответа и коды ошибок у них
+    // общие, а расходятся они ровно в двух местах — обновление удерживает
+    // открытый чат вместе с отметками «передан» и не стирает ленту, если запрос
+    // не удался. Человек жмёт «Обновить» с чатом на экране, и потерять этот чат
+    // из-за упавшей сети больнее, чем не увидеть новых сообщений.
+    const load = useCallback(async (rawPhone, { refresh = false } = {}) => {
+        const phone = String(rawPhone || '').trim();
+        if (!phone || searching || refreshing) return;
+        const setBusy = refresh ? setRefreshing : setSearching;
+        setBusy(true);
+        if (!refresh) setSearchError('');
         try {
             const response = await fetch(
-                `${apiBaseUrl}/api/driver_chats/search?phone=${encodeURIComponent(phone)}`,
+                `${apiBaseUrl}/api/driver_chats/search?phone=${encodeURIComponent(phone)}`
+                + (refresh ? '&refresh=1' : ''),
                 { headers: headers(), credentials: 'include' });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
+                if (refresh) {
+                    toast(data.error || 'Не удалось обновить переписку', 'error');
+                    return;
+                }
                 setResult(emptyResult);
                 setSearchError(data.error || 'Не удалось найти чаты');
                 return;
             }
             const chats = data.chats || [];
+            setSearchError('');
             setResult({
                 chats,
                 phone: data.phone || phone,
@@ -122,12 +141,20 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 clientName: data.client_name || '',
                 notFound: Boolean(data.not_found),
                 truncated: Boolean(data.truncated),
+                fetchedAt: data.fetched_at || null,
             });
-            setHandedOff({});
-            // Открываем самый свежий живой чат сразу: в 9 случаях из 10 нужен
-            // именно он, и лишний клик здесь — это лишний клик в каждом звонке.
-            const first = chats.find((chat) => !chat.is_service) || chats[0];
-            setActiveKey(first ? chatKey(first) : null);
+            if (refresh) {
+                // Открытый чат остаётся открытым. Съехать он может только если
+                // парк выпал из двухсуточного окна, — тогда возвращаемся к
+                // самому свежему живому, а не в пустоту.
+                setActiveKey((prev) => (chats.some((chat) => chatKey(chat) === prev)
+                    ? prev : firstLiveKey(chats)));
+            } else {
+                setHandedOff({});
+                // Открываем самый свежий живой чат сразу: в 9 случаях из 10 нужен
+                // именно он, и лишний клик здесь — это лишний клик в каждом звонке.
+                setActiveKey(firstLiveKey(chats));
+            }
             if (typeof data.searches_left === 'number') {
                 setContext((prev) => (prev ? {
                     ...prev,
@@ -135,12 +162,20 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 } : prev));
             }
         } catch {
+            if (refresh) {
+                toast('Сеть недоступна. Переписка не обновлена', 'error');
+                return;
+            }
             setResult(emptyResult);
             setSearchError('Сеть недоступна. Попробуйте ещё раз');
         } finally {
-            setSearching(false);
+            setBusy(false);
         }
-    }, [apiBaseUrl, headers, query, searching]);
+    }, [apiBaseUrl, headers, refreshing, searching, toast]);
+
+    const runSearch = useCallback(() => load(query, { refresh: false }), [load, query]);
+    const runRefresh = useCallback(() => load(result.phone, { refresh: true }),
+                                   [load, result.phone]);
 
     const chats = result.chats || [];
 
@@ -222,7 +257,12 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             setHandedOff((prev) => ({ ...prev, [chatKey(activeChat)]: true }));
             setHandoffOpen(false);
             setHandoffNote('');
-            toast('Комментарий отправлен чат-менеджеру', 'success');
+            /* Заметка уже в чате у вендора, но лента на экране — снимок,
+               снятый до неё. Кеш сервер сбросил, дело за человеком: без этой
+               подсказки «не вижу свой комментарий» читается как «не отправилось»,
+               и он жмёт «Передан» второй раз, а отозвать заметку нельзя. */
+            toast('Комментарий отправлен. Нажмите «Обновить», чтобы увидеть его в ленте',
+                  'success');
         } catch {
             toast('Сеть недоступна. Комментарий не отправлен', 'error');
         } finally {
@@ -269,6 +309,10 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         searching={searching}
                         inputRef={inputRef}
                         leftToday={leftToday}
+                        onRefresh={runRefresh}
+                        refreshing={refreshing}
+                        canRefresh={Boolean(result.phone)}
+                        fetchedAt={result.fetchedAt}
                     />
 
                     {searchError && (
@@ -347,9 +391,23 @@ function chatKey(chat) {
     return 'x0';
 }
 
+/* Какой чат открывать, когда выбирать приходится за человека. Служебные (одно
+   меню парка и опрос «оцените оператора») пропускаем: искали не их. Null, а не
+   chatKey(undefined): 'x0' пометил бы выбранным чат, которого нет. */
+function firstLiveKey(chats) {
+    const first = (chats || []).find((chat) => !chat.is_service) || (chats || [])[0];
+    return first ? chatKey(first) : null;
+}
+
 // ── Поисковая строка ────────────────────────────────────────────────────────
 
-const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday }) => (
+/* «Обновить» стоит рядом с «Найти», а не в шапке списка чатов: результат
+   перерисовывают целиком (список, лента, счётчик сообщений), и место у кнопки
+   там же, где у действия, которое этот результат создало. Показываем её только
+   когда обновлять есть что — пустая строка поиска обходится без второй кнопки.
+   Серая рядом с синей — обычная пара macOS: главное действие одно. */
+const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday,
+                     onRefresh, refreshing, canRefresh, fetchedAt }) => (
     <div className={`${iosCard} px-4 py-4 sm:px-5`}>
         <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
             <div className="relative flex-1">
@@ -365,18 +423,40 @@ const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday }
                     className={`${iosInput} h-11 pl-10 text-[15px] tabular-nums`}
                 />
             </div>
-            <button
-                type="button"
-                onClick={onSubmit}
-                disabled={searching || !value.trim()}
-                className={`${iosBtnPrimary} h-11 min-w-[120px] justify-center disabled:opacity-40`}
-            >
-                {searching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-                {searching ? 'Ищем…' : 'Найти'}
-            </button>
+            <div className="flex items-center gap-2">
+                {canRefresh && (
+                    <button
+                        type="button"
+                        onClick={onRefresh}
+                        disabled={searching || refreshing}
+                        title="Загрузить переписку заново, минуя кеш"
+                        aria-label="Обновить переписку"
+                        className={`${iosBtnSecondary} h-11 flex-1 justify-center px-3.5 sm:flex-none disabled:opacity-40`}
+                    >
+                        <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+                        {refreshing ? 'Обновляем…' : 'Обновить'}
+                    </button>
+                )}
+                <button
+                    type="button"
+                    onClick={onSubmit}
+                    disabled={searching || refreshing || !value.trim()}
+                    className={`${iosBtnPrimary} h-11 flex-1 min-w-[120px] justify-center sm:flex-none disabled:opacity-40`}
+                >
+                    {searching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+                    {searching ? 'Ищем…' : 'Найти'}
+                </button>
+            </div>
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
             <span>{WINDOW_HINT}</span>
+            {/* Время снятия ленты — с сервера: на кеше оно на несколько минут
+                старше часов браузера, и подпись «обновлено сейчас» под
+                пятиминутным снимком была бы враньём ровно там, где человек ей
+                поверит. */}
+            {Boolean(fetchedAt) && (
+                <span className="tabular-nums">Обновлено в {formatTime(fetchedAt)}</span>
+            )}
             {typeof leftToday === 'number' && leftToday <= 20 && (
                 <span className="tabular-nums text-amber-600">
                     Осталось поисков сегодня: {leftToday}

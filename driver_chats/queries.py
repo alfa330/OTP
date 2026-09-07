@@ -192,26 +192,31 @@ _CACHE_PUT_SQL = """
 
 
 def cached_messages(cursor, client_id, window_from, window_to, ttl_seconds):
-    """Свежий кеш переписки или None.
+    """Свежий кеш переписки и время его снятия — или (None, None).
 
     Кеш существует ради квоты вендора и ради скорости: смена целиком открывает
     один и тот же чат несколько раз подряд, пока водитель на линии. TTL короткий
     (минуты): переписка живая, и показать оператору вчерашнее состояние диалога,
     который идёт прямо сейчас, — хуже, чем сходить в API ещё раз.
+
+    Время снятия отдаём вместе с сообщениями, потому что экран подписывает ленту
+    «обновлено в HH:MM». Взять эту минуту с часов браузера значило бы соврать
+    ровно на возраст кеша — до пяти минут на разговоре, который идёт прямо
+    сейчас, — и обесценить кнопку «Обновить»: подпись менялась бы, а лента нет.
     """
     cursor.execute(_CACHE_GET_SQL, {'client_id': int(client_id)})
     row = cursor.fetchone()
     if not row:
-        return None
+        return None, None
     messages, fetched_at, cached_from, cached_to = row
     if not fetched_at:
-        return None
+        return None, None
     # Окно сдвинулось (наступил новый день) — кеш больше не про то, что просят.
     if cached_from != window_from or cached_to != window_to:
-        return None
+        return None, None
     if (now_almaty() - fetched_at).total_seconds() > max(0, int(ttl_seconds)):
-        return None
-    return messages or []
+        return None, None
+    return (messages or []), fetched_at
 
 
 def drop_cached_messages(cursor, client_id):

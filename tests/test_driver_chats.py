@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from driver_chats import access, chat2desk, report, schema  # noqa: E402
+from driver_chats import access, chat2desk, queries, report, schema  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 JOURNAL_META = ROOT / 'src' / 'components' / 'driver_chats' / 'journalMeta.js'
@@ -623,6 +623,126 @@ class HandoffFlowTests(unittest.TestCase):
         self.assertLess(handoff.index('send_internal_comment'),
                         handoff.index('drop_cached_messages'),
                         'кеш сбрасывается ПОСЛЕ успешной отправки, а не до')
+
+
+class RefreshTests(unittest.TestCase):
+    """Кнопка «Обновить»: она обязана ходить к вендору, а не отдавать тот же кеш.
+
+    Дефект, ради которого кнопка появилась (замечен владельцем 07.09.2026):
+    отправив внутренний комментарий, оператор не видел его в ленте, потому что
+    единственным способом перечитать переписку был повторный поиск, а тот
+    молча возвращал пятиминутный кеш. Если обновление снова начнёт читать кеш,
+    кнопка станет украшением — и человек нажмёт «Передан» второй раз, а отозвать
+    заметку через API вендора нельзя.
+    """
+
+    class _Cursor:
+        """Курсор ровно настолько, насколько его использует cached_messages."""
+
+        def __init__(self, row):
+            self.row = row
+
+        def execute(self, *args, **kwargs):
+            return None
+
+        def fetchone(self):
+            return self.row
+
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        cls.search = cls.routes.split('def driver_chats_search')[1].split(
+            'def driver_chats_open')[0]
+        cls.view = VIEW_JSX.read_text(encoding='utf-8')
+        cls.load = cls.view.split('const load = useCallback')[1].split(
+            'const runSearch = useCallback')[0]
+
+    # ── Сервер ───────────────────────────────────────────────────────────────
+
+    def test_cache_is_read_only_when_the_request_is_not_a_refresh(self):
+        """Единственное чтение кеша обязано стоять под флагом обновления."""
+        self.assertEqual(self.search.count('cached_messages'), 1,
+                         'чтение кеша в поиске одно — иначе флаг обойдут мимо')
+        guarded = self.search.split('if not force_fresh:')[1].split('from_cache =')[0]
+        self.assertIn('cached_messages', guarded,
+                      'кеш читается ТОЛЬКО когда это не «Обновить»')
+
+    def test_refresh_flag_is_read_from_the_query(self):
+        self.assertIn("request.args.get('refresh')", self.search)
+
+    def test_refresh_still_costs_a_search_from_the_daily_limit(self):
+        """Обновление — обращение к вендору, и лимит защищает именно его.
+
+        Потолок стоит не ради денег: исчерпав месячную квоту Chat2Desk, встают
+        табло СЗоВ и зарплатные метрики чат-менеджеров. Кнопка, ходящая мимо
+        счётчика, обошла бы эту защиту.
+        """
+        self.assertIn('DAILY_LIMIT_REACHED', self.search)
+        self.assertIn("'search'", self.search, 'обновление пишется в журнал доступа')
+
+    def test_response_carries_the_time_of_the_snapshot(self):
+        """Подпись «обновлено в HH:MM» берётся с сервера, а не с часов браузера:
+        на кеше они расходятся на его возраст."""
+        self.assertIn("'fetched_at':", self.search)
+
+    # ── Контракт кеша ────────────────────────────────────────────────────────
+
+    def test_cache_always_answers_with_a_pair(self):
+        """Один голый `return None` на любом из выходов — и распаковка на
+        вызывающей стороне упала бы или связала сообщения с пустым временем."""
+        window_from = date(2026, 9, 6)
+        window_to = date(2026, 9, 7)
+        fresh = queries.now_almaty()
+        cases = {
+            'кеша нет': None,
+            'без времени': (['m'], None, window_from, window_to),
+            'окно уехало': (['m'], fresh, date(2026, 9, 5), window_to),
+            'протух': (['m'], fresh - timedelta(seconds=600), window_from, window_to),
+        }
+        for label, row in cases.items():
+            with self.subTest(label):
+                got = queries.cached_messages(self._Cursor(row), 1,
+                                              window_from, window_to, 300)
+                self.assertEqual(got, (None, None))
+
+        got = queries.cached_messages(
+            self._Cursor((['m'], fresh, window_from, window_to)), 1,
+            window_from, window_to, 300)
+        self.assertEqual(got, (['m'], fresh))
+
+    # ── Экран ────────────────────────────────────────────────────────────────
+
+    def test_refresh_asks_the_server_to_skip_the_cache(self):
+        self.assertIn("refresh=1", self.load,
+                      'без флага обновление вернуло бы тот же самый снимок')
+
+    def test_refresh_keeps_the_handoff_marks(self):
+        """«Передан» — отметка о необратимом действии. Стереть её обновлением
+        значит предложить человеку сделать это же второй раз."""
+        self.assertEqual(self.load.count('setHandedOff'), 1,
+                         'отметки сбрасывает только новый поиск')
+        self.assertLess(self.load.index('} else {'), self.load.index('setHandedOff'),
+                        'сброс отметок стоит в ветке поиска, а не обновления')
+
+    def test_failed_refresh_does_not_wipe_the_open_chat(self):
+        """Упавшая сеть не имеет права уносить с экрана уже прочитанную ленту."""
+        guards = 0
+        for chunk in self.load.split('if (refresh) {')[1:]:
+            head = chunk.split('}')[0]
+            if 'toast(' not in head:
+                continue
+            guards += 1
+            self.assertIn('return;', head,
+                          'ошибка обновления уходит в тост и выходит, '
+                          'не доводя до setResult(emptyResult)')
+        self.assertEqual(guards, 2,
+                         'таких выходов ровно два — отказ сервера и упавшая сеть')
+
+    def test_button_exists_and_is_not_a_timer(self):
+        """Автообновление жгло бы дневной лимит в фоне у каждого открытого
+        экрана — обновляет человек, кнопкой."""
+        self.assertIn("'Обновить'", self.view)
+        self.assertNotIn('setInterval', self.view)
 
 
 class LabelTwinTests(unittest.TestCase):
