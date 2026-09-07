@@ -265,6 +265,40 @@ def cached_client_id(cursor, phone):
     return int(row[0]) if row and row[0] is not None else None
 
 
+_PENDING_NOTES_SQL = """
+    SELECT c2d_message_id, comment_text, channel_id, dialog_id, request_id, created_at
+      FROM dch_events
+     WHERE kind = 'handoff'
+       AND client_id = %(client_id)s
+       AND c2d_message_id IS NOT NULL
+       AND created_at >= {now} - make_interval(mins => %(minutes)s)
+     ORDER BY created_at
+""".format(now=_NOW)
+
+
+def pending_handoff_notes(cursor, client_id, minutes):
+    """Заметки «Передан», отправленные только что. Ноль вызовов API.
+
+    Вендор показывает свежесозданное сообщение в /v1/messages примерно через
+    минуту (замер 07.09.2026), и всё это время оператор не видит собственный
+    комментарий. Журнал же знает про него сразу: там лежит и id, который вернул
+    вендор, и точный текст, и адрес чата. Отсюда лента и добирает недостающее.
+
+    Окно намеренно шире наблюдавшегося запаздывания: лишняя заметка ничего не
+    портит — доехавшая копия вендора вытеснит её по совпадению id.
+    """
+    cursor.execute(_PENDING_NOTES_SQL,
+                   {'client_id': int(client_id), 'minutes': int(minutes)})
+    return [{
+        'message_id': row[0],
+        'text': row[1] or '',
+        'channel_id': row[2],
+        'dialog_id': row[3],
+        'request_id': row[4],
+        'created': row[5],
+    } for row in cursor.fetchall()]
+
+
 def drop_cached_messages(cursor, client_id):
     """Пометить кеш переписки протухшим.
 

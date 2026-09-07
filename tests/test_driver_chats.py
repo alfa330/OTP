@@ -741,25 +741,28 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(guards, 2,
                          'таких выходов ровно два — отказ сервера и упавшая сеть')
 
-    def test_refresh_is_reachable_from_the_open_chat_too(self):
-        """Кнопка в строке поиска стоит НАД списком парков и читается как
-        «перечитать список». Человек в этот момент смотрит в саму переписку: там
-        он ждёт ответа водителя и туда только что отправил внутренний
-        комментарий. Замечание владельца 07.09.2026 — обновление должно быть и
-        внутри чата, а не только по таксопаркам.
+    def test_refresh_is_one_button_inside_the_chat(self):
+        """Кнопка обновления ОДНА и стоит в шапке переписки.
+
+        Сначала она жила в строке поиска — над списком парков, — и владелец
+        сказал, что оттуда она читается как «перечитать список»: человек в этот
+        момент смотрит в саму переписку. Кнопку добавили и туда, а две одинаковые
+        кнопки стали читаться как разные действия («эта обновляет список, эта —
+        чат»). 07.09.2026 владелец попросил свести их в одну общую: запрос к
+        вендору один на всего водителя, и делить его не на что.
         """
-        self.assertEqual(self.view.count('onRefresh={runRefresh}'), 2,
-                         'обновление вызывается из строки поиска И из шапки чата')
         panel = self.view.split('const ChatPanel = ')[1].split('const HandoffModal')[0]
         self.assertIn('onRefresh', panel)
-        self.assertIn('aria-label="Обновить переписку"', panel)
         self.assertIn('RefreshCw', panel)
+        search_bar = self.view.split('const SearchBar = ')[1].split('const StartHint')[0]
+        self.assertNotIn('onRefresh', search_bar,
+                         'второй кнопки над списком парков быть не должно')
 
     def test_fresh_message_is_not_left_below_the_fold(self):
         """Обновление обязано ПОКАЗАТЬ новое сообщение, а не дописать его под
         сгибом двухсуточной ленты: снимок пересобирается на новом чате, а лента
         на смене снимка прижимается к низу."""
-        snap = self.view.split('const snapshot = useMemo(')[1].split(';')[0]
+        snap = self.view.split('const snapshot = useMemo(')[1].split(');')[0]
         self.assertIn('[activeChat]', snap,
                       'снимок пересобирается, когда чат приехал заново')
         thread = (ROOT / 'src' / 'components' / 'c2d_eval' / 'ChatThread.jsx'
@@ -871,6 +874,110 @@ class SearchLatencyTests(unittest.TestCase):
                          'chat2desk.channel_names'):
                 self.assertNotIn(call, body,
                                  f'{call} ходит в сеть — не под курсором')
+
+
+class VendorLagTests(unittest.TestCase):
+    """Заметка «Передан» видна СРАЗУ, хотя вендор показывает её через минуту.
+
+    Замер на живом чате 07.09.2026 (журнал раздела, client 64098578):
+
+        10:05:23  handoff, message_id 666212283 — вендор принял заметку
+        10:05:25…10:05:56  двадцать нажатий «Обновить», каждое ходило к вендору
+                           и получало ленту из 10 сообщений — БЕЗ заметки
+        10:06:19  сообщений 11 — заметка появилась
+
+    То есть 56 секунд. При этом created у заметки — 10:05:22, момент отправки:
+    у вендора она была всё это время, он просто не отдавал её в /v1/messages.
+    Ускорить это нельзя, ждать — нечего: id заметки вендор возвращает сразу,
+    текст собираем мы. Показываем свою копию, а доехавшая вытесняет её по id
+    (проверено на трёх заметках: message_id из ответа = id в ленте).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        cls.view = VIEW_JSX.read_text(encoding='utf-8')
+
+    def test_merge_drops_the_copy_the_vendor_already_returned(self):
+        vendor = [{'id': 1, 'created': '2026-09-07T10:00:00'},
+                  {'id': 666212283, 'created': '2026-09-07T10:05:22'}]
+        mine = [chat2desk.pending_comment_message(
+            message_id=666212283, text='Передан оператором Тест',
+            created='2026-09-07T10:05:22', channel_id=2137)]
+        merged = chat2desk.merge_pending_comments(vendor, mine)
+        self.assertEqual([m['id'] for m in merged], [1, 666212283],
+                         'своя копия не должна задваивать вендорскую')
+
+    def test_merge_adds_the_note_the_vendor_still_hides(self):
+        vendor = [{'id': 1, 'created': '2026-09-07T10:00:00'}]
+        mine = [chat2desk.pending_comment_message(
+            message_id=666212283, text='Передан оператором Тест',
+            created='2026-09-07T10:05:22', channel_id=2137)]
+        merged = chat2desk.merge_pending_comments(vendor, mine)
+        self.assertEqual([m['id'] for m in merged], [1, 666212283])
+        self.assertEqual(merged[-1]['type'], 'comment',
+                         'заметка рисуется по центру ленты, как внутренняя')
+
+    def test_merged_note_keeps_the_order_of_the_thread(self):
+        """Лента идёт по времени: заметка, отправленная раньше последнего
+        сообщения водителя, не имеет права прыгнуть в конец."""
+        vendor = [{'id': 1, 'created': '2026-09-07T10:00:00'},
+                  {'id': 2, 'created': '2026-09-07T10:09:00'}]
+        mine = [chat2desk.pending_comment_message(
+            message_id=9, text='x', created='2026-09-07T10:05:00')]
+        self.assertEqual([m['id'] for m in
+                          chat2desk.merge_pending_comments(vendor, mine)], [1, 9, 2])
+
+    def test_note_carries_no_invented_author(self):
+        """У вендорской копии автор свой — учётная запись API. Подставить сюда
+        оператора портала значило бы через минуту молча заменить одно имя
+        другим; имя передавшего и так стоит в тексте заметки."""
+        note = chat2desk.pending_comment_message(
+            message_id=1, text='Передан оператором Тест', created='2026-09-07T10:00:00')
+        self.assertIsNone(note['author'])
+        self.assertEqual(note['type'], 'comment')
+
+    def test_handoff_hands_the_ready_message_back(self):
+        """Без этого экран ждал бы вендора целую минуту."""
+        handoff = self.routes.split('def driver_chats_handoff')[1].split('\n    # ──')[0]
+        self.assertIn('pending_comment_message', handoff)
+        self.assertIn("'message':", handoff)
+
+    def test_search_backfills_notes_the_vendor_still_hides(self):
+        """Обновление и перезагрузка страницы в ту же минуту тоже обязаны
+        показывать заметку — иначе она мигнёт и пропадёт."""
+        search = self.routes.split('def driver_chats_search')[1].split(
+            'def driver_chats_open')[0]
+        self.assertIn('pending_handoff_notes', search)
+        self.assertIn('merge_pending_comments', search)
+        self.assertLess(search.index('merge_pending_comments'),
+                        search.index('group_chats'),
+                        'склейка ДО разбора по паркам, иначе заметка мимо чата')
+        self.assertEqual(search.count('db._get_cursor()'), 3,
+                         'заметки читаются уже открытым курсором, без четвёртого')
+
+    def test_screen_shows_the_note_without_waiting(self):
+        self.assertIn('pendingNotes', self.view)
+        handoff = self.view.split('const sendHandoff')[1].split('const snapshot')[0]
+        self.assertIn('setPendingNotes', handoff)
+        self.assertNotIn('Нажмите «Обновить»', self.view,
+                         'подсказка про кнопку больше не нужна — заметка уже в ленте')
+
+    def test_note_is_pinned_to_the_driver_not_just_the_park(self):
+        """Адрес заметки — парк, а парк у водителей общий. Без привязки к
+        клиенту заметка, отправленная одному, показалась бы в чате следующего
+        найденного по тому же парку — и уехала бы туда на скриншоте."""
+        merge = self.view.split('const chats = useMemo(')[1].split('}, [')[0]
+        self.assertIn('item.clientId === result.clientId', merge)
+        self.assertIn('noteBelongsTo(item.message, chat)', merge)
+
+    def test_counter_agrees_with_what_the_thread_shows(self):
+        """Заметка в ленте есть, а под ней «4 сообщ.» — и человек поверит
+        счётчику. Вендор свою копию в счёт включает (в живом замере 10 -> 11),
+        значит и наша обязана."""
+        merge = self.view.split('const chats = useMemo(')[1].split('}, [')[0]
+        self.assertIn('messages_count:', merge)
+        self.assertIn('last_at:', merge)
 
 
 class LabelTwinTests(unittest.TestCase):
@@ -1042,9 +1149,23 @@ class ViewContractTests(unittest.TestCase):
         ДО нажатия, а не после."""
         self.assertIn('Отозвать', self.source)
 
-    def test_screenshot_hint_is_present(self):
-        """Снимок делает человек — интерфейс обязан сказать, чем именно."""
-        self.assertIn('⌘⇧4', self.source)
+    def test_thread_is_shown_whole(self):
+        """Переписка показывается ЦЕЛИКОМ, без фильтра служебных сообщений.
+
+        Тумблер «скрыть служебные» и подсказка про снимок экрана (⌘⇧4) убраны по
+        решению владельца 07.09.2026: полосу под лентой они занимали на каждом
+        чате, а нужны были один раз. Служебные строки — меню парка и автоопрос
+        «оцените работу оператора» — теперь просто часть ленты, ровно так их
+        видит и чат-менеджер у себя.
+
+        Формулировка правила поменялась осознанно: раньше здесь стояло
+        «интерфейс обязан сказать, чем делать снимок». Меняешь обратно — меняй
+        и это правило, а не тест под код.
+        """
+        self.assertNotIn('hideService', self.source,
+                         'фильтр служебных сообщений в разделе не нужен')
+        self.assertNotIn('IosToggle', self.source)
+        self.assertNotIn('⌘⇧4', self.source)
 
     def test_taxi_park_is_shown_on_every_chat(self):
         """По одному номеру приходят чаты разных парков. Без названия оператор

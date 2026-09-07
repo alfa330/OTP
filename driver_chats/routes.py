@@ -46,6 +46,14 @@ CACHE_TTL_SECONDS = 300
 # больше живой потребности (за сутки во всём отделе 872 уникальных телефона).
 DAILY_SEARCH_LIMIT = 150
 
+# Сколько минут после отправки лента показывает НАШУ копию заметки «Передан».
+# Вендор принимает её мгновенно и сразу возвращает message_id, но в выборке
+# /v1/messages показывает примерно через минуту: 07.09.2026 заметка ушла в
+# 10:05:23, двадцать обращений за следующие 31 секунду вернули ленту без неё, а
+# появилась она в 10:06:19. Десять минут — с запасом на медленный день вендора;
+# лишнего не покажет, доехавшая копия вытесняется по совпадению id.
+PENDING_NOTE_MINUTES = 10
+
 # Потолок строк выгрузки: книга собирается в памяти инстанса.
 EXPORT_ROW_CAP = 20000
 
@@ -210,6 +218,7 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # Ожидание слота человек ждёт ровно так же, как сам запрос.
         truncated = False
         client_id, messages, fetched_at = None, None, None
+        pending_notes = []
         with db._get_cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM dch_events "
@@ -224,9 +233,15 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 client_id = (queries.cached_client_id(cursor, phone)
                              or queries.local_client_id(
                                  cursor, chat2desk.phone_variants(phone)))
-                if client_id is not None and not force_fresh:
-                    messages, fetched_at = queries.cached_messages(
-                        cursor, client_id, window_from, window_to, CACHE_TTL_SECONDS)
+                if client_id is not None:
+                    # Свои заметки «Передан», которых вендор ещё не показывает.
+                    # Читаем здесь, чтобы не открывать под них третий курсор.
+                    pending_notes = queries.pending_handoff_notes(
+                        cursor, client_id, PENDING_NOTE_MINUTES)
+                    if not force_fresh:
+                        messages, fetched_at = queries.cached_messages(
+                            cursor, client_id, window_from, window_to,
+                            CACHE_TTL_SECONDS)
         if used_today >= DAILY_SEARCH_LIMIT:
             return jsonify({
                 "error": "На сегодня исчерпан лимит поисков (%d). Он защищает "
@@ -265,6 +280,17 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             messages = [chat2desk.normalize_message(msg, names) for msg in raw]
             truncated = total > len(raw)
             fetched_at = chat2desk.now_almaty()
+            # Вендор показывает свежесозданное сообщение в списке примерно через
+            # минуту, поэтому собственную заметку оператор не видел, сколько бы
+            # раз ни нажал «Обновить». Дописываем её сами — id у нашей копии тот
+            # же, что вернул вендор, так что его копия, доехав, не задвоится.
+            messages = chat2desk.merge_pending_comments(
+                messages,
+                [chat2desk.pending_comment_message(
+                    message_id=note['message_id'], text=note['text'],
+                    created=note['created'], channel_id=note['channel_id'],
+                    dialog_id=note['dialog_id'], request_id=note['request_id'])
+                 for note in pending_notes])
 
         chats = chat2desk.group_chats(messages)
 
@@ -407,7 +433,21 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 c2d_message_id=_int_or_none(sent.get('message_id')),
                 ip_address=_ip(), user_agent=_ua())
 
-        return jsonify({'status': 'ok', 'sent': sent, 'text': text, 'event': event}), 200
+        # Готовое сообщение для ленты — чтобы экран показал заметку СРАЗУ, не
+        # дожидаясь, пока вендор начнёт отдавать её в выборке (это около
+        # минуты). Собирает его сервер, а не фронт: форму сообщения знает
+        # chat2desk.normalize_message, и второе место, знающее её же, разъехалось
+        # бы с ним на первой правке.
+        return jsonify({
+            'status': 'ok', 'sent': sent, 'text': text, 'event': event,
+            'message': chat2desk.pending_comment_message(
+                message_id=sent.get('message_id'),
+                text=text,
+                created=chat2desk.now_almaty(),
+                channel_id=_int_or_none(data.get('channel_id')),
+                dialog_id=sent.get('dialog_id') or _int_or_none(data.get('dialog_id')),
+                request_id=sent.get('request_id')),
+        }), 200
 
     # ── Журнал ───────────────────────────────────────────────────────────────
 

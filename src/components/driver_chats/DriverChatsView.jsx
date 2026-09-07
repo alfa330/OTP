@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Search, Loader2, AlertCircle, Send, Check, Lock, Info,
+    Search, Loader2, AlertCircle, Send, Check, Lock,
     MessageSquare, Download, Phone, Clock, ImageIcon, Building2, RefreshCw,
 } from 'lucide-react';
 
 import ChatThread from '../c2d_eval/ChatThread';
 import {
     APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
-    IosModal, IosSegmented, IosBadge, IosToggle,
+    IosModal, IosSegmented, IosBadge,
 } from '../ui/ios';
 import {
     kindLabel, roleLabel, formatPhone, formatDateTime, formatTime, formatDayShort,
@@ -69,8 +69,21 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [searchError, setSearchError] = useState('');
     const [result, setResult] = useState(emptyResult);
     const [activeKey, setActiveKey] = useState(null);
-    const [hideService, setHideService] = useState(true);
     const [handedOff, setHandedOff] = useState({});
+    /* Свои заметки «Передан», которых Chat2Desk ещё не показывает в ленте.
+       Вендор принимает заметку мгновенно и сразу возвращает её id, но в выборке
+       сообщений отдаёт примерно через минуту (замер 07.09.2026: отправлена в
+       10:05:23, появилась в 10:06:19, и двадцать нажатий «Обновить» между ними
+       возвращали ленту без неё). Ждать вендора незачем — про заметку известно
+       всё, и сервер отдаёт её готовым сообщением прямо в ответе на отправку.
+       Держим до тех пор, пока та же заметка не приедет от вендора: id у копий
+       один, и склейка идёт по нему.
+
+       Рядом с сообщением лежит clientId, и это НЕ перестраховка: адрес заметки —
+       парк, а парк у водителей общий (у «Ясной поляны» их тысячи). Без привязки
+       к водителю заметка, отправленная одному, показалась бы в чате следующего
+       найденного по тому же парку — и уехала бы туда на скриншоте. */
+    const [pendingNotes, setPendingNotes] = useState([]);
 
     const [handoffOpen, setHandoffOpen] = useState(false);
     const [handoffNote, setHandoffNote] = useState('');
@@ -134,6 +147,14 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             }
             const chats = data.chats || [];
             setSearchError('');
+            // Заметка доехала от вендора — своя копия больше не нужна. Ключ
+            // склейки тот же, что на сервере: id сообщения.
+            const arrived = new Set(
+                chats.flatMap((chat) => (chat.messages || []).map((m) => m.id)));
+            setPendingNotes((prev) => {
+                const left = prev.filter((item) => !arrived.has(item.message.id));
+                return left.length === prev.length ? prev : left;
+            });
             setResult({
                 chats,
                 phone: data.phone || phone,
@@ -177,21 +198,35 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const runRefresh = useCallback(() => load(result.phone, { refresh: true }),
                                    [load, result.phone]);
 
-    const chats = result.chats || [];
+    /* Свои заметки вклеиваем в САМ чат, а не только в ленту: у чата есть ещё
+       счётчик сообщений и время последнего — покажи заметку в переписке, но
+       оставь «4 сообщ.» под ней, и человек поверит счётчику. Когда вендор
+       отдаст свою копию, она придёт с тем же id и вытеснит нашу здесь же. */
+    const chats = useMemo(() => {
+        const base = result.chats || [];
+        if (!pendingNotes.length) return base;
+        return base.map((chat) => {
+            const known = new Set((chat.messages || []).map((m) => m.id));
+            const mine = pendingNotes
+                .filter((item) => item.clientId === result.clientId
+                    && !known.has(item.message.id)
+                    && noteBelongsTo(item.message, chat))
+                .map((item) => item.message);
+            if (!mine.length) return chat;
+            const messages = [...(chat.messages || []), ...mine].sort(
+                (a, b) => String(a.created || '').localeCompare(String(b.created || '')));
+            return {
+                ...chat,
+                messages,
+                messages_count: (chat.messages_count || 0) + mine.length,
+                last_at: messages[messages.length - 1]?.created || chat.last_at,
+            };
+        });
+    }, [result.chats, result.clientId, pendingNotes]);
 
     const activeChat = useMemo(
         () => chats.find((chat) => chatKey(chat) === activeKey) || chats[0] || null,
         [chats, activeKey]);
-
-    /* Служебное прячем на уровне СООБЩЕНИЙ, а не чатов. Пока чат был обращением,
-       автоопрос «оцените работу оператора» приходил отдельной карточкой и
-       фильтровался списком; после склейки «один чат — один парк» он лежит внутри
-       живой переписки, вместе с приветственным меню парка на пол-экрана.
-       Считаем их здесь, чтобы подпись тумблера говорила, сколько именно скрыто. */
-    const serviceCount = useMemo(
-        () => (activeChat?.messages || []).filter(
-            (m) => m.type === 'system' || m.type === 'autoreply').length,
-        [activeChat]);
 
     /* Открытие чата пишется в журнал — это и есть ответ на вопрос «кто смотрел
        переписку». Отправляем «в фон»: ответ сервера экрану не нужен, а ждать
@@ -257,12 +292,18 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
             setHandedOff((prev) => ({ ...prev, [chatKey(activeChat)]: true }));
             setHandoffOpen(false);
             setHandoffNote('');
-            /* Заметка уже в чате у вендора, но лента на экране — снимок,
-               снятый до неё. Кеш сервер сбросил, дело за человеком: без этой
-               подсказки «не вижу свой комментарий» читается как «не отправилось»,
-               и он жмёт «Передан» второй раз, а отозвать заметку нельзя. */
-            toast('Комментарий отправлен. Нажмите «Обновить», чтобы увидеть его в ленте',
-                  'success');
+            /* Показываем заметку немедленно — сервер вернул её готовым
+               сообщением. Дожидаться вендора нельзя: в списке сообщений он
+               покажет её примерно через минуту, и всё это время экран выглядел
+               бы как «не отправилось», а человек жал бы «Передан» второй раз —
+               отозвать заметку через API вендора невозможно. */
+            if (data.message && data.message.id != null) {
+                setPendingNotes((prev) => (
+                    prev.some((item) => item.message.id === data.message.id)
+                        ? prev
+                        : [...prev, { clientId: result.clientId, message: data.message }]));
+            }
+            toast('Комментарий отправлен — он уже в ленте', 'success');
         } catch {
             toast('Сеть недоступна. Комментарий не отправлен', 'error');
         } finally {
@@ -309,9 +350,6 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         searching={searching}
                         inputRef={inputRef}
                         leftToday={leftToday}
-                        onRefresh={runRefresh}
-                        refreshing={refreshing}
-                        canRefresh={Boolean(result.phone)}
                         fetchedAt={result.fetchedAt}
                     />
 
@@ -337,6 +375,21 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                     ? 'Проверьте номер: возможно, водитель писал с другого.'
                                     : 'Более ранняя переписка в разделе не показывается.'}
                             </div>
+                            {/* Единственная кнопка обновления живёт в шапке
+                                переписки, а её здесь нет. Водитель может
+                                написать прямо сейчас, пока оператор смотрит на
+                                этот экран, — без кнопки пришлось бы искать номер
+                                заново, то есть тратить второй поиск из
+                                дневного лимита на то же самое. */}
+                            <button
+                                type="button"
+                                onClick={runRefresh}
+                                disabled={refreshing}
+                                className={`${iosBtnSecondary} mt-4 disabled:opacity-40`}
+                            >
+                                <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+                                {refreshing ? 'Обновляем…' : 'Обновить'}
+                            </button>
                         </div>
                     )}
 
@@ -361,9 +414,6 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 onRefresh={runRefresh}
                                 refreshing={refreshing}
                                 fetchedAt={result.fetchedAt}
-                                serviceCount={serviceCount}
-                                hideService={hideService}
-                                onToggleService={setHideService}
                             />
                         </div>
                     )}
@@ -394,6 +444,20 @@ function chatKey(chat) {
     return 'x0';
 }
 
+/* Та ли это переписка. Заметка адресована парку (каналу), а если канала у неё
+   нет — диалогу: тот же порядок, что в chatKey и в chat2desk.chat_key на
+   сервере. Без этой проверки заметка, отправленная в один парк, показалась бы
+   в чате другого — и уехала бы туда на скриншоте. */
+function noteBelongsTo(note, chat) {
+    if (note?.channelId && chat?.channel_id) {
+        return String(note.channelId) === String(chat.channel_id);
+    }
+    if (note?.dialogId && chat?.dialog_id) {
+        return String(note.dialogId) === String(chat.dialog_id);
+    }
+    return false;
+}
+
 /* Какой чат открывать, когда выбирать приходится за человека. Служебные (одно
    меню парка и опрос «оцените оператора») пропускаем: искали не их. Null, а не
    chatKey(undefined): 'x0' пометил бы выбранным чат, которого нет. */
@@ -404,13 +468,8 @@ function firstLiveKey(chats) {
 
 // ── Поисковая строка ────────────────────────────────────────────────────────
 
-/* «Обновить» стоит рядом с «Найти», а не в шапке списка чатов: результат
-   перерисовывают целиком (список, лента, счётчик сообщений), и место у кнопки
-   там же, где у действия, которое этот результат создало. Показываем её только
-   когда обновлять есть что — пустая строка поиска обходится без второй кнопки.
-   Серая рядом с синей — обычная пара macOS: главное действие одно. */
 const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday,
-                     onRefresh, refreshing, canRefresh, fetchedAt }) => (
+                     fetchedAt }) => (
     <div className={`${iosCard} px-4 py-4 sm:px-5`}>
         <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
             <div className="relative flex-1">
@@ -426,29 +485,15 @@ const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday,
                     className={`${iosInput} h-11 pl-10 text-[15px] tabular-nums`}
                 />
             </div>
-            <div className="flex items-center gap-2">
-                {canRefresh && (
-                    <button
-                        type="button"
-                        onClick={onRefresh}
-                        disabled={searching || refreshing}
-                        title="Загрузить переписку заново, минуя кеш"
-                        className={`${iosBtnSecondary} h-11 flex-1 justify-center px-3.5 sm:flex-none disabled:opacity-40`}
-                    >
-                        <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
-                        {refreshing ? 'Обновляем…' : 'Обновить'}
-                    </button>
-                )}
-                <button
-                    type="button"
-                    onClick={onSubmit}
-                    disabled={searching || refreshing || !value.trim()}
-                    className={`${iosBtnPrimary} h-11 flex-1 min-w-[120px] justify-center sm:flex-none disabled:opacity-40`}
-                >
-                    {searching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-                    {searching ? 'Ищем…' : 'Найти'}
-                </button>
-            </div>
+            <button
+                type="button"
+                onClick={onSubmit}
+                disabled={searching || !value.trim()}
+                className={`${iosBtnPrimary} h-11 min-w-[120px] justify-center disabled:opacity-40`}
+            >
+                {searching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+                {searching ? 'Ищем…' : 'Найти'}
+            </button>
         </div>
         <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
             <span>{WINDOW_HINT}</span>
@@ -545,16 +590,15 @@ const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, trun
     </div>
 );
 
-/* Обновление живёт в ДВУХ местах, и это не дублирование ради симметрии.
-   Кнопка в строке поиска стоит над списком парков и читается как «перечитать
-   список»; человек же смотрит в саму переписку — там он ждёт ответа водителя и
-   туда только что отправил внутренний комментарий. Действие у обеих кнопок одно
-   и то же (запрос к вендору один на всего водителя), поэтому здесь достаточно
-   значка: слово уже сказано наверху, а шапка чата и без того несёт имя, парк,
-   телефон, время и «Передан». */
+/* «Обновить» здесь ОДНА на весь раздел, и она перечитывает всё сразу: и список
+   парков со счётчиками, и открытую переписку — запрос к вендору один на всего
+   водителя, разделять его не на что. Стояла она раньше и в строке поиска, но
+   две одинаковые кнопки читались как разные действия («эта обновляет список, а
+   эта — чат»), и владелец попросил свести их в одну (07.09.2026). Живёт она в
+   шапке переписки, а не над списком: человек в этот момент смотрит именно в
+   переписку — ждёт ответа водителя или только что отправил комментарий. */
 const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
-                     onRefresh, refreshing, fetchedAt,
-                     serviceCount, hideService, onToggleService }) => {
+                     onRefresh, refreshing, fetchedAt }) => {
     if (!chat) return null;
     return (
         <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
@@ -595,12 +639,12 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
                         onClick={onRefresh}
                         disabled={refreshing}
                         title={fetchedAt
-                            ? `Обновить переписку · загружена в ${formatTime(fetchedAt)}`
-                            : 'Обновить переписку'}
-                        aria-label="Обновить переписку"
-                        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95 disabled:opacity-40"
+                            ? `Перечитать чаты и переписку · загружены в ${formatTime(fetchedAt)}`
+                            : 'Перечитать чаты и переписку'}
+                        className={`${iosBtnSecondary} disabled:opacity-40`}
                     >
                         <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+                        {refreshing ? 'Обновляем…' : 'Обновить'}
                     </button>
                     {/* Кнопку не прячем после передачи: склеенный чат живёт двое
                         суток и покрывает несколько поводов, а запрет вынуждал бы
@@ -613,29 +657,18 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
             </div>
 
             <div className="min-h-0 flex-1 overflow-hidden bg-[#f2f2f7]">
+                {/* Переписка показывается ЦЕЛИКОМ. Тумблер «скрыть служебные» и
+                    подсказка про снимок экрана убраны по решению владельца
+                    07.09.2026: они занимали полосу под лентой на каждом чате, а
+                    нужны были один раз. Служебные строки (меню парка, автоопрос
+                    «оцените работу оператора») теперь просто часть ленты — ровно
+                    так их видит и чат-менеджер у себя. */}
                 <ChatThread
                     snapshot={snapshot}
-                    hideService={hideService}
                     initialScroll="end"
                     emptyText="За последние 2 дня живой переписки в этом парке нет"
                     className="h-full"
                 />
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-slate-200/70 px-4 py-2.5">
-                <div className="flex items-start gap-2 text-[11.5px] leading-snug text-slate-500">
-                    <Info size={13} className="mt-0.5 shrink-0" />
-                    <span>
-                        Снимок экрана делайте средствами системы: на Mac — ⌘⇧4, на Windows — Win+Shift+S.
-                        Кнопка «Передан» отправит чат-менеджеру внутренний комментарий, водителю он не виден.
-                    </span>
-                </div>
-                {serviceCount > 0 && (
-                    <label className="flex shrink-0 items-center gap-2 text-[12px] text-slate-600">
-                        <span>Скрыть служебные ({serviceCount})</span>
-                        <IosToggle checked={hideService} onChange={onToggleService} />
-                    </label>
-                )}
             </div>
         </div>
     );

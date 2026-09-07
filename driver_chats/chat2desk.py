@@ -466,6 +466,57 @@ def normalize_message(msg, names=None):
     return item
 
 
+def pending_comment_message(*, message_id, text, created, channel_id=None,
+                            dialog_id=None, request_id=None):
+    """Наша только что отправленная заметка в форме сообщения ленты.
+
+    ЗАЧЕМ ЭТО ВООБЩЕ НУЖНО. Вендор принимает заметку мгновенно и сразу отдаёт её
+    message_id, но в выборке /v1/messages показывает её примерно ЧЕРЕЗ МИНУТУ.
+    Замер на живом чате 07.09.2026: заметка отправлена в 10:05:23, двадцать
+    обращений к вендору за следующие 31 секунду вернули ленту без неё, а
+    появилась она в 10:06:19 — с меткой created 10:05:22, то есть у вендора она
+    всё это время была. Раздел тут бессилен: сколько ни обновляй, из списка
+    берётся то, что список отдаёт.
+
+    Поэтому заметку показываем свою — благо про неё известно всё: id вернул сам
+    вендор, текст собрали мы, время отправки наше. Когда вендор наконец отдаст
+    свою копию, она приедет с ТЕМ ЖЕ id (проверено на трёх заметках) и просто
+    вытеснит нашу.
+
+    Автора намеренно оставляем пустым. У вендорской копии он свой — учётная
+    запись, от имени которой ходит API, — и подставить сюда оператора портала
+    значило бы показать одно имя, а через минуту молча заменить его другим. Имя
+    того, кто передал чат, и так стоит в САМОМ тексте заметки.
+    """
+    return {
+        'id': message_id,
+        'type': 'comment',
+        'text': text or '',
+        'created': created.isoformat() if hasattr(created, 'isoformat') else created,
+        'photo': None, 'video': None, 'audio': None, 'pdf': None,
+        'attachments': [],
+        'status': None,
+        'requestId': request_id,
+        'dialogId': dialog_id,
+        'channelId': channel_id,
+        'author': None,
+    }
+
+
+def merge_pending_comments(messages, pending):
+    """Дописать в ленту свои заметки, которых вендор ещё не отдал.
+
+    Ключ склейки — id сообщения: у нашей копии он тот самый, что вернул вендор
+    на отправку, поэтому его же копия, доехав, не задвоится. Порядок ленты — по
+    времени, как и у вендора.
+    """
+    known = {m.get('id') for m in messages if m.get('id') is not None}
+    extra = [note for note in pending if note.get('id') not in known]
+    if not extra:
+        return messages
+    return sorted(messages + extra, key=lambda m: (m.get('created') or ''))
+
+
 def chat_key(channel_id=None, dialog_id=None):
     """Ключ чата. Двойник во фронте — chatKey в DriverChatsView.jsx.
 
