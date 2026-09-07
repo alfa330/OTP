@@ -141,8 +141,8 @@ export default function AssistantPanel({
     const serverLocked = chat.statusError?.code === 'SENSITIVE_ACCESS_REQUIRED';
     const showLock = locked || serverLocked;
 
-    const feedback = useCallback((messageId, value) => {
-        chat.sendFeedback(messageId, value)
+    const feedback = useCallback((messageId, value, previous = null) => {
+        chat.sendFeedback(messageId, value, previous)
             .catch(() => showToast?.('Не удалось сохранить оценку', 'error'));
     }, [chat, showToast]);
 

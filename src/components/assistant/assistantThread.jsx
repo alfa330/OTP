@@ -130,6 +130,29 @@ export const SourceChip = ({ source, onOpen }) => {
     );
 };
 
+/* Как выглядит ВЫБРАННАЯ оценка. Восклицательный знак здесь обязателен.
+
+   Цвет — единственный ответ кнопки на нажатие, и он молча проигрывал. Утилиты
+   цвета Tailwind идут в собранном CSS ПО АЛФАВИТУ, а «slate» стоит почти в
+   конце: `.text-slate-500` из iosBtnGhost лежит ПОЗЖЕ, чем `.text-emerald-600`
+   и `.text-rose-500` (замер на собранном бандле: 95 049, 99 314 и 100 672
+   байт). Специфичность у всех троих одинаковая — выигрывает последнее правило,
+   то есть серый. Оценка при этом уходила на сервер и сохранялась, но кнопка не
+   менялась ничем, и это читалось ровно как «кнопки не нажимаются» (жалоба
+   07.09.2026). То же и с подложкой: `hover:bg-slate-100` из той же строки
+   перебивает `hover:bg-emerald-100`.
+
+   Одним цветом не ограничиваемся. Разница между серым и зелёным на подписи в
+   13 px — это ответ, который легко не заметить; подложка держит выбор видимым
+   и тому, кто оттенки различает хуже.
+
+   Дописывать цвет к iosBtnGhost без `!` тут нельзя ни в каком виде: то же
+   место в коде уже один раз выглядело исправным и не работало. */
+const VOTE_ON = {
+    up: '!text-emerald-600 bg-emerald-50 hover:!bg-emerald-100',
+    down: '!text-rose-500 bg-rose-50 hover:!bg-rose-100',
+};
+
 /**
  * Одна реплика ленты — своя или ответ помощника со всей его обвязкой.
  *
@@ -228,15 +251,20 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
                 <div className="flex gap-1 px-4">
                     <button
                         type="button"
-                        onClick={() => onFeedback(message.id, 1)}
-                        className={`${iosBtnGhost} ${message.feedback === 1 ? 'text-emerald-600' : ''}`}
+                        aria-pressed={message.feedback === 1}
+                        /* Прошлую оценку отдаём вместе с новой: откатывать её,
+                           если сервер не принял, умеет только тот, кто держит
+                           ленту, а помнить прежнее значение больше некому. */
+                        onClick={() => onFeedback(message.id, 1, message.feedback ?? null)}
+                        className={`${iosBtnGhost} ${message.feedback === 1 ? VOTE_ON.up : ''}`}
                     >
                         <ThumbsUp size={13} /> Помогло
                     </button>
                     <button
                         type="button"
-                        onClick={() => onFeedback(message.id, -1)}
-                        className={`${iosBtnGhost} ${message.feedback === -1 ? 'text-rose-500' : ''}`}
+                        aria-pressed={message.feedback === -1}
+                        onClick={() => onFeedback(message.id, -1, message.feedback ?? null)}
+                        className={`${iosBtnGhost} ${message.feedback === -1 ? VOTE_ON.down : ''}`}
                     >
                         <ThumbsDown size={13} /> Нет
                     </button>

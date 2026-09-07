@@ -147,12 +147,19 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
         }
     }, [activeId, base, headers, loadChats]);
 
-    const sendFeedback = useCallback((messageId, value) => {
-        setMessages((prev) => (prev || []).map(
-            (m) => (m.id === messageId ? { ...m, feedback: value } : m)));
+    /* Оценка красит кнопку сразу, до ответа сервера — но если сервер её не
+       принял, крашеная кнопка врёт. Поэтому на ошибке возвращаем прежнее
+       значение, а не только показываем тост. */
+    const sendFeedback = useCallback((messageId, value, previous = null) => {
+        const mark = (feedback) => setMessages((prev) => (prev || []).map(
+            (m) => (m.id === messageId ? { ...m, feedback } : m)));
+        mark(value);
         axios.post(`${base}/ai/messages/${messageId}/feedback`,
                    { feedback: value }, { headers })
-            .catch(() => toast('Не удалось сохранить оценку', 'error'));
+            .catch(() => {
+                mark(previous);
+                toast('Не удалось сохранить оценку', 'error');
+            });
     }, [base, headers, toast]);
 
     const removeChat = useCallback((chatId) => {

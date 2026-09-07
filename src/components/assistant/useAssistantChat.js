@@ -140,11 +140,16 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
         }
     }, [activeId, base, headers, spaceId, busy, loadChats]);
 
-    const sendFeedback = useCallback((messageId, value) => {
-        setMessages((prev) => (prev || []).map(
-            (m) => (m.id === messageId ? { ...m, feedback: value } : m)));
+    /* Красим кнопку сразу, но на отказе сервера возвращаем прежнюю оценку:
+       иначе на экране осталась бы отметка, которой в базе нет. Тост о неудаче
+       показывает вызывающая панель — она же ловит эту ошибку. */
+    const sendFeedback = useCallback((messageId, value, previous = null) => {
+        const mark = (feedback) => setMessages((prev) => (prev || []).map(
+            (m) => (m.id === messageId ? { ...m, feedback } : m)));
+        mark(value);
         return axios.post(`${base}/ai/messages/${messageId}/feedback`,
-                          { feedback: value }, { headers });
+                          { feedback: value }, { headers })
+            .catch((error) => { mark(previous); throw error; });
     }, [base, headers]);
 
     const removeChat = useCallback((chatId) => (
