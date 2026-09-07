@@ -666,10 +666,23 @@ class VerifierChatsPerimeterTests(unittest.TestCase):
         self.assertIn("OP_DEPARTMENT_CODE not in allowed", guard_body)
 
     def test_perimeter_excludes_tez_on_both_sides(self):
-        self.assertIn("VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov'})",
-                      self.api_source)
-        self.assertIn("const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);",
-                      self.app)
+        """Тез КЦ в переписку Верификаторов не входит, маркетинг — входит.
+
+        Глава маркетинга читал её и до правки: это разборы звонков ОП, а он их
+        наблюдатель. Рядовой наблюдатель «Маркетинга» вычитается отдельно."""
+        self.assertIn(
+            "VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov', 'marketing'})",
+            self.api_source)
+        self.assertIn(
+            "const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);",
+            self.app)
+        # Сверяем именно ПРИСВАИВАНИЕ, а не первое упоминание имени: выше него
+        # стоит пояснение, в котором Тез КЦ назван законно.
+        for source in (self.api_source, self.app):
+            marker = "VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = "
+            listing = source[source.index(marker):]
+            listing = listing[:listing.index(")")]
+            self.assertNotIn("tez", listing)
 
 
 class PullCallTests(unittest.TestCase):

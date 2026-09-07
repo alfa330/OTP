@@ -123,10 +123,13 @@ class AiQaAccessControlTests(unittest.TestCase):
             "normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike)",
             predicate,
         )
-        # Главы — только ОП и СЗоВ; Тез КЦ здесь быть не должно.
+        # Главы — ОП, СЗоВ и маркетинг (наблюдатель разборов ОП); Тез КЦ здесь
+        # быть не должно: у него своя переписка в разделе «Чаты ChatApp».
         self.assertIn("VERIFIER_CHATS_HEAD_DEPARTMENT_CODES", predicate)
-        self.assertIn("const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);",
-                      self.app_source)
+        self.assertIn(
+            "const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);",
+            self.app_source)
+        self.assertNotIn("'tez'", predicate)
         # СВ — только отдела продаж, не «любой СВ раздела ИИ-оценки».
         self.assertIn("isOpSalesSupervisorForAiQa(userLike)", predicate)
         self.assertNotIn("isAiQaSupervisor", predicate)

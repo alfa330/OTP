@@ -253,10 +253,11 @@ const AI_QA_SUBJECT_DEPARTMENT_CODES = new Set(['op', 'szov', 'tez']);
 // Отдел-наблюдатель: своих оцениваемых направлений нет, смотрит разборы ОП
 // (решение владельца 06.08.2026).
 const AI_QA_OBSERVER_DEPARTMENT_CODES = new Set(['marketing']);
-// «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ он
-// открыт исторически, Тез КЦ — нет: у него своя переписка в «Чатах ChatApp».
+// «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ (переписка Wazzup). Главам СЗоВ и
+// маркетинга он открыт исторически, Тез КЦ — нет: у него своя переписка в
+// «Чатах ChatApp». Рядовой наблюдатель «Маркетинга» вычитается отдельно.
 // Та же константа на бэкенде — VERIFIER_CHATS_HEAD_DEPARTMENT_CODES.
-const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);
+const VERIFIER_CHATS_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
 // Кому раздел открыт целиком — главам отделов раздела и наблюдателя.
 // Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES).
 const AI_QA_HEAD_DEPARTMENT_CODES = new Set([
@@ -1706,8 +1707,13 @@ const canAccessVerifierChatsForUser = (userLike) => {
     // расширением на СЗоВ и Тез КЦ тот же вывод молча отдал бы переписку Wazzup
     // главе Тез КЦ и супервайзерам СЗоВ/Тез — а это раздел ОТДЕЛА ПРОДАЖ: у СЗоВ
     // своя переписка в Chat2Desk, у Тез КЦ — раздел «Чаты ChatApp».
-    if (isDepartmentHead(userLike)
-        && aiQaHeadDepartmentCodesOf(userLike).some((code) => VERIFIER_CHATS_HEAD_DEPARTMENT_CODES.has(code))) {
+    // Сверяем и код отдела, и id: у части профилей приходит только одно из двух,
+    // и проверка по одному полю молча теряла бы человека (та же ловушка, что в
+    // isAiQaDepartmentHead — там она уже описана).
+    if (isDepartmentHead(userLike) && (
+        Number(headedDepartmentId(userLike)) === AI_QA_OP_DEPARTMENT_ID
+        || aiQaHeadDepartmentCodesOf(userLike).some((code) => VERIFIER_CHATS_HEAD_DEPARTMENT_CODES.has(code))
+    )) {
         return true;
     }
     return isOpSalesSupervisorForAiQa(userLike);

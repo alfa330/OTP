@@ -10,14 +10,18 @@ import {
  * Кто попадает в «Чаты Верификаторов», а кто — в «ИИ-оценку».
  *
  * Разделы жили на одном предикате, пока раздел с перепиской не открыли всем
- * глобальным админам: саму переписку они читают, а разборы ИИ им не нужны —
- * там оценки операторов чужих отделов и кнопки переоценки. Предикатов стало
- * два, и разъехаться они могут молча: лишний допуск НИКАК не проявляется в
- * интерфейсе того, кто его получил.
+ * глобальным админам. Потом «ИИ-оценка» расширилась с одного отдела продаж на
+ * три (СЗоВ и Тез КЦ), и предикаты разошлись во ВТОРУЮ сторону: «Чаты
+ * Верификаторов» остались разделом ОТДЕЛА ПРОДАЖ — это переписка Wazzup, у СЗоВ
+ * своя в Chat2Desk, у Тез КЦ — раздел «Чаты ChatApp». Вывод одного предиката из
+ * другого молча отдал бы переписку Верификаторов главе Тез КЦ и супервайзерам
+ * СЗоВ/Тез.
  *
- * Поэтому проверяем не текст, а поведение — таблицей по всем ролям сразу. Сами
- * объявления достаём из src/App.jsx: файл монолитный и не импортируется, а
- * переписывать предикат в тест значит проверять копию вместо кода.
+ * Разъехаться они могут молча: лишний допуск НИКАК не проявляется в интерфейсе
+ * того, кто его получил. Поэтому проверяем не текст, а поведение — таблицей по
+ * всем ролям сразу. Сами объявления достаём из src/App.jsx: файл монолитный и не
+ * импортируется, а переписывать предикат в тест значит проверять копию вместо
+ * кода.
  */
 const source = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
 
@@ -39,15 +43,21 @@ const declarationOf = (name) => {
 
 const NAMES = [
     'AI_QA_OP_DEPARTMENT_ID',
+    // Порядок важен: тело склеивается в этом же порядке, а
+    // AI_QA_HEAD_DEPARTMENT_CODES собирается из двух наборов выше.
+    'AI_QA_SUBJECT_DEPARTMENT_CODES',
+    'AI_QA_OBSERVER_DEPARTMENT_CODES',
+    'VERIFIER_CHATS_HEAD_DEPARTMENT_CODES',
     'AI_QA_HEAD_DEPARTMENT_CODES',
     'AI_QA_EXTRA_ACCESS_USER_IDS',
     'normalizeDepartmentCode',
     'isOpSalesSupervisorForAiQa',
+    'isAiQaSupervisor',
     'aiQaHeadDepartmentCodesOf',
     'isAiQaDepartmentHead',
-    'canAccessAiQaForUser',
     'MARKETING_OBSERVER_DEPARTMENT_CODE',
     'isMarketingObserver',
+    'canAccessAiQaForUser',
     'canAccessVerifierChatsForUser',
 ];
 
@@ -67,10 +77,14 @@ const OP_DEPARTMENT_ID = 367;
 const PEOPLE = [
     // [кто, пользователь, чаты верификаторов, ИИ-оценка]
     ['супер-админ', { id: 1, role: 'super_admin' }, true, true],
-    ['глобальный админ', { id: 2, role: 'admin' }, true, false],
+    // Глобальному админу «ИИ-оценку» открыли вместе с селектором отдела: ради
+    // него селектор и сделан — он единственный, кто видит все три отдела.
+    ['глобальный админ', { id: 2, role: 'admin' }, true, true],
+    // Глава Тез КЦ: разборы своего отдела теперь его, а переписка Верификаторов
+    // отдела продаж — нет.
     ['админ, назначенный главой ТЭЗ', {
-        id: 3, role: 'admin', headed_department_id: 777, headed_department_codes: ['tez'],
-    }, false, false],
+        id: 3, role: 'admin', headed_department_id: 560, headed_department_codes: ['tez'],
+    }, false, true],
     ['глава СЗоВ', {
         id: 4, role: 'admin', headed_department_id: 501, headed_department_codes: ['szov'],
     }, true, true],
@@ -81,6 +95,9 @@ const PEOPLE = [
         id: 6, role: 'admin', headed_department_id: OP_DEPARTMENT_ID,
     }, true, true],
     ['СВ отдела продаж', { id: 7, role: 'sv', department_id: OP_DEPARTMENT_ID }, true, true],
+    // СВ СЗоВ и Тез КЦ: разборы своего отдела — да, переписка Верификаторов — нет.
+    ['СВ СЗоВ', { id: 14, role: 'sv', department_code: 'szov' }, false, true],
+    ['СВ Тез КЦ', { id: 15, role: 'sv', department_code: 'tez' }, false, true],
     ['СВ чужого отдела', { id: 8, role: 'sv', department_id: 900 }, false, false],
     ['тренер', { id: 9, role: 'trainer' }, false, false],
     ['оператор', { id: 10, role: 'operator' }, false, false],
@@ -106,22 +123,36 @@ test('чаты верификаторов открыты глобальным а
     }
 });
 
-test('доступ к чатам — надмножество доступа к ИИ-оценке, кроме маркетинга', () => {
-    /* Обратное отношение было бы дефектом молчаливым: человек с разборами, но
-       без переписки, упирался бы в 403 внутри раздела.
+test('разборы без переписки Верификаторов раздел не ломают', () => {
+    /* Отношения «надмножество» между разделами БОЛЬШЕ НЕТ: у «ИИ-оценки» три
+       отдела, а «Чаты Верификаторов» — раздел отдела продаж. Людей с разборами
+       и без этой переписки теперь много (глава и СВ СЗоВ и Тез КЦ, рядовой
+       маркетолог), и это нормально, а не дефект.
 
-       У рядового маркетолога исключение, и оно проверено по коду, а не принято
-       на веру: экран «ИИ-оценки» (src/components/call_qa/CallQaView.jsx) ходит
-       ТОЛЬКО в /api/ai-qa/* и ни одной ручки /api/wazzup/* не зовёт — значит
-       закрытые чаты Верификаторов его не ломают. Появится в CallQaView запрос к
-       /api/wazzup/* — исключение придётся снимать, и упадёт этот тест. */
-    const { canAccessAiQaForUser, canAccessVerifierChatsForUser } = predicates();
-    for (const [who, user] of PEOPLE) {
-        if (who === 'рядовой маркетолог') continue;
-        if (canAccessAiQaForUser(user)) {
-            assert.ok(canAccessVerifierChatsForUser(user), `у «${who}» есть разборы, но нет чатов`);
-        }
+       Проверять надо другое — что закрытая переписка Верификаторов не ломает сам
+       экран «ИИ-оценки». Это проверено по коду: CallQaView ходит ТОЛЬКО в
+       /api/ai-qa/* и ни одной ручки /api/wazzup/* не зовёт. Появится там запрос
+       к /api/wazzup/* — раздел начнёт отдавать 403 всем, кроме продаж, и этот
+       тест упадёт. */
+    const view = readFileSync(
+        new URL('../src/components/call_qa/CallQaView.jsx', import.meta.url), 'utf8');
+    assert.ok(!view.includes('/api/wazzup/'),
+        'экран «ИИ-оценки» зовёт ручку Верификаторов — закрытая переписка его сломает');
+    for (const name of ['ChatQueue', 'EvaluationsList', 'QaDashboard', 'QueueList',
+                        'CriteriaClassification', 'AdjudicationsRag', 'CallReviewCard']) {
+        const child = readFileSync(
+            new URL(`../src/components/call_qa/${name}.jsx`, import.meta.url), 'utf8');
+        assert.ok(!child.includes('/api/wazzup/'),
+            `${name} зовёт ручку Верификаторов — закрытая переписка сломает раздел`);
     }
+});
+
+test('«Чаты Верификаторов» не выводятся из аудитории «ИИ-оценки»', () => {
+    /* Ровно этот вывод и отдал бы переписку отдела продаж главе Тез КЦ и
+       супервайзерам СЗоВ/Тез, когда раздел оценки расширили на три отдела. */
+    const declaration = declarationOf('canAccessVerifierChatsForUser');
+    assert.ok(!declaration.includes('canAccessAiQaForUser('),
+        'периметр чатов снова выведен из «ИИ-оценки» — он поедет за ней');
 });
 
 test('страж ловит потерю вычета наблюдателя «Маркетинга»', () => {
@@ -151,11 +182,17 @@ test('страж ловит потерю проверки «не глава от
 });
 
 test('страж ловит склейку разделов обратно в один предикат', () => {
+    // Подделка возвращает вывод одного предиката из другого — тот самый, из-за
+    // которого переписка Верификаторов уехала бы главе Тез КЦ.
     const tampered = predicates({
-        canAccessAiQaForUser:
-            'const canAccessAiQaForUser = (userLike) => '
-            + "normalizeRole(userLike?.role) === 'admin' && !isDepartmentHead(userLike);",
+        canAccessVerifierChatsForUser:
+            'const canAccessVerifierChatsForUser = (userLike) => '
+            + 'canAccessAiQaForUser(userLike);',
     });
-    assert.equal(tampered.canAccessAiQaForUser({ id: 2, role: 'admin' }), true,
-        'подделка обязана открывать ИИ-оценку админу — иначе тест ничего не сторожит');
+    const tezHead = PEOPLE.find(([who]) => who === 'админ, назначенный главой ТЭЗ')[1];
+    assert.equal(tampered.canAccessVerifierChatsForUser(tezHead), true,
+        'подделка обязана открывать чаты главе ТЭЗ — иначе тест ничего не сторожит');
+    const szovSupervisor = PEOPLE.find(([who]) => who === 'СВ СЗоВ')[1];
+    assert.equal(tampered.canAccessVerifierChatsForUser(szovSupervisor), true,
+        'подделка обязана открывать чаты СВ СЗоВ — иначе тест ничего не сторожит');
 });
