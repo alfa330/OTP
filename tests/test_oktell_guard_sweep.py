@@ -319,3 +319,41 @@ def test_record_without_sip_is_skipped(monkeypatch):
     monkeypatch.setattr(patrol.queries, 'set_violation_verdict', lambda *a, **k: None)
     summary = patrol.recheck_pending(_FakeDb(), lambda sql: [])
     assert summary['still_pending'] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Отчёт: три разных числа нельзя складывать в одно
+# --------------------------------------------------------------------------- #
+#
+# «Выброс» (программа выкинула), «пересидел без выброса» (ограничитель не
+# доехал) и «ждёт сверки» (АТС молчала) — события с противоположным смыслом.
+# Сложенные вместе они врут, а спрятанное «ждёт сверки» выглядит как «выбросов
+# не было»: именно так 07.09 два состоявшихся выброса оказались невидимыми.
+
+import inspect
+
+from oktell_guard import queries as _queries
+
+
+def test_report_counts_three_kinds_separately():
+    sql = inspect.getsource(_queries.report)
+    assert "FILTER (WHERE v.verified = 'confirmed'" in sql
+    assert "v.reason <> 'recall_unmanaged') AS kicks" in sql
+    assert "v.reason = 'recall_unmanaged') AS missed" in sql
+    assert "FILTER (WHERE v.verified = 'pending') AS pending" in sql
+
+
+def test_report_does_not_hide_pending():
+    """Пока сверка не прошла, факт всё равно должен быть виден — отдельным
+    числом. Фильтр только по 'confirmed' прятал его насовсем."""
+    sql = inspect.getsource(_queries.report)
+    assert "v.verified IN ('confirmed', 'pending')" in sql
+    assert "AND v.verified = 'confirmed'\n         GROUP BY" not in sql
+
+
+def test_employee_kicks_stay_confirmed_only():
+    """А вот число у сотрудника — про ответственность, и в него идёт только
+    подтверждённое историей АТС. Непроверенное там было бы обвинением."""
+    sql = _queries._EMPLOYEES_SQL
+    assert "verified = 'confirmed'" in sql
+    assert "FILTER (WHERE reason <> 'recall_unmanaged') AS kicks" in sql

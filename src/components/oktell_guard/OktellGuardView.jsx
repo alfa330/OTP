@@ -673,7 +673,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                         </div>
                     ) : (
                         <div className="overflow-x-auto">
-                            <table className="w-full min-w-[600px] border-separate border-spacing-y-1">
+                            <table className="w-full min-w-[680px] border-separate border-spacing-y-1">
                                 <thead>
                                     <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500">
                                         <th className="px-2 py-1">Дата</th>
@@ -683,6 +683,10 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                                             АТС человек просидел дольше нормы, а ограничитель до
                                             него не доехал. Складывать с выбросами нельзя. */}
                                         <th className="px-2 py-1 text-right">Пересидел без выброса</th>
+                                        {/* Прокси к базе АТС лежит часами и днями; всё это
+                                            время состоявшийся выброс не подтверждён и без
+                                            отдельной колонки выглядел бы как «ничего не было». */}
+                                        <th className="px-2 py-1 text-right">Ждёт сверки</th>
                                         <th className="px-2 py-1 text-right">Дольше всего</th>
                                     </tr>
                                 </thead>
@@ -701,6 +705,11 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                                             <td className="px-2 py-2 text-right tabular-nums font-semibold">
                                                 {row.missed
                                                     ? <span className="text-amber-600">{row.missed}</span>
+                                                    : <span className="text-slate-300">—</span>}
+                                            </td>
+                                            <td className="px-2 py-2 text-right tabular-nums font-semibold">
+                                                {row.pending
+                                                    ? <span className="text-slate-500">{row.pending}</span>
                                                     : <span className="text-slate-300">—</span>}
                                             </td>
                                             <td className="rounded-r-xl px-2 py-2 text-right tabular-nums text-slate-600">

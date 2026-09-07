@@ -514,8 +514,14 @@ def report(cursor, date_from, date_to, department_code=None):
                v.sip_number,
                d.code AS department_code,
                v.happened_at::date AS day,
-               COUNT(*) FILTER (WHERE v.reason <> 'recall_unmanaged') AS kicks,
-               COUNT(*) FILTER (WHERE v.reason = 'recall_unmanaged') AS missed,
+               COUNT(*) FILTER (WHERE v.verified = 'confirmed'
+                                  AND v.reason <> 'recall_unmanaged') AS kicks,
+               COUNT(*) FILTER (WHERE v.verified = 'confirmed'
+                                  AND v.reason = 'recall_unmanaged') AS missed,
+               -- Ждущие сверки показываем отдельным числом, а не прячем. Прокси
+               -- к базе АТС падает на часы и дни (05–07.09 лежал двое суток), и
+               -- всё это время состоявшиеся выбросы выглядели как их отсутствие.
+               COUNT(*) FILTER (WHERE v.verified = 'pending') AS pending,
                MAX(v.seconds) AS max_seconds,
                BOOL_OR(v.dry_run) AS had_dry_run
           FROM oktell_guard_violations v
@@ -523,9 +529,9 @@ def report(cursor, date_from, date_to, department_code=None):
           LEFT JOIN departments d ON d.id = u.department_id
          WHERE v.happened_at::date BETWEEN %(date_from)s AND %(date_to)s
            AND (%(department_code)s IS NULL OR d.code = %(department_code)s)
-           AND v.verified = 'confirmed'
+           AND v.verified IN ('confirmed', 'pending')
          GROUP BY v.user_id, u.name, v.sip_number, d.code, v.happened_at::date
-         ORDER BY day DESC, kicks DESC, name
+         ORDER BY day DESC, kicks DESC, pending DESC, name
         """,
         {'date_from': date_from, 'date_to': date_to, 'department_code': department_code},
     )
