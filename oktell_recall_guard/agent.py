@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.14"
+VERSION = "1.0.15"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -2477,6 +2477,9 @@ def run_agent(cfg: dict) -> int:
     config_every_s = max(60.0, float(cfg.get("config_refresh_minutes", 10)) * 60.0)
     next_config_refresh = time.time() + config_every_s
     last_config_login = ""
+    # Сколько кругов подряд не удалось поднять сторожа и сколько ещё пропустить.
+    watchdog_failures = 0
+    watchdog_skip = 0
 
     def rule_print(current: dict) -> str:
         """Отпечаток того, что реально уедет в окно: правило плюс обкатка."""
@@ -2494,9 +2497,31 @@ def run_agent(cfg: dict) -> int:
 
                 # Взаимный сторож: агент поднимает watchdog, watchdog — агента.
                 # Убить контроль можно только сняв обе копии в одном узком окне.
+                # Симметрично сторожу: если вторая копия не поднимается, не
+                # дёргаем её каждый круг. Упавшая сборка без консоли оставляет
+                # висеть модальное окно, и минутный цикл превращался в стопку
+                # таких окон за смену.
                 if cfg.get("ensure_watchdog_alive", True) and not is_running_by_mutex(WATCHDOG_MUTEX_NAME):
-                    logging.info("Watchdog не обнаружен — поднимаю")
-                    spawn_self()
+                    if watchdog_skip > 0:
+                        watchdog_skip -= 1
+                    else:
+                        logging.info("Watchdog не обнаружен — поднимаю")
+                        spawn_self()
+                        time.sleep(1.0)
+                        if is_running_by_mutex(WATCHDOG_MUTEX_NAME):
+                            watchdog_failures = 0
+                        else:
+                            watchdog_failures += 1
+                            # Пропускаем тем больше кругов, чем дольше не выходит.
+                            watchdog_skip = min(30, 2 ** min(watchdog_failures, 5))
+                            if watchdog_failures == 3:
+                                logging.error(
+                                    "Watchdog не поднимается три раза подряд — пробую реже. "
+                                    "Похоже, сломана сборка."
+                                )
+                elif watchdog_failures:
+                    watchdog_failures = 0
+                    watchdog_skip = 0
 
                 if browser_cfg.get("keep_open", False):
                     browser.ensure_running()
@@ -2620,16 +2645,54 @@ def run_watchdog(cfg: dict) -> int:
     logging.info("Режим WATCHDOG")
     check_s = max(0.5, float(cfg.get("watchdog_check_interval_s", 2)))
     grace_s = max(0.5, float(cfg.get("watchdog_spawn_grace_s", 3)))
+    # Пауза между НЕУДАЧНЫМИ попытками растёт. Без этого один сорвавшийся запуск
+    # превращался в шторм: сторож дёргал агента каждые ~5 с, каждая попытка
+    # распаковывала 16 МБ во временную папку, а при сборке без консоли упавший
+    # процесс ВИСИТ с модальным окном «Unhandled exception in script» и мьютекс
+    # не берёт — то есть окна копились, пока их закрывали руками. Ровно это
+    # случилось 07.09.2026 при переходе на 1.0.14: с 14:19 до 14:27 сторож сделал
+    # больше сотни попыток. Причину запуска чинит сборка, а шторм — этот отсчёт.
+    retry_s = check_s
+    max_retry_s = max(60.0, float(cfg.get("watchdog_max_retry_s", 300)))
+    failures = 0
+    complained = False
     try:
         while True:
             try:
-                if not is_running_by_mutex(AGENT_MUTEX_NAME):
-                    logging.info("Агент не обнаружен — запускаю")
-                    spawn_self("--agent")
-                    time.sleep(grace_s)
-                    if not is_running_by_mutex(AGENT_MUTEX_NAME):
-                        logging.warning("Агент не поднялся после запуска")
-                time.sleep(check_s)
+                if is_running_by_mutex(AGENT_MUTEX_NAME):
+                    if failures:
+                        logging.info("Агент поднялся, попыток было %d", failures)
+                    failures = 0
+                    retry_s = check_s
+                    complained = False
+                    time.sleep(check_s)
+                    continue
+
+                logging.info("Агент не обнаружен — запускаю")
+                spawn_self("--agent")
+                time.sleep(grace_s)
+                if is_running_by_mutex(AGENT_MUTEX_NAME):
+                    failures = 0
+                    retry_s = check_s
+                    complained = False
+                    time.sleep(check_s)
+                    continue
+
+                failures += 1
+                # Жалуемся ОДИН раз: строка в логе на каждую попытку — это тот
+                # же шум, только в файле, и он вытесняет из лога всё остальное
+                # (за восемь минут набежало 47 КБ).
+                if not complained and failures >= 3:
+                    complained = True
+                    logging.error(
+                        "Агент не поднимается (%d попытки подряд). Дальше пробую реже, "
+                        "с паузой до %.0f c. Скорее всего сломана сама сборка.",
+                        failures, max_retry_s,
+                    )
+                elif failures < 3:
+                    logging.warning("Агент не поднялся после запуска (попытка %d)", failures)
+                time.sleep(retry_s)
+                retry_s = min(max_retry_s, retry_s * 2)
             except KeyboardInterrupt:
                 return 0
             except Exception:  # noqa: BLE001

@@ -1050,3 +1050,68 @@ def test_heartbeat_rule_alive_unknown_for_old_agents_state():
     cfg = agent.load_config(Path("нет-такого.json"))
     payload = agent.build_heartbeat_payload(_state(), cfg, "2026-09-04T15:30:00+0500")
     assert payload["rule"]["alive"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Шторм запусков и лишнее в сборке (07.09.2026)
+# --------------------------------------------------------------------------- #
+#
+# Сборка 1.0.14 выросла на 2,2 МБ: PyInstaller сам подтянул setuptools, потому
+# что они стоят в окружении сборки. Вместе с ними приехал хук pyi_rth_pkgres,
+# который на старте читает вшитый файл setuptools\_vendor\...\Lorem ipsum.txt.
+# Имя временной папки onefile считается от PID и повторяется, а после убитых
+# копий такие папки остаются недораспакованными — процесс попал на чужую, файла
+# там не оказалось, и он умер с модальным окном «Unhandled exception in script».
+#
+# Смертельным это сделал сторож: он дёргал агента каждые ~5 с без остановки, а
+# упавшая копия без консоли ВИСИТ с этим окном и мьютекс не берёт. За восемь
+# минут набежало больше сотни окон и 47 КБ одинаковых строк в логе.
+
+
+def test_build_does_not_bundle_setuptools():
+    """Ни одна строка агента их не импортирует — в сборке им делать нечего."""
+    bat = (Path(agent.__file__).parent / "build_exe.bat").read_text(encoding="utf-8")
+    assert "--exclude-module pkg_resources" in bat
+    assert "--exclude-module setuptools" in bat
+
+
+def test_agent_really_does_not_need_setuptools():
+    """Если однажды понадобятся — исключение придётся снять осознанно, а не
+    обнаружить падение на машинах операторов."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("REM"):
+            continue
+        assert "import pkg_resources" not in stripped
+        assert "import setuptools" not in stripped
+
+
+def test_watchdog_backs_off_instead_of_storming():
+    """Пауза между неудачными попытками обязана расти. Постоянные пять секунд
+    превращают одно падение в стопку модальных окон."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_watchdog("):source.index("def run_open(")]
+    assert "retry_s = min(max_retry_s, retry_s * 2)" in body, "нет удвоения паузы"
+    assert "watchdog_max_retry_s" in body, "нет потолка паузы"
+    # И обнуление после успеха: иначе первая же осечка за смену навсегда
+    # оставила бы сторожа медленным.
+    assert body.count("retry_s = check_s") >= 2, "пауза не сбрасывается после успеха"
+
+
+def test_watchdog_complains_once_not_every_attempt():
+    """47 КБ одинаковых строк вытеснили из лога всё остальное."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_watchdog("):source.index("def run_open(")]
+    assert "complained" in body, "нет отметки «уже пожаловался»"
+    assert "if not complained and failures >= 3:" in body
+
+
+def test_agent_backs_off_when_watchdog_will_not_start():
+    """Та же мина с другой стороны: минутный цикл агента поднимал сторожа
+    каждый круг и копил такие же окна."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    assert "watchdog_skip" in body
+    assert "watchdog_failures" in body
+    assert "if watchdog_skip > 0:" in body

@@ -19,10 +19,21 @@ echo SERVER_URL = "%OKTELL_GUARD_SERVER%" >> _build_token.py
 
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
+REM setuptools/pkg_resources агенту не нужны — их НЕ импортирует ни одна строка
+REM исходников, PyInstaller тянет их сам, раз они стоят в окружении сборки.
+REM 07.09.2026 из-за них сборка выросла на 2,2 МБ и начала падать: хук
+REM pyi_rth_pkgres читает вшитый файл setuptools\_vendor\...\Lorem ipsum.txt, и
+REM когда onefile-процесс попадает на ЧУЖУЮ недораспакованную папку _MEI (такие
+REM остаются после убитых копий, имя считается от PID и повторяется), файла на
+REM месте нет — процесс умирает с модальным окном «Unhandled exception in
+REM script». Без этих модулей у падения нет и повода.
 python -m PyInstaller --onefile --noconsole --name OktellRecallGuard ^
   --hidden-import websocket ^
   --hidden-import win32gui ^
   --hidden-import _build_token ^
+  --exclude-module pkg_resources ^
+  --exclude-module setuptools ^
+  --exclude-module pip ^
   agent.py
 set BUILD_RESULT=%errorlevel%
 
