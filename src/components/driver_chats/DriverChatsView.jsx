@@ -358,6 +358,9 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 driverName={result.clientName}
                                 handedOff={activeChat ? handedOff[chatKey(activeChat)] : false}
                                 onHandoff={() => setHandoffOpen(true)}
+                                onRefresh={runRefresh}
+                                refreshing={refreshing}
+                                fetchedAt={result.fetchedAt}
                                 serviceCount={serviceCount}
                                 hideService={hideService}
                                 onToggleService={setHideService}
@@ -430,7 +433,6 @@ const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday,
                         onClick={onRefresh}
                         disabled={searching || refreshing}
                         title="Загрузить переписку заново, минуя кеш"
-                        aria-label="Обновить переписку"
                         className={`${iosBtnSecondary} h-11 flex-1 justify-center px-3.5 sm:flex-none disabled:opacity-40`}
                     >
                         <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
@@ -543,7 +545,15 @@ const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, trun
     </div>
 );
 
+/* Обновление живёт в ДВУХ местах, и это не дублирование ради симметрии.
+   Кнопка в строке поиска стоит над списком парков и читается как «перечитать
+   список»; человек же смотрит в саму переписку — там он ждёт ответа водителя и
+   туда только что отправил внутренний комментарий. Действие у обеих кнопок одно
+   и то же (запрос к вендору один на всего водителя), поэтому здесь достаточно
+   значка: слово уже сказано наверху, а шапка чата и без того несёт имя, парк,
+   телефон, время и «Передан». */
 const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
+                     onRefresh, refreshing, fetchedAt,
                      serviceCount, hideService, onToggleService }) => {
     if (!chat) return null;
     return (
@@ -580,6 +590,18 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
                             <Check size={14} /> Передан
                         </span>
                     )}
+                    <button
+                        type="button"
+                        onClick={onRefresh}
+                        disabled={refreshing}
+                        title={fetchedAt
+                            ? `Обновить переписку · загружена в ${formatTime(fetchedAt)}`
+                            : 'Обновить переписку'}
+                        aria-label="Обновить переписку"
+                        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95 disabled:opacity-40"
+                    >
+                        <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+                    </button>
                     {/* Кнопку не прячем после передачи: склеенный чат живёт двое
                         суток и покрывает несколько поводов, а запрет вынуждал бы
                         искать номер заново и жёг дневной лимит поисков. */}

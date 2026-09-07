@@ -3019,6 +3019,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_c2d_requests_operator_day
                 ON c2d_requests(operator_id, day);
             """)
+            # Телефон водителя — разрез раздела «Чаты водителей»: он начинается
+            # с номера и по нему находит клиента Chat2Desk. Без индекса это шло
+            # обратным проходом по idx_c2d_requests_day через ВСЕ 86 052 строки
+            # (22 мс на каждом поиске и обновлении, замер на проде 07.09.2026).
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_c2d_requests_client_phone
+                ON c2d_requests(client_phone);
+            """)
             # Снапшот переписки заявки: тянется из API один раз при выборе чата и
             # дальше служит источником и для оценки СВ, и для просмотра ЧМ — даже
             # если Chat2Desk удалит историю. Ретеншн 180 дней (~полгода).

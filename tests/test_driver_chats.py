@@ -661,10 +661,13 @@ class RefreshTests(unittest.TestCase):
 
     def test_cache_is_read_only_when_the_request_is_not_a_refresh(self):
         """Единственное чтение кеша обязано стоять под флагом обновления."""
-        self.assertEqual(self.search.count('cached_messages'), 1,
+        lines = self.search.splitlines()
+        reads = [i for i, line in enumerate(lines) if 'cached_messages' in line]
+        self.assertEqual(len(reads), 1,
                          'чтение кеша в поиске одно — иначе флаг обойдут мимо')
-        guarded = self.search.split('if not force_fresh:')[1].split('from_cache =')[0]
-        self.assertIn('cached_messages', guarded,
+        guard = next(line for line in reversed(lines[:reads[0]])
+                     if line.strip().startswith('if '))
+        self.assertIn('not force_fresh', guard,
                       'кеш читается ТОЛЬКО когда это не «Обновить»')
 
     def test_refresh_flag_is_read_from_the_query(self):
@@ -738,11 +741,136 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(guards, 2,
                          'таких выходов ровно два — отказ сервера и упавшая сеть')
 
+    def test_refresh_is_reachable_from_the_open_chat_too(self):
+        """Кнопка в строке поиска стоит НАД списком парков и читается как
+        «перечитать список». Человек в этот момент смотрит в саму переписку: там
+        он ждёт ответа водителя и туда только что отправил внутренний
+        комментарий. Замечание владельца 07.09.2026 — обновление должно быть и
+        внутри чата, а не только по таксопаркам.
+        """
+        self.assertEqual(self.view.count('onRefresh={runRefresh}'), 2,
+                         'обновление вызывается из строки поиска И из шапки чата')
+        panel = self.view.split('const ChatPanel = ')[1].split('const HandoffModal')[0]
+        self.assertIn('onRefresh', panel)
+        self.assertIn('aria-label="Обновить переписку"', panel)
+        self.assertIn('RefreshCw', panel)
+
+    def test_fresh_message_is_not_left_below_the_fold(self):
+        """Обновление обязано ПОКАЗАТЬ новое сообщение, а не дописать его под
+        сгибом двухсуточной ленты: снимок пересобирается на новом чате, а лента
+        на смене снимка прижимается к низу."""
+        snap = self.view.split('const snapshot = useMemo(')[1].split(';')[0]
+        self.assertIn('[activeChat]', snap,
+                      'снимок пересобирается, когда чат приехал заново')
+        thread = (ROOT / 'src' / 'components' / 'c2d_eval' / 'ChatThread.jsx'
+                  ).read_text(encoding='utf-8')
+        deps = thread.split('}, [snapshot')[1].split(']')[0]
+        self.assertIn('initialScroll', deps,
+                      'прижатие к низу пересчитывается на новом снимке')
+
     def test_button_exists_and_is_not_a_timer(self):
         """Автообновление жгло бы дневной лимит в фоне у каждого открытого
         экрана — обновляет человек, кнопкой."""
         self.assertIn("'Обновить'", self.view)
         self.assertNotIn('setInterval', self.view)
+
+
+class SearchLatencyTests(unittest.TestCase):
+    """Скорость поиска и обновления. Замеры на проде 07.09.2026.
+
+    Владелец: «почему обновляется не моментально». Раздел ждал в четырёх местах,
+    и ни одно из них не было видно по коду:
+
+    * поиск клиента по телефону шёл обратным проходом по индексу дня через ВСЕ
+      86 052 строки c2d_requests — 22 мс;
+    * справочник парков собирался Seq Scan-ом по той же таблице ради 14 строк —
+      45 мс, на КАЖДОМ запросе;
+    * до вендора и после него бралось пять отдельных курсоров, а в общем пуле
+      соединений четыре места постоянно держит цикл запросов бота;
+    * каждый вызов Chat2Desk открывал новое TLS-соединение — 117 мс против
+      58 мс по живому.
+
+    Всё это дёшево вернуть обратно случайной правкой, поэтому сторожим.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        cls.search = cls.routes.split('def driver_chats_search')[1].split(
+            'def driver_chats_open')[0]
+        cls.queries = (ROOT / 'driver_chats' / 'queries.py').read_text(encoding='utf-8')
+        cls.vendor = (ROOT / 'driver_chats' / 'chat2desk.py').read_text(encoding='utf-8')
+
+    def test_phone_lookup_has_an_index(self):
+        """Телефон — разрез раздела, и без индекса это полный проход таблицы."""
+        database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        self.assertIn('idx_c2d_requests_client_phone', database)
+        self.assertIn('ON c2d_requests(client_phone)', database)
+        self.assertIn('idx_dch_cache_phone', '\n'.join(schema.DDL),
+                      'по телефону спрашивают и собственную память раздела')
+
+    def test_client_is_looked_up_in_our_own_memory_first(self):
+        """Ночной синк c2d_requests не знает того, кто написал впервые сегодня,
+        и поиск по нему уходил к вендору перебирать записи номера — до трёх
+        вызовов. Свою же пару телефон-клиент мы узнали ещё на первом поиске."""
+        self.assertIn('cached_client_id', self.search)
+        self.assertLess(self.search.index('cached_client_id'),
+                        self.search.index('local_client_id'),
+                        'своя память раньше ночного среза')
+        self.assertLess(self.search.index('local_client_id'),
+                        self.search.index('find_client'),
+                        'ночной срез раньше вендора')
+
+    def test_handoff_keeps_the_phone_to_client_memory(self):
+        """«Передан» состаривает снимок, но не выбрасывает строку: вместе с ней
+        ушла бы и пара телефон-клиент, и следующее же обновление — то самое,
+        ради которого кнопку жмут, — снова искало бы клиента у вендора."""
+        drop = self.queries.split('def drop_cached_messages')[1].split('\ndef ')[0]
+        # Смотрим на КОД, а не на пояснение: слово DELETE стоит и в тексте
+        # docstring, объясняющем, почему его здесь нет.
+        code = drop.split('"""')[2]
+        self.assertNotIn('DELETE', code.upper(), 'строку не удаляем — состариваем')
+        self.assertIn('UPDATE dch_message_cache', code)
+
+    def test_parks_dictionary_is_not_rebuilt_on_every_request(self):
+        """Агрегат по всей таблице ради 14 строк. Индекса под него нет и быть не
+        может — только кеш в процессе."""
+        names = self.queries.split('def channel_names')[1].split('\ndef ')[0]
+        self.assertIn('_CHANNELS_CACHE', names)
+        self.assertIn('_CHANNELS_TTL', names)
+
+    def test_vendor_calls_reuse_one_connection(self):
+        """Рукопожатие TLS стоит столько же, сколько сам запрос."""
+        self.assertIn('_SESSION = requests.Session()', self.vendor)
+        self.assertIn('_SESSION.request(', self.vendor)
+        self.assertNotIn('requests.request(', self.vendor,
+                         'холодный вызов мимо сессии возвращает потерянные 60 мс')
+
+    def test_database_is_visited_twice_not_five_times(self):
+        """Каждый курсор — заявка на место в общем пуле, где четыре из них
+        держит цикл запросов бота; ожидание слота человек ждёт наравне с
+        запросом. Третий курсор в коде — ветка «номера нет», она к обычному
+        пути отношения не имеет."""
+        self.assertLessEqual(self.search.count('db._get_cursor()'), 3)
+        not_found = self.search.split("'not_found': True")[0]
+        self.assertEqual(not_found.count('db._get_cursor()'), 2,
+                         'до ответа «номера нет» — общий курсор и курсор журнала')
+
+    def test_no_vendor_call_while_holding_a_connection(self):
+        """Держать место в пуле, пока идёт сетевой запрос, — занимать его на
+        порядок дольше самой работы с базой."""
+        for chunk in self.search.split('with db._get_cursor() as cursor:')[1:]:
+            # тело блока — строки с отступом глубже, чем у самого with
+            body = []
+            for line in chunk.splitlines()[1:]:
+                if line.strip() and not line.startswith('            '):
+                    break
+                body.append(line)
+            body = '\n'.join(body)
+            for call in ('fetch_window_messages', 'find_client', 'operator_names',
+                         'chat2desk.channel_names'):
+                self.assertNotIn(call, body,
+                                 f'{call} ходит в сеть — не под курсором')
 
 
 class LabelTwinTests(unittest.TestCase):

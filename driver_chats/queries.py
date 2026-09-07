@@ -128,10 +128,27 @@ _CHANNELS_SQL = """
 """
 
 
+# Справочник парков держим в процессе. Запрос бесплатный по деньгам, но не по
+# времени: индекса под него нет и быть не может — это агрегат по всей таблице,
+# Seq Scan по 86 052 строкам ради 14 значений, 45 мс на КАЖДОМ поиске и
+# обновлении (замер на проде 07.09.2026). Парков 14 и новый появляется раз в
+# месяцы, а только что подключённый и так подхватится: неизвестный канал
+# добирается у вендора отдельной веткой в /search.
+_CHANNELS_CACHE = {'names': None, 'at': None}
+_CHANNELS_TTL = timedelta(minutes=30)
+
+
 def channel_names(cursor):
     """id канала -> название таксопарка. Ноль вызовов API."""
+    at = _CHANNELS_CACHE.get('at')
+    if _CHANNELS_CACHE.get('names') is not None and at:
+        if now_almaty() - at < _CHANNELS_TTL:
+            return _CHANNELS_CACHE['names']
     cursor.execute(_CHANNELS_SQL)
-    return {int(row[0]): row[1] for row in cursor.fetchall() if row[0] is not None}
+    names = {int(row[0]): row[1] for row in cursor.fetchall() if row[0] is not None}
+    _CHANNELS_CACHE['names'] = names
+    _CHANNELS_CACHE['at'] = now_almaty()
+    return names
 
 
 # Метаданные заявок — канал, чат-менеджер, оценка водителя. Живут в той же
@@ -219,16 +236,55 @@ def cached_messages(cursor, client_id, window_from, window_to, ttl_seconds):
     return (messages or []), fetched_at
 
 
+_CACHED_CLIENT_SQL = """
+    SELECT client_id
+      FROM dch_message_cache
+     WHERE phone = %(phone)s
+     ORDER BY fetched_at DESC
+     LIMIT 1
+"""
+
+
+def cached_client_id(cursor, phone):
+    """client_id по телефону из СВОЕЙ памяти. Ноль вызовов API, один индекс.
+
+    Зачем отдельно от local_client_id: тот ищет по c2d_requests, которую
+    наполняет НОЧНОЙ синк («в 04:10 за вчера»). Водителя, который написал
+    впервые сегодня, там нет — и каждый поиск по нему, включая «Обновить»,
+    уходил к вендору перебирать записи номера: до трёх вызовов, ~360 мс. А наша
+    собственная таблица эту пару узнала ещё на первом поиске.
+
+    Срок жизни у ПАРЫ телефон-клиент не тот, что у сообщений: сообщения
+    протухают за пять минут, а клиент за номером закреплён навсегда. Поэтому
+    читаем строку без оглядки на fetched_at.
+    """
+    if not phone:
+        return None
+    cursor.execute(_CACHED_CLIENT_SQL, {'phone': phone})
+    row = cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
 def drop_cached_messages(cursor, client_id):
-    """Сбросить кеш переписки клиента.
+    """Пометить кеш переписки протухшим.
 
     Зовётся сразу после «Передан»: заметка уже лежит в чате у вендора, но наш
     снимок ей на пять минут старше. Без сброса оператор жмёт «Найти» и НЕ видит
     собственный комментарий — выглядит это как «кнопка не сработала», и человек
     жмёт её второй раз, а отозвать лишнюю заметку через API нельзя.
+
+    Не DELETE, а состаривание: строка держит ещё и пару телефон-клиент
+    (cached_client_id), которая к свежести сообщений отношения не имеет. Удалив
+    строку, мы бы после каждого «Передан» заставляли следующий же поиск заново
+    искать клиента у вендора — то есть тормозили ровно тот случай, ради
+    которого кнопку «Обновить» и жмут. Уборщик раздела снимет строку сам, когда
+    она выйдет за двухсуточное окно.
     """
-    cursor.execute("DELETE FROM dch_message_cache WHERE client_id = %(client_id)s",
-                   {'client_id': int(client_id)})
+    cursor.execute(
+        "UPDATE dch_message_cache "
+        "   SET fetched_at = %(stale)s "
+        " WHERE client_id = %(client_id)s",
+        {'client_id': int(client_id), 'stale': datetime(1970, 1, 1)})
     return cursor.rowcount or 0
 
 

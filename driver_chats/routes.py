@@ -203,6 +203,13 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
 
         window_from, window_to = chat2desk.window_bounds()
 
+        # ОДИН поход в базу на всё, что нужно ДО вендора: счётчик лимита, клиент
+        # за номером и, если это не обновление, готовая переписка. Раньше это
+        # были три отдельных курсора, а каждый — заявка на место в общем пуле
+        # соединений, где четыре места постоянно держит цикл запросов бота.
+        # Ожидание слота человек ждёт ровно так же, как сам запрос.
+        truncated = False
+        client_id, messages, fetched_at = None, None, None
         with db._get_cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM dch_events "
@@ -211,6 +218,15 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 "      (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))",
                 {'user_id': ctx['user_id']})
             used_today = int((cursor.fetchone() or [0])[0] or 0)
+            if used_today < DAILY_SEARCH_LIMIT:
+                # Клиент вендора: сначала своя память о паре телефон-клиент,
+                # потом ночной срез заявок, и только потом — API.
+                client_id = (queries.cached_client_id(cursor, phone)
+                             or queries.local_client_id(
+                                 cursor, chat2desk.phone_variants(phone)))
+                if client_id is not None and not force_fresh:
+                    messages, fetched_at = queries.cached_messages(
+                        cursor, client_id, window_from, window_to, CACHE_TTL_SECONDS)
         if used_today >= DAILY_SEARCH_LIMIT:
             return jsonify({
                 "error": "На сегодня исчерпан лимит поисков (%d). Он защищает "
@@ -220,9 +236,6 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 "code": "DAILY_LIMIT_REACHED",
             }), 429
 
-        # Клиент вендора: сначала бесплатно из своей базы, и только потом — API.
-        with db._get_cursor() as cursor:
-            client_id = queries.local_client_id(cursor, chat2desk.phone_variants(phone))
         client_name = None
         if client_id is None:
             found = chat2desk.find_client(phone)
@@ -239,17 +252,12 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             client_id = int(found['id'])
             client_name = found.get('name')
 
-        # Переписка: кеш -> вендор. Обновление кеш не читает вовсе: кнопку жмут
-        # ровно тогда, когда пятиминутный снимок не годится — оператор только
-        # что отправил внутренний комментарий или ждёт ответа водителя, который
-        # сейчас на линии. Отдать ему в ответ тот же самый снимок — это
-        # «кнопка не работает», и он нажмёт «Передан» второй раз.
-        truncated = False
-        messages, fetched_at = None, None
-        if not force_fresh:
-            with db._get_cursor() as cursor:
-                messages, fetched_at = queries.cached_messages(
-                    cursor, client_id, window_from, window_to, CACHE_TTL_SECONDS)
+        # Переписка. Кеш прочитан выше, тем же курсором; обновление его не
+        # читает вовсе: кнопку жмут ровно тогда, когда пятиминутный снимок не
+        # годится — оператор только что отправил внутренний комментарий или ждёт
+        # ответа водителя, который сейчас на линии. Отдать ему в ответ тот же
+        # самый снимок — это «кнопка не работает», и он нажмёт «Передан» второй
+        # раз.
         from_cache = messages is not None
         if not from_cache:
             raw, total = chat2desk.fetch_window_messages(client_id, window_from, window_to)
@@ -257,12 +265,14 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             messages = [chat2desk.normalize_message(msg, names) for msg in raw]
             truncated = total > len(raw)
             fetched_at = chat2desk.now_almaty()
-            with db._get_cursor() as cursor:
-                queries.store_messages(cursor, client_id, phone, messages,
-                                       window_from, window_to)
 
         chats = chat2desk.group_chats(messages)
 
+        # ВТОРОЙ и последний поход в базу: сохранить снимок, забрать метаданные
+        # заявок и справочник парков, записать журнал. Вендора внутри блока нет
+        # намеренно — держать место в пуле соединений, пока идёт сетевой запрос,
+        # значит занимать его на порядок дольше самой работы с базой.
+        #
         # Обогащение метаданными заявок — бесплатное и НЕОБЯЗАТЕЛЬНОЕ: сегодняшних
         # заявок в c2d_requests ещё нет (синк идёт в 04:10 за вчера), и чат
         # прекрасно показывается без оценки водителя.
@@ -272,12 +282,21 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         # парк берётся из самого сообщения (channel_id) через справочник, а
         # ночной срез заявок остаётся лишь третьим запасным вариантом.
         with db._get_cursor() as cursor:
+            if not from_cache:
+                queries.store_messages(cursor, client_id, phone, messages,
+                                       window_from, window_to)
             # Обогащаемся по ВСЕМ обращениям чата, а не по одному: после склейки
             # по парку их внутри несколько, и любое выбранное было бы
             # произвольным.
             meta = queries.request_meta(
                 cursor, [rid for c in chats for rid in c.get('request_ids') or []])
             channels = queries.channel_names(cursor)
+            # Журнал пишем здесь же. От обогащения ниже он не зависит ни одним
+            # полем — там доклеиваются только названия парков в ответ, — а
+            # отдельный курсор ради этой строки стоил бы ещё одного места в пуле.
+            queries.log_event(cursor, ctx, 'search', phone=phone, client_id=client_id,
+                              messages_count=len(messages), ip_address=_ip(),
+                              user_agent=_ua())
         unknown = [c['channel_id'] for c in chats
                    if c.get('channel_id') and int(c['channel_id']) not in channels]
         if unknown:
@@ -306,11 +325,6 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 'rating_score', [r for r in rows if r.get('request_type') != 'rating'])
             if not client_name:
                 client_name = chat2desk.clean_client_name(_first('client_name'))
-
-        with db._get_cursor() as cursor:
-            queries.log_event(cursor, ctx, 'search', phone=phone, client_id=client_id,
-                              messages_count=len(messages), ip_address=_ip(),
-                              user_agent=_ua())
 
         return jsonify({
             'phone': phone,

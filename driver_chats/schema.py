@@ -115,6 +115,12 @@ DDL = (
     )
     """.format(now=_NOW),
     "CREATE INDEX IF NOT EXISTS idx_dch_cache_fetched ON dch_message_cache (fetched_at)",
+    # Второй разрез — «какой клиент за этим номером». Ключ таблицы — клиент, а
+    # спрашивают её телефоном: раздел начинается с номера, и без этого индекса
+    # поиск клиента уходил к вендору перебирать записи номера (до трёх вызовов)
+    # для всякого, кто написал впервые сегодня, — ночной синк c2d_requests его
+    # ещё не видел.
+    "CREATE INDEX IF NOT EXISTS idx_dch_cache_phone ON dch_message_cache (phone)",
 )
 
 

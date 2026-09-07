@@ -182,11 +182,20 @@ def _base_url():
             or 'https://api-02.chat2desk.kz').strip().rstrip('/')
 
 
+# Одно соединение на процесс вместо нового на каждый вызов. Рукопожатие TLS с
+# api-02.chat2desk.kz стоит примерно столько же, сколько сам запрос: замер
+# 07.09.2026 — 117 мс «холодным» вызовом против 58 мс по живому соединению.
+# Раздел ходит к вендору на каждом поиске и обновлении, и эти полсотни
+# миллисекунд человек ждёт зря. requests.Session переиспользует пул urllib3,
+# который потокобезопасен, — а Flask здесь многопоточный.
+_SESSION = requests.Session()
+
+
 def _request(method, path, *, params=None, json_body=None, timeout=30):
     authorization = _authorization()
     if not authorization:
         raise Chat2DeskError('CHAT2DESK_API_TOKEN не задан')
-    response = requests.request(
+    response = _SESSION.request(
         method, f"{_base_url()}{path}",
         headers={'Authorization': authorization, 'Accept': 'application/json'},
         params=params or {}, json=json_body, timeout=timeout)
