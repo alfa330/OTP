@@ -61,6 +61,19 @@ module.exports = {
         scaleOut: {
           '0%': { opacity: '1', transform: 'scale(1) translateY(0)' },
           '100%': { opacity: '0', transform: 'scale(0.95) translateY(-10px)' }
+        },
+        /* Второй уровень ВНУТРИ модалки — как переход между экранами в
+           «Настройках» iOS: вперёд экран приезжает справа, назад — слева.
+           Сдвиг маленький (14px), а не на всю ширину: полный выезд внутри
+           прокручиваемого тела окна пришлось бы прятать под overflow и он
+           читался бы как «уехала страница», а не «открылась подробность». */
+        pushIn: {
+          '0%': { opacity: '0', transform: 'translateX(14px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' }
+        },
+        popIn: {
+          '0%': { opacity: '0', transform: 'translateX(-14px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' }
         }
       },
       animation: {
@@ -74,7 +87,11 @@ module.exports = {
         'fade-in': 'fadeIn 0.3s ease-out forwards',
         'scale-in': 'scaleIn 0.2s ease-out forwards',
         'card-open': 'cardOpen 0.28s cubic-bezier(0.4, 0, 0.2, 1) both',
-        'scale-out': 'scaleOut 0.2s ease-in forwards'
+        'scale-out': 'scaleOut 0.2s ease-in forwards',
+        /* Кривая та же, что у раскрытия модалки (IOS_MODAL_MOTION): быстрый
+           старт, мягкое приземление — характер macOS. */
+        'push-in': 'pushIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both',
+        'pop-in': 'popIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both'
       }
     }
   },

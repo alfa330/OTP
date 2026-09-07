@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Building2, ChevronDown, Globe, Loader2, Lock, Pencil, Plus, Trash2, TriangleAlert,
+    Building2, ChevronDown, ChevronRight, Globe, Loader2, Lock, Plus, RotateCw,
+    Trash2, TriangleAlert,
 } from 'lucide-react';
 import {
-    iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
-    IosBadge, IosModal, IosToggle,
+    iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary,
+    IosHint, IosModal, IosSegmented, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { sectionAncestors } from './sectionPicker';
@@ -20,13 +21,31 @@ import useStableCallback from './useStableCallback';
  * уезжало в чужую ветку, а замечали это, только когда раздел переставали
  * видеть нужные люди. Здесь раздел выбран тем, что человек нажал на его строку.
  *
- * ── Две части формы ───────────────────────────────────────────────────────
+ * ── Одно окно и два уровня ────────────────────────────────────────────────
+ * Первый уровень — СПИСОК: кому раздел уже открыт, одной строкой на адресата.
+ * Второй — ПОДРОБНОСТЬ одного адресата: что ему разрешено. Переход внутри
+ * того же окна, шевроном «назад» в шапке (`onBack` у IosModal), как в
+ * «Настройках» iOS.
+ *
+ * До 07.09.2026 второй уровень был ВТОРОЙ МОДАЛКОЙ поверх первой. Это давало
+ * два затемнения и два размытия подряд (фон уходил почти в чёрный), две шапки
+ * с двумя крестиками, а вложенное окно было ýже нижнего — из-под него торчала
+ * рамка, как ошибка вёрстки. На телефоне второй лист закрывал первый целиком,
+ * и было непонятно, куда вернёт «Отмена».
+ *
+ * Заодно исчезла причина двух разных моделей сохранения. Раньше матрица
+ * должностей копила правки до кнопки в подвале, а точечные правила писались
+ * сразу — и любое действие с точечным правилом звало loadRules(), молча
+ * стирая несохранённые тумблеры наверху. Теперь правило сохраняется там, где
+ * его правят: на своём экране подробности, своей кнопкой.
+ *
+ * ── Из чего состоит список ────────────────────────────────────────────────
  * Наверху — должности ЭТОЙ ветки, как они заведены в дереве «Структуры»: у
  * СЗоВ это «Оператор», «Супервайзер», «Руководитель группы», у «Маркетинга» —
  * «Видеограф», «Таргетолог», «Контекстолог», «SMM-менеджер», «Руководитель».
  * Это ровно то, что настраивают каждый день, и оно не требует знать слово
- * «субъект». Внизу, свёрнутое, — точечные правила (человек, группа,
- * направление, роль вики): нужны редко, но без них модель прав беднее.
+ * «субъект». Ниже — точечные правила (человек, группа, направление, роль
+ * вики): нужны редко, но без них модель прав беднее.
  *
  * До 04.09.2026 строк было четыре и они были одинаковы во всех ветках. Для
  * линии это правда, для отделов без линии — нет: форма предлагала выдать
@@ -109,16 +128,34 @@ const PERMISSIONS = [
 ];
 
 /* Готовые наборы прав — то, что выбирают в 9 случаях из 10. Тонкая настройка
-   остаётся рядом, но начинать с шести тумблеров незачем. */
+   остаётся рядом, но НИЖЕ и свёрнутая: пока шесть тумблеров лежали прямо под
+   сегментами, пресеты не экономили ничего — человек всё равно видел десять
+   органов управления одним и тем же.
+
+   `summary` — как набор называется одним словом в строке списка, `note` — чем
+   он отличается от соседнего. Без них строка перечисляла все выданные права
+   пилюлями: у полного доступа их семь, они переносились в три ряда, и список
+   должностей превращался в рваную лестницу. */
 const PRESETS = [
-    { key: 'none', label: 'Нет', permissions: {} },
-    { key: 'read', label: 'Чтение', permissions: { can_read: true } },
-    { key: 'write', label: 'Правка',
+    { key: 'none', label: 'Нет', summary: 'Нет доступа',
+      note: 'Раздела не видно в дереве, статьи не открываются.',
+      permissions: {} },
+    { key: 'read', label: 'Чтение', summary: 'Чтение',
+      note: 'Видит раздел и читает его статьи. Менять ничего не может.',
+      permissions: { can_read: true } },
+    { key: 'write', label: 'Правка', summary: 'Правка',
+      note: 'Читает, заводит новые статьи и меняет текст существующих.',
       permissions: { can_read: true, can_create: true, can_edit: true } },
-    { key: 'full', label: 'Полный',
+    { key: 'full', label: 'Полный', summary: 'Полный доступ',
+      note: 'Все шесть прав: вместе с публикацией, согласованием и удалением.',
       permissions: { can_read: true, can_create: true, can_edit: true,
                      can_publish: true, can_approve: true, can_delete: true } },
 ];
+
+/* Пятый сегмент — не выбор, а ЧЕСТНАЯ подпись набора, собранного руками.
+   Пока его не было, ручная правка тумблера гасила подсветку у всех четырёх
+   сегментов сразу, и контрол выглядел сломанным. */
+const CUSTOM_KEY = 'custom';
 
 const NO_PERMISSIONS = Object.fromEntries(PERMISSIONS.map((p) => [p.key, false]));
 
@@ -136,6 +173,32 @@ const presetOf = (permissions) => PRESETS.find(
 /** Право на запись без чтения бессмысленно — сервер всё равно включит чтение. */
 const withRead = (permissions) => (
     anyPermission(permissions) ? { ...permissions, can_read: true } : permissions);
+
+/** Одно слово для строки списка: «Чтение», «Полный доступ», «Свои права». */
+const accessSummary = (permissions) => {
+    const key = presetOf(permissions);
+    if (key) return PRESETS.find((p) => p.key === key).summary;
+    return 'Свои права';
+};
+
+/** Чем этот набор отличается от соседнего — строкой под сегментами. */
+const accessNote = (permissions) => {
+    const key = presetOf(permissions);
+    if (key) return PRESETS.find((p) => p.key === key).note;
+    return PERMISSIONS.filter((p) => permissions[p.key]).map((p) => p.label).join(' · ');
+};
+
+/* «174 человека», «1 человек», «22 человека». Счётчик под строкой должности
+   отвечает на главный вопрос выдачи — кому именно я сейчас открываю раздел, —
+   и склонение тут не украшение: «174 человек» читается как опечатка и роняет
+   доверие ко всей строке. Число приезжает готовым (positions[].people). */
+const peopleLabel = (count) => {
+    const ten = count % 10;
+    const hundred = count % 100;
+    if (ten === 1 && hundred !== 11) return `${count} человек`;
+    if (ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14)) return `${count} человека`;
+    return `${count} человек`;
+};
 
 const SUBJECT_KINDS = [
     { value: 'user', label: 'Конкретный человек' },
@@ -166,9 +229,11 @@ const ROLE_TITLE = {
     admin: 'админ', super_admin: 'супер-админ',
 };
 
+/* Развёрнуто, а не «от СВ»: в строке правила это единственное объяснение,
+   кого правило захватывает, и аббревиатура должности там читается как код. */
 const ROLE_LEVEL_LABEL = {
-    10: 'от оператора', 20: 'от тренера', 30: 'от СВ',
-    40: 'от руководителя', 50: 'супер-админ',
+    10: 'от оператора и выше', 20: 'от тренера и выше', 30: 'от супервайзера и выше',
+    40: 'от руководителя и выше', 50: 'супер-админ',
 };
 
 /** Ветка отдела над разделом: он сам или ближайший предок с отделом. */
@@ -190,129 +255,210 @@ export function branchDepartment(sections, sectionId) {
 /** Строка матрицы, которой принадлежит правило. null — оно точечное. */
 const rowOfRule = (rule, rows) => rows.find((row) => ruleMatchesRow(rule, row)) || null;
 
-// ── Строка должности ────────────────────────────────────────────────────────
-const RoleRow = ({ row, draft, expanded, locked, mayGrant, onToggleExpand, onChange }) => {
-    const preset = presetOf(draft.permissions);
-    const granted = PERMISSIONS.filter((p) => draft.permissions[p.key]);
+/* Что дописано к правилу сверх шести прав. Серым текстом, а не цветной
+   пилюлей: это не право, а область его действия. Цвет тут ничего не значил
+   бы, а на строке с выданным доступом их бывает сразу два.
 
-    /* Строка выше потолка показана, но заперта, а не спрятана. Спрятанная
-       строка выглядит как «такой должности не бывает»; запертая объясняет, что
-       выдача есть, но не отсюда, — и к кому идти. */
+   Первой идёт расшифровка ручного набора: одно слово «Свои права» в правой
+   колонке — ровно тот чёрный ящик, ради которого строку и открывают. Здесь
+   набор назван поимённо, и открывать её незачем. */
+const scopeNotes = (permissions, state) => [
+    presetOf(permissions) ? null : accessNote(permissions),
+    state.grant_subsections ? 'вместе с подразделами' : null,
+    state.manage_subsections ? 'строит подразделы' : null,
+].filter(Boolean);
+
+// ── Строка списка ───────────────────────────────────────────────────────────
+/* Навигационная строка в духе «Настроек»: слева адресат, справа одно слово о
+   выданном и шеврон. Всё, что нужно для «кому открыт раздел», читается
+   вертикальным взглядом по правому краю — не разбирая пилюли в каждой строке. */
+const AccessRow = ({ title, meta, notes = [], value, muted, locked, onOpen }) => {
+    const body = (
+        <>
+            <div className="min-w-0 flex-1">
+                <div className={`truncate text-[14px] font-medium ${
+                    locked ? 'text-slate-400' : 'text-slate-900'}`}>
+                    {title}
+                </div>
+                {meta && (
+                    <div className="mt-0.5 truncate text-[11.5px] text-slate-400">{meta}</div>
+                )}
+                {notes.length > 0 && (
+                    <div className="mt-1 truncate text-[11.5px] text-slate-400">
+                        {notes.join(' · ')}
+                    </div>
+                )}
+            </div>
+            <span className={`shrink-0 text-[13px] ${muted ? 'text-slate-400' : 'text-slate-700'}`}>
+                {value}
+            </span>
+            {/* Строка выше потолка ПОКАЗАНА, но заперта, а не спрятана.
+                Спрятанная строка выглядит как «такой должности не бывает»;
+                запертая объясняет, что выдача есть, но не отсюда. */}
+            {locked
+                ? <Lock size={13} className="shrink-0 text-slate-300" />
+                : <ChevronRight size={16} className="shrink-0 text-slate-300" />}
+        </>
+    );
+
+    if (locked) {
+        return <div className="flex items-center gap-3 px-4 py-3 text-left">{body}</div>;
+    }
     return (
-        <div className={expanded ? 'bg-slate-50/70' : ''}>
+        <button
+            type="button"
+            onClick={onOpen}
+            className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100"
+        >
+            {body}
+        </button>
+    );
+};
+
+// ── Что разрешено ───────────────────────────────────────────────────────────
+/* Один и тот же блок на обоих экранах подробности — должности и точечного
+   правила. Пока это были два разных куска разметки, они разъезжались: в
+   матрице у каждого права была подпись, в точечном правиле — нет. */
+const PermissionPicker = ({ permissions, onChange, mayGrant, detailed, onDetailed }) => {
+    const preset = presetOf(permissions);
+    /* Показываем пресеты по силам раздающему — И тот, который стоит сейчас,
+       даже если сам он его выдать не вправе. Иначе супервайзер, открывший
+       строку с полным доступом от директора, видел бы контрол без единого
+       подсвеченного сегмента: набор есть, а как он называется — не сказано. */
+    const options = PRESETS
+        .filter((p) => presetIsGrantable(p, mayGrant) || p.key === preset)
+        .map((p) => ({ value: p.key, label: p.label }));
+    if (!preset) options.push({ value: CUSTOM_KEY, label: 'Своё' });
+
+    return (
+        <section className="space-y-2">
+            <div className={iosGroupLabel}>Что разрешено</div>
+            <IosSegmented
+                value={preset || CUSTOM_KEY}
+                options={options}
+                size="lg"
+                ariaLabel="Что разрешено"
+                onChange={(key) => {
+                    const chosen = PRESETS.find((p) => p.key === key);
+                    if (!chosen) return;   // «Своё» — признак ручного набора, а не выбор
+                    onChange({ ...NO_PERMISSIONS, ...chosen.permissions });
+                }}
+            />
+            <p className="px-1 text-[12px] leading-relaxed text-slate-500">
+                {accessNote(permissions)}
+            </p>
+
             <button
                 type="button"
-                disabled={locked}
-                onClick={onToggleExpand}
-                className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${
-                    locked ? 'cursor-default opacity-60' : 'hover:bg-slate-50'
-                }`}
+                onClick={() => onDetailed(!detailed)}
+                aria-expanded={detailed}
+                className="flex w-full items-center gap-1.5 rounded-lg px-1 py-1 text-left transition hover:bg-slate-100"
             >
-                <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-baseline gap-x-2">
-                        <span className="text-[14px] font-medium text-slate-900">{row.label}</span>
-                        <span className="text-[11.5px] text-slate-400">{row.hint}</span>
-                        {/* Ноль носителей — почти всегда опечатка в названии
-                            раздела-должности: правило сохранится и не откроет
-                            НИЧЕГО. Без этой подписи такая выдача выглядит
-                            рабочей. Пишем только когда людей нет: счётчик у
-                            каждой строки был бы шумом. */}
-                        {row.people === 0 && (
-                            <span className="text-[11.5px] text-amber-600">
-                                нет таких сотрудников
-                            </span>
-                        )}
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                        {granted.length === 0 ? (
-                            <span className="text-[12px] text-slate-400">доступа нет</span>
-                        ) : granted.map((p) => (
-                            <IosBadge key={p.key} tone={p.danger ? 'amber' : 'blue'}>{p.label}</IosBadge>
-                        ))}
-                        {granted.length > 0 && draft.grant_subsections && (
-                            <IosBadge tone="slate">+ подразделы</IosBadge>
-                        )}
-                    </div>
-                </div>
-                {locked ? (
-                    <span className="flex shrink-0 items-center gap-1 text-[11.5px] text-slate-400">
-                        <Lock size={12} /> не ваш уровень
-                    </span>
-                ) : (
-                    <ChevronDown
-                        size={16}
-                        className={`shrink-0 text-slate-300 transition-transform ${expanded ? 'rotate-180' : ''}`}
-                    />
-                )}
+                <span className={iosGroupLabel}>Права по одному</span>
+                <ChevronDown
+                    size={14}
+                    className={`text-slate-400 transition-transform ${detailed ? 'rotate-180' : ''}`}
+                />
             </button>
 
-            {expanded && (
-                <div className="space-y-3 px-4 pb-4">
-                    <div className="flex gap-1 rounded-xl bg-slate-200/70 p-1">
-                        {PRESETS.filter(
-                            (p) => presetIsGrantable(p, mayGrant),
-                        ).map((p) => (
-                            <button
-                                key={p.key}
-                                type="button"
-                                onClick={() => onChange({
-                                    ...draft,
-                                    permissions: { ...NO_PERMISSIONS, ...p.permissions },
-                                })}
-                                className={`flex-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-[12.5px] font-medium transition ${
-                                    preset === p.key
-                                        ? 'bg-white text-slate-900 shadow-sm'
-                                        : 'text-slate-500 hover:text-slate-700'
-                                }`}
-                            >
-                                {p.label}
-                            </button>
-                        ))}
-                    </div>
-
-                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {PERMISSIONS.map((p) => (
-                            <div key={p.key} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
-                                <div className="min-w-0">
-                                    <div className={`text-[13.5px] ${p.danger ? 'text-amber-700' : 'text-slate-800'}`}>
-                                        {p.label}
-                                    </div>
-                                    <div className="text-[11.5px] text-slate-400">
-                                        {mayGrant(p.key) ? p.note
-                                            : 'это право выдаёт вышестоящий руководитель'}
-                                    </div>
+            {detailed && (
+                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                    {PERMISSIONS.map((p) => (
+                        <div key={p.key} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                            <div className="min-w-0">
+                                <div className={`text-[13.5px] ${
+                                    !mayGrant(p.key) ? 'text-slate-400'
+                                        : p.danger ? 'text-amber-700' : 'text-slate-800'}`}>
+                                    {p.label}
                                 </div>
-                                <IosToggle
-                                    checked={!!draft.permissions[p.key]}
-                                    // Снять чтение, оставив правку, нельзя: сервер всё
-                                    // равно вернёт его обратно, и тумблер соврал бы.
-                                    // Право выше собственного — тоже: сервер откажет.
-                                    disabled={!mayGrant(p.key)
-                                        || (p.key === 'can_read' && PERMISSIONS.some(
-                                            (x) => x.key !== 'can_read' && draft.permissions[x.key]))}
-                                    onChange={(v) => onChange({
-                                        ...draft,
-                                        permissions: withRead({ ...draft.permissions, [p.key]: v }),
-                                    })}
-                                />
+                                <div className="text-[11.5px] text-slate-400">
+                                    {mayGrant(p.key) ? p.note
+                                        : 'это право выдаёт вышестоящий руководитель'}
+                                </div>
                             </div>
-                        ))}
-                    </div>
-
-                    <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
-                        <div className="min-w-0">
-                            <div className="text-[13.5px] font-medium text-slate-900">
-                                Вместе с подразделами
-                            </div>
-                            <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                                Те же права во всех вложенных разделах, включая созданные позже.
-                            </p>
+                            <IosToggle
+                                checked={!!permissions[p.key]}
+                                // Снять чтение, оставив правку, нельзя: сервер всё
+                                // равно вернёт его обратно, и тумблер соврал бы.
+                                // Право выше собственного — тоже: сервер откажет.
+                                disabled={!mayGrant(p.key)
+                                    || (p.key === 'can_read' && PERMISSIONS.some(
+                                        (x) => x.key !== 'can_read' && permissions[x.key]))}
+                                onChange={(v) => onChange(withRead({ ...permissions, [p.key]: v }))}
+                            />
                         </div>
-                        <IosToggle
-                            checked={!!draft.grant_subsections}
-                            onChange={(v) => onChange({ ...draft, grant_subsections: v })}
-                        />
+                    ))}
+                </div>
+            )}
+        </section>
+    );
+};
+
+// ── Область действия правила ────────────────────────────────────────────────
+/* Два тумблера про ДЕРЕВО, а не про статьи, поэтому они отдельной карточкой
+   под правами, а не седьмым и восьмым в общем списке.
+
+   Показываются только когда права вообще выданы: «вместе с подразделами» без
+   единого права — это уточнение к тому, чего нет. */
+const ScopeCard = ({ state, onChange, canManage }) => {
+    if (!anyPermission(state.permissions)) return null;
+    return (
+        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+            <div className="flex items-start justify-between gap-3 p-3.5">
+                <div className="min-w-0">
+                    <div className="text-[13.5px] font-medium text-slate-900">
+                        Вместе с подразделами
                     </div>
+                    <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
+                        Те же права во всех вложенных разделах, включая созданные позже.
+                    </p>
+                </div>
+                <IosToggle
+                    checked={!!state.grant_subsections}
+                    onChange={(v) => onChange({ ...state, grant_subsections: v })}
+                />
+            </div>
+
+            {/* Передача управления ВЕТКОЙ. Тумблера нет у того, кто сам
+                структуру не ведёт: сервер такое правило отвергнет, и галочка
+                соврала бы. Шести прав выше он не касается — те про статьи,
+                этот про дерево. */}
+            {canManage && (
+                <div className="flex items-start justify-between gap-3 p-3.5">
+                    <div className="min-w-0">
+                        <div className="text-[13.5px] font-medium text-slate-900">
+                            Может заводить подразделы
+                        </div>
+                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
+                            Заводит подразделы внутри этого раздела и переименовывает их.
+                            Архив, публичность и перенос в другую ветку остаются у вас.
+                        </p>
+                    </div>
+                    <IosToggle
+                        checked={!!state.manage_subsections}
+                        onChange={(v) => onChange({ ...state, manage_subsections: v })}
+                    />
+                </div>
+            )}
+
+            {/* Право строить дерево уже выдано, а этот раздающий им не
+                распоряжается. Строка показана заперто и с прямым
+                предупреждением: сервер такое правило принимает только от того,
+                кто управляет структурой, поэтому сохранение отсюда снимет флаг.
+                Раньше он снимался молча — правило переставало пускать человека
+                в дерево, и связать это с чужой правкой прав было невозможно. */}
+            {!canManage && state.manage_subsections && (
+                <div className="flex items-start justify-between gap-3 p-3.5 opacity-70">
+                    <div className="min-w-0">
+                        <div className="text-[13.5px] font-medium text-slate-500">
+                            Может заводить подразделы · включено
+                        </div>
+                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-amber-700">
+                            Этим правом распоряжается тот, кто управляет структурой вики.
+                            Если сохранить права отсюда, оно снимется.
+                        </p>
+                    </div>
+                    <Lock size={14} className="mt-1 shrink-0 text-slate-400" />
                 </div>
             )}
         </div>
@@ -345,11 +491,22 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     const [people, setPeople] = useState([]);
     const [catalog, setCatalog] = useState({});
     const [loading, setLoading] = useState(true);
+    /* Отказ загрузки — ОТДЕЛЬНОЕ состояние, а не пустой список. Пока его не
+       было, сорвавшийся запрос показывал уверенное «В этой ветке ещё нет
+       разделов-должностей» и отправлял человека заводить то, что уже заведено. */
+    const [failed, setFailed] = useState(false);
     const [busy, setBusy] = useState(false);
     const [matrix, setMatrix] = useState({});
-    const [expanded, setExpanded] = useState(null);
-    const [showExtra, setShowExtra] = useState(false);
+
+    /* Второй уровень окна. Одновременно открыт ровно один: rowDraft — экран
+       должности, draft — экран точечного правила. Правка идёт в КОПИИ, а не в
+       matrix: иначе «Отмена» пришлось бы откатывать вручную, а перезагрузка
+       правил посреди правки затирала бы тумблеры. */
+    const [rowDraft, setRowDraft] = useState(null);
     const [draft, setDraft] = useState(null);
+    const [detailed, setDetailed] = useState(false);
+    // Направление перехода: вперёд экран приезжает справа, назад — слева.
+    const [anim, setAnim] = useState('');
 
     const sectionId = section?.id;
     const department = useMemo(
@@ -376,8 +533,12 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                 setGrantDepartments(r.data?.grant_departments ?? null);
                 setGrantable(r.data?.grantable ?? null);
                 setGrantableStructure(!!r.data?.grantable_structure);
+                setFailed(false);
             })
-            .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
+            .catch((e) => {
+                setFailed(true);
+                toast(errText(e, 'Не удалось загрузить правила'), 'error');
+            })
             .finally(() => setLoading(false));
     }, [base, headers, sectionId, toast]);
 
@@ -407,7 +568,8 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         () => (department ? positions : FALLBACK_ROWS), [department, positions]);
 
     /* Матрица должностей — производная от загруженных правил, но состояние
-       собственное: человек правит несколько строк и сохраняет разом. */
+       собственное: с ним сверяется экран подробности, отвечая на вопрос
+       «что здесь изменили». */
     useEffect(() => {
         const next = {};
         rows.forEach((row) => {
@@ -417,6 +579,11 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                 // Новое правило по умолчанию НЕ уходит вглубь: глубокое правило
                 // на родителе сливает соседние ветки отделов в одну.
                 grant_subsections: rule ? !!rule.grant_subsections : false,
+                /* Флаг про ДЕРЕВО обязан ездить с правилом туда и обратно.
+                   POST перезаписывает правило целиком, и пока матрица его не
+                   возила, сохранение строки молча гасило «строит подразделы» у
+                   правила, попавшего в эту строку. */
+                manage_subsections: rule ? !!rule.manage_subsections : false,
                 ruleId: rule?.id || null,
             };
         });
@@ -425,13 +592,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
 
     const extraRules = useMemo(
         () => rules.filter((r) => !rowOfRule(r, rows)), [rules, rows]);
-    /* Свёрнутый блок — это правило, которого не видно. Именно так владелец
-       21.08.2026 искал выписанное им же точечное правило и видел вместо него
-       матрицу должностей. Есть правила — раскрываем; свернуть руками по-прежнему
-       можно, эффект срабатывает только на изменение их числа. */
-    useEffect(() => {
-        if (extraRules.length) setShowExtra(true);
-    }, [extraRules.length]);
 
     /* Заперта ли строка. У должностей ветки ответ считает СЕРВЕР той же
        функцией, что и отказ на записи (may_grant_with_ceiling): у строки без
@@ -441,17 +601,6 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     const isLocked = (row) => (row.locked != null
         ? !!row.locked
         : ceiling == null || rowWeight(row) > ceiling);
-
-    const dirty = useMemo(() => rows.some((row) => {
-        const state = matrix[row.key];
-        if (!state || isLocked(row)) return false;
-        const rule = rules.find((r) => r.id === state.ruleId);
-        const before = rule ? permissionsOf(rule) : { ...NO_PERMISSIONS };
-        const deepBefore = rule ? !!rule.grant_subsections : false;
-        return PERMISSIONS.some((p) => before[p.key] !== state.permissions[p.key])
-            || (anyPermission(state.permissions) && deepBefore !== state.grant_subsections);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }), [rows, matrix, rules, ceiling]);
 
     /* Адресат правила берётся из САМОЙ строки, а не выводится заново из отдела:
        должность (job_title) порогом не выражается, и вывести её здесь неоткуда. */
@@ -464,67 +613,135 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
 
     const mayGrant = useMemo(() => grantableCheck(grantable), [grantable]);
 
-    const saveMatrix = () => {
-        const jobs = [];
-        rows.forEach((row) => {
-            const state = matrix[row.key];
-            // Запертую строку не отправляем, даже если она как-то оказалась
-            // изменена: сервер её всё равно отвергнет, а из-за одного отказа
-            // Promise.all потерял бы и остальные, уже корректные, правки.
-            if (!state || isLocked(row)) return;
-            const rule = rules.find((r) => r.id === state.ruleId);
-            const before = rule ? permissionsOf(rule) : { ...NO_PERMISSIONS };
-            const changed = PERMISSIONS.some((p) => before[p.key] !== state.permissions[p.key])
-                || (rule && !!rule.grant_subsections !== state.grant_subsections);
-            if (!changed) return;
+    const openRow = (row) => {
+        const state = matrix[row.key];
+        if (!state) return;
+        setAnim('animate-push-in');
+        // Ручной набор прав раскрываем сразу: свёрнутый список скрыл бы
+        // единственное объяснение, почему сегмент показывает «Своё».
+        setDetailed(!presetOf(state.permissions));
+        setRowDraft({ key: row.key, ...state });
+    };
 
-            if (!anyPermission(state.permissions)) {
-                // Права сняты все до одного — правила больше нет, а не «есть,
-                // но пустое»: пустое правило всё равно открывало бы раздел.
-                if (rule) jobs.push(axios.delete(`${base}/access/section-rules/${rule.id}`, { headers }));
-                return;
-            }
-            jobs.push(axios.post(`${base}/access/section-rules`, {
+    const openRule = (rule) => {
+        setAnim('animate-push-in');
+        setDetailed(rule ? !presetOf(permissionsOf(rule)) : false);
+        setDraft(rule ? {
+            editing: true,
+            ruleId: rule.id,
+            subject_label: rule.subject_label || rule.subject_role || `#${rule.subject_id}`,
+            subject_type: rule.subject_type,
+            subject_id: rule.subject_id ?? '',
+            subject_role: rule.subject_role || 'operator',
+            min_role_level: rule.min_role_level ?? '',
+            // Должность — часть КЛЮЧА правила. Не передав её обратно, правка
+            // прав завела бы второе правило, а исходное осталось бы висеть с
+            // прежними правами.
+            job_title: rule.job_title || null,
+            grant_subsections: !!rule.grant_subsections,
+            manage_subsections: !!rule.manage_subsections,
+            permissions: permissionsOf(rule),
+        } : {
+            editing: false,
+            ruleId: null,
+            subject_type: 'user', subject_id: '', subject_role: 'operator',
+            min_role_level: '', job_title: null, grant_subsections: false,
+            manage_subsections: false,
+            permissions: { ...NO_PERMISSIONS, can_read: true },
+        });
+    };
+
+    const goBack = () => {
+        setAnim('animate-pop-in');
+        setRowDraft(null);
+        setDraft(null);
+    };
+
+    /* Что изменилось на экране подробности. Сравниваем с matrix, а не с
+       правилом: matrix уже свёл правило и «правила нет» к одному виду. */
+    const rowChanged = rowDraft && (() => {
+        const before = matrix[rowDraft.key];
+        if (!before) return false;
+        return PERMISSIONS.some((p) => !!before.permissions[p.key] !== !!rowDraft.permissions[p.key])
+            || (anyPermission(rowDraft.permissions)
+                && (!!before.grant_subsections !== !!rowDraft.grant_subsections
+                    || !!before.manage_subsections !== !!rowDraft.manage_subsections));
+    })();
+
+    /* То же на экране точечного правила. У нового правила «изменилось» — это
+       «адресат выбран и права не пусты»: без обоих сервер либо откажет, либо
+       заведёт правило, которое ничего не откроет. */
+    const ruleChanged = draft && (() => {
+        if (!draft.editing) {
+            return !!(draft.subject_type === 'otp_role' || draft.subject_id)
+                && anyPermission(draft.permissions);
+        }
+        const before = rules.find((r) => r.id === draft.ruleId);
+        if (!before) return true;
+        return PERMISSIONS.some((p) => !!before[p.key] !== !!draft.permissions[p.key])
+            || !!before.grant_subsections !== !!draft.grant_subsections
+            || !!before.manage_subsections !== !!draft.manage_subsections;
+    })();
+
+    const saveRow = () => {
+        const row = rows.find((r) => r.key === rowDraft.key);
+        if (!row) return;
+        const state = rowDraft;
+        setBusy(true);
+        const request = anyPermission(state.permissions)
+            ? axios.post(`${base}/access/section-rules`, {
                 section_id: sectionId,
                 ...ruleBody(row),
                 ...state.permissions,
                 grant_subsections: state.grant_subsections,
-            }, { headers }));
-        });
-
-        if (!jobs.length) { onClose?.(); return; }
-        setBusy(true);
-        Promise.all(jobs)
-            // Закрываем только на успехе: после отказа лист обязан остаться
-            // открытым с несохранёнными переключателями, иначе правка молча
-            // пропадёт вместе с окном.
-            .then(() => { toast('Доступ сохранён', 'success'); reload?.(); onClose?.(); })
-            .catch((e) => { toast(errText(e, 'Не удалось сохранить доступ'), 'error'); loadRules(); })
+                /* Флаг едет обратно только от того, кто им распоряжается.
+                   Сервер отвергает manage_subsections=true у всех остальных
+                   (WIKI_GRANT_BEYOND_SELF), и отправлять его «как было» значило
+                   бы ловить отказ на правке обычного права. */
+                manage_subsections: grantableStructure && state.manage_subsections,
+            }, { headers })
+            // Права сняты все до одного — правила больше нет, а не «есть, но
+            // пустое»: пустое правило всё равно открывало бы раздел.
+            : (state.ruleId
+                ? axios.delete(`${base}/access/section-rules/${state.ruleId}`, { headers })
+                : Promise.resolve());
+        request
+            // Возвращаемся в список только на успехе: после отказа экран обязан
+            // остаться открытым с несохранёнными переключателями, иначе правка
+            // молча пропадёт вместе с ним.
+            .then(() => { toast('Доступ сохранён', 'success'); goBack(); loadRules(); reload?.(); })
+            .catch((e) => toast(errText(e, 'Не удалось сохранить доступ'), 'error'))
             .finally(() => setBusy(false));
     };
 
     const saveExtra = () => {
         setBusy(true);
-        axios.post(`${base}/access/section-rules`, {
-            section_id: sectionId,
-            subject_type: draft.subject_type,
-            subject_id: draft.subject_type === 'otp_role' ? null : Number(draft.subject_id) || null,
-            subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
-            min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
-            job_title: draft.job_title || null,
-            ...draft.permissions,
-            grant_subsections: draft.grant_subsections,
-            manage_subsections: !!draft.manage_subsections,
-        }, { headers })
-            .then(() => { toast('Правило сохранено', 'success'); setDraft(null); loadRules(); reload?.(); })
+        /* Правило без единого права — это удаление, ровно как в строке
+           должности. Пока экраны расходились, через точечное правило можно было
+           СОХРАНИТЬ пустое правило: в таблице оно оставалось и раздел открывало. */
+        const request = (!anyPermission(draft.permissions) && draft.ruleId)
+            ? axios.delete(`${base}/access/section-rules/${draft.ruleId}`, { headers })
+            : axios.post(`${base}/access/section-rules`, {
+                section_id: sectionId,
+                subject_type: draft.subject_type,
+                subject_id: draft.subject_type === 'otp_role' ? null : Number(draft.subject_id) || null,
+                subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
+                min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
+                job_title: draft.job_title || null,
+                ...draft.permissions,
+                grant_subsections: draft.grant_subsections,
+                manage_subsections: !!draft.manage_subsections && grantableStructure,
+            }, { headers });
+        request
+            .then(() => { toast('Правило сохранено', 'success'); goBack(); loadRules(); reload?.(); })
             .catch((e) => toast(errText(e, 'Не удалось сохранить правило'), 'error'))
             .finally(() => setBusy(false));
     };
 
-    const removeRule = (rule) => {
+    const removeRule = () => {
         setBusy(true);
-        axios.delete(`${base}/access/section-rules/${rule.id}`, { headers })
-            .then(() => { toast('Правило удалено', 'success'); loadRules(); reload?.(); })
+        axios.delete(`${base}/access/section-rules/${draft.ruleId}`, { headers })
+            .then(() => { toast('Правило удалено', 'success'); goBack(); loadRules(); reload?.(); })
             .catch((e) => toast(errText(e, 'Не удалось удалить'), 'error'))
             .finally(() => setBusy(false));
     };
@@ -560,424 +777,401 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     }, [catalog, draft?.subject_type]);
 
     const isPublic = section?.visibility_scope === 'public';
+    const openedRow = rowDraft ? rows.find((r) => r.key === rowDraft.key) : null;
+
+    // ── Шапка и подвал зависят от того, какой экран открыт ───────────────────
+    let title = 'Доступ к разделу';
+    let subtitle = path || section?.name;
+    let footer = (
+        <button type="button" className={iosBtnPrimary} onClick={onClose}>Готово</button>
+    );
+
+    if (rowDraft && openedRow) {
+        title = openedRow.label;
+        subtitle = department
+            ? `Должность отдела «${department.name}»`
+            : 'Роль в системе — во всей компании';
+        footer = (
+            <>
+                <button type="button" className={iosBtnSecondary} onClick={goBack}>
+                    {rowChanged ? 'Отмена' : 'Назад'}
+                </button>
+                <button type="button" className={iosBtnPrimary} disabled={busy || !rowChanged}
+                        onClick={saveRow}>
+                    {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
+                </button>
+            </>
+        );
+    } else if (draft) {
+        title = draft.editing ? draft.subject_label : 'Новое правило';
+        subtitle = draft.editing
+            ? SUBJECT_KIND_LABEL[draft.subject_type]
+            : `Раздел «${section?.name}»`;
+        footer = (
+            <>
+                {draft.editing && (
+                    <button
+                        type="button"
+                        disabled={busy}
+                        onClick={removeRule}
+                        className="mr-auto inline-flex items-center gap-1.5 rounded-xl px-3 py-2.5 text-[13.5px] font-semibold text-rose-600 transition hover:bg-rose-50 active:scale-[0.98] disabled:opacity-50"
+                    >
+                        <Trash2 size={14} /> Удалить
+                    </button>
+                )}
+                <button type="button" className={iosBtnSecondary} onClick={goBack}>
+                    {ruleChanged ? 'Отмена' : 'Назад'}
+                </button>
+                <button
+                    type="button"
+                    className={iosBtnPrimary}
+                    disabled={busy || !ruleChanged}
+                    onClick={saveExtra}
+                >
+                    {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
+                </button>
+            </>
+        );
+    }
+
+    const screen = rowDraft ? `row:${rowDraft.key}` : (draft ? 'rule' : 'list');
+
+    /* Крестик и клик мимо окна закрывают его целиком, и на экране подробности
+       это уносило бы несохранённые тумблеры молча — промах мышью по затемнению
+       стоил бы всей настройки. Пока правки не сохранены, первый выход
+       возвращает в список: работа остаётся на виду, а второй клик закрывает.
+       Ничего не изменено — закрываем сразу, лишнего шага нет. */
+    const handleClose = () => {
+        if ((rowDraft && rowChanged) || (draft && ruleChanged)) { goBack(); return; }
+        onClose?.();
+    };
 
     return (
         <IosModal
             open={!!section}
-            onClose={onClose}
-            title="Доступ к разделу"
-            subtitle={path || section?.name}
+            onClose={handleClose}
+            onBack={rowDraft || draft ? goBack : null}
+            title={title}
+            subtitle={subtitle}
             maxWidth="max-w-xl"
-            footer={(
-                <>
-                    <button type="button" className={iosBtnSecondary} onClick={onClose}>
-                        {dirty ? 'Отмена' : 'Закрыть'}
-                    </button>
-                    <button type="button" className={iosBtnPrimary} disabled={busy || !dirty}
-                            onClick={saveMatrix}>
-                        {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
-                    </button>
-                </>
-            )}
+            footer={footer}
         >
-            <div className="space-y-5">
-                {/* Чей это раздел: ветка отдела задаётся в форме раздела, здесь
-                    она только показана — иначе непонятно, почему строки должностей
-                    означают «в СЗоВ», а не «во всей компании». */}
-                <div className={`${iosCard} flex flex-wrap items-center gap-2 px-4 py-3`}>
-                    {department ? (
-                        <>
-                            <Building2 size={16} className="shrink-0 text-indigo-500" />
-                            <div className="min-w-0 flex-1">
-                                <div className="text-[13.5px] font-medium text-slate-900">
-                                    Отдел ветки: {department.name}
-                                </div>
-                                <div className="mt-0.5 text-[11.5px] text-slate-500">
-                                    {department.own
-                                        ? 'Задан у этого раздела'
-                                        : `Унаследован от «${department.sectionName}»`}
-                                    {' · '}должности ниже работают внутри этого отдела
-                                </div>
-                            </div>
-                        </>
-                    ) : (
-                        <>
-                            <TriangleAlert size={16} className="shrink-0 text-amber-500" />
-                            <div className="min-w-0 flex-1">
-                                <div className="text-[13.5px] font-medium text-slate-900">
-                                    Отдел ветки не задан
-                                </div>
-                                <div className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                                    Права ниже получат сотрудники <b>всей компании</b> с такой
-                                    должностью. Чтобы удержать границу отдела, укажите отдел
-                                    у этого раздела или у ветки над ним — в форме «Изменить».
-                                </div>
-                            </div>
-                        </>
-                    )}
-                </div>
+            {/* key переклеивает содержимое на каждом переходе — иначе анимация
+                проигралась бы один раз за всю жизнь окна.
 
-                {isPublic && (
-                    <div className="flex items-start gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-[12.5px] leading-relaxed text-emerald-800">
-                        <Globe size={15} className="mt-0.5 shrink-0" />
-                        <span>
-                            Раздел публичный: читают его все сотрудники независимо от правил.
-                            Настройки ниже нужны только для прав на запись.
-                        </span>
-                    </div>
-                )}
+                Высоту окна экраны задают собой, без нижней границы: у строки
+                со снятым доступом настраивать нечего, и подпёртое до «как у
+                списка» окно давало полполотна пустого поля — тот самый воздух,
+                который на этом экране и убирали. */}
+            <div key={screen} className={anim}>
 
-                <section className="space-y-1.5">
-                    <div className={iosGroupLabel}>Кому открыт раздел</div>
-                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {loading ? (
-                            <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
-                                <Loader2 size={16} className="animate-spin" />
-                                <span className="text-[13px]">Загружаем…</span>
-                            </div>
-                        ) : rows.length === 0 ? (
-                            /* Ветка отдела есть, а разделов-должностей внутри
-                               неё нет: выдавать нечему. Подменять это ролями
-                               значило бы предложить «супервайзера маркетинга»,
-                               которого не существует. */
-                            <div className="px-4 py-8 text-center text-[12.5px] leading-relaxed text-slate-400">
-                                В этой ветке ещё нет разделов-должностей.
-                                <br />
-                                Заведите их во вкладке «Структура» — строки ниже
-                                повторяют дерево отдела.
-                            </div>
-                        ) : rows.map((row) => (
-                            matrix[row.key] ? (
-                                <RoleRow
-                                    mayGrant={mayGrant}
-                                    key={row.key}
-                                    row={row}
-                                    draft={matrix[row.key]}
-                                    locked={isLocked(row)}
-                                    expanded={expanded === row.key}
-                                    onToggleExpand={() => setExpanded(expanded === row.key ? null : row.key)}
-                                    onChange={(next) => setMatrix({ ...matrix, [row.key]: next })}
-                                />
-                            ) : null
-                        ))}
-                    </div>
-                    <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                        Строки повторяют должности этой ветки. Доступ, выданный должности,
-                        автоматически есть и у всех, кто выше неё в отделе — руководитель
-                        видит всё, что видит подчинённый.
-                    </p>
-                </section>
+                {/* ── Экран должности ─────────────────────────────────────── */}
+                {rowDraft && openedRow && (
+                    <div className="space-y-4">
+                        <div className="px-1 text-[12.5px] leading-relaxed text-slate-500">
+                            {typeof openedRow.people === 'number' && (
+                                openedRow.people === 0
+                                    // Ноль носителей — почти всегда опечатка в названии
+                                    // раздела-должности: правило сохранится и не откроет
+                                    // НИЧЕГО. Без этой подписи такая выдача выглядит рабочей.
+                                    ? <span className="text-amber-600">нет таких сотрудников</span>
+                                    : <span>{peopleLabel(openedRow.people)}</span>
+                            )}
+                            {openedRow.hint && (
+                                <span>
+                                    {typeof openedRow.people === 'number' ? ' · ' : ''}
+                                    {openedRow.hint}
+                                </span>
+                            )}
+                        </div>
 
-                {/* Точечные правила свёрнуты: нужны редко, а места занимают столько
-                    же, сколько главная часть формы. */}
-                <section className="space-y-1.5">
-                    <button
-                        type="button"
-                        onClick={() => setShowExtra((v) => !v)}
-                        className="flex w-full items-center gap-2 px-1"
-                    >
-                        <span className={iosGroupLabel}>Точечные правила</span>
-                        {extraRules.length > 0 && (
-                            <IosBadge tone="blue">{extraRules.length}</IosBadge>
-                        )}
-                        <ChevronDown
-                            size={14}
-                            className={`ml-auto text-slate-400 transition-transform ${showExtra ? 'rotate-180' : ''}`}
+                        <PermissionPicker
+                            permissions={rowDraft.permissions}
+                            onChange={(permissions) => setRowDraft({ ...rowDraft, permissions })}
+                            mayGrant={mayGrant}
+                            detailed={detailed}
+                            onDetailed={setDetailed}
                         />
-                    </button>
 
-                    {showExtra && (
-                        <>
-                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                                {extraRules.length === 0 && (
-                                    <div className="px-4 py-6 text-center text-[12.5px] leading-relaxed text-slate-400">
-                                        Правил на отдельного человека, группу или направление нет.
-                                    </div>
-                                )}
-                                {extraRules.map((rule) => (
-                                    <div key={rule.id} className="flex flex-wrap items-center gap-2 px-4 py-3">
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex flex-wrap items-center gap-1.5">
-                                                <IosBadge tone="slate">
-                                                    {SUBJECT_KIND_LABEL[rule.subject_type] || rule.subject_type}
-                                                    {/* Должность сужает правило и заменяет порог: без
-                                                        неё правило видеографа и правило таргетолога
-                                                        подписаны здесь одинаково. */}
-                                                    {rule.job_title
-                                                        ? ` · ${rule.job_title}`
-                                                        : (rule.min_role_level
-                                                            ? ` · ${ROLE_LEVEL_LABEL[rule.min_role_level] || rule.min_role_level}`
-                                                            : '')}
-                                                </IosBadge>
-                                                <span className="truncate text-[13.5px] font-medium text-slate-900">
-                                                    {rule.subject_label || rule.subject_role || `#${rule.subject_id}`}
-                                                </span>
-                                            </div>
-                                            <div className="mt-1 flex flex-wrap gap-1">
-                                                {PERMISSIONS.filter((p) => rule[p.key]).map((p) => (
-                                                    <IosBadge key={p.key} tone={p.danger ? 'amber' : 'blue'}>
-                                                        {p.label}
-                                                    </IosBadge>
-                                                ))}
-                                                {rule.grant_subsections && (
-                                                    <IosBadge tone="slate">+ подразделы</IosBadge>
-                                                )}
-                                                {/* Право на ДЕРЕВО, а не на статьи. Тон тот
-                                                    же синий, что у выданных прав, — новый цвет
-                                                    здесь ничего бы не значил; отличает его
-                                                    подпись. */}
-                                                {rule.manage_subsections && (
-                                                    <IosBadge tone="blue">строит подразделы</IosBadge>
-                                                )}
-                                            </div>
-                                        </div>
-                                        {/* Правило можно было только снести и завести
-                                            заново — то есть на время правки снять
-                                            человеку доступ целиком. */}
-                                        <button
-                                            type="button"
-                                            disabled={busy}
-                                            onClick={() => setDraft({
-                                                editing: true,
-                                                subject_label: rule.subject_label
-                                                    || rule.subject_role || `#${rule.subject_id}`,
-                                                subject_type: rule.subject_type,
-                                                subject_id: rule.subject_id ?? '',
-                                                subject_role: rule.subject_role || 'operator',
-                                                min_role_level: rule.min_role_level ?? '',
-                                                // Должность — часть КЛЮЧА правила. Не
-                                                // передав её обратно, правка прав завела бы
-                                                // второе правило, а исходное осталось бы
-                                                // висеть с прежними правами.
-                                                job_title: rule.job_title || null,
-                                                grant_subsections: !!rule.grant_subsections,
-                                                manage_subsections: !!rule.manage_subsections,
-                                                permissions: permissionsOf(rule),
-                                            })}
-                                            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
-                                            aria-label="Изменить правило"
-                                        >
-                                            <Pencil size={14} />
-                                        </button>
-                                        <button
-                                            type="button"
-                                            disabled={busy}
-                                            onClick={() => removeRule(rule)}
-                                            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
-                                            aria-label="Удалить правило"
-                                        >
-                                            <Trash2 size={14} />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                            <button
-                                type="button"
-                                className={iosBtnGhost}
-                                onClick={() => setDraft({
-                                    subject_type: 'user', subject_id: '', subject_role: 'operator',
-                                    min_role_level: '', job_title: null, grant_subsections: false,
-                                    manage_subsections: false,
-                                    permissions: { ...NO_PERMISSIONS, can_read: true },
-                                })}
-                            >
-                                <Plus size={14} /> Добавить правило
-                            </button>
-                        </>
-                    )}
-                </section>
-            </div>
-
-            {/* ── Точечное правило ── */}
-            <IosModal
-                open={!!draft}
-                onClose={() => setDraft(null)}
-                title="Точечное правило"
-                subtitle={section?.name}
-                footer={(
-                    <>
-                        <button type="button" className={iosBtnSecondary} onClick={() => setDraft(null)}>
-                            Отмена
-                        </button>
-                        <button
-                            type="button"
-                            className={iosBtnPrimary}
-                            disabled={busy || (draft?.subject_type !== 'otp_role' && !draft?.subject_id)}
-                            onClick={saveExtra}
-                        >
-                            {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
-                        </button>
-                    </>
-                )}
-            >
-                {draft && (
-                    <div className="space-y-3.5">
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Кому</label>
-                            <CustomSelect
-                                variant="ios"
-                                value={draft.subject_type}
-                                onChange={(v) => setDraft({ ...draft, subject_type: v, subject_id: '' })}
-                                options={subjectKinds}
-                                ariaLabel="Тип субъекта"
-                                // Адресат — часть ключа правила (раздел + субъект +
-                                // порог). Сменить его на месте нельзя: получилось бы
-                                // второе правило, а первое осталось бы висеть.
-                                disabled={!!draft.editing}
-                            />
-                            {draft.editing && (
-                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                    Меняем права правила для «{draft.subject_label}».
-                                    Нужен другой адресат — заведите отдельное правило.
-                                </p>
-                            )}
-                            {grantDepartments && (
-                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                    Правило вы адресуете своему отделу: людям, группам и
-                                    направлениям внутри него. Правило на должность или роль
-                                    в вики действует во всей компании — его выписывает
-                                    директор.
-                                </p>
-                            )}
-                        </div>
-
-                        {/* Сотрудник выбирается поиском по имени, а не вводом id.
-                            Числовой id можно было узнать только заглянув в базу, а
-                            опечатка выдавала доступ постороннему молча — сервер
-                            несуществующий id даже не проверял. Список приходит уже
-                            обрезанным по потолку и отделу. */}
-                        {draft.subject_type === 'user' && (
-                            <div>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                    Сотрудник
-                                </label>
-                                <CustomSelect
-                                    variant="ios"
-                                    value={draft.subject_id}
-                                    onChange={(v) => setDraft({ ...draft, subject_id: v })}
-                                    options={peopleOptions}
-                                    searchable
-                                    placeholder="Выберите сотрудника…"
-                                    searchPlaceholder="Поиск по имени…"
-                                    ariaLabel="Сотрудник"
-                                    disabled={!!draft.editing}
-                                />
-                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                    {peopleOptions.length
-                                        ? 'В списке только те, кому вы вправе открыть раздел.'
-                                        : 'Открывать раздел отдельным людям вам пока некому.'}
-                                </p>
-                            </div>
-                        )}
-
-                        {draft.subject_type === 'otp_role' && (
-                            <div>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Роль</label>
-                                <CustomSelect
-                                    variant="ios"
-                                    value={draft.subject_role}
-                                    onChange={(v) => setDraft({ ...draft, subject_role: v })}
-                                    options={(catalog.otp_role || []).map((r) => ({
-                                        value: String(r.id), label: r.name,
-                                    }))}
-                                    ariaLabel="Роль в системе"
-                                    disabled={!!draft.editing}
-                                />
-                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-amber-700">
-                                    Роль не знает границ отдела: правило подействует во всей компании.
-                                </p>
-                            </div>
-                        )}
-
-                        {!['otp_role', 'user'].includes(draft.subject_type) && (
-                            <div>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                    {SUBJECT_KIND_LABEL[draft.subject_type]}
-                                </label>
-                                <CustomSelect
-                                    variant="ios"
-                                    value={draft.subject_id}
-                                    onChange={(v) => setDraft({ ...draft, subject_id: v })}
-                                    options={subjectOptions}
-                                    searchable
-                                    ariaLabel="Субъект правила"
-                                />
-                            </div>
-                        )}
-
-                        <div className="space-y-1.5">
-                            <div className={iosGroupLabel}>Что разрешено</div>
-                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                                {PERMISSIONS.map((p) => (
-                                    <div key={p.key} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
-                                        <span className={`text-[13.5px] ${
-                                            !mayGrant(p.key) ? 'text-slate-400'
-                                                : p.danger ? 'text-amber-700' : 'text-slate-800'}`}>
-                                            {p.label}
-                                            {!mayGrant(p.key) && (
-                                                <span className="ml-1.5 text-[11.5px] text-slate-400">
-                                                    выдаёт вышестоящий
-                                                </span>
-                                            )}
-                                        </span>
-                                        <IosToggle
-                                            checked={!!draft.permissions[p.key]}
-                                            disabled={!mayGrant(p.key)
-                                                || (p.key === 'can_read' && PERMISSIONS.some(
-                                                    (x) => x.key !== 'can_read'
-                                                        && draft.permissions[x.key]))}
-                                            onChange={(v) => setDraft({
-                                                ...draft,
-                                                permissions: withRead({ ...draft.permissions, [p.key]: v }),
-                                            })}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
-                            <div className="min-w-0">
-                                <div className="text-[13.5px] font-medium text-slate-900">
-                                    Вместе с подразделами
-                                </div>
-                                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                                    Те же права во всех вложенных разделах, включая созданные позже.
-                                </p>
-                            </div>
-                            <IosToggle
-                                checked={!!draft.grant_subsections}
-                                onChange={(v) => setDraft({ ...draft, grant_subsections: v })}
-                            />
-                        </div>
-
-                        {/* Передача управления ВЕТКОЙ. Тумблера нет у того, кто сам
-                            структуру не ведёт: сервер такое правило отвергнет, и
-                            галочка соврала бы. Шести прав выше он не касается —
-                            те про статьи, этот про дерево. */}
-                        {grantableStructure && (
-                            <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
-                                <div className="min-w-0">
-                                    <div className="text-[13.5px] font-medium text-slate-900">
-                                        Может заводить подразделы
-                                    </div>
-                                    <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                                        Строит дерево внутри этого раздела: заводит подразделы и
-                                        переименовывает их. Убрать раздел в архив, сделать
-                                        публичным или перенести в другую ветку — по-прежнему
-                                        только у вас.
-                                    </p>
-                                </div>
-                                <IosToggle
-                                    checked={!!draft.manage_subsections}
-                                    onChange={(v) => setDraft({ ...draft, manage_subsections: v })}
-                                />
-                            </div>
-                        )}
-
+                        <ScopeCard
+                            state={rowDraft}
+                            onChange={setRowDraft}
+                            canManage={grantableStructure}
+                        />
                     </div>
                 )}
-            </IosModal>
+
+                {/* ── Экран точечного правила ─────────────────────────────── */}
+                {draft && (
+                    <div className="space-y-4">
+                        <section className="space-y-1.5">
+                            <div className={iosGroupLabel}>Кому</div>
+                            {/* Селекты БЕЗ обёртки-карточки: у CustomSelect в
+                                варианте ios своя белая плашка с кантом, и внутри
+                                iosCard получались две рамки в трёх пикселях
+                                друг от друга — ровно тот «ящик в ящике», из-за
+                                которого экран и выглядел неаккуратно. */}
+                            <div className="space-y-2">
+                                <CustomSelect
+                                    variant="ios"
+                                    value={draft.subject_type}
+                                    onChange={(v) => setDraft({ ...draft, subject_type: v, subject_id: '' })}
+                                    options={subjectKinds}
+                                    ariaLabel="Тип субъекта"
+                                    // Адресат — часть ключа правила (раздел + субъект +
+                                    // порог). Сменить его на месте нельзя: получилось бы
+                                    // второе правило, а первое осталось бы висеть.
+                                    disabled={!!draft.editing}
+                                />
+
+                                {/* Сотрудник выбирается поиском по имени, а не вводом id.
+                                    Числовой id можно было узнать только заглянув в базу, а
+                                    опечатка выдавала доступ постороннему молча — сервер
+                                    несуществующий id даже не проверял. Список приходит уже
+                                    обрезанным по потолку и отделу. */}
+                                {draft.subject_type === 'user' && (
+                                    <CustomSelect
+                                        variant="ios"
+                                        value={draft.subject_id}
+                                        onChange={(v) => setDraft({ ...draft, subject_id: v })}
+                                        options={peopleOptions}
+                                        searchable
+                                        placeholder="Выберите сотрудника…"
+                                        searchPlaceholder="Поиск по имени…"
+                                        ariaLabel="Сотрудник"
+                                        disabled={!!draft.editing}
+                                    />
+                                )}
+
+                                {draft.subject_type === 'otp_role' && (
+                                    <CustomSelect
+                                        variant="ios"
+                                        value={draft.subject_role}
+                                        onChange={(v) => setDraft({ ...draft, subject_role: v })}
+                                        options={(catalog.otp_role || []).map((r) => ({
+                                            value: String(r.id), label: r.name,
+                                        }))}
+                                        ariaLabel="Роль в системе"
+                                        disabled={!!draft.editing}
+                                    />
+                                )}
+
+                                {!['otp_role', 'user'].includes(draft.subject_type) && (
+                                    <CustomSelect
+                                        variant="ios"
+                                        value={draft.subject_id}
+                                        onChange={(v) => setDraft({ ...draft, subject_id: v })}
+                                        options={subjectOptions}
+                                        searchable
+                                        placeholder="Выберите…"
+                                        ariaLabel="Субъект правила"
+                                        // Тот же ключ правила, что у человека и у роли.
+                                        // Здесь запрета не было, и «переставленный»
+                                        // адресат заводил ВТОРОЕ правило, а первое
+                                        // оставалось с прежними правами.
+                                        disabled={!!draft.editing}
+                                    />
+                                )}
+                            </div>
+
+                            {draft.editing ? (
+                                <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    Адресата у готового правила не меняют — заведите отдельное.
+                                </p>
+                            ) : draft.subject_type === 'otp_role' ? (
+                                <p className="px-1 text-[11.5px] leading-relaxed text-amber-700">
+                                    Роль не знает границ отдела: правило подействует
+                                    во всей компании.
+                                </p>
+                            ) : draft.subject_type === 'user' && !peopleOptions.length ? (
+                                <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    Открывать раздел отдельным людям вам пока некому.
+                                </p>
+                            ) : null}
+                        </section>
+
+                        <PermissionPicker
+                            permissions={draft.permissions}
+                            onChange={(permissions) => setDraft({ ...draft, permissions })}
+                            mayGrant={mayGrant}
+                            detailed={detailed}
+                            onDetailed={setDetailed}
+                        />
+
+                        <ScopeCard
+                            state={draft}
+                            onChange={setDraft}
+                            canManage={grantableStructure}
+                        />
+                    </div>
+                )}
+
+                {/* ── Список ──────────────────────────────────────────────── */}
+                {!rowDraft && !draft && (
+                    <div className="space-y-5">
+                        {/* Чей это раздел: ветка отдела задаётся в форме раздела, здесь
+                            она только показана — иначе непонятно, почему строки должностей
+                            означают «в СЗоВ», а не «во всей компании».
+
+                            Отдел на месте — это норма, и норме карточка не нужна: строка
+                            под шапкой. Отдела нет — это риск открыть раздел всей компании,
+                            и вот он предупреждением. Цвет только со смыслом. */}
+                        {department ? (
+                            <div className="flex items-center gap-2 px-1 text-[12px] text-slate-500">
+                                <Building2 size={14} className="shrink-0 text-slate-400" />
+                                <span className="truncate">
+                                    Отдел ветки: {department.name}
+                                    {' · '}
+                                    {department.own
+                                        ? 'задан у этого раздела'
+                                        : `унаследован от «${department.sectionName}»`}
+                                </span>
+                            </div>
+                        ) : (
+                            <div className="flex items-start gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-[12.5px] leading-relaxed text-amber-800">
+                                <TriangleAlert size={15} className="mt-0.5 shrink-0" />
+                                <span>
+                                    <b>Отдел ветки не задан.</b> Права ниже получат сотрудники
+                                    всей компании с такой должностью. Чтобы удержать границу
+                                    отдела, укажите отдел у этого раздела или у ветки над ним —
+                                    в форме «Изменить».
+                                </span>
+                            </div>
+                        )}
+
+                        {isPublic && (
+                            <div className="flex items-start gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-[12.5px] leading-relaxed text-emerald-800">
+                                <Globe size={15} className="mt-0.5 shrink-0" />
+                                <span>
+                                    Раздел публичный: читают его все сотрудники независимо от правил.
+                                    Настройки ниже нужны только для прав на запись.
+                                </span>
+                            </div>
+                        )}
+
+                        <section className="space-y-1.5">
+                            <div className="flex items-center gap-1.5 px-1">
+                                <span className={iosGroupLabel}>
+                                    {department ? 'Должности отдела' : 'Роли в системе'}
+                                </span>
+                                <IosHint
+                                    label="Как работают должности"
+                                    text={department
+                                        ? 'Строки повторяют должности этой ветки. Доступ, выданный должности, автоматически есть и у всех, кто выше неё в отделе: руководитель видит всё, что видит подчинённый.'
+                                        : 'Над разделом нет ветки отдела, поэтому писать не на что, кроме самой роли. Такое правило действует во всей компании.'}
+                                />
+                            </div>
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                {loading ? (
+                                    <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
+                                        <Loader2 size={16} className="animate-spin" />
+                                        <span className="text-[13px]">Загружаем…</span>
+                                    </div>
+                                ) : failed ? (
+                                    <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+                                        <p className="text-[12.5px] leading-relaxed text-slate-500">
+                                            Не удалось загрузить правила доступа.
+                                        </p>
+                                        <button type="button" className={iosBtnSecondary} onClick={loadRules}>
+                                            <RotateCw size={14} /> Повторить
+                                        </button>
+                                    </div>
+                                ) : rows.length === 0 ? (
+                                    /* Ветка отдела есть, а разделов-должностей внутри
+                                       неё нет: выдавать нечему. Подменять это ролями
+                                       значило бы предложить «супервайзера маркетинга»,
+                                       которого не существует. */
+                                    <div className="px-4 py-8 text-center text-[12.5px] leading-relaxed text-slate-400">
+                                        В этой ветке ещё нет разделов-должностей.
+                                        <br />
+                                        Заведите их во вкладке «Структура» — строки ниже
+                                        повторяют дерево отдела.
+                                    </div>
+                                ) : rows.map((row) => {
+                                    const state = matrix[row.key];
+                                    if (!state) return null;
+                                    const locked = isLocked(row);
+                                    const granted = anyPermission(state.permissions);
+                                    const meta = [
+                                        typeof row.people === 'number'
+                                            ? (row.people === 0 ? 'нет таких сотрудников' : peopleLabel(row.people))
+                                            : null,
+                                        row.hint,
+                                        locked ? 'выдаёт вышестоящий' : null,
+                                    ].filter(Boolean).join(' · ');
+                                    return (
+                                        <AccessRow
+                                            key={row.key}
+                                            title={row.label}
+                                            meta={meta}
+                                            notes={granted ? scopeNotes(state.permissions, state) : []}
+                                            value={accessSummary(state.permissions)}
+                                            muted={!granted}
+                                            locked={locked}
+                                            onOpen={() => openRow(row)}
+                                        />
+                                    );
+                                })}
+                            </div>
+                        </section>
+
+                        {/* Точечные правила: человек, группа, направление, роль вики.
+                            Нужны редко — и раньше блок был свёрнут, из-за чего владелец
+                            21.08.2026 искал выписанное им же правило и не находил.
+                            Теперь строки те же, что у должностей, и места занимают
+                            столько же: прятать стало нечего. */}
+                        <section className="space-y-1.5">
+                            <div className="flex items-center gap-1.5 px-1">
+                                <span className={iosGroupLabel}>Точечные правила</span>
+                                <IosHint
+                                    label="Что это"
+                                    text={grantDepartments
+                                        ? 'Доступ мимо должностей: конкретному человеку, группе, направлению или главе отдела. Адресовать можно только своему отделу.'
+                                        : 'Доступ мимо должностей: конкретному человеку, группе, направлению, главе отдела или роли.'}
+                                />
+                            </div>
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                {extraRules.map((rule) => {
+                                    const state = {
+                                        grant_subsections: rule.grant_subsections,
+                                        manage_subsections: rule.manage_subsections,
+                                    };
+                                    return (
+                                        <AccessRow
+                                            key={rule.id}
+                                            title={rule.subject_label || rule.subject_role || `#${rule.subject_id}`}
+                                            meta={[
+                                                SUBJECT_KIND_LABEL[rule.subject_type] || rule.subject_type,
+                                                // Должность сужает правило и заменяет порог: без
+                                                // неё правило видеографа и правило таргетолога
+                                                // подписаны здесь одинаково.
+                                                rule.job_title
+                                                    || (rule.min_role_level
+                                                        ? ROLE_LEVEL_LABEL[rule.min_role_level] || rule.min_role_level
+                                                        : null),
+                                            ].filter(Boolean).join(' · ')}
+                                            notes={scopeNotes(permissionsOf(rule), state)}
+                                            value={accessSummary(permissionsOf(rule))}
+                                            onOpen={() => openRule(rule)}
+                                        />
+                                    );
+                                })}
+                                {/* Кнопка — последней строкой списка, а не отдельным
+                                    призраком под карточкой: так она читается как
+                                    продолжение перечня, а не как украшение. */}
+                                <button
+                                    type="button"
+                                    onClick={() => openRule(null)}
+                                    className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13.5px] font-medium text-blue-600 transition hover:bg-slate-50 active:bg-slate-100"
+                                >
+                                    <Plus size={16} className="shrink-0" />
+                                    Добавить правило
+                                </button>
+                            </div>
+                        </section>
+                    </div>
+                )}
+            </div>
         </IosModal>
     );
 }

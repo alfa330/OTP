@@ -11,6 +11,12 @@ import { createPortal } from 'react-dom';
 export const APPLE_FONT =
     '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif';
 
+/* Замер до отрисовки нужен только в браузере, а на сервере useLayoutEffect
+   выполниться не может — React пишет об этом предупреждение на КАЖДЫЙ рендер.
+   В портале серверного рендера нет, зато есть тесты (react-dom/server), и там
+   предупреждение забивало вывод, пряча настоящие ошибки. */
+const useIsoLayoutEffect = typeof window === 'undefined' ? React.useEffect : React.useLayoutEffect;
+
 /*
  * Моторика оверлеев портала — единый набор для всех модалок раздела.
  *
@@ -171,7 +177,7 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
      * useLayoutEffect, то есть до отрисовки: текст у подсказок разной длины, а
      * подстановка «примерно ста пикселей» ошибается ровно на длинных.
      */
-    React.useLayoutEffect(() => {
+    useIsoLayoutEffect(() => {
         if (!open) return;
         const anchor = btnRef.current;
         const tip = tipRef.current;
@@ -355,8 +361,15 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
 /**
  * iOS-модалка: затемнение + backdrop-blur, закруглённый контейнер,
  * липкие хедер и (опц.) футер с размытием.
+ *
+ * `onBack` — второй уровень ВНУТРИ окна, как в «Настройках» iOS: шеврон слева
+ * от заголовка вместо второй модалки поверх первой. Вложенная модалка на этом
+ * же примитиве кладёт второе затемнение на первое (`bg-slate-900/40` дважды) и
+ * второй `backdrop-blur`: фон уходит почти в чёрный, а нижнее окно остаётся
+ * призраком по краям. Раздел, которому нужен второй экран, меняет заголовок,
+ * подвал и содержимое, а окно остаётся одно.
  */
-export const IosModal = ({ open, onClose, title, subtitle, children, footer = null, maxWidth = 'max-w-lg' }) => {
+export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg' }) => {
     if (!open) return null;
     return (
         <div
@@ -365,8 +378,18 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
             onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
         >
             <div className={`flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
-                <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
-                    <div className="min-w-0">
+                <div className="relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
+                    {onBack && (
+                        <button
+                            type="button"
+                            onClick={onBack}
+                            className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95"
+                            aria-label="Назад"
+                        >
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                        </button>
+                    )}
+                    <div className="min-w-0 flex-1">
                         <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
                         {subtitle && <p className="truncate text-[12px] text-slate-500">{subtitle}</p>}
                     </div>
@@ -379,7 +402,10 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
                         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
                     </button>
                 </div>
-                <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
+                {/* overflow-x-hidden: экраны второго уровня въезжают сдвигом по
+                    горизонтали, и без этого сдвиг на 16px давал бы полосу
+                    прокрутки внизу окна на всё время перехода. */}
+                <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 sm:px-5">
                     {children}
                 </div>
                 {/* flex-wrap в подвале: там бывает не только «Отмена/Сохранить»,
@@ -441,7 +467,7 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
         });
     }, [align, shown.length]);
 
-    React.useLayoutEffect(() => { if (open) recompute(); }, [open, recompute]);
+    useIsoLayoutEffect(() => { if (open) recompute(); }, [open, recompute]);
 
     React.useEffect(() => {
         if (!open) return undefined;
