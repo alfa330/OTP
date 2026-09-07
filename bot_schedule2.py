@@ -57876,7 +57876,13 @@ def oktell_guard_patrol_job(hours_back: int = 2):
         return None
     until = datetime.now(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
     since = until - _timedelta(hours=max(1, int(hours_back)))
-    return patrol.run_patrol(db, _oktell_query, since, until)
+    # Сначала досверка: прокси к Oktell падает и поднимается сам, и факты,
+    # пойманные в такую минуту, оставались 'pending' навсегда. Отчёт показывает
+    # только подтверждённое — то есть настоящий выброс был невидим.
+    recheck = patrol.recheck_pending(db, _oktell_query)
+    result = patrol.run_patrol(db, _oktell_query, since, until)
+    result['recheck'] = recheck
+    return result
 
 
 async def run_oktell_guard_patrol_async():

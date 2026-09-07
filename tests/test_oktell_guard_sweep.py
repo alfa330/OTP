@@ -210,3 +210,112 @@ def test_note_explains_itself_to_a_human():
 @pytest.mark.parametrize('bad', [None, [], 'строка'])
 def test_no_rows_no_crash(bad):
     assert sweep.recall_segments(bad) == []
+
+
+# --------------------------------------------------------------------------- #
+# Досверка: 'pending' не должно быть конечным состоянием
+# --------------------------------------------------------------------------- #
+#
+# Прокси к базе Oktell падает и поднимается сам. Факт, пойманный в такую минуту,
+# честно получал verified='pending' — и оставался им НАВСЕГДА, потому что никто
+# к нему не возвращался. Отчёт показывает только подтверждённое, поэтому
+# настоящий выброс был невидим: снаружи это выглядело как «количество
+# выкидываний не отображается» (07.09.2026, записи 70 и 71).
+
+import contextlib
+
+from oktell_guard import patrol, verify
+
+
+class _FakeDb:
+    @contextlib.contextmanager
+    def _get_cursor(self):
+        yield object()
+
+
+def _pending_item(vid=70, sip='6612', seconds=180):
+    return {
+        'id': vid, 'user_id': 1, 'sip_number': sip,
+        'happened_at': datetime(2026, 9, 7, 8, 35, 31),
+        'seconds': seconds, 'threshold_s': 180, 'reason': 'recall_timeout',
+    }
+
+
+def _history(start, seconds):
+    """Строки истории: «Перезвон» с start и выход через seconds."""
+    finish = start + timedelta(seconds=seconds)
+    return [
+        {'State': 2, 'ICode': 2, 'time_change': start.strftime('%Y-%m-%d %H:%M:%S')},
+        {'State': 1, 'ICode': -1, 'time_change': finish.strftime('%Y-%m-%d %H:%M:%S')},
+    ]
+
+
+def test_pending_becomes_confirmed_when_ats_answers(monkeypatch):
+    item = _pending_item()
+    saved = []
+    monkeypatch.setattr(patrol.queries, 'pending_violations', lambda *a, **k: [item])
+    monkeypatch.setattr(patrol.queries, 'set_violation_verdict',
+                        lambda cur, vid, status, note: saved.append((vid, status, note)))
+    # По истории человек просидел ровно столько, сколько заявил агент.
+    rows = _history(item['happened_at'] - timedelta(seconds=180), 180)
+    summary = patrol.recheck_pending(_FakeDb(), lambda sql: rows)
+    assert summary['confirmed'] == 1
+    assert saved and saved[0][1] == verify.CONFIRMED
+
+
+def test_pending_becomes_rejected_when_history_says_otherwise(monkeypatch):
+    item = _pending_item()
+    saved = []
+    monkeypatch.setattr(patrol.queries, 'pending_violations', lambda *a, **k: [item])
+    monkeypatch.setattr(patrol.queries, 'set_violation_verdict',
+                        lambda cur, vid, status, note: saved.append((vid, status, note)))
+    summary = patrol.recheck_pending(_FakeDb(), lambda sql: [])
+    assert summary['rejected'] == 1
+    assert saved and saved[0][1] == verify.REJECTED
+
+
+def test_ats_still_down_leaves_the_record_alone(monkeypatch):
+    """Прокси не ответил и сейчас — запись не трогаем и не роняем прогон.
+    Вернёмся к ней на следующем круге."""
+    item = _pending_item()
+    saved = []
+    monkeypatch.setattr(patrol.queries, 'pending_violations', lambda *a, **k: [item])
+    monkeypatch.setattr(patrol.queries, 'set_violation_verdict',
+                        lambda cur, vid, status, note: saved.append((vid, status, note)))
+
+    def dead(sql):
+        raise RuntimeError('прокси лежит')
+
+    summary = patrol.recheck_pending(_FakeDb(), dead)
+    assert saved == []
+    assert summary['still_pending'] == 1
+
+
+def test_dead_proxy_does_not_hammer_the_ats(monkeypatch):
+    """Один отказ — выходим, а не пытаемся 200 раз подряд."""
+    items = [_pending_item(vid=i) for i in range(5)]
+    calls = []
+    monkeypatch.setattr(patrol.queries, 'pending_violations', lambda *a, **k: items)
+    monkeypatch.setattr(patrol.queries, 'set_violation_verdict', lambda *a, **k: None)
+
+    def dead(sql):
+        calls.append(sql)
+        raise RuntimeError('прокси лежит')
+
+    patrol.recheck_pending(_FakeDb(), dead)
+    assert len(calls) == 1
+
+
+def test_nothing_pending_is_not_an_error(monkeypatch):
+    monkeypatch.setattr(patrol.queries, 'pending_violations', lambda *a, **k: [])
+    summary = patrol.recheck_pending(_FakeDb(), lambda sql: [])
+    assert summary == {'pending': 0, 'confirmed': 0, 'rejected': 0, 'still_pending': 0}
+
+
+def test_record_without_sip_is_skipped(monkeypatch):
+    """Без номера сверять не с чем — но и падать нельзя."""
+    item = _pending_item(sip='')
+    monkeypatch.setattr(patrol.queries, 'pending_violations', lambda *a, **k: [item])
+    monkeypatch.setattr(patrol.queries, 'set_violation_verdict', lambda *a, **k: None)
+    summary = patrol.recheck_pending(_FakeDb(), lambda sql: [])
+    assert summary['still_pending'] == 1

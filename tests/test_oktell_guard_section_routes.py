@@ -77,6 +77,7 @@ class OktellGuardSectionGateTest(unittest.TestCase):
             ('list_employees', lambda _cursor, **_kw: []),
             ('report', lambda _cursor, *_a, **_kw: []),
             ('rejected_count', lambda _cursor, *_a, **_kw: 0),
+            ('pending_count', lambda _cursor, *_a, **_kw: 0),
             # Пишущие обязаны остаться нетронутыми: если гейт их пропустит,
             # тест упадёт на неожиданном вызове, а не молча позеленеет.
             ('save_settings', self._must_not_be_called('save_settings')),

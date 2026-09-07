@@ -441,7 +441,12 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         with db._get_cursor() as cursor:
             rows = queries.report(cursor, date_from, date_to, department_code=scope)
             rejected = queries.rejected_count(cursor, date_from, date_to, department_code=scope)
-        return jsonify({"rows": rows, "from": date_from, "to": date_to, "rejected": rejected})
+            # Ждущие сверки показываем числом рядом с отчётом. Молчать про них
+            # нельзя: в отчёт идёт только подтверждённое, и без этой цифры
+            # настоящие выбросы выглядели бы как «выкидываний не было».
+            pending = queries.pending_count(cursor, date_from, date_to, department_code=scope)
+        return jsonify({"rows": rows, "from": date_from, "to": date_to,
+                        "rejected": rejected, "pending": pending})
 
     @section_route('/download')
     def oktell_guard_download(requester_id, requester):

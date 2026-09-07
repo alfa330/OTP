@@ -127,6 +127,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
     const [employees, setEmployees] = useState([]);
     const [reportRows, setReportRows] = useState([]);
     const [reportRejected, setReportRejected] = useState(0);
+    const [reportPending, setReportPending] = useState(0);
     const [reportFrom, setReportFrom] = useState(isoDaysAgo(13));
     const [reportTo, setReportTo] = useState(isoDaysAgo(0));
 
@@ -195,6 +196,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             const data = await request(`/report?from=${reportFrom}&to=${reportTo}`);
             setReportRows(Array.isArray(data.rows) ? data.rows : []);
             setReportRejected(Number(data.rejected || 0));
+            setReportPending(Number(data.pending || 0));
         } catch (error) {
             toast(`Отчёт не загрузился: ${error.message}`, 'error');
         }
@@ -639,9 +641,14 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             {tab === 'report' && (
                 <IosSection
                     title="Кого и когда выкинуло"
-                    hint={reportRejected > 0
-                        ? `Не подтверждено историей Oktell: ${reportRejected}. В отчёт такие не попадают.`
-                        : 'В отчёте только то, что подтвердилось историей статусов самого Oktell.'}
+                    hint={[
+                        // Ждущие сверки — не «ничего не было»: прокси к Oktell
+                        // падает и поднимается сам, и пойманный в такую минуту
+                        // выброс лежит непроверенным, пока АТС не ответит.
+                        // Без этой строки он выглядел бы как отсутствие выбросов.
+                        reportPending > 0 ? `Ждут сверки с Oktell: ${reportPending} — появятся в отчёте, как только АТС ответит.` : '',
+                        reportRejected > 0 ? `Не подтверждено историей Oktell: ${reportRejected}. В отчёт такие не попадают.` : '',
+                    ].filter(Boolean).join(' ') || 'В отчёте только то, что подтвердилось историей статусов самого Oktell.'}
                     right={(
                         <div className="flex items-center gap-1.5">
                             <input

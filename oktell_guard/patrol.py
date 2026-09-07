@@ -48,6 +48,58 @@ def fetch_history(oktell_query, since: datetime, until: datetime) -> list:
     return rows
 
 
+def recheck_pending(db, oktell_query, days: int = 14, limit: int = 200) -> dict:
+    """Досверить факты, которые не удалось проверить в момент получения.
+
+    Прокси к базе Oktell падает и поднимается сам, и в такие минуты сверка
+    ставит 'pending'. Раньше это состояние было конечным: отчёт показывает
+    только подтверждённое, и настоящий выброс оставался невидимым навсегда —
+    ровно то, что снаружи выглядело как «количество выкидываний не считается».
+    Теперь к таким записям возвращаемся, пока АТС не ответит.
+    """
+    from . import verify
+
+    since = datetime.now().replace(microsecond=0) - timedelta(days=max(1, int(days)))
+    with db._get_cursor() as cursor:
+        items = queries.pending_violations(cursor, since, limit)
+    if not items:
+        return {'pending': 0, 'confirmed': 0, 'rejected': 0, 'still_pending': 0}
+
+    verdicts = []
+    for item in items:
+        moment = item.get('happened_at')
+        sip = str(item.get('sip_number') or '')
+        if not moment or not sip:
+            continue
+        window = max(int(item.get('seconds') or 0), int(item.get('threshold_s') or 0), 60)
+        try:
+            rows = oktell_query(verify.build_history_sql(sip, moment, window))
+        except Exception:  # noqa: BLE001 — АТС может быть недоступна и сейчас
+            logging.info("Ограничитель Перезвона: досверка отложена — история Oktell недоступна")
+            break
+        status, note = verify.verdict(item, rows)
+        if status == verify.PENDING:
+            continue
+        verdicts.append((item['id'], status, note))
+
+    if verdicts:
+        with db._get_cursor() as cursor:
+            for violation_id, status, note in verdicts:
+                queries.set_violation_verdict(cursor, violation_id, status, note)
+
+    summary = {
+        'pending': len(items),
+        'confirmed': sum(1 for _, s, _ in verdicts if s == verify.CONFIRMED),
+        'rejected': sum(1 for _, s, _ in verdicts if s == verify.REJECTED),
+        'still_pending': len(items) - len(verdicts),
+    }
+    logging.info(
+        "Ограничитель Перезвона, досверка: ждали %s, подтвердилось %s, отклонено %s, осталось %s",
+        summary['pending'], summary['confirmed'], summary['rejected'], summary['still_pending'],
+    )
+    return summary
+
+
 def run_patrol(db, oktell_query, since: datetime, until: datetime,
                department_code=None, dry_run: bool = False) -> dict:
     """Один прогон сверки. Возвращает сводку для лога.

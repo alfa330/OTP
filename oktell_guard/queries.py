@@ -404,6 +404,59 @@ def thresholds_by_sip(cursor, department_code=None):
     return out, ambiguous
 
 
+def pending_violations(cursor, since, limit=200):
+    """Факты, которые не удалось сверить с Oktell в момент получения.
+
+    Прокси к базе АТС падает и поднимается сам по себе, и в такие минуты сверка
+    честно ставит 'pending'. Беда была в том, что это состояние КОНЕЧНОЕ: никто
+    не возвращался к записи, а отчёт показывает только подтверждённое. Реальный
+    выброс так и оставался невидимым — «выкидываний не отображается».
+    """
+    cursor.execute(
+        """
+        SELECT id, user_id, sip_number, happened_at, seconds, threshold_s, reason
+          FROM oktell_guard_violations
+         WHERE verified = 'pending'
+           AND happened_at >= %(since)s
+           AND COALESCE(sip_number, '') <> ''
+         ORDER BY happened_at DESC
+         LIMIT %(limit)s
+        """,
+        {'since': since, 'limit': int(limit)},
+    )
+    return fetch_all(cursor)
+
+
+def set_violation_verdict(cursor, violation_id, status, note) -> None:
+    cursor.execute(
+        """
+        UPDATE oktell_guard_violations
+           SET verified = %(status)s, verified_note = %(note)s
+         WHERE id = %(id)s AND verified = 'pending'
+        """,
+        {'id': int(violation_id), 'status': str(status)[:16], 'note': str(note or '')},
+    )
+
+
+def pending_count(cursor, date_from, date_to, department_code=None) -> int:
+    """Сколько фактов ждут сверки. Ноль — норма; заметное число означает, что
+    прокси к Oktell лежит, и часть выбросов пока не показана."""
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt
+          FROM oktell_guard_violations v
+          LEFT JOIN users u ON u.id = v.user_id
+          LEFT JOIN departments d ON d.id = u.department_id
+         WHERE v.happened_at::date BETWEEN %(date_from)s AND %(date_to)s
+           AND (%(department_code)s IS NULL OR d.code = %(department_code)s)
+           AND v.verified = 'pending'
+        """,
+        {'date_from': date_from, 'date_to': date_to, 'department_code': department_code},
+    )
+    row = fetch_one(cursor) or {}
+    return int(row.get('cnt') or 0)
+
+
 def violations_between(cursor, since, until):
     """Уже записанные выбросы за период — чтобы сверка не удвоила отчёт.
 
