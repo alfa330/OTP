@@ -520,5 +520,57 @@ iTaxi · Алматы · период февраль 2026
         self.assertIn('<b>Тип ошибки:</b>', out)
 
 
+class MentionsTest(unittest.TestCase):
+    """Строка с тегами ответственных офисов (задача #280).
+
+    Уведомление в группе даёт именно упоминание «@ник» обычным текстом. Ссылка
+    на профиль выглядит так же, но не будит никого, — поэтому здесь сторожится
+    сам вид тега, а не только его наличие.
+    """
+
+    def message(self, body='Город: Алматы', **kwargs):
+        return telegram.build_ticket_message(
+            ticket_id=51, subject='Статус работы офиса · Алматы',
+            body=body, queue_title='Регионы', **kwargs)
+
+    def test_mentions_are_plain_at_names(self):
+        out = self.message(mentions=[{'username': 'itaxi_jambyla'}])
+        self.assertIn('@itaxi_jambyla', out)
+        self.assertNotIn('t.me/itaxi_jambyla', out)
+        self.assertNotIn('<a href="https://t.me', out)
+
+    def test_the_at_sign_is_not_doubled(self):
+        """Ник копируют из профиля вместе с собакой. «@@ник» — обычный текст."""
+        out = self.message(mentions=[{'username': '@itaxi_uralsk'}])
+        self.assertIn('@itaxi_uralsk', out)
+        self.assertNotIn('@@', out)
+
+    def test_repeated_office_is_tagged_once(self):
+        """У двух точек города менеджер бывает один."""
+        out = self.message(mentions=[{'username': 'itaxi_astana'},
+                                     {'username': 'Itaxi_Astana'},
+                                     {'username': 'itaxi_taraz'}])
+        self.assertEqual(out.count('@itaxi_astana'), 1)
+        self.assertIn('@itaxi_taraz', out)
+
+    def test_no_mentions_no_line(self):
+        clean = self.message()
+        self.assertNotIn('Ответственные', clean)
+        self.assertNotIn('Ответственные', self.message(mentions=[]))
+        self.assertNotIn('Ответственные', self.message(mentions=[{'username': '  '}]))
+
+    def test_long_ticket_does_not_cut_the_tags_off(self):
+        """Обрезка по пределу Telegram обязана съесть текст, а не теги: иначе
+        сообщение уйдёт, а уведомления — нет, и узнать об этом будет неоткуда."""
+        out = self.message(body='строка ответа\n' * 900,
+                           mentions=[{'username': 'itaxi_jambyla'}])
+        self.assertLessEqual(len(out), telegram.MESSAGE_LIMIT)
+        self.assertTrue(out.endswith('@itaxi_jambyla'), out[-80:])
+
+    def test_line_reads_as_an_address_not_as_data(self):
+        out = self.message(mentions=[{'username': 'itaxi_jambyla'}])
+        self.assertIn('👥 <b>Ответственные:</b> @itaxi_jambyla', out)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -751,5 +751,107 @@ class SnapshotWithClosureTest(unittest.TestCase):
         self.assertEqual(cursor.rows[(1, self.DAY)], ('auto', 'closed'))
 
 
+class TelegramUsernamesTest(unittest.TestCase):
+    """Ники офиса для тегов в группе «Вопросы/ответы» (задача #280).
+
+    Проверка стоит именно здесь, на вводе, потому что дальше её негде поставить:
+    Bot API не умеет превращать «@ник» в человека, и опечатка не даёт никакой
+    ошибки — сообщение уходит, тег молча становится обычным текстом, а в группе
+    никто не получает уведомления.
+    """
+
+    def clean(self, value):
+        return wiki_offices.clean_telegram_usernames(value)
+
+    def test_at_sign_and_link_are_stripped(self):
+        """Ник копируют и из профиля, и ссылкой из чата. Хранится одна форма:
+        тег собирается склейкой «@» + ник, и вторая собака его сломала бы."""
+        for value in ('itaxi_uralsk', '@itaxi_uralsk', 't.me/itaxi_uralsk',
+                      'https://t.me/itaxi_uralsk', '  @itaxi_uralsk  '):
+            self.assertEqual(self.clean(value), (['itaxi_uralsk'], None), value)
+
+    def test_several_usernames_for_one_office(self):
+        """Решение владельца 07.09.2026: у офиса бывает несколько ответственных
+        — в ТЗ так у Астаны."""
+        self.assertEqual(
+            self.clean('@Itaxi_astana, t.me/itaxiAstanakaldayakova19'),
+            (['Itaxi_astana', 'itaxiAstanakaldayakova19'], None))
+        # Список принимаем наравне со строкой: форма шлёт строку, скрипт
+        # переноса удобнее пишется списком.
+        self.assertEqual(self.clean(['@itaxi_taraz', 'itaxi_semey'])[0],
+                         ['itaxi_taraz', 'itaxi_semey'])
+
+    def test_repeats_are_dropped_silently(self):
+        """Два способа записать одно и то же — не ошибка ввода."""
+        self.assertEqual(self.clean('@itaxi_taraz, itaxi_taraz, t.me/ITAXI_TARAZ')[0],
+                         ['itaxi_taraz'])
+
+    def test_empty_is_not_an_error(self):
+        """У восьми действующих офисов ника нет, и требовать его на каждой
+        правке адреса значило бы не дать сохранить карточку."""
+        for value in (None, '', '   ', '@', ',,', []):
+            self.assertEqual(self.clean(value), ([], None), value)
+
+    def test_typos_are_refused_not_swallowed(self):
+        for value in ('итакси_уральск', 'itax', '1itaxi', 'itaxi-uralsk', 'i' * 33,
+                      '@itaxi_taraz, итакси'):
+            names, error = self.clean(value)
+            self.assertIsNone(names, value)
+            self.assertTrue(error, value)
+
+    def test_a_wall_of_tags_is_refused(self):
+        """Строка тегов длиннее нескольких имён перестаёт быть адресом."""
+        many = ', '.join('itaxi_office%d' % i for i in range(wiki_offices.MAX_TELEGRAM_USERNAMES + 1))
+        names, error = self.clean(many)
+        self.assertIsNone(names)
+        self.assertIn('не больше', error)
+
+    def test_storage_round_trip(self):
+        names = ['Itaxi_astana', 'itaxiAstanakaldayakova19']
+        stored = wiki_offices.join_telegram_usernames(names)
+        self.assertEqual(wiki_offices.split_telegram_usernames(stored), names)
+        self.assertIsNone(wiki_offices.join_telegram_usernames([]))
+        self.assertEqual(wiki_offices.split_telegram_usernames(None), [])
+
+    def test_office_row_gives_a_list_not_a_stored_string(self):
+        """Клиенту незачем знать, что в базе ники лежат через запятую."""
+        values = {key: None for key in _OFFICE_KEYS}
+        values.update({'id': 1, 'name': 'Офис Астана', 'city': 'Астана',
+                       'telegram_usernames': 'Itaxi_astana,itaxiAstanakaldayakova19'})
+        office = _office_row(tuple(values[key] for key in _OFFICE_KEYS))
+        self.assertEqual(office['telegram_usernames'],
+                         ['Itaxi_astana', 'itaxiAstanakaldayakova19'])
+
+    def test_the_column_is_read_and_written(self):
+        """Забыть ник в одном из трёх списков — значит показать его в форме и
+        не сохранить (или наоборот). Списки лежат рядом, а расходятся молча."""
+        self.assertIn('telegram_usernames', _OFFICE_KEYS)
+        self.assertIn('o.telegram_usernames', wiki_offices._OFFICE_COLUMNS)
+        self.assertIn('telegram_usernames', wiki_offices._OFFICE_WRITABLE)
+
+    def test_the_form_sends_the_field_it_shows(self):
+        """Поле в форме и поле в теле запроса — два разных файла, и разъезжаются
+        они молча: ник вводится, тост говорит «Офис обновлён», а в справочнике
+        пусто. Проверяем текстом, как это делают остальные стражи фронта.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / 'src' / 'components' / 'wiki'
+        editor = (root / 'OfficeEditor.jsx').read_text(encoding='utf-8')
+        view = (root / 'WikiOffices.jsx').read_text(encoding='utf-8')
+        self.assertIn('telegram_usernames: e.target.value', editor)
+        self.assertIn('telegram_usernames:', view)
+        # Черновик обязан завести ключ: без него input становится
+        # неуправляемым, и React ругается в консоль на первой же букве.
+        self.assertIn("telegram_usernames: ''", view)
+
+    def test_migration_adds_the_column_idempotently(self):
+        from wiki import schema as wiki_schema
+
+        statements = [' '.join(str(item).split()) for item in wiki_schema._OFFICE_STATEMENTS]
+        self.assertTrue(any('wiki_offices ADD COLUMN IF NOT EXISTS telegram_usernames'
+                            in item for item in statements))
+
+
 if __name__ == '__main__':
     unittest.main()

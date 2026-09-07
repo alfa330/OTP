@@ -123,9 +123,31 @@ def format_body(text):
     return chr(10).join(result)
 
 
+def mentions_line(mentions):
+    """Строка с тегами ответственных офисов или None, если отмечать некого.
+
+    Тег — обычный текст «@ник», а не ссылка: уведомление в группе Telegram даёт
+    именно упоминание, а <a href="https://t.me/ник"> внешне неотличимо от него и
+    не будит никого. По той же причине ник не оборачивается ни в какой тег.
+
+    Повторы снимаются: у двух офисов города ник может быть один (один менеджер
+    на две точки), и отмечать его дважды в одном сообщении незачем.
+    """
+    seen, names = set(), []
+    for item in mentions or []:
+        username = str((item or {}).get('username') or '').strip().lstrip('@')
+        if not username or username.lower() in seen:
+            continue
+        seen.add(username.lower())
+        names.append('@' + html.escape(username))
+    if not names:
+        return None
+    return '👥 <b>Ответственные:</b> %s' % ' '.join(names)
+
+
 def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
                          priority='normal', client_name=None, client_phone=None,
-                         due_text=None, own_wording=False):
+                         due_text=None, own_wording=False, mentions=None):
     """Текст исходного сообщения обращения (HTML-разметка Telegram).
 
     Шапка устроена так, как её нарисовали в ТЗ задачи #206: первой строкой —
@@ -179,7 +201,15 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
     # владельца 19.08.2026). Отвечают не человеку, а обращению; имя, отдел и
     # время видны в карточке, куда ведёт ссылка в шапке.
 
-    return _clip('\n'.join(lines), MESSAGE_LIMIT)
+    # Теги — последней строкой, и обрезка их не касается. Обрезать сообщение
+    # целиком было бы дешевле, но у длинного обращения обрезанным оказался бы
+    # именно хвост, то есть теги: сообщение ушло бы, а уведомления — нет, и
+    # понять это можно было бы только по молчанию группы.
+    tail = mentions_line(mentions)
+    if not tail:
+        return _clip('\n'.join(lines), MESSAGE_LIMIT)
+    text = _clip('\n'.join(lines), MESSAGE_LIMIT - len(tail) - 2)
+    return '%s\n\n%s' % (text, tail)
 
 
 def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None):

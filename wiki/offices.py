@@ -587,6 +587,78 @@ def _text(value, limit):
     return ' '.join(str(value if value is not None else '').split())[:limit]
 
 
+# Telegram-ники офиса.
+#
+# Хранятся без «@» и без адреса t.me — принимаем все три формы, потому что ник
+# копируют и из профиля («@itaxi_uralsk»), и ссылкой из чата. Приводить к одной
+# форме обязательно: тег в сообщении собирается склейкой «@» + ник, и лишняя
+# собака превратила бы его в «@@ник», то есть в обычный текст.
+#
+# Ников бывает несколько: у Астаны в ТЗ задачи #280 их два. Список — строка
+# через запятую (см. миграцию в wiki/schema.py), наружу отдаётся списком.
+#
+# Проверка по правилам Telegram (5–32 знака, латиница, цифры и «_», первый знак
+# — буква) стоит здесь, а не только в форме, ровно по одной причине: бот НЕ
+# УМЕЕТ проверить ник перед отправкой. Bot API не превращает @ник в человека,
+# поэтому опечатка не даёт никакой ошибки — сообщение уходит, а тег молча
+# становится обычным текстом, и в группе никто не получает уведомления. Значит
+# единственное место, где опечатку вообще можно поймать, — момент ввода.
+_TELEGRAM_USERNAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{4,31}$')
+
+# Потолок — как у номеров точки и по той же причине: строка тегов длиннее
+# нескольких имён перестаёт быть адресом и становится рассылкой на всю группу.
+MAX_TELEGRAM_USERNAMES = 5
+
+TELEGRAM_USERNAME_ERROR = ('Telegram-ник офиса — от 5 до 32 знаков: латиница, цифры '
+                           'и «_», первым знаком буква. Несколько ников пишите через '
+                           'запятую. Не похоже на ник: %s')
+
+TELEGRAM_USERNAMES_LIMIT_ERROR = ('Ников у офиса не больше %d: строка тегов длиннее '
+                                  'перестаёт быть адресом' % MAX_TELEGRAM_USERNAMES)
+
+
+def split_telegram_usernames(value):
+    """Хранимая строка → список ников. Пусто — пустой список."""
+    return [item for item in re.split(r'[,\s]+', str(value or '').strip()) if item]
+
+
+def clean_telegram_usernames(value):
+    """Ники офиса из тела запроса → (список без «@», текст ошибки).
+
+    Принимает и строку («@a, t.me/b»), и готовый список — форма шлёт первое,
+    скрипт переноса удобнее пишется вторым.
+
+    Пусто — это не ошибка, а «ники не заполнены»: у восьми действующих офисов их
+    и правда нет, и требовать ник на каждой правке адреса значило бы не дать
+    сохранить карточку.
+    """
+    if isinstance(value, (list, tuple)):
+        raw = [' '.join(str(item or '').split()) for item in value]
+    else:
+        raw = split_telegram_usernames(value)
+
+    result = []
+    for item in raw:
+        item = re.sub(r'^(?:https?://)?(?:t\.me/|telegram\.me/)', '', item, flags=re.I)
+        item = item.strip().lstrip('@').strip()
+        if not item:
+            continue
+        if not _TELEGRAM_USERNAME_RE.match(item):
+            return None, TELEGRAM_USERNAME_ERROR % item
+        # Повтор — не ошибка ввода, а два способа записать одно и то же:
+        # снимаем молча, как и у номеров точки.
+        if item.lower() not in {x.lower() for x in result}:
+            result.append(item)
+    if len(result) > MAX_TELEGRAM_USERNAMES:
+        return None, TELEGRAM_USERNAMES_LIMIT_ERROR
+    return result, None
+
+
+def join_telegram_usernames(names):
+    """Список ников → то, что ложится в колонку. Пустой список — NULL."""
+    return ','.join(names) if names else None
+
+
 def clean_phones(values):
     """Номера точки: [{phone, note}]. Пустые отсеиваются, повторы снимаются.
 
@@ -796,14 +868,14 @@ _OFFICE_KEYS = ('id', 'slug', 'name', 'city', 'address', 'address_note', 'phone'
                 'map_url', 'map_resolved_url', 'lat', 'lon', 'schedule',
                 'is_online', 'all_parks', 'kind', 'partner_label', 'status', 'position',
                 'no_office', 'updated_at',
-                'closed_from', 'closed_until', 'closed_note')
+                'closed_from', 'closed_until', 'closed_note', 'telegram_usernames')
 
 _OFFICE_COLUMNS = """
     o.id, o.slug, o.name, o.city, o.address, o.address_note, o.phone,
     o.map_url, o.map_resolved_url, o.lat, o.lon, o.schedule,
     o.is_online, o.all_parks, o.kind, o.partner_label, o.status, o.position,
     o.no_office, o.updated_at,
-    o.closed_from, o.closed_until, o.closed_note
+    o.closed_from, o.closed_until, o.closed_note, o.telegram_usernames
 """
 
 
@@ -820,6 +892,9 @@ def _office_row(row):
     for key in ('closed_from', 'closed_until'):
         if office.get(key) is not None:
             office[key] = office[key].isoformat()
+    # Ники — списком, а не хранимой строкой: клиенту незачем знать, что в базе
+    # они лежат через запятую, а форма и без того собирает строку для поля.
+    office['telegram_usernames'] = split_telegram_usernames(office.get('telegram_usernames'))
     return office
 
 
@@ -931,7 +1006,7 @@ def cities(cursor, *, space_id):
 _OFFICE_WRITABLE = ('name', 'city', 'address', 'address_note', 'phone',
                     'map_url', 'map_resolved_url', 'lat', 'lon', 'schedule',
                     'is_online', 'all_parks', 'kind', 'partner_label',
-                    'status', 'position', 'slug', 'no_office')
+                    'status', 'position', 'slug', 'no_office', 'telegram_usernames')
 
 
 def _schedule_param(value):
@@ -945,12 +1020,12 @@ def create_office(cursor, *, slug, name, fields, created_by, space_id):
         INSERT INTO wiki_offices (space_id, slug, name, city, address, address_note, phone,
                                   map_url, map_resolved_url, lat, lon, map_checked_at,
                                   schedule, is_online, all_parks, kind, partner_label,
-                                  no_office, position, created_by)
+                                  no_office, telegram_usernames, position, created_by)
         VALUES (%(space)s, %(slug)s, %(name)s, %(city)s, %(address)s, %(address_note)s, %(phone)s,
                 %(map_url)s, %(map_resolved_url)s, %(lat)s, %(lon)s,
                 CASE WHEN %(lat)s IS NULL THEN NULL ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') END,
                 %(schedule)s, %(is_online)s, %(all_parks)s, %(kind)s, %(partner_label)s,
-                %(no_office)s,
+                %(no_office)s, %(telegram_usernames)s,
                 -- Позиция считается ВНУТРИ пространства: общий max сдвигал бы
                 -- первый офис новой вики на сорок седьмое место.
                 COALESCE((SELECT max(position) + 1 FROM wiki_offices
@@ -967,7 +1042,8 @@ def create_office(cursor, *, slug, name, fields, created_by, space_id):
          'is_online': bool(fields.get('is_online')),
          'all_parks': bool(fields.get('all_parks')),
          'kind': fields.get('kind') or 'park',
-         'partner_label': fields.get('partner_label')},
+         'partner_label': fields.get('partner_label'),
+         'telegram_usernames': fields.get('telegram_usernames')},
     )
     return cursor.fetchone()[0]
 

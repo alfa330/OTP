@@ -52,11 +52,13 @@ class FakeQueries:
     UNREAD_PROGRESS = 'progress'
 
     def __init__(self, db, payload=None, ticket=None, found=None,
-                 message_id=1, status_changed=True, thread_message=None):
+                 message_id=1, status_changed=True, thread_message=None,
+                 mentions=None):
         self.db = db
         self.calls = []
         self._payload = payload
         self._ticket = ticket
+        self._mentions = mentions or []
         self._found = found
         self._message_id = message_id
         self._status_changed = status_changed
@@ -103,6 +105,14 @@ class FakeQueries:
     def mark_seen_by_author(self, _cursor, ticket_id, user_id):
         self._record('mark_seen_by_author', ticket_id=ticket_id, user_id=user_id)
         return True
+
+    def section_space_ids(self, _cursor):
+        self._record('section_space_ids')
+        return [11]
+
+    def office_mentions(self, _cursor, target, *, space_ids):
+        self._record('office_mentions', target=target, space_ids=space_ids)
+        return self._mentions
 
     def find_ticket_by_tg_message(self, _cursor, chat_id, message_id):
         self._record('find_ticket', chat_id=chat_id, message_id=message_id)
@@ -201,11 +211,12 @@ class ServiceCase(unittest.TestCase):
         service.transport = self._real_transport
 
     def wire(self, *, payload=None, ticket=None, found=None, message_id=1,
-             status_changed=True, result=None, error=None, thread_message=None):
+             status_changed=True, result=None, error=None, thread_message=None,
+             mentions=None):
         service.queries = FakeQueries(
             self.db, payload=payload, ticket=ticket, found=found,
             message_id=message_id, status_changed=status_changed,
-            thread_message=thread_message,
+            thread_message=thread_message, mentions=mentions,
         )
         service.transport = FakeTransport(self.db, result=result, error=error)
         return service.queries, service.transport
@@ -408,6 +419,77 @@ class DeliveryTest(ServiceCase):
         Держать на них соединение пула нельзя: его делят SSE колокола и
         аукциона, и он уже голодал однажды."""
         self.wire(payload=dict(PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        self.assertEqual(self.db.max_depth, 1)
+
+
+class OfficeMentionTest(ServiceCase):
+    """Теги ответственных в группе «iTaxi Вопросы/ответы» (задача #280).
+
+    Проверяется не текст строки (он в test_crm_telegram.py), а то, КОГО раздел
+    просит найти и куда попадает результат: правило владельца — выбран офис,
+    зовём его; выбран только город, зовём всех по городу.
+    """
+
+    OFFICE_PAYLOAD = dict(
+        PARCEL_PAYLOAD,
+        subject='Статус работы офиса · Алматы',
+        body='Город: Алматы\nАдрес офиса: Офис Алматы №1',
+        scenario_key='office_status',
+        answers={'office_city': 'Алматы', 'office': '47',
+                 'driver_phone': '+7 777 000 00 00'},
+    )
+
+    def test_city_only_topic_asks_for_the_whole_city(self):
+        """«Уточнение посылки» офис не спрашивает вовсе: Яндекс называет город,
+        а офисов парка в Алматы четыре."""
+        queries, _transport = self.wire(payload=dict(PARCEL_PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        self.assertEqual([call['target'] for call in queries.find('office_mentions')],
+                         [{'city': 'Атырау'}])
+
+    def test_chosen_office_wins_over_its_city(self):
+        """Соседний офис того же города про чужой адрес не отвечает — будить
+        его незачем."""
+        queries, _transport = self.wire(payload=dict(self.OFFICE_PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        self.assertEqual([call['target'] for call in queries.find('office_mentions')],
+                         [{'office_id': '47'}])
+
+    def test_mentions_reach_the_message(self):
+        queries, transport = self.wire(
+            payload=dict(self.OFFICE_PAYLOAD),
+            mentions=[{'office_id': 47, 'name': 'Офис Алматы №1',
+                       'city': 'Алматы', 'username': 'itaxi_jambyla'}])
+        service.deliver_ticket(self.db, 42)
+        self.assertIn('@itaxi_jambyla', transport.sent[0]['text'])
+        # И в журнал обращения: «почему регион не отреагировал» разбирается
+        # только так — тег молчит одинаково и без ника, и с опечаткой в нём.
+        sent = [event for event in queries.find('add_event') if event['kind'] == 'sent']
+        self.assertEqual(sent[0]['payload'].get('mentions'), ['@itaxi_jambyla'])
+
+    def test_nobody_to_tag_leaves_the_message_as_it_was(self):
+        """У восьми действующих офисов ника нет. Это не повод не отправлять
+        обращение и не повод подставлять вместо них соседей."""
+        queries, transport = self.wire(payload=dict(self.OFFICE_PAYLOAD), mentions=[])
+        ok, error = service.deliver_ticket(self.db, 42)
+        self.assertTrue(ok, error)
+        self.assertNotIn('Ответственные', transport.sent[0]['text'])
+        sent = [event for event in queries.find('add_event') if event['kind'] == 'sent']
+        self.assertNotIn('mentions', sent[0]['payload'])
+
+    def test_foreign_queue_does_not_ask_the_office_directory(self):
+        """Город спрашивают и вопросы Sapar, но их читают в своей группе:
+        офис-менеджеру Тараза там делать нечего."""
+        queries, _transport = self.wire(payload=dict(PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        self.assertEqual(queries.find('office_mentions'), [])
+
+    def test_directory_is_read_outside_the_network_call(self):
+        """Ник читается в момент отправки, но не с открытым на сеть курсором:
+        пул делят SSE колокола и аукциона."""
+        self.wire(payload=dict(self.OFFICE_PAYLOAD),
+                  mentions=[{'username': 'itaxi_jambyla'}])
         service.deliver_ticket(self.db, 42)
         self.assertEqual(self.db.max_depth, 1)
 

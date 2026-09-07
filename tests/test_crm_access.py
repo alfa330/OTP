@@ -373,6 +373,51 @@ class SchemaContractTest(unittest.TestCase):
             queries.city_offices(cursor, 'Атырау', date(2026, 8, 31), space_ids=[]), [])
         self.assertEqual(cursor.queries, [])
 
+    def test_mentions_are_looked_up_by_the_same_rules_as_the_office_list(self):
+        """Теги ответственных (#280) берутся из того же справочника и с теми же
+        границами, что и список офисов на шаге «Адрес офиса»: иначе тег привёл
+        бы в группу СЗоВ офис-менеджера «Тез»."""
+        cursor = RecordingCursor()
+        queries.office_mentions(cursor, {'city': 'Алматы'}, space_ids=[11])
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('FROM wiki_offices', sql)
+        self.assertIn("o.status = 'active'", sql)
+        self.assertIn("o.kind = 'park'", sql)
+        self.assertIn('o.space_id = ANY(%(spaces)s)', sql)
+        # Офис без ника в выборку не попадает вовсе: пустая строка тега — это
+        # «@» в сообщении, то есть мусор вместо адресата.
+        self.assertIn('o.telegram_usernames IS NOT NULL', sql)
+        self.assertEqual(cursor.params['spaces'], [11])
+        self.assertEqual(cursor.params['city'], 'Алматы')
+        self.assertIsNone(cursor.params['office'])
+
+    def test_chosen_office_narrows_the_lookup_to_itself(self):
+        cursor = RecordingCursor()
+        queries.office_mentions(cursor, {'office_id': '47', 'city': 'Алматы'},
+                                space_ids=[11])
+        self.assertEqual(cursor.params['office'], 47)
+        self.assertIsNone(cursor.params['city'], 'город рядом с офисом расширил выборку')
+
+    def test_an_office_with_two_managers_gives_two_tags(self):
+        """Решение владельца 07.09.2026: ников у офиса бывает несколько."""
+        cursor = RecordingCursor([(49, 'Офис Астана', 'Астана',
+                                   'Itaxi_astana,itaxiAstanakaldayakova19')])
+        found = queries.office_mentions(cursor, {'office_id': '49'}, space_ids=[11])
+        self.assertEqual([item['username'] for item in found],
+                         ['Itaxi_astana', 'itaxiAstanakaldayakova19'])
+        # Чей это ник — рядом: в журнале обращения «@itaxi_almaty3» сам по себе
+        # не скажет, какой офис звали.
+        self.assertEqual({item['name'] for item in found}, {'Офис Астана'})
+
+    def test_mentions_without_a_space_or_a_target_ask_nothing(self):
+        """Пустая граница — не «все офисы», а «отмечать некого». Мусор вместо
+        id офиса (ответ приезжает с клиента строкой) не должен падать в отправке."""
+        for target, spaces in (({'city': 'Алматы'}, []), (None, [11]), ({}, [11]),
+                               ({'office_id': 'сорок семь'}, [11])):
+            cursor = RecordingCursor()
+            self.assertEqual(queries.office_mentions(cursor, target, space_ids=spaces), [])
+            self.assertEqual(cursor.queries, [])
+
     def test_section_asks_the_wiki_by_the_code_of_its_own_department(self):
         """Пространство выводится из отдела РАЗДЕЛА, а не смотрящего: раздел
         пускает и глобального админа, у которого отдела нет вовсе."""

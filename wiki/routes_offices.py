@@ -117,6 +117,27 @@ def _fields(data, *, partial):
     return fields
 
 
+def _telegram_usernames(data, fields):
+    """Кладёт ники офиса в поля. Возвращает ответ 400, если ник не похож на ник.
+
+    Отдельно от _fields, а не внутри него, потому что здесь нужен ОТКАЗ, а не
+    вычищенное значение: молча выбросить «@itaxi уральск» значит сохранить
+    карточку без ника и не сказать об этом — а узнают об этом уже в группе,
+    когда никого не отметило.
+    """
+    if 'telegram_usernames' not in data:
+        return None
+    names, error = wiki_offices.clean_telegram_usernames(data.get('telegram_usernames'))
+    if error:
+        return jsonify({"error": error, "code": "BAD_TELEGRAM_USERNAME"}), 400
+    # У записи «офиса в городе нет» ников не бывает — по той же причине, по
+    # которой у неё гасятся телефон и график: звать в группу некого, а
+    # оставленный ник продолжал бы отмечать человека по городу без офиса.
+    fields['telegram_usernames'] = (None if fields.get('no_office')
+                                    else wiki_offices.join_telegram_usernames(names))
+    return None
+
+
 def register(bp, wiki_route, db, log_ip):
 
     def _may_edit(ctx):
@@ -190,9 +211,14 @@ def register(bp, wiki_route, db, log_ip):
             slug = '%s-%d' % (base, suffix)
             suffix += 1
 
+        fields = _fields(data, partial=False)
+        bad_handle = _telegram_usernames(data, fields)
+        if bad_handle:
+            return bad_handle
+
         office_id = wiki_offices.create_office(
             cursor, slug=slug, name=name, created_by=ctx['user_id'],
-            fields=_fields(data, partial=False), space_id=space_id)
+            fields=fields, space_id=space_id)
         wiki_offices.set_office_parks(cursor, office_id, _links(data) or [],
                                       space_id=space_id)
 
@@ -224,6 +250,9 @@ def register(bp, wiki_route, db, log_ip):
 
         data = _body()
         fields = _fields(data, partial=True)
+        bad_handle = _telegram_usernames(data, fields)
+        if bad_handle:
+            return bad_handle
         if 'name' in data:
             name = _clean(data['name'])
             if not name:

@@ -50,7 +50,7 @@ const emptyDraft = () => ({
     name: '', city: '', address: '', address_note: '', phone: '',
     map_url: '', map_resolved_url: null, lat: null, lon: null,
     schedule: {}, no_office: false,
-    kind: 'park', partner_label: '',
+    kind: 'park', partner_label: '', telegram_usernames: '',
 });
 
 const draftFrom = (office) => ({
@@ -68,6 +68,9 @@ const draftFrom = (office) => ({
     no_office: !!office.no_office,
     kind: office.kind || 'park',
     partner_label: office.partner_label || '',
+    // В карточку ники приезжают списком, в поле живут строкой: вводят их
+    // через запятую, и разбирать на чипы нечего — ник и есть весь ответ.
+    telegram_usernames: (office.telegram_usernames || []).join(', '),
 });
 
 const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
@@ -267,6 +270,9 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
             no_office: !!draft.no_office,
             kind: draft.kind,
             partner_label: draft.kind === 'partner' ? (draft.partner_label || null) : null,
+            // Ники шлём и пустыми: стёртое поле обязано стереться и в справочнике,
+            // иначе бот продолжит звать в группу того, кого уже убрали.
+            telegram_usernames: draft.no_office ? '' : (draft.telegram_usernames || ''),
         };
         setBusy(true);
         const request = draft.id

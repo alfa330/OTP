@@ -343,6 +343,23 @@ export default function OfficeEditor({ draft, setDraft, base, headers, showToast
                         />
                     </Field>
 
+                    {/* Ники офиса в Telegram. Здесь, рядом с телефоном, потому
+                        что это тоже способ связи с этим офисом, — и здесь их
+                        правит тот, кто ведёт справочник, а не разработчик. По
+                        ним бот отмечает ответственных в группе, когда придёт
+                        обращение по этому офису или по его городу. */}
+                    <Field
+                        label="Telegram-ники офиса"
+                        hint="Кого бот отметит в группе «Вопросы/ответы» по обращениям этого офиса. Несколько — через запятую. Можно вставлять со «@» или ссылкой t.me."
+                    >
+                        <input
+                            className={iosInput}
+                            value={draft.telegram_usernames}
+                            placeholder="itaxi_almaty2, itaxi_jambyla"
+                            onChange={(e) => setDraft((prev) => ({ ...prev, telegram_usernames: e.target.value }))}
+                        />
+                    </Field>
+
                     <Field label="График работы">
                         <ScheduleEditor
                             schedule={draft.schedule}

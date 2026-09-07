@@ -1520,5 +1520,49 @@ class ScreensTest(unittest.TestCase):
         self.assertNotIn('Вложение', sc.groups_of(sc.get('yandex_termobox')))
 
 
+class MentionTargetTest(unittest.TestCase):
+    """Кого отмечать тегом в группе (задача #280).
+
+    Правило владельца от 07.09.2026 одно: выбран конкретный офис — тег этого
+    офиса, выбран только город — теги всех офисов города.
+    """
+
+    def test_chosen_office_wins_over_the_city(self):
+        self.assertEqual(
+            sc.mention_target('office_status', {'office_city': 'Алматы', 'office': '47'}),
+            {'office_id': '47'})
+
+    def test_city_alone_tags_the_whole_city(self):
+        """Офис ещё не выбран — в городе спрашивают всех: в Алматы у нас четыре
+        офиса парка, и угадывать за оператора нечего."""
+        self.assertEqual(sc.mention_target('office_status', {'office_city': 'Алматы'}),
+                         {'city': 'Алматы'})
+        self.assertEqual(sc.mention_target('parcel_location', {'parcel_city': 'Тараз'}),
+                         {'city': 'Тараз'})
+
+    def test_topics_of_other_queues_never_tag_offices(self):
+        """Город спрашивают и вопросы Sapar (STEP_CITY на входе в тематику), но
+        читают их специалисты Sapar в своей группе."""
+        for item in sc.SCENARIOS:
+            if item['queue_code'] in sc.MENTION_QUEUES:
+                continue
+            answers = {step['key']: 'Алматы' for step in item['steps']}
+            self.assertIsNone(sc.mention_target(item['key'], answers), item['key'])
+
+    def test_empty_answers_tag_nobody(self):
+        self.assertIsNone(sc.mention_target('office_status', {}))
+        self.assertIsNone(sc.mention_target('office_status', {'office_city': '  '}))
+        self.assertIsNone(sc.mention_target('нет такой тематики', {'city': 'Алматы'}))
+
+    def test_the_rule_is_set_on_the_queue(self):
+        self.assertEqual(sc.MENTION_QUEUES, frozenset({'regions'}))
+
+    def test_tagging_topics_do_not_go_as_a_picture(self):
+        """Теги живут в тексте сообщения, а у подписи к картинке их сборки нет:
+        совпади эти два списка — обращение ушло бы картинкой и без тегов, молча.
+        """
+        self.assertFalse(sc.MENTION_QUEUES & sc.CARD_QUEUES)
+
+
 if __name__ == '__main__':
     unittest.main()

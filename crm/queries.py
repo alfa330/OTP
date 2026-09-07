@@ -1355,6 +1355,64 @@ def city_offices(cursor, city, day, *, space_ids):
     return items
 
 
+def office_mentions(cursor, target, *, space_ids):
+    """Telegram-ники, которых бот отметит в группе. [{office_id, name, city, username}].
+
+    target — ответ scenarios.mention_target: {'office_id': …} или {'city': …}.
+    Фильтр офисов тот же, что у списка на шаге «Адрес офиса» (city_offices):
+    только действующие офисы парка и только нашего пространства. Иначе тег
+    привёл бы в группу СЗоВ офис-менеджера «Тез» — ровно та ошибка, которую
+    31.08.2026 уже ловили на выборе офиса.
+
+    Офис без ника молча пропускается, и подмены городом у него НЕТ: правило
+    владельца адресует обращение офису, а соседний офис того же города про
+    чужой адрес не отвечает. Пустой ответ означает «отметить некого» —
+    сообщение уходит как раньше, без строки с тегами.
+
+    Строка на КАЖДЫЙ ник, а не на офис: у офиса их бывает несколько (у Астаны
+    два), а отправке нужен плоский список. Чей ник — остаётся рядом, потому что
+    в журнале обращения «@itaxi_almaty3» сам по себе ничего не скажет о том,
+    какой офис звали.
+    """
+    from wiki import offices as wiki_offices
+
+    space_ids = [int(x) for x in (space_ids or [])]
+    if not space_ids or not target:
+        return []
+
+    office_id = str((target or {}).get('office_id') or '').strip()
+    city = str((target or {}).get('city') or '').strip()
+    if office_id:
+        # Ответ приезжает с клиента строкой; нечисловой id — не офис, а мусор,
+        # и запрос по нему упал бы прямо в отправке.
+        if not office_id.isdigit():
+            return []
+    elif not city:
+        return []
+
+    cursor.execute(
+        """
+        SELECT o.id, o.name, o.city, o.telegram_usernames
+          FROM wiki_offices o
+         WHERE o.status = 'active'
+           AND o.kind = 'park'
+           AND o.space_id = ANY(%(spaces)s)
+           AND o.telegram_usernames IS NOT NULL
+           AND btrim(o.telegram_usernames) <> ''
+           AND (%(office)s::int IS NULL OR o.id = %(office)s::int)
+           AND (%(city)s::text IS NULL
+                OR LOWER(TRIM(COALESCE(o.city, ''))) = LOWER(TRIM(%(city)s::text)))
+         ORDER BY o.position, o.name
+        """,
+        {'spaces': space_ids,
+         'office': int(office_id) if office_id else None,
+         'city': None if office_id else city},
+    )
+    return [{'office_id': row[0], 'name': row[1], 'city': row[2], 'username': username}
+            for row in cursor.fetchall()
+            for username in wiki_offices.split_telegram_usernames(row[3])]
+
+
 def bot_chats(cursor):
     """Чаты, куда бот уже добавлен, — для привязки очереди к группе.
 

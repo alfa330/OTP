@@ -40,6 +40,21 @@ def compute_due_at(sla_minutes):
 # Отправка обращения в группу
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _office_mentions(db, payload):
+    """Ники офисов, которых отметит бот. Пустой список — отмечать некого.
+
+    Отдельным коротким заходом в базу, а не полем delivery_payload: тег нужен
+    ровно одной очереди из четырёх, и платить за джойн со справочником офисов
+    на КАЖДОЙ отправке ради этого незачем.
+    """
+    target = scenarios.mention_target(payload.get('scenario_key'), payload.get('answers'))
+    if not target:
+        return []
+    with db._get_cursor() as cursor:
+        return queries.office_mentions(cursor, target,
+                                       space_ids=queries.section_space_ids(cursor))
+
+
 def deliver_ticket(db, ticket_id, *, attachment=None):
     """Отправляет обращение в Telegram-группу очереди. Возвращает (ok, error).
 
@@ -59,6 +74,12 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
     scenario = scenarios.get(payload['scenario_key']) or {}
     blocks = scenarios.body_blocks(payload['scenario_key'], payload['answers'],
                                    flags=payload['flags']) if scenario else []
+
+    # Кого отметить в группе (задача #280). Ники читаются В МОМЕНТ ОТПРАВКИ, а
+    # не сохраняются в обращение при создании: между «оператор заполнил форму» и
+    # «повторили отправку через час» ник офиса мог смениться, и правильный тот,
+    # что в справочнике сейчас.
+    mentions = _office_mentions(db, payload)
     heading = (scenario.get('group_title') or payload['subject'] or '').strip()
     subtitle = 'Обращение %s · %s' % (telegram.ticket_number(ticket_id),
                                       payload['queue_title'] or '')
@@ -104,6 +125,7 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
             client_phone=client_phone,
             due_text=due_text,
             own_wording=bool(scenario.get('body_template')),
+            mentions=mentions,
         )
         result, error = transport.send_message(payload['chat_id'], text)
 
@@ -127,10 +149,17 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
             author_user_id=payload['created_by'], author_name=payload['created_by_name'],
             tg_chat_id=payload['chat_id'], tg_message_id=message_id,
         )
+        # Кого отметили — в событие отправки. В карточке обращения этой строки
+        # нет намеренно (штатная отправка бейджами не рисуется), но вопрос
+        # «почему регион не отреагировал» разбирается только так: тег молчит
+        # одинаково и когда ника нет, и когда он с опечаткой.
+        sent_payload = {'queue': payload['queue_title']}
+        if mentions:
+            sent_payload['mentions'] = ['@%s' % item['username'] for item in mentions]
         queries.add_event(cursor, ticket_id=ticket_id, kind='sent',
                           actor_user_id=payload['created_by'],
                           actor_name=payload['created_by_name'],
-                          payload={'queue': payload['queue_title']})
+                          payload=sent_payload)
 
     # Скриншот оператора идёт следом реплаем на корень нити — само обращение (у
     # Sapar это карточка, у остальных текст). Склеивать их в альбом нельзя: на
