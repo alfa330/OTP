@@ -6325,6 +6325,7 @@ class Database:
             self._init_driver_chats_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
+            self._init_driver_mailings_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
             self._init_trainings_schema_tx(cursor)
             self._init_trainer_schema_tx(cursor)
@@ -7346,6 +7347,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT fleet_edm_schema")
+
+    def _init_driver_mailings_schema_tx(self, cursor):
+        """Схема раздела «Рассылки» (таблицы driver_mailing*).
+
+        Стоит ПОСЛЕ «Провайдера ЭДО» намеренно: сессию кабинета (fleet_edm_session)
+        заводит тот раздел, а «Рассылки» её только читают. Своей таблицы под куки
+        здесь нет и быть не должно — учётная запись кабинета одна, и второе
+        хранилище тех же кук означало бы две даты обновления и молчаливые 401 в
+        половине портала.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT driver_mailings_schema")
+        try:
+            from driver_mailings.schema import init_driver_mailings_schema
+            init_driver_mailings_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT driver_mailings_schema")
+            logging.exception(
+                "Схема раздела «Рассылки» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT driver_mailings_schema")
 
     def _init_cdr_schema_tx(self, cursor):
         """Схема раздела «Касания» (cdr_touches, cdr_sync_days, cdr_operators,

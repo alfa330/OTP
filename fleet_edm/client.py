@@ -230,18 +230,46 @@ class FleetClient:
                 self.concurrency += 1
                 self._since_throttle = 0
 
-    def _request(self, method, path, *, park_id, body=None, attempts=7):
+    def _request(self, method, path, *, park_id, body=None, attempts=7,
+                 params=None, extra_headers=None, allow_empty=False):
+        """Один запрос к кабинету с повторами, троттлингом и разбором отказов.
+
+        Три последних аргумента добавлены разделом «Рассылки» (задача #166) и на
+        «Провайдера ЭДО» не влияют — при значениях по умолчанию поведение прежнее:
+
+        * params — параметры строки запроса. Идентификатор рассылки кабинет ждёт
+          именно там (`GET /mailings?id=<uuid>`, `DELETE /mailings?id=<uuid>`),
+          а не в теле: с телом DELETE отвечает отказом.
+        * extra_headers — заголовки поверх общих. Нужен ровно один:
+          `x-idempotency-token` на отправке рассылки, один токен на одну попытку
+          в один парк, чтобы двойной клик или наш собственный повтор после
+          сетевого сбоя не превратились во вторую рассылку тем же людям.
+        * allow_empty — «пустой ответ это успех». Отправка рассылки и её отзыв
+          отвечают 204 без тела, и без этого флага такой ответ уходил бы в ветку
+          «Fleet вернул 204 без JSON — похоже, запрос собран неверно», то есть
+          удачная отправка выглядела бы ошибкой. Флаг признаёт пустоту успехом
+          ТОЛЬКО на 2xx: пустое тело с кодом 400 по-прежнему ошибка, и это
+          измеренный случай кривого запроса, а не тишина после удачи.
+        """
         url = BASE + path
         last_error = None
         for attempt in range(1, attempts + 1):
             self._wait_if_paused()
             try:
-                response = self._session.request(
-                    method, url,
-                    headers=self._headers(park_id, json_body=body is not None),
-                    data=(json.dumps(body) if body is not None else None),
-                    timeout=self._timeout,
-                )
+                headers = self._headers(park_id, json_body=body is not None)
+                if extra_headers:
+                    headers.update({str(k): str(v) for k, v in extra_headers.items()})
+                call = {
+                    'headers': headers,
+                    'data': json.dumps(body) if body is not None else None,
+                    'timeout': self._timeout,
+                }
+                if params:
+                    # Параметры добавляются в вызов, только когда они есть:
+                    # там, где их нет (весь «Провайдер ЭДО»), форма обращения к
+                    # транспорту остаётся ровно прежней.
+                    call['params'] = params
+                response = self._session.request(method, url, **call)
             except requests.RequestException as error:
                 # Сеть моргнула — ждём с нарастанием. В логе только тип ошибки:
                 # тело запроса содержит ID водителей, ему в логах не место.
@@ -268,6 +296,12 @@ class FleetClient:
                 last_error = FleetError('HTTP {}'.format(response.status_code))
                 time.sleep(min(self._max_delay, 2.0 * attempt))
                 continue
+
+            # Удачная тишина: 204 (и вообще любой 2xx с пустым телом) — законный
+            # ответ на отправку и отзыв рассылки, разбирать в нём нечего.
+            if (allow_empty and 200 <= response.status_code < 300
+                    and not (response.content or b'')):
+                return None
 
             try:
                 payload = response.json()

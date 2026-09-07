@@ -56015,6 +56015,26 @@ except Exception:
     logging.exception("Раздел «Провайдер ЭДО»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Рассылки»: сообщения водителям в приложение Pro (задача #166) ────
+# Своего пула потоков нет намеренно, в отличие от «Провайдера ЭДО»: там обход 86
+# диспетчерских занимает минуты, здесь вся работа — пять запросов в кабинет по
+# полсекунды. Раздел ходит в кабинет на ОБЩЕЙ сессии, которую держит «Провайдер
+# ЭДО» (таблица fleet_edm_session): учётка кабинета одна, и второе хранилище тех
+# же кук означало бы две даты обновления и молчаливые 401 в половине портала.
+try:
+    from driver_mailings.routes import build_driver_mailings_blueprint  # noqa: E402
+
+    app.register_blueprint(build_driver_mailings_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раздел «Рассылки»: Blueprint подключён на /api/driver_mailings")
+except Exception:
+    logging.exception("Раздел «Рассылки»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Касания»: звонки отдела продаж из CDR АТС FreePBX ────────────────
 # Своего пула у раздела нет намеренно: портал к станции не ходит. Станция стоит
 # в корпоративной сети (наружу её выводили 25.08.2026 и в тот же день закрыли —
