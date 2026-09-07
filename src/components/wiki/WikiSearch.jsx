@@ -17,9 +17,11 @@ import { matchBrand, matchCar } from './carMatch';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import WikiSearchFilters, {
-    hasOpenFilterLayer, isInsideSearchFilters,
+    SearchFilterButton, hasOpenFilterLayer, isInsideSearchFilters,
 } from './WikiSearchFilters';
-import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
+import {
+    EMPTY_FILTERS, filtersKey, isDefaultFilters, searchParams,
+} from './searchFilters';
 
 /* Поиск по вики — порт search-modal.tsx исходной вики на примитивы портала.
  *
@@ -628,6 +630,26 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         inputRef.current?.blur();
     }, []);
 
+    /* Escape снимает по ОДНОМУ слою сверху вниз: сначала список создателей
+       (CustomSelect гасит себя сам — его мы просто пропускаем вперёд), затем
+       панель фильтров, и только потом весь поиск. Раньше панель жила лишь при
+       набранном запросе и Escape закрывал поиск вместе с ней; теперь её
+       раскрывают и на пустом поле — выйти из неё было бы некуда.
+
+       ОБРАБОТЧИК ОДИН, оконный (ниже), и это не вкусовщина. Раньше Escape
+       ловили оба — и поле, и окно, — что было безобидно, пока он делал одно и
+       то же: close() дважды равен close() однажды. С лестницей слоёв тот же
+       нажим стал съедать сразу два: React слушает на корне приложения, окно —
+       выше по всплытию, и к моменту, когда событие дошло до window, React уже
+       перерисовался и ПОДМЕНИЛ оконного слушателя новым — с filtersOpen: false.
+       Панель закрывалась вместе с поиском; поймано в браузере, из кода не
+       видно. Поэтому в onKeyDown поля Escape больше нет вовсе. */
+    const escapeStep = useCallback(() => {
+        if (hasOpenFilterLayer()) return;
+        if (filtersOpen) { setFiltersOpen(false); return; }
+        close();
+    }, [filtersOpen, close]);
+
     const pickRow = useCallback((row) => {
         if (row.kind === 'assistant') {
             // Закрываемся ДО вопроса: помощник открывается на своей вкладке, и
@@ -658,9 +680,6 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     }, [items, sheetOpen]);
 
     const onKeyDown = useCallback((e) => {
-        // Escape обслуживает верхний слой: открытая панель фильтров или список
-        // создателей гасят себя сами, и поиск при этом обязан остаться.
-        if (e.key === 'Escape') { if (!hasOpenFilterLayer()) close(); return; }
         if (!rows.length) return;
         if (e.key === 'ArrowDown') {
             e.preventDefault();
@@ -674,7 +693,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
             e.preventDefault();
             pickRow(rows[selectedIndex]);
         }
-    }, [rows, selectedIndex, pickRow, close]);
+    }, [rows, selectedIndex, pickRow]);
 
     /* ⌘K / Ctrl+K — как в оригинале: на десктопе ставит фокус в поле, на
        телефоне открывает лист. Слушатель живёт только у смонтированного
@@ -694,16 +713,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                 inputRef.current?.focus();
                 return;
             }
-            if (e.key === 'Escape') {
-                // Открытый список CustomSelect («Город», «Создатель») и панель
-                // фильтров гасят себя сами — внутренний слой пропускаем вперёд.
-                if (hasOpenFilterLayer()) return;
-                close();
-            }
+            if (e.key === 'Escape') escapeStep();
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [close]);
+    }, [escapeStep]);
 
     /* Клик мимо — выпадашка закрывается. Внутри неё закрывать нечему:
        слушатель проверяет containerRef, а blur поля выпадашку не гасит.
@@ -744,7 +758,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
        запроса — везде, где поправка была ненулевой, то есть когда поле поиска
        близко к краю экрана. transform на раскладку не влияет вовсе, поэтому
        замер после него совпадает с замером до и круг сходится за один проход. */
-    const dropOpen = focused && term.length >= 2;
+    /* Выпадашка держится и на пустом запросе — когда раскрыта панель фильтров
+       или условие уже стоит. Без этого кнопка в поле открывала бы панель в
+       никуда: сама панель живёт ВНУТРИ выпадашки. */
+    const dropOpen = focused
+        && (term.length >= 2 || filtersOpen || !isDefaultFilters(filters));
     useLayoutEffect(() => {
         // Закрывающуюся выпадашку не меряем: AnimatePresence держит её в DOM
         // ещё 120 мс, и это замер уезжающего блока.
@@ -768,22 +786,22 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
        и мобильный лист. Две копии разметки разъехались бы: у них и так общий
        ResultsPane ровно по этой причине.
 
-       Показываем её с двух символов, как и саму выдачу: фильтровать нечего,
-       пока сервер не спрошен, а на телефоне пане рисуется всегда — и полоса
-       мигала бы над подсказкой «введите минимум два символа». */
-    const filtersSlot = term.length >= 2 ? (
+       Порога в два символа здесь БОЛЬШЕ НЕТ: панель раскрывают до слова, а своя
+       пустота — забота самой панели (свёрнутая и без выбранного она не рисует
+       ничего, включая рамку и отступ). Заодно элемент перестал появляться и
+       исчезать на втором символе — а вместе с каждым таким монтированием
+       терялась память о том, что создатели уже запрошены. */
+    const filtersSlot = (
         <WikiSearchFilters
             className="mb-2 border-b border-slate-100 px-1 pb-2"
-            size="sm"
             value={filters}
             onChange={setFilters}
             open={filtersOpen}
-            onOpenChange={setFiltersOpen}
             onNeedAuthors={loadAuthors}
             authors={authors}
             authorsLoading={authorsLoading}
         />
-    ) : null;
+    );
 
     const paneProps = {
         term, rows, articleRows, fragmentRows, selectedIndex,
@@ -848,7 +866,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                     aria-expanded={dropOpen}
                 />
                 {loading && <Loader2 size={14} className="shrink-0 animate-spin text-slate-400" />}
-                {query ? (
+                {query && (
                     <button
                         type="button"
                         onClick={() => { setQuery(''); inputRef.current?.focus(); }}
@@ -857,6 +875,19 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                     >
                         <X size={11} />
                     </button>
+                )}
+                {/* Фильтры — у самого правого края и ровно с того мига, как в
+                    поле щёлкнули: условие ставят ДО слова, а не вторым заходом
+                    по уже полученной выдаче. Подсказку ⌘K кнопка собой и
+                    заменяет — сочетание зовёт в поле, в котором человек уже
+                    стоит, и держать оба знака на одном краю незачем. */}
+                {focused ? (
+                    <SearchFilterButton
+                        className="-mr-1"
+                        value={filters}
+                        open={filtersOpen}
+                        onOpenChange={setFiltersOpen}
+                    />
                 ) : (
                     <kbd className="hidden shrink-0 rounded-md border border-slate-200 px-1.5 py-0.5 text-[10.5px] font-medium text-slate-400 lg:block">
                         ⌘K
@@ -946,6 +977,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                                         onKeyDown={onKeyDown}
                                         placeholder="Статья, марка или модель машины…"
                                         aria-label="Поисковый запрос"
+                                    />
+                                    <SearchFilterButton
+                                        value={filters}
+                                        open={filtersOpen}
+                                        onOpenChange={setFiltersOpen}
                                     />
                                     <button
                                         type="button"

@@ -8,7 +8,7 @@ import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
 import WikiPark from './WikiPark';
 import { markedWord } from './WikiSearch';
-import WikiSearchFilters from './WikiSearchFilters';
+import WikiSearchFilters, { SearchFilterButton } from './WikiSearchFilters';
 import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
@@ -688,25 +688,33 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                 <X size={11} />
                             </button>
                         )}
-                    </div>
-
-                    {/* Фильтры появляются вместе с выдачей, а не стоят на витрине
-                        «про меня»: пока искать не начали, фильтровать нечего, и
-                        кнопка читалась бы как настройки раздела. То же правило,
-                        что у поиска в шапке. */}
-                    {searching && (
-                        <WikiSearchFilters
-                            className="mx-auto mt-2.5 max-w-[560px] text-left"
-                            size="sm"
+                        {/* Кнопка фильтров — у правого края САМОГО поля, как и в
+                            поиске шапки раздела. Раньше и она, и панель ждали
+                            запроса: «пока искать не начали, фильтровать нечего».
+                            Возражение было про кнопку НА ВИТРИНЕ — отдельно
+                            стоящая, она читалась как настройки раздела. Внутри
+                            поля она часть поиска, и порядок наконец обычный:
+                            сузил, потом набрал. */}
+                        <SearchFilterButton
+                            className="-mr-1"
                             value={filters}
-                            onChange={setFilters}
                             open={filtersOpen}
                             onOpenChange={setFiltersOpen}
-                            onNeedAuthors={loadAuthors}
-                            authors={authors}
-                            authorsLoading={authorsLoading}
                         />
-                    )}
+                    </div>
+
+                    {/* Панель и чипы — без оглядки на запрос: своя пустота
+                        забота самой панели (свёрнутая и без выбранного она не
+                        рисует ничего). */}
+                    <WikiSearchFilters
+                        className="mx-auto mt-2.5 max-w-[560px] text-left"
+                        value={filters}
+                        onChange={setFilters}
+                        open={filtersOpen}
+                        onNeedAuthors={loadAuthors}
+                        authors={authors}
+                        authorsLoading={authorsLoading}
+                    />
 
                 </section>
 

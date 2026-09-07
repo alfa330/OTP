@@ -348,9 +348,33 @@ class SearchFiltersSourceTest(unittest.TestCase):
         self.assertIn('data-wiki-search-filters', self.panel_code)
 
     def test_escape_serves_the_top_layer_first(self):
-        """Escape при открытой панели гасит панель, а не поиск целиком."""
-        self.assertGreaterEqual(self.header_code.count('hasOpenFilterLayer()'), 2,
-                                'Escape поля и Escape окна должны спрашивать оба')
+        """Escape снимает по ОДНОМУ слою, а не гасит поиск целиком.
+
+        Слоёв три: список создателей (гасит себя сам), панель фильтров и сам
+        поиск. Панель раскрывают и на пустом запросе — закройся поиск вместе с
+        ней, выйти из панели было бы некуда.
+        """
+        self.assertIn('hasOpenFilterLayer()', self.header_code)
+        self.assertIn('setFiltersOpen(false)', self.header_code)
+
+    def test_escape_is_handled_in_exactly_one_place(self):
+        """Обработчик у Escape ровно один — оконный.
+
+        Пока Escape делал одно и то же, обработчиков было два (поле и окно), и
+        это не мешало: close() дважды равен close() однажды. С лестницей слоёв
+        тот же нажим стал съедать сразу два — и молча. React слушает на корне
+        приложения, окно стоит выше по всплытию, и к моменту, когда событие
+        доходит до window, React успел перерисоваться и ПОДМЕНИТЬ оконного
+        слушателя новым — уже с filtersOpen: false. Панель закрывалась вместе с
+        поиском; поймано в браузере, по коду не видно.
+        """
+        self.assertEqual(self.header_code.count('escapeStep()'), 1,
+                         'Escape снова ловят двое — один нажим съест два слоя')
+        keys = re.search(r'const onKeyDown = useCallback\((.*?)\n    \}, \[',
+                         self.header_code, re.S)
+        self.assertIsNotNone(keys, 'не нашли обработчик клавиш поля')
+        self.assertNotIn('Escape', keys.group(1),
+                         'Escape вернулся в обработчик поля и сработает вместе с оконным')
 
     def test_filters_are_not_a_keyboard_row(self):
         """Кнопка фильтров не входит в список строк выдачи.
@@ -390,15 +414,42 @@ class SearchFiltersSourceTest(unittest.TestCase):
         self.assertIsNotNone(reset, 'не нашли сброс при закрытии поиска')
         self.assertIn('setFilters(EMPTY_FILTERS)', reset.group(1))
 
-    def test_filter_row_appears_together_with_the_results(self):
-        """Фильтры показываются с двух символов, как и сама выдача.
+    def test_filters_can_be_set_before_the_query(self):
+        """Условие ставят ДО слова, а не вторым заходом по готовой выдаче.
 
-        На телефоне пане рисуется всегда, и без этого условия полоса фильтров
-        мигала бы над подсказкой «введите минимум два символа» — то есть
-        предлагала бы сузить то, чего ещё нет.
+        Раньше и кнопка, и панель появлялись только с двух символов. Человек,
+        который заранее знает, что ищет регламент, всё равно получал полную
+        выдачу и шёл сужать её повторно — порядок был перевёрнут.
+
+        Проверяются три звена: порога в два символа у строки фильтров больше
+        нет, выпадашка держится открытой ради панели на пустом запросе, и на
+        витрине панель не ждёт запроса. Отвались любое — фильтр снова стал бы
+        доступен только после поиска.
         """
-        self.assertIn('term.length >= 2 ? (', self.header_code)
-        self.assertIn('{searching && (', self.library_code)
+        self.assertNotIn('term.length >= 2 ? (', self.header_code,
+                         'строка фильтров снова ждёт двух символов')
+        self.assertIn('filtersOpen || !isDefaultFilters(filters)', self.header_code,
+                      'выпадашка не держится открытой ради панели фильтров')
+        self.assertNotRegex(self.library_code,
+                            r'searching\s*&&\s*\(\s*\n\s*<WikiSearchFilters',
+                            'на витрине фильтры снова ждут запроса')
+
+    def test_the_filter_button_stands_in_the_search_field(self):
+        """Кнопка живёт у правого края поля, а не отдельным органом над выдачей.
+
+        Отдельно стоящая кнопка и была причиной, по которой её прятали до
+        запроса: на пустом экране она читалась как настройки раздела. Внутри
+        поля она часть поиска — и появляется по щелчку в него.
+
+        В шапке раздела полей ДВА: растущая строка на десктопе и шапка
+        полноэкранного листа на телефоне. Кнопка обязана быть в обоих, иначе на
+        телефоне фильтр остался бы без единой двери.
+        """
+        self.assertGreaterEqual(self.header_code.count('<SearchFilterButton'), 2,
+                                'кнопка фильтров стоит не в обоих полях поиска шапки')
+        self.assertIn('<SearchFilterButton', self.library_code,
+                      'на витрине кнопка фильтров не в поле поиска')
+        self.assertIn('export function SearchFilterButton', self.panel_code)
 
     def test_authors_are_dropped_when_the_space_changes(self):
         """У соседней вики свой периметр и свои люди.

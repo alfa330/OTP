@@ -9,6 +9,18 @@ import {
 
 /* Фильтры поиска: где искать, какой тип документа, чей.
  *
+ * Кнопка стоит У ПРАВОГО КРАЯ САМОГО ПОЛЯ поиска, а панель раскрывается ДО
+ * запроса. Раньше и кнопка, и панель появлялись только с двух символов — то
+ * есть «сначала найди, потом сужай», — и это переворачивало обычный порядок:
+ * человек знает, что ищет регламент, ещё до того, как набрал слово, а получал
+ * полную выдачу и шёл сужать её вторым заходом. Кнопка внутри поля заодно
+ * снимает старое возражение против ранней кнопки на витрине «Все статьи вики»:
+ * стоя в поле, она читается как часть поиска, а не как настройки раздела.
+ *
+ * Кнопку держит РОДИТЕЛЬ (SearchFilterButton ниже), потому что поле поиска —
+ * его разметка: у шапки раздела это растущая строка с ⌘K, у витрины — широкая
+ * пилюля по центру, и одну кнопку в двух чужих строках компонент бы не собрал.
+ *
  * Панель ВСТРОЕНА в выдачу, а не всплывает поповером над ней, и это главное
  * решение здесь. Работа с фильтром всегда итеративная — отметил тип, посмотрел,
  * снял, добавил создателя, — а поповер (как у фильтра офисов, OfficeFilters.jsx)
@@ -90,7 +102,41 @@ export function SearchFilterChips({ value, authors = [], onChange, className = '
     );
 }
 
-/* ── Кнопка и панель ────────────────────────────────────────────────────── */
+/* ── Кнопка в поле поиска ───────────────────────────────────────────────── */
+
+/** Кнопка фильтров — значком, у правого края поля.
+ *
+ * Без подписи: место в поле считанное (в шапке раздела там же живут крестик
+ * «очистить» и подсказка ⌘K), а ползунки читаются как фильтр и без слова.
+ * Цифра рядом — сколько условий стоит: свёрнутая панель без неё была бы скрытым
+ * состоянием, из-за которого «ничего не найдено» выглядит поломкой поиска.
+ */
+export function SearchFilterButton({ value, open = false, onOpenChange, className = '' }) {
+    const count = activeCount(value);
+    return (
+        <button
+            type="button"
+            /* Метка та же, что у панели: щелчок по кнопке не должен считаться
+               щелчком мимо поиска — иначе выпадашка гасла бы в тот же миг, в
+               который кнопка её открывает. */
+            data-wiki-search-filters=""
+            aria-label="Фильтры поиска"
+            aria-expanded={open}
+            title="Фильтры поиска"
+            onClick={() => onOpenChange?.(!open)}
+            className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-lg px-1.5 text-[11px] font-bold tabular-nums transition active:scale-[0.95] ${
+                open || count
+                    ? 'bg-slate-900 text-white'
+                    : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+            } ${className}`}
+        >
+            <SlidersHorizontal size={13} />
+            {count > 0 && count}
+        </button>
+    );
+}
+
+/* ── Панель ─────────────────────────────────────────────────────────────── */
 
 const TypeChip = ({ checked, label, onClick }) => (
     <button
@@ -109,12 +155,9 @@ const TypeChip = ({ checked, label, onClick }) => (
 
 export default function WikiSearchFilters({
     value, onChange, authors = [], authorsLoading = false,
-    open = false, onOpenChange, onNeedAuthors = null,
-    size = 'md', className = '',
+    open = false, onNeedAuthors = null, className = '',
 }) {
     const filters = useMemo(() => normalizeFilters(value), [value]);
-    const count = activeCount(filters);
-    const small = size === 'sm';
 
     /* Создатели грузятся при ПЕРВОМ раскрытии панели, а не при заходе в поиск:
        список стоит обхода периметра, а открывает панель меньшинство. Ref, а не
@@ -137,48 +180,24 @@ export default function WikiSearchFilters({
 
     const selectedAuthors = useMemo(() => filters.authors.map(String), [filters.authors]);
 
+    /* Ни панели, ни чипов — не рисуем и оболочки. Компонент теперь стоит в
+       разметке БЕЗУСЛОВНО (кнопка, которая его открывает, живёт отдельно), и
+       пустой блок с рамкой и отступом висел бы над выдачей всё время, ничего
+       не сообщая. */
+    if (!open && isDefaultFilters(filters)) return null;
+
     return (
         <div className={className} data-wiki-search-filters="">
-            <div className="flex items-start gap-2">
-                <button
-                    type="button"
-                    aria-label="Фильтры поиска"
-                    aria-expanded={open}
-                    onClick={() => onOpenChange?.(!open)}
-                    className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl font-semibold transition-all active:scale-[0.98] ${
-                        small ? 'px-2.5 py-1.5 text-[12px]' : 'px-3 py-2 text-[13px]'
-                    } ${
-                        open || count
-                            ? 'bg-slate-900 text-white'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
-                >
-                    <SlidersHorizontal size={small ? 13 : 14} />
-                    Фильтры
-                    {count > 0 && (
-                        <span className="grid h-[17px] min-w-[17px] place-items-center rounded-full bg-white/25 px-1 text-[10.5px] font-bold tabular-nums">
-                            {count}
-                        </span>
-                    )}
-                </button>
-
-                {/* Пока панель раскрыта, чипы — второй экземпляр того же
-                    состояния: отмеченные типы и выбранный человек видны прямо в
-                    панели, а «Сбросить» там свой. Показываем их только когда
-                    панель свёрнута — тогда чипы единственное, что говорит, чем
-                    сужена выдача. */}
-                {!open && (
-                    <SearchFilterChips
-                        className="min-w-0 flex-1 pt-0.5"
-                        value={filters}
-                        authors={authors}
-                        onChange={onChange}
-                    />
-                )}
-            </div>
+            {/* Пока панель раскрыта, чипы — второй экземпляр того же состояния:
+                отмеченные типы и выбранный человек видны прямо в панели, а
+                «Сбросить» там свой. Показываем их только когда панель свёрнута —
+                тогда чипы единственное, что говорит, чем сужена выдача. */}
+            {!open && (
+                <SearchFilterChips value={filters} authors={authors} onChange={onChange} />
+            )}
 
             {open && (
-                <div className="mt-2 rounded-xl bg-slate-50 p-2.5 ring-1 ring-slate-200/70">
+                <div className="rounded-xl bg-slate-50 p-2.5 ring-1 ring-slate-200/70">
                     <div className={iosGroupLabel}>Где искать</div>
                     <IosSegmented
                         className="mt-1.5"
