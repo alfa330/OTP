@@ -176,7 +176,15 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             return wrapper
         return decorator
 
-    def section_route(rule, methods=('GET',), manage=False):
+    def section_route(rule, methods=('GET',), manage=False, gate=None):
+        """gate — чем закрыт вход. По умолчанию это доступ к разделу.
+
+        Отдельным кругом закрыто только скачивание exe: он положен КАЖДОМУ
+        оператору СЗоВ, а раздел с настройками — нет. Передавать сюда предикат,
+        а не размазывать проверку по обработчикам, важно по той же причине, по
+        которой гейт вообще живёт в декораторе: спрятанный пункт меню доступом
+        не является, адрес ручки известен.
+        """
         all_methods = tuple(methods) + ('OPTIONS',)
 
         def decorator(handler):
@@ -201,7 +209,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                     # Гейт здесь, а не в каждом обработчике: спрятанный пункт
                     # меню доступом не является, раздел открывается и прямым
                     # адресом.
-                    if not access.can_view_section(requester):
+                    if not (gate or access.can_view_section)(requester):
                         return jsonify({"error": "Раздел вам не открыт"}), 403
                     if manage and not access.can_manage_settings(requester):
                         return jsonify({"error": "Недостаточно прав"}), 403
@@ -448,7 +456,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         return jsonify({"rows": rows, "from": date_from, "to": date_to,
                         "rejected": rejected, "pending": pending})
 
-    @section_route('/download')
+    @section_route('/download', gate=access.can_download_agent)
     def oktell_guard_download(requester_id, requester):
         """«Скачать агента»: ссылка + личный токен в ИМЕНИ файла.
 
@@ -458,11 +466,14 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         перестаёт быть анонимной, а токен можно отозвать. У нас хранится только
         отпечаток, самого значения мы не знаем.
 
-        Ручка осталась на уровне ПРОСМОТРА и после выдачи раздела супервайзерам
-        (31.08.2026), хотя формально она пишет: установщик операторам раздаёт как
-        раз СВ, а сам файл и так отдаёт публичная /version — спрятать exe от СВ
-        всё равно невозможно. Плата — личный токен на имя СВ, то есть ровно те же
-        права, что уже есть у каждой машины с установленным агентом.
+        С 07.09.2026 ручка открыта КАЖДОМУ оператору СЗоВ (access.can_download_agent),
+        а не только тем, кто видит раздел: пункт «Скачать Oktell» стоит у них в
+        меню, как «Скачать iCore Phone» у ОП и Тез КЦ. Это ещё и точнее по сути —
+        личный токен оказывается на самом человеке, а не на супервайзере, который
+        раздавал установщик за него: до этого присланные факты подписывались чужим
+        именем, и в отчёте появлялась пометка «агент принадлежит такому-то».
+        Секретного ничего не открывается: сам файл и так отдаёт публичная /version,
+        без неё не работало бы автообновление ни на одной машине.
         """
         with db._get_cursor() as cursor:
             release = queries.current_release(cursor)

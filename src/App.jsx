@@ -191,6 +191,7 @@ const TouchesView = lazyWithRetry(() => import('./components/cdr/TouchesView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
 const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
+const DriverMailingsView = lazyWithRetry(() => import('./components/driver_mailings/DriverMailingsView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
 const ShiftHistoryPopover = lazyWithRetry(() => import('./components/schedule/ShiftHistoryPopover'));
@@ -244,6 +245,13 @@ const ICORE_PHONE_DEPARTMENT_IDS = new Set([367, 560]);
 // Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES в bot_schedule2.py).
 const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
 const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
+// Раздел «Рассылки» (задача #166): супер-админы и поимённо названные владельцем
+// люди. Периметр НЕ выводится из роли: одно нажатие отправляет сообщение больше
+// чем тысяче водителей в приложение Pro, отозвать его можно пять минут, а
+// прочитанное — уже никогда. Открыть «всем admin» значило бы раздать эту кнопку
+// десяткам людей, которым её никто не давал. Та же константа на бэкенде —
+// SECTION_ALLOWED_USER_IDS в driver_mailings/access.py.
+const DRIVER_MAILINGS_ALLOWED_USER_IDS = new Set([476]);
 // «Настройки SIP» — телефония: адрес сервера, пароли, автодозвон и SIP-номера
 // операторов. Раздел НЕ «для любого главы отдела»: бэк-офис (Бухгалтерия, HR)
 // и фронт-офисы звонков не принимают, и панель с паролями SIP им не нужна.
@@ -365,6 +373,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
     driver_chats: 'Driver chats',
+    driver_mailings: 'Driver mailings',
     olx_leads: 'OLX leads',
     touches: 'Sales touches',
     profile: 'Profile',
@@ -852,6 +861,26 @@ const downloadIcorePhone = async () => {
         window.open(data.url, '_blank', 'noopener');
     } catch (error) {
         emitAppToast(`Не удалось скачать iCORE Phone: ${error.message}`, 'error');
+    }
+};
+
+// Скачать программу Oktell (тот самый агент-ограничитель). Ссылку берём свежей
+// по нажатию не только из-за часа жизни подписи: в ИМЯ файла сервер вкладывает
+// личный токен сотрудника, и держать её в разметке нельзя тем более. Сотрудник
+// запускает файл двойным кликом — программа ставит себя сама и создаёт ярлык
+// «Oktell», больше от него ничего не требуется.
+const downloadOktellAgent = async () => {
+    try {
+        const resp = await fetch(`${API_BASE_URL}/api/oktell_guard/download`, {
+            credentials: 'include',
+            headers: withAccessTokenHeader(),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+        if (!data?.url) throw new Error('Сервер не вернул ссылку');
+        window.open(data.url, '_blank', 'noopener');
+    } catch (error) {
+        emitAppToast(`Не удалось скачать Oktell: ${error.message}`, 'error');
     }
 };
 
@@ -1770,6 +1799,25 @@ const canAccessOktellGuardForUser = (userLike) => {
             === OKTELL_GUARD_DEPARTMENT_CODE;
 };
 
+/* «Скачать Oktell» — программа-ограничитель на машину оператора СЗоВ. Решение
+   владельца 07.09.2026: пункт стоит у КАЖДОГО оператора отдела, ровно как
+   «Скачать iCore Phone» у ОП и Тез КЦ. Поэтому круг здесь ШИРЕ, чем у самого
+   раздела: настройки и отчёт оператору не нужны, а программа нужна.
+
+   Роли — те же, что показывает вкладка «Сотрудники» ограничителя (AGENT_USER_ROLES
+   в oktell_guard/access.py). Решающая проверка живёт там же, в can_download_agent:
+   спрятанный пункт меню доступом не является. Оба правила сверяет тест
+   tests/test_oktell_guard_wiring.py — половинчатая правка здесь ломается молча,
+   как уже было со СВ (кнопка есть, ручка отвечает 403). */
+const OKTELL_AGENT_USER_ROLES = new Set(['operator', 'trainee']);
+
+const canDownloadOktellAgentForUser = (userLike) => {
+    if (canAccessOktellGuardForUser(userLike)) return true;
+    return OKTELL_AGENT_USER_ROLES.has(normalizeRole(userLike?.role))
+        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+            === OKTELL_GUARD_DEPARTMENT_CODE;
+};
+
 // Раздел «Провайдер ЭДО» — выгрузка провайдеров водителей из диспетчерских Fleet.
 // Доступ уже, чем у табло: глобальные админы и глава СЗоВ, БЕЗ супервайзеров. Причина
 // не в иерархии, а в содержимом: раздел отдаёт файл с ФИО и телефонами десятков тысяч
@@ -1785,6 +1833,14 @@ const canAccessFleetEdmForUser = (userLike) => {
     return isDepartmentHead(userLike)
         && aiQaHeadDepartmentCodesOf(userLike).includes(FLEET_EDM_DEPARTMENT_CODE);
 };
+
+/* «Рассылки»: супер-админы и поимённый список. Здесь решается только «показывать
+   ли пункт меню»; обязательную границу держит driver_mailings/access.py, и оба
+   правила должны совпадать буквально — их сверяет тест. */
+const canAccessDriverMailingsForUser = (userLike) => (
+    normalizeRole(userLike?.role) === 'super_admin'
+    || DRIVER_MAILINGS_ALLOWED_USER_IDS.has(Number(userLike?.id))
+);
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
@@ -37599,8 +37655,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // роль и режет периметр отделом, ровно как у табло СЗоВ. СВ раздел
             // ЧИТАЕТ, но не правит: правку гасит can_manage с бэкенда.
             const canAccessOktellGuard = canAccessOktellGuardForUser(user);
+            // «Скачать Oktell»: каждый оператор СЗоВ плюс круг самого раздела.
+            // Решающая проверка — can_download_agent в oktell_guard/access.py.
+            const canDownloadOktellAgent = canDownloadOktellAgentForUser(user);
             // «Провайдер ЭДО»: админы и глава СЗоВ (см. canAccessFleetEdmForUser).
             const canAccessFleetEdm = canAccessFleetEdmForUser(user);
+            // «Рассылки»: супер-админы и поимённый список (см. canAccessDriverMailingsForUser).
+            const canAccessDriverMailings = canAccessDriverMailingsForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             const wikiSectionEnabled = wikiEnabledFor(user);
@@ -40548,6 +40609,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     // путь, он ведёт на ?view=oktell_guard, и новая вкладка молча
                     // уезжала в раздел по умолчанию.
                     (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
+                    (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
@@ -40558,7 +40620,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTouchesSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -45860,6 +45922,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
                 // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
                 if (view === 'fleet_edm' && canAccessFleetEdm) return;
+                // «Рассылки» — сообщения водителям, периметр именной, вне allowlist отдела.
+                if (view === 'driver_mailings' && canAccessDriverMailings) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -46627,6 +46691,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canAccessDriverMailings && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
+                                                    </button>
+                                                </li>
+                                            )}
                                             {canAccessAiQaSection && (
                                                 <li>
                                                     <button
@@ -46932,6 +47006,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* «Рассылки» продублированы в обеих ветках сайдбара намеренно.
+                                                Сегодня доступ есть у супер-админов и у одного человека с ролью
+                                                admin — все они попадают в ветку выше. Но право здесь ИМЕННОЕ, по
+                                                id, и если этого человека однажды назначат главой отдела, его
+                                                роль сменится на «глава», бэкенд по-прежнему будет пускать, раздел
+                                                откроется прямым адресом — а пункт меню исчезнет. Именно так
+                                                разделы и «теряли доступ» раньше. */}
+                                            {canAccessDriverMailings && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47377,8 +47468,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
-                                    {/* «Скачать телефон» — программа iCORE Phone сотруднику.
-                                        Только отделы продаж и ТЭЗ, а также админы: раздаётся он там.
+                                    {/* «Скачать iCore Phone» — программа телефона сотруднику.
+                                        Только отделы продаж и Тез КЦ, а также админы: раздаётся он там.
+                                        Названо именем самой программы, а не «телефон»: у СЗоВ
+                                        рядом стоит «Скачать Oktell», и два безымянных «телефона»
+                                        в одном меню человек различить не сможет.
                                         Объявлен ОДИН раз в общей части меню, а не по ролевым
                                         ветвям. Это не переход в раздел, а действие: ссылка на
                                         файл в GCS подписана на час, поэтому берётся свежей по
@@ -47391,7 +47485,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
                                         >
                                             <FaIcon className="fas fa-download"></FaIcon>
-                                            <span className="sidebar-text">Скачать телефон</span>
+                                            <span className="sidebar-text">Скачать iCore Phone</span>
+                                        </button>
+                                    </li>
+                                    )}
+
+                                    {/* «Скачать Oktell» — то же действие для СЗоВ: их телефон
+                                        это веб-клиент Oktell, а вместе с ним ставится и
+                                        ограничитель «Перезвона». Круг шире раздела —
+                                        каждый оператор отдела (can_download_agent на бэкенде). */}
+                                    {canDownloadOktellAgent && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={downloadOktellAgent}
+                                            className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                        >
+                                            <FaIcon className="fas fa-download"></FaIcon>
+                                            <span className="sidebar-text">Скачать Oktell</span>
                                         </button>
                                     </li>
                                     )}
@@ -47589,6 +47700,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessCrmSection,
                 canAccessParcelsSection,
                 canAccessTouchesSection,
+                canAccessDriverMailings,
                 bellReadSource,
                 mobileIncomingNonce,
                 selectedSvId,
@@ -49752,6 +49864,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {( view === "fleet_edm" && canAccessFleetEdm && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <FleetEdmView
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        ))}
+                        {( view === "driver_mailings" && canAccessDriverMailings && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <DriverMailingsView
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
