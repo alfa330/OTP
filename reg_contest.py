@@ -27,7 +27,11 @@
 Чего в текущем формате НЕТ (и что из-за этого делаем сами):
   1. operator_group CRM не заполняет — группу (Чаты/Линия) определяем по
      направлению нашего пользователя: «Чат менеджер» СЗоВ -> chat, остальные
-     направления СЗоВ -> line, всё прочее (ОП, фронт-офис) -> off.
+     направления СЗоВ -> line, всё прочее (ОП, фронт-офис) -> off. Направление
+     берётся ТЕКУЩЕЕ, поэтому у перешедшего посреди конкурса весь его счёт
+     разом переезжает в новую группу. Для таких людей в CONTEST заведён список
+     splits: счёт делится по дате регистрации между прежней и новой группой
+     (apply_group_splits), а часть «до перехода» синк берёт вторым срезом CRM.
   2. Времени поездок больше нет, а тай-брейк конкурса — «выше тот, кто набрал
      результат раньше». Момент смены счётчика засекаем сами: синк ходит раз в
      полчаса и штампует reached_at, когда successful у оператора изменился
@@ -69,6 +73,7 @@ ENV (окружение или .env.codex.local):
 import logging
 import os
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import requests
@@ -97,9 +102,34 @@ CONTEST = {
     "results_date": "2026-09-11",      # день подведения итогов
     # Призовые: индекс = место - 1.
     "prizes": {"chat": [40000, 20000], "line": [40000, 25000, 10000]},
+    # Операторы, сменившие направление ПОСРЕДИ конкурса. CRM про наши
+    # направления ничего не знает и держит все регистрации человека одной
+    # строкой, а конкурс идёт по группам — поэтому счёт делим сами, по ДАТЕ
+    # РЕГИСТРАЦИИ: что зарегистрировано до switch_date, остаётся в прежней
+    # группе, что с этой даты — в новой. Часть «до» синк спрашивает у CRM
+    # отдельным срезом (registered_to = switch_date минус день, trip_deadline
+    # тот же), «после» = общий счёт минус «до». Так человек не теряет
+    # заработанное в прежней группе и не приносит его в новую.
+    "splits": [
+        {
+            "crm_operator_id": "393",
+            "operator_name": "Нургазы Жанеля Багдаткызы",
+            # В iCORE направление сменили 03.09.2026 в 19:02 (user_history:
+            # «Чат менеджер» -> «Основа»), то есть в конце дня, поэтому весь
+            # день 3 сентября остаётся за чатами — решение владельца 07.09.2026.
+            "switch_date": "2026-09-04",
+            "before_group": "chat",
+            "after_group": "line",
+        },
+    ],
 }
 
 GROUP_LABELS = {"chat": "Чаты", "line": "Линия"}
+
+# Ключ части разделённого оператора: «<id CRM>#<группа>». Части живут в срезе
+# отдельными строками, потому что рейтинг, приз и штамп тай-брейка у каждой
+# группы свои; исходный ключ из среза при этом уходит (см. apply_group_splits).
+SPLIT_KEY_SEP = "#"
 
 
 def _parse_env_file(path):
@@ -368,6 +398,103 @@ def resolve_operators(crm_operators, directory):
             "successful": _int_or_zero(row.get("successful_registrations_count")),
         })
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Оператор, сменивший направление посреди конкурса
+# ---------------------------------------------------------------------------
+
+def split_before_to(switch_date):
+    """registered_to для среза «до перехода» — последний день в прежней группе.
+
+    trip_deadline при этом НЕ двигаем: зачёт остаётся конкурсным (поездка до
+    11.09), меняется только окно дат регистрации. Сдвиг trip_deadline дал бы
+    другую величину — «что синк записал бы в тот день», а нам нужны сегодняшние
+    зачёты по регистрациям прежней группы."""
+    return (date.fromisoformat(switch_date) - timedelta(days=1)).isoformat()
+
+
+def split_part_key(crm_operator_id, group):
+    return f"{crm_operator_id}{SPLIT_KEY_SEP}{group}"
+
+
+def counts_by_operator(crm_operators):
+    """Счётчики среза по ключу оператора — для сверки с другим срезом."""
+    return {operator_key(row): {
+        "registrations": _int_or_zero(row.get("registrations_count")),
+        "successful": _int_or_zero(row.get("successful_registrations_count")),
+    } for row in crm_operators}
+
+
+def apply_group_splits(entries, before_by_date, splits):
+    """Делит счёт перешедшего оператора между прежней и новой группой.
+
+    entries — общий срез (resolve_operators), before_by_date — {switch_date:
+    counts_by_operator(среза «до перехода»)}. Исходная строка оператора
+    заменяется двумя частями с ключами «<id>#chat» и «<id>#line»: у каждой свой
+    рейтинг, свой приз и свой reached_at.
+
+    Часть без единой регистрации в срез не попадает: в той группе человек
+    ничего не привёл, и строка «0 из 0» была бы только шумом.
+
+    Возвращает {"entries", "origins", "notes"}: origins — {ключ части: исходный
+    ключ}, по нему синк отличает переразметку от настоящего изменения счётчиков
+    (иначе разделение легло бы в журнал как «CRM отобрала регистрации»)."""
+    if not splits:
+        return {"entries": entries, "origins": {}, "notes": []}
+
+    by_id = {str(s["crm_operator_id"]): s for s in splits}
+    result, origins, notes = [], {}, []
+    seen = set()
+    for entry in entries:
+        split = by_id.get(entry["crm_operator_id"])
+        if not split:
+            result.append(entry)
+            continue
+        seen.add(entry["crm_operator_id"])
+        name = entry.get("user_name") or entry.get("operator_name") or entry["crm_operator_id"]
+        total = {"registrations": _int_or_zero(entry.get("registrations")),
+                 "successful": _int_or_zero(entry.get("successful"))}
+        before = dict(before_by_date.get(split["switch_date"], {}).get(
+            entry["crm_operator_id"]) or {"registrations": 0, "successful": 0})
+        # CRM переписывает прошлое (п. 5 в шапке), поэтому срез «до перехода»
+        # в принципе может оказаться больше общего. Отрицательный остаток в
+        # рейтинг отдавать нельзя — прижимаем к общему счёту и оставляем след.
+        for field in ("registrations", "successful"):
+            value = _int_or_zero(before.get(field))
+            if value > total[field]:
+                notes.append(
+                    f"{name}: срез до {split['switch_date']} больше общего "
+                    f"({field} {value} > {total[field]}) — часть "
+                    f"«{split['after_group']}» обнулена")
+                value = total[field]
+            before[field] = value
+        parts = ((split["before_group"], before),
+                 (split["after_group"], {f: total[f] - before[f]
+                                         for f in ("registrations", "successful")}))
+        for group, counts in parts:
+            if not counts["registrations"] and not counts["successful"]:
+                # В этой группе человек не привёл никого: строка «0 из 0» в
+                # рейтинге — чистый шум, а появится регистрация — появится и
+                # часть (ключ у неё постоянный).
+                continue
+            part = dict(entry)
+            part["crm_operator_id"] = split_part_key(entry["crm_operator_id"], group)
+            part["contest_group"] = group
+            part["registrations"] = counts["registrations"]
+            part["successful"] = counts["successful"]
+            result.append(part)
+            origins[part["crm_operator_id"]] = entry["crm_operator_id"]
+
+    for operator_id, split in by_id.items():
+        if operator_id in seen:
+            continue
+        # Не авария: оператор мог пропасть из выдачи CRM (она переписывает
+        # привязки задним числом). Но делить стало нечего, и это должно быть
+        # видно — иначе человек молча выпадет из обоих рейтингов.
+        notes.append(f"{split.get('operator_name') or operator_id}: оператора "
+                     "нет в выдаче CRM — делить нечего")
+    return {"entries": result, "origins": origins, "notes": notes}
 
 
 # ---------------------------------------------------------------------------

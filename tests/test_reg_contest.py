@@ -4,15 +4,22 @@
 reg_contest.py — чистая логика без БД и Flask, поэтому импортируется напрямую
 (в отличие от bot_schedule2.py, который на старте поднимает пул к боевой БД).
 """
+import ast
 import sys
+import textwrap
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import reg_contest
+
+from tests import source_cache
+
+DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
 
 
 def _user(uid, name, email=None, direction="Основа", department="СЗоВ — Служба заботы о водителях"):
@@ -313,6 +320,351 @@ class LeaderboardTests(unittest.TestCase):
         entries = reg_contest.resolve_operators(operators, self._directory())
         item = reg_contest.build_leaderboards(entries)["chat"][0]
         self.assertEqual((item["drivers"], item["registrations"]), (3, 7))
+
+
+class GroupSplitTests(unittest.TestCase):
+    """Оператор сменил направление посреди конкурса.
+
+    CRM держит все его регистрации одной строкой и про наши направления не
+    знает, поэтому счёт делим сами по дате регистрации: заработанное в прежней
+    группе там и остаётся, новая группа получает только то, что после перехода.
+    Живой случай — Нургазы Жанеля (CRM 393): 3 сентября перешла из чатов на
+    линию, где её полный счёт стоял на третьем призовом месте.
+    """
+
+    SPLIT = {"crm_operator_id": "7", "operator_name": "Перешедший Оператор",
+             "switch_date": "2026-09-04", "before_group": "chat", "after_group": "line"}
+
+    def _entries(self, registrations=22, successful=10):
+        entry = {"crm_operator_id": "7", "operator_login": "move@yandextaxi.kz",
+                 "operator_name": "Перешедший Оператор", "user_id": 149,
+                 "user_name": "Перешедший Оператор", "contest_group": "line",
+                 "match_method": "email", "registrations": registrations,
+                 "successful": successful}
+        other = dict(entry, crm_operator_id="8", operator_login="stay@yandextaxi.kz",
+                     operator_name="Осевший Оператор", user_id=150,
+                     user_name="Осевший Оператор", registrations=5, successful=1)
+        return [entry, other]
+
+    def _split(self, before, entries=None, splits=None):
+        return reg_contest.apply_group_splits(
+            entries if entries is not None else self._entries(),
+            {"2026-09-04": {"7": before}} if before is not None else {},
+            splits if splits is not None else [self.SPLIT])
+
+    def test_before_snapshot_ends_the_day_before_the_switch(self):
+        # Срез «до перехода» просим по последний день в прежней группе:
+        # 4 сентября — первый линейный день, значит 3-е ещё чатовое.
+        self.assertEqual(reg_contest.split_before_to("2026-09-04"), "2026-09-03")
+
+    def test_counters_split_between_two_groups(self):
+        result = self._split({"registrations": 18, "successful": 8})
+        parts = {e["crm_operator_id"]: e for e in result["entries"]}
+        self.assertEqual(set(parts), {"7#chat", "7#line", "8"})
+        self.assertEqual((parts["7#chat"]["contest_group"],
+                          parts["7#chat"]["registrations"],
+                          parts["7#chat"]["successful"]), ("chat", 18, 8))
+        self.assertEqual((parts["7#line"]["contest_group"],
+                          parts["7#line"]["registrations"],
+                          parts["7#line"]["successful"]), ("line", 4, 2))
+        # Сумма частей равна тому, что прислала CRM: делим, а не дорисовываем.
+        self.assertEqual(parts["7#chat"]["registrations"] + parts["7#line"]["registrations"], 22)
+        self.assertEqual(parts["7#chat"]["successful"] + parts["7#line"]["successful"], 10)
+        self.assertEqual(result["notes"], [])
+        self.assertEqual(result["origins"], {"7#chat": "7", "7#line": "7"})
+
+    def test_person_stays_the_same_in_both_parts(self):
+        # Обе части — один и тот же человек: аватарка, подсветка «Вы» и приз
+        # ищут его по user_id.
+        parts = {e["crm_operator_id"]: e for e in
+                 self._split({"registrations": 18, "successful": 8})["entries"]}
+        for key in ("7#chat", "7#line"):
+            self.assertEqual(parts[key]["user_id"], 149)
+            self.assertEqual(parts[key]["user_name"], "Перешедший Оператор")
+
+    def test_untouched_operators_keep_their_key(self):
+        parts = {e["crm_operator_id"]: e for e in
+                 self._split({"registrations": 18, "successful": 8})["entries"]}
+        self.assertEqual(parts["8"]["contest_group"], "line")
+        self.assertEqual(parts["8"]["successful"], 1)
+
+    def test_group_without_a_single_registration_gets_no_row(self):
+        # Пустая часть — строка «0 из 0» в чужом рейтинге: в срез не идёт.
+        result = self._split({"registrations": 0, "successful": 0})
+        parts = {e["crm_operator_id"]: e for e in result["entries"]}
+        self.assertEqual(set(parts), {"7#line", "8"})
+        self.assertEqual((parts["7#line"]["registrations"], parts["7#line"]["successful"]), (22, 10))
+        self.assertEqual(result["origins"], {"7#line": "7"})
+
+    def test_everything_earned_before_the_switch_leaves_the_new_group_empty(self):
+        # Живой случай на 07.09.2026: после перехода ни одной регистрации —
+        # весь счёт остаётся в прежней группе, в новой строки нет вовсе.
+        result = self._split({"registrations": 22, "successful": 10})
+        parts = {e["crm_operator_id"]: e for e in result["entries"]}
+        self.assertEqual(set(parts), {"7#chat", "8"})
+        self.assertEqual((parts["7#chat"]["registrations"], parts["7#chat"]["successful"]), (22, 10))
+
+    def test_missing_from_before_snapshot_counts_as_zero(self):
+        # Оператора не было в срезе «до» — значит до перехода он не привёл
+        # никого, а не «делить нечего».
+        parts = {e["crm_operator_id"]: e for e in self._split(None)["entries"]}
+        self.assertEqual(set(parts), {"7#line", "8"})
+        self.assertEqual(parts["7#line"]["registrations"], 22)
+
+    def test_before_bigger_than_total_is_clipped_and_noted(self):
+        # CRM переписывает прошлое, поэтому срез «до» умеет обогнать общий.
+        # Отрицательный остаток в рейтинг не отдаём, но и молчать нельзя.
+        result = self._split({"registrations": 30, "successful": 12})
+        parts = {e["crm_operator_id"]: e for e in result["entries"]}
+        self.assertEqual((parts["7#chat"]["registrations"], parts["7#chat"]["successful"]), (22, 10))
+        self.assertNotIn("7#line", parts)
+        self.assertEqual(len(result["notes"]), 2)
+        self.assertIn("Перешедший Оператор", result["notes"][0])
+
+    def test_operator_absent_from_crm_is_noted_not_crashed(self):
+        result = self._split({"registrations": 1, "successful": 1},
+                             entries=[self._entries()[1]])
+        self.assertEqual([e["crm_operator_id"] for e in result["entries"]], ["8"])
+        self.assertEqual(len(result["notes"]), 1)
+        self.assertIn("нет в выдаче CRM", result["notes"][0])
+
+    def test_empty_split_list_changes_nothing(self):
+        entries = self._entries()
+        result = reg_contest.apply_group_splits(entries, {}, [])
+        self.assertIs(result["entries"], entries)
+        self.assertEqual(result["origins"], {})
+
+    def test_counts_by_operator_reads_both_counters(self):
+        counts = reg_contest.counts_by_operator([
+            _crm_op("move@yandextaxi.kz", "Перешедший Оператор", 8, 18, operator_id="7")])
+        self.assertEqual(counts["7"], {"registrations": 18, "successful": 8})
+
+    def test_parts_rank_and_win_prizes_in_their_own_groups(self):
+        # Ради этого всё и делается: часть «до» борется за приз в чатах,
+        # часть «после» — в линии, каждая своим счётом.
+        entries = self._split({"registrations": 18, "successful": 8})["entries"]
+        for entry in entries:
+            entry["reached_at"] = _at(10)
+        boards = reg_contest.build_leaderboards(entries)
+        self.assertEqual([(i["crm_operator_id"], i["drivers"]) for i in boards["chat"]],
+                         [("7#chat", 8)])
+        self.assertEqual(boards["chat"][0]["prize"], 40000)
+        self.assertEqual([i["crm_operator_id"] for i in boards["line"]], ["7#line", "8"])
+        self.assertEqual(boards["line"][0]["drivers"], 2)
+
+    def test_live_contest_split_is_inside_the_contest_window(self):
+        # Страж конфига: дата перехода вне окна конкурса означала бы, что одна
+        # из групп получает пустой срез, а вторая — весь счёт целиком.
+        contest = reg_contest.CONTEST
+        for split in contest.get("splits") or []:
+            switch = date.fromisoformat(split["switch_date"])
+            self.assertGreater(switch, date.fromisoformat(contest["registered_from"]))
+            self.assertLessEqual(switch, date.fromisoformat(contest["registered_to"]))
+            self.assertIn(split["before_group"], reg_contest.GROUP_LABELS)
+            self.assertIn(split["after_group"], reg_contest.GROUP_LABELS)
+            self.assertNotEqual(split["before_group"], split["after_group"])
+
+
+class _FakeCursor:
+    """Курсор ровно того объёма, что нужен upsert_reg_contest_operators."""
+
+    def __init__(self, previous_rows):
+        self._previous_rows = previous_rows
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        self.statements.append((sql, params))
+
+    def fetchall(self):
+        return self._previous_rows
+
+
+class SplitJournalTests(unittest.TestCase):
+    """Разделение оператора не должно читаться как просадка от CRM.
+
+    Журнал изменений отвечает операторам на вопрос «почему у меня стало
+    меньше» и метит просадки на самом синке. Переразметка строки на две части
+    — наше решение, а не действие CRM: если бы она попала в журнал, админ
+    увидел бы «пропал из выдачи (было 10 из 22)» ровно там, где ничего не
+    пропадало. Метод исполняется настоящий (через AST — импорт database.py
+    поднял бы пул к боевой БД), с фейковым курсором.
+    """
+
+    ROW = ("393", "Нургазы Жанеля Багдаткызы", "Нургазы Жанеля Багдаткызы", 22, 10)
+
+    def _run(self, previous_rows, entries, split_origins=None):
+        source, module = source_cache.read(str(DATABASE_PATH)), source_cache.tree(str(DATABASE_PATH))
+        class_node = next(n for n in module.body
+                          if isinstance(n, ast.ClassDef) and n.name == "Database")
+        node = next(n for n in class_node.body
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "upsert_reg_contest_operators")
+        namespace = {}
+        journal, snapshot = [], []
+
+        def execute_values(cursor, sql, argslist, template=None):
+            (journal if "reg_contest_operator_changes" in sql else snapshot).extend(argslist)
+
+        namespace["execute_values"] = execute_values
+        exec(textwrap.dedent(ast.get_source_segment(source, node)), namespace)
+
+        cursor = _FakeCursor(previous_rows)
+
+        class _Dummy:
+            def _get_cursor(self):
+                from contextlib import contextmanager
+
+                @contextmanager
+                def scope():
+                    yield cursor
+
+                return scope()
+
+            _reg_contest_change_is_drop = staticmethod(
+                lambda change: any(
+                    change[f"{f}_before"] is not None
+                    and (change[f"{f}_after"] is None
+                         or change[f"{f}_after"] < change[f"{f}_before"])
+                    for f in ("registrations", "successful")))
+
+            @staticmethod
+            def _reg_contest_decrease_note(decreases):
+                return "; ".join(str(c["crm_operator_id"]) for c in decreases) or None
+
+        dummy = _Dummy()
+        result = namespace["upsert_reg_contest_operators"].__get__(dummy, _Dummy)(
+            "top_registrations_2026_09", entries, split_origins=split_origins)
+        return result, journal, snapshot
+
+    def _parts(self, chat=(18, 8), line=(4, 2)):
+        base = {"operator_login": "nurgazy@yandextaxi.kz",
+                "operator_name": "Нургазы Жанеля Багдаткызы", "user_id": 149,
+                "user_name": "Нургазы Жанеля Багдаткызы", "match_method": "name"}
+        return [dict(base, crm_operator_id="393#chat", contest_group="chat",
+                     registrations=chat[0], successful=chat[1]),
+                dict(base, crm_operator_id="393#line", contest_group="line",
+                     registrations=line[0], successful=line[1])]
+
+    def test_first_split_run_writes_nothing_to_the_journal(self):
+        result, journal, snapshot = self._run(
+            [self.ROW], self._parts(),
+            split_origins={"393#chat": "393", "393#line": "393"})
+        self.assertEqual(journal, [])
+        self.assertEqual(result["decreases"], 0)
+        self.assertIsNone(result["decrease_note"])
+        # Обе части при этом в срезе — переразметка молчит, но происходит.
+        self.assertEqual({row[1] for row in snapshot}, {"393#chat", "393#line"})
+
+    def test_real_change_of_a_part_still_reaches_the_journal(self):
+        # Когда части уже лежат в срезе, они живут по общим правилам.
+        previous = [("393#chat", "Нургазы Жанеля Багдаткызы", "Нургазы Жанеля Багдаткызы", 18, 8),
+                    ("393#line", "Нургазы Жанеля Багдаткызы", "Нургазы Жанеля Багдаткызы", 4, 2)]
+        result, journal, _ = self._run(
+            previous, self._parts(line=(4, 1)),
+            split_origins={"393#chat": "393", "393#line": "393"})
+        self.assertEqual([row[1] for row in journal], ["393#line"])
+        self.assertEqual(result["decreases"], 1)
+
+    def test_disappearance_of_an_ordinary_operator_is_still_logged(self):
+        # Глушим только переразметку: настоящая пропажа строки обязана
+        # оставаться видимой.
+        previous = [self.ROW,
+                    ("500", "Пропавший Оператор", "Пропавший Оператор", 7, 3)]
+        result, journal, _ = self._run(
+            previous, self._parts(),
+            split_origins={"393#chat": "393", "393#line": "393"})
+        self.assertEqual([row[1] for row in journal], ["500"])
+        self.assertEqual(result["decreases"], 1)
+
+    def test_without_split_origins_behaviour_is_unchanged(self):
+        result, journal, _ = self._run([self.ROW], self._parts())
+        self.assertEqual(sorted(row[1] for row in journal), ["393", "393#chat", "393#line"])
+        self.assertEqual(result["decreases"], 1)
+
+
+class SyncSplitFlowTests(unittest.TestCase):
+    """Синк целиком: сколько раз он ходит в CRM и что кладёт в срез.
+
+    `sync_reg_contest` живёт в bot_schedule2.py, который импортировать из
+    тестов нельзя (на старте поднимает пул к боевой БД), поэтому функция
+    достаётся через AST и исполняется с фейковыми клиентом и базой.
+    """
+
+    CONTEST = {
+        "code": "test_contest",
+        "registered_from": "2026-08-07",
+        "registered_to": "2026-09-07",
+        "trip_deadline": "2026-09-11",
+        "prizes": {"chat": [40000], "line": [40000]},
+        "splits": [{"crm_operator_id": "7", "operator_name": "Перешедший Оператор",
+                    "switch_date": "2026-09-04",
+                    "before_group": "chat", "after_group": "line"}],
+    }
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_operators(self, registered_from, registered_to, trip_deadline):
+            self.calls.append((registered_from, registered_to, trip_deadline))
+            successful = 8 if registered_to == "2026-09-03" else 10
+            registrations = 18 if registered_to == "2026-09-03" else 22
+            return [_crm_op("move@yandextaxi.kz", "Перешедший Оператор",
+                            successful, registrations, operator_id="7")]
+
+    class _Db:
+        def __init__(self):
+            self.upserted = None
+
+        def get_reg_contest_sync_state(self, code):
+            return {"total_rows": 1}
+
+        def get_reg_contest_operator_directory(self):
+            return [_user(149, "Перешедший Оператор", email="move@yandextaxi.kz")]
+
+        def get_reg_contest_operators(self, code):
+            return []
+
+        def upsert_reg_contest_operators(self, code, entries, split_origins=None):
+            self.upserted = {"entries": entries, "split_origins": split_origins}
+            return {"total": len(entries), "changes": 0, "decreases": 0,
+                    "decrease_note": None}
+
+    def _sync(self):
+        import logging
+        import time as time_module
+
+        source = source_cache.read(str(BOT_PATH))
+        node = next(n for n in source_cache.tree(str(BOT_PATH)).body
+                    if isinstance(n, ast.FunctionDef) and n.name == "sync_reg_contest")
+        client, db = self._Client(), self._Db()
+        namespace = {"reg_contest": reg_contest, "db": db, "logging": logging,
+                     "time": time_module}
+        exec(textwrap.dedent(ast.get_source_segment(source, node)), namespace)
+        with patch.object(reg_contest, "CONTEST", self.CONTEST), \
+             patch.object(reg_contest, "get_config", lambda: {"url": "u", "token": "t"}), \
+             patch.object(reg_contest.RegContestClient, "from_config",
+                          classmethod(lambda cls, config=None: client)):
+            result = namespace["sync_reg_contest"](triggered_by="test")
+        return result, client, db
+
+    def test_sync_asks_crm_for_the_period_before_the_switch(self):
+        result, client, db = self._sync()
+        self.assertEqual(result["status"], "success")
+        # Второй запрос отличается ТОЛЬКО концом окна регистраций: срок
+        # поездки остаётся конкурсным, иначе часть зачётов пропала бы.
+        self.assertEqual(client.calls, [("2026-08-07", "2026-09-07", "2026-09-11"),
+                                        ("2026-08-07", "2026-09-03", "2026-09-11")])
+
+    def test_sync_writes_two_parts_with_their_origins(self):
+        _, _, db = self._sync()
+        parts = {e["crm_operator_id"]: e for e in db.upserted["entries"]}
+        self.assertEqual(set(parts), {"7#chat", "7#line"})
+        self.assertEqual((parts["7#chat"]["contest_group"], parts["7#chat"]["successful"]),
+                         ("chat", 8))
+        self.assertEqual((parts["7#line"]["contest_group"], parts["7#line"]["successful"]),
+                         ("line", 2))
+        self.assertEqual(db.upserted["split_origins"], {"7#chat": "7", "7#line": "7"})
 
 
 if __name__ == "__main__":

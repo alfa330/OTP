@@ -7587,7 +7587,7 @@ class Database:
             """, (ids,))
             return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
 
-    def upsert_reg_contest_operators(self, contest_code, entries):
+    def upsert_reg_contest_operators(self, contest_code, entries, split_origins=None):
         """Свежий срез CRM в строки операторов (одна транзакция).
 
         Обновляем на месте, а не сносим-вставляем: reached_at — наш
@@ -7605,7 +7605,13 @@ class Database:
         транзакции и складываем в reg_contest_operator_changes каждое реальное
         изменение счётчиков. Возвращаем сводку прогона — сколько строк, что
         изменилось и какие счётчики ушли ВНИЗ (CRM переписывает прошлое, см.
-        п. 5 в шапке reg_contest.py; молча проглатывать это нельзя)."""
+        п. 5 в шапке reg_contest.py; молча проглатывать это нельзя).
+
+        split_origins — {ключ части: исходный ключ оператора} для тех, кто
+        сменил направление посреди конкурса (reg_contest.apply_group_splits).
+        Разделение — не событие CRM: строка не «просела» и не «пропала», а
+        разошлась на две части, поэтому в журнал оно не попадает. Настоящие
+        изменения счётчиков у самих частей журнал ловит как у всех."""
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT crm_operator_id, operator_name, user_name, registrations, successful
@@ -7616,11 +7622,20 @@ class Database:
                                  "registrations": row[3], "successful": row[4]}
                         for row in cursor.fetchall()}
             fresh = {e["crm_operator_id"] for e in entries}
+            split_origins = split_origins or {}
+            # Исходные ключи, которых в срезе больше нет именно потому, что
+            # оператор разошёлся на части.
+            split_parents = {origin for part, origin in split_origins.items()
+                             if part in fresh}
             changes = []
             for entry in entries:
                 was = previous.get(entry["crm_operator_id"])
                 if (was and was["registrations"] == entry["registrations"]
                         and was["successful"] == entry["successful"]):
+                    continue
+                if was is None and split_origins.get(entry["crm_operator_id"]) in previous:
+                    # Часть появилась не «из ниоткуда»: это половина строки,
+                    # которая до этого прогона лежала целой.
                     continue
                 changes.append({
                     "crm_operator_id": entry["crm_operator_id"],
@@ -7632,7 +7647,7 @@ class Database:
                     "successful_after": entry["successful"],
                 })
             for key, was in previous.items():
-                if key in fresh:
+                if key in fresh or key in split_parents:
                     continue
                 changes.append({
                     "crm_operator_id": key,

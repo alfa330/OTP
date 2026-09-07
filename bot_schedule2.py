@@ -12586,13 +12586,30 @@ def sync_reg_contest(triggered_by='scheduler'):
                     f"{previous['total_rows']} — рейтинг не затираем")
         directory = db.get_reg_contest_operator_directory()
         entries = reg_contest.resolve_operators(crm_operators, directory)
+        # Оператор, сменивший направление посреди конкурса, идёт в рейтинг
+        # двумя частями: CRM держит его одной строкой и про наши направления
+        # не знает, поэтому часть «до перехода» спрашиваем отдельным срезом —
+        # те же даты, но registered_to = день до перехода (trip_deadline не
+        # трогаем, иначе потеряются зачёты по поездкам после этой даты).
+        splits = contest.get("splits") or []
+        before_by_date = {}
+        for switch_date in sorted({s["switch_date"] for s in splits}):
+            before_by_date[switch_date] = reg_contest.counts_by_operator(
+                client.fetch_operators(contest["registered_from"],
+                                       reg_contest.split_before_to(switch_date),
+                                       contest["trip_deadline"]))
+        split_result = reg_contest.apply_group_splits(entries, before_by_date, splits)
+        entries = split_result["entries"]
+        for note in split_result["notes"]:
+            logging.warning("reg_contest sync (%s): %s", triggered_by, note)
         # Обрезанный ответ опаснее пустого: пропавшие строки синк удаляет, а
         # вместе с ними навсегда уходит reached_at — штамп тай-брейка.
         shrink = reg_contest.check_snapshot_shrink(
             db.get_reg_contest_operators(contest["code"]), entries)
         if shrink:
             raise RuntimeError(shrink)
-        result = db.upsert_reg_contest_operators(contest["code"], entries)
+        result = db.upsert_reg_contest_operators(
+            contest["code"], entries, split_origins=split_result["origins"])
         unmatched = sum(1 for e in entries if e["match_method"] == "none")
         logging.info(
             "reg_contest sync (%s): %s операторов, %s не сопоставлено, "
