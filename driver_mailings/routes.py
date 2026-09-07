@@ -15,9 +15,11 @@ Blueprint собирается фабрикой, зависимости прих
 ЧТО ЗДЕСЬ ДЕЙСТВИТЕЛЬНО СЛОЖНО — три вещи, и все три про кабинет:
 
 1. **Кабинет не возвращает id отправленной рассылки.** Успех — 204 без тела.
-   Без id нельзя ни показать прочтения, ни отозвать, поэтому сразу после
-   отправки id разыскивается в журнале кабинета по заголовку и времени
-   (client.resolve_mailing_id). Не нашли — рассылка всё равно считается
+   Без id нельзя ни показать прочтения, ни отозвать, поэтому перед отправкой
+   снимается снимок журнала парка, а после — берётся запись, которой в снимке не
+   было (client.journal_ids + client.resolve_mailing_id). Искать по времени
+   нельзя: у только что созданной рассылки поля `sent_at` в журнале НЕТ вовсе,
+   кабинет проставляет его позже. Не нашли — рассылка всё равно считается
    отправленной: она ушла, и делать вид, что нет, было бы враньём.
 
 2. **Опрос девяноста парков дорог.** Узнать, где рассылка разрешена, можно
@@ -83,6 +85,14 @@ CLAIM_LOOKBACK = timedelta(days=1)
 # Потолок страницы журнала — чтобы один запрос не потянул за собой обход всего
 # кабинета.
 JOURNAL_MAX_LIMIT = 100
+
+# Насколько далеко может разойтись наше время отправки и время записи в кабинете
+# при «лечении» строк без связи. Кабинет проставляет `sent_at` не в момент
+# создания рассылки, а когда действительно разошлёт, и на большом парке это
+# минуты; отозванная запись вместо `sent_at` показывает `deleted_at`, который
+# ещё позже. Час — с запасом на оба случая и всё ещё несравнимо меньше, чем
+# промежуток между двумя рассылками с одинаковым заголовком.
+HEAL_WINDOW_SECONDS = 3600
 
 
 def _parse_stamp(value):
@@ -383,18 +393,28 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         """
         wanted = {}
         oldest = {}
+        # Цели, у которых связи с кабинетом нет: их будем лечить по заголовку.
+        unlinked = {}
         for item in items:
             for target in item.get('targets') or []:
-                ident = target.get('fleet_mailing_id')
                 park_id = target.get('park_id')
-                if not ident or not park_id:
+                if not park_id:
+                    continue
+                stamp = _parse_stamp(target.get('sent_at'))
+                ident = target.get('fleet_mailing_id')
+                if not ident:
+                    if target.get('status') == 'sent' and stamp:
+                        unlinked.setdefault(park_id, []).append((item, target, stamp))
+                        if park_id not in oldest or stamp < oldest[park_id]:
+                            oldest[park_id] = stamp
                     continue
                 wanted.setdefault(park_id, set()).add(str(ident))
-                stamp = _parse_stamp(target.get('sent_at'))
                 if stamp and (park_id not in oldest or stamp < oldest[park_id]):
                     oldest[park_id] = stamp
-        if not wanted:
+        if not wanted and not unlinked:
             return items
+        for park_id in unlinked:
+            wanted.setdefault(park_id, set())
 
         try:
             client = make_client()
@@ -404,7 +424,9 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
 
         def collect(park_id):
             found = {}
+            seen = []
             needed = set(wanted[park_id])
+            heal = bool(unlinked.get(park_id))
             edge = oldest.get(park_id)
             cursor = None
             for _ in range(STATS_MAX_PAGES):
@@ -416,26 +438,62 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                     break
                 for row in page:
                     ident = str(row.get('id') or '')
+                    if heal:
+                        seen.append(row)
                     if ident in needed:
                         found[ident] = row
                         needed.discard(ident)
-                if not needed or not cursor or not page:
+                if (not needed and not heal) or not cursor or not page:
                     break
                 # Дошли до рассылок старше самой старой нашей — дальше искать
                 # нечего. Сравниваем РАЗОБРАННОЕ время: кабинет отдаёт
                 # «2026-09-04T12:57:13.770911+00:00», а у нас в базе datetime, и
                 # сравнение их строковых видов не срабатывало никогда — цикл
                 # каждый раз выбирал все четыре страницы.
-                last = _parse_stamp(page[-1].get('sent_at'))
+                last = _parse_stamp(page[-1].get('sent_at') or page[-1].get('deleted_at'))
                 if edge is not None and last is not None and last < edge:
                     break
-            return park_id, found
+            return park_id, found, seen
 
         stats = {}
+        pages = {}
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
                                 thread_name_prefix='mailings-stats') as pool:
-            for park_id, found in pool.map(collect, list(wanted)):
+            for park_id, found, seen in pool.map(collect, list(wanted)):
                 stats[park_id] = found
+                pages[park_id] = seen
+
+        # Лечим записи без связи с кабинетом. Такие остались от первой версии,
+        # которая искала id по времени и потому не находила его никогда: у только
+        # что созданной рассылки кабинет `sent_at` ещё не проставил. Раз журнал
+        # парка уже выкачан, найти пропажу по заголовку стоит ноль запросов.
+        #
+        # Совпадения заголовка мало: тем же заголовком мог отправить человек
+        # прямо из кабинета. Поэтому берём только запись, время которой (отправки
+        # либо отзыва) рядом с нашим, и только не занятую другой нашей целью.
+        for park_id, rows in unlinked.items():
+            journal_rows = pages.get(park_id) or []
+            taken = set(wanted.get(park_id) or set())
+            for item, target, stamp in rows:
+                title = str(item.get('title') or '').strip()
+                for row in journal_rows:
+                    ident = str(row.get('id') or '')
+                    if not ident or ident in taken:
+                        continue
+                    if str(row.get('preview') or '').strip() != title:
+                        continue
+                    row_stamp = _parse_stamp(row.get('sent_at') or row.get('deleted_at'))
+                    if row_stamp is not None and abs((row_stamp - stamp).total_seconds()) > HEAL_WINDOW_SECONDS:
+                        continue
+                    target['fleet_mailing_id'] = ident
+                    stats.setdefault(park_id, {})[ident] = row
+                    taken.add(ident)
+                    with db._get_cursor() as cursor:
+                        queries.mark_target_sent(cursor, item['id'], park_id,
+                                                 fleet_mailing_id=ident)
+                    logging.info('Рассылки: связали запись %s (парк %s) с рассылкой %s',
+                                 item['id'], park_id, ident)
+                    break
 
         for item in items:
             sent_total = 0
@@ -448,6 +506,14 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                 target['read_by_number'] = row.get('read_by_number')
                 target['read_percent'] = row.get('read_percent')
                 target['fleet_status'] = row.get('status')
+                target['deleted_at'] = row.get('deleted_at')
+                # Отозвать рассылку можно и мимо портала — прямо в кабинете, и
+                # так уже делали. Наш журнал обязан это показывать, иначе он
+                # утверждает «Ушла» про сообщение, которого у водителей нет.
+                if str(row.get('status') or '').startswith('deleted_') \
+                        and target.get('status') == 'sent':
+                    target['status'] = 'revoked'
+                    target['revoked_in_cabinet'] = True
                 sent_total += int(row.get('sent_to_number') or 0)
                 read_total += int(row.get('read_by_number') or 0)
             item['sent_total'] = sent_total
@@ -641,8 +707,13 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         started = datetime.now(timezone.utc) - timedelta(seconds=30)
         started_iso = started.isoformat()
 
-        def claim_fleet_id(park_id):
+        def claim_fleet_id(park_id, before_ids):
             """Найти в журнале кабинета id только что отправленной рассылки.
+
+            before_ids — снимок журнала ДО отправки: id, которого там не было, и
+            есть наш. Это главный признак, потому что у только что созданной
+            рассылки кабинет ещё не проставил время (проверено на живой отправке
+            07.09.2026), и искать её по времени бесполезно.
 
             Окно «уже занятых» берём ШИРЕ окна поиска (started минус запас): если
             в этот же парк сегодня уже уходила рассылка с тем же заголовком, её id
@@ -652,7 +723,8 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
             with db._get_cursor() as cursor:
                 claimed = queries.claimed_fleet_ids(
                     cursor, park_id, since=started - CLAIM_LOOKBACK)
-            return client.resolve_mailing_id(park_id, title, started_iso, skip_ids=claimed)
+            return client.resolve_mailing_id(park_id, title, since_iso=started_iso,
+                                             skip_ids=claimed, before_ids=before_ids)
 
         # Отправляем по одной диспетчерской и после КАЖДОЙ пишем результат в базу.
         # Последовательно, а не пачкой: кабинет считает лимиты на аккаунт, и пять
@@ -665,6 +737,9 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
         try:
             for park_id in park_ids:
                 token = '{}-{}'.format(idempotency_key, park_id)
+                # Снимок журнала ДО отправки — по нему потом узнаём свою рассылку.
+                # Один запрос на парк; без него id найти нечем.
+                before_ids = client.journal_ids(park_id)
                 try:
                     client.send_mailing(park_id, title=title, message=message,
                                         filters=filters, idempotency_token=token)
@@ -691,7 +766,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
                                     park_id, error)
                     recovered = None
                     try:
-                        recovered = claim_fleet_id(park_id)
+                        recovered = claim_fleet_id(park_id, before_ids)
                     except FleetError:
                         recovered = None
                     with db._get_cursor() as cursor:
@@ -706,7 +781,7 @@ def build_driver_mailings_blueprint(*, db, require_api_key, build_cors_preflight
 
                 # Ушло. Ищем id в журнале кабинета — он нужен для прочтений и
                 # отзыва. Не нашли — всё равно отмечаем отправку: рассылка у людей.
-                fleet_id = claim_fleet_id(park_id)
+                fleet_id = claim_fleet_id(park_id, before_ids)
                 with db._get_cursor() as cursor:
                     queries.mark_target_sent(cursor, mailing_id, park_id,
                                              fleet_mailing_id=fleet_id)

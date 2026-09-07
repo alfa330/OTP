@@ -40,6 +40,12 @@ const Blocks = ({ text }) => {
         <>
             {blocks.map((block, index) => {
                 if (block.type === 'gap') return <div key={index} className="h-2" />;
+                // Черта между языками — такая же линия, как в Pro: именно её
+                // рисует приложение по `___`. Показать здесь сами подчёркивания
+                // значило бы соврать про итоговый вид.
+                if (block.type === 'rule') {
+                    return <hr key={index} className="my-2.5 border-0 border-t border-slate-200" />;
+                }
                 if (block.type === 'list') {
                     return (
                         <ul key={index} className="my-0.5 space-y-0.5 pl-1">

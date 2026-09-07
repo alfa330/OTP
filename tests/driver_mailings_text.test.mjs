@@ -61,6 +61,18 @@ test('несуществующая разметка остаётся обычн�
 
 /* Двуязычный составитель */
 
+test('разделитель — три подчёркивания: только их приложение Pro рисует чертой', () => {
+  // Десять «─» выглядят чертой в поле ввода, но водителю приезжают палочками.
+  assert.match(BILINGUAL_SEPARATOR, /^\n\n___\n\n$/);
+});
+
+test('черта между языками — отдельный блок предпросмотра, а не курсив', () => {
+  // `___` подпадает под правило курсива `_текст_`; если разбирать его инлайново,
+  // предпросмотр покажет подчёркивания вместо линии.
+  const blocks = parseMailingText(composeBilingual('Сәлем', 'Привет'));
+  assert.deepEqual(blocks.map((b) => b.type), ['line', 'gap', 'rule', 'gap', 'line']);
+});
+
 test('склейка двух языков ставит разделитель только между заполненными частями', () => {
   assert.equal(composeBilingual('Сәлем', 'Привет'), `Сәлем${BILINGUAL_SEPARATOR}Привет`);
   assert.equal(composeBilingual('', 'Привет'), 'Привет');
@@ -78,9 +90,11 @@ test('склейка и обратное разбиение — обратима
   assert.equal(back.ru, 'Привет, водитель!');
 });
 
-test('обратное разбиение узнаёт черту любой длины', () => {
+test('обратное разбиение узнаёт и подчёркивания, и старые «─»', () => {
+  // Рассылки, отправленные до смены разделителя, тоже открываются «Повторить».
+  assert.deepEqual(splitBilingual('Сәлем\n\n___\n\nПривет'), { kk: 'Сәлем', ru: 'Привет', bilingual: true });
+  assert.deepEqual(splitBilingual('Сәлем\n_____\nПривет').bilingual, true);
   assert.deepEqual(splitBilingual('Сәлем\n──────────\nПривет'), { kk: 'Сәлем', ru: 'Привет', bilingual: true });
-  assert.deepEqual(splitBilingual('Сәлем\n───\nПривет').bilingual, true);
   assert.deepEqual(splitBilingual('Просто текст'), { kk: '', ru: 'Просто текст', bilingual: false });
 });
 
@@ -104,10 +118,18 @@ test('без выделения вставляется заготовка и о�
   assert.equal(result.value.slice(result.selectionStart, result.selectionEnd), 'текст');
 });
 
-test('ссылка выделяет адрес, а не подпись — подпись уже написана', () => {
+test('ссылка вставляет заготовки словами и выделяет адрес', () => {
+  // «https://» выглядело наполовину готовым адресом, и его дописывали прямо к
+  // нему, получая «https://https://…». В задании заготовки названы словами.
   const result = applyFormatting('жми сюда', 4, 8, 'link');
-  assert.equal(result.value, 'жми [сюда](https://)');
-  assert.equal(result.value.slice(result.selectionStart, result.selectionEnd), 'https://');
+  assert.equal(result.value, 'жми [сюда](вставьте ссылку)');
+  assert.equal(result.value.slice(result.selectionStart, result.selectionEnd), 'вставьте ссылку');
+});
+
+test('ссылка без выделения подставляет и подпись, и адрес', () => {
+  const result = applyFormatting('', 0, 0, 'link');
+  assert.equal(result.value, '[введите текст](вставьте ссылку)');
+  assert.equal(result.value.slice(result.selectionStart, result.selectionEnd), 'вставьте ссылку');
 });
 
 test('список ставит маркеры на все затронутые строки и не дублирует их', () => {
@@ -126,7 +148,7 @@ test('снятие разметки в тексте без выделения н
 
 test('текст без разметки годится для строки журнала', () => {
   assert.equal(
-    stripMailingMarkup('**Акция**\n• _пункт_\n[тут](https://a.kz)\n──────────\nРусский'),
+    stripMailingMarkup('**Акция**\n• _пункт_\n[тут](https://a.kz)\n___\nРусский'),
     'Акция пункт тут Русский',
   );
 });

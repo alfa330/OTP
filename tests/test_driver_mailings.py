@@ -9,6 +9,7 @@
 
 import json
 import os
+import re
 import sys
 import unittest
 
@@ -192,6 +193,30 @@ class ReferenceCleanupTests(unittest.TestCase):
                 self.assertIn(key, catalog.GROUP_LABELS, key)
 
 
+class SeparatorTests(unittest.TestCase):
+    """Разделитель двуязычной рассылки живёт в двух местах и обязан совпадать.
+
+    Склейку делает сервер, а «Повторить» разбирает её обратно фронт. Разойдись
+    значения — и повтор перестал бы делить текст на языки, свалив обе части в
+    русское поле. Заметили бы это не сразу: рассылка ушла бы криво.
+    """
+
+    def test_separator_is_three_underscores(self):
+        # Только подчёркивания приложение Pro рисует чертой; «─» приезжают
+        # водителю обычным текстом.
+        self.assertEqual(catalog.BILINGUAL_SEPARATOR, '\n\n___\n\n')
+
+    def test_front_and_back_agree_byte_for_byte(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'src', 'components', 'driver_mailings', 'mailingText.js')
+        with open(path, encoding='utf-8') as handle:
+            source = handle.read()
+        found = re.search(r"BILINGUAL_SEPARATOR = '([^']*)'", source)
+        self.assertIsNotNone(found, 'на фронте не нашёлся BILINGUAL_SEPARATOR')
+        front = found.group(1).encode().decode('unicode_escape')
+        self.assertEqual(front, catalog.BILINGUAL_SEPARATOR)
+
+
 class ErrorMessageTests(unittest.TestCase):
     def test_known_codes_are_translated(self):
         self.assertIn('получател', catalog.error_message('limit_drivers', 500).lower())
@@ -316,6 +341,44 @@ class ResolveMailingIdTests(unittest.TestCase):
         {'id': 'old', 'preview': 'Акция', 'sent_at': '2026-08-01T09:00:00+00:00'},
         {'id': 'other', 'preview': 'Другая тема', 'sent_at': '2026-09-07T10:00:07+00:00'},
     ]}
+
+    # Так выглядит журнал СРАЗУ после отправки: у только что созданной рассылки
+    # поля sent_at НЕТ вовсе — кабинет проставит его позже, когда разошлёт.
+    # Снято с живой отправки 07.09.2026; из-за этого первая версия не находила
+    # id НИКОГДА, и каждая рассылка оседала в журнале без связи с кабинетом.
+    JUST_SENT = {'mailings': [
+        {'id': 'brand-new', 'preview': 'Акция', 'type': 'pro', 'is_legacy': False},
+        {'id': 'old', 'preview': 'Акция', 'sent_at': '2026-08-01T09:00:00+00:00',
+         'status': 'sent'},
+    ]}
+
+    def test_fresh_mailing_without_sent_at_is_found_by_snapshot(self):
+        client = _client([_Response(200, self.JUST_SENT)])
+        got = client.resolve_mailing_id(PARK, 'Акция', before_ids={'old'})
+        self.assertEqual(got, 'brand-new')
+
+    def test_snapshot_never_takes_a_mailing_that_was_already_there(self):
+        # Своей записи в журнале ещё нет — брать старую с тем же заголовком
+        # нельзя: «Отозвать» ударил бы по чужой рассылке.
+        client = _client([_Response(200, {'mailings': [self.JUST_SENT['mailings'][1]]})])
+        self.assertIsNone(client.resolve_mailing_id(PARK, 'Акция', before_ids={'old'}))
+
+    def test_without_snapshot_a_mailing_without_time_is_no_longer_dropped(self):
+        # Запасной путь: снимок снять не удалось. Раньше запись без времени
+        # отбрасывалась — то есть отбрасывалась ровно свежая рассылка.
+        client = _client([_Response(200, {'mailings': [self.JUST_SENT['mailings'][0]]})])
+        got = client.resolve_mailing_id(PARK, 'Акция', since_iso='2026-09-07T09:59:30+00:00')
+        self.assertEqual(got, 'brand-new')
+
+    def test_snapshot_reads_ids_of_the_first_page(self):
+        client = _client([_Response(200, self.LIST)])
+        self.assertEqual(client.journal_ids(PARK), {'new', 'old', 'other'})
+
+    def test_broken_snapshot_is_empty_and_does_not_break_the_send(self):
+        client = _client([_Response(500, {'error': 'oops'}),
+                          _Response(500, {'error': 'oops'}),
+                          _Response(500, {'error': 'oops'})])
+        self.assertEqual(client.journal_ids(PARK), set())
 
     def test_matches_by_title_and_time(self):
         client = _client([_Response(200, self.LIST)])

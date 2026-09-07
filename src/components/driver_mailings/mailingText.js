@@ -12,10 +12,17 @@
  * в поле, а не в HTML, и превращать это в HTML по дороге незачем.
  */
 
-/* Разделитель двуязычной рассылки. Ровно так — десять символов «─» — выглядят
-   живые рассылки в кабинете диспетчерской: сначала казахская часть, затем
-   черта, затем русская. Мы не придумали формат, а повторили сложившийся. */
-export const BILINGUAL_SEPARATOR = '\n──────────\n';
+/* Разделитель двуязычной рассылки — ТРИ НИЖНИХ ПОДЧЁРКИВАНИЯ.
+ *
+ * Приложение Pro рисует черту между языками именно по `___`: это разметка, и
+ * приложение превращает её в горизонтальную линию. Первая версия ставила десять
+ * символов «─» — в поле ввода они выглядят чертой, но водителю приезжают
+ * обычным текстом, и вместо аккуратной линии он видит ряд палочек во всю ширину
+ * (сверено со скриншотами из самого приложения 07.09.2026).
+ *
+ * Пустые строки вокруг обязательны: без них Pro считает подчёркивания
+ * продолжением абзаца и черту не рисует. */
+export const BILINGUAL_SEPARATOR = '\n\n___\n\n';
 
 /* Пределы кабинета. Приходят с сервера в ответе overview, здесь — запасные
    значения на случай, если кабинет не ответил: интерфейс должен считать
@@ -35,12 +42,14 @@ export const composeBilingual = (kk, ru) => {
  * Обратное разбиение — для кнопки «Повторить» в журнале.
  *
  * Возвращает { kk, ru, bilingual }. Разделитель ищем по строке из трёх и более
- * «─», а не по точному совпадению: рассылку могли собрать руками в кабинете, и
- * длина черты там гуляет.
+ * подчёркиваний, а не по точному совпадению: рассылку могли собрать руками в
+ * кабинете, и длина черты там гуляет. Старые «─» тоже узнаём — рассылки,
+ * отправленные до смены разделителя, открываются кнопкой «Повторить», и
+ * разобрать их обратно на два языка мы обязаны.
  */
 export const splitBilingual = (text) => {
     const source = String(text ?? '');
-    const match = source.match(/\n[ \t]*─{3,}[ \t]*\n/);
+    const match = source.match(/\n\s*(?:_{3,}|─{3,})\s*\n/);
     if (!match) return { kk: '', ru: source, bilingual: false };
     return {
         kk: source.slice(0, match.index).trim(),
@@ -80,10 +89,17 @@ const parseInline = (line) => {
  */
 const BULLET_RE = /^[ \t]*[•\-*][ \t]+(.*)$/;
 
+/* Строка-разделитель между языками. Разбирается ДО инлайновой разметки: иначе
+   `___` уехало бы в курсив (`_текст_`) и предпросмотр показал бы подчёркивания
+   вместо черты — то есть врал бы ровно про то место, из-за которого разделитель
+   и меняли. */
+const RULE_RE = /^\s*(?:_{3,}|─{3,})\s*$/;
+
 /**
  * Текст рассылки → список блоков для предпросмотра.
  *
- * Блоки: { type: 'list', items: [inline[]] } и { type: 'line', nodes: inline[] }.
+ * Блоки: { type: 'list', items: [inline[]] }, { type: 'line', nodes: inline[] },
+ * { type: 'rule' } — черта между языками, { type: 'gap' } — пустая строка.
  * Пустая строка — это { type: 'gap' }: в уведомлении Pro пустая строка видна как
  * отбивка абзаца, и съедать её нельзя, иначе предпросмотр врёт про вёрстку.
  */
@@ -93,6 +109,11 @@ export const parseMailingText = (text) => {
     let list = null;
     const flush = () => { if (list) { blocks.push(list); list = null; } };
     for (const line of lines) {
+        if (RULE_RE.test(line)) {
+            flush();
+            blocks.push({ type: 'rule' });
+            continue;
+        }
         const bullet = line.match(BULLET_RE);
         if (bullet) {
             if (!list) list = { type: 'list', items: [] };
@@ -113,7 +134,7 @@ export const stripMailingMarkup = (text) => String(text ?? '')
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
     .replace(/_([^_\n]+)_/g, '$1')
     .replace(/^[ \t]*[•\-*][ \t]+/gm, '')
-    .replace(/─{3,}/g, ' ')
+    .replace(/^\s*(?:_{3,}|─{3,})\s*$/gm, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -133,6 +154,13 @@ const WRAPPERS = {
     italic: { open: '_', close: '_', sample: 'текст' },
 };
 
+/* Заготовки ссылки — ровно те слова, что в задании: «[введите текст](вставьте
+   ссылку)». Обе видны в поле и обе выделяются, поэтому их нельзя не заметить и
+   нельзя случайно отправить: незаполненная заготовка бросается в глаза и в
+   предпросмотре. */
+export const LINK_TEXT_PLACEHOLDER = 'введите текст';
+export const LINK_HREF_PLACEHOLDER = 'вставьте ссылку';
+
 export const applyFormatting = (value, selectionStart, selectionEnd, kind) => {
     const text = String(value ?? '');
     const from = Math.max(0, Math.min(selectionStart ?? 0, text.length));
@@ -140,15 +168,18 @@ export const applyFormatting = (value, selectionStart, selectionEnd, kind) => {
     const selected = text.slice(from, to);
 
     if (kind === 'link') {
-        const label = selected || 'текст ссылки';
-        const inserted = `[${label}](https://)`;
-        // Курсор ставим внутрь скобок с адресом: подпись человек уже написал
-        // или увидит выделенной, а вот адрес надо вставить обязательно.
+        const label = selected || LINK_TEXT_PLACEHOLDER;
+        const inserted = `[${label}](${LINK_HREF_PLACEHOLDER})`;
+        // Курсор ставим внутрь скобок с адресом и выделяем заготовку: подпись
+        // человек уже написал или увидит выделенной, а адрес надо вставить
+        // обязательно. Заготовка — слова «вставьте ссылку», как в задании:
+        // «https://» выглядело наполовину готовым адресом, и его дописывали
+        // прямо к нему, получая «https://https://...».
         const caret = from + label.length + 3;
         return {
             value: text.slice(0, from) + inserted + text.slice(to),
             selectionStart: caret,
-            selectionEnd: caret + 'https://'.length,
+            selectionEnd: caret + LINK_HREF_PLACEHOLDER.length,
         };
     }
 

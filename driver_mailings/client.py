@@ -347,28 +347,54 @@ class MailingsClient(FleetClient):
                       params={'id': str(mailing_id)}, attempts=3, allow_empty=True)
         return None
 
-    def resolve_mailing_id(self, park_id, title, since_iso, skip_ids=None):
+    def journal_ids(self, park_id):
+        """Идентификаторы рассылок на первой странице журнала парка.
+
+        Снимок делается ПЕРЕД отправкой: разность «что было / что стало» — это и
+        есть надёжный способ узнать id своей рассылки, потому что кабинет его не
+        возвращает (успех — 204 без тела). Ошибку глушим: не сняли снимок —
+        сопоставление просто пойдёт запасным путём, а отправку срывать нельзя.
+        """
+        try:
+            items, _ = self.list_mailings(park_id, limit=RESOLVE_PAGE_LIMIT)
+        except FleetError as error:
+            logging.warning('Рассылки: снимок журнала парка %s не снят (%s)', park_id, error)
+            return set()
+        return {str(item.get('id') or '').strip()
+                for item in items if isinstance(item, dict) and item.get('id')}
+
+    def resolve_mailing_id(self, park_id, title, since_iso=None, skip_ids=None,
+                           before_ids=None):
         """Найти в журнале кабинета рассылку, которую мы только что отправили.
 
         Обходной путь, потому что прямого нет: успешная отправка отвечает 204 без
-        тела, идентификатора в ней не бывает, а без него нельзя ни показать
-        прочтения, ни отозвать. Признаков сопоставления три, и все нужны:
+        тела, а без идентификатора нельзя ни показать прочтения, ни отозвать.
 
-        * `preview == title` — у типа `pro` превью буквально совпадает с
-          заголовком (проверено на всех 12 живых рассылках);
-        * `sent_at` не раньше начала нашей отправки (с допуском SINCE_TOLERANCE
-          на расхождение часов) — иначе подберём прошлогоднюю рассылку с тем же
-          заголовком, а «Отозвать» ударит по чужой;
-        * идентификатор не занят другой нашей записью (`skip_ids`) — иначе при
-          двух одинаковых рассылках подряд обе сошлись бы на одном id.
+        ГЛАВНЫЙ ПРИЗНАК — НОВИЗНА, А НЕ ВРЕМЯ. `before_ids` — снимок первой
+        страницы журнала, снятый перед отправкой; id, которого там не было, и
+        есть наш. Это единственный признак, который не зависит от того, что
+        кабинет успел проставить в записи.
+
+        ПОЧЕМУ НЕ ПО `sent_at`. Первая версия требовала «sent_at не раньше начала
+        отправки» — и не находила НИЧЕГО НИКОГДА. У только что созданной рассылки
+        поля `sent_at` в журнале НЕТ вовсе: кабинет проставляет его позже, когда
+        реально разошлёт (проверено 07.09.2026 на живой отправке — обе записи
+        пришли без `sent_at`, только с `id`, `preview` и `status`). Условие «нет
+        времени — пропускаем» отбрасывало ровно те записи, ради которых всё и
+        затевалось, и каждая рассылка оседала в журнале без связи с кабинетом.
+
+        `preview == title` остаётся вторым признаком: у типа `pro` превью
+        буквально равно заголовку. `skip_ids` — уже занятые другими нашими
+        записями. `since_iso` используется только запасным путём, когда снимок
+        снять не удалось, и уже НЕ отбрасывает записи без времени.
 
         Не нашли — возвращаем None. Это законный исход: журнал честно скажет, что
-        связать с кабинетом не удалось, и отзыв для такой строки будет недоступен.
-        Выдумывать связь опаснее, чем её не иметь.
+        связать с кабинетом не удалось. Выдумывать связь опаснее, чем её не иметь.
         """
         wanted = str(title or '').strip()
         since = _parse_ts(since_iso)
         skip = {str(x) for x in (skip_ids or []) if x}
+        before = {str(x) for x in (before_ids or []) if x}
         try:
             items, _ = self.list_mailings(park_id, limit=RESOLVE_PAGE_LIMIT)
         except FleetError as error:
@@ -378,26 +404,34 @@ class MailingsClient(FleetClient):
                             park_id, error)
             return None
 
-        best_id, best_stamp = None, None
+        matched = []
         for item in items:
             if not isinstance(item, dict):
                 continue
             ident = str(item.get('id') or item.get('mailing_id') or '').strip()
             if not ident or ident in skip:
                 continue
-            preview = str(item.get('preview') or item.get('title') or '').strip()
-            if preview != wanted:
+            if str(item.get('preview') or item.get('title') or '').strip() != wanted:
                 continue
-            stamp = _parse_ts(item.get('sent_at') or item.get('created_at'))
-            if since is not None:
-                # Без разобранного времени проверить окно нечем, а брать
-                # наугад — значит рискнуть отзывом чужой рассылки.
-                if stamp is None or stamp < since - SINCE_TOLERANCE:
-                    continue
-            if best_id is None:
-                # Журнал приходит от свежих к старым, поэтому первое совпадение
-                # без разобранного времени — всё же самое свежее из них.
-                best_id, best_stamp = ident, stamp
-            elif stamp is not None and (best_stamp is None or stamp > best_stamp):
-                best_id, best_stamp = ident, stamp
-        return best_id
+            matched.append((ident, _parse_ts(item.get('sent_at') or item.get('created_at'))))
+
+        if before:
+            # Снимок есть — работает только он. Записи в журнале идут от свежих
+            # к старым, поэтому первая, которой в снимке не было, и есть наша.
+            # Ничего нового с нашим заголовком нет — значит кабинет ещё не
+            # показал рассылку; брать старую запись нельзя, «Отозвать» ударил бы
+            # по чужой.
+            for ident, _stamp in matched:
+                if ident not in before:
+                    return ident
+            return None
+
+        # Снимок снять не удалось — идём по заголовку и времени. Запись БЕЗ
+        # времени здесь не отбрасывается: у только что отправленной рассылки его
+        # как раз и не бывает, и прежнее «нет времени — пропускаем» означало, что
+        # свою рассылку мы не находили никогда.
+        for ident, stamp in matched:
+            if since is not None and stamp is not None and stamp < since - SINCE_TOLERANCE:
+                continue
+            return ident
+        return None

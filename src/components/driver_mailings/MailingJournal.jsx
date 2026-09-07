@@ -120,6 +120,15 @@ const MailingCard = ({ item, revokeWindow, onRevoke, onRepeat, revoking, refs })
                                         <IosBadge tone={targetStatusMeta(target.status).tone}>
                                             {targetStatusMeta(target.status).label}
                                         </IosBadge>
+                                        {/* Отозвать можно и мимо портала — прямо в кабинете,
+                                            и так уже делали. Молчать об этом нельзя: иначе
+                                            журнал утверждает «Ушла» про сообщение, которого
+                                            у водителей больше нет. */}
+                                        {target.revoked_in_cabinet && (
+                                            <div className="mt-1 text-[11.5px] text-slate-500">
+                                                отозвана в кабинете
+                                            </div>
+                                        )}
                                         {target.error && (
                                             <div className="mt-1 text-[11.5px] text-rose-600">{target.error}</div>
                                         )}
