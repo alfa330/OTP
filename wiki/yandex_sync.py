@@ -660,7 +660,7 @@ def preview(cursor, gcs, *, url, uploaded_by, fetch_page_fn=None,
         'summary': yandex_pro.summary_of(parsed),
         'content': content,
         'images': len(mapping),
-        'warnings': warnings,
+        'warnings': yandex_pro.collapse_warnings(warnings),
         'linked_article_id': (existing or {}).get('article_id'),
         'imported': imported,
     }
@@ -741,7 +741,8 @@ def import_page(cursor, gcs, *, url, section_ids, author_id, space_ids=None,
         dedup=dedup, imported_by=author_id)
     return {'article_id': article_id, 'slug': slug, 'created': True,
             'status': STATUS_CHANGED, 'title': parsed['title'],
-            'images': len(mapping), 'warnings': warnings,
+            'images': len(mapping),
+            'warnings': yandex_pro.collapse_warnings(warnings),
             'source_url': parsed['url']}
 
 
@@ -899,7 +900,8 @@ def sync_article(cursor, gcs, *, article_id, editor_id=None, force=False,
     )
     return {'article_id': article_id, 'status': STATUS_CHANGED, 'url': page['url'],
             'title': parsed['title'], 'images': len(mapping),
-            'warnings': warnings, 'content_changed': bool(changed)}
+            'warnings': yandex_pro.collapse_warnings(warnings),
+            'content_changed': bool(changed)}
 
 
 def due_pages(cursor, *, limit=SYNC_BATCH):

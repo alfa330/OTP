@@ -28,6 +28,15 @@ HTML. Ровно из-за этого модуль можно гонять те�
    один раз. Без дедупликации статья получает абзац дважды, и никакой флаг от
    этого не спасает — сверять надо сам текст (см. _dedupe_texts).
 
+   И СРАЗУ ОБРАТНАЯ СТОРОНА ЭТОЙ ЛОВУШКИ. Одинаковый текст в РАЗНЫХ разделах
+   статьи — не перекрытие: у «Стандартов Премиума» дресс-код мужской и женский
+   описаны слово в слово и различаются только фотографиями, а у «Как закрыть
+   ИП» одни и те же шаги идут дважды со своими скриншотами. Сравнивая абзац со
+   всей статьёй, импортёр выбрасывал такие разделы до последнего слова и
+   оставлял в вике заголовок со стеной картинок. Поэтому окно сравнения
+   заканчивается на заголовке (замер: 32 такие потери на 189 живых страницах,
+   и все 32 пересекали заголовок).
+
 2. ПРИЗНАК СКРЫТОГО НАПИСАН ТРЕМЯ РАЗНЫМИ СПОСОБАМИ. На 22 разобранных
    страницах встречаются is_hide, isHide и is_hidden — вперемешку, у
    компонентов одного и того же типа. Проверять надо все три: пропустишь
@@ -44,11 +53,21 @@ HTML. Ровно из-за этого модуль можно гонять те�
    вместо него ставится ссылка на источник.
 
 ЧЕГО В ВИКЕ НЕТ, И ВО ЧТО ЭТО ПРЕВРАЩАЕТСЯ. Видео (VideoInternal,
-YandexVideoText) переносить некуда: в белом списке санитайзера нет ни video, ни
-iframe (wiki/sanitize.py). Динамические врезки Яндекса (TariffCarClassifier,
-TaxiStation) — это его собственные виджеты, данных у первого в JSON нет вовсе.
-Всё такое становится ссылкой или таблицей, и о каждой потере пишется замечание:
-человек должен узнать о ней от импортёра, а не от читателя статьи.
+YandexVideoText, VideoText) переносить некуда: в белом списке санитайзера нет
+ни video, ни iframe (wiki/sanitize.py). Готовый адрес источник кладёт только у
+первого — у двух других лежит ОДИН КЛЮЧ, и по нему адрес проигрывателя
+собирается здесь (_video_url). Динамические врезки Яндекса
+(TariffCarClassifier, TaxiStation, PastingCar) — это его собственные виджеты,
+данных у первого в JSON нет вовсе, у двух других это справочники и у нас они
+становятся таблицей. YMediaArticle — ссылка на статью чужого сайта. Всё такое
+становится ссылкой или таблицей, и о каждой потере пишется замечание: человек
+должен узнать о ней от импортёра, а не от читателя статьи.
+
+ЗАМЕЧАНИЕ ПИШЕТСЯ ТОЛЬКО О ПОТЕРЕ. Список замечаний — это то, чего в статье НЕ
+окажется, и разбавлять его обычным устройством страницы нельзя: пока туда
+писали про каждое снятое перекрытие, предпросмотр выдавал до девяти дословно
+одинаковых жёлтых строк (226 вхождений на 99 живых страницах из 189), и
+настоящие потери тонули среди них.
 """
 
 import hashlib
@@ -228,9 +247,9 @@ def _audience_allows(values, audience):
     if not audience:
         return True, None
     if forbidden and audience & set(forbidden):
-        return False, 'запрещён для города'
+        return False, 'закрыта для нашего города'
     if allowed and not (audience & set(allowed)):
-        return False, 'предназначен другим городам'
+        return False, 'предназначена другим городам'
     return True, None
 
 
@@ -241,6 +260,29 @@ def _is_hidden(values):
 
 # ── Разбор компонентов в поток блоков ────────────────────────────────────────
 
+# Адрес проигрывателя по ключу видео. Готовый url источник кладёт ТОЛЬКО у
+# VideoInternal; YandexVideoText отдаёт один yandex_key, VideoText — один
+# youtube_key, и без этой таблицы оба приезжали врезкой «смотрите на странице
+# базы знаний» вообще без ссылки. Шаблоны сняты с самой страницы — это src
+# отрендеренного iframe, а не догадка.
+_VIDEO_PLAYERS = (
+    ('yandex_key', 'https://frontend.vh.yandex.ru/player/%s'),
+    ('youtube_key', 'https://www.youtube.com/watch?v=%s'),
+)
+
+
+def _video_url(values):
+    """Адрес видео источника. Пустая строка — смотреть негде даже по ссылке."""
+    url = str(values.get('url') or '').strip()
+    if url:
+        return url
+    for key, pattern in _VIDEO_PLAYERS:
+        found = str(values.get(key) or '').strip()
+        if found:
+            return pattern % found
+    return ''
+
+
 def _walk(components, audience, out, warnings, depth=0):
     for component in components or []:
         kind = str(component.get('type') or '')
@@ -249,7 +291,10 @@ def _walk(components, audience, out, warnings, depth=0):
             continue
         allowed, reason = _audience_allows(values, audience)
         if not allowed:
-            warnings.append('Пропущен блок «%s»: %s' % (kind, reason))
+            # «Пропущен блок «YTextArea»» человеку не говорит ничего: YTextArea —
+            # внутреннее имя компонента источника, а не название чего-либо, что
+            # он видел на странице.
+            warnings.append('Часть текста источника %s — она не перенесена' % reason)
             continue
 
         if kind == 'YTextArea':
@@ -280,13 +325,22 @@ def _walk(components, audience, out, warnings, depth=0):
         elif kind == 'Table':
             out.append({'kind': 'table', 'head': values.get('head') or [],
                         'body': values.get('body') or [], 'depth': depth})
-        elif kind == 'TaxiStation':
+        elif kind in ('TaxiStation', 'PastingCar'):
+            # Врезки-справочники источника: офисы у первой, точки брендирования
+            # у второй. Поля у них одни и те же, у второй сверх того услуги.
             out.append({'kind': 'stations', 'rows': values.get('body') or [], 'depth': depth})
         elif kind == 'LeaveRequest':
             out.append({'kind': 'link', 'url': str(values.get('url') or '').strip(),
                         'title': str(values.get('title') or '').strip(), 'depth': depth})
-        elif kind in ('VideoInternal', 'YandexVideoText'):
-            out.append({'kind': 'video', 'url': str(values.get('url') or '').strip(),
+        elif kind == 'YMediaArticle':
+            # Врезка со ссылкой на статью Яндекс Медиа — чужой сайт, у нас это
+            # обычная ссылка. Картинку-обложку не тянем: она про чужую статью.
+            out.append({'kind': 'link',
+                        'url': str(values.get('article_url') or '').strip(),
+                        'title': str(values.get('article_name') or '').strip(),
+                        'depth': depth})
+        elif kind in ('VideoInternal', 'YandexVideoText', 'VideoText'):
+            out.append({'kind': 'video', 'url': _video_url(values),
                         'title': str(values.get('title') or '').strip(), 'depth': depth})
         elif kind == 'TariffCarClassifier':
             # Врезка Яндекса, у которой в JSON нет ни строчки данных: перечень
@@ -306,38 +360,92 @@ _SPACE_RE = re.compile(r'\s+')
 
 
 def _fold(html):
-    """Свёртка текста для сравнения на дубль: без тегов, пробелов и nbsp."""
+    """Свёртка текста для сравнения на дубль: без тегов, пробелов и nbsp.
+
+    Ею же считается отпечаток страницы (fingerprint), поэтому трогать её нельзя
+    без нужды: любое изменение делает «изменившимися» ВСЕ подписанные страницы
+    сразу, и ночная сверка перепишет их тела ради одной новой редакции в
+    истории у каждой. Для сравнения абзацев между собой есть _fold_words.
+    """
     plain = _TAG_RE.sub(' ', html or '').replace('\xa0', ' ').replace('&nbsp;', ' ')
     return _SPACE_RE.sub('', plain).lower()
 
 
-def _dedupe_texts(blocks, warnings):
-    """Снять перекрывающиеся текстовые компоненты (ловушка 1 из шапки).
+def _fold_words(html):
+    """Свёртка для сравнения абзацев: пробелы СЖИМАЮТСЯ, а не удаляются.
 
-    Сравнивается свёрнутый текст: если он целиком содержится в тексте, который
-    уже взяли, компонент лишний. Обратный случай тоже бывает — сначала пришёл
-    короткий кусок, потом полный, — поэтому ранее взятый короткий выбрасывается
-    из результата, а не остаётся вторым абзацем.
+    Отличие от _fold ровно в одном пробеле, и оно существенно: сносив пробелы
+    целиком, «Яндекс Про» превращается в «яндекспро» и находится внутри
+    «работавяндекспросегодня». Так совпадение засчитывается через границы слов,
+    и абзац объявляется повтором того, чего в источнике нет как фразы. Пробел
+    по краям тоже нужен — иначе «Готово» совпадает с «Готовость».
+    """
+    plain = _TAG_RE.sub(' ', html or '').replace('\xa0', ' ').replace('&nbsp;', ' ')
+    return ' %s ' % _SPACE_RE.sub(' ', plain).strip().lower()
+
+
+def _dedupe_texts(blocks):
+    """Снять КОМПОНЕНТ-ОБЁРТКУ (ловушка 1 из шапки).
+
+    Ловушка про вложение: у «Межгорода» текст компонента [1] лежит ЦЕЛИКОМ
+    внутри компонента [0], и у обоих is_hide=False. Обратный случай тоже
+    бывает — сначала пришёл короткий кусок, потом полный, — поэтому ранее
+    взятый короткий выбрасывается из результата, а не остаётся вторым абзацем;
+    полный при этом встаёт НА МЕСТО первого выброшенного, иначе картинки между
+    кусками съезжают выше текста, который они поясняют.
+
+    СРАВНЕНИЕ НЕ ПЕРЕХОДИТ ЧЕРЕЗ ЗАГОЛОВОК, и это главное здесь. Обёртка и её
+    куски всегда лежат внутри одного раздела; заголовок начинает новый, и текст
+    нового раздела принадлежит ему, даже если слово в слово повторяет соседний.
+    Пока сравнивали по всей статье, вика теряла живой текст тремя способами
+    (замер на 189 живых страницах базы знаний, 225 выбросов):
+
+      * «Как закрыть ИП» — два раздела с дословно одинаковыми шагами и РАЗНЫМИ
+        скриншотами к каждому. Восемь абзацев второго раздела выброшены, в вику
+        уехали заголовок и стена из восьми картинок без единого слова;
+      * «Яндекс ID» — раздел «Не помню логин или пароль» состоит из одной
+        строки «Обратитесь в поддержку Яндекс ID по кнопке ниже», и она же
+        оказалась хвостом абзаца соседнего раздела. Раздел приехал пустым;
+      * ответы FAQ, повторяющие друг друга («Когда будут уплачены социальные
+        платежи?» и «Как проверить, оплачен налог или нет?»): вопрос остался
+        без ответа.
+
+    Все 32 таких выброса пересекали заголовок, и ни один из 193 правильных —
+    нет. Поэтому граница окна сравнения именно здесь.
+
+    О ПОВТОРАХ НЕ ПРЕДУПРЕЖДАЕМ. Обёртка — обычное устройство страницы
+    источника (99 страниц из 189), а её слова остаются в статье целиком: терять
+    нечего, и сказать человеку тут не о чем. Пока предупреждали, предпросмотр
+    получал до девяти дословно одинаковых жёлтых строк, выдавливавших вниз
+    выбор раздела, — а настоящие потери (видео, длинная таблица, врезка) тонули
+    среди них.
     """
     kept, folded = [], []
     for block in blocks:
+        if block['kind'] == 'heading':
+            # Новый раздел: всё, что было сказано выше, ему не родня.
+            folded = []
+            kept.append(block)
+            continue
         if block['kind'] != 'text':
             kept.append(block)
             continue
-        fold = _fold(block['html'])
-        if not fold:
+        fold = _fold_words(block['html'])
+        if not fold.strip():
+            # Пустой <p></p> между компонентами — у источника их хватает.
             continue
         if any(fold in earlier for earlier in folded):
-            warnings.append('Источник повторил абзац — взят один раз')
             continue
-        inner = [index for index, earlier in enumerate(folded) if earlier in fold]
-        if inner:
-            drop = {id(kept[position]) for position in
-                    [i for i, item in enumerate(kept)
-                     if item['kind'] == 'text' and _fold(item['html']) in fold]}
-            kept = [item for item in kept if id(item) not in drop]
-            folded = [earlier for earlier in folded if earlier not in fold]
-            warnings.append('Источник повторил абзац — взят один раз')
+        swallowed = {earlier for earlier in folded if earlier in fold}
+        if swallowed:
+            drop = [index for index, item in enumerate(kept)
+                    if item['kind'] == 'text' and _fold_words(item['html']) in swallowed]
+            place = drop[0]
+            kept = [item for index, item in enumerate(kept) if index not in set(drop)]
+            folded = [earlier for earlier in folded if earlier not in swallowed]
+            folded.append(fold)
+            kept.insert(place, block)
+            continue
         folded.append(fold)
         kept.append(block)
     return kept
@@ -375,8 +483,7 @@ def parse_article(page, url=None):
     audience = _city_audience(data, city)
 
     warnings = []
-    blocks = _dedupe_texts(_walk(article.get('text_components'), audience, [], warnings),
-                           warnings)
+    blocks = _dedupe_texts(_walk(article.get('text_components'), audience, [], warnings))
     images, seen = [], set()
     for block in blocks:
         for item in _slides_of(block):
@@ -545,20 +652,51 @@ def _table_html(head, body, source_url):
 
 _STATION_COLUMNS = (('name', 'Название'), ('address', 'Адрес'),
                     ('phone', 'Телефон'), ('work_time', 'Время работы'))
+# Услуги есть только у точек брендирования (PastingCar) и приходят списком.
+# Столбец добавляется, лишь когда он у кого-то заполнен: у офисов (TaxiStation)
+# его нет вовсе, и пустая колонка на всю таблицу — это шум.
+_STATION_SERVICES = ('services', 'Услуги')
+
+
+def _cell(value):
+    """Клетка справочника. Список услуг источник кладёт массивом."""
+    if isinstance(value, (list, tuple)):
+        return ', '.join(_escape(item) for item in value if item)
+    return _escape(value)
 
 
 def _stations_html(rows):
-    """Врезка Яндекса со списком офисов — у нас это обычная таблица."""
+    """Врезка-справочник источника — у нас это обычная таблица."""
+    rows = [row for row in (rows or []) if row]
+    columns = list(_STATION_COLUMNS)
+    if any((row or {}).get(_STATION_SERVICES[0]) for row in rows):
+        columns.append(_STATION_SERVICES)
     out = ['<table><thead><tr>']
-    out += ['<th><p>%s</p></th>' % title for _, title in _STATION_COLUMNS]
+    out += ['<th><p>%s</p></th>' % title for _, title in columns]
     out.append('</tr></thead><tbody>')
-    for row in rows or []:
+    for row in rows:
         out.append('<tr>')
-        out += ['<td><p>%s</p></td>' % _escape((row or {}).get(key))
-                for key, _ in _STATION_COLUMNS]
+        out += ['<td><p>%s</p></td>' % _cell((row or {}).get(key))
+                for key, _ in columns]
         out.append('</tr>')
     out.append('</tbody></table>')
     return ''.join(out)
+
+
+def collapse_warnings(items):
+    """Одинаковые замечания — одной строкой, в порядке появления.
+
+    Замечание, повторённое дословно, ничего не добавляет: человек читает его
+    один раз, а девять одинаковых жёлтых строк выдавливают из предпросмотра
+    выбор раздела и топят в себе единственное важное.
+    """
+    seen, out = set(), []
+    for item in items or []:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
 
 
 def build_content(parsed, image_map=None, *, source_link=True):
@@ -677,7 +815,7 @@ def build_content(parsed, image_map=None, *, source_link=True):
                      '<a href="%s" target="_blank">%s</a>.%s</p></div>'
                      % (_escape(parsed['url']), _escape(parsed['url']), updated))
 
-    return sanitize_html(''.join(parts)), warnings
+    return sanitize_html(''.join(parts)), collapse_warnings(warnings)
 
 
 def summary_of(parsed, content=None, limit=280):

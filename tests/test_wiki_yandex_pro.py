@@ -468,6 +468,228 @@ class ParseTest(unittest.TestCase):
 # Схема
 # ─────────────────────────────────────────────────────────────────────────────
 
+class RepeatedTextTest(unittest.TestCase):
+    """Повтор абзаца — не всегда ловушка источника, и цена ошибки здесь высокая.
+
+    Дедупликация писалась под ловушку 1 (компонент-обёртка: текст [1] лежит
+    внутри [0]) и сравнивала абзац со ВСЕЙ статьёй. Замер на 189 живых
+    страницах базы знаний: из 225 выбросов 32 уносили живой текст, и все 32
+    пересекали заголовок раздела. «Как закрыть ИП» приезжала в вику вторым
+    разделом из одного заголовка и восьми картинок без единого слова, раздел
+    «Не помню логин или пароль» — заголовком без ответа, а ответы FAQ,
+    повторяющие друг друга, исчезали вместе с вопросами.
+
+    Ни один из 106 прежних сторожей этого не ловил: в фикстуре была ровно одна
+    ловушка — соседние компоненты, где второй строгий подтекст первого.
+    """
+
+    def build(self, components):
+        parsed = yandex_pro.parse_article(make_page(components), PAGE_URL)
+        content, warnings = yandex_pro.build_content(parsed, image_map(parsed),
+                                                     source_link=False)
+        return parsed, content, warnings
+
+    # ── Что должно ОСТАТЬСЯ ─────────────────────────────────────────────
+    def test_a_repeat_in_another_section_is_kept(self):
+        """Форма страницы «Как закрыть ИП»: те же шаги, СВОИ скриншоты.
+
+        Источник показывает оба раздела целиком — проверено на живой странице:
+        в отрендеренной разметке шаг встречается дважды.
+        """
+        step = '<p>Перейдите в Кабинет налогоплательщика.</p>'
+        _parsed, content, warnings = self.build([
+            component('AccordionStart', {'title': 'Как закрыть ИП'}, children=[
+                component('YTextArea', {'text': step}),
+                component('ImageSlider', {'dataList': [{'url': IMG_PORTRAIT,
+                                                        'name': 'Шаг первого раздела'}]}),
+            ]),
+            component('AccordionStart', {'title': 'Как закрыть ИП на упрощёнке'},
+                      children=[
+                component('YTextArea', {'text': step}),
+                component('ImageSlider', {'dataList': [{'url': IMG_WIDE,
+                                                        'name': 'Шаг второго раздела'}]}),
+            ]),
+        ])
+        self.assertEqual(content.count('Перейдите в Кабинет налогоплательщика'), 2,
+                         'второй раздел остался без единого слова:\n' + content)
+        self.assertEqual(warnings, [])
+
+    def test_a_one_line_section_that_repeats_a_tail_is_kept(self):
+        """Форма страницы «Яндекс ID»: раздел из одной строки.
+
+        Строка «Обратитесь в поддержку» — целый раздел и одновременно хвост
+        абзаца соседнего. Сравнение по всей статье уносило её, и в вике
+        оставался заголовок с кнопкой и пустотой между ними.
+        """
+        _parsed, content, _warnings = self.build([
+            component('AccordionStart', {'title': 'Не приходит смс'}, children=[
+                component('YTextArea', {'text': '<p>Проверьте связь. Если не помогло, '
+                                                'обратитесь в поддержку.</p>'}),
+            ]),
+            component('AccordionStart', {'title': 'Не помню пароль'}, children=[
+                component('YTextArea', {'text': '<p>Обратитесь в поддержку.</p>'}),
+            ]),
+        ])
+        self.assertIn('Не помню пароль', content)
+        # Свёртка сравнения не различает регистр, и на живой странице первое
+        # вхождение стоит после запятой — со строчной буквы.
+        self.assertEqual(content.lower().count('обратитесь в поддержку'), 2, content)
+
+    def test_comparison_does_not_glue_words_together(self):
+        """Свёртка сжимает пробелы, а не сносит их.
+
+        Сносив пробелы, «Яндекс Про» становится «яндекспро» и находится внутри
+        «работавяндекспросегодня»: абзац объявляется повтором того, чего в
+        источнике нет как фразы.
+        """
+        _parsed, content, _warnings = self.build([
+            component('YTextArea', {'text': '<p>Заходите в Яндекс Про</p>'}),
+            component('YTextArea', {'text': '<p>Яндекспро</p>'}),
+        ])
+        self.assertIn('Яндекспро', content)
+        self.assertNotIn(' яндекспро ', yandex_pro._fold('Заходите в Яндекс Про'),
+                         'свёртка отпечатка не для сравнения абзацев')
+
+    # ── Что должно УЙТИ ─────────────────────────────────────────────────
+    def test_the_wrapper_component_is_still_taken_once(self):
+        """Ловушка 1 никуда не делась: внутри РАЗДЕЛА повтор снимается."""
+        _parsed, content, _warnings = self.build([
+            component('YTextArea', {'text': '<p>Вводка.</p><p>Заказ можно получить.</p>'}),
+            component('YTextArea', {'text': '<p>Заказ можно получить.</p>'}),
+        ])
+        self.assertEqual(content.count('Заказ можно получить'), 1, content)
+
+    def test_taking_a_paragraph_once_is_silent(self):
+        """Слова остаются в статье целиком — человеку тут не о чем говорить.
+
+        Пока предупреждали, предпросмотр получал до девяти ОДИНАКОВЫХ жёлтых
+        строк (226 вхождений на 99 живых страницах из 189), и настоящие потери
+        тонули среди них.
+        """
+        _parsed, _content, warnings = self.build([
+            component('YTextArea', {'text': '<p>Вводка.</p><p>Первый.</p><p>Второй.</p>'}),
+            component('YTextArea', {'text': '<p>Первый.</p>'}),
+            component('YTextArea', {'text': '<p>Второй.</p>'}),
+        ])
+        self.assertEqual(warnings, [])
+
+    def test_a_late_full_block_takes_the_place_of_the_first_it_swallows(self):
+        """Обратный случай: сначала куски, потом целое.
+
+        Целое встаёт НА МЕСТО первого выброшенного куска. Оставаясь в конце,
+        оно уводило картинки выше текста, который они поясняют.
+        """
+        _parsed, content, _warnings = self.build([
+            component('YTextArea', {'text': '<p>Шаг один.</p>'}),
+            component('ImageSlider', {'dataList': [{'url': IMG_PORTRAIT, 'name': 'кадр'}]}),
+            component('YTextArea', {'text': '<p>Шаг два.</p>'}),
+            component('YTextArea', {'text': '<p>Шаг один.</p><p>Шаг два.</p>'}),
+        ])
+        self.assertLess(content.index('Шаг один'), content.index('<img'),
+                        'картинка уехала выше текста:\n' + content)
+
+
+class SourceBlockTest(unittest.TestCase):
+    """Типы компонентов, которых разбор не знал.
+
+    Замер по 1826 компонентам 189 живых страниц: VideoText (5), YMediaArticle
+    (3) и PastingCar (1) уезжали в предупреждение «Незнакомый блок источника»,
+    то есть терялись. У видео при этом нашлась вторая беда: готовый url есть
+    только у VideoInternal, а YandexVideoText и VideoText отдают ОДИН КЛЮЧ — и
+    ссылки на видео в статье не оставалось вовсе.
+    """
+
+    def build(self, components):
+        parsed = yandex_pro.parse_article(make_page(components), PAGE_URL)
+        content, warnings = yandex_pro.build_content(parsed, image_map(parsed),
+                                                     source_link=False)
+        return content, warnings
+
+    def test_youtube_video_becomes_a_working_link(self):
+        content, warnings = self.build([
+            component('VideoText', {'title': 'Видеоинструкция',
+                                    'youtube_key': 'b2tnUNgaDjc'}),
+        ])
+        self.assertIn('https://www.youtube.com/watch?v=b2tnUNgaDjc', content)
+        self.assertFalse([w for w in warnings if 'Незнакомый' in w], warnings)
+
+    def test_yandex_video_key_becomes_a_working_link(self):
+        """Адрес проигрывателя снят с самой страницы — это src её iframe."""
+        content, _warnings = self.build([
+            component('YandexVideoText', {'title': 'Как выполнить брендирование',
+                                          'yandex_key': 'v2GxvNxsj6W0'}),
+        ])
+        self.assertIn('https://frontend.vh.yandex.ru/player/v2GxvNxsj6W0', content)
+
+    def test_a_video_without_any_key_still_says_so(self):
+        content, warnings = self.build([
+            component('VideoInternal', {'title': 'Без ключа'}),
+        ])
+        self.assertIn('Без ключа', content)
+        self.assertTrue(any('Видео' in w for w in warnings), warnings)
+
+    def test_media_article_becomes_a_link(self):
+        content, warnings = self.build([
+            component('YMediaArticle', {
+                'article_url': 'https://mediapro.yandex.ru/work/drive-safe-in-the-dark',
+                'article_name': 'Как безопасно ездить в темноте'}),
+        ])
+        self.assertIn('mediapro.yandex.ru/work/drive-safe-in-the-dark', content)
+        self.assertIn('Как безопасно ездить в темноте', content)
+        self.assertFalse([w for w in warnings if 'Незнакомый' in w], warnings)
+
+    def test_branding_contractors_become_a_table_with_services(self):
+        """PastingCar — тот же справочник, что офисы, плюс перечень услуг."""
+        content, warnings = self.build([
+            component('PastingCar', {'body': [
+                {'name': 'ТОО Fast Media', 'address': 'ул. Витебская, 44',
+                 'phone': '+7 705 157 46 03', 'work_time': 'Пн–сб, 10:00–20:00',
+                 'services': ['Брендирование легковых машин', 'Мойка рядом']},
+            ]}),
+        ])
+        self.assertIn('<table>', content)
+        self.assertIn('ТОО Fast Media', content)
+        self.assertIn('Услуги', content)
+        self.assertIn('Брендирование легковых машин, Мойка рядом', content)
+        self.assertFalse([w for w in warnings if 'Незнакомый' in w], warnings)
+
+    def test_offices_table_has_no_empty_services_column(self):
+        """У офисов услуг нет — пустая колонка во всю таблицу это шум."""
+        content, _warnings = self.build([
+            component('TaxiStation', {'body': [
+                {'name': 'АК ЖОЛ', 'address': 'улица Б. Сокпакбаева, 48',
+                 'phone': '+77072282838', 'work_time': 'С 10:00 до 18:00'},
+            ]}),
+        ])
+        self.assertIn('АК ЖОЛ', content)
+        self.assertNotIn('Услуги', content)
+
+    def test_an_unknown_block_is_still_reported(self):
+        _content, warnings = self.build([
+            component('СовсемНовыйБлок', {'text': 'что-то'}),
+        ])
+        self.assertTrue(any('СовсемНовыйБлок' in w for w in warnings), warnings)
+
+    def test_a_skipped_city_block_does_not_name_the_component_type(self):
+        """«Пропущен блок «YTextArea»» человеку не говорит ничего."""
+        _content, warnings = self.build([
+            component('YTextArea', {'text': '<p>ТОЛЬКО-АСТАНА</p>',
+                                    'allowed_ids': ['city-10']}),
+        ])
+        self.assertTrue(warnings)
+        self.assertNotIn('YTextArea', ' '.join(warnings))
+        self.assertIn('другим городам', ' '.join(warnings))
+
+    def test_identical_warnings_are_said_once(self):
+        """Девять одинаковых строк выдавливают из предпросмотра выбор раздела."""
+        _content, warnings = self.build([
+            component('НовыйБлок', {}), component('НовыйБлок', {}),
+            component('НовыйБлок', {}),
+        ])
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertEqual(yandex_pro.collapse_warnings(['а', 'б', 'а']), ['а', 'б'])
+
+
 class SchemaTest(unittest.TestCase):
     def _ddl(self):
         return '\n'.join(s for s in wiki_schema._YANDEX_PRO_STATEMENTS
