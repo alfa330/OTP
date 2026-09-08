@@ -40,11 +40,21 @@ CACHE_TTL_SECONDS = 300
 
 # Потолок поисков на человека в сутки. Не про деньги, а про то, что исчерпание
 # месячной квоты Chat2Desk роняет НЕ этот раздел, а ежедневный синк метрик — то
-# есть табло СЗоВ, зарплатные метрики чат-менеджеров и учёт часов. В августе
-# бесплатный пул уже выбирали досуха (27.08: left_free_requests = 0), поэтому
-# потолок — условие запуска, а не украшение. 150 поисков в смену — заведомо
-# больше живой потребности (за сутки во всём отделе 872 уникальных телефона).
-DAILY_SEARCH_LIMIT = 150
+# есть табло СЗоВ, зарплатные метрики чат-менеджеров и учёт часов.
+#
+# ТРИДЦАТЬ (решение владельца 08.09.2026, было 150). Прежнее число ставилось,
+# когда разделом пользовался один супер-админ; после открытия отделу в периметре
+# 54 человека, и 150 на каждого — это до 8100 поисков в сутки, то есть втрое
+# больше всего месячного пула вендора (замер 08.09: 100 326 вызовов в месяц,
+# из них половина уже съедена ночным синком к восьмому числу). Тридцать на
+# человека — это 1620 поисков в сутки в самом худшем случае, когда лимит выберут
+# ВСЕ, а по факту за первые дни весь отдел делал 3-63 поиска в сутки.
+#
+# Один поиск стоит в среднем полтора вызова к вендору: 65 % водителей уже есть в
+# нашей базе (тогда вызов один, за сообщениями), 35 % пишут впервые (плюс поиск
+# клиента, 1-3 вызова). Повторный поиск того же номера в пределах пяти минут
+# бесплатен — отвечает кеш.
+DAILY_SEARCH_LIMIT = 30
 
 # Сколько минут после отправки лента показывает НАШУ копию заметки «Передан».
 # Вендор принимает её мгновенно и сразу возвращает message_id, но в выборке
@@ -186,7 +196,13 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             'capabilities': access.capabilities(ctx),
             'window': {'from': window_from.isoformat(), 'to': window_to.isoformat(),
                        'days': chat2desk.WINDOW_DAYS},
-            'limits': {'searches_per_day': DAILY_SEARCH_LIMIT, 'used_today': used_today},
+            # Супер-админу потолка нет, и в limits вместо числа уходит null:
+            # экран рисует остаток по числу, а «осталось поисков: —» было бы
+            # шумом там, где считать нечего.
+            'limits': {
+                'searches_per_day': DAILY_SEARCH_LIMIT if access.is_search_limited(ctx) else None,
+                'used_today': used_today,
+            },
             'comment_max_length': chat2desk.MAX_COMMENT_LENGTH,
             'me': {'user_id': ctx['user_id'], 'name': ctx.get('name')},
         }), 200
@@ -236,7 +252,8 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 "      (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))",
                 {'user_id': ctx['user_id']})
             used_today = int((cursor.fetchone() or [0])[0] or 0)
-            if used_today < DAILY_SEARCH_LIMIT:
+            limited = access.is_search_limited(ctx)
+            if not limited or used_today < DAILY_SEARCH_LIMIT:
                 # Клиент вендора: сначала своя память о паре телефон-клиент,
                 # потом ночной срез заявок, и только потом — API.
                 # Точные записи спрашиваем, только если номер собрался
@@ -289,7 +306,7 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                 "code": "PHONE_AMBIGUOUS",
             }), 400
 
-        if used_today >= DAILY_SEARCH_LIMIT:
+        if limited and used_today >= DAILY_SEARCH_LIMIT:
             return jsonify({
                 "error": "На сегодня исчерпан лимит поисков (%d). Он защищает "
                          "общий лимит запросов к Chat2Desk, от которого зависят "
@@ -414,7 +431,8 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             # Возраст ленты — с сервера, а не с часов браузера: на кеше они
             # расходятся на его возраст, и подпись «обновлено» врала бы.
             'fetched_at': fetched_at.isoformat() if fetched_at else None,
-            'searches_left': max(0, DAILY_SEARCH_LIMIT - used_today - 1),
+            'searches_left': (max(0, DAILY_SEARCH_LIMIT - used_today - 1)
+                              if limited else None),
         }), 200
 
     # ── Открытие чата (только журнал) ────────────────────────────────────────

@@ -62,7 +62,13 @@ CHAT_MANAGER_DIRECTION_MODEL = 'chat_manager'
 # parcels/access.py:requires_sensitive_qr). Здесь на кону не карточка с
 # телефоном, а переписка целиком, и «стажёр читает чаты водителей из дома без
 # подтверждения» — не та сторона ошибки, на которой стоит оказаться.
-_QR_GATED_ROLES = ('operator', 'trainee')
+#
+# Имя ПУБЛИЧНОЕ, потому что список читает монолит: три ручки /api/sensitive-access/*
+# и кнопка «Открыть доступ» в «Сессиях» умеют выдавать подтверждение только тем
+# ролям, у которых его хоть кто-то спрашивает. Пока список был приватным, они о
+# стажёре не знали, и он оказывался в тупике: раздел требует QR, а сгенерировать
+# его портал отказывается («этой роли подтверждение не требуется»).
+QR_GATED_ROLES = ('operator', 'trainee')
 
 
 # ─── Стадия выката ────────────────────────────────────────────────────────────
@@ -186,6 +192,22 @@ def can_open_section(ctx):
     return section_perimeter_allows(ctx)
 
 
+def is_search_limited(ctx):
+    """Считать ли этому человеку суточный лимит поисков.
+
+    Лимит защищает не деньги, а месячную квоту Chat2Desk, общую с ночным синком
+    метрик отдела: исчерпав её, встают табло СЗоВ, зарплатные метрики
+    чат-менеджеров и учёт часов. Поэтому он стоит на КАЖДОМ, кто работает в
+    разделе, — от оператора до главы отдела.
+
+    Супер-админ вне лимита (решение владельца 08.09.2026). Он не ведёт линию, а
+    разбирает жалобы и проверяет сам раздел: упереться в потолок посреди разбора
+    ему негде и незачем. Обратная сторона — потолка у него нет вовсе, поэтому
+    его поиски видны в журнале наравне со всеми.
+    """
+    return not is_super_admin(ctx)
+
+
 def can_view_journal(ctx):
     """Журнал «кто открывал чаты и кто нажимал «Передан»».
 
@@ -239,7 +261,7 @@ def requires_sensitive_qr(ctx):
     """
     if is_super_admin(ctx) or is_department_head(ctx) or is_supervisor(ctx):
         return False
-    return normalize_role(ctx.get('role')) in _QR_GATED_ROLES
+    return normalize_role(ctx.get('role')) in QR_GATED_ROLES
 
 
 def capabilities(ctx):
@@ -251,6 +273,7 @@ def capabilities(ctx):
         'can_open': can_open_section(ctx),
         'can_view_journal': can_view_journal(ctx),
         'requires_qr': requires_sensitive_qr(ctx),
+        'is_search_limited': is_search_limited(ctx),
         'is_super_admin': is_super_admin(ctx),
         'is_department_head': is_department_head(ctx),
     }

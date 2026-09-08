@@ -2093,6 +2093,30 @@ const sensitiveSectionQrRequiredFor = (userLike) => (
     && !isDepartmentHead(userLike)
 );
 
+/* «Чаты водителей» спрашивают QR ШИРЕ остальных чувствительных разделов: ещё и
+   у стажёра. Там на кону не карточка с телефоном, а переписка водителя целиком,
+   и «стажёр читает чаты из дома без подтверждения» — не та сторона ошибки, на
+   которой стоит оказаться. Двойник правила — driver_chats/access.py:
+   requires_sensitive_qr; расходиться им нельзя, иначе экран покажет раздел, а
+   сервер ответит отказом (или наоборот — покажет замок там, где всё открыто).
+
+   Отдельным предикатом, а не расширением общего: общий решает судьбу вики,
+   «Обращений» и «Посылок», и стажёра они пропускают молча. Добавь его туда — и
+   стажёр получил бы замок в разделах, куда сервер его пускает. */
+const driverChatsQrRequiredFor = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin' || isDepartmentHead(userLike) || isSupervisorRole(role)) return false;
+    return role === 'operator' || role === 'trainee';
+};
+
+/* Кому портал вообще выдаёт QR. Кнопка «Сгенерировать QR» и закрытие окна после
+   подтверждения смотрят сюда, а не в один общий предикат: у стажёра гейт есть
+   только в «Чатах водителей», и без этого объединения кнопка в замке молча не
+   делала бы ничего (ровно так уже было у бэк-офиса с литералом 'operator'). */
+const sensitiveQrAvailableFor = (userLike) => (
+    sensitiveSectionQrRequiredFor(userLike) || driverChatsQrRequiredFor(userLike)
+);
+
 const canManageSzovBroadcastForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
@@ -38188,6 +38212,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // QR-подтверждением сессии, что и данные в «Моих оценках».
             const sensitiveSectionsLocked = sensitiveSectionQrRequiredFor(user) && !sensitiveAccess.granted;
             const sensitiveSectionsChecking = sensitiveSectionsLocked && !sensitiveAccess.checked;
+            // У «Чатов водителей» круг шире на стажёра — свой замок, тот же ключ.
+            const driverChatsLocked = driverChatsQrRequiredFor(user) && !sensitiveAccess.granted;
+            const driverChatsChecking = driverChatsLocked && !sensitiveAccess.checked;
             const [qrApproveInput, setQrApproveInput] = useState('');
             const [qrApproveLoading, setQrApproveLoading] = useState(false);
             const [qrApproveResult, setQrApproveResult] = useState('');
@@ -45746,7 +45773,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         // проходит. С литералом 'operator' окно сотрудника
                         // бэк-офиса оставалось висеть после подтверждения, а
                         // опрос статуса продолжал ходить на сервер.
-                        if (sensitiveSectionQrRequiredFor(user) && data.granted) {
+                        if (sensitiveQrAvailableFor(user) && data.granted) {
                             clearSensitiveQrPolling();
                             setShowSensitiveQrModal(false);
                             // Оценки перечитываем только в самих «Моих оценках»: тем же
@@ -45779,7 +45806,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Просит QR ровно тот, кому он нужен. Раньше здесь стоял литерал
                 // 'operator': замок сотруднику бэк-офиса показывался, а кнопка в
                 // нём молча не делала ничего.
-                if (!user || !sensitiveSectionQrRequiredFor(user)) return;
+                if (!user || !sensitiveQrAvailableFor(user)) return;
 
                 setSensitiveQrError('');
                 setSensitiveQrUrl('');
@@ -48192,11 +48219,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
-                        {view === "driver_chats" && canAccessDriverChatsSection && (sensitiveSectionsLocked ? (
+                        {view === "driver_chats" && canAccessDriverChatsSection && (driverChatsLocked ? (
                             <SensitiveSectionGate
                                 sectionTitle="Чаты водителей"
                                 description="В разделе переписка живых водителей. Он открывается после подтверждения доступа старшим."
-                                checking={sensitiveSectionsChecking}
+                                checking={driverChatsChecking}
                                 onRequestQr={requestSensitiveQrAccess}
                             />
                         ) : (

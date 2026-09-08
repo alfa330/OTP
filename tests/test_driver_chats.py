@@ -41,6 +41,7 @@ except ImportError:  # pragma: no cover
     Flask = None
 
 from driver_chats import access, chat2desk, queries, report, schema  # noqa: E402
+from driver_chats import routes as routes_module  # noqa: E402
 from driver_chats.routes import build_driver_chats_blueprint  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
@@ -278,6 +279,54 @@ class QrPolicyTests(unittest.TestCase):
                        ctx(role='operator', headed=('szov',))):
             with self.subTest(role=person['role'], headed=person['headed_department_codes']):
                 self.assertFalse(access.requires_sensitive_qr(person))
+
+    def test_the_portal_can_actually_issue_a_qr_to_everyone_gated_here(self):
+        """Гейт без выдачи — это тупик, и он у нас был.
+
+        Раздел спрашивает подтверждение у стажёра, а монолит до 08.09.2026 знал
+        только список вики (оператор и бэк-офис). Стажёр получал 403 от раздела,
+        а на просьбу выдать QR — «этой роли подтверждение не требуется»: замок
+        есть, ключа нет. Теперь список монолита СОБИРАЕТСЯ из списков разделов,
+        и эта проверка держит связь: добавь сюда роль — портал обязан уметь
+        выдать ей подтверждение.
+        """
+        from wiki.access import QR_GATED_ROLES as portal_roles
+        issuable = set(portal_roles) | set(access.QR_GATED_ROLES)
+        for role in access.QR_GATED_ROLES:
+            with self.subTest(role=role):
+                self.assertIn(role, issuable)
+
+        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        self.assertIn('from driver_chats.access import QR_GATED_ROLES', bot,
+                      'монолит обязан читать список раздела, а не догадываться')
+        self.assertIn('SENSITIVE_QR_GATED_ROLES = frozenset(_WIKI_QR_GATED_ROLES) '
+                      '| frozenset(_DRIVER_CHATS_QR_GATED_ROLES)', bot)
+
+    def test_the_screen_asks_the_same_people_as_the_server(self):
+        """Двойник на фронте. Разойдись они — либо экран покажет раздел, который
+        сервер закроет, либо замок там, где всё открыто."""
+        app = APP_JSX.read_text(encoding='utf-8-sig')
+        predicate = app.split('const driverChatsQrRequiredFor = (userLike) => {')[1].split('};')[0]
+        # Те же исключения, что в requires_sensitive_qr: супер-админ, глава
+        # отдела и супервайзер.
+        self.assertIn("role === 'super_admin'", predicate)
+        self.assertIn('isDepartmentHead(userLike)', predicate)
+        self.assertIn('isSupervisorRole(role)', predicate)
+        # И тот же круг гейтованных ролей.
+        for role in access.QR_GATED_ROLES:
+            with self.subTest(role=role):
+                self.assertIn("role === '%s'" % role, predicate)
+
+    def test_the_section_has_its_own_lock_not_the_shared_one(self):
+        """Общий предикат решает судьбу вики, «Обращений» и «Посылок», и стажёра
+        они пропускают молча. Расширь его — стажёр получит замок там, куда
+        сервер его пускает."""
+        app = APP_JSX.read_text(encoding='utf-8-sig')
+        self.assertIn('const driverChatsLocked = driverChatsQrRequiredFor(user)', app)
+        self.assertIn('view === "driver_chats" && canAccessDriverChatsSection && (driverChatsLocked ?', app)
+        shared = app.split('const sensitiveSectionQrRequiredFor = (userLike) => (')[1].split(');')[0]
+        self.assertNotIn('trainee', shared,
+                         'стажёр не должен попасть в общий предикат портала')
 
 
 class PhoneTests(unittest.TestCase):
@@ -1788,6 +1837,130 @@ class SearchRouteForeignPhoneTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.get_json()['code'], 'BAD_PHONE')
         self.assertEqual(seen['tail'], [])
+        self.assertEqual(seen['vendor'], [])
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class DailySearchLimitTests(unittest.TestCase):
+    """Суточный потолок поисков: 30 на человека, супер-админ вне лимита.
+
+    Потолок защищает не деньги, а месячную квоту Chat2Desk, общую с ночным
+    синком метрик отдела: исчерпав её, встают табло СЗоВ, зарплатные метрики
+    чат-менеджеров и учёт часов. Число снижено со 150 до 30 владельцем
+    08.09.2026 — 150 ставились, когда разделом пользовался один супер-админ, а
+    сейчас в периметре 54 человека.
+    """
+
+    def build(self, *, role='operator', used_today=0):
+        context = {'user_id': 7, 'name': 'Тест', 'role': role,
+                   'department_id': 1,
+                   'department_code': '' if role == 'super_admin' else 'szov',
+                   'direction_model': None,
+                   'headed_department_ids': [], 'headed_department_codes': []}
+        seen = {'vendor': [], 'logged': []}
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (used_today,)
+        db = MagicMock()
+
+        @contextmanager
+        def _get_cursor():
+            yield cursor
+
+        db._get_cursor = _get_cursor
+
+        def _patch(module, name, value):
+            original = getattr(module, name)
+            setattr(module, name, value)
+            self.addCleanup(setattr, module, name, original)
+
+        def _find_client(phone):
+            seen['vendor'].append(phone)
+            return {'id': 500, 'name': 'Водитель', 'phone': phone}
+
+        _patch(queries, 'load_access_context', lambda _c, _uid: dict(context))
+        _patch(queries, 'cached_client_id', lambda _c, _phone: None)
+        _patch(queries, 'local_client_id', lambda *_a, **_k: None)
+        _patch(queries, 'local_client_by_tail', lambda *_a, **_k: None)
+        _patch(queries, 'pending_handoff_notes', lambda *_a, **_k: [])
+        _patch(queries, 'cached_messages', lambda *_a, **_k: (None, None))
+        _patch(queries, 'store_messages', lambda *_a, **_k: None)
+        _patch(queries, 'request_meta', lambda *_a, **_k: {})
+        _patch(queries, 'channel_names', lambda *_a, **_k: {})
+        _patch(queries, 'log_event',
+               lambda _c, _ctx, kind, **kw: seen['logged'].append(kind))
+        _patch(chat2desk, 'find_client', _find_client)
+        _patch(chat2desk, 'fetch_window_messages', lambda *_a, **_k: ([], 0))
+        _patch(chat2desk, 'operator_names', lambda *_a, **_k: {})
+        _patch(chat2desk, 'channel_names', lambda *_a, **_k: {})
+
+        app = Flask(__name__)
+        app.register_blueprint(build_driver_chats_blueprint(
+            db=db,
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (context['user_id'], None, None),
+            sensitive_access_granted=lambda _uid: True))
+        return app.test_client(), seen
+
+    def test_the_limit_is_thirty(self):
+        """Число названо владельцем словами. Двойника у него нет: экран берёт
+        потолок из ответа сервера, а не хранит свою копию."""
+        self.assertEqual(routes_module.DAILY_SEARCH_LIMIT, 30)
+
+    def test_everyone_but_the_super_admin_is_counted(self):
+        for role in ('operator', 'trainee', 'sv', 'admin'):
+            with self.subTest(role=role):
+                self.assertTrue(access.is_search_limited(ctx(role=role)))
+        self.assertFalse(access.is_search_limited(
+            ctx(role='super_admin', department_code='')))
+
+    def test_the_thirtieth_search_still_goes_through(self):
+        """Потолок — это «не больше тридцати», а не «двадцать девять»."""
+        client, seen = self.build(role='sv', used_today=29)
+        response = client.get('/api/driver_chats/search?phone=87071234567')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['searches_left'], 0)
+        self.assertEqual(seen['vendor'], ['77071234567'])
+
+    def test_the_thirty_first_is_refused_before_the_vendor(self):
+        """Отказ обязан прийти РАНЬШЕ обращения к вендору — иначе потолок
+        защищает квоту уже после того, как её потратили."""
+        client, seen = self.build(role='sv', used_today=30)
+        response = client.get('/api/driver_chats/search?phone=87071234567')
+        self.assertEqual(response.status_code, 429)
+        payload = response.get_json()
+        self.assertEqual(payload['code'], 'DAILY_LIMIT_REACHED')
+        self.assertIn('30', payload['error'])
+        self.assertEqual(seen['vendor'], [], 'вендора не спрашивали')
+        self.assertEqual(seen['logged'], [], 'и поиск в журнал не писали')
+
+    def test_super_admin_passes_far_past_the_limit(self):
+        """Он не ведёт линию, а разбирает жалобы и проверяет сам раздел."""
+        client, seen = self.build(role='super_admin', used_today=999)
+        response = client.get('/api/driver_chats/search?phone=87071234567')
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.get_json()['searches_left'],
+                          'остатка у него нет — считать нечего')
+        self.assertEqual(seen['vendor'], ['77071234567'])
+
+    def test_context_hides_the_ceiling_from_the_super_admin(self):
+        """Экран рисует остаток по числу; «осталось поисков: —» было бы шумом."""
+        client, _ = self.build(role='super_admin', used_today=999)
+        limits = client.get('/api/driver_chats/context').get_json()['limits']
+        self.assertIsNone(limits['searches_per_day'])
+
+        client, _ = self.build(role='operator', used_today=4)
+        limits = client.get('/api/driver_chats/context').get_json()['limits']
+        self.assertEqual(limits['searches_per_day'], 30)
+        self.assertEqual(limits['used_today'], 4)
+
+    def test_refresh_costs_a_search_too(self):
+        """«Обновить» — то же обращение к вендору мимо кеша. Кнопка, ходящая
+        мимо счётчика, обошла бы защиту квоты."""
+        client, seen = self.build(role='sv', used_today=30)
+        response = client.get('/api/driver_chats/search?phone=87071234567&refresh=1')
+        self.assertEqual(response.status_code, 429)
         self.assertEqual(seen['vendor'], [])
 
 

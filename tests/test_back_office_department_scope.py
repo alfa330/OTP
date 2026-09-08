@@ -829,9 +829,12 @@ class RankAndFileGatesTests(unittest.TestCase):
     def test_qr_modal_closes_when_access_is_granted(self):
         # После подтверждения окно с QR оставалось висеть, а опрос статуса
         # продолжал ходить на сервер: закрытие стояло на литерале 'operator'.
+        # С 08.09.2026 здесь `sensitiveQrAvailableFor` — объединение замков:
+        # у стажёра гейт есть только в «Чатах водителей», и на прежнем предикате
+        # его окно после подтверждения снова висело бы.
         app = _read(APP_PATH)
         self.assertIn(
-            "                        if (sensitiveSectionQrRequiredFor(user) && data.granted) {\n"
+            "                        if (sensitiveQrAvailableFor(user) && data.granted) {\n"
             "                            clearSensitiveQrPolling();\n"
             "                            setShowSensitiveQrModal(false);",
             app,
@@ -839,26 +842,48 @@ class RankAndFileGatesTests(unittest.TestCase):
         self.assertNotIn("if (user.role === 'operator' && data.granted) {", app)
 
     def test_whole_qr_flow_shares_one_predicate(self):
-        # Замок, кнопка в нём и закрытие окна обязаны спрашивать ОДНО и то же:
-        # разойдясь, они дают экран, который показан, но не работает.
+        """Кнопка QR и закрытие окна обязаны покрывать КАЖДЫЙ замок.
+
+        Правило поменялось 08.09.2026, и вот почему. Замков стало два: общий
+        (вики, «Обращения», «Посылки») и свой у «Чатов водителей» — там гейт
+        шире на стажёра, потому что на кону переписка водителя целиком.
+        Требовать «один предикат на всё» стало нельзя: добавь стажёра в общий —
+        и он получит замок в разделах, куда сервер его пускает.
+
+        Вместо этого инвариант такой: кнопка и закрытие смотрят в
+        `sensitiveQrAvailableFor`, а он ОБЪЕДИНЯЕТ оба замка. Разойдись они —
+        снова экран, который показан, но не работает (ровно этот дефект и был у
+        бэк-офиса с литералом 'operator').
+        """
         app = _read(APP_PATH)
-        self.assertEqual(4, app.count("sensitiveSectionQrRequiredFor"))  # объявление + 3 места
+        self.assertIn(
+            "const sensitiveQrAvailableFor = (userLike) => (\n"
+            "    sensitiveSectionQrRequiredFor(userLike) || driverChatsQrRequiredFor(userLike)\n"
+            ");",
+            app,
+            'предикат выдачи обязан быть объединением ВСЕХ замков',
+        )
         for site in (
+            # общий замок
             "const sensitiveSectionsLocked = sensitiveSectionQrRequiredFor(user) && !sensitiveAccess.granted;",
-            "if (sensitiveSectionQrRequiredFor(user) && data.granted) {",
-            "if (!user || !sensitiveSectionQrRequiredFor(user)) return;",
+            # замок «Чатов водителей»
+            "const driverChatsLocked = driverChatsQrRequiredFor(user) && !sensitiveAccess.granted;",
+            # закрытие окна и кнопка — по объединению
+            "if (sensitiveQrAvailableFor(user) && data.granted) {",
+            "if (!user || !sensitiveQrAvailableFor(user)) return;",
         ):
             self.assertIn(site, app)
 
     def test_qr_button_works_for_everyone_the_lock_is_shown_to(self):
         # Замок рисовался, а кнопка в нём выходила на литерале 'operator' —
-        # то есть молча не делала ничего.
+        # то есть молча не делала ничего. С двумя замками проверка та же по
+        # смыслу: кнопка спрашивает объединение, а не один из них.
         app = _read(APP_PATH)
         self.assertIn(
             "            const requestSensitiveQrAccess = async () => {",
             app,
         )
-        self.assertIn("if (!user || !sensitiveSectionQrRequiredFor(user)) return;", app)
+        self.assertIn("if (!user || !sensitiveQrAvailableFor(user)) return;", app)
         self.assertNotIn("if (!user || user.role !== 'operator') return;", app)
 
 
@@ -870,14 +895,33 @@ class SensitiveQrRolesSingleSourceTests(unittest.TestCase):
     просто не открывался бы, ничего не объясняя.
     """
 
-    def test_backend_imports_the_list_instead_of_copying(self):
+    def test_backend_builds_the_list_from_the_sections_instead_of_copying(self):
+        """Список ролей монолит СОБИРАЕТ из списков самих разделов.
+
+        Раньше он просто импортировал список вики. 08.09.2026 это пришлось
+        поменять: «Чаты водителей» спрашивают QR ещё и у стажёра, а портал о
+        нём не знал — раздел требовал подтверждение, ручка выдачи отвечала
+        «этой роли подтверждение не требуется», и снять замок было нечем.
+
+        Теперь это объединение двух ИМПОРТОВ. Литерала с ролями по-прежнему
+        быть не должно: копия разошлась бы молча, ради чего правило и заводили.
+        """
         source = _read(BOT_PATH)
+        self.assertIn("from wiki.access import QR_GATED_ROLES as _WIKI_QR_GATED_ROLES", source)
         self.assertIn(
-            "from wiki.access import QR_GATED_ROLES as SENSITIVE_QR_GATED_ROLES",
+            "from driver_chats.access import QR_GATED_ROLES as _DRIVER_CHATS_QR_GATED_ROLES",
             source,
         )
-        # Собственного литерального множества тех же ролей быть не должно.
-        self.assertNotIn("SENSITIVE_QR_GATED_ROLES = frozenset", source)
+        self.assertIn(
+            "SENSITIVE_QR_GATED_ROLES = frozenset(_WIKI_QR_GATED_ROLES) "
+            "| frozenset(_DRIVER_CHATS_QR_GATED_ROLES)",
+            source,
+        )
+        # Ни одной роли, набранной руками, в этой строке нет.
+        line = next(l for l in source.splitlines()
+                    if l.startswith('SENSITIVE_QR_GATED_ROLES ='))
+        for role in ("'operator'", "'trainee'", "'hr_manager'", "'accounting_manager'"):
+            self.assertNotIn(role, line)
 
     def test_all_three_endpoints_use_it(self):
         for name in ("request_sensitive_access_qr", "get_sensitive_access_status",
