@@ -255,8 +255,18 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
         self.assertIn("activeSalaryModel === 'op_verificator' ? (", self.app)
         self.assertIn("salaryResult.model === 'op_verificator'", self.result_card)
         self.assertIn("VerificatorCalculationResult", self.result_card)
-        # Продажи, качество и ОБЕ колонки штрафов из таблицы владельца.
-        for state in ("setSales", "setQuality", "setPromoFines", "setFines", "setHourlyRate", "setIsNewbie", "setNightShift"):
+        # Продажи, качество, «чаты в час» (третья шкала баллов) и ОБЕ колонки
+        # штрафов из файла заказчика.
+        for state in (
+            "setSales",
+            "setQuality",
+            "setChatsPerHour",
+            "setPromoFines",
+            "setFines",
+            "setHourlyRate",
+            "setIsNewbie",
+            "setNightShift",
+        ):
             self.assertIn(state, self.verificator_calculator)
 
     def test_yandex_reg_calculator_is_wired(self):

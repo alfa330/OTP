@@ -51553,7 +51553,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const isOsnovaModel = !hasMixedCalculationModels && calculationModelCode === 'op_osnova';
                                             // ОП «Поток»: часы × ставку + два потока продаж, качество не влияет.
                                             const isPotokModel = !hasMixedCalculationModels && calculationModelCode === 'op_potok';
-                                            // ОП «Верификатор»: оклад × (качество% + премия за план%), качество — прямой процент.
+                                            // ОП «Верификатор»: сумма за часы × баллы трёх шкал (качество, план, чаты/час).
                                             const isVerificatorModel = !hasMixedCalculationModels && calculationModelCode === 'op_verificator';
                                             // ОП «Яндекс Регистрация»: цена успешки от конверсии группы, удержание по личному качеству.
                                             const isYandexRegModel = !hasMixedCalculationModels && calculationModelCode === 'op_yandex_reg';
@@ -51815,15 +51815,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     fines,
                                                 })
                                                 : null;
-                                            // «Верификатор»: оклад и бонус за качество из часов есть, план продаж — нет,
-                                            // поэтому превью показывает выплату без премии за план.
+                                            // «Верификатор»: из часов есть сумма за часы и баллы за качество,
+                                            // а продаж и «чатов в час» в системе нет — превью показывает выплату
+                                            // без баллов за план и за чаты (обе шкалы дают 0).
+                                            // Если оценок за месяц ещё нет, качество передаём как «не задано»:
+                                            // иначе ноль попал бы в нижнюю ступень и превью приписало бы
+                                            // 5 баллов бонуса за качество, которого в системе нет.
                                             const estimatedVerificatorSalary = isVerificatorModel
                                                 ? calculateVerificatorSalary({
                                                     hoursWorked: regular,
                                                     hoursNorm: norm,
                                                     sales: 0,
                                                     planTarget: 0,
-                                                    quality: salaryQuality,
+                                                    quality: hasSalaryQuality ? salaryQuality : null,
+                                                    chatsPerHour: 0,
                                                     fines,
                                                 })
                                                 : null;
@@ -51878,9 +51883,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ].filter(Boolean)
                                                 : isVerificatorModel
                                                 ? [
-                                                    // Продажи и план вносятся в калькуляторе — бонус за качество
-                                                    // в превью уже есть, премии за план ещё нет.
-                                                    'план и продажи',
+                                                    // Продажи, план и «чаты в час» вносятся в калькуляторе —
+                                                    // баллы за качество в превью уже есть, две другие шкалы нет.
+                                                    'план, продажи и чаты в час',
                                                     !hasSalaryQuality ? 'качество' : null,
                                                     safeNum(norm) <= 0 ? 'норма' : null,
                                                 ].filter(Boolean)
@@ -52281,7 +52286,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     : isPotokModel
                                                                     ? 'Только сумма за часы: часы × 700 ₸, минус штрафы. Бонусы за продажи — в калькуляторе.'
                                                                     : isVerificatorModel
-                                                                    ? 'Оклад (часы × 500 ₸) и бонус за качество, минус штрафы. Премия за план — в калькуляторе.'
+                                                                    ? 'Сумма за часы (часы × 500 ₸) и баллы за качество, минус штрафы. Баллы за план и за чаты — в калькуляторе.'
                                                                     : isYandexRegModel
                                                                     ? 'Только оклад: часы × 600 ₸, минус штрафы. Бонус за успешки — в калькуляторе.'
                                                                     : isChatModel

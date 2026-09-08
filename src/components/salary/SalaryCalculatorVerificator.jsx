@@ -4,9 +4,12 @@ import SalaryCalculationResult from './SalaryCalculationResult';
 import {
   VERIFICATOR_HOURLY_RATE,
   VERIFICATOR_PLAN_PER_FTE,
+  VERIFICATOR_QUALITY_POINT_STEPS,
+  VERIFICATOR_CHAT_POINT_STEPS,
   calculateVerificatorMonthlyPlan,
   calculateVerificatorSalary,
   opFteNormHoursForMonth,
+  verificatorMatchStep,
 } from '../../utils/salaryFormula';
 
 const Field = ({ label, icon, iconColor, children }) => (
@@ -36,9 +39,9 @@ const fmtPlan = (v) => {
 
 /**
  * Калькулятор зарплаты направления «Верификатор» отдела продаж (op_verificator).
- * Формулы — src/utils/salaryFormula.js, перенесены из файла владельца
- * «Верификаторы_калькулятор_зарплаты_1.xlsx» (лист «Верик») и сверены с
- * презентацией «Мотивационная схема верификатора».
+ * Формулы — src/utils/salaryFormula.js, перенесены из файла заказчика
+ * (задача #296, лист «Верик»): три шкалы баллов — качество, выполнение плана и
+ * «чаты/час», бонус берётся от суммы за часы по итоговым баллам.
  * prefill: часы/норма/качество/штрафы из «Моих часов» (по смене prefillNonce).
  * month: 'YYYY-MM' — от него зависит норма часов на 1 FTE (176 / 168 / 160).
  */
@@ -53,6 +56,7 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
   const [nightShift, setNightShift] = useState(false);
   const [isNewbie, setIsNewbie] = useState(false);
   const [quality, setQuality] = useState('');
+  const [chatsPerHour, setChatsPerHour] = useState('');
   const [promoFines, setPromoFines] = useState('');
   const [fines, setFines] = useState('');
 
@@ -62,8 +66,8 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
     setNormHoursFte(String(monthNormFte));
   }, [monthNormFte]);
 
-  // Переход из «Моих часов»: часы месяца, норма, качество и штрафы. Продажи
-  // вносятся вручную — их источника в системе нет.
+  // Переход из «Моих часов»: часы месяца, норма, качество и штрафы. Продажи и
+  // «чаты/час» вносятся вручную — их источника в системе нет.
   useEffect(() => {
     if (!prefill) return;
     if (prefill.hoursNorm !== undefined) setHoursNorm(String(prefill.hoursNorm ?? ''));
@@ -71,6 +75,7 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
     if (prefill.quality !== undefined) setQuality(String(prefill.quality ?? ''));
     if (prefill.fines !== undefined) setFines(String(prefill.fines ?? ''));
     if (prefill.sales !== undefined) setSales(String(prefill.sales ?? ''));
+    if (prefill.chatsPerHour !== undefined) setChatsPerHour(String(prefill.chatsPerHour ?? ''));
     if (prefill.promoFines !== undefined) setPromoFines(String(prefill.promoFines ?? ''));
     if (prefill.planPerFte !== undefined) setPlanPerFte(String(prefill.planPerFte ?? ''));
     if (prefill.normHoursFte !== undefined) setNormHoursFte(String(prefill.normHoursFte ?? ''));
@@ -96,10 +101,11 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
       newbie: isNewbie,
       nightShift,
       quality,
+      chatsPerHour,
       promoFines,
       fines,
     }),
-    [hoursWorked, hoursNorm, hourlyRate, sales, planInfo.plan, planPerFte, normHoursFte, isNewbie, nightShift, quality, promoFines, fines]
+    [hoursWorked, hoursNorm, hourlyRate, sales, planInfo.plan, planPerFte, normHoursFte, isNewbie, nightShift, quality, chatsPerHour, promoFines, fines]
   );
 
   const reset = () => {
@@ -112,11 +118,16 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
     setNightShift(false);
     setIsNewbie(false);
     setQuality('');
+    setChatsPerHour('');
     setPromoFines('');
     setFines('');
   };
 
   const planPercentText = result.planTarget > 0 ? `${(result.planPercent * 100).toFixed(1).replace('.', ',')}%` : '—';
+  // Подписи ступеней берём тем же правилом, что и расчёт, — иначе подсказка
+  // и баллы разъедутся на границах диапазонов.
+  const qualityStep = verificatorMatchStep(VERIFICATOR_QUALITY_POINT_STEPS, result.quality);
+  const chatStep = verificatorMatchStep(VERIFICATOR_CHAT_POINT_STEPS, result.chatsPerHour);
 
   return (
     <div>
@@ -132,8 +143,8 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
         <Field label="Отработанные часы:" icon="fa-briefcase" iconColor="text-indigo-500">
           {numberInput(hoursWorked, setHoursWorked, { min: 0, max: 744, step: '0.01' })}
           <div className="mt-2 text-xs text-gray-500">
-            Оклад: <span className="font-medium text-gray-700">{Math.round(result.oklad).toLocaleString('ru-RU')} ₸</span>
-            <span className="ml-1 text-gray-400">— часы × ставку, оба бонуса считаются от него</span>
+            Сумма за часы: <span className="font-medium text-gray-700 tabular-nums">{Math.round(result.oklad).toLocaleString('ru-RU')} ₸</span>
+            <span className="ml-1 text-gray-400">— часы × ставку, бонус считается от неё</span>
           </div>
         </Field>
 
@@ -179,7 +190,7 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
             <span className="ml-1 text-gray-400">ч</span>
           </div>
           <div className="mt-2 text-xs text-gray-500">
-            Индивидуальный план: <span className="font-medium text-gray-700">{fmtPlan(planInfo.plan)}</span>
+            Индивидуальный план: <span className="font-medium text-gray-700 tabular-nums">{fmtPlan(planInfo.plan)}</span>
             <span className="ml-1 text-gray-400">— {fmtPlan(planInfo.planPerFte)} ÷ {fmtPlan(planInfo.normHoursFte)} × отработанные часы</span>
           </div>
         </Field>
@@ -187,31 +198,46 @@ const SalaryCalculatorVerificator = ({ prefill = null, prefillNonce = 0, month =
         <Field label="Факт продаж, шт:" icon="fa-check-circle" iconColor="text-green-500">
           {numberInput(sales, setSales, { min: 0, step: '1' })}
           <div className="mt-2 text-xs text-gray-500">
-            Выполнение плана: <span className="font-medium text-gray-700">{planPercentText}</span>
-            <span className="ml-1 text-gray-400">— бонус за план {result.planBonusPercent}% оклада</span>
+            Баллы за план: <span className="font-medium text-gray-700 tabular-nums">{fmtPlan(result.planPoints)}</span>
+            <span className="ml-1 text-gray-400">
+              {result.planTarget > 0
+                ? `— выполнение ${planPercentText}, коридор 100–110% даёт ровно 100`
+                : '— пропорционально выполнению, коридор 100–110% даёт ровно 100'}
+            </span>
           </div>
         </Field>
         <Field label="Качество (%):" icon="fa-star" iconColor="text-yellow-500">
           {numberInput(quality, setQuality, { min: 0, max: 100, step: '0.01' })}
           <div className="mt-2 text-xs text-gray-500">
-            Бонус за качество: <span className="font-medium text-gray-700">{Math.round(result.bonusQuality).toLocaleString('ru-RU')} ₸</span>
-            <span className="ml-1 text-gray-400">— оклад × % качества, ступеней нет</span>
+            Баллы за качество: <span className="font-medium text-gray-700 tabular-nums">{result.qualityPoints}</span>
+            <span className="ml-1 text-gray-400">
+              {result.qualityKnown
+                ? `— ступень ${qualityStep.label} из 5 / 15 / 20 / 30 / 50`
+                : '— поле пустое, ступень не выбрана; ступени 5 / 15 / 20 / 30 / 50'}
+            </span>
           </div>
         </Field>
 
+        <Field label="Чаты в час:" icon="fa-comments" iconColor="text-sky-500">
+          {numberInput(chatsPerHour, setChatsPerHour, { min: 0, step: '0.01' })}
+          <div className="mt-2 text-xs text-gray-500">
+            Баллы за чаты: <span className="font-medium text-gray-700 tabular-nums">{result.chatPoints}</span>
+            <span className="ml-1 text-gray-400">— ступень {chatStep.label} из 0 / 5 / 10 / 15 / 25</span>
+          </div>
+        </Field>
         <Field label="Штраф за акции (₸):" icon="fa-ban" iconColor="text-orange-500">
           {numberInput(promoFines, setPromoFines, { min: 0, step: '0.01' })}
         </Field>
+
         <Field label="Штрафы (₸):" icon="fa-triangle-exclamation" iconColor="text-red-500">
           {numberInput(fines, setFines, { min: 0, step: '0.01' })}
         </Field>
       </div>
 
+      {/* Слагаемые не повторяем: баллы каждой шкалы уже подписаны у своего поля. */}
       <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600">
-        Итого баллов: <span className="font-semibold text-gray-800">{fmtPlan(result.totalBonusPercent)}%</span>
-        <span className="ml-1 text-gray-400">
-          — качество {fmtPlan(result.quality)}% + план {result.planBonusPercent}%; бонус = оклад × эти баллы
-        </span>
+        Итого баллов: <span className="font-semibold text-gray-800 tabular-nums">{fmtPlan(result.totalBonusPercent)}%</span>
+        <span className="ml-1 text-gray-400">— сумма трёх шкал; бонус = сумма за часы × эти баллы</span>
       </div>
 
       <div className="flex justify-center mt-6">

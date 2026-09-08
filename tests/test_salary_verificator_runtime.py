@@ -9,8 +9,8 @@ NODE_TEST = ROOT / "tests" / "salary_verificator.test.mjs"
 
 
 class SalaryVerificatorRuntimeTests(unittest.TestCase):
-    """Формулы ОП «Верификатор» гоняются настоящим Node — сверка с таблицей
-    владельца (172 656 ₸ у оператора со стажем, 171 315 ₸ у новичка) идёт в .mjs."""
+    """Формулы ОП «Верификатор» гоняются настоящим Node — сверка с файлом
+    заказчика (193 800 ₸ у новичка, 215 600 ₸ у ночника) идёт в .mjs."""
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_verificator_salary_runtime(self):

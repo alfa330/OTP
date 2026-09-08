@@ -778,34 +778,98 @@ export function calculatePotokSalary({
 
 // ──────────────────────────────────────────────────────────────────────────
 // МОДЕЛЬ ОП «ВЕРИФИКАТОР» (op_verificator).
-// Перенесена из файла владельца «Верификаторы_калькулятор_зарплаты_1.xlsx»
-// (лист «Верик») и сверена с презентацией «Мотивационная схема верификатора»:
-//   Оклад             = отработанные часы × 500 ₸/ч                 (H22 = C22×G22)
-//   План продаж       = план_1FTE ÷ норму_1FTE × часы, новичку ×0,8 (D6 / D7)
-//   % выполнения      = факт продаж ÷ план                          (F6)
-//   Бонус за качество = Оклад × % качества           (слайд «Переменная часть №1»)
-//   Бонус за план     = Оклад × % из шкалы 0/5/10/20/30 (слайд «Переменная часть №2»)
-//   Итого             = Оклад + оба бонуса − штраф за акции − штрафы (M22)
-// В таблице владельца оба бонуса свёрнуты в одну колонку «Итого баллов, %»
-// (I22 = качество + премия за план, J22 = H22×I22/100). Считаем ровно так же —
-// раздельные строки в UI это та же сумма, разложенная как в презентации.
-// Качество здесь НЕ ступень, а прямой процент бонуса: 93% качества → +93% оклада.
+// Перенесена из файла заказчика (задача #296, лист «Верик»):
+//   Сумма за часы     = отработанные часы × 500 ₸/ч                 (K24 = B24×J24)
+//   План продаж       = план_1FTE ÷ норму_1FTE × часы, новичку ×0,8 (C6 / C7),
+//                       ночная смена — «План на 1FTE Ночь» = день ÷ 2 (H6 = H5/2)
+//   % выполнения      = факт продаж ÷ план продаж                   (E6)
+//   Баллы за качество — СТУПЕНЬ 5/15/20/30/50                       (F24)
+//   Баллы за план     — пропорционально: % выполнения × 100, но коридор
+//                       100–110% включительно всегда даёт 100 баллов (G24)
+//   Баллы за чаты     — СТУПЕНЬ 0/5/10/15/25 по показателю «чаты/час» (H24)
+//   Итого баллов, %   = качество + план + чаты                      (I24)
+//   Сумма бонусов     = сумма за часы × итого баллов ÷ 100          (L24)
+//   Итого к выплате   = сумма за часы + бонусы − штраф за акции − штрафы (O24)
+//
+// ЧТО ИЗМЕНИЛОСЬ против прежней схемы (сентябрь 2026, задача #296):
+//   • качество было ПРЯМЫМ процентом бонуса (93% → +93% оклада) — стало ступенью;
+//   • премия за план была ступенью 0/5/10/20/30 — стала пропорциональной
+//     с плоским коридором 100–110%;
+//   • добавилась ТРЕТЬЯ метрика «чаты/час» со своей ступенчатой шкалой.
+// Разложение бонуса на три слагаемых в UI — то же самое число, что и одна
+// колонка L24 в файле заказчика, просто показанное по составу баллов.
 // ──────────────────────────────────────────────────────────────────────────
-export const VERIFICATOR_HOURLY_RATE = 500;       // I12 «Оплата в час» + слайд «Оклад — ваша база»
-export const VERIFICATOR_NORM_HOURS_FTE = 176;    // K5 — норма 1 FTE, от неё считается план
-export const VERIFICATOR_PLAN_PER_FTE = 440;      // I5 «План на 1FTE День»
-export const VERIFICATOR_NEWBIE_COEF = 0.8;       // D7 — план новичка ×0,8
-export const VERIFICATOR_NIGHT_PLAN_COEF = 0.5;   // I6 = I5/2 «План на 1FTE Ночь»
+export const VERIFICATOR_HOURLY_RATE = 500;       // K13 «Оплата в час»
+export const VERIFICATOR_NORM_HOURS_FTE = 176;    // J5 — норма 1 FTE, от неё считается план
+export const VERIFICATOR_PLAN_PER_FTE = 440;      // H5 «План на 1FTE День»
+export const VERIFICATOR_NEWBIE_COEF = 0.8;       // C7 — план новичка ×0,8
+export const VERIFICATOR_NIGHT_PLAN_COEF = 0.5;   // H6 = H5/2 «План на 1FTE Ночь»
 
-// Премия за план в ПРОЦЕНТНЫХ ПУНКТАХ к окладу (D13:E17, формула F22).
-// Границы — из массива MATCH {0;0,8;0,9;1;1,1}; подписи диапазонов совпадают.
-export function verificatorPlanBonusPercent(planRatio) {
+// Шкала баллов за качество (A14:B18, формула F24). Ступень выбирается как
+// INDEX/MATCH с типом 1 — «наибольшая граница, не превышающая значение», то есть
+// диапазоны полуоткрытые: [0;80) → 5, [80;85) → 15 и так далее.
+export const VERIFICATOR_QUALITY_POINT_STEPS = [
+    { from: 0, points: 5, label: '0–79,9%' },
+    { from: 80, points: 15, label: '80–84,9%' },
+    { from: 85, points: 20, label: '85–89,9%' },
+    { from: 90, points: 30, label: '90–94,9%' },
+    { from: 95, points: 50, label: '95–100%' },
+];
+
+// Шкала баллов за «чаты/час» (G14:H18, формула H24) — те же полуоткрытые границы.
+export const VERIFICATOR_CHAT_POINT_STEPS = [
+    { from: 0, points: 0, label: '0–9,9' },
+    { from: 10, points: 5, label: '10–14,99' },
+    { from: 15, points: 10, label: '15–19,99' },
+    { from: 20, points: 15, label: '20–24,99' },
+    { from: 25, points: 25, label: 'от 25' },
+];
+
+// Плоский коридор выполнения плана (D15:E15): от 100% до 110% включительно —
+// ровно 100 баллов, вне коридора — пропорционально проценту выполнения.
+export const VERIFICATOR_PLAN_FLAT_POINTS = 100;
+export const VERIFICATOR_PLAN_FLAT_FROM = 1;
+export const VERIFICATOR_PLAN_FLAT_TO = 1.1;
+
+/**
+ * Общий поиск ступени: повторяет MATCH(...;1) — берём последнюю границу,
+ * которую значение уже перешагнуло. Ниже первой границы остаётся первая ступень
+ * (в файле заказчика значений ниже нуля не бывает).
+ * Возвращает саму ступень, а не только баллы: подпись диапазона нужна экрану,
+ * и правило выбора должно жить в одном месте, иначе подсказка и расчёт разъедутся.
+ */
+export function verificatorMatchStep(steps, value) {
+    const parsed = parseFloat(value);
+    const v = Number.isFinite(parsed) ? parsed : 0;
+    let matched = steps[0];
+    for (const step of steps) {
+        if (v < step.from) break;
+        matched = step;
+    }
+    return matched;
+}
+
+/** Баллы за качество: ступень 5/15/20/30/50 по проценту качества (F24). */
+export function verificatorQualityPoints(quality) {
+    return verificatorMatchStep(VERIFICATOR_QUALITY_POINT_STEPS, quality).points;
+}
+
+/** Баллы за «чаты/час»: ступень 0/5/10/15/25 (H24). */
+export function verificatorChatPoints(chatsPerHour) {
+    return verificatorMatchStep(VERIFICATOR_CHAT_POINT_STEPS, chatsPerHour).points;
+}
+
+/**
+ * Баллы за выполнение плана (G24 = IF(AND(D>=1;D<=1,1);100;D*100)).
+ * Ступеней здесь нет: 87% плана → 87 баллов, 122% → 122 балла, а всё, что
+ * попало в коридор 100–110% включительно, даёт ровно 100 баллов.
+ */
+export function verificatorPlanPoints(planRatio) {
     const r = parseFloat(planRatio) || 0;
-    if (r < 0.8) return 0;    // 0-79,9%
-    if (r < 0.9) return 5;    // 80-89,9%
-    if (r < 1.0) return 10;   // 90-99,9%
-    if (r < 1.1) return 20;   // 100-109,9%
-    return 30;                // 110%+
+    if (r >= VERIFICATOR_PLAN_FLAT_FROM && r <= VERIFICATOR_PLAN_FLAT_TO) {
+        return VERIFICATOR_PLAN_FLAT_POINTS;
+    }
+    return Math.max(0, r * 100);
 }
 
 /**
@@ -841,8 +905,9 @@ export function calculateVerificatorMonthlyPlan({
 
 /**
  * Зарплата верификатора за месяц.
- * quality — качество в процентах 0..100 (прямой процент бонуса к окладу).
- * promoFines — отдельная колонка «Штраф за акции, ₸» (K21), fines — «Штрафы, ₸» (L21).
+ * quality — качество в процентах 0..100 (ступень баллов, а не прямой процент).
+ * chatsPerHour — показатель «чаты/час» (E24), тоже ступень баллов.
+ * promoFines — отдельная колонка «Штраф за акции, ₸» (M23), fines — «Штрафы, ₸» (N23).
  */
 export function calculateVerificatorSalary({
     hoursWorked = 0,
@@ -854,7 +919,8 @@ export function calculateVerificatorSalary({
     normHoursFte = VERIFICATOR_NORM_HOURS_FTE,
     newbie = false,
     nightShift = false,
-    quality = 0,
+    quality = null,          // null = оценок нет; ноль — это настоящий ноль качества
+    chatsPerHour = 0,
     promoFines = 0,
     fines = 0,
 } = {}) {
@@ -870,14 +936,34 @@ export function calculateVerificatorSalary({
 
     const oklad = hours * rateV;
     const planPercent = target > 0 ? salesV / target : 0;
-    const planBonusPercent = verificatorPlanBonusPercent(planPercent);
-    const qualityPercent = Math.max(0, parseFloat(quality) || 0);
-    // «Итого баллов, %» (I22) — сумма качества и премии за план; бонус берётся от
-    // неё целиком (J22 = H22×I22/100), чтобы копейки сходились с таблицей владельца.
-    const totalBonusPercent = qualityPercent + planBonusPercent;
+    // Качество «не задано» и качество «ноль» — разные вещи. Пустое поле и месяц
+    // без оценок баллов не приносят вовсе, а введённый ноль попадает в нижнюю
+    // ступень шкалы и даёт 5 баллов, как в файле заказчика (там C24 всегда занята).
+    const qualityRaw = parseFloat(quality);
+    const qualityKnown = Number.isFinite(qualityRaw);
+    const qualityPercent = qualityKnown ? Math.max(0, qualityRaw) : 0;
+    const chatsPerHourV = Math.max(0, parseFloat(chatsPerHour) || 0);
+
+    const qualityPoints = qualityKnown ? verificatorQualityPoints(qualityPercent) : 0;
+    const planPoints = verificatorPlanPoints(planPercent);
+    const chatPoints = verificatorChatPoints(chatsPerHourV);
+    // «Итого баллов, %» (I24) — сумма трёх шкал; бонус берётся от неё целиком
+    // (L24 = K24×I24/100), чтобы копейки сходились с файлом заказчика.
+    const totalBonusPercent = qualityPoints + planPoints + chatPoints;
     const bonusTotal = oklad * totalBonusPercent / 100;
-    const bonusQuality = oklad * qualityPercent / 100;
-    const bonusPlan = bonusTotal - bonusQuality;
+    // Разложение бонуса по трём шкалам — только для показа: в файле заказчика
+    // денежная колонка одна (L24), и она остаётся главной. Хвост двоичного
+    // округления сваливаем на САМОЕ КРУПНОЕ слагаемое — его и выводим
+    // вычитанием. Складывать остаток в последнее нельзя: при нулевых баллах за
+    // чаты он уходит в минус, и на экране появляется «Бонус за чаты −0,00 ₸».
+    const pointsByPart = [qualityPoints, planPoints, chatPoints];
+    let widest = 0;
+    for (let i = 1; i < pointsByPart.length; i += 1) {
+        if (pointsByPart[i] > pointsByPart[widest]) widest = i;
+    }
+    const bonusParts = pointsByPart.map((p, i) => (i === widest ? 0 : oklad * p / 100));
+    bonusParts[widest] = bonusTotal - bonusParts.reduce((a, b) => a + b, 0);
+    const [bonusQuality, bonusPlan, bonusChats] = bonusParts;
 
     const promoFinesV = parseFloat(promoFines) || 0;
     const finesV = parseFloat(fines) || 0;
@@ -896,10 +982,15 @@ export function calculateVerificatorSalary({
         isNewbie: planInfo.isNewbie,
         nightShift: planInfo.nightShift,
         quality: qualityPercent,
-        planBonusPercent,
+        qualityKnown,                      // false = оценок нет, баллы за качество не начисляем
+        chatsPerHour: chatsPerHourV,
+        qualityPoints,
+        planPoints,
+        chatPoints,
         totalBonusPercent,
         bonusQuality,
         bonusPlan,
+        bonusChats,
         bonusTotal,
         promoFines: promoFinesV,
         fines: finesV,

@@ -7,8 +7,14 @@ import {
     OSNOVA_HOURLY_RATE,
     POTOK_HOURLY_RATE,
     VERIFICATOR_HOURLY_RATE,
+    VERIFICATOR_QUALITY_POINT_STEPS,
+    VERIFICATOR_CHAT_POINT_STEPS,
     YANDEX_REG_HOURLY_RATE,
 } from '../../utils/salaryFormula';
+
+// Подпись шкалы собираем из самой шкалы: перечислять диапазоны руками значит
+// однажды поправить формулу и забыть подсказку.
+const stepsText = (steps) => steps.map((s) => `${s.label} → ${s.points}`).join(', ');
 
 const num = (v) => {
     const n = Number(v);
@@ -679,11 +685,11 @@ const PotokCalculationResult = ({ salaryResult, label }) => {
 };
 
 /**
- * Карточка результата для модели ОП «Верификатор»: оклад по ставке плюс два
- * бонуса, оба считаются процентом ОТ ОКЛАДА — за качество (прямой процент) и за
- * выполнение плана продаж (ступень 0/5/10/20/30%).
- * Формулы — calculateVerificatorSalary (лист «Верик» таблицы владельца,
- * сверено с презентацией «Мотивационная схема верификатора»).
+ * Карточка результата для модели ОП «Верификатор»: сумма за часы по ставке плюс
+ * бонус, который берётся от неё по ИТОГОВЫМ БАЛЛАМ трёх шкал — качество
+ * (ступень 5/15/20/30/50), выполнение плана (пропорционально, коридор
+ * 100–110% = 100) и «чаты/час» (ступень 0/5/10/15/25).
+ * Формулы — calculateVerificatorSalary (файл заказчика, задача #296, лист «Верик»).
  */
 const VerificatorCalculationResult = ({ salaryResult, label }) => {
     const hoursWorked = num(salaryResult.hoursWorked);
@@ -694,19 +700,31 @@ const VerificatorCalculationResult = ({ salaryResult, label }) => {
     const sales = num(salaryResult.sales);
     const planTarget = num(salaryResult.planTarget);
     const planPercent = num(salaryResult.planPercent) * 100;
-    const planBonusPercent = num(salaryResult.planBonusPercent);
+    const qualityPoints = num(salaryResult.qualityPoints);
+    const planPoints = num(salaryResult.planPoints);
+    const chatPoints = num(salaryResult.chatPoints);
     const totalBonusPercent = num(salaryResult.totalBonusPercent);
     const quality = num(salaryResult.quality);
+    const chatsPerHour = num(salaryResult.chatsPerHour);
     const bonusQuality = num(salaryResult.bonusQuality);
     const bonusPlan = num(salaryResult.bonusPlan);
+    const bonusChats = num(salaryResult.bonusChats);
     const bonusTotal = num(salaryResult.bonusTotal);
     const promoFines = num(salaryResult.promoFines);
     const fines = num(salaryResult.fines);
     const finalSalary = num(salaryResult.finalSalary);
     const planValue = planTarget > 0 ? simple(Math.round(planTarget * 10) / 10) : '—';
+    // Баллы за план теперь пропорциональны проценту выполнения, поэтому дробные
+    // значения (83,18) в этой карточке — норма, а не редкость. Печатаем их через
+    // запятую, как и деньги рядом: точка в одном кадре с «88 000,00 ТГ» читается
+    // как опечатка.
+    const points = (v) => {
+        const n = Math.round(num(v) * 100) / 100;
+        return Number.isInteger(n) ? n.toString() : n.toFixed(2).replace('.', ',');
+    };
 
     return (
-        <CardShell subtitle="Сводка по часам, качеству и плану продаж" finalSalary={finalSalary}>
+        <CardShell subtitle="Сводка по часам, баллам и плану продаж" finalSalary={finalSalary}>
             {/* Сводка */}
             <div className="bg-white p-4 rounded border border-gray-100">
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -728,13 +746,13 @@ const VerificatorCalculationResult = ({ salaryResult, label }) => {
                     <SummaryTile title="Факт продаж" value={simple(sales)} />
                     <SummaryTile
                         title="Итого баллов"
-                        value={`${simple(Math.round(totalBonusPercent * 100) / 100)}%`}
+                        value={`${points(totalBonusPercent)}%`}
                         tooltip={(
                             <>
-                                <div className="font-medium mb-1">Баллы = качество + премия за план</div>
+                                <div className="font-medium mb-1">Баллы = качество + план + чаты</div>
                                 <div className="text-xs text-gray-600">
-                                    Качество {pct(quality)} + план {simple(planBonusPercent)}% — бонус берётся
-                                    от оклада по этой сумме.
+                                    Качество {points(qualityPoints)} + план {points(planPoints)} + чаты {points(chatPoints)}
+                                    {' '}— бонус берётся от суммы за часы по этой сумме баллов.
                                 </div>
                             </>
                         )}
@@ -745,54 +763,50 @@ const VerificatorCalculationResult = ({ salaryResult, label }) => {
             {/* Компоненты выплаты */}
             <div className="bg-white p-4 rounded border border-gray-100">
                 <h4 className="text-sm font-semibold text-gray-700 mb-3">Компоненты выплаты</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                     <ComponentTile
-                        title="Оклад (часы)"
+                        title="Сумма за часы"
                         value={money(oklad)}
                         tooltip={(
                             <>
                                 <div className="font-medium mb-1">Формула</div>
                                 <div className="text-xs text-gray-600 mb-2">
-                                    Оклад = отработанные часы × {hourlyRate} ₸/ч
+                                    Сумма за часы = отработанные часы × {fmtNum(hourlyRate)} ₸/ч
                                 </div>
                                 <div className="text-sm font-semibold">
-                                    Подстановка: {fmtNum(hoursWorked)} × {hourlyRate} = <b>{fmtNum(oklad)}</b>
+                                    Подстановка: {fmtNum(hoursWorked)} × {fmtNum(hourlyRate)} = <b>{fmtNum(oklad)}</b>
                                 </div>
                             </>
                         )}
                     />
                     <ComponentTile
-                        title="Бонус за качество"
-                        value={money(bonusQuality)}
+                        title={`Сумма бонусов (${points(totalBonusPercent)}%)`}
+                        value={money(bonusTotal)}
                         tooltip={(
                             <>
-                                <div className="font-medium mb-1">Формула</div>
+                                <div className="font-medium mb-1">Три шкалы баллов</div>
                                 <div className="text-xs text-gray-600 mb-2">
-                                    Бонус за качество = оклад × % качества. Ступеней нет: сколько процентов
-                                    качества, столько процентов оклада.
-                                </div>
-                                <div className="text-sm font-semibold">
-                                    Подстановка: {fmtNum(oklad)} × {pct(quality)} = <b>{fmtNum(bonusQuality)}</b>
-                                </div>
-                            </>
-                        )}
-                    />
-                    <ComponentTile
-                        title="Бонус за план"
-                        value={money(bonusPlan)}
-                        tooltip={(
-                            <>
-                                <div className="font-medium mb-1">Ступени по % плана</div>
-                                <div className="text-xs text-gray-600 mb-2">
-                                    0–79,9% → 0%, 80–89,9% → 5%, 90–99,9% → 10%, 100–109,9% → 20%, от 110% → 30%
+                                    <div>Качество: {stepsText(VERIFICATOR_QUALITY_POINT_STEPS)}</div>
+                                    <div className="mt-1">
+                                        План: пропорционально проценту выполнения, но 100–110% включительно — ровно 100
+                                    </div>
+                                    <div className="mt-1">Чаты в час: {stepsText(VERIFICATOR_CHAT_POINT_STEPS)}</div>
                                 </div>
                                 <div className="text-sm">
-                                    <div>План продаж: <b>{planValue}</b></div>
-                                    <div>Факт продаж: <b>{simple(sales)}</b></div>
-                                    <div>% плана: <b>{pct(planPercent)}</b></div>
+                                    <div>Бонус за качество: <b>{fmtNum(bonusQuality)}</b></div>
+                                    <div>Бонус за план: <b>{fmtNum(bonusPlan)}</b></div>
+                                    <div>Бонус за чаты: <b>{fmtNum(bonusChats)}</b></div>
                                     <div className="mt-2 font-semibold">
-                                        Подстановка: {fmtNum(oklad)} × {simple(planBonusPercent)}% = <b>{fmtNum(bonusPlan)}</b>
+                                        Подстановка: {fmtNum(oklad)} × {points(totalBonusPercent)}% = <b>{fmtNum(bonusTotal)}</b>
                                     </div>
+                                    {/* Баллы за план бывают бесконечной дробью (85,2272…), и подстановка
+                                        с округлённым множителем «не сходится» на копейки. Говорим об этом
+                                        прямо — но только когда округление действительно произошло. */}
+                                    {Math.round(totalBonusPercent * 100) / 100 !== totalBonusPercent && (
+                                        <div className="mt-1 text-xs text-gray-500">
+                                            Баллы округлены для показа, считается точное значение.
+                                        </div>
+                                    )}
                                 </div>
                             </>
                         )}
@@ -842,18 +856,22 @@ const VerificatorCalculationResult = ({ salaryResult, label }) => {
                 </DetailGroup>
 
                 <DetailGroup title="Баллы бонуса">
-                    <DetailRow label="Качество" value={pct(quality)} />
-                    <DetailRow alt label="Премия за план" value={`${simple(planBonusPercent)}%`} />
-                    <DetailRow strong label="Итого баллов" value={`${simple(Math.round(totalBonusPercent * 100) / 100)}%`} />
+                    <DetailRow label="Качество" value={salaryResult.qualityKnown === false ? '—' : pct(quality)} />
+                    <DetailRow alt label="Баллы за качество" value={points(qualityPoints)} />
+                    <DetailRow label="Баллы за план" value={points(planPoints)} />
+                    <DetailRow alt label="Чаты в час" value={simple(chatsPerHour)} />
+                    <DetailRow label="Баллы за чаты" value={points(chatPoints)} />
+                    <DetailRow strong label="Итого баллов" value={`${points(totalBonusPercent)}%`} />
                 </DetailGroup>
 
                 <DetailGroup title="Компоненты выплаты">
-                    <DetailRow label="Оклад (часы)" value={money(oklad)} />
+                    <DetailRow label="Сумма за часы" value={money(oklad)} />
                     <DetailRow alt label="Бонус за качество" value={money(bonusQuality)} />
                     <DetailRow label="Бонус за план" value={money(bonusPlan)} />
-                    <DetailRow alt label="Сумма бонусов" value={money(bonusTotal)} />
-                    <DetailRow label="Штраф за акции" value={`− ${money(promoFines)}`} />
-                    <DetailRow alt label="Штрафы" value={`− ${money(fines)}`} />
+                    <DetailRow alt label="Бонус за чаты" value={money(bonusChats)} />
+                    <DetailRow label="Сумма бонусов" value={money(bonusTotal)} />
+                    <DetailRow alt label="Штраф за акции" value={`− ${money(promoFines)}`} />
+                    <DetailRow label="Штрафы" value={`− ${money(fines)}`} />
                     <DetailRow strong label="Итого к выплате" value={money(finalSalary)} />
                 </DetailGroup>
             </div>
@@ -1051,7 +1069,7 @@ const SalaryCalculationResult = ({ salaryResult, label }) => {
             return <PotokCalculationResult salaryResult={salaryResult} label={label} />;
         }
 
-        // ОП «Верификатор»: оклад × (качество% + премия за план%), без ступеней качества.
+        // ОП «Верификатор»: сумма за часы × баллы трёх шкал (качество, план, чаты/час).
         if (salaryResult.model === 'op_verificator') {
             return <VerificatorCalculationResult salaryResult={salaryResult} label={label} />;
         }
