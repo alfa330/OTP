@@ -1,17 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Search, Loader2, AlertCircle, Send, Check, Lock,
+    Search, Loader2, AlertCircle, Send, Check, Lock, Eye, X,
     MessageSquare, Download, Phone, Clock, ImageIcon, Building2, RefreshCw,
 } from 'lucide-react';
 
 import ChatThread from '../c2d_eval/ChatThread';
+import CustomSelect from '../ui/CustomSelect';
+import { IosDateRangeCalendar, IosDateRangePicker, rangeLabel } from '../ui/DateRangePicker';
 import {
-    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
-    IosModal, IosSegmented, IosBadge,
+    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
+    IosModal, IosSegmented, IosBadge, IosPager,
 } from '../ui/ios';
 import {
-    kindLabel, roleLabel, formatPhone, formatDateTime, formatTime, formatDayShort,
-    exportFileName, KIND_TONE,
+    kindLabel, roleLabel, formatPhone, formatTime, formatDayShort, formatDayFull,
+    dayKeyOf, exportFileName, pluralChats, pluralDays, rangeDays, shiftDaysBack,
+    todayISO, EXPORT_MAX_DAYS, KIND_TONE,
 } from './journalMeta';
 
 /* Раздел «Чаты водителей» (задача #271).
@@ -39,8 +42,6 @@ import {
  * внутренние заметки, автоответы и системные строки, рисует фото с лайтбоксом и
  * покрыт тёмной темой. Второй ленты в проекте быть не должно.
  */
-
-const WINDOW_HINT = 'Показываем переписку за последние 2 дня';
 
 const emptyResult = { chats: [], phone: '', clientId: null, clientName: '',
                       notFound: false, fetchedAt: null };
@@ -316,6 +317,13 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         operator_name: activeChat.operator_name || null,
     } : null), [activeChat]);
 
+    /* Состояние экрана: пока чатов нет, поиск стоит посреди страницы с
+       объяснением; как только они появились — уезжает наверх и уступает место
+       переписке. Считаем по чатам, а не по «был ли поиск»: на ненайденном
+       номере объяснение должно остаться на месте, человек сейчас же наберёт
+       следующий. */
+    const hasChats = chats.length > 0;
+
     const limits = context?.limits || {};
     const leftToday = typeof limits.left_today === 'number'
         ? limits.left_today
@@ -343,68 +351,73 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 <JournalPanel apiBaseUrl={apiBaseUrl} headers={headers} toast={toast} />
             ) : (
                 <>
-                    <SearchBar
-                        value={query}
-                        onChange={setQuery}
-                        onSubmit={runSearch}
-                        searching={searching}
-                        inputRef={inputRef}
-                        leftToday={leftToday}
-                        fetchedAt={result.fetchedAt}
-                    />
+                    {/* Поиск — ОДИН узел на оба состояния экрана. «Уход наверх»
+                        сделан сворачиванием объяснения и поджатием отступа на
+                        том же самом поле, а не подменой одного блока другим:
+                        подмена размонтировала бы поле вместе с фокусом и
+                        кареткой, и следующий номер пришлось бы начинать с
+                        щелчка мышью. */}
+                    <div className={`transition-[padding] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                        hasChats ? 'pt-0' : 'pt-[3vh] sm:pt-[6vh]'}`}>
+                        <SearchStage
+                            compact={hasChats}
+                            value={query}
+                            onChange={setQuery}
+                            onSubmit={runSearch}
+                            searching={searching}
+                            inputRef={inputRef}
+                            leftToday={leftToday}
+                            fetchedAt={result.fetchedAt}
+                        />
 
-                    {searchError && (
-                        <div className={`${iosCard} flex items-start gap-2.5 px-4 py-3 text-sm text-rose-600`}>
-                            <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                            <span>{searchError}</span>
-                        </div>
-                    )}
-
-                    {!searchError && !searching && !result.phone && <StartHint />}
-
-                    {!searchError && result.phone && !chats.length && (
-                        <div className={`${iosCard} px-6 py-10 text-center`}>
-                            <MessageSquare size={26} className="mx-auto mb-3 text-slate-300" />
-                            <div className="text-sm font-medium text-slate-700">
-                                {result.notFound
-                                    ? 'Такого номера нет в переписках'
-                                    : 'За последние 2 дня этот водитель не писал'}
+                        {searchError && (
+                            <div className={`${iosCard} mx-auto mt-4 flex max-w-[640px] items-start gap-2.5 px-4 py-3 text-sm text-rose-600`}>
+                                <AlertCircle size={16} className="mt-0.5 shrink-0" />
+                                <span>{searchError}</span>
                             </div>
-                            <div className="mt-1 text-[13px] text-slate-500">
-                                {result.notFound
-                                    ? 'Проверьте номер: возможно, водитель писал с другого.'
-                                    : 'Более ранняя переписка в разделе не показывается.'}
-                            </div>
-                            {/* Единственная кнопка обновления живёт в шапке
-                                переписки, а её здесь нет. Водитель может
-                                написать прямо сейчас, пока оператор смотрит на
-                                этот экран, — без кнопки пришлось бы искать номер
-                                заново, то есть тратить второй поиск из
-                                дневного лимита на то же самое. */}
-                            <button
-                                type="button"
-                                onClick={runRefresh}
-                                disabled={refreshing}
-                                className={`${iosBtnSecondary} mt-4 disabled:opacity-40`}
-                            >
-                                <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
-                                {refreshing ? 'Обновляем…' : 'Обновить'}
-                            </button>
-                        </div>
-                    )}
+                        )}
 
-                    {Boolean(chats.length) && (
-                        <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
-                            <ChatList
-                                chats={chats}
-                                activeKey={chatKey(activeChat)}
-                                onPick={(chat) => setActiveKey(chatKey(chat))}
-                                handedOff={handedOff}
-                                driverName={result.clientName}
-                                phone={result.phone}
-                                truncated={result.truncated}
-                            />
+                        {!searchError && result.phone && !chats.length && (
+                            <div className={`${iosCard} mx-auto mt-4 max-w-[640px] px-6 py-8 text-center`}>
+                                <MessageSquare size={26} className="mx-auto mb-3 text-slate-300" />
+                                <div className="text-sm font-medium text-slate-700">
+                                    {result.notFound
+                                        ? 'Такого номера нет в переписках'
+                                        : 'За последние 2 дня этот водитель не писал'}
+                                </div>
+                                <div className="mt-1 text-[13px] text-slate-500">
+                                    {result.notFound
+                                        ? 'Проверьте номер: возможно, водитель писал с другого.'
+                                        : 'Более ранняя переписка в разделе не показывается.'}
+                                </div>
+                                {/* Единственная кнопка обновления живёт в шапке
+                                    переписки, а её здесь нет. Водитель может
+                                    написать прямо сейчас, пока оператор смотрит на
+                                    этот экран, — без кнопки пришлось бы искать номер
+                                    заново, то есть тратить второй поиск из
+                                    дневного лимита на то же самое. */}
+                                <button
+                                    type="button"
+                                    onClick={runRefresh}
+                                    disabled={refreshing}
+                                    className={`${iosBtnSecondary} mt-4 disabled:opacity-40`}
+                                >
+                                    <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} />
+                                    {refreshing ? 'Обновляем…' : 'Обновить'}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
+                    {hasChats && (
+                        /* Переписка слева, список парков справа — расположение
+                           владельца от 08.09.2026. На телефоне колонка одна, и
+                           порядок обратный: сначала выбрать парк, потом читать,
+                           поэтому список поднят классами order, а не порядком в
+                           разметке. */
+                        <div className="grid animate-card-open gap-4 lg:grid-cols-[minmax(0,1fr)_308px]">
                             <ChatPanel
+                                className="order-2 lg:order-1"
                                 chat={activeChat}
                                 snapshot={snapshot}
                                 phone={result.phone}
@@ -414,6 +427,16 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 onRefresh={runRefresh}
                                 refreshing={refreshing}
                                 fetchedAt={result.fetchedAt}
+                            />
+                            <ChatList
+                                className="order-1 lg:order-2"
+                                chats={chats}
+                                activeKey={chatKey(activeChat)}
+                                onPick={(chat) => setActiveKey(chatKey(chat))}
+                                handedOff={handedOff}
+                                driverName={result.clientName}
+                                phone={result.phone}
+                                truncated={result.truncated}
                             />
                         </div>
                     )}
@@ -467,62 +490,154 @@ function firstLiveKey(chats) {
 }
 
 // ── Поисковая строка ────────────────────────────────────────────────────────
+//
+// Экран поиска живёт двумя состояниями ОДНОГО узла (решение владельца
+// 08.09.2026):
+//
+//   пусто        — поле посреди страницы, над ним объяснение «как это работает»;
+//   есть чаты    — объяснение свернулось, поле уехало наверх и стало у́же, под
+//                  ним переписка и список парков.
+//
+// Почему один узел, а не два блока по условию: подмена размонтировала бы поле
+// вместе с фокусом и кареткой, и следующий номер человек начинал бы с щелчка
+// мышью. Свернуть объяснение и поджать отступ CSS умеет сам, переход выходит
+// настоящим.
+//
+// Три шага — это и есть просьба «объяснение, как что работает». Стоят они ПОД
+// полем: «поиск по середине сверху» значит, что выше поля не должно быть ничего,
+// кроме названия раздела. Формулировки честные: «снимите экран» вместо «нажмите
+// скриншот» — снимок делается средствами системы и разделу не виден (та же
+// честность, что в подписях журнала).
 
-const SearchBar = ({ value, onChange, onSubmit, searching, inputRef, leftToday,
-                     fetchedAt }) => (
-    <div className={`${iosCard} px-4 py-4 sm:px-5`}>
-        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-            <div className="relative flex-1">
-                <Search size={17} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                    ref={inputRef}
-                    value={value}
-                    onChange={(event) => onChange(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }}
-                    inputMode="tel"
-                    placeholder="Номер телефона водителя"
-                    aria-label="Номер телефона водителя"
-                    className={`${iosInput} h-11 pl-10 text-[15px] tabular-nums`}
-                />
+const SEARCH_STEPS = [
+    {
+        title: 'Введите номер',
+        text: 'Как удобно: 87071234567, +7 707 123 45 67 или 7071234567. Enter — и мы найдём переписку за последние двое суток.',
+    },
+    {
+        title: 'Выберите таксопарк',
+        text: 'По чату на каждый таксопарк. Вся переписка двух суток с этим парком лежит внутри одного чата.',
+    },
+    {
+        title: 'Передайте чат-менеджеру',
+        text: 'Снимите экран средствами системы и нажмите «Передан» — в чат уйдёт внутренний комментарий, водитель его не увидит.',
+    },
+];
+
+const WINDOW_HINT_SHORT = 'Переписка за последние 2 дня';
+
+/* Сворачивание заголовка и объяснения. Кривая та же, что у раскрытия модалок
+   портала (IOS_MODAL_MOTION): быстрый старт, мягкое приземление — характер
+   macOS. `motion-reduce` обязателен: раздел открывают по многу раз за смену. */
+const COLLAPSE = 'overflow-hidden transition-all duration-500'
+    + ' ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none';
+
+const SearchStage = ({ compact, value, onChange, onSubmit, searching, inputRef,
+                       leftToday, fetchedAt }) => {
+    /* Рост поля при наведении курсора в него — та самая «небольшая анимация».
+       Держим её состоянием, а не `focus-within`: у Tailwind нет варианта,
+       который дотянулся бы отсюда и до ширины обёртки, и до тени, и до высоты
+       строки одновременно. */
+    const [focused, setFocused] = useState(false);
+
+    return (
+        <div>
+            {/* Заголовок над полем и объяснение под ним сворачиваются по
+                высоте, а не исчезают: исчезновение рывком читается как «страница
+                перескочила», а сворачивание — как «поиск переехал наверх», о чём
+                и просил владелец. Само поле между ними остаётся на месте. */}
+            <div aria-hidden={compact} className={`${COLLAPSE} ${
+                compact ? 'max-h-0 -translate-y-2 opacity-0' : 'max-h-24 translate-y-0 opacity-100'}`}>
+                <h2 className="text-center text-[22px] font-semibold tracking-tight text-slate-900">
+                    Чаты водителей
+                </h2>
             </div>
-            <button
-                type="button"
-                onClick={onSubmit}
-                disabled={searching || !value.trim()}
-                className={`${iosBtnPrimary} h-11 min-w-[120px] justify-center disabled:opacity-40`}
-            >
-                {searching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-                {searching ? 'Ищем…' : 'Найти'}
-            </button>
-        </div>
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-slate-500">
-            <span>{WINDOW_HINT}</span>
-            {/* Время снятия ленты — с сервера: на кеше оно на несколько минут
-                старше часов браузера, и подпись «обновлено сейчас» под
-                пятиминутным снимком была бы враньём ровно там, где человек ей
-                поверит. */}
-            {Boolean(fetchedAt) && (
-                <span className="tabular-nums">Обновлено в {formatTime(fetchedAt)}</span>
-            )}
-            {typeof leftToday === 'number' && leftToday <= 20 && (
-                <span className="tabular-nums text-amber-600">
-                    Осталось поисков сегодня: {leftToday}
-                </span>
-            )}
-        </div>
-    </div>
-);
 
-const StartHint = () => (
-    <div className={`${iosCard} px-6 py-12 text-center`}>
-        <Phone size={26} className="mx-auto mb-3 text-slate-300" />
-        <div className="text-sm font-medium text-slate-700">Введите номер телефона водителя</div>
-        <div className="mx-auto mt-1.5 max-w-md text-[13px] leading-relaxed text-slate-500">
-            Номер можно вводить как удобно — 87071234567, +7 707 123 45 67 или 7071234567.
-            Откроется переписка за последние двое суток.
+            {/* Само поле. Ширина и высота меняются и от состояния экрана, и от
+                фокуса — отсюда четыре ветки вместо двух. Кнопка «Найти» стоит
+                ВНУТРИ поля, как в поиске macOS: снаружи она делала бы из одного
+                предмета два, и «строка увеличилась» читалось бы хуже. */}
+            <div
+                className={`mx-auto w-full transition-[max-width] duration-300 ease-out motion-reduce:transition-none ${
+                    compact
+                        ? (focused ? 'max-w-[560px]' : 'max-w-[480px]')
+                        : (focused ? 'max-w-[680px]' : 'max-w-[600px]')} ${compact ? 'mt-0' : 'mt-3'}`}
+            >
+                <div
+                    className={`relative flex items-center rounded-2xl bg-white transition-all duration-300 ease-out motion-reduce:transition-none ${
+                        focused
+                            ? 'shadow-[0_12px_34px_-14px_rgba(15,23,42,0.35)] ring-2 ring-blue-500/70'
+                            : 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70'} ${
+                        compact ? (focused ? 'h-12' : 'h-11') : (focused ? 'h-[58px]' : 'h-[52px]')}`}
+                >
+                    <Search
+                        size={17}
+                        className={`pointer-events-none absolute left-4 transition-colors ${
+                            focused ? 'text-blue-500' : 'text-slate-400'}`}
+                    />
+                    <input
+                        ref={inputRef}
+                        value={value}
+                        onChange={(event) => onChange(event.target.value)}
+                        onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }}
+                        onFocus={() => setFocused(true)}
+                        onBlur={() => setFocused(false)}
+                        inputMode="tel"
+                        placeholder="Номер телефона"
+                        aria-label="Номер телефона водителя"
+                        className={`h-full w-full rounded-2xl bg-transparent pl-11 pr-[112px] tabular-nums text-slate-900 outline-none placeholder:text-slate-400 ${
+                            compact ? 'text-[14.5px]' : 'text-[15.5px]'}`}
+                    />
+                    <button
+                        type="button"
+                        onClick={onSubmit}
+                        disabled={searching || !value.trim()}
+                        className={`${iosBtnPrimary} absolute right-1.5 top-1/2 h-9 -translate-y-1/2 px-3.5 py-0 disabled:opacity-40`}
+                    >
+                        {searching ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />}
+                        {searching ? 'Ищем…' : 'Найти'}
+                    </button>
+                </div>
+
+                <div className="mt-2 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[12px] text-slate-500">
+                    <span>{WINDOW_HINT_SHORT}</span>
+                    {/* Время снятия ленты — с сервера: на кеше оно на несколько минут
+                        старше часов браузера, и подпись «обновлено сейчас» под
+                        пятиминутным снимком была бы враньём ровно там, где человек ей
+                        поверит. */}
+                    {Boolean(fetchedAt) && (
+                        <span className="tabular-nums">Обновлено в {formatTime(fetchedAt)}</span>
+                    )}
+                    {typeof leftToday === 'number' && leftToday <= 20 && (
+                        <span className="tabular-nums text-amber-600">
+                            Осталось поисков сегодня: {leftToday}
+                        </span>
+                    )}
+                </div>
+            </div>
+
+            {/* Объяснение — ПОД полем: «поиск по середине сверху» значит, что
+                выше него не должно быть ничего, кроме названия раздела. Потолок
+                высоты взят с запасом на перенос трёх карточек в столбик. */}
+            <div aria-hidden={compact} className={`${COLLAPSE} ${
+                compact ? 'max-h-0 -translate-y-2 opacity-0' : 'max-h-[420px] translate-y-0 opacity-100'}`}>
+                <ol className="mx-auto mt-6 grid max-w-3xl gap-2 text-left sm:grid-cols-3">
+                    {SEARCH_STEPS.map((step, index) => (
+                        <li key={step.title} className="rounded-2xl bg-slate-500/[0.045] px-3.5 py-3">
+                            <div className="flex items-center gap-2">
+                                <span className="grid h-[18px] w-[18px] place-items-center rounded-full bg-slate-900/85 text-[10.5px] font-semibold text-white">
+                                    {index + 1}
+                                </span>
+                                <span className="text-[13px] font-semibold text-slate-800">{step.title}</span>
+                            </div>
+                            <p className="mt-1 text-[12px] leading-snug text-slate-500">{step.text}</p>
+                        </li>
+                    ))}
+                </ol>
+            </div>
         </div>
-    </div>
-);
+    );
+};
 
 // ── Список чатов и панель ───────────────────────────────────────────────────
 //
@@ -530,16 +645,21 @@ const StartHint = () => (
 // список резал переписку по обращениям, и один разговор с одним парком выглядел
 // как несколько разных чатов; теперь строка ровно одна на парк, а вся история
 // двух суток лежит внутри.
+//
+// Стоит список СПРАВА от переписки (владелец, 08.09.2026). На телефоне он
+// поднимается над перепиской и получает свой потолок высоты: во весь экран он
+// оттолкнул бы ленту за нижний край, а выбирают парк раньше, чем читают.
 
-const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, truncated }) => (
-    <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
+const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, truncated,
+                    className = '' }) => (
+    <div className={`${iosCard} flex max-h-[44vh] flex-col overflow-hidden lg:max-h-[76vh] ${className}`}>
         <div className="border-b border-slate-200/70 px-4 py-3">
             <div className="truncate text-[15px] font-semibold text-slate-900">
                 {driverName || formatPhone(phone)}
             </div>
             <div className="mt-0.5 flex items-center gap-2 text-[12px] text-slate-500">
                 {driverName && <span className="tabular-nums">{formatPhone(phone)}</span>}
-                <span>{chats.length === 1 ? '1 чат' : `${chats.length} чата`}</span>
+                <span>{pluralChats(chats.length)}</span>
             </div>
         </div>
 
@@ -598,12 +718,17 @@ const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, trun
    шапке переписки, а не над списком: человек в этот момент смотрит именно в
    переписку — ждёт ответа водителя или только что отправил комментарий. */
 const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
-                     onRefresh, refreshing, fetchedAt }) => {
+                     onRefresh, refreshing, fetchedAt, className = '' }) => {
     if (!chat) return null;
     return (
-        <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
-            <div className="flex flex-wrap items-center gap-3 border-b border-slate-200/70 px-4 py-3">
-                <div className="min-w-0 flex-1">
+        <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden ${className}`}>
+            {/* Шапка переписки. На телефоне сведения и кнопки стоят РАЗНЫМИ
+                строками: `flex-wrap` переносит элемент целиком, а `flex-1`
+                позволял левому блоку сжаться до 110 px рядом с двумя кнопками —
+                имя водителя превращалось в «Ерме…», бейдж парка ломался на две
+                строки, а телефон на три (замер на 390 px, 08.09.2026). */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-200/70 px-4 py-3">
+                <div className="min-w-0 basis-full sm:flex-1 sm:basis-auto">
                     <div className="flex flex-wrap items-center gap-2">
                         {/* Имени у водителя часто нет — тогда заголовком идёт
                             телефон, а не слово «Водитель»: по нему человека и
@@ -628,7 +753,7 @@ const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
                         <span className="tabular-nums">{chat.messages_count} сообщ. за 2 дня</span>
                     </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
                     {handedOff && (
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[13px] font-medium text-emerald-700">
                             <Check size={14} /> Передан
@@ -725,27 +850,129 @@ const HandoffModal = ({ open, onClose, note, onNote, sending, onSend, maxLength,
 );
 
 // ── Журнал ──────────────────────────────────────────────────────────────────
+//
+// Журнал отвечает на один вопрос: КТО открывал переписку водителей и что
+// передал чат-менеджеру. Отсюда и устройство экрана (переделан 08.09.2026 по
+// просьбе владельца «сделать понятнее и удобнее»):
+//
+// * Отбор — одна строка чипов и списков, а не сетка из пяти подписанных полей.
+//   Подписи «С», «По», «Действие» занимали строку над каждым полем и ничего не
+//   добавляли: чип с датами читается сам, а список подписан выбранным значением.
+// * Системных `<select>` и `<input type="date">` больше нет: их рисует ОС, и
+//   внутри интерфейса в стиле macOS они выглядели деталью из другой программы
+//   (эталон пикера — выгрузка табло СЗоВ, `IosDateRangeCalendar`).
+// * Дата вынесена в разделитель дня, в строке осталось время. За неделю дата
+//   повторялась в пятидесяти строках подряд, а нужна она там, где меняется.
+// * Телефон водителя применяется по Enter или уходу из поля, а не по каждой
+//   набранной цифре: иначе один номер — это одиннадцать запросов к журналу.
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
-const shiftDaysBack = (iso, days) => {
-    const date = new Date(`${iso}T00:00:00`);
-    date.setDate(date.getDate() - days);
-    return date.toISOString().slice(0, 10);
+/* Пресеты периода. У экрана свои («7 дней» — рабочая неделя разбора), у
+   выгрузки свои: там последний пресет обязан упираться ровно в потолок, и им
+   же человек узнаёт, сколько максимум можно взять за раз. Отсчёт от сегодня по
+   Алматы (`todayISO`), а не от `new Date()`: у сотрудника в другом поясе иначе
+   поехала бы граница на сутки. */
+const JOURNAL_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: todayISO(), to: todayISO() }) },
+    { label: '7 дней', range: () => ({ from: shiftDaysBack(todayISO(), 6), to: todayISO() }) },
+    { label: '30 дней', range: () => ({ from: shiftDaysBack(todayISO(), 29), to: todayISO() }) },
+];
+
+const EXPORT_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: todayISO(), to: todayISO() }) },
+    { label: 'Неделя', range: () => ({ from: shiftDaysBack(todayISO(), 6), to: todayISO() }) },
+    {
+        label: `${EXPORT_MAX_DAYS} дней`,
+        range: () => ({ from: shiftDaysBack(todayISO(), EXPORT_MAX_DAYS - 1), to: todayISO() }),
+    },
+];
+
+/* Подписи действий берём из одного словаря с выгрузкой (`kindLabel`), а не
+   пишем заново: разойдись они — в фильтре и в файле стояли бы разные слова про
+   одно и то же. */
+const KIND_OPTIONS = [
+    { value: 'all', label: 'Все действия' },
+    { value: 'handoff', label: kindLabel('handoff') },
+    { value: 'open', label: kindLabel('open') },
+    { value: 'search', label: kindLabel('search') },
+];
+
+const KIND_ICONS = { search: Search, open: Eye, handoff: Send };
+
+const EMPTY_FILTERS = { kind: 'all', userId: 'all', phone: '' };
+
+/* Вид чипа дат и поля телефона — ОДИН В ОДИН с ios-вариантом CustomSelect
+   (белое поле, ring-1, px-3 py-2, 12.5px). Иначе в одной строке отбора стоят
+   три разных предмета: серый чип, белый список и серое поле, — и строка
+   читается как собранная из чужих деталей.
+   `[&>span]:flex-1` у чипа обязателен: triggerClassName заменяет класс кнопки
+   целиком, и без него подпись не растягивается, а шеврон уезжает к тексту. */
+const FILTER_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 '
+    + 'text-left text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:bg-slate-50 '
+    + 'active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
+    + '[&>span]:flex-1 [&>span]:text-left [&>span]:truncate';
+
+const FILTER_INPUT = 'h-9 w-full rounded-xl bg-white pl-9 pr-8 text-[12.5px] '
+    + 'font-medium tabular-nums text-slate-700 ring-1 ring-slate-200/70 '
+    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] outline-none transition-all '
+    + 'placeholder:font-normal placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/60';
+
+/* Период выгрузки не длиннее потолка. Экран периодом не ограничен — на нём
+   можно смотреть хоть квартал, — поэтому «выгрузить то, что вижу» приходится
+   поджимать: берём последние EXPORT_MAX_DAYS суток окна, а не молча обрезаем
+   начало и не отдаём заведомо отказной запрос. */
+const clampExportRange = ({ from, to }) => {
+    const days = rangeDays(from, to);
+    if (!days) return { from: todayISO(), to: todayISO() };
+    if (days <= EXPORT_MAX_DAYS) return { from, to };
+    return { from: shiftDaysBack(to, EXPORT_MAX_DAYS - 1), to };
 };
 
 const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
     const [filters, setFilters] = useState(() => ({
+        ...EMPTY_FILTERS,
         from: shiftDaysBack(todayISO(), 6),
         to: todayISO(),
-        kind: 'all',
-        userId: 'all',
-        phone: '',
     }));
+    /* Черновик телефона живёт отдельно от отбора: набранное на клавиатуре ещё
+       не запрос. Применяется он по Enter и по уходу из поля — так «набрал и
+       щёлкнул мышью в таблицу» тоже срабатывает, а одиннадцати запросов на
+       один номер не случается. */
+    const [phoneDraft, setPhoneDraft] = useState('');
     const [data, setData] = useState({ items: [], total: 0, summary: {}, people: [] });
     const [page, setPage] = useState(1);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [downloading, setDownloading] = useState(false);
+
+    /* Пикер периода выгрузки. Период у файла ОБЯЗАТЕЛЕН и не длиннее месяца,
+       поэтому он живёт своим состоянием: на экране период мог остаться каким
+       угодно, а книга собирается по выбранному в пикере. Открываясь, пикер
+       подхватывает период экрана — «выгрузить то, что вижу» самый частый
+       случай, — но поджатый до потолка. */
+    const [exportOpen, setExportOpen] = useState(false);
+    const [exportRange, setExportRange] = useState(
+        () => clampExportRange({ from: shiftDaysBack(todayISO(), 6), to: todayISO() }));
+    const exportRef = useRef(null);
+
+    /* Клик мимо и Esc закрывают панель выгрузки — как у эталонного пикера табло
+       СЗоВ. Слушаем `mousedown`, а не `click`: прокрутка колесом внутри панели
+       тогда не считается внешней и не гасит её. */
+    useEffect(() => {
+        if (!exportOpen) return undefined;
+        const onDown = (event) => {
+            if (exportRef.current && !exportRef.current.contains(event.target)) {
+                setExportOpen(false);
+            }
+        };
+        const onKey = (event) => { if (event.key === 'Escape') setExportOpen(false); };
+        document.addEventListener('mousedown', onDown);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', onDown);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [exportOpen]);
 
     const params = useMemo(() => {
         const search = new URLSearchParams();
@@ -786,11 +1013,33 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
         return () => { cancelled = true; };
     }, [apiBaseUrl, headers, params, page]);
 
-    const download = useCallback(async () => {
+    const applyPhone = useCallback(() => {
+        const next = phoneDraft.trim();
+        setFilters((prev) => (prev.phone === next ? prev : { ...prev, phone: next }));
+    }, [phoneDraft]);
+
+    const resetFilters = useCallback(() => {
+        setPhoneDraft('');
+        setFilters((prev) => ({ ...prev, ...EMPTY_FILTERS }));
+    }, []);
+
+    const download = useCallback(async (from, to) => {
+        setExportOpen(false);
         setDownloading(true);
         try {
+            /* Рамку файла задаёт пикер, остальной отбор — экран. Собираем
+               строку запроса заново, а не правим `params`: там лежит период
+               экрана, и подмена двух ключей в общем объекте разъехалась бы с
+               именем файла на первой же правке. */
+            const search = new URLSearchParams();
+            search.set('date_from', from);
+            search.set('date_to', to);
+            if (filters.kind !== 'all') search.set('kinds', filters.kind);
+            if (filters.userId !== 'all') search.set('user_id', String(filters.userId));
+            if (filters.phone.trim()) search.set('phone', filters.phone.trim());
+
             const response = await fetch(
-                `${apiBaseUrl}/api/driver_chats/journal/export?${params.toString()}`,
+                `${apiBaseUrl}/api/driver_chats/journal/export?${search.toString()}`,
                 { headers: headers(), credentials: 'include' });
             if (!response.ok) {
                 const payload = await response.json().catch(() => ({}));
@@ -801,7 +1050,7 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
-            link.download = exportFileName(filters.from, filters.to);
+            link.download = exportFileName(from, to);
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -811,60 +1060,184 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
         } finally {
             setDownloading(false);
         }
-    }, [apiBaseUrl, filters.from, filters.to, headers, params, toast]);
+    }, [apiBaseUrl, filters, headers, toast]);
 
     const summary = data.summary || {};
-    const pageCount = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 50)));
+    const pageSize = data.page_size || 50;
+    const total = data.total || 0;
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+    const peopleOptions = useMemo(() => ([
+        { value: 'all', label: 'Все сотрудники' },
+        ...(data.people || []).map((person) => ({
+            value: String(person.user_id),
+            label: person.name || `№${person.user_id}`,
+        })),
+    ]), [data.people]);
+
+    /* Строки, разложенные по дням. Группируем последовательно, а не через
+       словарь: сервер уже отдал их по убыванию времени, и группа меняется ровно
+       там, где меняется день. */
+    const groups = useMemo(() => {
+        const out = [];
+        (data.items || []).forEach((item) => {
+            const key = dayKeyOf(item.created_at);
+            const last = out[out.length - 1];
+            if (last && last.key === key) last.items.push(item);
+            else out.push({ key, label: formatDayFull(item.created_at), items: [item] });
+        });
+        return out;
+    }, [data.items]);
+
+    const filtered = filters.kind !== 'all' || filters.userId !== 'all'
+        || Boolean(filters.phone.trim());
+
+    /* Длина выбранного периода и подсказка под календарём. Считаем здесь, а не
+       в разметке: и «Подтвердить», и строка под ней читают одно число. Потолок
+       сторожит сервер — здесь он лишь гасит кнопку заранее, чтобы человек узнал
+       о нём до ожидания, а не из ошибки после. */
+    const exportDays = rangeDays(exportRange.from, exportRange.to);
+    const exportTooLong = exportDays > EXPORT_MAX_DAYS;
+    const exportHint = exportTooLong
+        ? `Максимум ${EXPORT_MAX_DAYS} суток за раз — выберите период короче`
+        : (exportDays
+            ? `${rangeLabel(exportRange.from, exportRange.to)} · ${pluralDays(exportDays)}${
+                filtered ? ' · с фильтрами экрана' : ''}`
+            : 'Выберите период выгрузки');
 
     return (
-        <div className="space-y-4">
-            <div className={`${iosCard} px-4 py-4`}>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-                    <Field label="С">
-                        <input type="date" value={filters.from} className={iosInput}
-                               onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} />
-                    </Field>
-                    <Field label="По">
-                        <input type="date" value={filters.to} className={iosInput}
-                               onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} />
-                    </Field>
-                    <Field label="Действие">
-                        <select value={filters.kind} className={iosInput}
-                                onChange={(e) => setFilters((f) => ({ ...f, kind: e.target.value }))}>
-                            <option value="all">Все</option>
-                            <option value="handoff">Передал чат-менеджеру</option>
-                            <option value="open">Открыл переписку</option>
-                            <option value="search">Искал номер</option>
-                        </select>
-                    </Field>
-                    <Field label="Сотрудник">
-                        <select value={filters.userId} className={iosInput}
-                                onChange={(e) => setFilters((f) => ({ ...f, userId: e.target.value }))}>
-                            <option value="all">Все</option>
-                            {(data.people || []).map((person) => (
-                                <option key={person.user_id} value={person.user_id}>{person.name}</option>
-                            ))}
-                        </select>
-                    </Field>
-                    <Field label="Телефон водителя">
-                        <input value={filters.phone} placeholder="любой" className={`${iosInput} tabular-nums`}
-                               onChange={(e) => setFilters((f) => ({ ...f, phone: e.target.value }))} />
-                    </Field>
+        <div className="space-y-3">
+            {/* ── Отбор ─────────────────────────────────────────────────── */}
+            <div className={`${iosCard} flex flex-wrap items-center gap-2 px-3 py-2.5`}>
+                {/* Обёртка нужна: сам пикер рисует `relative`-блок без ширины,
+                    и в строке-флексе он сжимается по содержимому — `w-full` на
+                    кнопке внутри тогда считается от той же ширины и ничего не
+                    меняет. Ширину задаём снаружи, кнопка её наследует. */}
+                <div className="w-full sm:w-[188px]">
+                    <IosDateRangePicker
+                        from={filters.from}
+                        to={filters.to}
+                        max={todayISO()}
+                        presets={JOURNAL_PRESETS}
+                        triggerClassName={FILTER_TRIGGER}
+                        onChange={(next) => setFilters((prev) => ({
+                            ...prev,
+                            from: next.from || next.to || prev.from,
+                            to: next.to || next.from || prev.to,
+                        }))}
+                    />
                 </div>
-
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap gap-x-5 gap-y-1 text-[12.5px] text-slate-500">
-                        <Stat label="Действий" value={summary.events} />
-                        <Stat label="Передано" value={summary.handoffs} />
-                        <Stat label="Сотрудников" value={summary.people} />
-                        <Stat label="Водителей" value={summary.drivers} />
-                    </div>
-                    <button type="button" onClick={download} disabled={downloading || !data.total}
-                            className={`${iosBtnSecondary} disabled:opacity-40`}>
-                        {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                        Выгрузить
+                <CustomSelect
+                    variant="ios"
+                    value={filters.kind}
+                    options={KIND_OPTIONS}
+                    ariaLabel="Действие"
+                    className="w-full sm:w-[196px]"
+                    onChange={(value) => setFilters((prev) => ({ ...prev, kind: value }))}
+                />
+                <CustomSelect
+                    variant="ios"
+                    value={filters.userId}
+                    options={peopleOptions}
+                    ariaLabel="Сотрудник"
+                    searchable={peopleOptions.length > 8}
+                    className="w-full sm:w-[200px]"
+                    onChange={(value) => setFilters((prev) => ({ ...prev, userId: value }))}
+                />
+                <div className="relative w-full sm:w-[186px]">
+                    <Phone size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                        value={phoneDraft}
+                        onChange={(event) => setPhoneDraft(event.target.value)}
+                        onKeyDown={(event) => { if (event.key === 'Enter') applyPhone(); }}
+                        onBlur={applyPhone}
+                        inputMode="tel"
+                        placeholder="Телефон водителя"
+                        aria-label="Телефон водителя"
+                        className={FILTER_INPUT}
+                    />
+                    {Boolean(phoneDraft) && (
+                        <button
+                            type="button"
+                            aria-label="Очистить телефон"
+                            onClick={() => { setPhoneDraft(''); setFilters((prev) => ({ ...prev, phone: '' })); }}
+                            className="absolute right-2 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                        >
+                            <X size={12} />
+                        </button>
+                    )}
+                </div>
+                {filtered && (
+                    <button type="button" onClick={resetFilters} className={iosBtnGhost}>
+                        Сбросить
                     </button>
+                )}
+
+                {/* Выгрузка прижата к правому краю строки отбора: она итог того,
+                    что в этой строке набрали. Нажатие не качает файл сразу, а
+                    раскрывает пикер периода — период у файла обязателен и не
+                    длиннее месяца. */}
+                <div ref={exportRef} className="relative ml-auto shrink-0">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setExportRange(clampExportRange({ from: filters.from, to: filters.to }));
+                            setExportOpen((value) => !value);
+                        }}
+                        disabled={downloading}
+                        className={`${iosBtnSecondary} h-9 py-0 ${exportOpen ? 'bg-slate-200 text-slate-900' : ''}`}
+                        title={`Выгрузить журнал в Excel — период не длиннее ${EXPORT_MAX_DAYS} суток`}
+                    >
+                        {downloading
+                            ? <Loader2 size={15} className="animate-spin" />
+                            : <Download size={15} />}
+                        {downloading ? 'Готовим файл…' : 'Выгрузить'}
+                    </button>
+                    {exportOpen && (
+                        /* Панель прижата к правому краю кнопки, а та стоит у
+                           правого края карточки на любой ширине (`ml-auto`), —
+                           значит и панель никуда не уезжает: замер на 390 px
+                           даёт 86…354 при окне 390, на 1024 и 1366 тоже внутри.
+                           Раскрытие влево увело бы календарь за край экрана. */
+                        <div className="absolute right-0 top-full z-[60] mt-2">
+                            <IosDateRangeCalendar
+                                from={exportRange.from}
+                                to={exportRange.to}
+                                max={todayISO()}
+                                presets={EXPORT_PRESETS}
+                                onChange={(next) => setExportRange({
+                                    from: next.from || next.to,
+                                    to: next.to || next.from,
+                                })}
+                                footer={(
+                                    <div className="mt-2.5 border-t border-slate-100 pt-2.5">
+                                        <button
+                                            type="button"
+                                            className={`${iosBtnPrimary} w-full`}
+                                            disabled={!exportDays || exportTooLong}
+                                            onClick={() => download(exportRange.from, exportRange.to)}
+                                        >
+                                            <Download size={15} />
+                                            Подтвердить
+                                        </button>
+                                        <p className={`mt-1.5 text-center text-[11px] ${
+                                            exportTooLong ? 'text-rose-500' : 'text-slate-400'}`}>
+                                            {exportHint}
+                                        </p>
+                                    </div>
+                                )}
+                            />
+                        </div>
+                    )}
                 </div>
+            </div>
+
+            {/* ── Сводка по всей выборке, а не по странице ───────────────── */}
+            <div className={`${iosCard} grid grid-cols-2 divide-x divide-y divide-slate-100 sm:grid-cols-4 sm:divide-y-0`}>
+                <Stat label="Действий" value={summary.events} />
+                <Stat label="Передач чат-менеджеру" value={summary.handoffs} />
+                <Stat label="Сотрудников" value={summary.people} />
+                <Stat label="Водителей" value={summary.drivers} />
             </div>
 
             {error && (
@@ -879,59 +1252,50 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
                         <Loader2 size={15} className="animate-spin" /> Загрузка журнала…
                     </div>
                 ) : !data.items?.length ? (
-                    <div className="py-12 text-center text-sm text-slate-400">
-                        За выбранный период действий не было
+                    <div className="px-6 py-12 text-center">
+                        <div className="text-sm font-medium text-slate-700">
+                            За выбранный период действий не было
+                        </div>
+                        <div className="mt-1 text-[13px] text-slate-500">
+                            {filtered
+                                ? 'Попробуйте расширить период или снять фильтры.'
+                                : 'Раздел в эти дни не открывали.'}
+                        </div>
+                        {filtered && (
+                            <button type="button" onClick={resetFilters} className={`${iosBtnSecondary} mt-4`}>
+                                Снять фильтры
+                            </button>
+                        )}
                     </div>
                 ) : (
                     <div className="overflow-x-auto">
-                        <table className="w-full min-w-[760px] text-left text-[13px]">
+                        <table className="w-full min-w-[720px] text-left text-[13px]">
                             <thead>
-                                <tr className="border-b border-slate-200/70 text-[11.5px] uppercase tracking-wide text-slate-400">
-                                    <th className="px-4 py-2.5 font-medium">Когда</th>
+                                <tr className="border-b border-slate-200/70 text-[11px] uppercase tracking-wide text-slate-400">
+                                    <th className="px-4 py-2.5 font-medium">Время</th>
                                     <th className="px-4 py-2.5 font-medium">Сотрудник</th>
                                     <th className="px-4 py-2.5 font-medium">Действие</th>
                                     <th className="px-4 py-2.5 font-medium">Водитель</th>
                                     <th className="px-4 py-2.5 font-medium">Таксопарк</th>
-                                    <th className="px-4 py-2.5 font-medium">Заметка</th>
                                     <th className="px-4 py-2.5 font-medium">Комментарий</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {data.items.map((item) => (
-                                    <tr key={item.id} className="border-b border-slate-100 last:border-0">
-                                        <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-500">
-                                            {formatDateTime(item.created_at)}
-                                        </td>
-                                        <td className="px-4 py-2.5">
-                                            <div className="font-medium text-slate-800">{item.user_name || '—'}</div>
-                                            <div className="text-[11.5px] text-slate-400">{roleLabel(item.user_role)}</div>
-                                        </td>
-                                        <td className="px-4 py-2.5">
-                                            {item.kind === 'handoff' ? (
-                                                <IosBadge tone={KIND_TONE[item.kind]}>{kindLabel(item.kind)}</IosBadge>
-                                            ) : (
-                                                <span className="text-slate-600">{kindLabel(item.kind)}</span>
-                                            )}
-                                        </td>
-                                        <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600">
-                                            {formatPhone(item.phone)}
-                                        </td>
-                                        <td className="px-4 py-2.5 text-[12.5px] text-slate-600">
-                                            <span className="truncate">{item.channel_name || '—'}</span>
-                                        </td>
-                                        {/* Номер обращения есть только у передачи:
-                                            это заявка, куда вендор реально положил
-                                            заметку. У просмотра его нет — чат склеен
-                                            по парку, и обращений внутри несколько. */}
-                                        <td className="px-4 py-2.5 text-[12px] text-slate-400">
-                                            {item.kind === 'handoff' && item.request_id ? (
-                                                <span className="tabular-nums">№ {item.request_id}</span>
-                                            ) : ''}
-                                        </td>
-                                        <td className="max-w-[280px] px-4 py-2.5 text-[12.5px] text-slate-600">
-                                            {item.comment_text || ''}
-                                        </td>
-                                    </tr>
+                                {groups.map((group) => (
+                                    <React.Fragment key={group.key}>
+                                        <tr>
+                                            <th
+                                                colSpan={6}
+                                                scope="colgroup"
+                                                className="bg-slate-500/[0.04] px-4 py-1.5 text-left text-[11.5px] font-semibold text-slate-500"
+                                            >
+                                                {group.label}
+                                            </th>
+                                        </tr>
+                                        {group.items.map((item) => (
+                                            <JournalRow key={item.id} item={item} />
+                                        ))}
+                                    </React.Fragment>
                                 ))}
                             </tbody>
                         </table>
@@ -940,35 +1304,74 @@ const JournalPanel = ({ apiBaseUrl, headers, toast }) => {
             </div>
 
             {pageCount > 1 && (
-                <div className="flex items-center justify-center gap-2">
-                    <button type="button" className={`${iosBtnSecondary} disabled:opacity-40`}
-                            disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
-                        Назад
-                    </button>
-                    <span className="px-2 text-[12.5px] tabular-nums text-slate-500">
-                        {page} из {pageCount}
-                    </span>
-                    <button type="button" className={`${iosBtnSecondary} disabled:opacity-40`}
-                            disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}>
-                        Вперёд
-                    </button>
-                </div>
+                <IosPager
+                    page={page}
+                    pageCount={pageCount}
+                    total={total}
+                    from={(page - 1) * pageSize + 1}
+                    to={Math.min(total, page * pageSize)}
+                    onPage={setPage}
+                    unit="записи"
+                />
             )}
         </div>
     );
 };
 
-const Field = ({ label, children }) => (
-    <label className="block">
-        <span className="mb-1.5 block text-[12px] font-medium text-slate-500">{label}</span>
-        {children}
-    </label>
-);
+/* Строка журнала. Дата вынесена в разделитель дня, поэтому здесь только время.
+   Цветом помечено одно действие — «Передал»: оно единственное меняет чужую
+   систему и не отзывается. «Искал» и «Открыл» нейтральные, их не красим. */
+const JournalRow = ({ item }) => {
+    const Icon = KIND_ICONS[item.kind] || Eye;
+    return (
+        <tr className="border-b border-slate-100 last:border-0">
+            <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-500">
+                {formatTime(item.created_at)}
+            </td>
+            <td className="px-4 py-2.5">
+                <div className="font-medium text-slate-800">{item.user_name || '—'}</div>
+                <div className="text-[11.5px] text-slate-400">{roleLabel(item.user_role)}</div>
+            </td>
+            <td className="px-4 py-2.5">
+                {item.kind === 'handoff' ? (
+                    <IosBadge tone={KIND_TONE[item.kind]}>{kindLabel(item.kind)}</IosBadge>
+                ) : (
+                    <span className="inline-flex items-center gap-1.5 text-slate-600">
+                        <Icon size={13} className="text-slate-400" />
+                        {kindLabel(item.kind)}
+                    </span>
+                )}
+            </td>
+            <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600">
+                {formatPhone(item.phone)}
+            </td>
+            <td className="px-4 py-2.5 text-[12.5px] text-slate-600">
+                {item.channel_name || '—'}
+            </td>
+            <td className="max-w-[320px] px-4 py-2.5 text-[12.5px] text-slate-600">
+                {item.comment_text || ''}
+                {/* Номер обращения есть только у передачи: это заявка, куда
+                    вендор реально положил заметку. У просмотра его нет — чат
+                    склеен по парку, и обращений внутри несколько. Стоит он под
+                    текстом, а не своей колонкой: пустая колонка занимала
+                    ширину во всех строках ради каждой седьмой. */}
+                {item.kind === 'handoff' && item.request_id ? (
+                    <div className="mt-0.5 text-[11px] tabular-nums text-slate-400">
+                        обращение № {item.request_id}
+                    </div>
+                ) : null}
+            </td>
+        </tr>
+    );
+};
 
 const Stat = ({ label, value }) => (
-    <span>
-        {label}: <span className="font-semibold tabular-nums text-slate-700">{value ?? 0}</span>
-    </span>
+    <div className="px-4 py-3">
+        <div className="text-[19px] font-semibold leading-tight tabular-nums text-slate-900">
+            {value ?? 0}
+        </div>
+        <div className="mt-0.5 text-[11.5px] leading-tight text-slate-500">{label}</div>
+    </div>
 );
 
 export default DriverChatsView;

@@ -474,8 +474,11 @@ class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
         self.assertEqual(response.get_json().get('code'), QR_CODE)
 
     def test_supervisor_and_admin_are_not_asked_for_qr(self):
+        """Админ ПОРТАЛА в этом списке больше нет: 08.09.2026 владелец сузил
+        периметр, и он сюда вовсе не проходит — его отсекает гейт раздела, а не
+        гейт QR (проверяется в test_closed_section_answers_before_the_qr_gate)."""
         for context in (driver_chats_ctx(role='sv'),
-                        driver_chats_ctx(role='admin', department_code='op'),
+                        driver_chats_ctx(role='sv', direction_model='chat_manager'),
                         driver_chats_ctx(role='super_admin', department_code='op'),
                         driver_chats_ctx(role='operator', headed=[1])):
             with self.subTest(role=context['role'], headed=context['headed_department_ids']):
@@ -484,18 +487,22 @@ class DriverChatsQrGateTest(DriverChatsGateHarness, unittest.TestCase):
                 self.assertEqual(gate.calls, [], 'ключ спрашивали зря')
 
     def test_closed_section_answers_before_the_qr_gate(self):
-        """Тренеру, чужому отделу и ЧАТ-МЕНЕДЖЕРУ — «раздел не открыт».
+        """Тренеру, чужому отделу, ЧАТ-МЕНЕДЖЕРУ и админу портала — «раздел не
+        открыт».
 
         Иначе человеку предлагают подтвердить доступ к тому, чего ему не
         выдавали, — тупик, из которого он не выйдет. Чат-менеджер здесь главный
         случай: он сотрудник СЗоВ, то есть по отделу проходит, и отсечь его
-        обязана именно проверка направления.
+        обязана именно проверка направления. Его СУПЕРВАЙЗЕР, наоборот, теперь
+        проходит, а админ портала — больше нет (оба края решены владельцем
+        08.09.2026, см. driver_chats/access.py).
         """
         self._forbid_vendor()
         for context in (driver_chats_ctx(role='trainer'),
                         driver_chats_ctx(department_code='op'),
                         driver_chats_ctx(direction_model='chat_manager'),
-                        driver_chats_ctx(role='sv', direction_model='chat_manager')):
+                        driver_chats_ctx(role='admin', department_code='op'),
+                        driver_chats_ctx(role='admin', department_code='szov')):
             with self.subTest(role=context['role'], dept=context['department_code'],
                               model=context['direction_model']):
                 client, gate = self.build(context, granted=False)

@@ -491,9 +491,72 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             people = queries.journal_people(cursor)
         return jsonify({**result, 'page': page, 'page_size': size, 'people': people}), 200
 
+    def _export_period(args):
+        """Период выгрузки из запроса. Возвращает ((начало, конец), ответ-ошибка).
+
+        Правила ровно те, что показывает пикер, — и здесь они настоящие, а не
+        подсказка: кнопку в интерфейсе можно обойти, ручку зовут напрямую.
+        Экран журнала при этом периодом не ограничен: смотреть за квартал можно,
+        а вот собрать его одним файлом — нет.
+
+        Перевёрнутый период не отвергаем, а разворачиваем: «с 30-го по 1-е» —
+        это описка, а не попытка сломать выгрузку (так же поступают выгрузки
+        «Посылок» и табло СЗоВ).
+        """
+        def _day(name):
+            raw = (args.get(name) or '').strip()
+            if not raw:
+                return None
+            try:
+                return datetime.strptime(raw[:10], '%Y-%m-%d').date()
+            except ValueError:
+                return None
+
+        date_from = _day('date_from')
+        date_to = _day('date_to')
+        if not date_from or not date_to:
+            return None, (jsonify({
+                "error": "Выберите период выгрузки — не длиннее %d суток"
+                         % report.EXPORT_MAX_DAYS,
+                "code": "DRIVER_CHATS_PERIOD_REQUIRED",
+            }), 400)
+        if date_to < date_from:
+            date_from, date_to = date_to, date_from
+        # Обе границы включительно: «с 1 по 1» — это одни сутки, а не ноль.
+        days = (date_to - date_from).days + 1
+        if days > report.EXPORT_MAX_DAYS:
+            return None, (jsonify({
+                # Называем ЗАПРОШЕННУЮ длину, а не только потолок: «слишком
+                # длинно» без числа заставляет человека считать самому.
+                # Запрошенную длину склоняем («31 день», «32 дня»), а потолок —
+                # число фиксированное, и «суток» после него стоит правильно.
+                "error": "Период %s — это слишком много за раз. Максимум %d суток: "
+                         "выберите период короче."
+                         % (report.plural_days(days), report.EXPORT_MAX_DAYS),
+                "code": "DRIVER_CHATS_PERIOD_TOO_LONG",
+            }), 400)
+        return (date_from, date_to), None
+
     @dch_route('/journal/export', journal=True)
     def driver_chats_journal_export(ctx):
+        # Период у файла ОБЯЗАТЕЛЕН и не длиннее месяца, в отличие от экрана.
+        # Считается он до всего остального: незачем ходить в базу за выборкой,
+        # которую всё равно нельзя отдать.
+        period, error = _export_period(request.args)
+        if error:
+            return error
+        period_from, period_to = period
+
         filters = _journal_filters()
+        # Рамку файла задаёт пикер, а не фильтр экрана: на экране период мог
+        # остаться каким угодно, а книга собирается по выбранному в пикере.
+        # Верхняя граница — начало следующих суток, как и в фильтре: иначе «по
+        # 3 сентября» молча теряло бы всё, что было в этот день после полуночи.
+        filters['date_from'] = datetime.combine(period_from, datetime.min.time())
+        filters['date_to'] = datetime.combine(period_to, datetime.min.time()) + timedelta(days=1)
+        filters['raw_from'] = period_from
+        filters['raw_to'] = period_to
+
         with db._get_cursor() as cursor:
             rows = queries.journal_all(cursor, filters, cap=EXPORT_ROW_CAP)
 

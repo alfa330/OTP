@@ -24,16 +24,24 @@ tests/test_sensitive_section_qr_gate.py — там же, где гейты ви�
 import json
 import re
 import sys
+from contextlib import contextmanager
 from unittest import mock
+from unittest.mock import MagicMock
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+try:
+    from flask import Flask
+except ImportError:  # pragma: no cover
+    Flask = None
+
 from driver_chats import access, chat2desk, queries, report, schema  # noqa: E402
+from driver_chats.routes import build_driver_chats_blueprint  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 JOURNAL_META = ROOT / 'src' / 'components' / 'driver_chats' / 'journalMeta.js'
@@ -54,25 +62,39 @@ def ctx(role='operator', department_code='szov', direction_model=None, headed=()
 
 
 class RolloutTests(unittest.TestCase):
-    """Стадия выката: пока флаг включён, раздел виден ТОЛЬКО супер-админу.
+    """Стадия выката. Флаг снят 08.09.2026 — раздел открыт отделу.
 
-    Решение владельца 03.09.2026 на время обкатки. Периметр при этом описан
-    целиком и проверен классами ниже — открыть раздел отделу значит снять флаг,
-    а не восстанавливать правила по памяти.
+    Владелец: «доступ для линии/основы СЗоВ, супервайзерам и руководителя Ару
+    Омаровой, и так же будет виден суперадминам». Флаг оставлен в коде, чтобы
+    закрыть раздел обратно одной строкой; правила периметра проверены классами
+    ниже и от флага не зависят.
     """
 
-    def test_flag_is_on_right_now(self):
-        """Если флаг снимут, этот тест напомнит поправить и фронт: там свой
-        двойник, и разъехавшись, они дадут пункт меню, ведущий в 403."""
-        self.assertTrue(access.ROLLOUT_SUPER_ADMIN_ONLY)
+    def test_flag_is_off_and_both_twins_agree(self):
+        """Двойники обязаны стоять в одном положении. Разъедься они — либо пункт
+        меню ведёт в 403 (фронт открыт, сервер закрыт), либо раздел доступен
+        прямым адресом, но его не видно в меню."""
+        self.assertFalse(access.ROLLOUT_SUPER_ADMIN_ONLY)
         source = APP_JSX.read_text(encoding='utf-8-sig')
-        self.assertIn('const DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY = true;', source)
+        self.assertIn('const DRIVER_CHATS_ROLLOUT_SUPER_ADMIN_ONLY = false;', source)
+
+    def test_the_department_is_inside_right_now(self):
+        """Без всяких моков: то, что увидит живой человек сегодня."""
+        self.assertTrue(access.can_open_section(ctx()))                    # оператор «Основы»
+        self.assertTrue(access.can_open_section(ctx(role='sv')))           # супервайзер
+        self.assertTrue(access.can_open_section(                            # Ару — глава СЗоВ
+            ctx(role='admin', department_code='szov', headed=('szov',))))
+        self.assertTrue(access.can_open_section(ctx(role='super_admin', department_code='')))
+        self.assertFalse(access.can_open_section(ctx(direction_model='chat_manager')))
+        self.assertFalse(access.can_open_section(ctx(role='trainer')))
+        self.assertFalse(access.can_open_section(ctx(department_code='op')))
 
     def test_only_super_admin_passes_while_the_flag_is_on(self):
         with mock.patch.object(access, 'ROLLOUT_SUPER_ADMIN_ONLY', True):
             self.assertTrue(access.can_open_section(
                 ctx(role='super_admin', department_code='')))
             for person in (ctx(), ctx(role='trainee'), ctx(role='sv'),
+                           ctx(role='sv', direction_model='chat_manager'),
                            ctx(role='admin', department_code=''),
                            ctx(role='admin', department_code='szov', headed=('szov',))):
                 with self.subTest(role=person['role']):
@@ -94,16 +116,27 @@ class SectionPerimeterTests(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertTrue(access.section_perimeter_allows(ctx(role=role)))
 
-    def test_chat_manager_is_excluded_even_inside_szov(self):
+    def test_rank_and_file_chat_manager_is_excluded_even_inside_szov(self):
         """Главный случай: по отделу он проходит, отсекает его направление.
 
         Раздел существует, чтобы оператор линии передал переписку ЕМУ; сами эти
         диалоги он видит у себя в Chat2Desk целиком и без посредника.
         """
-        for role in ('operator', 'trainee', 'sv'):
+        for role in ('operator', 'trainee'):
             with self.subTest(role=role):
                 self.assertFalse(access.section_perimeter_allows(
                     ctx(role=role, direction_model='chat_manager')))
+
+    def test_supervisor_of_chat_managers_does_pass(self):
+        """Решение владельца 08.09.2026: доступ супервайзерам он назвал по РОЛИ.
+
+        Исключение по направлению — про рядовых: им раздел открыл бы чужие
+        диалоги вместо своих рабочих. У супервайзера работа как раз в чужих
+        чатах, он их разбирает, и журнал ведётся в том числе для него.
+        """
+        person = ctx(role='sv', direction_model='chat_manager')
+        self.assertTrue(access.section_perimeter_allows(person))
+        self.assertTrue(access.can_view_journal(person))
 
     def test_chat_manager_model_outside_szov_is_not_the_same_people(self):
         """Модель `chat_manager` живёт в СЗоВ. Появись она в другом отделе — это
@@ -121,11 +154,24 @@ class SectionPerimeterTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertFalse(access.section_perimeter_allows(ctx(department_code=code)))
 
-    def test_global_admin_and_szov_head_are_allowed(self):
+    def test_super_admin_and_szov_head_are_allowed(self):
         self.assertTrue(access.section_perimeter_allows(ctx(role='super_admin', department_code='')))
-        self.assertTrue(access.section_perimeter_allows(ctx(role='admin', department_code='')))
         self.assertTrue(access.section_perimeter_allows(
             ctx(role='admin', department_code='szov', headed=('szov',))))
+
+    def test_portal_admin_is_not_let_in_here(self):
+        """В соседних разделах роль `admin` без своего отдела означает «видит
+        всё». Здесь — нет: 08.09.2026 владелец сузил круг до «линия/основа,
+        супервайзеры, Ару, суперадмины», а пятеро таких админов числятся в СЗоВ
+        и получали бы вместе с разделом ещё и журнал о работе чужого отдела.
+
+        Глава СЗоВ при этом проходит: назначение главой заменяет базовую роль.
+        """
+        for code in ('', 'szov', 'op'):
+            with self.subTest(department_code=code):
+                person = ctx(role='admin', department_code=code)
+                self.assertFalse(access.section_perimeter_allows(person))
+                self.assertFalse(access.can_view_journal(person))
 
     def test_head_of_another_department_is_not_a_global_admin(self):
         """Назначение главой ЗАМЕНЯЕТ базовую роль — действующая семантика
@@ -180,21 +226,43 @@ class JournalPerimeterTests(unittest.TestCase):
     def test_supervisor_of_another_department_sees_nothing(self):
         self.assertFalse(access.can_view_journal(ctx(role='sv', department_code='op')))
 
-    def test_chat_manager_supervisor_is_still_out(self):
-        """Гейт журнала не должен обходить гейт раздела."""
-        self.assertFalse(access.can_view_journal(
+    def test_chat_manager_supervisor_sees_the_journal_too(self):
+        """Она супервайзер СЗоВ, а журнал владелец дал супервайзерам (08.09.2026).
+
+        До этого дня она не проходила даже в раздел: исключение по направлению
+        считалось раньше роли.
+        """
+        self.assertTrue(access.can_view_journal(
             ctx(role='sv', direction_model='chat_manager')))
 
+    def test_the_journal_gate_never_bypasses_the_section_gate(self):
+        """Тот, кого не пустили в раздел, не видит и журнал."""
+        for person in (ctx(role='sv', department_code='op'),
+                       ctx(role='admin', department_code='szov'),
+                       ctx(role='trainer')):
+            with self.subTest(role=person['role'], dept=person['department_code']):
+                self.assertFalse(access.can_open_section(person))
+                self.assertFalse(access.can_view_journal(person))
+
     def test_journal_rule_has_no_hardcoded_person(self):
-        """Ару Омарова проходит как СВ СЗоВ, а не по своему id.
+        """Ару Омарова проходит как глава СЗоВ, а не по своему id.
 
         Именной список ломается ровно в тот день, когда человек меняется, и
-        ломается молча. Правило «СВ этого отдела» переживает и замену, и
-        появление второго руководителя.
+        ломается молча. Здесь он сломался бы сразу: у Ару в базе ДВЕ учётки —
+        id 205 («Омарова Ару», роль sv, статус fired, ни одной сессии) и рабочая
+        id 1 («Omarova Aru», роль admin), записанная главой СЗоВ. Любой из этих
+        id в коде выдал бы доступ не тому человеку, а правило «глава этого
+        отдела или его супервайзер» покрывает её как есть.
+
+        Проверяем не имя (имя в пояснении как раз полезно), а МЕХАНИКУ: правило
+        не имеет права смотреть ни на id человека, ни на равенство числу.
         """
         source = (ROOT / 'driver_chats' / 'access.py').read_text(encoding='utf-8')
-        self.assertNotRegex(source, r'==\s*205\b')
-        self.assertNotIn('Омаров', source.replace('Ару Омарова', ''))
+        rules = source.split('def normalize_role')[1]
+        self.assertNotRegex(rules, r'==\s*\d+\b',
+                            'сравнение с числом в правилах доступа — это хардкод человека')
+        self.assertNotIn("get('user_id')", rules,
+                         'правило доступа не должно зависеть от id человека')
 
 
 class QrPolicyTests(unittest.TestCase):
@@ -754,9 +822,10 @@ class RefreshTests(unittest.TestCase):
         panel = self.view.split('const ChatPanel = ')[1].split('const HandoffModal')[0]
         self.assertIn('onRefresh', panel)
         self.assertIn('RefreshCw', panel)
-        search_bar = self.view.split('const SearchBar = ')[1].split('const StartHint')[0]
-        self.assertNotIn('onRefresh', search_bar,
-                         'второй кнопки над списком парков быть не должно')
+        search_stage = self.view.split('const SearchStage = ')[1].split(
+            '// ── Список чатов и панель')[0]
+        self.assertNotIn('onRefresh', search_stage,
+                         'второй кнопки в строке поиска быть не должно')
 
     def test_fresh_message_is_not_left_below_the_fold(self):
         """Обновление обязано ПОКАЗАТЬ новое сообщение, а не дописать его под
@@ -1203,6 +1272,349 @@ class ThreadNoteRenderingTests(unittest.TestCase):
         note_branch = re.search(r"note\s*\?\s*'([^']*)'", block.group(1))
         self.assertIsNotNone(note_branch)
         self.assertNotIn('rounded-br-md', note_branch.group(1))
+
+
+class ExportPeriodTwinTests(unittest.TestCase):
+    """Потолок периода выгрузки живёт на двух сторонах и обязан совпадать.
+
+    Разъедься они — «Подтвердить» осталось бы живым на периоде, который сервер
+    отвергнет: человек ждал бы файл и получил отказ (тот же контракт, что у
+    выгрузки «Посылок»).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.meta = JOURNAL_META.read_text(encoding='utf-8')
+        cls.routes = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+
+    def test_cap_is_the_same_number_on_both_sides(self):
+        found = re.search(r'EXPORT_MAX_DAYS\s*=\s*(\d+)', self.meta)
+        self.assertIsNotNone(found, 'EXPORT_MAX_DAYS пропал из journalMeta.js')
+        self.assertEqual(int(found.group(1)), report.EXPORT_MAX_DAYS)
+        self.assertEqual(report.EXPORT_MAX_DAYS, 30,
+                         'владелец просил ровно 30 суток (08.09.2026)')
+
+    def test_days_are_declined_the_same_way_on_both_sides(self):
+        """Экран и отказ сервера склоняют число одинаково — иначе в подсказке
+        «31 день», а в ошибке «31 дней», и это видит один и тот же человек."""
+        js = self.meta.split('export const pluralDays = (count) => {')[1].split('};')[0]
+        # Обе стороны знают про 11–14 (там всегда «дней», хотя цифра кончается
+        # на 1–4) — самая частая ошибка в таких помощниках.
+        self.assertIn('11', js)
+        self.assertIn('14', js)
+        for count, word in ((1, '1 день'), (2, '2 дня'), (5, '5 дней'),
+                            (11, '11 дней'), (14, '14 дней'), (21, '21 день'),
+                            (31, '31 день'), (32, '32 дня'), (45, '45 дней')):
+            with self.subTest(count=count):
+                self.assertEqual(report.plural_days(count), word)
+
+    def test_period_is_counted_inclusive_on_both_sides(self):
+        """Обе границы включительно: «с 1 по 1» — одни сутки, а не ноль.
+        Забытое «+1» на одной стороне даёт расхождение ровно в сутки."""
+        self.assertIn('export const rangeDays', self.meta)
+        self.assertIn('86400000) + 1', self.meta, 'фронт перестал считать включительно')
+        self.assertIn('(date_to - date_from).days + 1', self.routes,
+                      'сервер перестал считать включительно')
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class JournalExportRouteTests(unittest.TestCase):
+    """Период выгрузки на СЕРВЕРЕ: он обязателен и не длиннее месяца.
+
+    Граница именно здесь, а не в пикере: кнопку в интерфейсе можно обойти, ручку
+    зовут напрямую. Просьба владельца 08.09.2026 — «корректная выгрузка с
+    кастомным пикером, макс выгрузка на 30 дней».
+    """
+
+    def build(self, context=None, rows=()):
+        context = context or {'user_id': 7, 'name': 'Супервайзер СЗоВ', 'role': 'sv',
+                              'department_id': 1, 'department_code': 'szov',
+                              'direction_model': None,
+                              'headed_department_ids': [], 'headed_department_codes': []}
+        captured = {}
+
+        def _journal_all(_cursor, filters, cap=0):
+            captured.update(filters)
+            captured['cap'] = cap
+            return list(rows)
+
+        cursor = MagicMock()
+        db = MagicMock()
+
+        @contextmanager
+        def _get_cursor():
+            yield cursor
+
+        db._get_cursor = _get_cursor
+
+        def _patch(module, name, value):
+            original = getattr(module, name)
+            setattr(module, name, value)
+            self.addCleanup(setattr, module, name, original)
+
+        _patch(queries, 'load_access_context', lambda _c, _uid: dict(context))
+        _patch(queries, 'journal_all', _journal_all)
+
+        app = Flask(__name__)
+        app.register_blueprint(build_driver_chats_blueprint(
+            db=db,
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (context['user_id'], None, None),
+            sensitive_access_granted=lambda _uid: True))
+        return app.test_client(), captured
+
+    def test_without_a_period_the_file_is_refused(self):
+        """Пустой период раньше означал «весь журнал за год» — книга собиралась
+        в памяти инстанса и уезжала человеку целиком."""
+        client, captured = self.build()
+        response = client.get('/api/driver_chats/journal/export')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'DRIVER_CHATS_PERIOD_REQUIRED')
+        self.assertEqual(captured, {}, 'в базу не ходили')
+
+    def test_half_a_period_is_not_enough_either(self):
+        client, _ = self.build()
+        for query in ('date_from=2026-09-01', 'date_to=2026-09-01'):
+            with self.subTest(query=query):
+                response = client.get('/api/driver_chats/journal/export?' + query)
+                self.assertEqual(response.status_code, 400)
+
+    def test_the_cap_itself_passes(self):
+        """Ровно потолок — это ещё можно: границы включительно, и забытое «+1»
+        молча выпускало бы период на сутки длиннее объявленного."""
+        client, captured = self.build()
+        response = client.get(
+            '/api/driver_chats/journal/export?date_from=2026-08-10&date_to=2026-09-08')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured['raw_from'], date(2026, 8, 10))
+        self.assertEqual(captured['raw_to'], date(2026, 9, 8))
+        self.assertEqual((captured['raw_to'] - captured['raw_from']).days + 1,
+                         report.EXPORT_MAX_DAYS)
+
+    def test_a_day_over_the_cap_is_refused_with_the_number_spoken(self):
+        """Отказ называет ЗАПРОШЕННУЮ длину и склоняет её: «слишком длинно» без
+        числа заставляет человека считать самому."""
+        client, captured = self.build()
+        response = client.get(
+            '/api/driver_chats/journal/export?date_from=2026-08-09&date_to=2026-09-08')
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertEqual(payload['code'], 'DRIVER_CHATS_PERIOD_TOO_LONG')
+        self.assertIn('31 день', payload['error'])
+        self.assertNotIn('31 суток', payload['error'])
+        self.assertIn('%d суток' % report.EXPORT_MAX_DAYS, payload['error'])
+        self.assertEqual(captured, {})
+
+    def test_the_refusal_declines_the_number_for_any_length(self):
+        client, _ = self.build()
+        for date_to, expected in (('2026-09-09', '32 дня'),
+                                  ('2026-09-22', '45 дней'),
+                                  ('2026-10-08', '61 день')):
+            with self.subTest(date_to=date_to):
+                response = client.get(
+                    '/api/driver_chats/journal/export?date_from=2026-08-09&date_to=' + date_to)
+                self.assertIn(expected, response.get_json()['error'])
+
+    def test_reversed_period_is_turned_around_not_refused(self):
+        """«С 8-го по 1-е» — описка, а не попытка сломать выгрузку."""
+        client, captured = self.build()
+        response = client.get(
+            '/api/driver_chats/journal/export?date_from=2026-09-08&date_to=2026-09-01')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured['raw_from'], date(2026, 9, 1))
+        self.assertEqual(captured['raw_to'], date(2026, 9, 8))
+
+    def test_the_upper_bound_covers_the_whole_last_day(self):
+        """Верхняя граница — начало СЛЕДУЮЩИХ суток, иначе «по 8 сентября»
+        молча теряет всё, что было в этот день после полуночи."""
+        client, captured = self.build()
+        client.get('/api/driver_chats/journal/export?date_from=2026-09-08&date_to=2026-09-08')
+        self.assertEqual(captured['date_from'], datetime(2026, 9, 8, 0, 0))
+        self.assertEqual(captured['date_to'], datetime(2026, 9, 9, 0, 0))
+
+    def test_the_rest_of_the_filters_still_travel_into_the_file(self):
+        """Пикер задаёт только рамку. Действие, сотрудник и телефон приезжают с
+        экрана — иначе файл не совпал бы с тем, что человек видел."""
+        client, captured = self.build()
+        client.get('/api/driver_chats/journal/export?date_from=2026-09-01&date_to=2026-09-08'
+                   '&kinds=handoff&user_id=42&phone=%2B7%20707%20123%2045%2067')
+        self.assertEqual(captured['kinds'], ['handoff'])
+        self.assertEqual(captured['user_id'], 42)
+        # Нормализация вендора приводит казахстанский номер к виду 7XXXXXXXXXX,
+        # а «восьмёрку» человеку рисует уже экран (formatPhone).
+        self.assertEqual(captured['phone'], '77071234567')
+
+    def test_the_file_is_named_by_the_chosen_period(self):
+        client, _ = self.build()
+        response = client.get(
+            '/api/driver_chats/journal/export?date_from=2026-09-01&date_to=2026-09-08')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            report.export_file_name(date(2026, 9, 1), date(2026, 9, 8)),
+            'Журнал чатов водителей 01.09.2026 — 08.09.2026.xlsx')
+
+    def test_an_operator_still_gets_nothing(self):
+        """Гейт журнала стоит раньше разбора периода: оператору незачем узнавать
+        про потолок того, чего ему не покажут."""
+        client, captured = self.build(context={
+            'user_id': 8, 'name': 'Оператор', 'role': 'operator', 'department_id': 1,
+            'department_code': 'szov', 'direction_model': None,
+            'headed_department_ids': [], 'headed_department_codes': []})
+        response = client.get(
+            '/api/driver_chats/journal/export?date_from=2026-09-01&date_to=2026-09-08')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'DRIVER_CHATS_JOURNAL_CLOSED')
+        self.assertEqual(captured, {})
+
+
+class SearchScreenTests(unittest.TestCase):
+    """Экран поиска, переделанный 08.09.2026 по просьбе владельца:
+
+    «поиск поставить по середине сверху, объяснение как что работает, при
+    нажатии небольшая анимация — строка поиска увеличивается; номер и
+    поиск/enter — находится чат, поиск плавно уходит наверх и появляется чат,
+    справа чаты по таксопаркам».
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = VIEW_JSX.read_text(encoding='utf-8')
+
+    def test_search_is_one_node_in_both_states(self):
+        """«Уход наверх» сделан сворачиванием на ТОМ ЖЕ поле, а не подменой
+        блока: подмена размонтировала бы поле вместе с фокусом и кареткой, и
+        следующий номер человек начинал бы с щелчка мышью."""
+        self.assertEqual(self.source.count('<SearchStage'), 1,
+                         'поисковая строка рисуется один раз, на оба состояния')
+        stage = self.source.split('const SearchStage = ')[1].split(
+            '// ── Список чатов и панель')[0]
+        self.assertIn('compact', stage, 'у строки два состояния, а не два компонента')
+
+    def test_the_explanation_stands_above_the_field(self):
+        """Три шага — это и есть просьба «сверху объяснение, как что работает».
+        Формулировка честная: снимок делает человек средствами системы."""
+        self.assertIn('SEARCH_STEPS', self.source)
+        steps = self.source.split('const SEARCH_STEPS = [')[1].split('];')[0]
+        self.assertEqual(steps.count('title:'), 3)
+        self.assertIn('Enter', steps, 'шаг про поиск называет клавишу')
+        self.assertIn('Передан', steps, 'шаг про передачу называет кнопку')
+        self.assertNotIn('скриншот', steps.lower(),
+                         'снимок экрана делает ОС, разделу он не виден')
+
+    def test_the_field_grows_on_focus(self):
+        """Та самая «небольшая анимация»: строка растёт, когда в неё встают."""
+        stage = self.source.split('const SearchStage = ')[1].split(
+            '// ── Список чатов и панель')[0]
+        self.assertIn('setFocused(true)', stage)
+        self.assertIn('setFocused(false)', stage)
+        self.assertIn('focused ?', stage)
+
+    def test_motion_is_muted_for_those_who_asked(self):
+        """Системная настройка «меньше движения» — не пожелание: раздел
+        открывают по многу раз за смену."""
+        stage = self.source.split('const SearchStage = ')[1].split(
+            '// ── Список чатов и панель')[0]
+        self.assertIn('motion-reduce:transition-none', stage)
+
+    def test_parks_are_on_the_right_of_the_thread(self):
+        """Владелец 08.09.2026: «справа чаты по таксопаркам». На телефоне
+        колонка одна и список поднимается наверх — выбирают парк раньше, чем
+        читают."""
+        grid = self.source.split('{hasChats && (')[1].split('</div>\n                    )}')[0]
+        self.assertLess(grid.index('<ChatPanel'), grid.index('<ChatList'),
+                        'переписка идёт первой — она главная на экране')
+        self.assertIn('order-2 lg:order-1', grid)
+        self.assertIn('order-1 lg:order-2', grid)
+
+    def test_the_explanation_hides_once_a_chat_is_found(self):
+        """Найденный чат — главное на экране, объяснение своё дело сделало."""
+        self.assertIn('const hasChats = chats.length > 0;', self.source)
+        stage = self.source.split('const SearchStage = ')[1].split(
+            '// ── Список чатов и панель')[0]
+        self.assertIn('compact ? \'max-h-0', stage)
+
+
+class JournalScreenTests(unittest.TestCase):
+    """Экран журнала, переделанный 08.09.2026: «сделать более понятным и
+    удобным и корректная выгрузка с кастомным пикером»."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = VIEW_JSX.read_text(encoding='utf-8')
+        cls.journal = cls.source.split('// ── Журнал ─')[1]
+
+    def test_no_system_pickers_and_selects_are_left(self):
+        """Системные `<select>` и `<input type="date">` рисует ОС: внутри
+        интерфейса в стиле macOS это деталь из другой программы. Эталон —
+        выгрузка табло СЗоВ (src/components/ui/DateRangePicker.jsx).
+
+        Смотрим на КОД без комментариев: сами эти слова в пояснении рядом с
+        решением как раз уместны, и запрещать их — значит запрещать объяснять.
+        """
+        code = re.sub(r'/\*.*?\*/', '', self.source, flags=re.S)
+        code = re.sub(r'^\s*//.*$', '', code, flags=re.M)
+        self.assertNotIn('<select', code)
+        self.assertNotIn('type="date"', code)
+        self.assertIn('IosDateRangePicker', self.journal)
+        self.assertIn('CustomSelect', self.journal)
+        self.assertIn('variant="ios"', self.journal)
+
+    def test_export_opens_the_picker_instead_of_downloading(self):
+        """Нажатие «Выгрузить» раскрывает период, а не качает файл: период у
+        файла обязателен."""
+        block = self.journal.split('ref={exportRef}')[1].split('</div>')[0]
+        self.assertIn('setExportOpen', block)
+        self.assertNotIn('download(', block.split('exportOpen && (')[0],
+                         'кнопка сама файл не собирает')
+        self.assertIn('IosDateRangeCalendar', self.journal)
+        self.assertIn('Подтвердить', self.journal)
+
+    def test_the_picker_closes_by_click_outside_and_escape(self):
+        """Требование эталонного пикера. Слушаем mousedown, а не click: иначе
+        прокрутка колесом внутри панели считается внешней и гасит её."""
+        self.assertIn("document.addEventListener('mousedown'", self.journal)
+        self.assertIn("event.key === 'Escape'", self.journal)
+
+    def test_confirm_is_dead_past_the_cap(self):
+        """Потолок держит сервер, но узнать о нём человек должен ДО ожидания."""
+        self.assertIn('EXPORT_MAX_DAYS', self.journal)
+        self.assertIn('exportTooLong', self.journal)
+        self.assertIn('disabled={!exportDays || exportTooLong}', self.journal)
+
+    def test_export_has_its_own_period_but_the_screen_filters(self):
+        """Рамку задаёт пикер, остальной отбор — экран. Строка запроса
+        собирается заново: подмена двух ключей в общем объекте разъехалась бы с
+        именем файла на первой правке."""
+        download = self.journal.split('const download = useCallback')[1].split(
+            '}, [apiBaseUrl')[0]
+        self.assertIn("search.set('date_from', from)", download)
+        self.assertIn("search.set('date_to', to)", download)
+        self.assertIn('exportFileName(from, to)', download)
+        self.assertIn("search.set('kinds'", download)
+        self.assertIn("search.set('user_id'", download)
+
+    def test_phone_filter_costs_one_request_not_eleven(self):
+        """Телефон применяется по Enter и по уходу из поля. Запрос на каждую
+        набранную цифру — это одиннадцать обращений к журналу на один номер."""
+        self.assertIn('phoneDraft', self.journal)
+        self.assertIn('onBlur={applyPhone}', self.journal)
+        self.assertIn("if (event.key === 'Enter') applyPhone();", self.journal)
+
+    def test_the_date_lives_in_a_day_separator_not_in_every_row(self):
+        """За неделю дата повторялась в пятидесяти строках подряд. В строке
+        осталось время, день вынесен в разделитель."""
+        self.assertIn('formatDayFull', self.journal)
+        self.assertIn('dayKeyOf', self.journal)
+        row = self.journal.split('const JournalRow = ')[1].split('const Stat = ')[0]
+        self.assertIn('formatTime(item.created_at)', row)
+        self.assertNotIn('formatDateTime', row)
+
+    def test_the_pager_is_the_shared_one(self):
+        """Своих «Назад/Вперёд» в портале быть не должно — у общего пагинатора
+        есть ещё и «1–50 из 179», которого не хватало."""
+        self.assertIn('<IosPager', self.journal)
+        self.assertNotIn('Вперёд', self.journal)
 
 
 if __name__ == '__main__':
