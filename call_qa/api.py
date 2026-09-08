@@ -254,6 +254,18 @@ _SUBJECT_DATETIME = ("COALESCE(TO_CHAR(c.created_at,'DD.MM HH24:MI'),"
                      " TO_CHAR(ce.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'))")
 
 
+def _subject_kind_predicate(subject_kind, column: str = "rc.subject_kind"):
+    """Фильтр по субъекту для списков: один вид, семейство вкладки или перечень.
+
+    Всегда ANY(): вкладка «Оценки» просит СЕМЕЙСТВО `calls` (call + imported_call),
+    потому что у СЗоВ и Тез КЦ звонок в разделе — это `imported_call`, а сравнение
+    с одним видом оставляло их вкладку пустой при живых оценках."""
+    kinds = subjects_mod.normalise_kinds(subject_kind)
+    if not kinds:
+        return "", ()
+    return f" AND {column} = ANY(%s)", (kinds,)
+
+
 def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
                       subject_kind=None, department=None) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
@@ -274,9 +286,7 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
         if scope_sql is None:
             cur.close(); conn.close()
             return []
-        kind_sql, kind_params = "", ()
-        if subject_kind:
-            kind_sql, kind_params = " AND rc.subject_kind = %s", (subjects_mod.normalise_kind(subject_kind),)
+        kind_sql, kind_params = _subject_kind_predicate(subject_kind)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
@@ -350,9 +360,7 @@ def review_queue_count(allowed_direction_ids=None, subject_kind=None, department
         if scope_sql is None:
             cur.close(); conn.close()
             return 0
-        kind_sql, kind_params = "", ()
-        if subject_kind:
-            kind_sql, kind_params = " AND rc.subject_kind = %s", (subjects_mod.normalise_kind(subject_kind),)
+        kind_sql, kind_params = _subject_kind_predicate(subject_kind)
         cur.execute(
             """SELECT COUNT(*) FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
                  LEFT JOIN ai_evaluation_meta m
@@ -3606,16 +3614,21 @@ def _c2d_eligibility_counts(cur, family) -> dict:
     оператора: именно они, а не доля ответов, делают оценку одного человека
     нечестной. Доли ответов у источника нет вовсе, поэтому
     min_operator_share_pct не возвращаем — по его отсутствию фронт и понимает,
-    что эту мерку показывать не нужно."""
+    что эту мерку показывать не нужно.
+
+    «Можно оценить» обязано совпадать с ПУЛОМ, из которого берётся случайная
+    заявка (_c2d_candidates), иначе сводка обещает больше, чем даёт кнопка. Пул
+    вычитает заявки, уже оценённые человеком в журнале, — счётчик считал их
+    заодно и завышал число (на 08.09.2026: 1870 обещанных против 1708 реальных).
+    У эпизодов ChatApp то же условие уже учтено."""
     cur.execute(
         """SELECT COUNT(*) AS chats,
                   COUNT(*) FILTER (WHERE s.operator_id IS NULL) AS unattributed,
                   COUNT(*) FILTER (WHERE s.split) AS multi_operator,
-                  COUNT(*) FILTER (WHERE NOT s.split AND s.op_msgs >= %s) AS evaluable,
                   COUNT(*) FILTER (WHERE NOT s.split AND s.op_msgs >= %s
-                                     AND s.ai_done) AS evaluated,
+                                     AND NOT s.in_journal) AS evaluable,
                   COUNT(*) FILTER (WHERE NOT s.split AND s.op_msgs >= %s
-                                     AND NOT s.in_journal) AS not_in_journal
+                                     AND NOT s.in_journal AND s.ai_done) AS evaluated
              FROM (
                SELECT t.id, t.operator_id,
                       """ + _C2D_OPERATOR_MESSAGES_SQL + """ AS op_msgs,
@@ -3631,12 +3644,12 @@ def _c2d_eligibility_counts(cur, family) -> dict:
                   AND (u.direction_id = ANY(%s) OR t.operator_id IS NULL)
              ) s""",
         (config.C2D_MIN_OPERATOR_MESSAGES, config.C2D_MIN_OPERATOR_MESSAGES,
-         config.C2D_MIN_OPERATOR_MESSAGES, config.CLAUDE_MODEL, family))
-    row = cur.fetchone() or (0, 0, 0, 0, 0, 0)
+         config.CLAUDE_MODEL, family))
+    row = cur.fetchone() or (0, 0, 0, 0, 0)
     return {"min_operator_messages": config.C2D_MIN_OPERATOR_MESSAGES,
             "dialogs": int(row[0] or 0), "unattributed": int(row[1] or 0),
             "multi_operator": int(row[2] or 0), "evaluable": int(row[3] or 0),
-            "evaluated": int(row[4] or 0), "not_in_journal": int(row[5] or 0)}
+            "evaluated": int(row[4] or 0)}
 
 
 def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=None) -> int:
@@ -3650,10 +3663,7 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=
         if scope_sql is None:
             cur.close(); conn.close()
             return 0
-        kind_sql, kind_params = "", ()
-        if subject_kind:
-            kind_sql = " AND rc.subject_kind = %s"
-            kind_params = (subjects_mod.normalise_kind(subject_kind),)
+        kind_sql, kind_params = _subject_kind_predicate(subject_kind)
         cur.execute(
             """SELECT COUNT(*) FROM (
                    SELECT DISTINCT rc.subject_kind, rc.call_id
@@ -3690,10 +3700,7 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
         if scope_sql is None:
             cur.close(); conn.close()
             return []
-        kind_sql, kind_params = "", ()
-        if subject_kind:
-            kind_sql = " AND rc.subject_kind = %s"
-            kind_params = (subjects_mod.normalise_kind(subject_kind),)
+        kind_sql, kind_params = _subject_kind_predicate(subject_kind)
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
                       TO_CHAR(rc.created_at,'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { MessageSquare, Loader2, AlertCircle, Users, Sparkles } from 'lucide-react';
 import { iosCard, iosBtnPrimary, IosBadge } from '../ui/ios';
@@ -55,18 +55,39 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
         // eslint-disable-next-line
     }, [apiBaseUrl, department]);
 
+    /* Подбор переписки — не мгновенная операция: сервер перебирает кандидатов
+     * отдела и проверяет пригодность. За эти секунды человек успевает
+     * переключить отдел, а компонент при этом НЕ размонтируется (меняется лишь
+     * проп), поэтому старый промис доживает до .then и без сверки открыл бы
+     * карточку чужого отдела. Тот же приём, что в EvaluationsList. */
+    const randomRequest = useRef({ id: 0, controller: null });
+    const departmentRef = useRef(department);
+    departmentRef.current = department;
+
+    useEffect(() => () => randomRequest.current.controller?.abort(), []);
+
     const openRandom = async () => {
         if (!apiBaseUrl || randomBusy) return;
+        randomRequest.current.controller?.abort();
+        const controller = new AbortController();
+        const requestId = randomRequest.current.id + 1;
+        const requestedDepartment = department;
+        randomRequest.current = { id: requestId, controller };
         setRandomBusy(true);
         try {
             const r = await axios.get(`${apiBaseUrl}/api/ai-qa/random-chat`,
-                { params: { ...(department ? { department } : {}) }, headers: headers() });
+                { params: { ...(department ? { department } : {}) },
+                  headers: headers(), signal: controller.signal });
+            if (requestId !== randomRequest.current.id
+                || departmentRef.current !== requestedDepartment) return;
             if (r.data?.call) onOpen?.(r.data.call);
             else showToast?.('Подходящая переписка не найдена', 'error');
         } catch (error) {
+            if (axios.isCancel(error) || requestId !== randomRequest.current.id
+                || departmentRef.current !== requestedDepartment) return;
             showToast?.(error?.response?.data?.error || 'Не удалось выбрать переписку', 'error');
         } finally {
-            setRandomBusy(false);
+            if (requestId === randomRequest.current.id) setRandomBusy(false);
         }
     };
 

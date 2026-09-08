@@ -397,6 +397,13 @@ RANDOM_CALL_MAX_COUNT = _env_int('RANDOM_CALL_MAX_COUNT', 20, minimum=1, maximum
 # Семь дней — предел окна Binotel (tez_binotel_calls.MAX_WINDOW_DAYS), одно
 # значение годится обеим АТС.
 AI_QA_PULL_CALL_DAYS = _env_int('AI_QA_PULL_CALL_DAYS', 7, minimum=1, maximum=30)
+# Сколько операторов отдела перебрать, пока АТС не отдаст звонок. Одного мало:
+# у трети кандидатов СЗоВ в семидневном окне записей нет вовсе, и кнопка «Из
+# АТС» срабатывала через раз. Потолок нужен, чтобы неудачный клик не превратился
+# в полсотни запросов к АТС: пустая попытка — это один быстрый запрос списка
+# операторов, скачивание начинается только у того, у кого звонки нашлись.
+AI_QA_PULL_CALL_MAX_OPERATORS = _env_int('AI_QA_PULL_CALL_MAX_OPERATORS', 8,
+                                         minimum=1, maximum=50)
 # Маркер в imported_calls.notes: журнальная кнопка пишет 'random:<id>:<атс>',
 # раздел «ИИ-оценка» — 'aiqa:<id>:<атс>'. Разный маркер нужен, чтобы подтяжки
 # раздела были отличимы в пуле (у журнала это план прослушки, у раздела — нет).
@@ -5323,6 +5330,25 @@ def _ai_qa_subject_kind(value, *, default=None):
     return raw
 
 
+def _ai_qa_subject_filter(value):
+    """Фильтр СПИСКА по субъекту: вид, семейство вкладки или перечень через запятую.
+
+    Отдельно от _ai_qa_subject_kind, которому нужен РОВНО один вид (карточка,
+    разбор, права). Список показывает вкладку целиком, а вкладка «Оценки» — это
+    сразу `call` и `imported_call`: у СЗоВ и Тез КЦ звонок раздела приходит из
+    АТС и лежит в imported_calls, поэтому запрос одним видом `call` показывал им
+    пустую вкладку при живых оценках в базе.
+
+    Пусто и 'all'/'any' — без фильтра. Неизвестное значение отвергается (400),
+    а не игнорируется: молча показанный полный список выглядел бы как рабочая
+    вкладка, только с чужими строками."""
+    raw = str(value or '').strip().lower()
+    if not raw or raw in ('all', 'any'):
+        return None
+    from call_qa import subjects as _qa_subjects
+    return _qa_subjects.normalise_kinds(raw) or None
+
+
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_review_queue():
@@ -5339,7 +5365,7 @@ def api_ai_qa_review_queue():
         scope = _ai_qa_direction_scope(requester_id)
         limit = int(request.args.get('limit', 30))
         offset = int(request.args.get('offset', 0))
-        subject = _ai_qa_subject_kind(request.args.get('subject'))
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
         items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                   subject_kind=subject, department=department)
         total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject,
@@ -5756,44 +5782,34 @@ def api_ai_qa_pull_call():
         except (TypeError, ValueError):
             count = 1
 
-        operator_id = body.get('operator_id')
-        if operator_id in (None, ''):
+        # Оператора либо называют явно, либо подбираем сами. Во втором случае
+        # ОДНОЙ попытки мало: обе АТС на человека без записей в окне отвечают
+        # честным 404 «звонков нет», а таких людей в отделе много (замер по
+        # проду — в docstring кандидатов). Именно поэтому кнопка «Из АТС»
+        # срабатывала через раз. Берём список и перебираем.
+        requested_operator = body.get('operator_id')
+        explicit_operator = requested_operator not in (None, '')
+        if explicit_operator:
             try:
-                operator_id = _ai_qa_pick_department_operator(requester_id, department)
+                candidates = [int(requested_operator)]
+            except (TypeError, ValueError):
+                return jsonify({"error": "operator_id должен быть числом"}), 400
+        else:
+            try:
+                candidates = _ai_qa_department_operator_candidates(
+                    requester_id, department, limit=AI_QA_PULL_CALL_MAX_OPERATORS)
             except Exception:
                 # Сбой справочника — это НЕ «в отделе нет операторов»: с таким
                 # текстом дежурный пошёл бы искать проблему в кадрах.
                 logging.exception("ai-qa: не удалось выбрать оператора отдела %s", department)
                 return jsonify({"error": "Справочник сотрудников недоступен, "
                                          "попробуйте ещё раз"}), 503
-            if operator_id is None:
+            if not candidates:
                 return jsonify({"error": "В отделе нет действующих операторов "
                                          "звонковых направлений"}), 404
-        try:
-            operator_id = int(operator_id)
-        except (TypeError, ValueError):
-            return jsonify({"error": "operator_id должен быть числом"}), 400
 
-        operator = db.get_user(id=operator_id)
-        if not operator:
-            return jsonify({"error": "Оператор не найден"}), 404
-        # АТС выбираем по ОТДЕЛУ ОПЕРАТОРА, как это делает журнал, а не по
-        # параметру запроса: иначе пара «department=tez + оператор СЗоВ» ушла бы
-        # в Binotel за звонками человека, которого там нет, и вернула бы
-        # невнятный отказ вместо понятного.
-        _operator_dept_id, operator_department = db.get_user_department(operator_id)
-        operator_department = str(operator_department or '').strip().lower()
-        if operator_department != department:
-            return jsonify({"error": "Оператор не из выбранного отдела"}), 400
         # Скоуп раздела: СВ подтягивает только по своим направлениям.
         scope = _ai_qa_direction_scope(requester_id)
-        if scope is not None:
-            from call_qa.api import direction_in_scope
-            direction_id = _ai_qa_operator_direction_id(operator_id)
-            if direction_id is None or not direction_in_scope(direction_id, scope):
-                return jsonify({"error": "Этот оператор вне ваших направлений"}), 403
-        if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
-            return jsonify({"error": "Нет доступа к этому оператору"}), 403
 
         # Период обязателен обеим АТС, но раздел смотрит «просто на отдел» и не
         # спрашивает даты. Без умолчания кнопка НИКОГДА не работала бы: обе ветки
@@ -5807,27 +5823,92 @@ def api_ai_qa_pull_call():
             # 06:00 местного — это ещё вчера (тот же разбор, что у ночных
             # падений CI). Иначе окно молча теряло бы последний рабочий день.
             today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+            # Окно ВКЛЮЧАЕТ оба крайних дня, поэтому «7 дней» — это today-6…today.
+            # `today - 7` давало ВОСЕМЬ суток: Binotel считает окно в секундах
+            # (_day_bounds_unix: 00:00:00 первого дня … 23:59:59 последнего) и
+            # сверяет с MAX_WINDOW_DAYS * 86400. Восемь суток — это 691199 против
+            # предела 604800, то есть КАЖДЫЙ клик «Из АТС» у Тез КЦ упирался в
+            # безусловный 400 «период не больше 7 дней», ни один запрос до
+            # Binotel не доходил. Тот же расчёт в журнале уже сделан верно
+            # (rcAddDays(endDate, -(RC_TEZ_MAX_DAYS - 1))).
+            import tez_binotel_calls
+            window_days = max(1, AI_QA_PULL_CALL_DAYS)
+            if department == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+                # Отдельный зажим на случай, если окно раздела расширят через env:
+                # у Binotel предел жёсткий, и превышение — не «мало звонков», а отказ.
+                window_days = min(window_days, tez_binotel_calls.MAX_WINDOW_DAYS)
             date_to = date_to or today.strftime('%Y-%m-%d')
-            date_from = date_from or (today - timedelta(days=AI_QA_PULL_CALL_DAYS)).strftime('%Y-%m-%d')
+            date_from = date_from or (today - timedelta(days=window_days - 1)).strftime('%Y-%m-%d')
 
-        # Маркер источника: журнальная кнопка и раздел пишут в ОДИН пул
-        # imported_calls, и без разного notes подтяжки раздела нельзя ни
-        # отличить в разборе, ни вычесть из плана прослушки, если решат вычитать.
-        kwargs = dict(operator_id=operator_id, operator_name=operator[2],
-                      requester_id=requester_id, incoming=incoming, outgoing=outgoing,
-                      date_from=date_from, date_to=date_to, count=count,
-                      source=AI_QA_PULL_CALL_SOURCE)
-        if department == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE:
-            # У Oktell окно длительности берётся из общих настроек «Деления
-            # звонков»; у Binotel такого источника нет, и без умолчания в пул
-            # уезжал бы односекундный «не туда попал» — платный субъект оценки.
-            settings = db.get_call_distribution_settings() or {}
-            return _binotel_random_call(
-                min_duration_sec=body.get('min_duration_sec',
-                                          settings.get('min_duration_sec')),
-                max_duration_sec=body.get('max_duration_sec',
-                                          settings.get('max_duration_sec')), **kwargs)
-        return _oktell_random_call(**kwargs)
+        empty_window = None   # последний честный 404 «за период записей нет»
+        checked = 0
+        for operator_id in candidates:
+            operator = db.get_user(id=operator_id)
+            if not operator:
+                if explicit_operator:
+                    return jsonify({"error": "Оператор не найден"}), 404
+                continue
+            # АТС выбираем по ОТДЕЛУ ОПЕРАТОРА, как это делает журнал, а не по
+            # параметру запроса: иначе пара «department=tez + оператор СЗоВ» ушла бы
+            # в Binotel за звонками человека, которого там нет, и вернула бы
+            # невнятный отказ вместо понятного.
+            _operator_dept_id, operator_department = db.get_user_department(operator_id)
+            operator_department = str(operator_department or '').strip().lower()
+            if operator_department != department:
+                if explicit_operator:
+                    return jsonify({"error": "Оператор не из выбранного отдела"}), 400
+                continue
+            if scope is not None:
+                from call_qa.api import direction_in_scope
+                direction_id = _ai_qa_operator_direction_id(operator_id)
+                if direction_id is None or not direction_in_scope(direction_id, scope):
+                    if explicit_operator:
+                        return jsonify({"error": "Этот оператор вне ваших направлений"}), 403
+                    continue
+            if not _ensure_call_access_for_requester(operator_id, requester, requester_id):
+                if explicit_operator:
+                    return jsonify({"error": "Нет доступа к этому оператору"}), 403
+                continue
+
+            checked += 1
+            # Маркер источника: журнальная кнопка и раздел пишут в ОДИН пул
+            # imported_calls, и без разного notes подтяжки раздела нельзя ни
+            # отличить в разборе, ни вычесть из плана прослушки, если решат вычитать.
+            kwargs = dict(operator_id=operator_id, operator_name=operator[2],
+                          requester_id=requester_id, incoming=incoming, outgoing=outgoing,
+                          date_from=date_from, date_to=date_to, count=count,
+                          source=AI_QA_PULL_CALL_SOURCE)
+            if department == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+                # У Oktell окно длительности берётся из общих настроек «Деления
+                # звонков»; у Binotel такого источника нет, и без умолчания в пул
+                # уезжал бы односекундный «не туда попал» — платный субъект оценки.
+                settings = db.get_call_distribution_settings() or {}
+                response = _binotel_random_call(
+                    min_duration_sec=body.get('min_duration_sec',
+                                              settings.get('min_duration_sec')),
+                    max_duration_sec=body.get('max_duration_sec',
+                                              settings.get('max_duration_sec')), **kwargs)
+            else:
+                response = _oktell_random_call(**kwargs)
+
+            status = response[1] if isinstance(response, tuple) else 200
+            # Следующего оператора пробуем ТОЛЬКО на 404 «у этого пусто». Отказ
+            # самой АТС (502/503) или запроса (400) от смены человека не лечится,
+            # а перебор превратил бы одну аварию в десять запросов к упавшей АТС.
+            if status != 404 or explicit_operator:
+                return response
+            empty_window = response
+
+        if empty_window is not None:
+            # У всех проверенных окно пустое. Голое «звонков нет» читалось как
+            # случайный сбой — говорим, скольких проверили и за какой период,
+            # чтобы человек видел, что дело в окне, а не в кнопке.
+            return jsonify({"error": f"За период {date_from} — {date_to} записей нет "
+                                     f"ни у одного из {checked} проверенных операторов "
+                                     f"отдела. Выберите оператора вручную или задайте "
+                                     f"период пошире."}), 404
+        return jsonify({"error": "Среди операторов отдела нет ни одного, "
+                                 "доступного вам для прослушивания"}), 403
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
     except Exception:
@@ -5835,11 +5916,19 @@ def api_ai_qa_pull_call():
         return jsonify({"error": "не удалось подтянуть звонок из АТС (детали в логах)"}), 500
 
 
-def _ai_qa_pick_department_operator(requester_id, department):
-    """Случайный действующий оператор отдела (в пределах скоупа проверяющего).
+def _ai_qa_department_operator_candidates(requester_id, department, limit=1):
+    """Действующие операторы отдела в СЛУЧАЙНОМ порядке (в пределах скоупа).
 
     Нужен «случайному звонку отдела»: без оператора ни Oktell, ни Binotel список
     звонков не отдают — у обоих выборка идёт от конкретного сотрудника.
+
+    Отдаём СПИСОК, а не одного: обе АТС на человека без записей в окне честно
+    отвечают «звонков нет», и одна попытка делала кнопку «Из АТС» рулеткой. На
+    боевых данных 08.09.2026 у 17 из 48 кандидатов СЗоВ (35%) в семидневном окне
+    записей не было вовсе — отпуск, больничный, Б/С, новичок; у Тез КЦ таких 1 из
+    18. Отсюда и жалоба «иногда возвращает ошибку, что звонков нет»: кнопка
+    срабатывала через раз. Ручка перебирает кандидатов, пока кто-нибудь не
+    отдаст звонок.
 
     Берём ТОЛЬКО «звонковые» направления: у СЗоВ 19 из 67 действующих сотрудников
     сидят на «Чат менеджере», и случайный выбор из всех отдела в четверти случаев
@@ -5849,8 +5938,8 @@ def _ai_qa_pick_department_operator(requester_id, department):
     по шкале «ТП чат»), но её же операторы звонят — вычитание по семье убрало бы
     11 из 18 действующих операторов ТЭЗ.
 
-    Возвращает id либо None. None означает «кандидатов нет»; сбой соединения
-    бросается наружу, чтобы дежурный увидел 503, а не «в отделе нет операторов»."""
+    Возвращает список id (возможно пустой); сбой соединения бросается наружу,
+    чтобы дежурный увидел 503, а не «в отделе нет операторов»."""
     scope = _ai_qa_direction_scope(requester_id)
     conn = call_qa_config.connect_ro()
     try:
@@ -5860,7 +5949,7 @@ def _ai_qa_pick_department_operator(requester_id, department):
         scope_sql = ""
         if scope is not None:
             if not scope:
-                return None
+                return []
             scope_sql = " AND COALESCE(d.canonical_id, d.id) = ANY(%s)"
             params.append([int(x) for x in scope])
         # Отсекаем ТОЛЬКО чисто чатовые направления — по МОДЕЛИ расчёта, а не по
@@ -5868,17 +5957,29 @@ def _ai_qa_pick_department_operator(requester_id, department):
         # оценивается по шкале «ТП чат»), но её же операторы и звонят. Вычитание
         # по семье убрало бы из подтяжки 11 из 18 действующих операторов ТЭЗ.
         chat_sql = " AND COALESCE(d.calculation_model_code, '') <> 'chat_manager'"
+        params.append(max(1, int(limit or 1)))
+        # Роль и статус — не формальность, а тот же круг людей, что у резолвера АТС.
+        # role='operator': имя из Oktell матчится по lookup, построенному из
+        # db.get_all_operators() (там `WHERE u.role = 'operator'`), поэтому СВ,
+        # выросший из оператора, в lookup не попадает — его id не совпадёт ни с
+        # одной строкой, и ручка вернёт «за период у оператора нет звонков», хотя
+        # звонки в АТС есть. Статус: «не уволен» — это ещё не «работает». В
+        # users.status семь значений, и bs / sick_leave / annual_leave означают,
+        # что человека в окне не было вовсе (на 08.09.2026 таких 2 из 48 у СЗоВ
+        # и 1 из 18 у ТЭЗ) — их жребий тратился впустую.
+        role_sql = (" AND COALESCE(u.role, '') = 'operator'"
+                    " AND COALESCE(u.status, '') IN ('working', '')")
         cur.execute(
             """SELECT u.id FROM users u
                  JOIN departments dep ON dep.id = u.department_id
                  JOIN directions d ON d.id = u.direction_id
                 WHERE lower(COALESCE(dep.code, '')) = %s
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')"""
-            + scope_sql + chat_sql + """
-                ORDER BY random() LIMIT 1""", tuple(params))
-        row = cur.fetchone()
+            + role_sql + scope_sql + chat_sql + """
+                ORDER BY random() LIMIT %s""", tuple(params))
+        rows = cur.fetchall()
         cur.close()
-        return int(row[0]) if row else None
+        return [int(row[0]) for row in rows]
     finally:
         conn.close()
 
@@ -6008,7 +6109,7 @@ def api_ai_qa_evaluations():
         scope = _ai_qa_direction_scope(requester_id)
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
-        subject = _ai_qa_subject_kind(request.args.get('subject'))
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
         items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
                                  subject_kind=subject, department=department)
         total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject,

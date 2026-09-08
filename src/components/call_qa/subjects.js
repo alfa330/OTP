@@ -17,6 +17,16 @@ export const SUBJECT_CA_EPISODE = 'ca_episode';
 export const CHAT_SUBJECTS = [SUBJECT_WZ_EPISODE, SUBJECT_C2D_SNAPSHOT, SUBJECT_CA_EPISODE];
 export const CALL_SUBJECTS = [SUBJECT_CALL, SUBJECT_IMPORTED_CALL];
 
+/* Семейство субъектов — то, что спрашивает ВКЛАДКА, а не одна таблица. Вкладка
+ * «Оценки» показывает телефонию отдела, но «звонок отдела» — это сразу два вида:
+ * у ОП оценивают строки журнала (`call`), у СЗоВ и Тез КЦ — подтянутые из АТС
+ * записи без оценки в журнале (`imported_call`), и в одном отделе встречаются
+ * оба. Пока вкладка просила один вид `call`, у СЗоВ и Тез КЦ она была пуста при
+ * живых оценках в базе — это и выглядело как «оценки не сохраняются».
+ * Зеркало call_qa/config.py SUBJECT_FAMILIES. */
+export const SUBJECT_FAMILY_CALLS = 'calls';
+export const SUBJECT_FAMILY_CHATS = 'chats';
+
 /** Источник переписки у отдела. Пусто — у отдела нет чатов в разделе. */
 export const CHAT_SUBJECT_BY_DEPARTMENT = {
     op: SUBJECT_WZ_EPISODE,
@@ -28,7 +38,9 @@ export const chatSubjectOf = (department) => (
     CHAT_SUBJECT_BY_DEPARTMENT[String(department || '').toLowerCase()] || SUBJECT_WZ_EPISODE
 );
 
-export const isChat = (subject) => CHAT_SUBJECTS.includes(subject);
+export const isChat = (subject) => (
+    CHAT_SUBJECTS.includes(subject) || subject === SUBJECT_FAMILY_CHATS
+);
 
 /** Единица оценки словами — она разная, и в подписях это видно. */
 export const subjectUnit = (subject) => {

@@ -333,6 +333,14 @@ SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_WZ_EPISODE, SUBJECT_IMPORTED_CALL,
 # распознан, у чата набран руками), и вкладкам раздела.
 AUDIO_SUBJECT_KINDS = (SUBJECT_CALL, SUBJECT_IMPORTED_CALL)
 CHAT_SUBJECT_KINDS = (SUBJECT_WZ_EPISODE, SUBJECT_C2D_SNAPSHOT, SUBJECT_CA_EPISODE)
+# Семейство субъектов — то, что спрашивает ВКЛАДКА раздела, а не одна таблица.
+# Вкладка «Оценки» показывает телефонию отдела, но «звонок отдела» — это сразу
+# два вида: у ОП оценивают строки журнала (`call`), у СЗоВ и Тез КЦ — подтянутые
+# из АТС записи без оценки в журнале (`imported_call`), и в одном отделе
+# встречаются оба (см. random_call: пул 1 — imported_calls, пул 2 — calls).
+# Список одним видом молча прятал БЫ половину, а у СЗоВ и Тез КЦ — вообще всё:
+# их оценки существуют, а вкладка писала «Пока ни один звонок не оценён ИИ».
+SUBJECT_FAMILIES = {"calls": AUDIO_SUBJECT_KINDS, "chats": CHAT_SUBJECT_KINDS}
 
 # Источник переписки у отдела. У каждого отдела он ровно один: ОП — Wazzup
 # (Верификаторы), СЗоВ — Chat2Desk, Тез КЦ — ChatApp. Обратная карта нужна,

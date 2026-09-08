@@ -163,6 +163,113 @@ class QueueSqlTests(unittest.TestCase):
         self.assertIn("c2d_snapshot_id", self.api._SUBJECT_HUMAN_SCORE)
 
 
+class SubjectFamilyTests(unittest.TestCase):
+    """Вкладка спрашивает СЕМЕЙСТВО субъектов, а не одну таблицу.
+
+    «Звонок отдела» — это два вида сразу: у ОП оценивают строки журнала (`call`),
+    у СЗоВ и Тез КЦ — подтянутые из АТС записи (`imported_call`). Пока вкладка
+    «Оценки» просила один вид `call`, у СЗоВ и Тез КЦ она была ПУСТА при живых
+    оценках в базе, и это читалось как «оценки не сохраняются».
+    """
+
+    def setUp(self):
+        from call_qa import api, config, subjects
+        self.api = api
+        self.config = config
+        self.subjects = subjects
+
+    def test_every_subject_kind_belongs_to_exactly_one_family(self):
+        families = [kind for family in self.config.SUBJECT_FAMILIES.values()
+                    for kind in family]
+        self.assertEqual(sorted(families), sorted(self.config.SUBJECT_KINDS))
+        self.assertEqual(len(families), len(set(families)))
+
+    def test_calls_family_carries_the_pbx_pool(self):
+        """Без imported_call вкладка «Оценки» у СЗоВ и Тез КЦ пуста."""
+        self.assertIn(self.config.SUBJECT_IMPORTED_CALL,
+                      self.subjects.normalise_kinds("calls"))
+        self.assertIn(self.config.SUBJECT_CALL, self.subjects.normalise_kinds("calls"))
+
+    def test_single_kind_still_works_and_stays_a_list(self):
+        self.assertEqual(self.subjects.normalise_kinds("c2d_snapshot"), ["c2d_snapshot"])
+        self.assertEqual(self.subjects.normalise_kinds(None), [])
+        self.assertEqual(self.subjects.normalise_kinds(""), [])
+
+    def test_unknown_kind_is_refused_not_ignored(self):
+        """Молча снятый фильтр показал бы чужие строки как «свои»."""
+        with self.assertRaises(ValueError):
+            self.subjects.normalise_kinds("bogus")
+        with self.assertRaises(ValueError):
+            self.subjects.normalise_kinds("call,bogus")
+
+    def test_list_predicate_compares_with_any_not_equals(self):
+        """`= %s` пропускал бы ровно один вид — из-за него и была пустая вкладка."""
+        sql, params = self.api._subject_kind_predicate("calls")
+        self.assertIn("= ANY(%s)", sql)
+        self.assertNotIn("= %s", sql)
+        self.assertEqual(params, (["call", "imported_call"],))
+        self.assertEqual(self.api._subject_kind_predicate(None), ("", ()))
+
+    def test_frontend_mirrors_the_family_names(self):
+        """subjects.js — зеркало config.SUBJECT_FAMILIES; вкладка шлёт `calls`."""
+        js = (ROOT / "src" / "components" / "call_qa" / "subjects.js").read_text(
+            encoding="utf-8")
+        for family in self.config.SUBJECT_FAMILIES:
+            self.assertIn(f"= '{family}'", js)
+        view = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(
+            encoding="utf-8")
+        self.assertIn("subject={SUBJECT_FAMILY_CALLS}", view)
+        # Именно этот литерал и прятал звонки СЗоВ и Тез КЦ.
+        self.assertNotIn('subject="call"', view)
+
+    def test_chat_summary_counts_the_same_pool_the_button_draws_from(self):
+        """«Можно оценить» обязано совпадать с пулом «Случайной заявки»: тот
+        вычитает заявки, уже оценённые человеком в журнале, а счётчик — нет, и
+        сводка обещала больше, чем давала кнопка (1870 против 1708)."""
+        source = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8")
+        node = next(item for item in source_cache.parse(source).body
+                    if isinstance(item, ast.FunctionDef)
+                    and item.name == "_c2d_eligibility_counts")
+        counts = ast.get_source_segment(source, node)
+        # Оба счётчика пула — и «можно оценить», и «уже оценено ИИ» — с вычетом.
+        self.assertEqual(counts.count("AND NOT s.in_journal"), 2)
+        pool = ast.get_source_segment(source, next(
+            item for item in source_cache.parse(source).body
+            if isinstance(item, ast.FunctionDef) and item.name == "_c2d_candidates"))
+        self.assertIn("c.c2d_snapshot_id = t.id", pool)
+
+    def test_department_races_are_guarded_on_every_slow_picker(self):
+        """Компонент при смене отдела НЕ размонтируется, поэтому поздний ответ
+        открыл бы карточку чужого отдела. Сверять надо с отделом, открытым
+        СЕЙЧАС: `department` внутри .then — копия из того же замыкания, что
+        записана в ref, и прежнее сравнение не срабатывало никогда."""
+        evals = (ROOT / "src" / "components" / "call_qa" / "EvaluationsList.jsx").read_text(
+            encoding="utf-8")
+        chat = (ROOT / "src" / "components" / "call_qa" / "ChatQueue.jsx").read_text(
+            encoding="utf-8")
+        self.assertIn("departmentRef.current !== pullRequest.current.department", evals)
+        self.assertNotIn("pullRequest.current.department !== department", evals)
+        for fragment in ("const departmentRef = useRef(department);",
+                         "departmentRef.current !== requestedDepartment",
+                         "randomRequest.current.controller?.abort()"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, chat)
+
+    def test_list_routes_take_the_family_and_the_card_does_not(self):
+        """Карточке и разбору нужен РОВНО один вид: там семейство — бессмыслица."""
+        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        for route in ("api_ai_qa_evaluations", "api_ai_qa_review_queue"):
+            node = next(item for item in source_cache.parse(source).body
+                        if isinstance(item, ast.FunctionDef) and item.name == route)
+            with self.subTest(route=route):
+                self.assertIn("_ai_qa_subject_filter(", ast.get_source_segment(source, node))
+        card = next(item for item in source_cache.parse(source).body
+                    if isinstance(item, ast.FunctionDef) and item.name == "api_ai_qa_call")
+        card_body = ast.get_source_segment(source, card)
+        self.assertIn("_ai_qa_subject_kind(", card_body)
+        self.assertNotIn("_ai_qa_subject_filter(", card_body)
+
+
 class SchemaConstraintTests(unittest.TestCase):
     """Значение subject_kind ограничено на каждой таблице, где оно в ключе."""
 
@@ -719,7 +826,7 @@ class PullCallTests(unittest.TestCase):
     def test_operator_pick_skips_chat_only_directions(self):
         node = next(item for item in source_cache.parse(self.api_source).body
                     if isinstance(item, ast.FunctionDef)
-                    and item.name == "_ai_qa_pick_department_operator")
+                    and item.name == "_ai_qa_department_operator_candidates")
         body = ast.get_source_segment(self.api_source, node)
         # По МОДЕЛИ, а не по «чатовой семье»: у Тез КЦ «ТП линия» входит в семью
         # (её чат оценивается по шкале «ТП чат»), но её операторы и звонят —
@@ -732,6 +839,82 @@ class PullCallTests(unittest.TestCase):
     def test_directory_failure_is_not_reported_as_no_operators(self):
         self.assertIn("Справочник сотрудников недоступен", self.body)
         self.assertIn("503", self.body)
+
+    def test_auto_pick_tries_more_than_one_operator(self):
+        """У трети кандидатов СЗоВ в семидневном окне записей нет вовсе, и одна
+        попытка делала кнопку рулеткой: «Из АТС» срабатывала через раз."""
+        self.assertIn("_ai_qa_department_operator_candidates(", self.body)
+        self.assertIn("AI_QA_PULL_CALL_MAX_OPERATORS", self.body)
+        self.assertIn("AI_QA_PULL_CALL_MAX_OPERATORS = _env_int(", self.api_source)
+        # Перебор — это цикл по кандидатам, а не повтор одного и того же.
+        node = next(item for item in ast.walk(self.node) if isinstance(item, ast.For))
+        self.assertEqual(node.target.id, "operator_id")
+
+    def test_only_an_empty_window_moves_on_to_the_next_operator(self):
+        """404 — «у этого пусто», её лечит следующий человек. 502/503 — авария
+        самой АТС, и перебор превратил бы один сбой в десять запросов к ней."""
+        self.assertIn("status != 404 or explicit_operator", self.body)
+
+    def test_explicit_operator_is_never_silently_replaced(self):
+        """Назвали человека — отвечаем про НЕГО, а не подсовываем соседа."""
+        self.assertIn("explicit_operator", self.body)
+        for refusal in ("Оператор не найден", "Оператор не из выбранного отдела",
+                        "Этот оператор вне ваших направлений",
+                        "Нет доступа к этому оператору"):
+            with self.subTest(refusal=refusal):
+                self.assertIn(refusal, self.body)
+
+    def test_exhausted_pool_says_how_many_were_checked(self):
+        """Голое «звонков нет» читалось как случайный сбой кнопки."""
+        self.assertIn("проверенных операторов", self.body)
+        self.assertIn("{date_from} — {date_to}", self.body)
+
+    def test_default_window_fits_the_binotel_limit(self):
+        """Окно включает ОБА крайних дня. `today - 7` — это восемь суток, а
+        Binotel сверяет секунды с MAX_WINDOW_DAYS * 86400: 691199 против 604800,
+        то есть КАЖДЫЙ клик «Из АТС» у Тез КЦ упирался в безусловный 400."""
+        self.assertIn("timedelta(days=window_days - 1)", self.body)
+        self.assertIn("tez_binotel_calls.MAX_WINDOW_DAYS", self.body)
+        self.assertNotIn("timedelta(days=AI_QA_PULL_CALL_DAYS)", self.body)
+
+    def test_default_window_arithmetic_matches_the_guard(self):
+        """Считаем ровно то же, что считает _binotel_random_call."""
+        import tez_binotel_calls
+        from datetime import date, timedelta
+        window_days = min(7, tez_binotel_calls.MAX_WINDOW_DAYS)
+        today = date(2026, 9, 8)
+        start, stop = tez_binotel_calls._day_bounds_unix(
+            (today - timedelta(days=window_days - 1)).strftime("%Y-%m-%d"),
+            today.strftime("%Y-%m-%d"), "Asia/Almaty")
+        self.assertLessEqual(stop - start,
+                             tez_binotel_calls.MAX_WINDOW_DAYS * 86400)
+        # А прежнее умолчание границу пробивало — сторожим, чтобы не вернули.
+        old_start, old_stop = tez_binotel_calls._day_bounds_unix(
+            (today - timedelta(days=7)).strftime("%Y-%m-%d"),
+            today.strftime("%Y-%m-%d"), "Asia/Almaty")
+        self.assertGreater(old_stop - old_start,
+                           tez_binotel_calls.MAX_WINDOW_DAYS * 86400)
+
+    def test_candidates_match_the_pbx_resolver_and_exclude_absentees(self):
+        """Круг кандидатов обязан совпадать с тем, из которого строится lookup
+        АТС (`db.get_all_operators()` → `WHERE u.role = 'operator'`), иначе СВ,
+        выросший из оператора, даёт «звонков нет» при живых звонках. И «не
+        уволен» — ещё не «работает»: bs/больничный/отпуск тратили жребий зря."""
+        node = next(item for item in source_cache.parse(self.api_source).body
+                    if isinstance(item, ast.FunctionDef)
+                    and item.name == "_ai_qa_department_operator_candidates")
+        body = ast.get_source_segment(self.api_source, node)
+        self.assertIn("COALESCE(u.role, '') = 'operator'", body)
+        self.assertIn("COALESCE(u.status, '') IN ('working', '')", body)
+
+    def test_candidate_query_is_ordered_randomly_and_limited(self):
+        node = next(item for item in source_cache.parse(self.api_source).body
+                    if isinstance(item, ast.FunctionDef)
+                    and item.name == "_ai_qa_department_operator_candidates")
+        body = ast.get_source_segment(self.api_source, node)
+        self.assertIn("ORDER BY random() LIMIT %s", body)
+        # Порядок именно случайный: LIMIT по id всегда давал бы одних и тех же.
+        self.assertNotIn("ORDER BY random() LIMIT 1", body)
 
     def test_section_pulls_are_distinguishable_in_the_pool(self):
         """Журнальная кнопка и раздел пишут в ОДИН пул imported_calls."""
@@ -897,9 +1080,26 @@ class BatchChatStageTests(unittest.TestCase):
     def test_batch_fingerprint_carries_subject_and_department(self):
         """Иначе прогон СЗоВ подписан промптом ЗВОНКА ОТДЕЛА ПРОДАЖ, и открытие
         карточки не нашло бы его — оценило бы заново за деньги."""
+        self.assertIn("department_code = _direction_department_code(", self.source)
         self.assertIn("subject_kind=subject_kind,\n"
-                      "                department=_direction_department_code(",
+                      "                department=department_code,", self.source)
+
+    def test_batch_sends_the_prompt_it_signed(self):
+        """Отпечаток считался с отделом, а тело запроса уходило БЕЗ него: подпись
+        обещала контакт-центр, а модель получала «контролёр качества звонков
+        отдела продаж». Отдел обязан дойти и до первого прохода, и до добивки."""
+        self.assertIn("subject_kind=subject_kind, department=department_code,",
                       self.source)
+        self.assertIn('department=entry.get("department")', self.source)
+
+    def test_batch_takes_the_chat_scale_from_the_criteria_direction(self):
+        """У ТЭЗ оператор числится на «ТП линия», а чат оценивается по «ТП чат».
+        Без подмены батч подписывал прогон шкалой линии, а карточка считала
+        отпечаток по шкале чата — совпасть они не могли никогда."""
+        self.assertIn("subjects_mod.criteria_direction_id(criteria_direction_id)",
+                      self.source)
+        self.assertIn("if subject_kind in config.CHAT_SUBJECT_KINDS:", self.source)
+        self.assertIn("info = get_dir(criteria_direction_id)", self.source)
 
     def test_imported_call_is_refused_rather_than_silently_wrong(self):
         self.assertIn("пакетная оценка звонков из АТС (imported_call) не поддержана",

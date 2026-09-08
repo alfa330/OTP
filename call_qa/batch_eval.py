@@ -704,8 +704,24 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             rec = transcripts.get(_subject_key(call))
             if not rec:
                 continue
-            info = get_dir(call["direction_id"])
+            # Шкала переписки может лежать на ДРУГОМ направлении: техменеджеры
+            # ТЭЗ числятся на «ТП линия», а чат оценивается по «ТП чат». Ровно
+            # это делает _evaluate_and_cache при открытии карточки. Без той же
+            # подмены батч подписывал прогон шкалой ЛИНИИ, а карточка считала
+            # отпечаток по шкале ЧАТА — другой scale_hash и другая ревизия, так
+            # что совпасть они не могли никогда: каждый батчевый разбор ТЭЗ
+            # открывался бы с пометкой «оценка устарела».
+            criteria_direction_id = call["direction_id"]
+            if subject_kind in config.CHAT_SUBJECT_KINDS:
+                criteria_direction_id = subjects_mod.criteria_direction_id(criteria_direction_id)
+            info = get_dir(criteria_direction_id)
             snapshot = info["snapshot"]
+            # Отдел — часть промпта, а значит и отпечатка. Считаем ОДИН раз и
+            # отдаём и подписи, и самому запросу: раньше отпечаток считался с
+            # отделом, а тело запроса уходило без него, и модель получала
+            # «контролёр качества звонков ОТДЕЛА ПРОДАЖ» там, где подпись
+            # обещала контакт-центр.
+            department_code = _direction_department_code(int(info["direction"]["id"]))
             transcript_identity = transcript_fingerprint(
                 audio_fingerprint=rec["audio_fingerprint"],
                 asr_model=rec.get("source_model") or config.SONIOX_MODEL,
@@ -720,7 +736,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 # промптом ЗВОНКА ОТДЕЛА ПРОДАЖ: воспроизводимость врала бы, а
                 # открытие карточки не нашло бы прогон и оценило заново за деньги.
                 subject_kind=subject_kind,
-                department=_direction_department_code(int(info["direction"]["id"])),
+                department=department_code,
             )
             cached = runtime_store.get_cached_evaluation(
                 call_id=call["id"], evaluation_fingerprint=fingerprint,
@@ -737,7 +753,8 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 rec["asm"]["text"], info["direction"], info["t_crits"],
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
                 model=config.CLAUDE_MODEL_BULK, rag_text=prepared["rag_text"],
-                subject_kind=subject_kind, cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
+                subject_kind=subject_kind, department=department_code,
+                cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
             )
             custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {
@@ -755,6 +772,10 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "request_body_hash": content_hash(body),
                 "request_body": body,
+                # Добивка HARD-моделью в process_results обязана идти тем же
+                # промптом, что и первый проход, иначе половина критериев
+                # оценена «продажным» промптом, а половина — отделом субъекта.
+                "department": department_code,
             }
         manifest = {"version": 2, "created_at": datetime.now(timezone.utc).isoformat(),
                     "model": config.CLAUDE_MODEL_BULK, "entries": entries}
@@ -926,6 +947,10 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                         use_rag=True, knowledge_snapshot_id=snapshot["id"],
                         prepared_rag=entry["prepared_rag"], primary_result=parsed,
                         primary_llm_meta=primary_meta, subject_kind=subject_kind,
+                        # Манифест мог быть создан прежней версией — там ключа
+                        # ещё нет; тогда считаем отдел по направлению прогона.
+                        department=entry.get("department") or _direction_department_code(
+                            int(direction["id"])),
                     ),
                     tries=3, delay=20, what=f"завершение оценки call {cid}",
                 )

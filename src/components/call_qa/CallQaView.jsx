@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
-import { canPullCalls } from './subjects';
+import { canPullCalls, SUBJECT_FAMILY_CALLS } from './subjects';
 import CallReviewCard from './CallReviewCard';
 import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
@@ -480,8 +480,12 @@ export default function CallQaView(props) {
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              department={department} />
             ) : tab === 'evals' ? (
+                /* Семейство, а не один вид: у СЗоВ и Тез КЦ звонок раздела приходит
+                   из АТС и лежит в imported_calls, поэтому запрос одним `call`
+                   показывал им пустую вкладку при живых оценках. */
                 <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                                 onOpen={openCall} showToast={showToast} subject="call"
+                                 onOpen={openCall} showToast={showToast}
+                                 subject={SUBJECT_FAMILY_CALLS}
                                  department={department} canPull={canPullCalls(department)} />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl}

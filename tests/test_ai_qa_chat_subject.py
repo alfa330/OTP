@@ -637,7 +637,10 @@ class QueueRowTests(unittest.TestCase):
         chat = (ROOT / "src" / "components" / "call_qa" / "ChatQueue.jsx").read_text(
             encoding="utf-8")
         self.assertIn("label: 'Звонки'", view)
-        self.assertIn('subject="call"', view)
+        # Семейство, а не один вид: «звонок отдела» — это `call` у ОП и
+        # `imported_call` у СЗоВ и Тез КЦ, и литерал "call" оставлял их вкладку
+        # пустой при живых оценках (см. SubjectFamilyTests).
+        self.assertIn("subject={SUBJECT_FAMILY_CALLS}", view)
         # Источник переписки зависит от отдела (Wazzup у ОП, Chat2Desk у СЗоВ,
         # ChatApp у Тез КЦ), поэтому вкладка передаёт вид субъекта переменной, а
         # не литералом. Литерал здесь снова сделал бы вкладку однооотдельной.

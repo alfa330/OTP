@@ -62,6 +62,35 @@ def normalise_kind(kind) -> str:
     return value
 
 
+def normalise_kinds(kinds) -> list[str]:
+    """Виды субъекта для фильтра СПИСКА: один вид, семейство вкладки или перечень.
+
+    Списки раздела показывают вкладку целиком, а вкладка «Оценки» — это два вида
+    сразу (`calls` = call + imported_call, см. config.SUBJECT_FAMILIES). Возвращаем
+    список даже для одного вида: SQL всегда сравнивает через ANY(), и отдельная
+    ветка «ровно один вид» рано или поздно разошлась бы с веткой «семейство».
+
+    Пусто — фильтра нет. Неизвестное значение отвергается, а не игнорируется:
+    молча показанный полный список выглядел бы как рабочая вкладка.
+    """
+    if kinds is None:
+        return []
+    if isinstance(kinds, str):
+        value = kinds.strip()
+        if not value:
+            return []
+        family = config.SUBJECT_FAMILIES.get(value.lower())
+        if family:
+            return list(family)
+        kinds = value.split(",")
+    out: list[str] = []
+    for kind in kinds:
+        value = normalise_kind(kind)
+        if value not in out:
+            out.append(value)
+    return out
+
+
 # ── направления ──────────────────────────────────────────────────────────────
 
 def op_direction_family(cur) -> list[int]:

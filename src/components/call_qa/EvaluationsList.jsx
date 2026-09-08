@@ -25,6 +25,12 @@ export default function EvaluationsList(props) {
     const loadRequest = useRef({ id: 0, controller: null });
     const randomRequest = useRef({ id: 0, controller: null });
     const pullRequest = useRef({ id: 0, department: null });
+    /* Отдел, открытый СЕЙЧАС. Сравнивать ответ с `department` из замыкания
+     * бесполезно: там лежит значение того рендера, в котором запрос ушёл, —
+     * ровно оно же записано и в pullRequest. Ref переживает перерисовку и
+     * показывает, на что человек смотрит в момент ответа. */
+    const departmentRef = useRef(department);
+    departmentRef.current = department;
 
     const fetchPage = (offset, append) => {
         loadRequest.current.controller?.abort();
@@ -93,6 +99,8 @@ export default function EvaluationsList(props) {
         // Запрос идёт в АТС и качает запись — это секунды, за которые человек
         // успевает сменить отдел или уйти со вкладки. Ответ применяем только
         // если он всё ещё про ТОТ отдел: иначе открылась бы карточка чужого.
+        // Запрос при этом НЕ отменяем: звонок уже подтянут и лежит в пуле, и
+        // обрыв соединения его оттуда не убрал бы — просто не открываем карточку.
         const requestId = pullRequest.current.id + 1;
         pullRequest.current = { id: requestId, department };
         setPullBusy(true);
@@ -100,7 +108,7 @@ export default function EvaluationsList(props) {
             { ...(department ? { department } : {}), count: 1 }, { headers: headers() })
             .then((r) => {
                 if (requestId !== pullRequest.current.id
-                    || pullRequest.current.department !== department) return;
+                    || departmentRef.current !== pullRequest.current.department) return;
                 const call = (r.data?.calls || [])[0] || r.data?.call;
                 if (!call) { showToast?.('АТС не вернула подходящий звонок', 'error'); return; }
                 showToast?.('Звонок подтянут — оцениваю', 'success');
