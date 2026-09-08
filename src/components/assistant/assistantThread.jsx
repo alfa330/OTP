@@ -46,8 +46,9 @@ export const fmtChatDate = (iso) => {
         : date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
 };
 
-export const errText = (error, fallback) => (
-    error?.response?.data?.detail || error?.response?.data?.error || fallback);
+/* Определение переехало в errText.js — см. причину там. Реэкспорт держит
+   единственный вход для вкладки вики, которая берёт его отсюда вместе с лентой. */
+export { errText } from './errText';
 
 /** Статьи ответа, требующие подтверждения ознакомления, без повторов. */
 export const ackTitles = (sources) => {

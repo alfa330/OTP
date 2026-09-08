@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { errText } from './assistantThread.jsx';
+import { errText } from './errText';
 
 /* Состояние разговора с помощником — одно на вкладку в вике и на мини-чат шарика.
  *

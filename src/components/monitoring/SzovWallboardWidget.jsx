@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT } from '../ui/ios';
+import { cloneDocumentStyles } from '../../utils/pipWindow';
 import {
     WALLBOARD_TONE_TEXT,
     formatClock,
@@ -61,19 +62,6 @@ const writeStoredMetrics = (userId, config, metrics) => {
     } catch (error) {
         // Набор показателей — предпочтение браузера, без него виджет просто откроется по умолчанию.
     }
-};
-
-/*
- * Стили PiP-окна. Это отдельный документ: без переноса таблиц стилей там будет голый HTML.
- * href клонированной ссылки подставляем уже разрешённым — базовый адрес у PiP-окна свой,
- * и относительный путь до бандла в нём не нашёлся бы.
- */
-const cloneDocumentStyles = (targetWindow) => {
-    Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).forEach((node) => {
-        const clone = node.cloneNode(true);
-        if (clone.tagName === 'LINK' && node.href) clone.href = node.href;
-        targetWindow.document.head.appendChild(clone);
-    });
 };
 
 /** Сколько плиток влезает в ряд: считаем по ширине окна виджета, а не по ширине экрана. */

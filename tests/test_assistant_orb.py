@@ -269,5 +269,133 @@ class SharedThreadTests(unittest.TestCase):
         self.assertIn('compact ? null :', compact_block)
 
 
+class DetachedWindowTests(unittest.TestCase):
+    """Помощник, вынесенный в окно поверх других окон.
+
+    Шарик снял «уйти из раздела за ответом», но не снял «уйти из портала»:
+    половину смены оператор проводит в чужих системах — Fleet, CRM, чаты, — и
+    там помощника не было вовсе. Открепление выносит панель в окно Document
+    Picture-in-Picture, которое браузер держит поверх всего.
+
+    Всё, что проверяется ниже, — это места, где правка «в одну строку» тихо
+    возвращает окно в нерабочее состояние, а увидеть это можно только открыв
+    Chrome, открепив панель и уйдя в другую программу.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.orb = ORB.read_text(encoding='utf-8')
+        cls.panel = PANEL.read_text(encoding='utf-8')
+        cls.hook = (ROOT / 'src' / 'components' / 'assistant'
+                    / 'useAssistantChat.js').read_text(encoding='utf-8')
+
+    def test_разговор_живёт_в_шарике_а_не_в_панели(self):
+        """Главная проверка файла.
+
+        Открепление — это createPortal в ДРУГОЙ контейнер, а смена контейнера
+        для React означает размонтирование и монтирование заново. Хук внутри
+        панели терял бы открытый чат, ленту и набранный вопрос ровно в тот миг,
+        когда человек нажимает «открепить», — то есть кнопка работала бы против
+        того, ради чего её нажали.
+        """
+        self.assertIn('useAssistantChat({', self.orb)
+        # Имя в комментарии панели стоит законно — ловим ввоз и вызов.
+        self.assertNotIn('import useAssistantChat', self.panel,
+                         'панель снова ввозит хук — разговор будет теряться')
+        self.assertNotIn('useAssistantChat({', self.panel,
+                         'панель снова завела свой хук — разговор будет теряться')
+        self.assertIn('chat={chat}', self.orb)
+
+    def test_хук_не_тащит_ленту_в_основной_бандл(self):
+        """Хук теперь в шарике, то есть в основном коде у всех.
+
+        Лента ответов тянет markdown с DOMPurify, и мини-чат грузится lazy()
+        ровно ради того, чтобы этот вес платил только открывший чат. Любая связь
+        хука с лентой утащила бы markdown в основной бандл и молча отменила
+        ленивую загрузку — сборка при этом остаётся зелёной.
+        """
+        self.assertNotIn('assistantThread', self.hook)
+        self.assertIn("from './errText'", self.hook)
+        # Ленивая загрузка панели при этом обязана остаться.
+        self.assertRegex(self.orb, r'lazy\(\(\) => import\(.\./AssistantPanel')
+
+    def test_окно_переживает_смену_раздела(self):
+        """Уйдя в «Вики», человек теряет шарик — так и задумано (там свой
+        помощник). Но окно, которое он вынес поверх Fleet и в котором лежит его
+        разговор, от перехода по меню в чужой вкладке закрываться не должно:
+        ранние return, гасившие весь виджет, обязаны пропускать откреплённое.
+        """
+        self.assertIn('if (!orbVisible && !detached) return null;', self.orb)
+        self.assertIn('createPortal(panel, pipContainer)', self.orb)
+        # Встроенная панель при этом не рисуется второй копией.
+        self.assertIn('{!detached && orbVisible && open && anchor && (', self.orb)
+
+    def test_escape_слушает_то_окно_где_панель(self):
+        """У откреплённого помощника фокус в PiP-окне, а это отдельный window:
+        обработчик на окне вкладки туда не дотягивается, и Escape молчал бы."""
+        self.assertIn('const host = pipWindow || (open ? window : null);', self.orb)
+        self.assertIn('host.addEventListener(\'keydown\'', self.orb)
+
+    def test_чужое_окно_не_отбирается(self):
+        """Окно поверх других в документе ровно одно, и запрос при занятом не
+        падает ошибкой, а ОТБИРАЕТ его молча. Открытый помощник схлопнул бы
+        табло линии, за которым следит смена, — и человек увидел бы это как
+        пропажу табло, а не как свой выбор.
+        """
+        request_at = self.orb.index('requestWindow({')
+        self.assertLess(self.orb.index('pipWindowTaken()'), request_at,
+                        'занятость окна проверяется ПОСЛЕ запроса или не проверяется')
+
+    def test_в_окно_переносятся_стили_и_тема(self):
+        """PiP — отдельный документ: без переноса таблиц стилей там голый HTML,
+        а без атрибута темы окно откроется белым у того единственного аккаунта,
+        ради которого тёмный режим и делался."""
+        self.assertIn('cloneDocumentStyles(win)', self.orb)
+        self.assertIn('mirrorDocumentChrome(win)', self.orb)
+
+    def test_окно_закрывается_вместе_с_сессией_и_крестиком(self):
+        """В окне лежит переписка с базой знаний. Оставить его открытым над
+        формой входа — это показать содержимое чужой сессии тому, кто сел за
+        компьютер следующим."""
+        self.assertIn("win.addEventListener('pagehide'", self.orb)
+        self.assertIn('if (userId || !pipWindow) return;', self.orb)
+
+    def test_кнопки_нет_там_где_окна_не_будет(self):
+        """Firefox и Safari такого окна не умеют. Кнопка, которая по построению
+        не работает, хуже отсутствующей — приём тот же, что у табло СЗоВ."""
+        self.assertIn('canDetach={canOpenPipWindow()}', self.orb)
+        self.assertIn('{canDetach && (', self.panel)
+
+    def test_в_откреплённом_окне_нет_второго_крестика(self):
+        """У окна есть системная кнопка закрытия в заголовке. Своя, с тем же
+        смыслом, в шапке на 384 пикселя — лишний шум, а не удобство: место
+        отдано возврату в портал."""
+        header = self.panel[self.panel.index('{detached ? ('):]
+        detached_branch = header[:header.index(') : (')]
+        self.assertIn('onAttach', detached_branch)
+        self.assertNotIn('<X ', detached_branch)
+
+
+class PipWindowReuseTests(unittest.TestCase):
+    """Механика окна — одна на портал."""
+
+    def test_перенос_стилей_не_скопирован_в_третий_раз(self):
+        """К приходу помощника окно поверх других открывали уже двое —
+        закреплённая задача и табло СЗоВ, — и перенос стилей у них успел
+        разъехаться: табло подставляло клонированной <link> разрешённый href,
+        «Задачи» копировали атрибут как есть. У PiP-окна СВОЙ базовый адрес,
+        поэтому копия без этой строки ищет бандл от другого корня. Третья копия
+        закрепила бы расхождение навсегда.
+        """
+        needle = "link[rel=\"stylesheet\"]"
+        owners = sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / 'src').rglob('*')
+            if path.suffix in ('.js', '.jsx') and needle in path.read_text(encoding='utf-8')
+        )
+        self.assertEqual(owners, ['src/utils/pipWindow.js'],
+                         'перенос стилей PiP-окна скопирован ещё раз')
+
+
 if __name__ == '__main__':
     unittest.main()

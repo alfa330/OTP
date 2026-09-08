@@ -1,11 +1,10 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import {
     AlertCircle, ArrowUpRight, Check, ChevronLeft, History, Loader2, Lock,
-    Plus, Trash2, X,
+    Minimize2, PictureInPicture2, Plus, Trash2, X,
 } from 'lucide-react';
 import { ChatComposer, useThreadAutoScroll } from '../ui/chat';
 import { AssistantMessage, fmtChatDate } from './assistantThread.jsx';
-import useAssistantChat from './useAssistantChat';
 import Orb from './Orb.jsx';
 
 /* Мини-чат шарика: тот же помощник, что во вкладке вики, в колонке 384 пикселя.
@@ -22,6 +21,13 @@ import Orb from './Orb.jsx';
  * которые оператор пересказывает водителю, и цена ошибки тут не в интерфейсе.
  * Узкая панель — повод убрать техническую справку, а не признак того, что
  * ответом можно пользоваться не глядя.
+ *
+ * РАЗГОВОР ПРИХОДИТ ИЗВНЕ. Панель не держит своего useAssistantChat: хук живёт
+ * в шарике. Причина не в стройности, а в откреплении — панель переезжает в
+ * окно поверх других окон через createPortal, а смена контейнера для React
+ * означает размонтирование, и хук внутри панели терял бы разговор ровно в миг
+ * переезда. Отсюда же правило: НЕ заводить здесь второго владельца ленты, даже
+ * маленького (см. assistantThread.jsx о цене третьей копии).
  *
  * ЗАМОК QR. Оператор, бухгалтер и HR без подтверждённой сессии получают 403 на
  * каждом роуте помощника (wiki/routes.py). Шарик им всё равно показывается —
@@ -124,12 +130,11 @@ const HistoryScreen = ({ chats, loading, activeId, onOpen, onDelete, onBack }) =
 );
 
 export default function AssistantPanel({
-    base, headers, spaceId, spaceName,
+    chat, spaceName,
     locked = false, lockChecking = false, onRequestQr,
     onOpenArticle, onOpenFullAssistant, onClose, showToast,
+    detached = false, canDetach = false, onDetach, onAttach,
 }) {
-    const chat = useAssistantChat({ base, headers, spaceId, enabled: !locked,
-                                    withSuggestions: true });
     const { boxRef, onScroll } = useThreadAutoScroll(chat.messages);
     const [screen, setScreen] = useState('thread');
     const [pendingDelete, setPendingDelete] = useState(null);
@@ -223,14 +228,44 @@ export default function AssistantPanel({
                         </button>
                     </>
                 )}
-                <button
-                    type="button"
-                    onClick={onClose}
-                    className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                    aria-label="Свернуть помощника"
-                >
-                    <X size={15} />
-                </button>
+                {/* Открепление и возврат занимают ОДНО место, а крестика в
+                    откреплённом окне нет вовсе: закрыть его нечем, кроме
+                    системной кнопки заголовка, которая там и так есть, — а
+                    вторая кнопка с тем же смыслом в шапке на 384 пикселя это
+                    лишний шум, не удобство. */}
+                {detached ? (
+                    <button
+                        type="button"
+                        onClick={onAttach}
+                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                        aria-label="Вернуть помощника в портал"
+                        title="Вернуть в портал"
+                    >
+                        <Minimize2 size={15} />
+                    </button>
+                ) : (
+                    <>
+                        {canDetach && (
+                            <button
+                                type="button"
+                                onClick={onDetach}
+                                className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                                aria-label="Открепить помощника в окно поверх других окон"
+                                title="Открепить в окно поверх других окон"
+                            >
+                                <PictureInPicture2 size={15} />
+                            </button>
+                        )}
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                            aria-label="Свернуть помощника"
+                        >
+                            <X size={15} />
+                        </button>
+                    </>
+                )}
             </div>
 
             {banner && (

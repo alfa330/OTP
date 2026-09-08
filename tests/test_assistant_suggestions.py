@@ -179,18 +179,37 @@ class ScopeTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     """Проводка: кто просит подсказки, а кто нет."""
 
-    def test_шарик_не_платит_за_подсказки(self):
-        """Проба шарика дёргает /ai/status на каждой загрузке портала у всех,
-        а пустой экран чата не рисует. Считать подсказки там незачем."""
+    def test_проба_шарика_не_платит_за_подсказки(self):
+        """Проба дёргает /ai/status на каждой загрузке портала у ВСЕХ, а пустой
+        экран чата при этом не рисует: считать ей подсказки незачем.
+
+        Стерегли это раньше проверкой «в файле шарика нет слова suggest». Она
+        перестала что-либо значить, когда в шарик переехал сам хук разговора:
+        withSuggestions: true теперь стоит в этом файле законно, и проверка
+        держалась только на регистре буквы S. Поэтому смотрим не файл целиком,
+        а САМ запрос пробы — то, ради чего правило и заводилось.
+        """
         orb = (ROOT / 'src' / 'components' / 'assistant' / 'AssistantOrb.jsx').read_text(
             encoding='utf-8')
-        self.assertIn('/ai/status', orb)
-        self.assertNotIn('suggest', orb)
+        start = orb.index('axios.get(`${base}/ai/status`')
+        probe = orb[start:orb.index('.then(', start)]
+        self.assertNotIn('suggest', probe.lower(), 'проба стала просить подсказки')
 
-    def test_панель_просит_подсказки_и_не_держит_зашитого_списка(self):
+    def test_подсказки_просит_хук_разговора_и_только_после_открытия(self):
+        """Сам хук подсказки просит — но лишь у того, кто помощника открыл.
+
+        `started` держит его выключенным до первого открытия панели: без этого
+        переезд хука в шарик означал бы /ai/status с подсказками и список чатов
+        на каждой загрузке портала у каждого сотрудника.
+        """
+        orb = (ROOT / 'src' / 'components' / 'assistant' / 'AssistantOrb.jsx').read_text(
+            encoding='utf-8')
+        self.assertIn('withSuggestions: true', orb)
+        self.assertIn('enabled: started && !locked', orb)
+
+    def test_панель_не_держит_зашитого_списка(self):
         panel = (ROOT / 'src' / 'components' / 'assistant' / 'AssistantPanel.jsx').read_text(
             encoding='utf-8')
-        self.assertIn('withSuggestions: true', panel)
         self.assertIn('chat.suggestions', panel)
         for gone in ('Как оформить возврат депозита водителю?',
                      'Какие документы нужны для подключения к парку?'):

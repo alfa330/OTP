@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { cloneDocumentStyles } from '../../utils/pipWindow';
 import axios from 'axios';
 import {
   Bell,
@@ -5951,9 +5952,7 @@ export const PinnedTaskWidget = React.memo(({
         height: 520,
       });
       nextPipWindow.document.title = 'Закрепленная задача';
-      Array.from(document.querySelectorAll('link[rel="stylesheet"], style')).forEach((node) => {
-        nextPipWindow.document.head.appendChild(node.cloneNode(true));
-      });
+      cloneDocumentStyles(nextPipWindow);
       nextPipWindow.document.body.style.margin = '0';
       nextPipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
       nextPipWindow.document.body.style.minHeight = '100vh';

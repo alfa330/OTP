@@ -1,9 +1,14 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import Orb from './Orb.jsx';
+import useAssistantChat from './useAssistantChat';
 import {
     clampPosition, defaultPosition, movedEnough, panelAnchor, resolveDock, undock,
 } from './orbPosition';
+import {
+    canOpenPipWindow, cloneDocumentStyles, mirrorDocumentChrome, pipWindowTaken,
+} from '../../utils/pipWindow';
 import './assistant-orb.css';
 
 const AssistantPanel = lazy(() => import('./AssistantPanel.jsx'));
@@ -30,6 +35,21 @@ const AssistantPanel = lazy(() => import('./AssistantPanel.jsx'));
  * оценок» (iframe со своей сборкой) и LMS (свой полноэкранный каркас). Плата за
  * простоту: модалки разделов на 70-80 остаются ПОД шариком. Сознательно — их
  * немного, шарик в углу мешает мало, и его всегда можно отодвинуть.
+ *
+ * ОТКРЕПЛЕНИЕ В ОКНО ПОВЕРХ ДРУГИХ ОКОН. Шарик снял «уйти из раздела за
+ * ответом», но не снял «уйти из портала»: половину рабочего времени оператор
+ * проводит в чужих системах — Fleet, CRM, чаты, — и там помощника не было
+ * вовсе. Кнопка «открепить» выносит панель в окно Document Picture-in-Picture,
+ * которое браузер держит поверх ВСЕГО, включая другие окна и другие программы.
+ * Механика окна общая на портал (src/utils/pipWindow.js): такое окно в
+ * документе ровно одно, и его уже открывают закреплённая задача и табло СЗоВ.
+ *
+ * РАЗГОВОР ЖИВЁТ ЗДЕСЬ, А НЕ В ПАНЕЛИ. useAssistantChat поднят в шарик
+ * намеренно. Открепление — это createPortal в ДРУГОЙ контейнер, а смена
+ * контейнера для React означает размонтирование и монтирование заново: хук
+ * внутри панели терял бы открытый чат, ленту и набранный вопрос ровно в тот
+ * миг, когда человек нажимает «открепить». Побочно это чинит и старую потерю —
+ * свёрнутая тычком в шарик панель больше не забывает разговор.
  *
  * ПОЧЕМУ ПАНЕЛЬ ГРУЗИТСЯ ЛЕНИВО. Шарик висит на каждой странице портала у всех,
  * а чат открывает меньшинство. Мини-чат тянет за собой markdown, DOMPurify и
@@ -96,6 +116,9 @@ export default function AssistantOrb({
     const [dragging, setDragging] = useState(false);
     const [hidden, setHidden] = useState(false);      // вкладка в фоне
     const [viewport, setViewport] = useState(null);
+    const [started, setStarted] = useState(false);    // панель хоть раз открывали
+    const [pipWindow, setPipWindow] = useState(null);     // окно поверх других окон
+    const [pipContainer, setPipContainer] = useState(null);
 
     const buttonRef = useRef(null);
     const dragRef = useRef(null);
@@ -164,6 +187,14 @@ export default function AssistantOrb({
     }, [userId, wikiEnabled, locked, base, headers]);
 
     const spaceId = probe?.spaceId ?? null;
+    const detached = !!pipContainer;
+
+    /* Разговор. `started` держит хук выключенным до первого открытия панели:
+       шарик висит у всех на каждой странице, а /ai/status с подсказками и
+       список чатов нужны только тому, кто помощника действительно открыл. */
+    const chat = useAssistantChat({
+        base, headers, spaceId, enabled: started && !locked, withSuggestions: true,
+    });
 
     /* Первая примерка к окну. Позицию сохранял, возможно, широкий монитор —
        на ноутбуке те же координаты означают шарик за краем экрана, которого
@@ -202,6 +233,22 @@ export default function AssistantOrb({
         if (!userId || !position || dragging) return;
         writeStored(userId, position);
     }, [userId, position, dragging]);
+
+    /* Тычок в шарик. Откреплённый помощник живёт в отдельном окне, и второй,
+       встроенной, панели быть не должно: две ленты одного разговора на экране —
+       это выбор «в какую из них писать» вместо вопроса. Поэтому тычок выводит
+       окно вперёд, а не открывает копию. */
+    const toggleOpen = useCallback(() => {
+        if (pipWindow) {
+            try {
+                pipWindow.focus();
+            } catch (error) { /* окно уже закрыто */ }
+            return;
+        }
+        setPosition((prev) => undock(prev, viewport || viewportSize()));
+        setStarted(true);
+        setOpen((prev) => !prev);
+    }, [pipWindow, viewport]);
 
     /* Перетаскивание. setPointerCapture обязателен: без него курсор, обогнавший
        шарик (а он обгоняет всегда — шарик едет за указателем), уносит события
@@ -252,8 +299,7 @@ export default function AssistantOrb({
 
         if (!drag.moved) {
             // Нажатие без движения — это клик: открываем или закрываем чат.
-            setPosition((prev) => undock(prev, viewport || viewportSize()));
-            setOpen((prev) => !prev);
+            toggleOpen();
             return;
         }
         setDragging(false);
@@ -270,7 +316,7 @@ export default function AssistantOrb({
             dock: null,
         }, size);
         setPosition(resolveDock(dropped, size));
-    }, [viewport]);
+    }, [viewport, toggleOpen]);
 
     /* Клавиатура. Перетаскивание живёт на pointer-событиях, а они с клавиатуры
        не приходят вовсе: Enter и пробел на <button> дают сразу click. Без этой
@@ -283,66 +329,194 @@ export default function AssistantOrb({
        переоткрывает. */
     const onClick = useCallback((event) => {
         if (event.detail !== 0) return;
-        setPosition((prev) => undock(prev, viewport || viewportSize()));
-        setOpen((prev) => !prev);
-    }, [viewport]);
+        toggleOpen();
+    }, [toggleOpen]);
+
+    /* Открепить помощника в окно поверх других окон.
+       Окно в документе ровно одно, и запрос при занятом ОТБИРАЕТ его молча —
+       поэтому вместо кражи объясняем, почему не открылось: иначе помощник
+       схлопнул бы табло линии, за которым следит смена. */
+    const detach = useCallback(async () => {
+        if (pipWindowTaken()) {
+            showToast?.('Окно поверх других уже занято другим виджетом — закройте его '
+                        + 'и открепите помощника снова', 'error');
+            return;
+        }
+        try {
+            const win = await window.documentPictureInPicture.requestWindow({
+                width: PANEL_SIZE.width,
+                height: PANEL_SIZE.height,
+            });
+            win.document.title = 'Помощник';
+            cloneDocumentStyles(win);
+            mirrorDocumentChrome(win);
+            win.document.body.style.margin = '0';
+            win.document.body.style.height = '100vh';
+            win.document.body.style.overflow = 'hidden';
+            const root = win.document.createElement('div');
+            root.className = 'aorb-pip-root';
+            win.document.body.appendChild(root);
+            // Закрыли окно системным крестиком — помощник закрыт, а не «висит невидимым».
+            win.addEventListener('pagehide', () => {
+                setPipWindow(null);
+                setPipContainer(null);
+            });
+            setOpen(false);
+            setStarted(true);
+            setPipWindow(win);
+            setPipContainer(root);
+        } catch (error) {
+            // Браузер вправе отказать: например, запрос ушёл без свежего жеста.
+            showToast?.('Не удалось открыть окно поверх других — попробуйте ещё раз', 'error');
+        }
+    }, [showToast]);
+
+    const closePip = useCallback(() => {
+        try {
+            pipWindow?.close?.();
+        } catch (error) {
+            /* Окно уже закрыл браузер — гонки при выключении нас не касаются. */
+        }
+        setPipWindow(null);
+        setPipContainer(null);
+    }, [pipWindow]);
+
+    /* Вернуть панель в портал: окно закрывается, панель раскрывается на месте
+       шарика. Разговор переживает переезд — он лежит в хуке выше, а не в панели. */
+    const attach = useCallback(() => {
+        closePip();
+        setOpen(true);
+    }, [closePip]);
+
+    /* Вышли из аккаунта — окно обязано уйти вместе с сессией: в нём лежит
+       переписка с базой знаний, а сам портал уже показывает форму входа. */
+    useEffect(() => {
+        if (userId || !pipWindow) return;
+        closePip();
+    }, [userId, pipWindow, closePip]);
+
+    /* Размонтировали шарик (выход, смена аккаунта) — окно за собой закрываем. */
+    useEffect(() => () => {
+        try {
+            pipWindow?.close?.();
+        } catch (error) { /* см. выше */ }
+    }, [pipWindow]);
 
     const anchor = useMemo(() => {
         if (!position || !viewport) return null;
         return panelAnchor(position, viewport, PANEL_SIZE);
     }, [position, viewport]);
 
-    /* Escape закрывает панель — привычка от всех модалок портала. */
+    /* Escape закрывает панель — привычка от всех модалок портала.
+       Слушать надо ТО окно, где панель на самом деле. У откреплённого помощника
+       фокус в PiP-окне, а это отдельный window: обработчик, повешенный на окно
+       вкладки, туда не дотягивается, и Escape в откреплённой панели молчал бы. */
     useEffect(() => {
-        if (!open) return undefined;
-        const onKey = (event) => { if (event.key === 'Escape') setOpen(false); };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-    }, [open]);
+        const host = pipWindow || (open ? window : null);
+        if (!host) return undefined;
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            if (pipWindow) closePip(); else setOpen(false);
+        };
+        host.addEventListener('keydown', onKey);
+        return () => host.removeEventListener('keydown', onKey);
+    }, [open, pipWindow, closePip]);
+
+    /* Источник и «открыть в вике» уводят в раздел, то есть во ВКЛАДКУ портала.
+       Из откреплённого окна она сейчас в фоне: без focus() человек нажал бы
+       «источник» и не увидел ничего — вкладка сменила бы раздел за его спиной,
+       а на экране осталось бы то же окно помощника. */
+    const raisePortal = useCallback(() => {
+        if (!pipWindow) return;
+        try {
+            window.focus();
+        } catch (error) { /* браузер вправе не поднять фоновую вкладку */ }
+    }, [pipWindow]);
 
     const openArticle = useCallback((slug, quote) => {
         if (!slug) return;
         setOpen(false);
+        raisePortal();
         onOpenWikiArticle?.(slug, quote);
-    }, [onOpenWikiArticle]);
+    }, [onOpenWikiArticle, raisePortal]);
 
     const openFull = useCallback(() => {
         setOpen(false);
+        raisePortal();
         onOpenWikiAssistant?.();
-    }, [onOpenWikiAssistant]);
+    }, [onOpenWikiAssistant, raisePortal]);
 
     /* Кому шарика не видно вовсе. Замок QR сюда НЕ входит: владелец решил, что
        неподтверждённый оператор обязан видеть помощника и понимать, как его
-       открыть, — иначе для самой массовой роли портала фичи просто нет. */
-    if (!userId || !wikiEnabled) return null;
-    if (SUPPRESSED_VIEWS.has(view)) return null;
-    // Запертому QR-ом шарик положен без пробы; всем остальным — только когда
-    // сервер подтвердил, что помощнику есть на чём отвечать.
-    if (!locked && !probe?.ok) return null;
-    if (!position) return null;
+       открыть, — иначе для самой массовой роли портала фичи просто нет.
 
-    const docked = !!position.dock;
+       Запертому QR-ом шарик положен без пробы; всем остальным — только когда
+       сервер подтвердил, что помощнику есть на чём отвечать. */
+    const orbVisible = !!userId
+        && wikiEnabled
+        && !SUPPRESSED_VIEWS.has(view)
+        && (locked || !!probe?.ok)
+        && !!position;
+
+    /* Откреплённое окно переживает всё перечисленное, и это не недосмотр.
+       Уйдя в «Вики», человек теряет шарик — но окно, которое он сам вынес
+       поверх Fleet и в котором лежит его разговор, закрываться от смены
+       раздела в чужой вкладке не должно. Закрывают его крестиком, Escape,
+       кнопкой «вернуть в портал» и выходом из аккаунта — то есть решением
+       человека, а не переходом по меню. */
+    if (!orbVisible && !detached) return null;
+
+    const docked = !!position?.dock;
+
+    const panel = (
+        <Suspense fallback={(
+            <div className="flex h-full items-center justify-center text-[12.5px] text-slate-400">
+                Открываем помощника…
+            </div>
+        )}>
+            <AssistantPanel
+                chat={chat}
+                locked={locked}
+                lockChecking={lockChecking}
+                detached={detached}
+                canDetach={canOpenPipWindow()}
+                onDetach={detach}
+                onAttach={attach}
+                onRequestQr={onRequestQr}
+                onOpenArticle={openArticle}
+                onOpenFullAssistant={openFull}
+                onClose={() => setOpen(false)}
+                showToast={showToast}
+            />
+        </Suspense>
+    );
 
     return (
         <>
-            <button
-                ref={buttonRef}
-                type="button"
-                className={`aorb-button${docked ? ' aorb-dock' : ''}${dragging ? ' aorb-dragging' : ''}${hidden ? ' aorb-idle' : ''}`}
-                style={{ left: position.x, top: position.y, zIndex: 84 }}
-                onClick={onClick}
-                onPointerDown={onPointerDown}
-                onPointerMove={onPointerMove}
-                onPointerUp={finishDrag}
-                onPointerCancel={finishDrag}
-                aria-label={open ? 'Свернуть помощника' : 'Открыть помощника'}
-                aria-expanded={open}
-                title="Помощник — вопрос по базе знаний"
-            >
-                <Orb animated={!hidden} />
-            </button>
+            {orbVisible && (
+                <button
+                    ref={buttonRef}
+                    type="button"
+                    className={`aorb-button${docked ? ' aorb-dock' : ''}${dragging ? ' aorb-dragging' : ''}${hidden ? ' aorb-idle' : ''}`}
+                    style={{ left: position.x, top: position.y, zIndex: 84 }}
+                    onClick={onClick}
+                    onPointerDown={onPointerDown}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={finishDrag}
+                    onPointerCancel={finishDrag}
+                    aria-label={detached
+                        ? 'Показать окно помощника'
+                        : (open ? 'Свернуть помощника' : 'Открыть помощника')}
+                    aria-expanded={open || detached}
+                    title={detached
+                        ? 'Помощник открыт в отдельном окне'
+                        : 'Помощник — вопрос по базе знаний'}
+                >
+                    <Orb animated={!hidden} />
+                </button>
+            )}
 
-            {open && anchor && (
+            {!detached && orbVisible && open && anchor && (
                 <div
                     className="fixed overflow-hidden rounded-[18px] border border-slate-200/80 bg-white/95 shadow-[0_18px_48px_rgba(15,23,42,0.16),0_2px_8px_rgba(15,23,42,0.06)] backdrop-blur-xl"
                     style={{
@@ -355,26 +529,11 @@ export default function AssistantOrb({
                     role="dialog"
                     aria-label="Помощник"
                 >
-                    <Suspense fallback={(
-                        <div className="flex h-full items-center justify-center text-[12.5px] text-slate-400">
-                            Открываем помощника…
-                        </div>
-                    )}>
-                        <AssistantPanel
-                            base={base}
-                            headers={headers}
-                            spaceId={spaceId}
-                            locked={locked}
-                            lockChecking={lockChecking}
-                            onRequestQr={onRequestQr}
-                            onOpenArticle={openArticle}
-                            onOpenFullAssistant={openFull}
-                            onClose={() => setOpen(false)}
-                            showToast={showToast}
-                        />
-                    </Suspense>
+                    {panel}
                 </div>
             )}
+
+            {detached && createPortal(panel, pipContainer)}
         </>
     );
 }
