@@ -1,0 +1,34 @@
+[
+ {
+  "generalCallID": "6843895847",
+  "startTime": "1788868279",
+  "externalNumber": "77015550026",
+  "customerNumber": "77015550026",
+  "customerNumberPrepare": "7<span class=\"space-before\">701</span><span class=\"space-before\">555</span><span class=\"space-before\">00</span><span class=\"space-before\">26</span>",
+  "customerData": "",
+  "employeeNumber": "909",
+  "employeeName": "Калиев Тимур Алмасулы",
+  "callType": "0",
+  "billsec": -3,
+  "duration": 6,
+  "timeIsNowOnBackend": 1788868288
+ },
+ {
+  "generalCallID": "6843894587",
+  "startTime": "1788868262",
+  "externalNumber": "77015550001",
+  "customerNumber": "77015550001",
+  "customerNumberPrepare": "7<span class=\"space-before\">701</span><span class=\"space-before\">555</span><span class=\"space-before\">00</span><span class=\"space-before\">01</span>",
+  "customerData": {
+   "id": "900550001",
+   "name": "Неразобранная сделка от 77015550001",
+   "listOfLabels": []
+  },
+  "employeeNumber": "903",
+  "employeeName": "Айтбай Дана Сериккызы",
+  "callType": "0",
+  "billsec": -2,
+  "duration": 24,
+  "timeIsNowOnBackend": 1788868288
+ }
+]

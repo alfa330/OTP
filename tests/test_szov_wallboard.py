@@ -67,12 +67,12 @@ class _FakeDb:
     def get_department_member_ids(self, department_id):
         return self.members.get(int(department_id), set())
 
-    def get_szov_wallboard_snapshot(self):
+    def get_szov_wallboard_snapshot(self, direction='osnova'):
         if self.snapshot_error:
             raise RuntimeError("БД недоступна")
         return self.wallboard_snapshot or (None, None)
 
-    def save_szov_wallboard_snapshot(self, payload, captured_at):
+    def save_szov_wallboard_snapshot(self, payload, captured_at, direction='osnova'):
         if self.snapshot_error:
             raise RuntimeError("БД недоступна")
         self.saved_snapshots.append((payload, captured_at))
@@ -526,6 +526,10 @@ class _SnapshotHarness:
             '_oktell_wallboard_operator_states_sql',
             '_oktell_wallboard_snapshot_sql',
             '_wallboard_snapshot_with_cache',
+            # Общие для всех табло, а не только для СЗоВ: снимков в БД стало больше одного
+            # (задача #292), и направление стало ключом строки.
+            '_wallboard_restore_cache',
+            '_wallboard_persist_cache',
             '_szov_wallboard_restore_cache',
             '_szov_wallboard_persist_cache',
             '_szov_wallboard_fetch_snapshot',
@@ -772,9 +776,9 @@ class SzovWallboardPersistedSnapshotTests(_SnapshotHarness, unittest.TestCase):
         fake_db = _FakeDb(members={1: {10, 11}})
         original = fake_db.get_szov_wallboard_snapshot
 
-        def counted():
+        def counted(direction='osnova'):
             reads['n'] += 1
-            return original()
+            return original(direction)
 
         fake_db.get_szov_wallboard_snapshot = counted
         ns = self._namespace(fail=True, db=fake_db)

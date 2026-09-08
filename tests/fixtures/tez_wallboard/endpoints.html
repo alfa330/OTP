@@ -1,0 +1,737 @@
+	
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+
+<html translate="no">
+<head>
+	<meta name="description" content="Платформа для связи с клиентами. История звонков, клиенты, сотрудники, аналитика, настройки, и др.">
+
+	<script type="text/javascript">
+		window.appData = {};
+		window.appData.extNumber = "";
+		window.appData.userName = "Администратор";
+		window.appData.userID = "329441";
+		window.appData.wireIsEnabled = "0";
+		window.appData.language = "ru";
+		window.appData.tags_multipleChoice = "1";
+	</script>
+
+	
+
+<title>Внутренние линии для сотрудников – MyBusiness</title>
+
+<script src="//ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.ui.widget.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.fileupload.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.fileupload-ui.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.tools.min.js?stylesheet-d213"></script>
+
+<script src="/public/javascript/bootstrap-jquerytools-tooltipsconflictfix.js?stylesheet-d213"></script>
+
+<script src="/public/javascript/main.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/bootstrap.css?stylesheet-d213" />
+<script src="/public/javascript/bootstrap.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/datepicker.css?stylesheet-d213" />
+<script src="/public/javascript/datepicker_i18n.js?stylesheet-d213"></script>
+<script src="/public/javascript/datepicker.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/lightbox.css?stylesheet-d213" />
+<script src="/public/javascript/lightbox.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/flag-sprites-com.min.css?stylesheet-d213" />
+
+<script src="/public/javascript/moment-with-locales.min.js?stylesheet-d213"></script>
+
+<script src="/public/javascript/clipboard.min.js?stylesheet-d213"></script>
+
+
+<script src="/public/javascript/react-0.14.2.min.js?stylesheet-d213"></script>
+<script src="/public/javascript/react-dom-0.14.2.min.js?stylesheet-d213"></script>
+<script src="/public-2/react-static/build/MyBusinessMixin.js?stylesheet-d213"></script>
+
+<link rel="chrome-webstore-item" href="https://chrome.google.com/webstore/detail/pejnjcmcdnphdniiobdfgfdldlfoikij">
+
+<script src="/public/javascript/jquery.selectric.min.js"></script>
+<link rel="stylesheet" href="/public/stylesheet/selectric.css">
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.0.0-rc/cropper.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.0.0-rc/cropper.js"></script>
+
+<link href='//fonts.googleapis.com/css?family=Ubuntu:300,400,500,700&subset=latin,cyrillic' rel='stylesheet' type='text/css'>
+<link href='//fonts.googleapis.com/css?family=Open+Sans:300,400,600,700&subset=latin,cyrillic' rel='stylesheet' type='text/css'>
+<link href='//fonts.googleapis.com/css?family=Roboto:300,400,500,700&subset=latin,cyrillic' rel='stylesheet' type='text/css'>
+
+<link rel="stylesheet" type="text/css" href="/templates/stylesheet/layout.css?stylesheet-d213" />
+
+	<link rel="stylesheet" type="text/css" href="/templates/stylesheet/sections/hiddenSettings.css?stylesheet-d213" />
+
+	<link rel="stylesheet" type="text/css" href="/templates/stylesheet/modules/hiddenSettings/hs_pbx_listOfEndpoints.css?stylesheet-d213" />
+
+
+<link rel="stylesheet" type="text/css" href="/templates/stylesheet/layout-media.css?stylesheet-d213" />
+
+	<script src="/f/binotel-sidebar/loader.js"></script>
+	<script src="/f/bnt-web-components/loader.js?binotel-call-player"></script>
+
+
+
+	<link rel="canonical" href="https://my.binotel.ua/" />
+
+<link rel="alternate" hreflang="ru-ua" href="https://my.binotel.ua/?lang=ru" />
+<link rel="alternate" hreflang="uk-ua" href="https://my.binotel.ua/?lang=ua" />
+<link rel="alternate" hreflang="en-ua" href="https://my.binotel.ua/" />
+<link rel="alternate" hreflang="ru-kz" href="https://my.binotel.kz/?lang=ru" />
+<link rel="alternate" hreflang="uk-kz" href="https://my.binotel.kz/?lang=ua" />
+<link rel="alternate" hreflang="en-kz" href="https://my.binotel.kz/" />
+
+	<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+	<script type="text/javascript">
+		  // Load the Visualization API and the piechart package.
+		  google.charts.load('current', { packages: ['corechart'] });
+	</script>
+
+			<script type="text/javascript">
+	$(function() {
+
+	});
+</script>
+
+
+<!-- Facebook Pixel Code -->
+<script>
+  
+
+  !function(f,b,e,v,n,t,s)
+  {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+  if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+  n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];
+  s.parentNode.insertBefore(t,s)}(window, document,'script',
+  'https://connect.facebook.net/en_US/fbevents.js');
+
+  
+
+  fbq('init', '790154847844042');
+  fbq('track', 'PageView');
+
+			try {
+			fbq('track', 'aus');
+		} catch (e) {
+			console.error(e);
+		}
+	</script>
+<noscript><img height="1" width="1" style="display:none"
+  src="https://www.facebook.com/tr?id=790154847844042&ev=PageView&noscript=1"
+/></noscript>
+<!-- End Facebook Pixel Code -->
+
+
+
+
+
+
+	
+	<script type="text/javascript">
+		moment.locale('ru');
+	</script>
+
+	
+</head>
+
+<body>
+			<div style="display: table-cell;">
+  <bnt-sidebar active-page="" expandable="true"></bnt-sidebar>
+</div>
+	
+	</div>
+	<div id="page">
+		<div id="wrapper">
+			<div id="top-header">
+				<div class="content">
+					<a href="/" class="logo">
+						<img src="/templates/images/redesign-2/logo-my.png" style="height: 50px;"></a>
+					
+
+					<div class="advertising-link">
+													<a href="javascript:void(0);" class="contacts-overlay" rel="#contacts-overlay">Контакты</a>
+							<span class="line-separator"></span>
+							<a href="javascript:void(0);" class="crm-telephony" rel="#write-to-quality-department-overlay">Связаться с отделом качества</a>
+						
+
+											</div>
+
+					<ul class="fast-buttons">
+												<li><a href="/?module=accounting" class="accounting-link ">Личный счет</a></li>
+					</ul>
+
+					<div class="menu-dropdown active">
+						<i class="menu-icon"></i>
+						<ul>
+															<li><a class="menu-link" href="/?module=browsingIncomingFaxes">Факс система</a></li>																																				<li class="active"><a class="menu-link" href="/?module=hs_pbx_listOfEndpoints">Скрытые настройки</a></li>
+																						<li class=""><a class="menu-link" href="/?module=affiliate_listOfClients">Партнерская программа</a></li>
+														<li><a class="menu-link" href="/?module=users&action=add&userID=329441">employee@example.kz</a></li>
+							<li><a class="menu-link" href="?logout">Выйти из MyBusiness</a></li>
+																				</ul>
+					</div>
+				</div>
+			</div>
+
+
+			<div id="edit-task-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="send-sms-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="show-advanced-c2c-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="write-to-quality-department-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="contacts-overlay">
+				<div class="contentWrap">
+					<div class="show-contacts-overlay" id="show-contacts-overlay">
+	<div class="header-title">
+		<div class="phone-icon"><svg version='1.1' xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' x='0px' y='0px' viewBox='0 0 23 32' enable-background='new 0 0 23 32' xml:space='preserve' transform="scale(-2,2)"><path fill-rule='evenodd' clip-rule='evenodd' d='M16.012,8.607c-0.177,1.104-2.168,5.161-2.729,6.199 c-0.755,1.377-3.64,5.505-4.877,6.421l0,0L7.39,21.9l-2.46-0.78l-4.923,5.069l0.167,1.321l2.784,3.588l1.197,0.871 c0,0,17.647-10.896,18.829-30.46c0,0-0.349-0.376-1.019-1.103l-4.633-0.4l-1.521,0.577l-1.351,6.263l1.476,1.56'/></svg></div>
+		<div>Свяжитесь с нами</div>
+	</div>
+	<div class="country-submenu" id="contacts-overlay-country-submenu">
+		<a href="javascript:void(0);" class="" data-country="ukraine">Украина</a>
+		<a href="javascript:void(0);" class="active" data-country="kazakhstan">Казахстан</a>
+		<a href="javascript:void(0);" class="" data-country="poland">Польша</a>
+			</div>
+
+	<div class="contacts-in-country ukraine ">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+38 044 344 04 44<br>+38 067 344 04 44<br>+38 050 344 04 44<br>+38 093 344 04 44</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>9:00 - 18:30<br>Без выходных</div>
+			</div>
+		</div>
+		<div class="happiness-contacts-details">
+			<div class="department-name">Отдел качества</div>
+			<div class="department-contacts">
+				<div>+38 044 344 25 25<br>+38 050 344 25 25</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>9:30 - 18:30<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+38 044 333 44 44<br>+38 050 333 44 44<br>0 800 33 00 33</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>9:30 - 18:30<br>Без выходных</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="contacts-in-country kazakhstan active">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+7 702 330 11 44</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>09:00 - 20:30 по Астане<br>Понедельник - Пятница</div>
+				<div>11:00 - 20:30 по Астане<br>Суббота - Воскресенье</div>
+			</div>
+		</div>
+		<div class="happiness-contacts-details">
+			<div class="department-name">Отдел качества</div>
+			<div class="department-contacts">
+				<div>+7 747 400 25 25</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>11:30 - 20:30 по Астане<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+7 747 533 44 44</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>09:00 - 19:00 по Астане<br>Понедельник - Пятница</div>
+				<div>10:00 - 19:00 по Астане<br>Суббота - Воскресенье</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="contacts-in-country poland ">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+48 222 927 211</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>08:30 - 17:30 по Варшаве<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+48 222 927 242</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>08:30 - 17:30 по Варшаве<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="contacts-in-country russia">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+7 495 134 14 23</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>10:00 - 19:30 по МСК<br>Без выходных</div>
+			</div>
+		</div>
+		<div class="happiness-contacts-details">
+			<div class="department-name">Отдел качества</div>
+			<div class="department-contacts">
+				<div>+7 495 409 21 11</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>10:30 - 19:30 по МСК<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+7 495 134 54 35</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>10:30 - 19:30 по МСК<br>Без выходных</div>
+			</div>
+		</div>
+	</div>
+
+	<svg class="close-cross close" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" width="24px" height="24px" viewBox="0 0 24 24" enable-background="new 0 0 24 24" xml:space="preserve"><polygon fill="#FFFFFF" points="24,0.993 22.985,-0.024 12,10.983 1.015,-0.024 0,0.993 10.985,12 0,23.008 1.015,24.023 12,13.017 22.985,24.023 24,23.008 13.015,12 "/></svg>
+</div>
+
+<script type="text/javascript">
+	
+
+	$(function() {
+		$('#contacts-overlay-country-submenu a').click(function() {
+			$('#contacts-overlay-country-submenu a').removeClass('active');
+			$(this).addClass('active');
+
+			$('#show-contacts-overlay div.contacts-in-country').removeClass('active');
+			$('#show-contacts-overlay div.contacts-in-country.'+ $(this).data('country')).addClass('active');
+		});
+	});
+
+	
+</script>
+				</div>
+			</div>
+
+
+			<div id="middle">
+				<div class="middle-center hs_pbx_listOfEndpoints" id="content-for-react-app">
+																								<div class="submenu">
+								<ul class="submenu">
+			<li class="active"><a href="/?module=hs_pbx_listOfEndpoints">Внутренние линии<br>для сотрудников</a></li>
+		<li ><a href="/?module=hs_pbx_listOfPbxNumbers">Телефонные номера</a></li>
+		<li ><a href="/?module=hs_pbx_blacklist">Черный список телефонных<br>номеров для входящих звонков</a></li>
+					<li ><a href="/?module=hs_pbx_securitySettings">Параметры безопасности</a></li>
+				<li ><a href="/?module=hs_pbx_listOfWires">Wire приложение<br>у сотрудников</a></li>
+	</ul>
+							</div>
+						
+																	
+					
+					<div class="content right-block hs_pbx_listOfEndpoints">
+						<div class="module-content">
+																								<div class="list-of-endpoints">
+	<div class="title">Внутренние линии для сотрудников.&nbsp; Онлайн: <span class="font-weight-400">6</span>.&nbsp; Офлайн: <span class="font-weight-400">13</span>.</div>
+	<div class="list-of-endpoints-content">
+		<table class="table-template-v1">
+			<tr>
+				<th class="number">Внутренний<br>номер</th>
+				<th class="name">Сотрудник</th>
+				<th class="status">Статус</th>
+				<th class="rtt">SIP ping</th>
+				<th class="amount-of-bad-network-alerts">Оповещений<br>о плохом<br>интернете<br>за сегодня</th>
+				<th class="ip-address">IP адрес : порт</th>
+				<th class="useragent">Устройство</th>
+			</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-903">903</span></td>
+					<td class="text-align-center">Айтбай Дана Сериккызы</td>
+					<td class="text-align-center">онлайн</td>
+					<td class="text-align-center"><span class="">1 ms</span></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center">203.0.113.10:62775</td>
+					<td class="text-align-center">iCORE Phone/3.22.7</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-906">906</span></td>
+					<td class="text-align-center">Оспан Айгерим Канаткызы</td>
+					<td class="text-align-center">онлайн</td>
+					<td class="text-align-center"><span class="">1 ms</span></td>
+					<td class="text-align-center ">3</td>
+					<td class="text-align-center">203.0.113.10:51817</td>
+					<td class="text-align-center">iCORE Phone/3.22.7</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-909">909</span></td>
+					<td class="text-align-center">Калиев Тимур Алмасулы</td>
+					<td class="text-align-center">онлайн</td>
+					<td class="text-align-center"><span class="">1 ms</span></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center">203.0.113.10:57181</td>
+					<td class="text-align-center">iCORE Phone/3.22.7</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-912">912</span></td>
+					<td class="text-align-center">Сатыбалды Арман Досжанулы</td>
+					<td class="text-align-center">онлайн</td>
+					<td class="text-align-center"><span class="">1 ms</span></td>
+					<td class="text-align-center ">1</td>
+					<td class="text-align-center">203.0.113.10:57631</td>
+					<td class="text-align-center">MicroSIP/3.22.12</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-913">913</span></td>
+					<td class="text-align-center">Ермекова Айнур Талгаткызы</td>
+					<td class="text-align-center">онлайн</td>
+					<td class="text-align-center"><span class="">1 ms</span></td>
+					<td class="text-align-center ">3</td>
+					<td class="text-align-center">203.0.113.10:51807</td>
+					<td class="text-align-center">iCORE Phone/3.22.7</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-916">916</span></td>
+					<td class="text-align-center">Токтар Ислам Бакытулы</td>
+					<td class="text-align-center">онлайн</td>
+					<td class="text-align-center"><span class="">1 ms</span></td>
+					<td class="text-align-center ">2</td>
+					<td class="text-align-center">203.0.113.10:57554</td>
+					<td class="text-align-center">iCORE Phone/3.22.7</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-901">901</span></td>
+					<td class="text-align-center">Алия СВ</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-904">904</span></td>
+					<td class="text-align-center">Курманова Асель Маратовна</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-905">905</span></td>
+					<td class="text-align-center">Байсеит Нурлан Ерболулы</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center">iCORE Phone/3.22.7</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-907">907</span></td>
+					<td class="text-align-center">Жумабек Диана Асхаткызы</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">4</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center">MicroSIP/3.22.12</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-914">914</span></td>
+					<td class="text-align-center">Нурланов Данияр Азаматулы</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">1</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center">MicroSIP/3.22.12</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-915">915</span></td>
+					<td class="text-align-center">Абишева Камила Ерликкызы</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-920">920</span></td>
+					<td class="text-align-center">Смагулова Айсулу Женисовна</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;16:31</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">1</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center">MicroSIP/3.22.12</td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-921">921</span></td>
+					<td class="text-align-center">Алимжанова Мадина Русламовна</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-922">922</span></td>
+					<td class="text-align-center">Байтерекова Гульнар Максатовна</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-924">924</span></td>
+					<td class="text-align-center">Сериккали Аружан Нурланкызы</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-925">925</span></td>
+					<td class="text-align-center">Досжан Аида Бериккызы</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-927">927</span></td>
+					<td class="text-align-center">Кенжебаева Алина Талгатовна</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+							<tr>
+					<td class="text-align-center"><span rel="tooltip" title="Логин: sip-fixture-928">928</span></td>
+					<td class="text-align-center">Мухтарова Дария Асановна</td>
+					<td class="text-align-center">офлайн<br><span class="was-online-at">08.09.2026 &nbsp;15:41</span></td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center ">0</td>
+					<td class="text-align-center"></td>
+					<td class="text-align-center"></td>
+				</tr>
+					</table>
+		<div class="table-footer"></div>
+	</div>
+</div>
+
+	<div class="show-endpoints-credentials"><a class="show-endpoints-credentials-link" id="show-endpoints-credentials-link" href="javascript:void(0);">Показать учетные данные внутренних линий</a></div>
+
+
+	<div class="list-of-endpoints-credentials" id="list-of-endpoints-credentials">
+		<div class="title">Учетные данные внутренних линий для сотрудников</div>
+		<div class="list-of-endpoints-credentials-content">
+			<table class="table-template-v1">
+				<tr>
+					<th class="number">Внутренний<br>номер</th>
+					<th class="name">Сотрудник</th>
+					<th class="login">Логин</th>
+					<th class="password">Пароль</th>
+					<th class="sip-server">SIP сервер</th>
+				</tr>
+									<tr>
+						<td class="text-align-center">903</td>
+						<td class="text-align-center">Айтбай Дана Сериккызы</td>
+						<td class="text-align-center">sip-fixture-903</td>
+						<td class="text-align-center">Fixture-Pass-903</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">906</td>
+						<td class="text-align-center">Оспан Айгерим Канаткызы</td>
+						<td class="text-align-center">sip-fixture-906</td>
+						<td class="text-align-center">Fixture-Pass-906</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">909</td>
+						<td class="text-align-center">Калиев Тимур Алмасулы</td>
+						<td class="text-align-center">sip-fixture-909</td>
+						<td class="text-align-center">Fixture-Pass-909</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">912</td>
+						<td class="text-align-center">Сатыбалды Арман Досжанулы</td>
+						<td class="text-align-center">sip-fixture-912</td>
+						<td class="text-align-center">Fixture-Pass-912</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">913</td>
+						<td class="text-align-center">Ермекова Айнур Талгаткызы</td>
+						<td class="text-align-center">sip-fixture-913</td>
+						<td class="text-align-center">Fixture-Pass-913</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">916</td>
+						<td class="text-align-center">Токтар Ислам Бакытулы</td>
+						<td class="text-align-center">sip-fixture-916</td>
+						<td class="text-align-center">Fixture-Pass-916</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">901</td>
+						<td class="text-align-center">Алия СВ</td>
+						<td class="text-align-center">sip-fixture-901</td>
+						<td class="text-align-center">Fixture-Pass-901</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">904</td>
+						<td class="text-align-center">Курманова Асель Маратовна</td>
+						<td class="text-align-center">sip-fixture-904</td>
+						<td class="text-align-center">Fixture-Pass-904</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">905</td>
+						<td class="text-align-center">Байсеит Нурлан Ерболулы</td>
+						<td class="text-align-center">sip-fixture-905</td>
+						<td class="text-align-center">Fixture-Pass-905</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">907</td>
+						<td class="text-align-center">Жумабек Диана Асхаткызы</td>
+						<td class="text-align-center">sip-fixture-907</td>
+						<td class="text-align-center">Fixture-Pass-907</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">914</td>
+						<td class="text-align-center">Нурланов Данияр Азаматулы</td>
+						<td class="text-align-center">sip-fixture-914</td>
+						<td class="text-align-center">Fixture-Pass-914</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">915</td>
+						<td class="text-align-center">Абишева Камила Ерликкызы</td>
+						<td class="text-align-center">sip-fixture-915</td>
+						<td class="text-align-center">Fixture-Pass-915</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">920</td>
+						<td class="text-align-center">Смагулова Айсулу Женисовна</td>
+						<td class="text-align-center">sip-fixture-920</td>
+						<td class="text-align-center">Fixture-Pass-920</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">921</td>
+						<td class="text-align-center">Алимжанова Мадина Русламовна</td>
+						<td class="text-align-center">sip-fixture-921</td>
+						<td class="text-align-center">Fixture-Pass-921</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">922</td>
+						<td class="text-align-center">Байтерекова Гульнар Максатовна</td>
+						<td class="text-align-center">sip-fixture-922</td>
+						<td class="text-align-center">Fixture-Pass-922</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">924</td>
+						<td class="text-align-center">Сериккали Аружан Нурланкызы</td>
+						<td class="text-align-center">sip-fixture-924</td>
+						<td class="text-align-center">Fixture-Pass-924</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">925</td>
+						<td class="text-align-center">Досжан Аида Бериккызы</td>
+						<td class="text-align-center">sip-fixture-925</td>
+						<td class="text-align-center">Fixture-Pass-925</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">927</td>
+						<td class="text-align-center">Кенжебаева Алина Талгатовна</td>
+						<td class="text-align-center">sip-fixture-927</td>
+						<td class="text-align-center">Fixture-Pass-927</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+									<tr>
+						<td class="text-align-center">928</td>
+						<td class="text-align-center">Мухтарова Дария Асановна</td>
+						<td class="text-align-center">sip-fixture-928</td>
+						<td class="text-align-center">Fixture-Pass-928</td>
+						<td class="text-align-center">sip52.binotel.com</td>
+					</tr>
+							</table>
+			<div class="table-footer"></div>
+		</div>
+	</div>
+
+	<script type="text/javascript">
+		$(function() {
+			$('#show-endpoints-credentials-link').click(function() {
+				if ($('#list-of-endpoints-credentials').is(':visible')) {
+					$(this).text('Показать учетные данные внутренних линий');
+					$('#list-of-endpoints-credentials').hide();
+				} else {
+					$(this).text('Скрыть учетные данные внутренних линий');
+					$('#list-of-endpoints-credentials').show();
+				}
+			});
+		});
+	</script>
+																					</div>
+					</div>
+				</div>
+			</div>
+
+			<div id="push"></div>
+		</div>
+
+		<div id="footer">
+			<div class="content">
+				<div class="slogan">
+					<h1>Платформа для связи с клиентами</h1>
+				</div>
+				<h5>Copyright 2010 - 2026 &nbsp; <a href="http://www.binotel.ua/" target="_blank">www.binotel.ua</a></h5>
+			</div>
+		</div>
+	</div>
+
+	<script type="text/javascript">
+		$(function() {
+			$("ul#secondaryMenu li a").hover(
+				function () {
+					$(this).parent().addClass("hover");
+				},
+				function () {
+					$(this).parent().removeClass("hover");
+				}
+			);
+		});
+	</script>
+</body>
+</html>

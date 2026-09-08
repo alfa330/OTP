@@ -35891,44 +35891,59 @@ def _szov_wallboard_fetch_snapshot():
     }
 
 
-def _szov_wallboard_restore_cache():
-    """Поднять последний снимок из БД в пустой кэш процесса. Ровно один раз за жизнь процесса.
+def _wallboard_restore_cache(cache, direction, stale_max, label='Табло СЗоВ'):
+    """Поднять последний снимок направления из БД в пустой кэш процесса. Один раз за жизнь.
 
     Без этого деплой или рестарт оставлял экран в зале пустым до первого удачного ответа
-    Oktell, а прокси бывает недоступен минутами."""
-    if _szov_wallboard_cache.get('restored') or _szov_wallboard_cache.get('payload') is not None:
+    источника, а он бывает недоступен минутами. Направление — ключ строки в БД: табло
+    больше одного, и снимок Тез не должен подниматься на место снимка линии СЗоВ."""
+    if cache.get('restored') or cache.get('payload') is not None:
         return
-    _szov_wallboard_cache['restored'] = True
+    cache['restored'] = True
     try:
-        payload, captured_at = db.get_szov_wallboard_snapshot()
+        payload, captured_at = db.get_szov_wallboard_snapshot(direction)
     except Exception as exc:
-        logging.warning("Табло СЗоВ: не удалось прочитать сохранённый снимок: %s", exc)
+        logging.warning("%s: не удалось прочитать сохранённый снимок: %s", label, exc)
         return
     if not payload or not captured_at:
         return
     # Протухшее старьё не поднимаем: показать данные часовой давности хуже, чем честно
     # сказать «данных нет» — те же границы, что и для stale-отдачи из памяти.
-    if time.time() - captured_at >= SZOV_WALLBOARD_STALE_MAX_SECONDS:
+    if time.time() - captured_at >= stale_max:
         return
-    _szov_wallboard_cache.update(ts=float(captured_at), payload=payload, persisted_at=float(captured_at))
-    logging.info("Табло СЗоВ: поднят сохранённый снимок %.0f с назад", time.time() - captured_at)
+    cache.update(ts=float(captured_at), payload=payload, persisted_at=float(captured_at))
+    logging.info("%s: поднят сохранённый снимок %.0f с назад", label, time.time() - captured_at)
+
+
+def _wallboard_persist_cache(cache, direction, interval, payload, captured_at,
+                             label='Табло СЗоВ'):
+    """Продублировать удачный снимок направления в БД, но не чаще, чем раз в `interval`.
+
+    Ошибку записи глотаем: копия — страховка на рестарт, ронять из-за неё живое табло нельзя."""
+    if captured_at - (cache.get('persisted_at') or 0.0) < interval:
+        return
+    try:
+        db.save_szov_wallboard_snapshot(payload, captured_at, direction)
+        cache['persisted_at'] = captured_at
+    except Exception as exc:
+        logging.warning("%s: не удалось сохранить снимок: %s", label, exc)
+
+
+def _szov_wallboard_restore_cache():
+    """Направление «Линия»: снимок Oktell из БД."""
+    return _wallboard_restore_cache(
+        _szov_wallboard_cache, 'osnova', SZOV_WALLBOARD_STALE_MAX_SECONDS)
 
 
 def _szov_wallboard_persist_cache(payload, captured_at):
-    """Продублировать удачный снимок в БД, но не чаще SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS.
-
-    Ошибку записи глотаем: копия — страховка на рестарт, ронять из-за неё живое табло нельзя."""
-    if captured_at - (_szov_wallboard_cache.get('persisted_at') or 0.0) < SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS:
-        return
-    try:
-        db.save_szov_wallboard_snapshot(payload, captured_at)
-        _szov_wallboard_cache['persisted_at'] = captured_at
-    except Exception as exc:
-        logging.warning("Табло СЗоВ: не удалось сохранить снимок: %s", exc)
+    """Направление «Линия»: снимок Oktell в БД."""
+    return _wallboard_persist_cache(
+        _szov_wallboard_cache, 'osnova', SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS,
+        payload, captured_at)
 
 
 def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max, retry_after,
-                                   lock_wait, before=None, after=None):
+                                   lock_wait, before=None, after=None, label='Табло СЗоВ'):
     """Снимок табло с общим TTL-кэшем на процесс. Одна механика на оба направления.
 
     Табло смотрят несколько человек сразу, и оно висит на стене весь день, поэтому к источнику
@@ -35936,11 +35951,12 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
     отдаём последний удачный снимок с stale=True: экран на стене гаснуть не должен, а поток
     waitress не должен стоять в ожидании медленного прокси.
 
-    Направления два («Линия» по Oktell и «Чат» по Chat2Desk), у каждого свои константы и свой
-    кэш, но правила устаревания у них обязаны быть одни: разъедутся — и одно табло будет
-    показывать замёрзшие данные как свежие. Поэтому копии этой функции быть не должно.
-    before/after — то, чем направления отличаются: «Линия» поднимает кэш из БД на старте и
-    дублирует туда удачные снимки."""
+    Направлений уже четыре («Линия» по Oktell, «Чат» по Chat2Desk, ТП и ОП Тез КЦ по кабинету
+    Binotel), у каждого свои константы и свой кэш, но правила устаревания у них обязаны быть
+    одни: разъедутся — и одно табло будет показывать замёрзшие данные как свежие. Поэтому
+    копии этой функции быть не должно. before/after — то, чем направления отличаются:
+    поднять кэш из БД на старте и дублировать туда удачные снимки. `label` — название табло
+    для текста ошибки и лога: зритель табло Тез не должен читать про «Табло СЗоВ»."""
 
     def _fresh(payload, at):
         return dict(payload, stale=False, age_seconds=int(max(0, time.time() - at)))
@@ -35966,7 +35982,7 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
         # Обновление уже идёт. Ждать нечего: отдаём что есть, следующий опрос подхватит свежее.
         if cached is not None and time.time() - cached_at < stale_max:
             return _stale(cached, cached_at, 'Обновление ещё идёт')
-        raise RuntimeError(f"Табло СЗоВ ({source}): снимок обновляется, данных пока нет")
+        raise RuntimeError(f"{label} ({source}): снимок обновляется, данных пока нет")
     try:
         # Пока ждали лок, соседний поток мог уже обновить кэш.
         cached = cache.get('payload')
@@ -35979,8 +35995,8 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
             cache.update(failed_at=time.time(), error=str(exc)[:200])
             age = time.time() - cached_at if cached is not None else None
             if cached is not None and age is not None and age < stale_max:
-                logging.warning("Табло СЗоВ: %s недоступен, отдаём снимок %.0f с назад: %s",
-                                source, age, exc)
+                logging.warning("%s: %s недоступен, отдаём снимок %.0f с назад: %s",
+                                label, source, age, exc)
                 return _stale(cached, cached_at, str(exc)[:200])
             raise
         payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
@@ -38515,6 +38531,341 @@ def api_szov_wallboard_chat_snapshot():
     except Exception as exc:
         logging.error("Табло СЗоВ (чат): снимок недоступен: %s", exc, exc_info=True)
         return jsonify({"error": "Chat2Desk недоступен", "detail": str(exc)[:300]}), 503
+
+
+# --- Табло Тез КЦ: ТП и ОП по кабинету Binotel ---------------------------------------------------
+# Задача #292. Отдел Тез КЦ работает не на Oktell, а на Binotel, поэтому SQL табло СЗоВ здесь не
+# переиспользуется — но переиспользуется ВСЯ обвязка: кэш «один поход на всех зрителей», снимок в
+# БД на случай рестарта, правила устаревания и форма ответа. Разбор ответов кабинета живёт
+# отдельным модулем tez_wallboard_source (он под тестами на фикстурах), здесь — только состав
+# людей, права и склейка в две половины табло.
+#
+# Направления два и они РАЗНЫЕ по природе:
+#   ТП — техподдержка, обслуживает очередь: у неё есть очередь, AR, SL, приём и потери;
+#   ОП — отдел продаж, очереди нет вовсе: только люди и исходящие звонки.
+# Снимок при этом ОДИН на оба: дневные итоги и активные звонки кабинет отдаёт сразу по всему
+# аккаунту, и два независимых кэша означали бы двойной трафик за теми же самыми данными.
+TEZ_WALLBOARD_DEPARTMENT_CODE = 'tez'
+# Шаг опроса чуть больше, чем у линии СЗоВ: обход кабинета стоит ~2,3 с против доли секунды у
+# Oktell, а меняется картинка не быстрее.
+TEZ_WALLBOARD_CACHE_TTL_SECONDS = _env_int('TEZ_WALLBOARD_CACHE_TTL_SECONDS', 20, minimum=10, maximum=120)
+TEZ_WALLBOARD_HTTP_TIMEOUT_SECONDS = _env_int('TEZ_WALLBOARD_HTTP_TIMEOUT_SECONDS', 25, minimum=5, maximum=120)
+TEZ_WALLBOARD_LOCK_WAIT_SECONDS = _env_int('TEZ_WALLBOARD_LOCK_WAIT_SECONDS', 3, minimum=1, maximum=60)
+TEZ_WALLBOARD_RETRY_AFTER_FAIL_SECONDS = _env_int('TEZ_WALLBOARD_RETRY_AFTER_FAIL_SECONDS', 60, minimum=5, maximum=900)
+TEZ_WALLBOARD_STALE_MAX_SECONDS = _env_int('TEZ_WALLBOARD_STALE_MAX_SECONDS', 900, minimum=60, maximum=3600)
+TEZ_WALLBOARD_PERSIST_INTERVAL_SECONDS = _env_int('TEZ_WALLBOARD_PERSIST_INTERVAL_SECONDS', 60, minimum=10, maximum=600)
+# Список линий кабинет отдаёт ~3,5 с (он реально пингует каждую) — втрое дольше всей остальной
+# тройки, поэтому у него свой срок и в общий шаг опроса он не входит.
+TEZ_WALLBOARD_ENDPOINTS_TTL_SECONDS = _env_int('TEZ_WALLBOARD_ENDPOINTS_TTL_SECONDS', 120, minimum=30, maximum=900)
+
+# AR у Тез — ПОТОЛОК, а не коридор (решение владельца 08.09.2026): норма «не выше 5 %». У СЗоВ
+# это коридор 3-5 %, и там 1 % — тоже отклонение, потому что означает перезаложенных операторов.
+# Смешивать нельзя: одна и та же цифра горела бы на двух табло разными цветами.
+TEZ_AR_TARGET_PERCENT = 5
+TEZ_AR_BAD_PERCENT = 7
+
+_TEZ_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
+_TEZ_WALLBOARD_DEPARTMENT_CACHE_TTL = 600
+# Свой словарь, а не общий с СЗоВ: _SZOV_WALLBOARD_DEPARTMENT_CACHE — один словарь на процесс, и
+# вызов той же функции с другим кодом отдела вытеснил бы из него id СЗоВ, перекосив чужой гард.
+_tez_wallboard_cache = {'ts': 0.0, 'payload': None, 'failed_at': 0.0, 'error': None,
+                        'restored': False, 'persisted_at': 0.0}
+_tez_wallboard_lock = threading.Lock()
+_tez_wallboard_session_holder = {'session': None}
+# Состав отдела меняется кадровыми решениями, а не поминутно: держим его отдельным коротким
+# кэшем, чтобы каждый опрос табло не ходил в базу за одним и тем же списком из двадцати строк.
+_TEZ_WALLBOARD_PEOPLE_CACHE = {'ts': 0.0, 'day': None, 'people': None}
+_TEZ_WALLBOARD_PEOPLE_CACHE_TTL = 300
+
+TEZ_WALLBOARD_DIRECTIONS = ('tp', 'op')
+_TEZ_WALLBOARD_MODEL_BY_DIRECTION = {'tp': 'tez_line', 'op': 'tez_op'}
+
+
+class TezWallboardDirectionUnavailable(RuntimeError):
+    """Половина снимка не собралась — например, поехала страница очереди ТП.
+
+    Отдельное исключение нужно, чтобы отказ ОДНОГО направления не гасил второе: очередь есть
+    только у техподдержки, и её поломка не должна снимать со стены табло отдела продаж."""
+
+
+def _tez_wallboard_department_id():
+    """id отдела Тез КЦ (по коду, с кэшем). Хардкодить нельзя — id засеян, а не задан."""
+    now = time.time()
+    if (_TEZ_WALLBOARD_DEPARTMENT_CACHE['id'] is not None
+            and now - _TEZ_WALLBOARD_DEPARTMENT_CACHE['ts'] < _TEZ_WALLBOARD_DEPARTMENT_CACHE_TTL):
+        return _TEZ_WALLBOARD_DEPARTMENT_CACHE['id']
+    found = None
+    for dept in (db.get_departments() or []):
+        if str(dept.get('code') or '').strip().lower() == TEZ_WALLBOARD_DEPARTMENT_CODE:
+            found = int(dept['id'])
+            break
+    _TEZ_WALLBOARD_DEPARTMENT_CACHE.update(ts=now, id=found)
+    return found
+
+
+def _tez_wallboard_guard():
+    """(requester_id, err) для раздела «Табло Тез КЦ».
+
+    Доступ: глобальные админы, глава отдела Тез КЦ и СВ отдела Тез КЦ. Граница отдела строгая,
+    как у _chatapp_guard: руководителю чужого отдела нагрузка линии Тез не нужна.
+
+    Ветка «глава отдела» здесь не формальность: у главы Тез КЦ роль admin, но
+    _is_global_admin_requester возвращает для неё False именно потому, что человек возглавляет
+    отдел. Без этой ветки руководитель получил бы 403 на собственном табло. Плюс у неё две
+    учётки — глава (admin) и СВ (sv), — и проходить обязаны обе."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if _is_global_admin_requester(role, requester_id):
+        return requester_id, None
+    department_id = _tez_wallboard_department_id()
+    if department_id is not None:
+        if _headed_department_id(requester_id) == department_id:
+            return requester_id, None
+        if _is_supervisor_role(role) and db.get_user_department_id(requester_id) == department_id:
+            return requester_id, None
+    return requester_id, (jsonify({"error": "forbidden"}), 403)
+
+
+def _tez_wallboard_session():
+    """Одна сессия кабинета на процесс: учётка у Binotel одна, параллельные входы гасят cookie."""
+    import tez_wallboard_source as tez_source
+    session = _tez_wallboard_session_holder.get('session')
+    if session is None:
+        session = tez_source.CabinetSession(timeout=TEZ_WALLBOARD_HTTP_TIMEOUT_SECONDS)
+        _tez_wallboard_session_holder['session'] = session
+    return session
+
+
+def _tez_wallboard_people(day=None):
+    """Состав отдела по направлениям: {'tp': [...], 'op': [...], 'by_number': {номер: человек}}.
+
+    Кабинет знает людей по внутренним номерам, наша база — по сотрудникам. Первый ключ связки —
+    номер (users.sip_number): на живом составе он покрывает всех до одного. Запасной ключ — имя,
+    нормализованное штатным резолвером импорта статусов (он складывает казахские буквы и
+    переставляет ФИО); он нужен для того, у кого номер в карточке ещё не проставлен."""
+    now = time.time()
+    day = day or dt_date.today()
+    cached = _TEZ_WALLBOARD_PEOPLE_CACHE
+    if (cached['people'] is not None and cached['day'] == day
+            and now - cached['ts'] < _TEZ_WALLBOARD_PEOPLE_CACHE_TTL):
+        return cached['people']
+    department_id = _tez_wallboard_department_id()
+    rows = db.get_tez_wallboard_operators(department_id, day) if department_id is not None else []
+    people = {'tp': [], 'op': [], 'by_number': {}, 'by_name': {}, 'department_id': department_id}
+    for row in rows:
+        direction = None
+        for key, model in _TEZ_WALLBOARD_MODEL_BY_DIRECTION.items():
+            if row.get('model') == model:
+                direction = key
+                break
+        if direction is None:
+            # Глава отдела и СВ модели не имеют — они не на линии, и в счётчиках им не место.
+            continue
+        people[direction].append(row)
+        if row.get('sip_number'):
+            people['by_number'][str(row['sip_number'])] = row
+        name_key = _status_import_normalize_operator_name(row.get('name') or '')
+        if name_key:
+            people['by_name'].setdefault(name_key, row)
+    _TEZ_WALLBOARD_PEOPLE_CACHE.update(ts=now, day=day, people=people)
+    return people
+
+
+def _tez_wallboard_person(people, number, name=None):
+    """Наш сотрудник по внутреннему номеру, с запасным ключом по имени."""
+    found = people['by_number'].get(str(number or ''))
+    if found is None and name:
+        found = people['by_name'].get(_status_import_normalize_operator_name(name))
+    return found
+
+
+def _tez_wallboard_name_list(people, rows):
+    """Список людей для колонки табло: наше имя, если сотрудник опознан, иначе имя из кабинета."""
+    out = []
+    for row in rows or []:
+        person = _tez_wallboard_person(people, row.get('number'), row.get('name'))
+        out.append({
+            'operator_id': person['id'] if person else None,
+            'name': (person or {}).get('name') or row.get('name') or '—',
+            'reason': row.get('reason'),
+            'reason_key': row.get('reason_key'),
+            'since': row.get('since'),
+            'seconds': row.get('seconds'),
+        })
+    # Дольше всех в статусе — первым: на стене это самая интересная строка. Неизвестное время
+    # уходит вниз, а не изображает ноль.
+    out.sort(key=lambda item: (item['seconds'] is None, -(item['seconds'] or 0)))
+    return out
+
+
+def _tez_wallboard_fetch_snapshot():
+    """Один обход кабинета Binotel на ОБА табло Тез КЦ."""
+    import tez_wallboard_source as tez_source
+
+    session = _tez_wallboard_session()
+    raw = tez_source.fetch_snapshot(
+        session,
+        with_endpoints=True,
+        endpoints_ttl_seconds=TEZ_WALLBOARD_ENDPOINTS_TTL_SECONDS,
+        timeout=TEZ_WALLBOARD_HTTP_TIMEOUT_SECONDS)
+    people = _tez_wallboard_people()
+    live_calls = raw.get('live_calls') or []
+    now_ts = raw.get('binotel_now_ts')
+    unmatched = []
+
+    snapshot = {
+        'binotel_now': raw.get('binotel_now'),
+        'binotel_now_source': raw.get('binotel_now_source'),
+        'day': raw.get('day'),
+        'sl_threshold_seconds': raw.get('sl_threshold_seconds'),
+        'ar_target_percent': TEZ_AR_TARGET_PERCENT,
+        'ar_bad_percent': TEZ_AR_BAD_PERCENT,
+    }
+
+    # --- ТП: всё берём со страницы очереди -------------------------------------------------
+    queue = raw.get('queue')
+    if queue:
+        queue_rows = queue.get('operators') or []
+        # Состав ТП — те, кто обслуживает очередь, а не весь отдел в кабинете: в отделе
+        # Binotel номеров больше, и разные определения в разных плитках разъехались бы.
+        tp_numbers = [row.get('number') for row in queue_rows if row.get('number')]
+        for row in queue_rows:
+            if _tez_wallboard_person(people, row.get('number'), row.get('name')) is None:
+                unmatched.append(row.get('name') or row.get('number'))
+        summary = tez_source.summarize_queue_operators(queue)
+        snapshot['tp'] = {
+            'now': dict(
+                summary,
+                queue=queue.get('queue'),
+                queue_max_wait_seconds=None,
+                break_list=_tez_wallboard_name_list(people, summary.get('break_list')),
+                recall_list=[],
+            ),
+            'today': tez_source.day_totals(raw.get('employees'), tp_numbers, queue=queue),
+        }
+    else:
+        snapshot['tp'] = None
+        snapshot['tp_error'] = raw.get('queue_error') or 'Страница очереди Binotel недоступна'
+
+    # --- ОП: очереди нет, ось собираем из статуса, звонков и регистрации телефона -----------
+    op_numbers = [row['sip_number'] for row in people['op'] if row.get('sip_number')]
+    op_summary = tez_source.summarize_presence_operators(
+        raw.get('employees'), op_numbers,
+        live_calls=live_calls, endpoints=raw.get('endpoints'), now_ts=now_ts)
+    op_today = tez_source.day_totals(raw.get('employees'), op_numbers)
+    snapshot['op'] = {
+        # Отдельного счётчика «разговоров» ни у одного направления нет намеренно. На живом
+        # прогоне 08.09.2026 у ТП он разошёлся с «в разговоре» (1 против 0): кабинет считает
+        # разговорами и исходящие, и ещё не поднятые звонки, а очередь — только людей на
+        # входящей линии. Две почти одинаковые цифры рядом со стены читаются как ошибка
+        # табло, а не как уточнение. В постановке просили именно операторов.
+        'now': dict(
+            op_summary,
+            break_list=_tez_wallboard_name_list(people, op_summary.get('break_list')),
+            recall_list=[],
+        ),
+        # Средняя длительность разговора у отдела продаж — по ИСХОДЯЩИМ: входящих у них нет
+        # вовсе, и общая плитка показывала бы прочерк круглые сутки.
+        'today': dict(op_today, avg_talk_seconds=op_today.get('avg_outgoing_talk_seconds')),
+    }
+
+    snapshot['diagnostics'] = dict(
+        raw.get('diagnostics') or {},
+        department_id=people.get('department_id'),
+        unmatched_binotel_names=sorted({str(x) for x in unmatched if x}),
+        operators_without_sip=sorted(
+            row['name'] for row in (people['tp'] + people['op']) if not row.get('sip_number')),
+        endpoints_age_seconds=raw.get('endpoints_age_seconds'),
+        free_unknown=bool(op_summary.get('free_unknown')),
+    )
+    return snapshot
+
+
+def _tez_wallboard_snapshot():
+    """Снимок обоих табло Тез КЦ с общим кэшем."""
+    return _wallboard_snapshot_with_cache(
+        cache=_tez_wallboard_cache,
+        lock=_tez_wallboard_lock,
+        fetch=_tez_wallboard_fetch_snapshot,
+        source='Binotel',
+        ttl=TEZ_WALLBOARD_CACHE_TTL_SECONDS,
+        stale_max=TEZ_WALLBOARD_STALE_MAX_SECONDS,
+        retry_after=TEZ_WALLBOARD_RETRY_AFTER_FAIL_SECONDS,
+        lock_wait=TEZ_WALLBOARD_LOCK_WAIT_SECONDS,
+        label='Табло Тез КЦ',
+        before=lambda: _wallboard_restore_cache(
+            _tez_wallboard_cache, 'tez', TEZ_WALLBOARD_STALE_MAX_SECONDS, 'Табло Тез КЦ'),
+        after=lambda payload, at: _wallboard_persist_cache(
+            _tez_wallboard_cache, 'tez', TEZ_WALLBOARD_PERSIST_INTERVAL_SECONDS,
+            payload, at, 'Табло Тез КЦ'))
+
+
+def _tez_wallboard_direction_payload(direction):
+    """Половина снимка + служебные поля кэша — ровно та форма, что у направлений СЗоВ."""
+    snapshot = _tez_wallboard_snapshot()
+    half = snapshot.get(direction)
+    if not half:
+        raise TezWallboardDirectionUnavailable(
+            snapshot.get('%s_error' % direction) or 'Данные направления не собрались')
+    payload = {
+        'binotel_now': snapshot.get('binotel_now'),
+        'binotel_now_source': snapshot.get('binotel_now_source'),
+        'day': snapshot.get('day'),
+        'generated_at': snapshot.get('generated_at'),
+        'stale': snapshot.get('stale', False),
+        'age_seconds': snapshot.get('age_seconds'),
+        'error': snapshot.get('error'),
+        'now': half.get('now') or {},
+        'today': half.get('today') or {},
+        'diagnostics': snapshot.get('diagnostics') or {},
+    }
+    if direction == 'tp':
+        # Порог SL читается из подписи на самой странице кабинета: поменяют его там —
+        # табло не должно разъехаться с тем, что видит руководитель у себя.
+        payload['sl_threshold_seconds'] = snapshot.get('sl_threshold_seconds')
+        payload['ar_target_percent'] = snapshot.get('ar_target_percent')
+        payload['ar_bad_percent'] = snapshot.get('ar_bad_percent')
+    return payload
+
+
+def _api_tez_wallboard_direction(direction):
+    """Общее тело обоих роутов табло Тез: права, готовность интеграции, снимок."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _tez_wallboard_guard()
+    if err:
+        return err
+    import tez_wallboard_source as tez_source
+    if not tez_source.is_configured():
+        return jsonify({"error": "Интеграция с Binotel недоступна: BINOTEL_LOGIN/BINOTEL_PASSWORD не заданы"}), 503
+    try:
+        return jsonify(_tez_wallboard_direction_payload(direction))
+    except TezWallboardDirectionUnavailable as exc:
+        # Половина табло не собралась, вторая при этом жива: отвечаем предметно, а не «всё упало».
+        logging.error("Табло Тез КЦ (%s): направление недоступно: %s", direction, exc)
+        return jsonify({"error": "Данные направления недоступны", "detail": str(exc)[:300]}), 502
+    except Exception as exc:
+        logging.error("Табло Тез КЦ (%s): не удалось получить данные Binotel: %s",
+                      direction, exc, exc_info=True)
+        return jsonify({"error": "Не удалось получить данные Binotel", "detail": str(exc)[:300]}), 502
+
+
+@app.route('/api/tez_wallboard/tp_snapshot', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_tez_wallboard_tp_snapshot():
+    """Табло Тез КЦ, направление «ТП»: очередь техподдержки и итоги дня."""
+    return _api_tez_wallboard_direction('tp')
+
+
+@app.route('/api/tez_wallboard/op_snapshot', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_tez_wallboard_op_snapshot():
+    """Табло Тез КЦ, направление «ОП»: люди отдела продаж и исходящие за день."""
+    return _api_tez_wallboard_direction('op')
+
 
 
 # --- Табло СЗоВ (чат): выгрузка показателей в Excel ----------------------------------------------

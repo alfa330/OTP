@@ -1,0 +1,797 @@
+	
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+
+<html translate="no">
+<head>
+	<meta name="description" content="Платформа для связи с клиентами. История звонков, клиенты, сотрудники, аналитика, настройки, и др.">
+
+	<script type="text/javascript">
+		window.appData = {};
+		window.appData.extNumber = "";
+		window.appData.userName = "Администратор";
+		window.appData.userID = "329441";
+		window.appData.wireIsEnabled = "0";
+		window.appData.language = "ru";
+		window.appData.tags_multipleChoice = "1";
+	</script>
+
+	
+
+<title>Мониторинг очередей – MyBusiness</title>
+
+<script src="//ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.ui.widget.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.fileupload.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.fileupload-ui.js?stylesheet-d213"></script>
+<script src="/public/javascript/jquery.tools.min.js?stylesheet-d213"></script>
+
+<script src="/public/javascript/bootstrap-jquerytools-tooltipsconflictfix.js?stylesheet-d213"></script>
+
+<script src="/public/javascript/main.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/bootstrap.css?stylesheet-d213" />
+<script src="/public/javascript/bootstrap.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/datepicker.css?stylesheet-d213" />
+<script src="/public/javascript/datepicker_i18n.js?stylesheet-d213"></script>
+<script src="/public/javascript/datepicker.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/lightbox.css?stylesheet-d213" />
+<script src="/public/javascript/lightbox.js?stylesheet-d213"></script>
+
+<link rel="stylesheet" href="/public/stylesheet/flag-sprites-com.min.css?stylesheet-d213" />
+
+<script src="/public/javascript/moment-with-locales.min.js?stylesheet-d213"></script>
+
+<script src="/public/javascript/clipboard.min.js?stylesheet-d213"></script>
+
+
+<script src="/public/javascript/react-0.14.2.min.js?stylesheet-d213"></script>
+<script src="/public/javascript/react-dom-0.14.2.min.js?stylesheet-d213"></script>
+<script src="/public-2/react-static/build/MyBusinessMixin.js?stylesheet-d213"></script>
+
+<link rel="chrome-webstore-item" href="https://chrome.google.com/webstore/detail/pejnjcmcdnphdniiobdfgfdldlfoikij">
+
+<script src="/public/javascript/jquery.selectric.min.js"></script>
+<link rel="stylesheet" href="/public/stylesheet/selectric.css">
+
+<link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.0.0-rc/cropper.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.0.0-rc/cropper.js"></script>
+
+<link href='//fonts.googleapis.com/css?family=Ubuntu:300,400,500,700&subset=latin,cyrillic' rel='stylesheet' type='text/css'>
+<link href='//fonts.googleapis.com/css?family=Open+Sans:300,400,600,700&subset=latin,cyrillic' rel='stylesheet' type='text/css'>
+<link href='//fonts.googleapis.com/css?family=Roboto:300,400,500,700&subset=latin,cyrillic' rel='stylesheet' type='text/css'>
+
+<link rel="stylesheet" type="text/css" href="/templates/stylesheet/layout.css?stylesheet-d213" />
+
+	<link rel="stylesheet" type="text/css" href="/templates/stylesheet/sections/statistics.css?stylesheet-d213" />
+
+	<link rel="stylesheet" type="text/css" href="/templates/stylesheet/modules/statistics/stateOfQueues.css?stylesheet-d213" />
+
+
+<link rel="stylesheet" type="text/css" href="/templates/stylesheet/layout-media.css?stylesheet-d213" />
+
+	<script src="/f/binotel-sidebar/loader.js"></script>
+	<script src="/f/bnt-web-components/loader.js?binotel-call-player"></script>
+
+
+
+	<link rel="canonical" href="https://my.binotel.ua/" />
+
+<link rel="alternate" hreflang="ru-ua" href="https://my.binotel.ua/?lang=ru" />
+<link rel="alternate" hreflang="uk-ua" href="https://my.binotel.ua/?lang=ua" />
+<link rel="alternate" hreflang="en-ua" href="https://my.binotel.ua/" />
+<link rel="alternate" hreflang="ru-kz" href="https://my.binotel.kz/?lang=ru" />
+<link rel="alternate" hreflang="uk-kz" href="https://my.binotel.kz/?lang=ua" />
+<link rel="alternate" hreflang="en-kz" href="https://my.binotel.kz/" />
+
+	<script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+	<script type="text/javascript">
+		  // Load the Visualization API and the piechart package.
+		  google.charts.load('current', { packages: ['corechart'] });
+	</script>
+
+			<script type="text/javascript">
+	$(function() {
+
+	});
+</script>
+
+
+<!-- Facebook Pixel Code -->
+<script>
+  
+
+  !function(f,b,e,v,n,t,s)
+  {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+  if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+  n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];
+  s.parentNode.insertBefore(t,s)}(window, document,'script',
+  'https://connect.facebook.net/en_US/fbevents.js');
+
+  
+
+  fbq('init', '790154847844042');
+  fbq('track', 'PageView');
+
+			try {
+			fbq('track', 'aus');
+		} catch (e) {
+			console.error(e);
+		}
+	</script>
+<noscript><img height="1" width="1" style="display:none"
+  src="https://www.facebook.com/tr?id=790154847844042&ev=PageView&noscript=1"
+/></noscript>
+<!-- End Facebook Pixel Code -->
+
+
+
+
+
+
+	
+	<script type="text/javascript">
+		moment.locale('ru');
+	</script>
+
+	
+</head>
+
+<body>
+			<div style="display: table-cell;">
+  <bnt-sidebar active-page="calls" expandable="true"></bnt-sidebar>
+</div>
+	
+	</div>
+	<div id="page">
+		<div id="wrapper">
+			<div id="top-header">
+				<div class="content">
+					<a href="/" class="logo">
+						<img src="/templates/images/redesign-2/logo-my.png" style="height: 50px;"></a>
+					
+
+					<div class="advertising-link">
+													<a href="javascript:void(0);" class="contacts-overlay" rel="#contacts-overlay">Контакты</a>
+							<span class="line-separator"></span>
+							<a href="javascript:void(0);" class="crm-telephony" rel="#write-to-quality-department-overlay">Связаться с отделом качества</a>
+						
+
+											</div>
+
+					<ul class="fast-buttons">
+												<li><a href="/?module=accounting" class="accounting-link ">Личный счет</a></li>
+					</ul>
+
+					<div class="menu-dropdown ">
+						<i class="menu-icon"></i>
+						<ul>
+															<li><a class="menu-link" href="/?module=browsingIncomingFaxes">Факс система</a></li>																																				<li class=""><a class="menu-link" href="/?module=hs_pbx_listOfEndpoints">Скрытые настройки</a></li>
+																						<li class=""><a class="menu-link" href="/?module=affiliate_listOfClients">Партнерская программа</a></li>
+														<li><a class="menu-link" href="/?module=users&action=add&userID=329441">employee@example.kz</a></li>
+							<li><a class="menu-link" href="?logout">Выйти из MyBusiness</a></li>
+																				</ul>
+					</div>
+				</div>
+			</div>
+
+
+			<div id="edit-task-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="send-sms-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="show-advanced-c2c-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="write-to-quality-department-overlay">
+				<div class="contentWrap"></div>
+			</div>
+
+			<div id="contacts-overlay">
+				<div class="contentWrap">
+					<div class="show-contacts-overlay" id="show-contacts-overlay">
+	<div class="header-title">
+		<div class="phone-icon"><svg version='1.1' xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' x='0px' y='0px' viewBox='0 0 23 32' enable-background='new 0 0 23 32' xml:space='preserve' transform="scale(-2,2)"><path fill-rule='evenodd' clip-rule='evenodd' d='M16.012,8.607c-0.177,1.104-2.168,5.161-2.729,6.199 c-0.755,1.377-3.64,5.505-4.877,6.421l0,0L7.39,21.9l-2.46-0.78l-4.923,5.069l0.167,1.321l2.784,3.588l1.197,0.871 c0,0,17.647-10.896,18.829-30.46c0,0-0.349-0.376-1.019-1.103l-4.633-0.4l-1.521,0.577l-1.351,6.263l1.476,1.56'/></svg></div>
+		<div>Свяжитесь с нами</div>
+	</div>
+	<div class="country-submenu" id="contacts-overlay-country-submenu">
+		<a href="javascript:void(0);" class="" data-country="ukraine">Украина</a>
+		<a href="javascript:void(0);" class="active" data-country="kazakhstan">Казахстан</a>
+		<a href="javascript:void(0);" class="" data-country="poland">Польша</a>
+			</div>
+
+	<div class="contacts-in-country ukraine ">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+38 044 344 04 44<br>+38 067 344 04 44<br>+38 050 344 04 44<br>+38 093 344 04 44</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>9:00 - 18:30<br>Без выходных</div>
+			</div>
+		</div>
+		<div class="happiness-contacts-details">
+			<div class="department-name">Отдел качества</div>
+			<div class="department-contacts">
+				<div>+38 044 344 25 25<br>+38 050 344 25 25</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>9:30 - 18:30<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+38 044 333 44 44<br>+38 050 333 44 44<br>0 800 33 00 33</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>9:30 - 18:30<br>Без выходных</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="contacts-in-country kazakhstan active">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+7 702 330 11 44</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>09:00 - 20:30 по Астане<br>Понедельник - Пятница</div>
+				<div>11:00 - 20:30 по Астане<br>Суббота - Воскресенье</div>
+			</div>
+		</div>
+		<div class="happiness-contacts-details">
+			<div class="department-name">Отдел качества</div>
+			<div class="department-contacts">
+				<div>+7 747 400 25 25</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>11:30 - 20:30 по Астане<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+7 747 533 44 44</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>09:00 - 19:00 по Астане<br>Понедельник - Пятница</div>
+				<div>10:00 - 19:00 по Астане<br>Суббота - Воскресенье</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="contacts-in-country poland ">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+48 222 927 211</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>08:30 - 17:30 по Варшаве<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+48 222 927 242</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>08:30 - 17:30 по Варшаве<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="contacts-in-country russia">
+		<div class="support-contacts-details">
+			<div class="department-name">Техническая поддержка</div>
+			<div class="department-contacts">
+				<div>+7 495 134 14 23</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>10:00 - 19:30 по МСК<br>Без выходных</div>
+			</div>
+		</div>
+		<div class="happiness-contacts-details">
+			<div class="department-name">Отдел качества</div>
+			<div class="department-contacts">
+				<div>+7 495 409 21 11</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>10:30 - 19:30 по МСК<br>Понедельник - Пятница</div>
+			</div>
+		</div>
+		<div class="sales-contacts-details">
+			<div class="department-name">Центр обслуживания клиентов</div>
+			<div class="department-contacts">
+				<div>+7 495 134 54 35</div>
+				<div>E-mail: <a href="mailto:employee@example.kz">employee@example.kz</a></div>
+				<div>График работы:<br>10:30 - 19:30 по МСК<br>Без выходных</div>
+			</div>
+		</div>
+	</div>
+
+	<svg class="close-cross close" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" width="24px" height="24px" viewBox="0 0 24 24" enable-background="new 0 0 24 24" xml:space="preserve"><polygon fill="#FFFFFF" points="24,0.993 22.985,-0.024 12,10.983 1.015,-0.024 0,0.993 10.985,12 0,23.008 1.015,24.023 12,13.017 22.985,24.023 24,23.008 13.015,12 "/></svg>
+</div>
+
+<script type="text/javascript">
+	
+
+	$(function() {
+		$('#contacts-overlay-country-submenu a').click(function() {
+			$('#contacts-overlay-country-submenu a').removeClass('active');
+			$(this).addClass('active');
+
+			$('#show-contacts-overlay div.contacts-in-country').removeClass('active');
+			$('#show-contacts-overlay div.contacts-in-country.'+ $(this).data('country')).addClass('active');
+		});
+	});
+
+	
+</script>
+				</div>
+			</div>
+
+
+			<div id="middle">
+				<div class="middle-center stateOfQueues" id="content-for-react-app">
+																								<div class="submenu">
+								<ul class="submenu">
+	<li class="incoming with-icon "><a href="/?module=cdrs&callType=internal"><i></i>Поступившие</a></li>
+	<li class="outgoing with-icon "><a href="/?module=cdrs&callType=external"><i></i>Совершенные</a></li>
+	<li class="missed with-icon "><a href="/?module=missedCalls"><i></i>Потерянные <span rel="tooltip" title="Количество потерянных<br>звонков за сегодня">(10)</span></a></li>
+	<li class="employee "><a href="/?module=employeeStatistics">По сотрудникам</a></li>
+	<li class="history "><a href="/?module=history">По номеру</a></li>
+	<li class="dashboard with-icon "><a href="/?module=dashboard"><i></i>Прямо сейчас</a></li>	<li class="stateOfQueues with-icon active"><a href="/?module=stateOfQueues"><i></i>Мониторинг<br>очередей</a></li></ul>
+							</div>
+						
+																	
+					
+					<div class="content right-block stateOfQueues">
+						<div class="module-content">
+																									<section class="queue-block">
+		<section class="queue-block__header queue-block__header--first">
+			<p class="header--first__name">Название очереди:</p>
+			<p class="header--first__name-accent"><a href="/?module=stateOfQueues&queueID=4242&updateEvery=15">Очередь</a></p>
+		</section>
+
+		<section class="queue-block__header queue-block__header--second">
+			<p class="header--second__name">Режим:</p>
+			<p class="header--second__name-accent">поочередное распределение звонков по операторам</p>
+		</section>
+
+		<section class="queue-block__queue-content">
+			<table class="queue-content__clients">
+				<tr class="clients__heading-line">
+					<th class="clients__heading-item clients__heading-item--name">Клиентов в очереди: 0</th>
+					<th class="clients__heading-item clients__heading-item--phone-number">Номер телефона</th>
+					<th class="clients__heading-item clients__heading-item--time-waiting">Время ожидания на линии</th>
+				</tr>
+
+							</table>
+							<br><br><br>
+			
+
+			<table class="queue-content__calls">
+				<tr class="calls__heading-line">
+					<th class="calls__heading-item calls__heading-item--received">
+						<p>Принятых звонков</p>
+					</th>
+					<th class="calls__heading-item calls__heading-item--missed">
+						<p>Непринятых звонков</p>
+					</th>
+					<th class="calls__heading-item calls__heading-item--average-time">
+						<p>Ср. время разговора</p>
+					</th>
+					<th class="calls__heading-item calls__heading-item--average-connection-time">
+						<p>Ср. время до соединения</p>
+					</th>
+					<th class="calls__heading-item calls__heading-item--sla-speed">
+						<p>Уровень обслуживания по<br>скорости ответа, SLA: 20 секунд</p>
+					</th>
+				</tr>
+
+				<tr class="calls__line">
+					<td class="calls__item">
+						<article>
+							<p class="calls__info">58</p>
+							<span class="calls__additional">(100.00%)</span>
+						</article>
+					</td>
+
+					<td class="calls__item calls__item--alarm">
+						<article>
+							<p class="calls__info">0</p>
+							<span class="calls__additional"></span>
+						</article>
+					</td>
+
+					<td class="calls__item">
+						<article>
+							<p class="calls__info-single">02:09</p>
+						</article>
+					</td>
+
+					<td class="calls__item">
+						<article>
+							<p class="calls__info-single">00:02</p>
+						</article>
+					</td>
+
+					<td class="calls__item">
+						<article>
+							<p class="calls__info-single">98.30%</p>
+						</article>
+					</td>
+				</tr>
+			</table>
+
+			<br>
+
+			<ul class="queue-content__state-ul queue-content__state-ul--one">
+				<li class="state-ul__item state-ul__item--one">
+					<article class="state-left">
+						<span class="state-ul__info-num">5</span>
+					</article>
+
+					<article class="state-right">
+						<p class="state-ul__info">в работе</p>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--two">
+					<article class="state-left">
+						<p class="state-ul__info">в<br>разговоре</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">0</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--three">
+					<article class="state-left">
+						<p class="state-ul__info">в<br>ожидании</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">5</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item  state-ul__item--four">
+					<article class="state-left">
+						<p class="state-ul__info">статус<br>активен</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">6</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--five">
+					<article class="state-left">
+						<p class="state-ul__info">сотрудников<br>с тел. линией</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">11</span>
+					</article>
+				</li>
+			</ul>
+
+			<ul class="queue-content__state-ul queue-content__state-ul--two">
+				<li class="state-ul__item state-ul__item--six">
+
+					<article class="state-left">
+						<span class="state-ul__info-num">6</span>
+					</article>
+
+					<article class="state-right">
+						<p class="state-ul__info">не работают</p>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--seven">
+					<article class="state-left">
+						<p class="state-ul__info">статус<br>работа в CRM</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">0</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--eight">
+					<article class="state-left">
+						<p class="state-ul__info">статус<br>перерыв</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">1</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--nine">
+					<article class="state-left">
+						<p class="state-ul__info">статус<br>не активен</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">5</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--ten">
+					<article class="state-left">
+						<p class="state-ul__info">приоста-<br>новлено</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">0</span>
+					</article>
+				</li>
+
+				<li class="state-ul__item state-ul__item--eleven">
+					<article class="state-left">
+						<p class="state-ul__info">телефонов<br>офлайн</p>
+					</article>
+
+					<article class="state-right">
+						<span class="state-ul__info-num">1</span>
+					</article>
+				</li>
+			</ul>
+
+
+			<table class="queue-content__employees">
+				<tr class="employees__heading-line">
+					<th class="employees__heading-item employees__heading-item--employee-name">Сотрудники обслуживающие очередь</th>
+					<th class="employees__heading-item employees__heading-item--line">Линия</th>
+					<th class="employees__heading-item employees__heading-item--state">Статус</th>
+					<th class="employees__heading-item employees__heading-item--received-calls">Принял звонков</th>
+					<th class="employees__heading-item employees__heading-item--last-calltime">Последний звонок<br>завершился в</th>
+					<th class="employees__heading-item employees__heading-item--time-in-status">В статусе уже</th>
+				</tr>
+
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800915" target="_blank">Абишева Камила Ерликкызы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=915">915</a></td>
+						<td class="employees__item employees__item--status employees__item--inactive">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">телефон офлайн</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700915">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">0</td>
+						<td class="employees__item"></td>
+						<td class="employees__item">
+							</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800906" target="_blank">Оспан Айгерим Канаткызы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=906">906</a></td>
+						<td class="employees__item employees__item--status employees__item--inactive">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">перерыв в работе</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700906">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">7</td>
+						<td class="employees__item">15:49&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							11:17</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800916" target="_blank">Токтар Ислам Бакытулы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=916">916</a></td>
+						<td class="employees__item employees__item--status employees__item--occupied">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">в ожидании</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700916">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">8</td>
+						<td class="employees__item">16:02&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800912" target="_blank">Сатыбалды Арман Досжанулы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=912">912</a></td>
+						<td class="employees__item employees__item--status employees__item--occupied">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">в ожидании</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700912">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">5</td>
+						<td class="employees__item">16:17&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800913" target="_blank">Ермекова Айнур Талгаткызы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=913">913</a></td>
+						<td class="employees__item employees__item--status employees__item--occupied">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">в ожидании</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700913">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">9</td>
+						<td class="employees__item">16:25&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800909" target="_blank">Калиев Тимур Алмасулы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=909">909</a></td>
+						<td class="employees__item employees__item--status employees__item--occupied">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">в ожидании</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700909">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">7</td>
+						<td class="employees__item">16:52&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800903" target="_blank">Айтбай Дана Сериккызы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=903">903</a></td>
+						<td class="employees__item employees__item--status employees__item--occupied">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">в ожидании</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700903">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">1</td>
+						<td class="employees__item">16:53&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800914" target="_blank">Нурланов Данияр Азаматулы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=914">914</a></td>
+						<td class="employees__item employees__item--status employees__item--inactive">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">неактивен</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700914">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">11</td>
+						<td class="employees__item">08:55&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							08:01:20</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800905" target="_blank">Байсеит Нурлан Ерболулы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=905">905</a></td>
+						<td class="employees__item employees__item--status employees__item--inactive">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">неактивен</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700905">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">5</td>
+						<td class="employees__item">12:29&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							04:27:14</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800907" target="_blank">Жумабек Диана Асхаткызы</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=907">907</a></td>
+						<td class="employees__item employees__item--status employees__item--inactive">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">неактивен</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700907">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">5</td>
+						<td class="employees__item">13:47&nbsp; 08-09-2026</td>
+						<td class="employees__item">
+							03:09:15</td>
+					</tr>
+									<tr class="employees__line">
+						<td class="employees__item employees__item--name"><a href="/?module=users&action=add&userID=800904" target="_blank">Курманова Асель Маратовна</a></td>
+						<td class="employees__item"><a href="/?module=employeeStatistics&extNumber=904">904</a></td>
+						<td class="employees__item employees__item--status employees__item--inactive">
+							<article class="employees__wrapper">
+								<div class="employees__dot"></div>
+								<p class="employees__status-text"><span class="employees__status-text--text">неактивен</span><br><a href="javascript:void(0);" class="employees__status-text--switchOnOff" data-queue-id="4242" data-member-ext-id="700904">приостановить</a></p>
+							</article>
+						</td>
+						<td class="employees__item">0</td>
+						<td class="employees__item"></td>
+						<td class="employees__item">
+							</td>
+					</tr>
+							</table>
+							<article class="queue-content__footer"></article>
+					</section>
+	</section>
+
+
+
+
+<script type="text/javascript">
+	$(function() {
+		$('a.employees__status-text--switchOnOff').click(function() {
+			var $this = $(this);
+
+			if ($(this).text().indexOf('обрабатывается') !== -1) {
+				return;
+			}
+
+			var action;
+			if ($(this).text().indexOf('приостановить') !== -1) {
+				action = 'switchOffTheMember';
+			} else {
+				action = 'switchOnTheMember';
+			}
+
+
+			$.ajax({
+				type: 'POST',
+				url: '/?module=stateOfQueues&action='+ action,
+				data: {
+					queueID: $(this).attr('data-queue-id'),
+					queueMemberExtID: $(this).attr('data-member-ext-id'),
+				},
+				dataType: 'json'
+			}).done(function(resp) {
+				if (resp && resp.status === 'success') {
+					if ($this.text().indexOf('приостановить') !== -1) {
+						$this.text('вернуть в работу');
+					} else {
+						$this.text('приостановить');
+					}
+
+					$this.parent().find('.employees__status-text--text').text('обновите страницу');
+				} else {
+					alert('Something went wrong');
+				}
+			}).fail(function (jqXHR, textStatus) {
+				alert('Something went wrong');
+			});
+		});
+
+					setTimeout(function() {
+				document.location.reload(true);
+			}, 15 * 1000);
+			});
+</script>
+																					</div>
+					</div>
+				</div>
+			</div>
+
+			<div id="push"></div>
+		</div>
+
+		<div id="footer">
+			<div class="content">
+				<div class="slogan">
+					<h1>Платформа для связи с клиентами</h1>
+				</div>
+				<h5>Copyright 2010 - 2026 &nbsp; <a href="http://www.binotel.ua/" target="_blank">www.binotel.ua</a></h5>
+			</div>
+		</div>
+	</div>
+
+	<script type="text/javascript">
+		$(function() {
+			$("ul#secondaryMenu li a").hover(
+				function () {
+					$(this).parent().addClass("hover");
+				},
+				function () {
+					$(this).parent().removeClass("hover");
+				}
+			);
+		});
+	</script>
+</body>
+</html>

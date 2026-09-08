@@ -1,0 +1,16 @@
+[
+ {
+  "generalCallID": "6843906088",
+  "startTime": "1788868427",
+  "externalNumber": "77015550002",
+  "customerNumber": "77015550002",
+  "customerNumberPrepare": "7<span class=\"space-before\">701</span><span class=\"space-before\">555</span><span class=\"space-before\">00</span><span class=\"space-before\">02</span>",
+  "customerData": "",
+  "employeeNumber": "903",
+  "employeeName": "Айтбай Дана Сериккызы",
+  "callType": "1",
+  "billsec": -13,
+  "duration": 16,
+  "timeIsNowOnBackend": 1788868456
+ }
+]

@@ -4750,8 +4750,8 @@ class Database:
                               exc, exc_info=True)
             # Последний удачный снимок табло. Кэш живёт в памяти процесса, поэтому рестарт или
             # деплой раньше оставлял экран в операционном зале пустым до первого удачного ответа
-            # Oktell — а прокси бывает недоступен минутами. Снимок один (singleton): это не
-            # история, а «что показать, пока не приехали свежие данные».
+            # Oktell — а прокси бывает недоступен минутами. Это не история, а «что показать,
+            # пока не приехали свежие данные»: на каждое направление ровно одна строка.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS szov_wallboard_snapshot (
                     id INTEGER PRIMARY KEY DEFAULT 1,
@@ -4760,6 +4760,54 @@ class Database:
                     CONSTRAINT szov_wallboard_snapshot_singleton CHECK (id = 1)
                 );
             """)
+            # Табло стало больше одного (задача #292: ТП и ОП отдела Тез КЦ на Binotel рядом с
+            # линией и чатом СЗоВ на Oktell), а таблица была рассчитана ровно на одну строку —
+            # снимки затирали бы друг друга, и после рестарта табло ТП показало бы цифры линии
+            # Oktell с пометкой «данные устарели». Ключом становится направление.
+            #
+            # Под SAVEPOINT — весь _init_db идёт одной транзакцией, и упавший DDL иначе уносит
+            # инициализацию ВСЕЙ схемы, а не только этой таблицы. Имя старого ключа не зашиваем,
+            # а ищем в каталоге: Postgres назвал бы его szov_wallboard_snapshot_pkey, но ошибка
+            # в имени уронила бы миграцию на проде.
+            try:
+                cursor.execute("SAVEPOINT sp_wallboard_snapshot_direction")
+                cursor.execute("""
+                    ALTER TABLE szov_wallboard_snapshot
+                    ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova';
+                """)
+                cursor.execute("""
+                    DO $$
+                    DECLARE
+                        single_key_pk text;
+                    BEGIN
+                        ALTER TABLE szov_wallboard_snapshot
+                            DROP CONSTRAINT IF EXISTS szov_wallboard_snapshot_singleton;
+                        SELECT con.conname INTO single_key_pk
+                        FROM pg_constraint con
+                        JOIN pg_index i ON i.indexrelid = con.conindid
+                        WHERE con.conrelid = 'szov_wallboard_snapshot'::regclass
+                          AND con.contype = 'p'
+                          AND i.indnkeyatts = 1
+                          AND EXISTS (
+                              SELECT 1 FROM pg_attribute a
+                              WHERE a.attrelid = con.conrelid
+                                AND a.attnum = i.indkey[0]
+                                AND a.attname = 'id'
+                          );
+                        IF single_key_pk IS NOT NULL THEN
+                            EXECUTE 'ALTER TABLE szov_wallboard_snapshot DROP CONSTRAINT '
+                                || quote_ident(single_key_pk);
+                            ALTER TABLE szov_wallboard_snapshot
+                                ALTER COLUMN id DROP NOT NULL;
+                            ALTER TABLE szov_wallboard_snapshot
+                                ADD PRIMARY KEY (direction);
+                        END IF;
+                    END $$;
+                """)
+                cursor.execute("RELEASE SAVEPOINT sp_wallboard_snapshot_direction")
+            except Exception as exc:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_wallboard_snapshot_direction")
+                logging.error("Табло: направление снимка не применилось: %s", exc, exc_info=True)
             # Выходы на перерыв мимо графика (задача #114). Пишем ТОЛЬКО нарушения: перерыв,
             # совпавший с графиком, — это норма, и хранить её незачем.
             #   kind: off_schedule — перерыв есть в графике, но в другое время;
@@ -17269,6 +17317,95 @@ class Database:
             )
             return [str(row[0]).strip() for row in (cursor.fetchall() or []) if row and row[0]]
 
+    # Кого табло Тез КЦ не показывает. Только увольнение: «Б/С» (bs) — это отпуск без
+    # сохранения, человек остаётся сотрудником и остаётся в Binotel. Отфильтруй мы его —
+    # состав ОП на экране разошёлся бы с составом в кабинете (6 против 7 на 08.09.2026),
+    # а счётчики кабинета всё равно считают его. dismissal — псевдоним fired.
+    TEZ_WALLBOARD_EXCLUDED_STATUSES = ('fired', 'dismissal')
+
+    def get_tez_wallboard_operators(self, department_id, on_date=None):
+        """Состав табло Тез КЦ: действующие сотрудники отдела с моделью расчёта и SIP.
+
+        Почему отдельный метод, а не общий lookup табло СЗоВ (_szov_wallboard_operator_lookup):
+          - тот строится из get_all_operators() с WHERE role = 'operator', и стажёры со
+            старшими сменами молча выпали бы из счётчиков «онлайн» и списков перерывов;
+          - там нет фильтра по занятости, а sip_number в этом отделе НЕ уникален: один и тот
+            же номер числится и за уволенным, и за действующим (914, 922, 924, 925, 927 на
+            08.09.2026). Без отсева уволенных в списке «на перерыве» появились бы чужие
+            фамилии — самый заметный сорт брака на экране в зале. Проверено: после отсева
+            уволенных дублей SIP в отделе не остаётся ни одного;
+          - ТП и ОП живут в ОДНОМ отделе, и разделить их можно только моделью расчёта.
+
+        ТП от ОП отличает ГРУППА, а не направление. Проверено на проде 08.09.2026: у обоих
+        направлений («ТП линия» id 83 и «ОП линия» id 78) calculation_model_code = 'operator',
+        то есть модель роли, а не модель отдела; настоящие tez_line / tez_op стоят на группах
+        34 «Тез КЦ - Тех поддержка» и 35 «Tez КЦ - Отдел продаж». Поэтому группа — первый ключ,
+        направление — запасной. По id направления не отбираем принципиально: оно версионируется
+        (у «ТП линия» уже семь версий), а переименование обнуляет users.direction_id.
+        """
+        day_obj = self._normalize_schedule_date(on_date or datetime.now().date())
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT u.id,
+                       u.name,
+                       NULLIF(TRIM(u.sip_number), ''),
+                       u.direction_id,
+                       d.name,
+                       LOWER(COALESCE(d.calculation_model_code, '')),
+                       (
+                           SELECT LOWER(COALESCE(gr.calculation_model_code, ''))
+                           FROM group_operator_memberships gom
+                           JOIN groups gr ON gr.id = gom.group_id
+                           WHERE gom.operator_id = u.id
+                             AND gom.start_date <= %s
+                             AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                           ORDER BY gom.start_date DESC
+                           LIMIT 1
+                       ),
+                       u.role
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                WHERE u.department_id = %s
+                  AND LOWER(COALESCE(u.status, '')) <> ALL(%s)
+                ORDER BY u.name
+                """,
+                (day_obj, day_obj, int(department_id),
+                 list(self.TEZ_WALLBOARD_EXCLUDED_STATUSES)),
+            )
+            rows = cursor.fetchall() or []
+
+        out = []
+        for row in rows:
+            if not row or not row[0]:
+                continue
+            direction_name = str(row[4] or '').strip() or None
+            direction_model = str(row[5] or '').strip() or None
+            group_model = str(row[6] or '').strip() or None
+            # Лестница: модель группы -> модель направления -> имя направления. Последняя
+            # ступень нужна для тех, кого в группу ещё не завели: без неё новый сотрудник
+            # просто исчезал бы с табло, и это выглядело бы как «человек не вышел».
+            model = group_model if group_model in CALCULATION_MODEL_TEZ_CODES else None
+            if model is None and direction_model in CALCULATION_MODEL_TEZ_CODES:
+                model = direction_model
+            if model is None and direction_name:
+                lowered = direction_name.strip().lower()
+                if lowered.startswith('тп'):
+                    model = CALCULATION_MODEL_TEZ_LINE
+                elif lowered.startswith('оп'):
+                    model = CALCULATION_MODEL_TEZ_OP
+            out.append({
+                'id': int(row[0]),
+                'name': str(row[1] or '').strip(),
+                'sip_number': str(row[2]).strip() if row[2] else None,
+                'direction_id': row[3],
+                'direction_name': direction_name,
+                'model': model,
+                'group_model': group_model,
+                'role': str(row[7] or '').strip() or None,
+            })
+        return out
+
     def replace_tez_op_call_metrics(self, start_date, end_date, rows):
         """Идемпотентно заменяет телефонную продуктивность TEZ ОП за период.
 
@@ -26671,28 +26808,33 @@ class Database:
 
     # --- Последний снимок «Табло СЗоВ» -----------------------------------------------------
 
-    def get_szov_wallboard_snapshot(self):
+    def get_szov_wallboard_snapshot(self, direction: str = 'osnova'):
         """(payload, captured_at) последнего удачного снимка табло или (None, None).
 
-        Нужен только на холодном старте процесса: пока Oktell не ответил, экран показывает
-        этот снимок с пометкой «данные устарели» вместо пустоты."""
+        Нужен только на холодном старте процесса: пока источник не ответил, экран показывает
+        этот снимок с пометкой «данные устарели» вместо пустоты.
+
+        direction — какое табло: 'osnova' (линия СЗоВ, Oktell) или 'tez' (ТП и ОП, Binotel).
+        Дефолт сохраняет прежние вызовы: у линии направление подразумевалось молчаливо."""
         with self._get_cursor() as cur:
-            cur.execute("SELECT payload, captured_at FROM szov_wallboard_snapshot WHERE id = 1")
+            cur.execute("SELECT payload, captured_at FROM szov_wallboard_snapshot WHERE direction = %s",
+                        (str(direction or 'osnova'),))
             row = cur.fetchone()
         if not row or not row[0]:
             return None, None
         return row[0], float(row[1] or 0.0)
 
-    def save_szov_wallboard_snapshot(self, payload: dict, captured_at: float) -> None:
-        """Перезаписать снимок табло. Строка ровно одна — история табло никому не нужна."""
+    def save_szov_wallboard_snapshot(self, payload: dict, captured_at: float,
+                                     direction: str = 'osnova') -> None:
+        """Перезаписать снимок табло. На направление ровно одна строка — история табло не нужна."""
         with self._get_cursor() as cur:
             cur.execute("""
-                INSERT INTO szov_wallboard_snapshot (id, payload, captured_at)
-                VALUES (1, %s, %s)
-                ON CONFLICT (id) DO UPDATE
+                INSERT INTO szov_wallboard_snapshot (direction, payload, captured_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (direction) DO UPDATE
                 SET payload = EXCLUDED.payload,
                     captured_at = EXCLUDED.captured_at
-            """, (Json(payload or {}), float(captured_at or 0.0)))
+            """, (str(direction or 'osnova'), Json(payload or {}), float(captured_at or 0.0)))
 
     # --- Отбивка показателей «Табло СЗоВ» в Telegram ---------------------------------------
 

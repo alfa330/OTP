@@ -573,7 +573,7 @@ const isTabVisible = () => {
         : !document.hidden;
 };
 
-function createSnapshotFeed({ path, pollIntervalMs }) {
+export function createSnapshotFeed({ path, pollIntervalMs }) {
     const store = {
         state: { snapshot: null, error: null, loading: true },
         listeners: new Set(),
