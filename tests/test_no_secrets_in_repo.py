@@ -22,6 +22,7 @@
 """
 
 import io
+import json
 import os
 import re
 import subprocess
@@ -60,6 +61,29 @@ _SECRET_NAME_RE = re.compile(
     r'KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIAL|DATABASE_URL|DSN|AUTH', re.I)
 _MIN_SECRET_LEN = 12
 
+# Логин — половина учётки, и его прячут хуже, чем пароль: он попадает в код как
+# «реалистичный пример». Так BINOTEL_OPERATOR_SIP_LOGIN (8 символов) прожил в
+# трёх файлах с 02.09.2026, а 08.09.2026 в публичный коммит уехал ещё и пароль
+# от той же линии. Под _SECRET_NAME_RE логин не подпадал, под порог в 12
+# символов — тоже.
+_LOGIN_NAME_RE = re.compile(r'LOGIN|USERNAME|\bUSER\b', re.I)
+_MIN_LOGIN_LEN = 8
+
+
+def _is_secret_env(name, value):
+    """Считать ли значение из .env секретом, который нельзя встречать в файлах."""
+    if len(value) >= _MIN_SECRET_LEN and _SECRET_NAME_RE.search(name):
+        return True
+    # Логины сверяем с порогом ниже, но требуем И букву, И цифру: иначе сюда
+    # попадут «postgres», «admin» и прочие словарные значения, которые встретятся
+    # в репозитории тысячу раз и утопят проверку в шуме.
+    if (_LOGIN_NAME_RE.search(name)
+            and len(value) >= _MIN_LOGIN_LEN
+            and re.search(r'[A-Za-z]', value)
+            and re.search(r'\d', value)):
+        return True
+    return False
+
 
 def _tracked_files():
     out = subprocess.check_output(["git", "ls-files"], cwd=ROOT)
@@ -77,11 +101,19 @@ def _strip_tags(chunk):
 
 
 def _read(name):
+    # Читаем БАЙТАМИ и декодируем с заменой. Раньше здесь стоял
+    # `except UnicodeDecodeError: return ""`, и любой файл не в UTF-8 (дамп
+    # кабинета в cp1251, выгрузка из Excel) молча выпадал из проверки целиком —
+    # то есть страж отворачивался ровно от того файла, который подозрительнее
+    # остальных.
     try:
-        with io.open(os.path.join(ROOT, name), encoding="utf-8") as handle:
-            return handle.read()
-    except (UnicodeDecodeError, IOError, OSError):
+        with io.open(os.path.join(ROOT, name), "rb") as handle:
+            data = handle.read()
+    except (IOError, OSError):
         return ""
+    if b"\x00" in data[:8192]:
+        return ""  # двоичный файл: сканировать нечего
+    return data.decode("utf-8", errors="replace")
 
 
 def _looks_synthetic(fragment):
@@ -96,6 +128,45 @@ def _looks_synthetic(fragment):
 
 def _line_of(text, index):
     return text.count("\n", 0, index) + 1
+
+
+# Заголовки колонок и ключи, за которыми в дампах кабинетов лежат доступы.
+# Прежний словарь состоял из четырёх слов (логин/пароль/login/password), и
+# колонка «Ключ», «Секрет», «Token» или «PIN» прошла бы мимо стража.
+_CREDENTIAL_LABEL_RE = re.compile(
+    r'логин|парол|ключ|секрет|учет|учёт|login|user(name)?|pass(word|wd)?|pwd|'
+    r'secret|token|api[_-]?key|\bpin\b|credential|hash', re.I)
+
+# Что ИМЕННО считается заглушкой в проверке «по месту». Здесь нужен строгий
+# шаблон, а не _looks_synthetic: тот признаёт выдуманным всё, что СОДЕРЖИТ
+# маркер, и потому пропустил бы боевой пароль вида «abcdefQ7x91».
+_PLACEHOLDER_RE = re.compile(
+    r'(?:sip-fixture-\d+|fixture-pass-\d+|fixture0+\d+|line\d+@example\.[a-z]+|'
+    r'ext-hash-\d+|-|—|\*+|\.\.\.)\Z', re.I)
+
+
+def _is_placeholder(value):
+    return bool(_PLACEHOLDER_RE.match(value.strip()))
+
+
+def _json_credential_values(node, path="$"):
+    """Пары (путь, значение) под ключами, которые пахнут доступом.
+
+    Дампы кабинетов приезжают не только в html: employees_day.json — такой же
+    дамп, и до 08.09.2026 страж «по месту» его не смотрел вовсе.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = "%s.%s" % (path, key)
+            if isinstance(value, (dict, list)):
+                for item in _json_credential_values(value, child):
+                    yield item
+            elif isinstance(value, str) and _CREDENTIAL_LABEL_RE.search(str(key)):
+                yield child, value
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            for item in _json_credential_values(value, "%s[%d]" % (path, index)):
+                yield item
 
 
 class NoSecretsInRepoTests(unittest.TestCase):
@@ -127,35 +198,65 @@ class NoSecretsInRepoTests(unittest.TestCase):
         колонка «Логин» или «Пароль», её ячейки обязаны быть заглушками.
         """
         bad = []
+        checked = 0
         for path in _tracked_files():
-            if not path.startswith('tests/fixtures/') or not path.endswith('.html'):
+            if not path.startswith('tests/fixtures/'):
                 continue
-            full = os.path.join(ROOT, path)
-            try:
-                html = io.open(full, encoding='utf-8', errors='replace').read()
-            except OSError:
-                continue
-            for table in re.findall(r'<table.*?</table>', html, re.S | re.I):
-                headers = [_strip_tags(h) for h in re.findall(r'<th[^>]*>(.*?)</th>', table, re.S | re.I)]
-                guarded = [i for i, h in enumerate(headers)
-                           if re.search(r'логин|пароль|login|password', h, re.I)]
-                if not guarded:
+
+            if path.endswith('.html'):
+                html = _read(path)
+                # Таблицы без вложенности: «.*?» дотягивалась до чужого </table>
+                # и склеивала две таблицы в одну, сбивая нумерацию колонок.
+                for table in re.findall(r'<table\b(?:(?!<table).)*?</table>', html, re.S | re.I):
+                    # Заголовок бывает и в <th>, и в первой строке <td>.
+                    headers = [_strip_tags(h) for h in
+                               re.findall(r'<th[^>]*>(.*?)</th>', table, re.S | re.I)]
+                    if not headers:
+                        first = re.search(r'<tr[^>]*>(.*?)</tr>', table, re.S | re.I)
+                        if first:
+                            headers = [_strip_tags(c) for c in
+                                       re.findall(r'<td[^>]*>(.*?)</td>', first.group(1), re.S | re.I)]
+                    guarded = [i for i, h in enumerate(headers)
+                               if _CREDENTIAL_LABEL_RE.search(h)]
+                    if not guarded:
+                        continue
+                    for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table, re.S | re.I):
+                        cells = [_strip_tags(c) for c in
+                                 re.findall(r'<td[^>]*>(.*?)</td>', row, re.S | re.I)]
+                        for i in guarded:
+                            if i >= len(cells) or not cells[i]:
+                                continue
+                            checked += 1
+                            if _is_placeholder(cells[i]):
+                                continue
+                            bad.append('%s — колонка «%s», строка %s' % (
+                                path, headers[i].strip(), cells[0] if cells else '?'))
+
+            elif path.endswith('.json'):
+                try:
+                    data = json.loads(_read(path) or 'null')
+                except ValueError:
                     continue
-                for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table, re.S | re.I):
-                    cells = [_strip_tags(c) for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.S | re.I)]
-                    for i in guarded:
-                        if i >= len(cells):
-                            continue
-                        value = cells[i]
-                        if not value or _looks_synthetic(value):
-                            continue
-                        bad.append('%s — колонка «%s», строка %s' % (
-                            path, headers[i].strip(), cells[0] if cells else '?'))
+                for where, value in _json_credential_values(data):
+                    if not value:
+                        continue
+                    checked += 1
+                    if _is_placeholder(value):
+                        continue
+                    bad.append('%s — поле %s' % (path, where))
+
         self.assertEqual(
             [], sorted(set(bad)),
             'Живая учётка в фикстуре. Замените значение на заглушку '
-            '(sip-fixture-<номер> / Fixture-Pass-<номер>) и СМЕНИТЕ пароль '
+            '(sip-fixture-<номер> / Fixture-Pass-<номер>) и СМЕНИТЕ доступ '
             'в кабинете: репозиторий публичный.')
+        # Страж, который ничего не проверил, неотличим от зелёного. 08.09.2026
+        # он и был таким: разбор не находил колонок, и тест радостно проходил.
+        self.assertTrue(
+            checked,
+            'проверка не нашла НИ ОДНОЙ ячейки с логином или паролем в '
+            'tests/fixtures/ — почти наверняка сломался разбор, а не исчезли '
+            'дампы кабинетов')
 
     def test_no_env_values_in_tracked_files(self):
         """Прямое сравнение с .env.codex.local — ловит форматы, которых мы не знали."""
@@ -170,7 +271,7 @@ class NoSecretsInRepoTests(unittest.TestCase):
                 if not match:
                     continue
                 name, value = match.group(1), match.group(2).strip().strip('"').strip("'")
-                if len(value) >= _MIN_SECRET_LEN and _SECRET_NAME_RE.search(name):
+                if _is_secret_env(name, value):
                     secrets[name] = value
 
         self.assertTrue(secrets, "в .env.codex.local не нашлось ни одного секрета — "

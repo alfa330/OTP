@@ -477,9 +477,51 @@ class EndpointsTests(unittest.TestCase):
         dumped = json.dumps(source.parse_endpoints(fixture("endpoints.html")), ensure_ascii=False)
         self.assertNotIn("sip-fixture", dumped)
 
+    def test_credentials_table_does_not_survive_parsing(self):
+        """Ни одно значение колонок «Логин»/«Пароль» не выходит из разбора.
+
+        Проверка берёт значения ИЗ САМОЙ фикстуры, а не сверяется со списком
+        заглушек: тогда она не зависит от того, чем обезличена фикстура, и
+        переживёт её переливку свежим дампом кабинета.
+        """
+        html = fixture("endpoints.html")
+        head = html.find('<th class="password">')
+        self.assertNotEqual(-1, head, "в фикстуре пропала таблица учётных данных")
+        block = html[head:html.find("</table>", head)]
+        values = set()
+        for row in re.findall(r"<tr[^>]*>(.*?)</tr>", block, re.S):
+            cells = [re.sub(r"<[^>]+>", "", c).strip()
+                     for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+            if len(cells) >= 4 and cells[0].isdigit():
+                values.update(cells[2:4])
+        self.assertTrue(values, "колонки логина и пароля в фикстуре не разобрались")
+        dumped = json.dumps(source.parse_endpoints(html), ensure_ascii=False)
+        for value in sorted(values):
+            self.assertNotIn(value, dumped)
+
     def test_foreign_page_is_rejected(self):
         with self.assertRaises(source.CabinetParseError):
             source.parse_endpoints("<html><body>logining[email]</body></html>")
+
+
+class FixtureNeedlesTests(unittest.TestCase):
+    """Иголки для проверок «учётка не пережила разбор» обязаны БЫТЬ в фикстурах.
+
+    08.09.2026 их там не было вовсе: обезличивание при добавлении фикстуры
+    прошло по одним значениям, а проверки искали другие — и проходили вхолостую,
+    пока в endpoints.html лежали 19 боевых SIP-учёток. Барьер, который ищет
+    отсутствующее, не барьер. Этот тест падает раньше, чем страж успеет стать
+    бесполезным.
+    """
+
+    def test_needles_are_present_in_fixtures(self):
+        blob = fixture("endpoints.html") + fixture("employees_day.json")
+        for secret in SECRET_VALUES:
+            self.assertIn(
+                secret, blob,
+                "иголка %r исчезла из фикстур — проверка разбора стала холостой. "
+                "Либо верните значение в фикстуру, либо обновите SECRET_VALUES "
+                "под новое обезличивание." % secret)
 
 
 class _FakeResponse:
