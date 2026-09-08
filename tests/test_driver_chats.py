@@ -306,6 +306,59 @@ class PhoneTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(chat2desk.normalize_phone(raw), expected)
 
+    def test_international_dialling_prefix_is_stripped(self):
+        """«00» вместо «+» — то, как номер диктуют «чтобы набрать».
+
+        Без этой поправки узбекский номер уходил в поиск четырнадцатизначным и
+        не находился нигде: ни точным совпадением, ни хвостом.
+        """
+        self.assertEqual(chat2desk.normalize_phone('00998901234567'), '998901234567')
+        self.assertEqual(chat2desk.normalize_phone('00 90 531 729 83 61'), '905317298361')
+        # Внутренняя форма после снятия префикса тоже приводится к «7…».
+        self.assertEqual(chat2desk.normalize_phone('0087071234567'), '77071234567')
+        # А вот у номера, который без «00» стал бы короче десяти цифр, префикс
+        # снимать нельзя — это не префикс, а часть чего-то другого.
+        self.assertIsNone(chat2desk.normalize_phone('001234567'))
+
+    def test_tail_is_the_same_in_every_way_of_writing(self):
+        """Хвост — то, чем номер опознаётся, как бы его ни записали."""
+        for raw in ('87071234567', '+7 707 123 45 67', '77071234567', '7071234567'):
+            with self.subTest(raw=raw):
+                self.assertEqual(chat2desk.phone_tail(raw), '071234567')
+        for raw in ('+90 531 729 83 61', '905317298361', '00905317298361'):
+            with self.subTest(raw=raw):
+                self.assertEqual(chat2desk.phone_tail(raw), '317298361')
+
+    def test_tail_is_nine_digits_and_not_invented_from_junk(self):
+        """Девять — не на глаз, а два измерения сразу.
+
+        Сверху: на всей базе (16 421 хвост) девятизначный не совпал ни у одной
+        пары разных водителей, а восьмизначный совпал дважды.
+        Снизу: девять — ровно длина национального номера Узбекистана, Киргизии
+        и Таджикистана, и водитель диктует его без кода страны.
+        """
+        self.assertEqual(chat2desk.PHONE_TAIL_DIGITS, 9)
+        self.assertEqual(len(chat2desk.phone_tail('998901234567')), 9)
+        for raw in ('', None, 'мусор', '12345678', '1' * 16,
+                    '[wa_dialog] KZ.1026155950418911'):
+            with self.subTest(raw=raw):
+                self.assertIsNone(chat2desk.phone_tail(raw))
+
+    def test_nine_digit_national_number_is_searchable_but_not_a_full_number(self):
+        """Узбекский «90 123 45 67» — это ХВОСТ, а не номер целиком.
+
+        Номером его считать нельзя: у вендора номер лежит с кодом страны, и
+        точный поиск по девяти цифрам не нашёл бы ничего. Зато по хвосту
+        водитель находится — ровно ради этого разделены два пути.
+        """
+        for raw in ('90 123 45 67', '901234567', '555510048', '920105581'):
+            with self.subTest(raw=raw):
+                self.assertIsNone(chat2desk.normalize_phone(raw))
+                self.assertIsNotNone(chat2desk.phone_tail(raw))
+        # Ввод, из которого не собирается даже хвост, раздел по-прежнему
+        # отвергает до всякой базы.
+        self.assertIsNone(chat2desk.phone_tail('1234'))
+
     def test_garbage_is_rejected_rather_than_guessed(self):
         """Границы — десять цифр (номер без кода страны) и пятнадцать (потолок
         E.164). Этого хватает, чтобы отсечь идентификаторы WhatsApp, которые
@@ -339,6 +392,128 @@ class PhoneTests(unittest.TestCase):
         self.assertEqual(chat2desk.phone_variants('8 707 123 45 67'),
                          chat2desk.phone_variants('77071234567'))
         self.assertEqual(chat2desk.phone_variants('мусор'), [])
+
+
+class PhoneTailLookupTests(unittest.TestCase):
+    """Поиск водителя по ХВОСТУ номера — то, чем находится иностранный номер.
+
+    Точные варианты (`phone_variants`) перебирают то, как номер пишут У НАС:
+    с «8», с «+», без кода страны. Достроить турецкий «531 729 83 61» до
+    «90 531 729 83 61» они не могут — кодов стран две сотни, — а хвост у номера
+    один и тот же в любой записи (владелец 08.09.2026: «могут быть и номера из
+    других стран, исправь это»).
+    """
+
+    class _Cursor:
+        def __init__(self, rows):
+            self.rows = rows
+            self.params = None
+
+        def execute(self, _sql, params=None):
+            self.params = params
+
+        def fetchall(self):
+            return self.rows
+
+    def test_one_driver_behind_the_tail_is_returned_with_his_stored_number(self):
+        """Телефон отдаётся В ТОЙ записи, в какой лежит у нас: под ней потом
+        сохраняется кеш и пишется журнал, а повторный поиск того же водителя
+        попадает уже в точный путь."""
+        cursor = self._Cursor([(124223666, '905317298361')])
+        self.assertEqual(queries.local_client_by_tail(cursor, '317298361'),
+                         (124223666, '905317298361'))
+        self.assertEqual(cursor.params, {'tail': '317298361'})
+
+    def test_nothing_found_is_not_an_error(self):
+        self.assertIsNone(queries.local_client_by_tail(self._Cursor([]), '317298361'))
+        self.assertIsNone(queries.local_client_by_tail(self._Cursor([]), None))
+
+    def test_two_drivers_behind_one_tail_stop_the_search(self):
+        """Такого на живой базе нет ни разу, но если случится — показать
+        переписку соседа нельзя. Раздел обязан спросить номер целиком."""
+        cursor = self._Cursor([(1, '905317298361'), (2, '77071234567')])
+        self.assertEqual(queries.local_client_by_tail(cursor, '317298361'),
+                         ('ambiguous', None))
+
+    def test_messenger_identifiers_are_excluded_from_the_lookup(self):
+        """В той же колонке вендор держит идентификаторы мессенджеров на 14-15
+        знаков (852 строки). У них тоже есть девять последних цифр, и без
+        отсечки поиск выдал бы за водителя чужой диалог."""
+        self.assertIn("client_phone ~ '^[+]?[0-9]{10,15}$'",
+                      queries._LOCAL_CLIENT_BY_TAIL_SQL)
+
+    def test_the_query_and_the_index_speak_the_same_expression(self):
+        """Разойдись выражения хоть пробелом — планировщик индекс не возьмёт и
+        уйдёт в полный проход по 86 тыс. строк (0,2 с против единиц мс), причём
+        молча: запрос останется правильным."""
+        expression = r"right(regexp_replace(client_phone, '\D', '', 'g'), 9)"
+        self.assertIn(expression, queries._LOCAL_CLIENT_BY_TAIL_SQL)
+        ddl = '\n'.join(schema.DDL)
+        self.assertIn('idx_c2d_requests_phone_tail', ddl)
+        self.assertIn(expression, ddl)
+        # Длина хвоста в SQL — та же, что в питоне: девять.
+        self.assertIn(', %d)' % chat2desk.PHONE_TAIL_DIGITS,
+                      queries._LOCAL_CLIENT_BY_TAIL_SQL)
+
+    def test_the_index_is_idempotent_like_the_rest_of_the_schema(self):
+        """Схема раздела разворачивается на КАЖДОМ старте."""
+        ddl = '\n'.join(schema.DDL)
+        self.assertIn('CREATE INDEX IF NOT EXISTS idx_c2d_requests_phone_tail', ddl)
+
+
+class ForeignPhoneSearchTests(unittest.TestCase):
+    """Ручка поиска на иностранном номере — целиком, до ответа."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = (ROOT / 'driver_chats' / 'routes.py').read_text(encoding='utf-8')
+        cls.search = cls.routes.split('def driver_chats_search')[1].split(
+            'def driver_chats_open')[0]
+
+    def test_the_tail_is_tried_only_after_the_exact_records(self):
+        """Порядок значим: точное совпадение дешевле и однозначнее, а хвост —
+        запасной ход. Поменяй местами — и раздел начал бы находить водителя по
+        девяти цифрам там, где есть точная запись."""
+        self.assertLess(self.search.index('local_client_id'),
+                        self.search.index('local_client_by_tail'))
+        self.assertLess(self.search.index('cached_client_id'),
+                        self.search.index('local_client_by_tail'))
+
+    def test_the_tail_is_tried_before_the_vendor(self):
+        """Свой запрос по индексу — единицы миллисекунд, вызов вендора — сотни
+        мс И квота, общая с ночным синком метрик отдела."""
+        self.assertLess(self.search.index('local_client_by_tail'),
+                        self.search.index('chat2desk.find_client'))
+
+    def test_the_number_switches_to_the_form_stored_in_our_base(self):
+        """Иначе кеш и журнал легли бы под «531 729 83 61», а следующий поиск
+        того же водителя снова пошёл бы через хвост."""
+        self.assertIn('phone = chat2desk.normalize_phone(stored_phone) or phone',
+                      self.search)
+
+    def test_ambiguous_tail_answers_with_its_own_code(self):
+        self.assertIn('PHONE_AMBIGUOUS', self.search)
+        self.assertIn('Введите номер целиком, с кодом страны', self.search)
+
+    def test_ambiguous_answer_does_not_open_a_fourth_cursor(self):
+        """Строка журнала пишется тем же курсором, которым нашли неоднозначность:
+        каждый курсор — место в общем пуле, где четыре держит цикл бота."""
+        self.assertEqual(self.search.count('db._get_cursor()'), 3)
+
+    def test_the_refusal_shows_a_foreign_example_too(self):
+        """Отказ «непохоже на номер» — единственное место, где раздел объясняет
+        формат. Три казахстанских примера в нём читались как «только КЗ»."""
+        refusal = self.search.split('BAD_PHONE')[0]
+        self.assertIn('79161234567', refusal)
+        self.assertIn('+998 90 123 45 67', refusal)
+
+    def test_the_screen_says_foreign_numbers_are_welcome(self):
+        """Человек читает подсказку на экране, а не код: пока в ней стояли одни
+        казахстанские примеры, раздел выглядел «только для КЗ»."""
+        view = VIEW_JSX.read_text(encoding='utf-8')
+        steps = view.split('const SEARCH_STEPS = [')[1].split('];')[0]
+        self.assertIn('иностранный', steps)
+        self.assertIn('998', steps)
 
 
 class WindowTests(unittest.TestCase):
@@ -1468,6 +1643,154 @@ class JournalExportRouteTests(unittest.TestCase):
         self.assertEqual(captured, {})
 
 
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class SearchRouteForeignPhoneTests(unittest.TestCase):
+    """Ручка поиска целиком: что происходит с иностранным номером.
+
+    Владелец 08.09.2026: «человек может искать только по кз номерам, могут быть
+    и номера из других стран, исправь это». Здесь проверяется весь путь, а не
+    отдельные функции: где раздел спрашивает свою базу, где — вендора (тот стоит
+    квоты, общей с ночным синком метрик отдела), и что он отвечает человеку.
+    """
+
+    def build(self, *, exact=None, by_tail=None):
+        context = {'user_id': 7, 'name': 'Оператор СЗоВ', 'role': 'sv',
+                   'department_id': 1, 'department_code': 'szov',
+                   'direction_model': None,
+                   'headed_department_ids': [], 'headed_department_codes': []}
+        seen = {'tail': [], 'variants': [], 'vendor': [], 'logged': []}
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (0,)          # поисков за сегодня — ноль
+        db = MagicMock()
+
+        @contextmanager
+        def _get_cursor():
+            yield cursor
+
+        db._get_cursor = _get_cursor
+
+        def _patch(module, name, value):
+            original = getattr(module, name)
+            setattr(module, name, value)
+            self.addCleanup(setattr, module, name, original)
+
+        def _local(_c, variants):
+            seen['variants'].append(list(variants))
+            return exact
+
+        def _tail(_c, tail):
+            seen['tail'].append(tail)
+            return by_tail
+
+        def _find_client(phone):
+            seen['vendor'].append(phone)
+            return None
+
+        def _log(_c, _ctx, kind, **kwargs):
+            seen['logged'].append((kind, kwargs.get('phone')))
+
+        _patch(queries, 'load_access_context', lambda _c, _uid: dict(context))
+        _patch(queries, 'cached_client_id', lambda _c, _phone: None)
+        _patch(queries, 'local_client_id', _local)
+        _patch(queries, 'local_client_by_tail', _tail)
+        _patch(queries, 'pending_handoff_notes', lambda *_a, **_k: [])
+        _patch(queries, 'cached_messages', lambda *_a, **_k: (None, None))
+        _patch(queries, 'store_messages', lambda *_a, **_k: None)
+        _patch(queries, 'request_meta', lambda *_a, **_k: {})
+        _patch(queries, 'channel_names', lambda *_a, **_k: {})
+        _patch(queries, 'log_event', _log)
+        _patch(chat2desk, 'find_client', _find_client)
+        _patch(chat2desk, 'fetch_window_messages', lambda *_a, **_k: ([], 0))
+        _patch(chat2desk, 'operator_names', lambda *_a, **_k: {})
+        _patch(chat2desk, 'channel_names', lambda *_a, **_k: {})
+
+        app = Flask(__name__)
+        app.register_blueprint(build_driver_chats_blueprint(
+            db=db,
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (context['user_id'], None, None),
+            sensitive_access_granted=lambda _uid: True))
+        return app.test_client(), seen
+
+    def test_foreign_number_without_the_country_code_is_found_by_its_tail(self):
+        """Турецкий номер, продиктованный как «531 729 83 61». Точного
+        совпадения нет и быть не может — в базе он лежит с кодом «90»."""
+        client, seen = self.build(by_tail=(124223666, '905317298361'))
+        response = client.get('/api/driver_chats/search?phone=531+729+83+61')
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(seen['tail'], ['317298361'])
+        self.assertEqual(payload['client_id'], 124223666)
+        # Дальше живём под ТОЙ записью номера, в какой он лежит у нас: под ней
+        # ляжет кеш и строка журнала, а следующий поиск попадёт в точный путь.
+        self.assertEqual(payload['phone'], '905317298361')
+        self.assertEqual(seen['logged'], [('search', '905317298361')])
+        self.assertEqual(seen['vendor'], [], 'вендора не спрашивали — нашли у себя')
+
+    def test_nine_digit_national_number_reaches_the_tail_instead_of_a_refusal(self):
+        """Узбекский, киргизский и таджикский номера девятизначные. Раньше на
+        них раздел отвечал «непохоже на номер телефона» — то есть отказывал
+        целой стране."""
+        client, seen = self.build(by_tail=(124421666, '996555510048'))
+        response = client.get('/api/driver_chats/search?phone=555510048')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen['tail'], ['555510048'])
+        self.assertEqual(response.get_json()['phone'], '996555510048')
+        self.assertEqual(seen['variants'], [],
+                         'точное совпадение по девяти цифрам не спрашивают')
+
+    def test_nine_digits_that_found_nobody_are_not_asked_of_the_vendor(self):
+        """Фильтр `phone` у вендора ТОЧНЫЙ: девять цифр без кода страны он не
+        найдёт, а вызов стоит квоты, общей с ночным синком метрик отдела."""
+        client, seen = self.build(by_tail=None)
+        response = client.get('/api/driver_chats/search?phone=555510048')
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['not_found'])
+        self.assertEqual(seen['vendor'], [])
+
+    def test_a_full_number_that_found_nobody_still_goes_to_the_vendor(self):
+        """Номер целиком вендор поискать может — там живут те, кто написал
+        впервые сегодня и в ночной срез ещё не попал."""
+        client, seen = self.build(by_tail=None)
+        response = client.get('/api/driver_chats/search?phone=998901234567')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(seen['vendor'], ['998901234567'])
+
+    def test_the_tail_is_skipped_when_the_exact_record_answered(self):
+        """Хвост — запасной ход. Точное совпадение и дешевле, и однозначнее."""
+        client, seen = self.build(exact=555001)
+        response = client.get('/api/driver_chats/search?phone=87071234567')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['client_id'], 555001)
+        self.assertEqual(seen['tail'], [], 'до хвоста дело не дошло')
+
+    def test_two_drivers_behind_one_tail_stop_with_a_clear_answer(self):
+        """Показать переписку соседа нельзя, ответить «не найдено» — соврать."""
+        client, seen = self.build(by_tail=('ambiguous', None))
+        response = client.get('/api/driver_chats/search?phone=531+729+83+61')
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertEqual(payload['code'], 'PHONE_AMBIGUOUS')
+        self.assertIn('с кодом страны', payload['error'])
+        self.assertEqual(seen['vendor'], [])
+        # В журнал ложится то, что человек ввёл (после нормализации), а не
+        # хвост: по нему потом и разбирают, кого искали.
+        self.assertEqual(seen['logged'], [('search', '5317298361')],
+                         'искал — значит в журнале')
+
+    def test_real_junk_is_still_refused_before_any_database(self):
+        client, seen = self.build()
+        for raw in ('1234', 'abc', ''):
+            with self.subTest(raw=raw):
+                response = client.get('/api/driver_chats/search?phone=' + raw)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()['code'], 'BAD_PHONE')
+        self.assertEqual(seen['tail'], [])
+        self.assertEqual(seen['vendor'], [])
+
+
 class SearchScreenTests(unittest.TestCase):
     """Экран поиска, переделанный 08.09.2026 по просьбе владельца:
 
@@ -1517,15 +1840,17 @@ class SearchScreenTests(unittest.TestCase):
             '// ── Список чатов и панель')[0]
         self.assertIn('motion-reduce:transition-none', stage)
 
-    def test_parks_are_on_the_right_of_the_thread(self):
-        """Владелец 08.09.2026: «справа чаты по таксопаркам». На телефоне
-        колонка одна и список поднимается наверх — выбирают парк раньше, чем
-        читают."""
+    def test_parks_are_on_the_left_of_the_thread(self):
+        """Владелец 08.09.2026 сначала попросил список парков справа, посмотрел
+        и в тот же день вернул налево. Порядок теперь один на все ширины —
+        список первый, — поэтому классов `order` в разметке быть не должно: они
+        означали бы, что где-то он всё-таки второй."""
         grid = self.source.split('{hasChats && (')[1].split('</div>\n                    )}')[0]
-        self.assertLess(grid.index('<ChatPanel'), grid.index('<ChatList'),
-                        'переписка идёт первой — она главная на экране')
-        self.assertIn('order-2 lg:order-1', grid)
-        self.assertIn('order-1 lg:order-2', grid)
+        self.assertLess(grid.index('<ChatList'), grid.index('<ChatPanel'),
+                        'список парков идёт первым — парк выбирают раньше, чем читают')
+        self.assertIn('lg:grid-cols-[308px_minmax(0,1fr)]', grid,
+                      'узкая колонка списка стоит первой и в сетке')
+        self.assertNotIn('order-', grid)
 
     def test_the_explanation_hides_once_a_chat_is_found(self):
         """Найденный чат — главное на экране, объяснение своё дело сделало."""

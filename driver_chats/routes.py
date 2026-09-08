@@ -197,15 +197,20 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
     def driver_chats_search(ctx):
         raw_phone = request.args.get('phone') or ''
         phone = chat2desk.normalize_phone(raw_phone)
+        # Хвост считаем от ИСХОДНОГО ввода, а не от нормализованного номера:
+        # узбекский, киргизский и таджикский национальные номера девятизначные,
+        # и номер целиком из них не собирается — а найти водителя по ним можно.
+        tail = chat2desk.phone_tail(raw_phone)
         # «Обновить» на экране — тот же поиск, но мимо кеша. Отдельного роута он
         # не заслуживает: ответ, лимит и запись в журнал у него ровно те же, а
         # два почти одинаковых обработчика разъехались бы на первой же правке.
         force_fresh = str(request.args.get('refresh') or '').strip().lower() \
             in ('1', 'true', 'yes')
-        if not phone:
+        if not phone and not tail:
             return jsonify({
                 "error": "Непохоже на номер телефона. Введите номер целиком — "
-                         "например, 87071234567 или 79161234567",
+                         "например, 87071234567, 79161234567 или "
+                         "+998 90 123 45 67",
                 "code": "BAD_PHONE",
             }), 400
 
@@ -219,6 +224,10 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
         truncated = False
         client_id, messages, fetched_at = None, None, None
         pending_notes = []
+        # Хвост нашёл нескольких водителей — отвечаем после блока: внутри него
+        # держится место в общем пуле соединений, и выходить из него с ответом
+        # значит держать его дольше нужного.
+        ambiguous_tail = False
         with db._get_cursor() as cursor:
             cursor.execute(
                 "SELECT count(*) FROM dch_events "
@@ -230,9 +239,35 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
             if used_today < DAILY_SEARCH_LIMIT:
                 # Клиент вендора: сначала своя память о паре телефон-клиент,
                 # потом ночной срез заявок, и только потом — API.
+                # Точные записи спрашиваем, только если номер собрался
+                # целиком: искать в базе по девяти цифрам без кода страны
+                # нечего — у вендора номер лежит с кодом.
                 client_id = (queries.cached_client_id(cursor, phone)
                              or queries.local_client_id(
-                                 cursor, chat2desk.phone_variants(phone)))
+                                 cursor, chat2desk.phone_variants(phone))) if phone else None
+                if client_id is None:
+                    # Точные записи не подошли — ищем по ХВОСТУ номера. Это
+                    # единственный способ найти иностранный номер, названный без
+                    # кода страны: достроить «531 729 83 61» до турецкого
+                    # «90 531 729 83 61» нельзя ничем, кроме гадания по двум
+                    # сотням кодов, а последние девять цифр у номера одни и те же
+                    # в любой записи.
+                    by_tail = queries.local_client_by_tail(cursor, tail)
+                    if by_tail and by_tail[0] == 'ambiguous':
+                        ambiguous_tail = True
+                        # Пишем журнал ЗДЕСЬ же, уже открытым курсором: искать
+                        # человек искал, а отдельный курсор ради одной строки —
+                        # ещё одно место в общем пуле, где четыре из них держит
+                        # цикл запросов бота.
+                        queries.log_event(cursor, ctx, 'search', phone=phone or tail,
+                                          ip_address=_ip(), user_agent=_ua())
+                    elif by_tail:
+                        client_id, stored_phone = by_tail
+                        # Дальше живём под ТОЙ записью номера, в какой он лежит
+                        # у нас: под ней сохранится кеш и ляжет строка журнала,
+                        # а повторный поиск того же водителя попадёт уже в
+                        # точный путь, без второго прохода по хвосту.
+                        phone = chat2desk.normalize_phone(stored_phone) or phone
                 if client_id is not None:
                     # Свои заметки «Передан», которых вендор ещё не показывает.
                     # Читаем здесь, чтобы не открывать под них третий курсор.
@@ -242,6 +277,18 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
                         messages, fetched_at = queries.cached_messages(
                             cursor, client_id, window_from, window_to,
                             CACHE_TTL_SECONDS)
+        if ambiguous_tail:
+            # Такого на живой базе нет ни разу (16 421 хвост, ни одного
+            # совпадения между разными водителями), но если однажды случится —
+            # показать переписку соседа нельзя, а молча ответить «не найдено»
+            # значило бы соврать. Строка журнала уже записана выше, тем же
+            # курсором.
+            return jsonify({
+                "error": "По последним цифрам этого номера нашлось несколько "
+                         "водителей. Введите номер целиком, с кодом страны.",
+                "code": "PHONE_AMBIGUOUS",
+            }), 400
+
         if used_today >= DAILY_SEARCH_LIMIT:
             return jsonify({
                 "error": "На сегодня исчерпан лимит поисков (%d). Он защищает "
@@ -253,13 +300,17 @@ def build_driver_chats_blueprint(*, db, require_api_key, build_cors_preflight_re
 
         client_name = None
         if client_id is None:
-            found = chat2desk.find_client(phone)
+            # У вендора фильтр `phone` ТОЧНЫЙ, поэтому девять цифр без кода
+            # страны спрашивать бесполезно — и незачем: вызов стоит квоты,
+            # общей с ночным синком метрик отдела. Такой номер мы либо нашли
+            # хвостом по своей базе, либо честно говорим «не нашли».
+            found = chat2desk.find_client(phone) if phone else None
             if not found or not found.get('id'):
                 with db._get_cursor() as cursor:
-                    queries.log_event(cursor, ctx, 'search', phone=phone,
+                    queries.log_event(cursor, ctx, 'search', phone=phone or tail,
                                       ip_address=_ip(), user_agent=_ua())
                 return jsonify({
-                    'phone': phone, 'client_id': None, 'chats': [],
+                    'phone': phone or raw_phone.strip(), 'client_id': None, 'chats': [],
                     'window': {'from': window_from.isoformat(), 'to': window_to.isoformat()},
                     'not_found': True,
                     'fetched_at': chat2desk.now_almaty().isoformat(),

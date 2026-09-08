@@ -410,14 +410,23 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     </div>
 
                     {hasChats && (
-                        /* Переписка слева, список парков справа — расположение
-                           владельца от 08.09.2026. На телефоне колонка одна, и
-                           порядок обратный: сначала выбрать парк, потом читать,
-                           поэтому список поднят классами order, а не порядком в
-                           разметке. */
-                        <div className="grid animate-card-open gap-4 lg:grid-cols-[minmax(0,1fr)_308px]">
+                        /* Список парков СЛЕВА, переписка справа — расположение
+                           владельца от 08.09.2026 (в тот же день он попросил
+                           сначала правую сторону, посмотрел и вернул левую).
+                           Классы `order` больше не нужны: и на телефоне, и на
+                           широком экране список идёт первым — парк выбирают
+                           раньше, чем читают. */
+                        <div className="grid animate-card-open gap-4 lg:grid-cols-[308px_minmax(0,1fr)]">
+                            <ChatList
+                                chats={chats}
+                                activeKey={chatKey(activeChat)}
+                                onPick={(chat) => setActiveKey(chatKey(chat))}
+                                handedOff={handedOff}
+                                driverName={result.clientName}
+                                phone={result.phone}
+                                truncated={result.truncated}
+                            />
                             <ChatPanel
-                                className="order-2 lg:order-1"
                                 chat={activeChat}
                                 snapshot={snapshot}
                                 phone={result.phone}
@@ -427,16 +436,6 @@ const DriverChatsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 onRefresh={runRefresh}
                                 refreshing={refreshing}
                                 fetchedAt={result.fetchedAt}
-                            />
-                            <ChatList
-                                className="order-1 lg:order-2"
-                                chats={chats}
-                                activeKey={chatKey(activeChat)}
-                                onPick={(chat) => setActiveKey(chatKey(chat))}
-                                handedOff={handedOff}
-                                driverName={result.clientName}
-                                phone={result.phone}
-                                truncated={result.truncated}
                             />
                         </div>
                     )}
@@ -512,7 +511,7 @@ function firstLiveKey(chats) {
 const SEARCH_STEPS = [
     {
         title: 'Введите номер',
-        text: 'Как удобно: 87071234567, +7 707 123 45 67 или 7071234567. Enter — и мы найдём переписку за последние двое суток.',
+        text: 'Как удобно: 87071234567, 7071234567 или иностранный — +998 90 123 45 67. Enter — и мы найдём переписку за последние двое суток.',
     },
     {
         title: 'Выберите таксопарк',
@@ -646,13 +645,12 @@ const SearchStage = ({ compact, value, onChange, onSubmit, searching, inputRef,
 // как несколько разных чатов; теперь строка ровно одна на парк, а вся история
 // двух суток лежит внутри.
 //
-// Стоит список СПРАВА от переписки (владелец, 08.09.2026). На телефоне он
-// поднимается над перепиской и получает свой потолок высоты: во весь экран он
-// оттолкнул бы ленту за нижний край, а выбирают парк раньше, чем читают.
+// Стоит список СЛЕВА от переписки. На телефоне он поднимается над перепиской и
+// получает свой потолок высоты: во весь экран он оттолкнул бы ленту за нижний
+// край, а выбирают парк раньше, чем читают.
 
-const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, truncated,
-                    className = '' }) => (
-    <div className={`${iosCard} flex max-h-[44vh] flex-col overflow-hidden lg:max-h-[76vh] ${className}`}>
+const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, truncated }) => (
+    <div className={`${iosCard} flex max-h-[44vh] flex-col overflow-hidden lg:max-h-[76vh]`}>
         <div className="border-b border-slate-200/70 px-4 py-3">
             <div className="truncate text-[15px] font-semibold text-slate-900">
                 {driverName || formatPhone(phone)}
@@ -718,10 +716,10 @@ const ChatList = ({ chats, activeKey, onPick, handedOff, driverName, phone, trun
    шапке переписки, а не над списком: человек в этот момент смотрит именно в
    переписку — ждёт ответа водителя или только что отправил комментарий. */
 const ChatPanel = ({ chat, snapshot, phone, driverName, handedOff, onHandoff,
-                     onRefresh, refreshing, fetchedAt, className = '' }) => {
+                     onRefresh, refreshing, fetchedAt }) => {
     if (!chat) return null;
     return (
-        <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden ${className}`}>
+        <div className={`${iosCard} flex max-h-[76vh] flex-col overflow-hidden`}>
             {/* Шапка переписки. На телефоне сведения и кнопки стоят РАЗНЫМИ
                 строками: `flex-wrap` переносит элемент целиком, а `flex-1`
                 позволял левому блоку сжаться до 110 px рядом с двумя кнопками —
