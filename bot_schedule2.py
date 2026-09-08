@@ -9843,16 +9843,16 @@ def _shift_auction_test_error_response(error):
     mapping.update({
         "AUCTION_END_BEFORE_START": ("Время завершения должно быть позже старта", 400),
         "AUCTION_GROUP_INVALID": ("Некорректные данные группы времени", 400),
-        "AUCTION_GROUP_LIMIT": ("Слишком много групп времени на одну неделю", 400),
+        "AUCTION_GROUP_LIMIT": ("Слишком много групп времени на один период", 400),
         "AUCTION_GROUP_START_REQUIRED": ("У каждой группы должно быть время старта", 400),
         "AUCTION_GROUP_WINDOW_EMPTY": ("Окно группы пустое: завершение должно быть позже её старта", 400),
-        "AUCTION_GROUP_WEEK_REQUIRED": ("Сначала выберите неделю аукциона — группы задаются для неё", 400),
+        "AUCTION_GROUP_WEEK_REQUIRED": ("Сначала выберите период аукциона — группы задаются для него", 400),
         "SELF_SCHEDULE_NOT_ALLOWED": ("Свой график вам не открыт", 403),
         "SELF_SCHEDULE_LIMIT_EXCEEDED": ("Лимит своего графика: не больше нормы плюс 10 часов", 409),
-        "AUCTION_PERIOD_NOT_FOUND": ("Недельный план для аукциона не найден", 404),
-        "AUCTION_PERIOD_NOT_WEEK": ("Для аукциона можно выбрать только полную неделю", 409),
-        "AUCTION_PERIOD_EMPTY": ("В выбранном недельном плане нет смен", 409),
-        "AUCTION_PERIOD_PAST": ("Прошедшую неделю нельзя запустить заново", 409),
+        "AUCTION_PERIOD_NOT_FOUND": ("План графика для аукциона не найден", 404),
+        "AUCTION_PERIOD_INVALID": ("У плана некорректный период: дата окончания раньше начала", 409),
+        "AUCTION_PERIOD_EMPTY": ("В выбранном плане нет смен", 409),
+        "AUCTION_PERIOD_PAST": ("Прошедший период нельзя запустить заново", 409),
         "POST_AUCTION_NOT_ACTIVE": ("Дополнительные смены можно забирать только после сохранения итогов в графики", 409),
         "LOT_NOT_OPEN_FOR_POST_CLAIM": ("Эту смену больше нельзя забрать", 409),
         "SHIFT_ALREADY_STARTED": ("Эта смена уже началась или прошла", 409),
@@ -9869,7 +9869,7 @@ def _shift_auction_test_error_response(error):
         "INVALID_DURATION": ("Длина смены не соответствует ставке", 400),
         "INVALID_RATE": ("Некорректная ставка смены", 400),
         "INVALID_DATE": ("Некорректная дата смены", 400),
-        "DATE_OUT_OF_RANGE": ("Этот день не входит в текущую неделю аукциона", 409),
+        "DATE_OUT_OF_RANGE": ("Этот день не входит в текущий период аукциона", 409),
     })
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
     return jsonify({"error": message, "code": code}), status

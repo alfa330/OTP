@@ -178,7 +178,7 @@ const formatDateTimeLabel = (value) => {
 const formatAuctionPeriodLabel = (period) => (
   period?.date_from && period?.date_to
     ? `${formatDateLabel(period.date_from)} — ${formatDateLabel(period.date_to)}`
-    : 'Неделя не выбрана'
+    : 'Период не выбран'
 );
 
 const AUCTION_DURATION_PRESETS = [
@@ -830,12 +830,29 @@ const getAuctionLotActionKey = (lotOrId) => {
   return lotOrId === null || lotOrId === undefined ? '' : String(lotOrId);
 };
 
+// Квота выходных зависит от длины периода, поэтому подпись под ней не может быть
+// прибита к «2 дня»: на пятидневке это один день, на трёхдневке выходных нет.
+const formatDayOffQuotaWord = (count) => {
+  // После «до» — родительный падеж: «до 1 дня», «до 2 дней», «до 11 дней».
+  const value = Math.abs(Number(count || 0)) % 100;
+  return value % 10 === 1 && value !== 11 ? 'дня' : 'дней';
+};
+
+// Две выходные — норма НЕДЕЛИ, а не «две на любой прогон»: период аукциона
+// задаётся датами в «Расчёте ресурсов» и бывает короче семи дней. Зеркало
+// Database._shift_auction_day_off_quota — расходиться им нельзя, иначе экран
+// обещает часы, которые сервер не отдаст.
+const getAuctionDayOffQuota = (periodDayCount) => {
+  const totalDays = Math.max(0, Number(periodDayCount || 0));
+  return Math.floor((totalDays * 2) / 7);
+};
+
 const getAuctionNormWorkdayCount = (periodDayCount, blockedDayCount = 0) => {
   const totalDays = Math.max(0, Number(periodDayCount || 0));
   const blockedDays = clampNumber(Number(blockedDayCount || 0), 0, totalDays);
   const availableDays = Math.max(0, totalDays - blockedDays);
   if (!availableDays) return 0;
-  const dayOffQuota = Math.min(2, totalDays);
+  const dayOffQuota = getAuctionDayOffQuota(totalDays);
   const manualDayOffQuota = Math.max(0, dayOffQuota - blockedDays);
   return Math.max(1, availableDays - manualDayOffQuota);
 };
@@ -1243,10 +1260,10 @@ const AuctionWeekSelector = ({
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
             <CalendarDays size={16} className="text-blue-700" />
-            Неделя аукциона
+            Период аукциона
           </div>
           <div className="mt-1 text-xs text-slate-500 sm:text-sm">
-            {selectedPeriod ? formatAuctionPeriodLabel(selectedPeriod) : 'Выберите неделю'}
+            {selectedPeriod ? formatAuctionPeriodLabel(selectedPeriod) : 'Выберите период'}
             {previewOnly ? ' · просмотр без выбора смен' : ''}
           </div>
         </div>
@@ -1303,11 +1320,11 @@ const AuctionWeekSelector = ({
           );
         }) : (
           <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-sm text-slate-500">
-            За {formatMonthValueLabel(visibleMonth) || 'выбранный месяц'} недельных планов нет.
+            За {formatMonthValueLabel(visibleMonth) || 'выбранный месяц'} планов графика нет.
           </div>
         )}
       </div>
-      {loading ? <div className="mt-2 text-xs text-slate-500">Загружаю неделю...</div> : null}
+      {loading ? <div className="mt-2 text-xs text-slate-500">Загружаю период...</div> : null}
       {error ? <div className="mt-2 text-xs font-medium text-rose-600">{error}</div> : null}
     </section>
   );
@@ -1769,7 +1786,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
       'Сумма часов не должна превышать вашу норму на период (норма видна в правом верхнем углу).',
       'Если смена недоступна по правилам (превысит норму, на этот день уже есть смена и т. п.) — кнопка станет серой с подсказкой.'
     ],
-    example: 'Например, при ставке 1.0 и неделе из 7 дней (квота 2 выходных) норма = 5 рабочих дней × 8 ч = 40 часов. При ставке 0.5 — 20 часов. Перерывы в норму не входят.'
+    example: 'Например, при ставке 1.0 и периоде из 7 дней (квота 2 выходных) норма = 5 рабочих дней × 8 ч = 40 часов. При ставке 0.5 — 20 часов. Квота выходных считается от длины периода: на 4–6 днях это один день, на 1–3 днях выходных нет. Перерывы в норму не входят.'
   },
   {
     icon: Lock,
@@ -1823,7 +1840,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
   {
     icon: Undo2,
     title: 'Шаг 4 · Посмотрите свои смены и верните лишнюю',
-    body: 'Нажмите на любой день в нижней панели — снизу откроется карточка дня со всеми вашими сменами этого дня: время, часы и пометка «добор», если вы брали только часть смены. Карточка работает и когда аукцион уже закрыт, и на прошлых неделях. Пока аукцион открыт, у каждой смены есть кнопка «Вернуть» — после подтверждения смена снова станет доступной остальным операторам.',
+    body: 'Нажмите на любой день в нижней панели — снизу откроется карточка дня со всеми вашими сменами этого дня: время, часы и пометка «добор», если вы брали только часть смены. Карточка работает и когда аукцион уже закрыт, и в прошлых периодах. Пока аукцион открыт, у каждой смены есть кнопка «Вернуть» — после подтверждения смена снова станет доступной остальным операторам.',
     visual: (
       <div className="space-y-3">
         <div>
@@ -1852,7 +1869,7 @@ const OPERATOR_INSTRUCTION_STEPS = [
       </div>
     ),
     nuances: [
-      'Смотреть свои смены можно всегда — и пока аукцион идёт, и после закрытия, и на прошлой неделе.',
+      'Смотреть свои смены можно всегда — и пока аукцион идёт, и после закрытия, и в прошлом периоде.',
       'Кнопка «Вернуть» есть только пока аукцион ещё открыт.',
       'Если кто-то параллельно её уже забрал — система покажет ошибку, ничего страшного не произойдёт.'
     ]
@@ -2002,8 +2019,8 @@ const ADMIN_INSTRUCTION_STEPS = [
   },
   {
     icon: CalendarDays,
-    title: 'Шаг 2 · Выберите неделю аукциона',
-    body: 'В блоке «Неделя аукциона» выберите сохранённый недельный план из «Расчёта ресурсов» — его смены станут лотами аукциона. Доступны только полные недели, которые ещё не закончились. Рядом видно, сколько смен в плане.',
+    title: 'Шаг 2 · Выберите период аукциона',
+    body: 'В блоке «Период аукциона» выберите сохранённый план графика из «Расчёта ресурсов» — его смены станут лотами аукциона. Период не обязан быть полной неделей: план на 4 дня разыгрывается так же, как недельный. Доступны периоды, которые ещё не закончились. Рядом видно, сколько смен в плане.',
     visual: (
       <div className="space-y-2">
         <div className="grid max-w-sm gap-2">
@@ -2018,13 +2035,13 @@ const ADMIN_INSTRUCTION_STEPS = [
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <ButtonPreview variant="outline" icon={RotateCcw}>Начать заново</ButtonPreview>
-          <span className="text-xs text-slate-500">Перезапускает аукцион выбранной недели с чистого листа.</span>
+          <span className="text-xs text-slate-500">Перезапускает аукцион выбранного периода с чистого листа.</span>
         </div>
       </div>
     ),
     nuances: [
-      'Смена недели или «Начать заново» очищает выбранные операторами смены и выходные этой недели. Прошлые опубликованные периоды не трогаются.',
-      'Если планов нет — сначала проведите генерацию в «Расчёте ресурсов» и сохраните недельный график.'
+      'Смена периода или «Начать заново» очищает выбранные операторами смены и выходные этого периода. Прошлые опубликованные периоды не трогаются.',
+      'Если планов нет — сначала проведите генерацию в «Расчёте ресурсов» и сохраните график.'
     ]
   },
   {
@@ -2093,7 +2110,7 @@ const ADMIN_INSTRUCTION_STEPS = [
   {
     icon: UserCog,
     title: 'Группы времени',
-    body: 'Части участников можно дать своё время аукциона — раньше или позже общего. В блоке «Группы времени» нажмите «Группа», выберите день внутри недели, задайте старт (и при необходимости своё завершение) и отметьте, кто в неё входит. Остальные заходят в общее окно.',
+    body: 'Части участников можно дать своё время аукциона — раньше или позже общего. В блоке «Группы времени» нажмите «Группа», выберите день внутри периода, задайте старт (и при необходимости своё завершение) и отметьте, кто в неё входит. Остальные заходят в общее окно.',
     visual: (
       <div className="max-w-sm space-y-2">
         <div className="overflow-hidden rounded-xl bg-white ring-1 ring-slate-200/70">
@@ -2117,10 +2134,10 @@ const ADMIN_INSTRUCTION_STEPS = [
       </div>
     ),
     nuances: [
-      'Группа живёт только в своей неделе: на других неделях аукциона она не действует.',
-      'День группы выбирается внутри недели общего старта — можно поставить её на другой день, не только на день аукциона.',
+      'Группа живёт только в своём периоде: в других периодах аукциона она не действует.',
+      'День группы выбирается внутри периода общего старта — можно поставить её на другой день, не только на день аукциона.',
       'В группу можно взять любого оператора направления (кроме уволенных) — он не обязан быть заранее отмечен в списке участников: попав в группу, он автоматически становится участником аукциона.',
-      'Оператор может быть только в одной группе недели.',
+      'Оператор может быть только в одной группе периода.',
       'Без своего завершения группа закрывается вместе со всеми; если группа стартует позже общего завершения, своё завершение обязательно.',
       'Пауза сдвигает завершение и у групп, а не только у общего окна.'
     ]
@@ -2220,7 +2237,7 @@ const ADMIN_INSTRUCTION_STEPS = [
     ),
     nuances: [
       'Включить добор можно только при открытом аукционе; выключить — в любой момент, даже на паузе.',
-      'При перезапуске аукциона или смене недели добор автоматически сбрасывается.'
+      'При перезапуске аукциона или смене периода добор автоматически сбрасывается.'
     ]
   },
   {
@@ -3526,7 +3543,7 @@ const ShiftAuctionShiftsTable = ({
       <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
         <p className="mt-2 text-sm text-slate-500">
-          {!dates.length ? 'Нет смен в выбранной неделе.' : 'Нет операторов-участников.'}
+          {!dates.length ? 'Нет смен в выбранном периоде.' : 'Нет операторов-участников.'}
         </p>
       </section>
     );
@@ -3539,7 +3556,7 @@ const ShiftAuctionShiftsTable = ({
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Таблица смен</h2>
             <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">
-              Распределение смен по операторам недели. Подсветка нормы:
+              Распределение смен по операторам периода. Подсветка нормы:
               <span className="ml-1 inline-flex items-center rounded border border-emerald-300 bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-800">100%+</span>
               <span className="ml-1 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1.5 text-[10px] font-semibold text-amber-800">80–99%</span>
               <span className="ml-1 inline-flex items-center rounded border border-orange-300 bg-orange-50 px-1.5 text-[10px] font-semibold text-orange-800">&lt;80%</span>
@@ -4481,7 +4498,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       setPeriodPreviewOperators([]);
       setPeriodPreviewParticipantWorkloads([]);
       setPeriodPreviewPostAuctionActive(false);
-      setPeriodPreviewError(error?.response?.data?.error || 'Не удалось загрузить выбранную неделю');
+      setPeriodPreviewError(error?.response?.data?.error || 'Не удалось загрузить выбранный период');
     } finally {
       if (!signal?.aborted) setPeriodPreviewLoading(false);
     }
@@ -4841,6 +4858,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       && String(period?.date_to || '') === dateTo
     ));
     if (!matchedPeriod?.id) {
+      // Молчать здесь нельзя: раздел останется на ПРОШЛОМ периоде и покажет чужие
+      // смены как свои. Именно так выглядел дефект 08.09.2026 — сохранённый график
+      // на 5 дней в список не попадал, а аукцион продолжал показывать семидневку.
+      notify?.(
+        `Плана графика на ${formatDateLabel(dateFrom)} — ${formatDateLabel(dateTo)} в аукционе нет:`
+        + ' сохраните график на этот период в «Расчёте ресурсов» или выберите период ниже',
+        'error',
+      );
       setAppliedInitialPeriodKey(initialPeriodKey);
       onInitialPeriodApplied?.();
       return;
@@ -4853,7 +4878,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
     setAppliedInitialPeriodKey(initialPeriodKey);
     onInitialPeriodApplied?.();
-  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, onInitialPeriodApplied, updateDraftSchedulePlanId]);
+  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, notify, onInitialPeriodApplied, updateDraftSchedulePlanId]);
 
   useEffect(() => {
     if (!selectedViewSchedulePlanId || isViewingActivePeriod) {
@@ -4966,7 +4991,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [myClaimedLots]
   );
 
-  const dayOffQuota = useMemo(() => Math.min(2, Math.max(0, lotDates.length)), [lotDates.length]);
+  const dayOffQuota = useMemo(() => getAuctionDayOffQuota(lotDates.length), [lotDates.length]);
   const manualDayOffLimit = useMemo(
     () => Math.max(0, dayOffQuota - Math.min(dayOffQuota, myBlockedDateMap.size)),
     [dayOffQuota, myBlockedDateMap.size]
@@ -5454,7 +5479,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (!supportsPartialClaim || canMonitor || !canClaim) return map;
     (monitoredLots || []).forEach((lot) => {
       if (!lot || lot.status !== 'available') return;
-      // Часть можно взять только у смены из недельного плана: занятые куски
+      // Часть можно взять только у смены из плана графика: занятые куски
       // хранятся парой (план, смена), а у добавленного вручную лота её нет.
       if (!lot.source_schedule_plan_id || !lot.source_schedule_shift_id) return;
       const lotId = getAuctionLotActionKey(lot);
@@ -5842,7 +5867,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       if (hasNewerUnsavedChanges) {
         notify('Настройки на момент нажатия сохранены. Новые изменения в форме ещё не сохранены.', 'warning');
       } else {
-        notify(selectedDraftPeriod ? `Аукцион сохранен для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}` : 'Настройки тестового аукциона сохранены');
+        notify(selectedDraftPeriod ? `Аукцион сохранен для периода ${formatAuctionPeriodLabel(selectedDraftPeriod)}` : 'Настройки тестового аукциона сохранены');
       }
     } catch (error) {
       notify(error?.response?.data?.error || 'Не удалось сохранить настройки аукциона смен', 'error');
@@ -5854,16 +5879,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const handleRestartAuction = useCallback(async () => {
     if (!canManage || !apiRoot) return;
     if (!selectedDraftPeriod?.id) {
-      notify('Сначала выберите недельный план для аукциона', 'error');
+      notify('Сначала выберите план графика для аукциона', 'error');
       return;
     }
     if (!selectedDraftPeriod.can_restart) {
-      notify('Прошедшую неделю нельзя запустить заново', 'error');
+      notify('Прошедший период нельзя запустить заново', 'error');
       return;
     }
     const confirmed = window.confirm(
-      `Начать аукцион заново для недели ${formatAuctionPeriodLabel(selectedDraftPeriod)}?\n\n`
-      + 'Будут очищены только выбранные смены и выходные этой недели. Прошлые опубликованные периоды не изменятся. '
+      `Начать аукцион заново для периода ${formatAuctionPeriodLabel(selectedDraftPeriod)}?\n\n`
+      + 'Будут очищены только выбранные смены и выходные этого периода. Прошлые опубликованные периоды не изменятся. '
       + 'Режим добора для нового запуска будет выключен.'
     );
     if (!confirmed) return;
@@ -5960,10 +5985,14 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
   }, [apiRoot, applySnapshot, buildHeaders, canManage, isTogglingRateLock, notify, settings.rate_lock_enabled, withDirection]);
 
+  // withDirection ОБЯЗАН быть в зависимостях: без него колбэк замыкается на
+  // направлении первого рендера, и первое «Сохранить в графики» после
+  // переключения тумблера уехало бы за ПРОШЛЫМ направлением — то есть
+  // опубликовало бы чужой аукцион в настоящие графики работы.
   const handlePublishAuction = useCallback(async () => {
     if (!canManage || !apiRoot || isPublishingAuction) return;
     const confirmed = window.confirm(
-      'Сохранить итоговые смены и выходные в раздел «Графики работы»? Данные за неделю аукциона у участников будут заменены.'
+      'Сохранить итоговые смены и выходные в раздел «Графики работы»? Данные за период аукциона у участников будут заменены.'
     );
     if (!confirmed) return;
     setIsPublishingAuction(true);
@@ -5981,7 +6010,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsPublishingAuction(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify, withDirection]);
 
   const openAddShiftModal = useCallback((group, date) => {
     if (!group || !date) return;
@@ -6904,7 +6933,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <ListChecks size={17} className="text-blue-700" />
                   Мои выходные
                 </div>
-                <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">Можно выбрать до 2 дней периода. Статусные периоды занимают эту квоту.</p>
+                <p className="mt-1 text-xs text-slate-500 sm:mt-2 sm:text-sm">
+                  {dayOffQuota > 0
+                    ? `Можно выбрать до ${dayOffQuota} ${formatDayOffQuotaWord(dayOffQuota)} периода. Статусные периоды занимают эту квоту.`
+                    : 'Период короче четырёх дней — выходные в нём не выбираются.'}
+                </p>
                 <div className="mt-2 flex min-w-0 max-w-full gap-1.5 overflow-x-auto overscroll-x-contain pb-1 xl:block xl:space-y-2 xl:overflow-visible xl:pb-0">
                   {lotDates.length ? lotDates.map((date) => {
                     const active = monitoredMyDayOffs.includes(date);
@@ -6964,7 +6997,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               <div className="min-w-0 sm:p-5">
                 {!isViewingActivePeriod ? (
                   <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 sm:text-sm">
-                    Предпросмотр недели {selectedViewPeriod ? formatAuctionPeriodLabel(selectedViewPeriod) : ''}. Выбор смен доступен только на активной неделе аукциона.
+                    Предпросмотр периода {selectedViewPeriod ? formatAuctionPeriodLabel(selectedViewPeriod) : ''}. Выбор смен доступен только в активном периоде аукциона.
                   </div>
                 ) : null}
                 {auctionTableGroups.length && lotDates.length ? (
@@ -7038,7 +7071,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                                             claimingLotIds={claimingLotIds}
                                             onClaimLot={handleClaimLot}
                                             userId={user?.id}
-                                            claimBlockReason={!isViewingActivePeriod && !selectedViewPostAuctionActive ? 'Выбор доступен только на активной неделе аукциона' : (claimBlockReasonByLotId.get(getAuctionLotActionKey(lot)) || '')}
+                                            claimBlockReason={!isViewingActivePeriod && !selectedViewPostAuctionActive ? 'Выбор доступен только в активном периоде аукциона' : (claimBlockReasonByLotId.get(getAuctionLotActionKey(lot)) || '')}
                                             postAuctionActive={selectedViewPostAuctionActive}
                                             postAuctionNowMs={postAuctionNowMs}
                                             postClaimingLotIds={postClaimingLotIds}
@@ -7176,11 +7209,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 ) : (
                   <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
                     {!isViewingActivePeriod && periodPreviewLoading
-                      ? 'Загружаю выбранную неделю...'
+                      ? 'Загружаю выбранный период...'
                       : lotDates.length
                       ? 'Для выбранных дней сейчас нет доступных смен.'
                       : canManage
-                        ? 'Выберите недельный план и начните аукцион заново.'
+                        ? 'Выберите план графика и начните аукцион заново.'
                         : canMonitor
                           ? 'Аукцион пока не запущен.'
                         : 'Пока нет доступных смен.'}
@@ -7472,7 +7505,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 <div>
                   <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Запуск аукциона</h2>
                   <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-                    Выберите неделю, задайте окно аукциона и управляйте составом участников.
+                    Выберите период, задайте окно аукциона и управляйте составом участников.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -7515,7 +7548,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     type="button"
                     onClick={handleExportAuctionReport}
                     disabled={isExportingAuctionReport || !isViewingActivePeriod || !lots.length}
-                    title={!isViewingActivePeriod ? 'Отчет доступен только для активной недели аукциона' : lots.length ? 'Выгрузить Excel-отчет по выбранному периоду аукциона' : 'Нет смен для выгрузки'}
+                    title={!isViewingActivePeriod ? 'Отчет доступен только для активного периода аукциона' : lots.length ? 'Выгрузить Excel-отчет по выбранному периоду аукциона' : 'Нет смен для выгрузки'}
                     className="inline-flex h-9 items-center justify-center gap-2 rounded-xl bg-slate-100 px-3.5 text-xs font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 sm:h-10 sm:px-4 sm:text-sm"
                   >
                     <Download size={16} />
@@ -7624,7 +7657,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                     <div>
                       <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                         <CalendarDays size={16} className="text-blue-700" />
-                        Неделя аукциона
+                        Период аукциона
                       </div>
                       <p className="mt-1 text-xs text-slate-500">
                         Активная: {formatAuctionPeriodLabel(settings.selected_period)}
@@ -7659,12 +7692,12 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       );
                     }) : (
                       <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500 sm:col-span-2">
-                        Нет доступных недельных планов на текущую или будущие недели.
+                        Нет доступных планов графика на текущие или будущие даты.
                       </div>
                     )}
                   </div>
                   <p className="mt-3 text-xs text-slate-500">
-                    Перезапуск доступен только для полных недель, которые еще не закончились. При перезапуске очищаются все выбранные смены и выходные.
+                    Перезапуск доступен для периодов, которые еще не закончились. При перезапуске очищаются все выбранные смены и выходные.
                   </p>
                 </div>
 
@@ -7739,8 +7772,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         Часть операторов может заходить раньше или позже общего окна. В группу можно взять
                         любого оператора направления — он сразу становится участником аукциона.
                         {selectedDraftPeriod
-                          ? <> Группы действуют только на неделю {formatAuctionPeriodLabel(selectedDraftPeriod)}.</>
-                          : <> Сначала выберите неделю аукциона.</>}
+                          ? <> Группы действуют только на период {formatAuctionPeriodLabel(selectedDraftPeriod)}.</>
+                          : <> Сначала выберите период аукциона.</>}
                       </p>
                     </div>
                     <button
@@ -8120,7 +8153,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                   <h2 className="text-base font-semibold text-slate-950 sm:text-lg">Журнал аукциона</h2>
                 </div>
                 <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-                  Кто и когда забрал смену в выбранном недельном периоде.
+                  Кто и когда забрал смену в выбранном периоде.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -8710,7 +8743,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           footnote={(
             <p className="mt-3 text-xs leading-5 text-slate-600">
               Можно взять смену целиком или только удобную часть — остальное останется
-              свободным для других. Всего за неделю по вашей ставке
+              свободным для других. Всего за период по вашей ставке
               {' '}
               <b className="text-slate-900">
                 {weeklyRateHoursLabel ? `${weeklyRateHoursLabel} ч` : 'по норме'}

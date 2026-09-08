@@ -100,5 +100,96 @@ class DirectionToggleRaceTests(unittest.TestCase):
         self.assertIn("}, [apiRoot, canOpenStream, direction, user?.id]);", self.source)
 
 
+class DirectionTravelsWithEveryActionTests(unittest.TestCase):
+    """Действие раздела не имеет права уехать за ПРОШЛЫМ направлением.
+
+    `withDirection` — это `useCallback` от `direction`. Значит колбэк, который его
+    зовёт, но не держит в зависимостях, замыкается на направлении того рендера, в
+    котором был создан, и после переключения тумблера уходит на сервер за чужим
+    прогоном. Тумблер при этом стоит правильно — расходится только запрос, и
+    заметить это по экрану нельзя.
+
+    Так лежало «Сохранить в графики» (31.08.2026): его зависимости менялись лишь
+    на самой публикации, поэтому первое нажатие после переключения на «Чат»
+    публиковало в настоящие графики работы аукцион ЛИНИИ — с заменой недели у её
+    участников. Правило общее, поэтому и сторож общий: перебираем ВСЕ колбэки
+    файла, а не один этот.
+    """
+
+    def setUp(self):
+        self.source = _read(VIEW)
+
+    @staticmethod
+    def _callbacks(source):
+        """(имя, тело, массив зависимостей) для каждого useCallback файла."""
+        needle = " = useCallback("
+        position = 0
+        while True:
+            found = source.find(needle, position)
+            if found == -1:
+                return
+            name_start = source.rfind("const ", 0, found)
+            name = source[name_start + len("const "):found].strip()
+            open_paren = found + len(needle) - 1
+            depth = 0
+            index = open_paren
+            while index < len(source):
+                char = source[index]
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                index += 1
+            call = source[open_paren + 1:index]
+            # Массив зависимостей — последний [...] вызова: тело колбэка стоит
+            # до него, поэтому rfind по '[' отделяет одно от другого.
+            bracket = call.rfind("[")
+            body = call if bracket == -1 else call[:bracket]
+            deps = "" if bracket == -1 else call[bracket:]
+            yield name, body, deps
+            position = index
+
+    def test_every_callback_that_names_direction_keeps_it_in_deps(self):
+        offenders = [
+            name
+            for name, body, deps in self._callbacks(self.source)
+            if "withDirection(" in body and "withDirection" not in deps
+        ]
+        self.assertEqual(
+            [],
+            offenders,
+            "эти действия уедут за направлением прошлого рендера: " + ", ".join(offenders),
+        )
+
+    def test_publish_is_the_one_that_burned_us(self):
+        """Точечный сторож там, где цена ошибки — подмена настоящих графиков."""
+        publish = dict(
+            (name, deps) for name, _body, deps in self._callbacks(self.source)
+        )["handlePublishAuction"]
+        self.assertIn("withDirection", publish)
+
+    def test_the_guard_can_actually_fail(self):
+        """Сторож обязан ловить порчу, иначе он украшение.
+
+        Проверяем на самом же файле: убираем `withDirection` из зависимостей
+        публикации ровно так, как он там лежал, — список нарушителей обязан
+        перестать быть пустым.
+        """
+        broken = self.source.replace(
+            "}, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify, withDirection]);",
+            "}, [apiRoot, applySnapshot, buildHeaders, canManage, isPublishingAuction, notify]);",
+            1,
+        )
+        self.assertNotEqual(broken, self.source, "не нашёл зависимости публикации — сторож потерял адрес")
+        offenders = [
+            name
+            for name, body, deps in self._callbacks(broken)
+            if "withDirection(" in body and "withDirection" not in deps
+        ]
+        self.assertIn("handlePublishAuction", offenders)
+
+
 if __name__ == "__main__":
     unittest.main()

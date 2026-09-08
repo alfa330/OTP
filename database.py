@@ -10726,11 +10726,18 @@ class Database:
         }
 
     def _shift_auction_day_off_quota(self, total_days):
+        # Две выходные — это норма НЕДЕЛИ, а не «две на любой прогон». Период
+        # аукциона задаётся датами в «Расчёте ресурсов» и бывает короче семи дней;
+        # с прежним min(2, ...) четырёхдневный прогон оставлял оператору два
+        # рабочих дня (16 ч при ставке 1,0), и раздать сгенерированные смены было
+        # некому. На семи днях формула даёт прежние 2, поэтому боевые недели
+        # линии и чата не сдвигаются.
         try:
             total = int(total_days or 0)
         except Exception:
             total = 0
-        return min(2, max(0, total))
+        total = max(0, total)
+        return (total * 2) // 7
 
     @staticmethod
     def _shift_auction_rate_bucket(rate_value):
@@ -11125,7 +11132,11 @@ class Database:
               -- одинаково (те же даты, тот же пустой заголовок) — без фильтра по
               -- направлению неделя чата встала бы в список периодов аукциона линии.
               AND COALESCE(p.direction_mode, 'line') = %s
-              AND p.date_to = p.date_from + 6
+              -- Длину периода не проверяем: график в «Расчёте ресурсов» строится
+              -- по произвольному отрезку дат, и план на 4 дня — такой же законный
+              -- предмет аукциона, как неделя. Раньше он молча выпадал из списка,
+              -- аукцион оставался на прошлом семидневном плане и показывал 7 дней
+              -- вместо четырёх вместе с чужими сменами.
             GROUP BY p.id, p.date_from, p.date_to, p.title, p.updated_at
             HAVING COUNT(s.id) > 0
             ORDER BY p.date_from, p.updated_at DESC, p.id DESC
@@ -11139,8 +11150,8 @@ class Database:
             raise ValueError("AUCTION_PERIOD_NOT_FOUND")
         date_from = row[1]
         date_to = row[2]
-        if not date_from or not date_to or date_to != date_from + timedelta(days=6):
-            raise ValueError("AUCTION_PERIOD_NOT_WEEK")
+        if not date_from or not date_to or date_to < date_from:
+            raise ValueError("AUCTION_PERIOD_INVALID")
         if int(row[5] or 0) <= 0:
             raise ValueError("AUCTION_PERIOD_EMPTY")
         if require_restartable and not bool(row[6]):
