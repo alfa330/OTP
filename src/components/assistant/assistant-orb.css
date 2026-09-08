@@ -238,22 +238,84 @@ html[data-otp-theme="dark"] .aorb__halo {
 }
 
 /* ── Откреплённое окно ──────────────────────────────────────────────────────
-   Помощник, вынесенный в окно поверх других окон (Document Picture-in-Picture),
-   занимает его целиком: рамку, тень и скругление рисует система, а не мы —
-   свои поверх системных дали бы вторую рамку внутри первой.
+   В окне живёт ВЕСЬ виджет, а не одна панель: пузырь снизу справа, чат над ним
+   — ровно так же, как в портале. Рамку, тень и скругление самого окна рисует
+   система, наши только у карточки чата внутри.
 
-   position: relative обязателен. На нём стоит подтверждение удаления разговора
-   (absolute inset-0): во встроенной панели опорой ему служила фиксированная
-   обёртка, а в отдельном документе её нет, и вопрос «удалить разговор?» уехал
-   бы в левый верхний угол окна.
-
-   Цвет объявлен здесь обоими состояниями — как и весь остальной пузырь. Слой
-   тёмной темы собирается скриптом по классам Tailwind и до собственного класса
-   виджета не достаёт; #1e2127 — то, во что он превращает bg-white. */
+   Цвета объявлены здесь обоими состояниями, как и весь остальной пузырь: слой
+   тёмной темы собирается скриптом по классам Tailwind и до собственных классов
+   виджета не достаёт. Значения взяты из него же — то, во что он превращает
+   bg-gray-50 (фон окна) и bg-white (карточка чата). */
 .aorb-pip-root {
-    position: relative;
     height: 100%;
+    background: #f9fafb;
+}
+
+html[data-otp-theme="dark"] .aorb-pip-root { background: #17191e; }
+
+.aorb-win {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    height: 100%;
+    padding: 8px;
+    box-sizing: border-box;
+}
+
+/* Свёрнутое окно — плашка: пузырь и подпись, прижатые к левому краю.
+   Раскрытое держит пузырь справа, как в углу портала. */
+.aorb-win--collapsed { justify-content: center; }
+
+.aorb-win__panel {
+    /* position: relative обязателен: на нём стоит подтверждение удаления
+       разговора (absolute inset-0). Во встроенной панели опорой ему служила
+       фиксированная обёртка, а в отдельном документе её нет, и вопрос «удалить
+       разговор?» уехал бы в левый верхний угол окна. */
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    border-radius: 18px;
+    border: 1px solid rgba(226, 232, 240, 0.8);
     background: #ffffff;
 }
 
-html[data-otp-theme="dark"] .aorb-pip-root { background: #1e2127; }
+html[data-otp-theme="dark"] .aorb-win__panel {
+    border-color: rgba(148, 163, 184, 0.18);
+    background: #1e2127;
+}
+
+.aorb-win__dock {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.aorb-win--collapsed .aorb-win__dock { justify-content: flex-start; }
+
+.aorb-win__label {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #334155;
+    order: 2;
+}
+
+html[data-otp-theme="dark"] .aorb-win__label { color: #cbd5e1; }
+
+.aorb-win__orb {
+    border: 0;
+    padding: 0;
+    background: none;
+    line-height: 0;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.aorb-win__orb:focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 3px;
+    border-radius: 50%;
+}

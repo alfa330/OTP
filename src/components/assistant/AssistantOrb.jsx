@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import axios from 'axios';
 import Orb from './Orb.jsx';
 import useAssistantChat from './useAssistantChat';
+import AssistantWindow, { WINDOW_SIZE } from './AssistantWindow.jsx';
 import {
     clampPosition, defaultPosition, movedEnough, panelAnchor, resolveDock, undock,
 } from './orbPosition';
@@ -39,10 +40,16 @@ const AssistantPanel = lazy(() => import('./AssistantPanel.jsx'));
  * ОТКРЕПЛЕНИЕ В ОКНО ПОВЕРХ ДРУГИХ ОКОН. Шарик снял «уйти из раздела за
  * ответом», но не снял «уйти из портала»: половину рабочего времени оператор
  * проводит в чужих системах — Fleet, CRM, чаты, — и там помощника не было
- * вовсе. Кнопка «открепить» выносит панель в окно Document Picture-in-Picture,
- * которое браузер держит поверх ВСЕГО, включая другие окна и другие программы.
- * Механика окна общая на портал (src/utils/pipWindow.js): такое окно в
- * документе ровно одно, и его уже открывают закреплённая задача и табло СЗоВ.
+ * вовсе. Кнопка «открепить» выносит помощника в окно Document
+ * Picture-in-Picture, которое браузер держит поверх ВСЕГО, включая другие окна
+ * и другие программы. Механика окна общая на портал (src/utils/pipWindow.js):
+ * такое окно в документе ровно одно, и его уже открывают закреплённая задача и
+ * табло СЗоВ.
+ *
+ * В ОКНО УЕЗЖАЕТ ВЕСЬ ВИДЖЕТ, А НЕ ОДНА ПАНЕЛЬ. Решение владельца: там должен
+ * быть тот же пузырь, тычок по нему раскрывает чат, и пузырь остаётся — как в
+ * портале. Разметку окна держит AssistantWindow.jsx, размер меняет сам тычок
+ * (Document PiP разрешает resizeTo только при свежем жесте пользователя).
  *
  * РАЗГОВОР ЖИВЁТ ЗДЕСЬ, А НЕ В ПАНЕЛИ. useAssistantChat поднят в шарик
  * намеренно. Открепление — это createPortal в ДРУГОЙ контейнер, а смена
@@ -119,6 +126,7 @@ export default function AssistantOrb({
     const [started, setStarted] = useState(false);    // панель хоть раз открывали
     const [pipWindow, setPipWindow] = useState(null);     // окно поверх других окон
     const [pipContainer, setPipContainer] = useState(null);
+    const [pipChatOpen, setPipChatOpen] = useState(true);   // чат раскрыт в окне
 
     const buttonRef = useRef(null);
     const dragRef = useRef(null);
@@ -343,9 +351,11 @@ export default function AssistantOrb({
             return;
         }
         try {
+            // Открываем раскрытым: открепляют из открытого чата, и свёрнутая
+            // в плашку панель заставила бы человека тут же раскрыть её обратно.
             const win = await window.documentPictureInPicture.requestWindow({
-                width: PANEL_SIZE.width,
-                height: PANEL_SIZE.height,
+                width: WINDOW_SIZE.open.width,
+                height: WINDOW_SIZE.open.height,
             });
             win.document.title = 'Помощник';
             cloneDocumentStyles(win);
@@ -363,6 +373,7 @@ export default function AssistantOrb({
             });
             setOpen(false);
             setStarted(true);
+            setPipChatOpen(true);
             setPipWindow(win);
             setPipContainer(root);
         } catch (error) {
@@ -379,6 +390,27 @@ export default function AssistantOrb({
         }
         setPipWindow(null);
         setPipContainer(null);
+    }, [pipWindow]);
+
+    /* Тычок по пузырю ВНУТРИ окна: складывает и раскрывает чат вместе с самим
+       окном. Размер меняем ЗДЕСЬ, в обработчике клика, и никак иначе: Document
+       PiP разрешает resizeTo только при свежем жесте пользователя, и попытка
+       сделать это эффектом на смену состояния упала бы молчаливым исключением.
+
+       Состояние переключаем даже если размер поменять не дали: окно тогда
+       останется прежней величины, но чат послушается — это хуже по виду, но
+       лучше, чем кнопка, которая ничего не делает. */
+    const toggleWindowChat = useCallback(() => {
+        setPipChatOpen((prev) => {
+            const next = !prev;
+            const size = next ? WINDOW_SIZE.open : WINDOW_SIZE.collapsed;
+            try {
+                pipWindow?.resizeTo(size.width, size.height);
+            } catch (error) {
+                /* Жест не засчитан браузером — размер оставляем человеку. */
+            }
+            return next;
+        });
     }, [pipWindow]);
 
     /* Вернуть панель в портал: окно закрывается, панель раскрывается на месте
@@ -410,7 +442,12 @@ export default function AssistantOrb({
     /* Escape закрывает панель — привычка от всех модалок портала.
        Слушать надо ТО окно, где панель на самом деле. У откреплённого помощника
        фокус в PiP-окне, а это отдельный window: обработчик, повешенный на окно
-       вкладки, туда не дотягивается, и Escape в откреплённой панели молчал бы. */
+       вкладки, туда не дотягивается, и Escape в откреплённой панели молчал бы.
+
+       В окне Escape закрывает ОКНО, а не складывает чат в пузырь, и это не
+       произвол: Chrome намеренно не считает Escape жестом пользователя, значит
+       resizeTo из этого обработчика бросит исключение и окно осталось бы
+       раскрытым с плашкой внутри. Складывает — только тычок по пузырю. */
     useEffect(() => {
         const host = pipWindow || (open ? window : null);
         if (!host) return undefined;
@@ -533,7 +570,13 @@ export default function AssistantOrb({
                 </div>
             )}
 
-            {detached && createPortal(panel, pipContainer)}
+            {/* В окне живёт весь виджет: пузырь и чат из него, как в портале. */}
+            {detached && createPortal(
+                <AssistantWindow open={pipChatOpen} onToggle={toggleWindowChat}>
+                    {panel}
+                </AssistantWindow>,
+                pipContainer,
+            )}
         </>
     );
 }
