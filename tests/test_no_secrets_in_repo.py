@@ -71,6 +71,11 @@ def _tracked_files():
         yield name
 
 
+def _strip_tags(chunk):
+    """Текст ячейки без разметки и лишних пробелов."""
+    return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', chunk)).strip()
+
+
 def _read(name):
     try:
         with io.open(os.path.join(ROOT, name), encoding="utf-8") as handle:
@@ -81,7 +86,12 @@ def _read(name):
 
 def _looks_synthetic(fragment):
     upper = fragment.upper()
-    return any(mark.upper() in upper for mark in _SYNTHETIC)
+    if any(mark.upper() in upper for mark in _SYNTHETIC):
+        return True
+    # Заглушки, принятые в фикстурах кабинета: sip-fixture-903, Fixture-Pass-903,
+    # line903@example.kz. Держим их здесь, а не в _SYNTHETIC, чтобы общий список
+    # оставался про «слова-маркеры», а не про формат конкретных фикстур.
+    return bool(re.match(r'(?:sip-fixture-|fixture-pass-|line\d+@)', fragment, re.I))
 
 
 def _line_of(text, index):
@@ -103,6 +113,49 @@ class NoSecretsInRepoTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          "Секрет в публичном репозитории (значения намеренно не "
                          "печатаются):\n" + "\n".join(offenders))
+
+    def test_credential_columns_in_fixtures_are_placeholders(self):
+        """Учётки в сохранённых страницах кабинета — только выдуманные.
+
+        08.09.2026 в репозиторий уехал `tests/fixtures/tez_wallboard/endpoints.html`
+        — страница кабинета Binotel с таблицей SIP-аккаунтов: 19 живых логинов и
+        19 живых паролей. Проверка по .env поймала ровно ОДИН из них (наш
+        собственный), потому что остальные 18 в .env не лежат и сверять их не с
+        чем. Формат у них тоже свой, под известные ключи не подходит.
+
+        Поэтому здесь другой признак: не значение, а МЕСТО. Если в таблице есть
+        колонка «Логин» или «Пароль», её ячейки обязаны быть заглушками.
+        """
+        bad = []
+        for path in _tracked_files():
+            if not path.startswith('tests/fixtures/') or not path.endswith('.html'):
+                continue
+            full = os.path.join(ROOT, path)
+            try:
+                html = io.open(full, encoding='utf-8', errors='replace').read()
+            except OSError:
+                continue
+            for table in re.findall(r'<table.*?</table>', html, re.S | re.I):
+                headers = [_strip_tags(h) for h in re.findall(r'<th[^>]*>(.*?)</th>', table, re.S | re.I)]
+                guarded = [i for i, h in enumerate(headers)
+                           if re.search(r'логин|пароль|login|password', h, re.I)]
+                if not guarded:
+                    continue
+                for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table, re.S | re.I):
+                    cells = [_strip_tags(c) for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.S | re.I)]
+                    for i in guarded:
+                        if i >= len(cells):
+                            continue
+                        value = cells[i]
+                        if not value or _looks_synthetic(value):
+                            continue
+                        bad.append('%s — колонка «%s», строка %s' % (
+                            path, headers[i].strip(), cells[0] if cells else '?'))
+        self.assertEqual(
+            [], sorted(set(bad)),
+            'Живая учётка в фикстуре. Замените значение на заглушку '
+            '(sip-fixture-<номер> / Fixture-Pass-<номер>) и СМЕНИТЕ пароль '
+            'в кабинете: репозиторий публичный.')
 
     def test_no_env_values_in_tracked_files(self):
         """Прямое сравнение с .env.codex.local — ловит форматы, которых мы не знали."""
