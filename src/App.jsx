@@ -47241,6 +47241,103 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </li>
                                             </SidebarDeptScope>
 
+                                            {renderDividerIfInner(
+                                                deptAllowsInner('work_schedules'),
+                                                deptAllowsInner('sv_hours'),
+                                                canAccessResourceFteSection && deptAllowsInner('resource_fte'),
+                                                deptAllowsInner('shift_auction'),
+                                                deptAllowsInner('trainings'),
+                                                deptAllowsInner('technical_issues'),
+                                            )}
+
+                                            {/* Блок 6 — смены, часы и ресурсы линии. */}
+                                            <SidebarDeptScope section="work_schedules" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="sv_hours" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            {canAccessResourceFteSection && (
+                                                <SidebarDeptScope section="resource_fte" activeCode={activeDeptCode}>
+                                                <li className="relative" ref={sidebarResourceRef}>
+                                                    <button
+                                                        onClick={stableSidebarHandleToggleResourceDropdown}
+                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
+                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
+                                                        }`}
+                                                        aria-expanded={showSidebarResourceDropdown}
+                                                        aria-haspopup="menu"
+                                                    >
+                                                        <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
+                                                    </button>
+
+                                                    {(showSidebarResourceDropdown || isResourceClosing) && (
+                                                        <div
+                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
+                                                            w-56
+                                                            ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                            style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
+                                                        >
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-headset mr-2"></FaIcon> Линия
+                                                            </button>
+
+                                                            <div className="border-t border-gray-200" />
+
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_chat', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_chat' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            <SidebarDeptScope section="shift_auction" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="trainings" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="technical_issues" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+
                                             {renderDividerIfInner(canAccessVerifierChatsSection && deptAllowsInner('wazzup_chats'), canAccessChatAppSection && deptAllowsInner('chatapp_chats'))}
 
                                             {/* Блок 3 — переписка с клиентами по мессенджерам. */}
@@ -47358,103 +47455,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </SidebarDeptScope>
                                             )}
 
-                                            {renderDividerIfInner(
-                                                deptAllowsInner('work_schedules'),
-                                                deptAllowsInner('sv_hours'),
-                                                canAccessResourceFteSection && deptAllowsInner('resource_fte'),
-                                                deptAllowsInner('shift_auction'),
-                                                deptAllowsInner('trainings'),
-                                                deptAllowsInner('technical_issues'),
-                                            )}
-
-                                            {/* Блок 6 — смены, часы и ресурсы линии. */}
-                                            <SidebarDeptScope section="work_schedules" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
-                                            <SidebarDeptScope section="sv_hours" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
-                                            {canAccessResourceFteSection && (
-                                                <SidebarDeptScope section="resource_fte" activeCode={activeDeptCode}>
-                                                <li className="relative" ref={sidebarResourceRef}>
-                                                    <button
-                                                        onClick={stableSidebarHandleToggleResourceDropdown}
-                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
-                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
-                                                        }`}
-                                                        aria-expanded={showSidebarResourceDropdown}
-                                                        aria-haspopup="menu"
-                                                    >
-                                                        <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
-                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
-                                                    </button>
-
-                                                    {(showSidebarResourceDropdown || isResourceClosing) && (
-                                                        <div
-                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
-                                                            w-56
-                                                            ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                                            style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
-                                                        >
-                                                            <button
-                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
-                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
-                                                            >
-                                                                <FaIcon className="fas fa-headset mr-2"></FaIcon> Линия
-                                                            </button>
-
-                                                            <div className="border-t border-gray-200" />
-
-                                                            <button
-                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_chat', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
-                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_chat' ? 'bg-gray-100 font-medium' : ''}`}
-                                                            >
-                                                                <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </li>
-                                                </SidebarDeptScope>
-                                            )}
-                                            <SidebarDeptScope section="shift_auction" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
-                                            <SidebarDeptScope section="trainings" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                        <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
-                                            <SidebarDeptScope section="technical_issues" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
-                                                        <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
-
                                             {renderSidebarDividerInner()}
 
                                             {/* Блок 7 — опросы и мотивация. */}
@@ -47546,6 +47546,101 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-chart-bar"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
+                                                </button>
+                                            </li>
+                                            )}
+
+
+                                            {renderDividerIfInner(
+                                                departmentAllowsView(user, 'work_schedules'),
+                                                departmentAllowsView(user, 'sv_hours'),
+                                                canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte'),
+                                                departmentAllowsView(user, 'shift_auction'),
+                                                departmentAllowsView(user, 'trainings'),
+                                                departmentAllowsView(user, 'technical_issues'),
+                                            )}
+
+                                            {departmentAllowsView(user, 'work_schedules') && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'sv_hours') && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte') && (
+                                                <li className="relative" ref={sidebarResourceRef}>
+                                                    <button
+                                                        onClick={stableSidebarHandleToggleResourceDropdown}
+                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
+                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
+                                                        }`}
+                                                        aria-expanded={showSidebarResourceDropdown}
+                                                        aria-haspopup="menu"
+                                                    >
+                                                        <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
+                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
+                                                    </button>
+
+                                                    {(showSidebarResourceDropdown || isResourceClosing) && (
+                                                        <div
+                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
+                                                            w-56
+                                                            ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                            style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
+                                                        >
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-headset mr-2"></FaIcon> Линия
+                                                            </button>
+
+                                                            <div className="border-t border-gray-200" />
+
+                                                            <button
+                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_chat', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_chat' ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </li>
+                                            )}
+                                            {departmentAllowsView(user, 'shift_auction') && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'trainings') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'technical_issues') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47647,100 +47742,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
-                                                </button>
-                                            </li>
-                                            )}
-
-                                            {renderDividerIfInner(
-                                                departmentAllowsView(user, 'work_schedules'),
-                                                departmentAllowsView(user, 'sv_hours'),
-                                                canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte'),
-                                                departmentAllowsView(user, 'shift_auction'),
-                                                departmentAllowsView(user, 'trainings'),
-                                                departmentAllowsView(user, 'technical_issues'),
-                                            )}
-
-                                            {departmentAllowsView(user, 'work_schedules') && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'sv_hours') && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte') && (
-                                                <li className="relative" ref={sidebarResourceRef}>
-                                                    <button
-                                                        onClick={stableSidebarHandleToggleResourceDropdown}
-                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${
-                                                            ['resource_fte', 'resource_fte_chat'].includes(view) ? 'bg-blue-700' : ''
-                                                        }`}
-                                                        aria-expanded={showSidebarResourceDropdown}
-                                                        aria-haspopup="menu"
-                                                    >
-                                                        <FaIcon className="fas fa-users-cog" /> <span className="sidebar-text">Расчет ресурсов</span>
-                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
-                                                    </button>
-
-                                                    {(showSidebarResourceDropdown || isResourceClosing) && (
-                                                        <div
-                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
-                                                            w-56
-                                                            ${showSidebarResourceDropdown && !isResourceClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                                            style={{ position: 'fixed', top: resourceDropdownPos.top, left: resourceDropdownPos.left, zIndex: 9999 }}
-                                                        >
-                                                            <button
-                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
-                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte' ? 'bg-gray-100 font-medium' : ''}`}
-                                                            >
-                                                                <FaIcon className="fas fa-headset mr-2"></FaIcon> Линия
-                                                            </button>
-
-                                                            <div className="border-t border-gray-200" />
-
-                                                            <button
-                                                                onClick={(e) => handleSidebarViewNavigation(e, 'resource_fte_chat', { onNavigate: () => stableSidebarHandleToggleResourceDropdown(true) })}
-                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'resource_fte_chat' ? 'bg-gray-100 font-medium' : ''}`}
-                                                            >
-                                                                <FaIcon className="fas fa-comments mr-2"></FaIcon> Чат
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </li>
-                                            )}
-                                            {departmentAllowsView(user, 'shift_auction') && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'trainings') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'technical_issues') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47948,11 +47949,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
-                                    {/* «Ивенты» — общая лента компании, открыта всем ролям, поэтому
-                                        объявлена один раз здесь, а не по ролевым ветвям. Ниже — разделы,
-                                        выданные отделу или поимённо. */}
-                                    {renderSidebarDividerInner()}
-                                    {renderEventsSidebarItemInner()}
+                                    {renderDividerIfInner(
+                                        canAccessCrmSection && deptAllowsInner('crm_tickets'),
+                                        canAccessParcelsSection && deptAllowsInner('parcels'),
+                                        canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
+                                        canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
+                                        canAccessTouchesSection && deptAllowsInner('touches'),
+                                        canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user),
+                                        canAccessVerifierChatsSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user),
+                                    )}
 
                                     {/* Работа с водителем и качество обслуживания: разделы,
                                         выданные отделу или поимённо, а не роли. */}
@@ -48147,24 +48152,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </SidebarDeptScope>
                                     )}
 
-                                    {/* «Скачать Oktell» — то же действие для СЗоВ: их телефон
-                                        это веб-клиент Oktell, а вместе с ним ставится и
-                                        ограничитель «Перезвона». Круг шире раздела —
-                                        каждый оператор отдела (can_download_agent на бэкенде). */}
-                                    {canDownloadOktellAgent && (
-                                    <SidebarDeptScope section="download_oktell" activeCode={activeDeptCode}>
-                                        <li>
-                                            <button
-                                                type="button"
-                                                onClick={downloadOktellAgent}
-                                                className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
-                                            >
-                                                <FaIcon className="fas fa-download"></FaIcon>
-                                                <span className="sidebar-text">Скачать Oktell</span>
-                                            </button>
-                                        </li>
-                                    </SidebarDeptScope>
-                                    )}
 
 
                                     {renderDividerIfInner(isAdminLikeRole)}
@@ -48188,7 +48175,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
-                                    {renderDividerIfInner(canAccessFourYouSection && !canManageFourYouSection, canAccessDevLetterSection)}
+
+                                    {/* Нижний блок — то, что открывают от случая к случаю: общая лента
+                                        компании, личное и установка телефона. Черта безусловная: «Ивенты»
+                                        открыты всем ролям, поэтому блок не бывает пустым. */}
+                                    {renderSidebarDividerInner()}
+                                    {renderEventsSidebarItemInner()}
 
                                     {canAccessFourYouSection && !canManageFourYouSection && (
                                         <li>
@@ -48230,6 +48222,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-envelope-open-text"></FaIcon> <span className="sidebar-text">{'Письмо от модера'}</span>
                                             </button>
                                         </li>
+                                    )}
+
+                                    {/* «Скачать Oktell» — то же действие для СЗоВ: их телефон
+                                        это веб-клиент Oktell, а вместе с ним ставится и
+                                        ограничитель «Перезвона». Круг шире раздела —
+                                        каждый оператор отдела (can_download_agent на бэкенде). */}
+                                    {canDownloadOktellAgent && (
+                                    <SidebarDeptScope section="download_oktell" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={downloadOktellAgent}
+                                                className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                            >
+                                                <FaIcon className="fas fa-download"></FaIcon>
+                                                <span className="sidebar-text">Скачать Oktell</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
                                     )}
                                 </ul>
                                 <ul className="sidebar-footer-menu mt-3 pt-3 border-t border-white/30 space-y-2">
