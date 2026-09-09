@@ -100,10 +100,32 @@ test('в карте только настоящие коды отделов', ()
     // СЗоВ добавлен отдельно — он и есть тот самый отдел по умолчанию.
     const known = new Set(['szov', ...Object.keys(DEPARTMENT_VIEW_ALLOWLIST)]);
     for (const [section, codes] of Object.entries(SECTION_DEPARTMENTS)) {
-        assert.ok(Array.isArray(codes) && codes.length > 0, `у '${section}' пустой список отделов`);
+        // Пустой список допустим и значит «раздел не про отдел» (сейчас это
+        // «Провайдер ЭДО» и «Рассылки» — они про водителей таксопарков):
+        // такой раздел виден только во «Всех отделах».
+        assert.ok(Array.isArray(codes), `у '${section}' список отделов должен быть массивом`);
         for (const code of codes) {
             assert.ok(known.has(code), `отдел '${code}' у раздела '${section}' не заведён — опечатка или новый отдел без карты разделов`);
         }
+    }
+});
+
+test('пустой список отделов прячет раздел при любом выбранном отделе', () => {
+    const item = { marker: 'пункт' };
+    const empty = Object.entries(SECTION_DEPARTMENTS)
+        .filter(([, codes]) => Array.isArray(codes) && codes.length === 0)
+        .map(([section]) => section);
+    assert.ok(empty.length > 0, 'пустых списков не осталось — тест можно снять вместе с ними');
+    for (const section of empty) {
+        for (const code of ['szov', ...Object.keys(DEPARTMENT_VIEW_ALLOWLIST)]) {
+            assert.equal(
+                SidebarDeptScope({ section, activeCode: code, children: item }),
+                null,
+                `'${section}' с пустым списком не должен показываться отделу '${code}'`,
+            );
+        }
+        // Во «Всех отделах» он на месте — иначе раздел стал бы недостижим.
+        assert.equal(SidebarDeptScope({ section, activeCode: null, children: item }), item);
     }
 });
 
@@ -122,6 +144,13 @@ test('обёртка режет раздел чужого отдела и ост
     // «Табло Тез КЦ» — только ТЭЗ.
     assert.equal(SidebarDeptScope({ section: 'tez_wallboard', activeCode: 'tez', children: item }), item);
     assert.equal(SidebarDeptScope({ section: 'tez_wallboard', activeCode: 'szov', children: item }), null);
+    // «Чаты Верификаторов» — переписка Wazzup отдела продаж; у СЗоВ своя в
+    // Chat2Desk, поэтому в его наборе раздела нет (решение владельца 09.09.2026).
+    assert.equal(SidebarDeptScope({ section: 'wazzup_chats', activeCode: 'op', children: item }), item);
+    assert.equal(SidebarDeptScope({ section: 'wazzup_chats', activeCode: 'szov', children: item }), null);
+    // «Ограничитель Перезвона» — наоборот, раздел линии СЗоВ и только его.
+    assert.equal(SidebarDeptScope({ section: 'oktell_guard', activeCode: 'szov', children: item }), item);
+    assert.equal(SidebarDeptScope({ section: 'oktell_guard', activeCode: 'op', children: item }), null);
 });
 
 test('раздела нет в карте — селектор его не скрывает', () => {

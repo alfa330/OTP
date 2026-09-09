@@ -337,7 +337,10 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     ai_qa: ['szov', 'op', 'tez', 'marketing'],
     // Диалоги
     crm_tickets: ['szov'],
-    wazzup_chats: ['op', 'szov', 'marketing'],
+    // Раздел отдела продаж. У СЗоВ своя переписка в Chat2Desk, поэтому в его
+    // наборе «Чатов Верификаторов» нет (решение владельца 09.09.2026) —
+    // круг доступа при этом не менялся, см. canAccessVerifierChatsForUser.
+    wazzup_chats: ['op', 'marketing'],
     chatapp_chats: ['tez'],
     driver_chats: ['szov'],
     olx_leads: ['op', 'marketing'],
@@ -353,10 +356,16 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     szov_wallboard: ['szov'],
     tez_wallboard: ['tez'],
     // Телефония и программы
-    sip_settings: ['szov', 'op', 'tez'],
+    sip_settings: ['op', 'tez'],
     oktell_guard: ['szov'],
-    fleet_edm: ['szov'],
-    driver_mailings: ['szov'],
+    /* ПУСТОЙ список — не «забыли заполнить», а «раздел не про отдел».
+       «Провайдер ЭДО» и «Рассылки» работают с водителями таксопарков через
+       Fleet: к работе любого из наших отделов они не относятся, и при
+       выбранном отделе показывать их незачем. Видны только во «Всех
+       отделах». Отличие от «раздела нет в карте вовсе»: тот считается
+       общефирменным и виден при ЛЮБОМ выбранном отделе. */
+    fleet_edm: [],
+    driver_mailings: [],
     download_icore_phone: ['op', 'tez'],
     download_oktell: ['szov'],
     // Обучение
@@ -47260,9 +47269,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </SidebarDeptScope>
                                             )}
 
-                                            {renderDividerIfInner(canAccessSzovWallboardSection && deptAllowsInner('szov_wallboard'), canAccessTezWallboardSection && deptAllowsInner('tez_wallboard'))}
+                                            {renderDividerIfInner(
+                                                canAccessSzovWallboardSection && deptAllowsInner('szov_wallboard'),
+                                                canAccessOktellGuard && deptAllowsInner('oktell_guard'),
+                                                canAccessTezWallboardSection && deptAllowsInner('tez_wallboard'),
+                                            )}
 
-                                            {/* Блок 4 — табло онлайн-нагрузки. */}
+                                            {/* Блок 4 — онлайн-нагрузка линии: табло и ограничитель,
+                                                который снимает оператора, застрявшего в «Перезвоне». */}
                                             {canAccessSzovWallboardSection && (
                                                 <SidebarDeptScope section="szov_wallboard" activeCode={activeDeptCode}>
                                                     <li>
@@ -47271,6 +47285,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessOktellGuard && (
+                                                <SidebarDeptScope section="oktell_guard" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -47290,7 +47316,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             {renderDividerIfInner(
                                                 (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
-                                                canAccessOktellGuard && deptAllowsInner('oktell_guard'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
                                             )}
@@ -47304,18 +47329,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
-                                                        </button>
-                                                    </li>
-                                                </SidebarDeptScope>
-                                            )}
-                                            {canAccessOktellGuard && (
-                                                <SidebarDeptScope section="oktell_guard" activeCode={activeDeptCode}>
-                                                    <li>
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
-                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -47565,7 +47578,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
 
-                                            {renderDividerIfInner(canAccessSzovWallboardSection, canAccessTezWallboardSection)}
+                                            {renderDividerIfInner(canAccessSzovWallboardSection, canAccessOktellGuard, canAccessTezWallboardSection)}
 
                                             {canAccessSzovWallboardSection && (
                                             <li>
@@ -47574,6 +47587,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessOktellGuard && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47588,7 +47611,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
 
-                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessOktellGuard, canAccessFleetEdm, canAccessDriverMailings)}
+                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessFleetEdm, canAccessDriverMailings)}
 
                                             {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
                                             <li>
@@ -47597,16 +47620,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {canAccessOktellGuard && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
                                                 </button>
                                             </li>
                                             )}
