@@ -848,14 +848,23 @@
     body:not(.mobile-shell) .sidebar .sidebar-logo-full,
     body:not(.mobile-shell) .sidebar .sidebar-logo-mini {
       display: flex !important;
+      align-items: center;
       position: absolute;
-      left: 0;
-      top: 50%;
-      transform: translateY(-50%);
+      /* Отсчёт от ВЕРХА шапки и своя полоса в 54 px — ровно под логотип.
+         Ни top: 50%, ни transform здесь нельзя: высота шапки разная (54 px у
+         развёрнутой панели и 118 в рельсе, где под знаком стоят ещё поиск и
+         колокол), и знак уезжал на середину этой высоты — прямо на кнопку
+         поиска. Слева 10 px — тот же отступ, что у карточек; в рельсе знак
+         встаёт по центру полосы (правило ниже), и переезд едет вместе с
+         шириной. Абсолютные координаты считаются от padding-бокса шапки,
+         поэтому её собственные 10 px отступа сюда НЕ прибавляются. */
+      left: 10px;
+      top: 0;
+      height: 54px;
       margin: 0;
       opacity: 0;
       visibility: hidden;
-      transition: opacity 0.2s ease, visibility 0s linear 0.2s;
+      transition: opacity 0.2s ease, visibility 0s linear 0.2s, left 0.3s ease;
     }
     body:not(.mobile-shell) .sidebar .sidebar-logo-full {
       opacity: 1;
@@ -870,7 +879,9 @@
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-logo-mini {
       opacity: 1;
       visibility: visible;
-      transition: opacity 0.2s ease, visibility 0s;
+      /* 20 = (80 − 40) / 2: знак по центру полосы, как плитки разделов. */
+      left: 20px;
+      transition: opacity 0.2s ease, visibility 0s, left 0.3s ease;
     }
     body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-full {
       opacity: 1;
