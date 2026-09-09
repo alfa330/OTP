@@ -325,6 +325,10 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   ни оценок нет.
  */
 const SIDEBAR_SECTION_DEPARTMENTS = {
+    // Сотрудники. «Рекрутинг» — раздел отдела кадров и только его (решение
+    // владельца 09.09.2026): найм по всей компании ведёт HR, остальным отделам
+    // (включая «Маркетинг») чужой поток резюме в меню не нужен.
+    recruiting: ['hr'],
     // Качество обслуживания
     call_evaluation: ['szov', 'op', 'tez', 'marketing'],
     call_division: ['szov', 'op', 'tez', 'marketing'],
@@ -47001,11 +47005,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
                                                 )}
                                             </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'recruiting')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'recruiting' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-user-tie"></FaIcon> <span className="sidebar-text">Рекрутинг</span>
-                                                </button>
-                                            </li>
+                                            <SidebarDeptScope section="recruiting" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'recruiting')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'recruiting' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-user-tie"></FaIcon> <span className="sidebar-text">Рекрутинг</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'departments')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'departments' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
