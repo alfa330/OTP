@@ -47188,6 +47188,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {isAdminLikeRole && (
                                         <>
                                             <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
+                                                </button>
+                                            </li>
+                                            <li>
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
 
@@ -47410,73 +47415,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </li>
                                                 </SidebarDeptScope>
                                             )}
-
-                                            {renderDividerIfInner(
-                                                (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
-                                                canAccessFleetEdm && deptAllowsInner('fleet_edm'),
-                                                canAccessDriverMailings && deptAllowsInner('driver_mailings'),
-                                            )}
-
-                                            {/* Блок 5 — телефония, интеграции и рассылки водителям. */}
-                                            {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
-                                                <SidebarDeptScope section="sip_settings" activeCode={activeDeptCode}>
-                                                    <li>
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
-                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
-                                                        </button>
-                                                    </li>
-                                                </SidebarDeptScope>
-                                            )}
-                                            {canAccessFleetEdm && (
-                                                <SidebarDeptScope section="fleet_edm" activeCode={activeDeptCode}>
-                                                    <li>
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
-                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
-                                                        </button>
-                                                    </li>
-                                                </SidebarDeptScope>
-                                            )}
-                                            {canAccessDriverMailings && (
-                                                <SidebarDeptScope section="driver_mailings" activeCode={activeDeptCode}>
-                                                    <li>
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
-                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
-                                                        </button>
-                                                    </li>
-                                                </SidebarDeptScope>
-                                            )}
-
-                                            {renderSidebarDividerInner()}
-
-                                            {/* Блок 7 — опросы и мотивация. */}
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
-                                                </button>
-                                            </li>
-                                            <SidebarDeptScope section="salary" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                                        <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
-                                            <SidebarDeptScope section="contests" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                        <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
                                         </>
                                     )}
 
@@ -47493,6 +47431,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
+                                            {departmentAllowsView(user, 'surveys') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
+                                                </button>
+                                            </li>
+                                            )}
                                             {departmentAllowsView(user, 'tasks') && (
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
@@ -47706,88 +47651,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
 
-                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessFleetEdm, canAccessDriverMailings)}
-
-                                            {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {canAccessFleetEdm && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {/* «Рассылки» продублированы в обеих ветках сайдбара намеренно.
-                                                Сегодня доступ есть у супер-админов и у одного человека с ролью
-                                                admin — все они попадают в ветку выше. Но право здесь ИМЕННОЕ, по
-                                                id, и если этого человека однажды назначат главой отдела, его
-                                                роль сменится на «глава», бэкенд по-прежнему будет пускать, раздел
-                                                откроется прямым адресом — а пункт меню исчезнет. Именно так
-                                                разделы и «теряли доступ» раньше. */}
-                                            {canAccessDriverMailings && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
-                                                </button>
-                                            </li>
-                                            )}
-
-                                            {renderDividerIfInner(
-                                                departmentAllowsView(user, 'tasks'),
-                                                departmentAllowsView(user, 'surveys'),
-                                                departmentAllowsView(user, 'salary'),
-                                                departmentAllowsView(user, 'contests'),
-                                            )}
-
-                                            {departmentAllowsView(user, 'surveys') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
-                                                </button>
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'salary') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'contests') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {/* «Группы» у главы: только если отдел явно разрешает раздел в своём
-                                                allowlist (front_office); бэкенд /api/groups и так режет по отделу. */}
-                                            {isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
-                                                </button>
-                                            </li>
-                                            )}
                                         </>
                                     )}
 
                                     {isPlainTrainer && (
                                         <>
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
+                                                </button>
+                                            </li>
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
@@ -47797,11 +47670,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
                                                 </button>
                                             </li>
                                             <li>
@@ -47817,6 +47685,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                                         <>
+                                            {departmentAllowsView(user, 'surveys') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
+                                                </button>
+                                            </li>
+                                            )}
                                             {/* «Задачи» рядовому — ТОЛЬКО в отделах с ограничениями
                                                 (бэк-офис, «Маркетинг»): departmentRestrictsViews здесь
                                                 обязателен и один только departmentAllowsView не годится.
@@ -47886,13 +47761,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
-                                            {departmentAllowsView(user, 'surveys') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
-                                                </button>
-                                            </li>
+                                            {renderDividerIfInner(
+                                                departmentRestrictsViews(user) && departmentAllowsView(user, 'call_evaluation'),
+                                                departmentRestrictsViews(user) && departmentAllowsView(user, 'call_division'),
+                                                departmentAllowsView(user, 'contests'),
+                                                departmentAllowsView(user, 'salary'),
                                             )}
                                             {/* Порядок как в ветке СВ: «Опросы» → «Задачи» → «Конкурсы».
                                                 Кнопка берётся тем же хелпером, что и у остальных ролей, —
@@ -48100,10 +47973,161 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </SidebarDeptScope>
                                     )}
 
+
+                                    {/* Фрагмент ролевой ветки ПОСЛЕ общего блока «работа с водителем».
+                                        Ветка разрезана намеренно: пункты «Обращений», «Посылок» и
+                                        «Чатов водителей» объявлены по одному разу в общей части меню и
+                                        потому никогда не отрисуются между пунктами ветки. Другого способа
+                                        поставить их сразу за «Табло СЗоВ» нет: продублировать пункт в
+                                        ветки нельзя — по одной копии требуют tests/test_crm_access.py,
+                                        test_parcels_access.py, test_driver_chats.py и test_olx_amo_integration.py. */}
+                                    {isAdminLikeRole && (
+                                        <>
+
+                                            {renderDividerIfInner(
+                                                (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
+                                                canAccessFleetEdm && deptAllowsInner('fleet_edm'),
+                                                canAccessDriverMailings && deptAllowsInner('driver_mailings'),
+                                            )}
+
+                                            {/* Блок 5 — телефония, интеграции и рассылки водителям. */}
+                                            {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
+                                                <SidebarDeptScope section="sip_settings" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessFleetEdm && (
+                                                <SidebarDeptScope section="fleet_edm" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessDriverMailings && (
+                                                <SidebarDeptScope section="driver_mailings" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {renderDividerIfInner(deptAllowsInner('salary'), deptAllowsInner('contests'))}
+
+                                            {/* Оплата и мотивация. */}
+                                            <SidebarDeptScope section="salary" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="contests" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                        </>
+                                    )}
+
+                                    {isDepartmentManager && !isAdminLikeRole && (
+                                        <>
+                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessFleetEdm, canAccessDriverMailings)}
+
+                                            {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessFleetEdm && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* «Рассылки» продублированы в обеих ветках сайдбара намеренно.
+                                                Сегодня доступ есть у супер-админов и у одного человека с ролью
+                                                admin — все они попадают в ветку выше. Но право здесь ИМЕННОЕ, по
+                                                id, и если этого человека однажды назначат главой отдела, его
+                                                роль сменится на «глава», бэкенд по-прежнему будет пускать, раздел
+                                                откроется прямым адресом — а пункт меню исчезнет. Именно так
+                                                разделы и «теряли доступ» раньше. */}
+                                            {canAccessDriverMailings && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
+                                                </button>
+                                            </li>
+                                            )}
+
+                                            {renderDividerIfInner(
+                                                departmentAllowsView(user, 'salary'),
+                                                departmentAllowsView(user, 'contests'),
+                                            )}
+
+                                            {departmentAllowsView(user, 'salary') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'contests') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* «Группы» у главы: только если отдел явно разрешает раздел в своём
+                                                allowlist (front_office); бэкенд /api/groups и так режет по отделу. */}
+                                            {isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                        </>
+                                    )}
+
                                     {renderDividerIfInner(
                                         isSuperAdmin && deptAllowsInner('voice_trainer'),
                                         canDownloadIcorePhone && deptAllowsInner('download_icore_phone'),
-                                        canDownloadOktellAgent && deptAllowsInner('download_oktell'),
+                                        /* canDownloadOktellAgent здесь НЕТ намеренно: «Скачать Oktell»
+                                           стоит самым последним пунктом меню, в нижнем блоке. Пока
+                                           условие висело тут, у каждого оператора СЗоВ (а им программа
+                                           выдана поимённо всем) черта рисовалась над ПУСТЫМ блоком —
+                                           две линии подряд перед «Ивентами». */
                                     )}
 
                                     {/* Тренажёр и программы на машину сотрудника. */}

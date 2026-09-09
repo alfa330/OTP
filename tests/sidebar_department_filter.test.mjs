@@ -209,12 +209,27 @@ test('разделитель между блоками меню рисуется
  */
 const RANK_MARKER = "{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (";
 
-// Первая половина — меню, вторая — рендер экранов; так же режут файл
-// tests/test_back_office_department_scope.py и tests/test_marketing_department_scope.py.
+/* Первое вхождение маркера — меню, второе — рендер экранов; так же режут файл
+   tests/test_back_office_department_scope.py и tests/test_marketing_department_scope.py.
+   Но «до второго маркера» — НЕ то же, что «тело ветки»: между ними лежат и общая
+   часть меню, и второй фрагмент ветки СВ (ветки админа и СВ разрезаны, чтобы
+   общий блок «работа с водителем» встал сразу за «Табло СЗоВ»). Гейты СВ в этом
+   окне давали ложные совпадения, поэтому режем ровно по закрытию ветки. */
+const BRANCH_CLOSE = `\n${' '.repeat(40)}</>\n${' '.repeat(36)})}`;
+
 const rankMenuBranch = () => {
     const parts = source.split(RANK_MARKER);
     assert.equal(parts.length, 3, 'ветки рядового сотрудника изменились — проверь тест');
-    return parts[1];
+    const at = parts[1].indexOf(BRANCH_CLOSE);
+    assert.ok(at > 0, 'не нашёл закрытие ветки рядового — изменились отступы, проверь тест');
+    const branch = parts[1].slice(0, at);
+    // Срез обязан быть именно веткой рядового, а не куском соседней.
+    assert.ok(branch.includes("handleSidebarViewNavigation(e, 'profile')"), 'в срезе нет «Профиля»');
+    assert.ok(
+        !branch.includes("handleSidebarViewNavigation(e, 'monitoring_scale')"),
+        'в срез попала ветка руководителя — граница среза уехала',
+    );
+    return branch;
 };
 
 // Разделы, которые оператор ЛИНИИ (отдел без ограничений — СЗоВ) видит в меню.
