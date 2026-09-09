@@ -617,9 +617,6 @@
       body:not(.has-install-offer) .auth-card form button[type="submit"] {
         font-size: 1rem;
       }
-      body:not(.has-install-offer) .auth-card .auth-error-slot {
-        min-height: 2.75rem;
-      }
     }
 
     /* Панель установки стоит внизу поверх страницы, а карточка входа
@@ -653,8 +650,12 @@
         width: 2.25rem;
         height: 2.25rem;
       }
+      /* Место под сообщение ужимается, но не ниже самого сообщения: 36 px —
+         это его высота в одну строку (замерено), и кнопка «Войти» не сдвинется
+         под уже нажимающим пальцем. Ниже отдавать нечего — экономить надо на
+         воздухе, а не на том, что должно поместиться. */
       body.has-install-offer .auth-card .auth-error-slot {
-        min-height: 1.75rem;
+        min-height: 2.5rem;
       }
     }
 
@@ -672,7 +673,7 @@
         height: 2rem;
       }
       body.has-install-offer .auth-card .auth-error-slot {
-        min-height: 1.25rem;
+        min-height: 2.25rem;
       }
     }
 

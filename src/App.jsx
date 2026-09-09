@@ -48503,8 +48503,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         {/* Контейнер под сообщение всегда занимает место —
                             иначе кнопка «Войти» прыгает вниз ровно в момент
-                            ошибки, под уже нажимающий палец. */}
-                        <div className="auth-error-slot flex min-h-[2.25rem] items-center justify-center">
+                            ошибки, под уже нажимающий палец.
+
+                            60 px — не на глаз. Сообщение в одну строку занимает
+                            36 px, в две (сервер отвечает длинным «Too many login
+                            attempts. Please try again later.») — 55 px, замерено
+                            в собранной карточке на 390 и 1440. Прежние 36 px
+                            равнялись сообщению ровно: красная плашка упиралась и
+                            в поле пароля, и в кнопку — поле, предупреждение и
+                            кнопка слипались в один бутерброд. Здесь помещается
+                            даже двухстрочное, а у обычного остаётся по 12 px
+                            воздуха сверху и снизу — тот же зазор, что между
+                            полями. */}
+                        <div className="auth-error-slot flex min-h-[3.75rem] items-center justify-center">
                           {errorMessage && (
                             <p className="w-full rounded-xl bg-red-50 px-3 py-2 text-center text-[13px] font-medium text-red-600 animate-fade-in-out">
                               {errorMessage}

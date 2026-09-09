@@ -499,6 +499,31 @@ class AuthScreenTests(unittest.TestCase):
             self.assertIn('text-indigo-600', classes,
                           'Знак поставлен без цвета — заливка возьмёт цвет родителя')
 
+    def test_error_slot_holds_the_message_without_moving_the_button(self):
+        """Место под сообщение об ошибке — это сообщение плюс воздух.
+
+        Сообщение в одну строку занимает 36 px, в две (сервер отвечает длинным
+        «Too many login attempts. Please try again later.») — 55 px; замерено в
+        собранной карточке на 390 и 1440. Прежние 36 px равнялись однострочному
+        РОВНО: красная плашка упиралась и в поле пароля, и в кнопку — поле,
+        предупреждение и кнопка слипались в один бутерброд, а двухстрочное
+        толкало кнопку вниз под уже нажимающий палец. 60 px держат даже
+        двухстрочное.
+
+        Уплотнение под панель установки на низких экранах место убавляет, но
+        ниже 36 px опускать его нельзя: экономия снова начнёт двигать кнопку.
+        Экономить надо на воздухе, а не на том, что должно поместиться."""
+        app = read(APP_JSX)
+        slot = re.search(r'className="auth-error-slot ([^"]*)"', app)
+        self.assertIsNotNone(slot, 'Место под сообщение исчезло из разметки')
+        self.assertIn('min-h-[3.75rem]', slot.group(1))
+        css = read(STYLES)
+        heights = re.findall(r'\.auth-error-slot \{\s*min-height: ([0-9.]+)rem', css)
+        self.assertTrue(heights, 'Уплотнение перестало трогать место под сообщение')
+        for value in heights:
+            self.assertGreaterEqual(float(value), 2.25,
+                                    'Сообщение в 36 px не поместится: %srem' % value)
+
     def test_login_card_has_room_on_a_desktop(self):
         """На большом экране телефонная карточка (380 px) читается зажатой.
 
