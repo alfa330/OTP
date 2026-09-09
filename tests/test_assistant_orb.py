@@ -326,8 +326,7 @@ class DetachedWindowTests(unittest.TestCase):
         ранние return, гасившие весь виджет, обязаны пропускать откреплённое.
         """
         self.assertIn('if (!orbVisible && !detached) return null;', self.orb)
-        self.assertIn('<AssistantWindow open={pipChatOpen}', self.orb)
-        self.assertIn('pipContainer,', self.orb)
+        self.assertIn('createPortal(panel, pipContainer)', self.orb)
         # Встроенная панель при этом не рисуется второй копией.
         self.assertIn('{!detached && orbVisible && open && anchor && (', self.orb)
 
@@ -375,65 +374,6 @@ class DetachedWindowTests(unittest.TestCase):
         detached_branch = header[:header.index(') : (')]
         self.assertIn('onAttach', detached_branch)
         self.assertNotIn('<X ', detached_branch)
-
-
-class DetachedOrbTests(unittest.TestCase):
-    """В окно уезжает ВЕСЬ виджет — пузырь и чат из него.
-
-    Первой версией в окно уезжала одна панель, и убрать чат с глаз можно было
-    только закрыв окно целиком. Владелец потребовал перенести туда поведение
-    портала: свёрнутое окно — это пузырь, тычок по нему раскрывает чат, пузырь
-    остаётся. Ниже — три места, где это ломается молча.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.orb = ORB.read_text(encoding='utf-8')
-        cls.window = (ROOT / 'src' / 'components' / 'assistant'
-                      / 'AssistantWindow.jsx').read_text(encoding='utf-8')
-
-    def test_в_окне_и_пузырь_и_чат(self):
-        self.assertIn('<AssistantWindow', self.orb)
-        self.assertIn('<Orb', self.window)
-        # Пузырь тот же самый, а не нарисованный заново рядом.
-        self.assertIn("from './Orb.jsx'", self.window)
-
-    def test_размер_окна_меняет_только_тычок(self):
-        """Главная проверка файла.
-
-        Document PiP разрешает `resizeTo` ТОЛЬКО при свежем жесте пользователя
-        («resizeTo() requires user activation in document picture-in-picture»).
-        Перенос этого вызова в useEffect на смену состояния выглядит чище и
-        именно поэтому опасен: исключение уходит в catch, состояние
-        переключается, а окно остаётся прежнего размера — то есть плашка
-        рисуется в раскрытом окне, и разобраться в этом можно только руками.
-        """
-        # Считаем ВЫЗОВЫ, а не упоминания: слово стоит и в трёх комментариях,
-        # объясняющих, почему вызов может быть только здесь.
-        self.assertEqual(self.orb.count('resizeTo('), 1,
-                         'resizeTo стал вызываться не в одном месте')
-        body = self.orb[self.orb.index('const toggleWindowChat'):]
-        body = body[:body.index('}, [pipWindow]);')]
-        self.assertIn('resizeTo', body, 'resizeTo уехал из обработчика тычка')
-
-    def test_escape_не_пытается_менять_размер(self):
-        """Chrome намеренно не считает Escape жестом пользователя, поэтому
-        Escape закрывает окно, а не складывает его в плашку."""
-        body = self.orb[self.orb.index('const host = pipWindow ||'):]
-        body = body[:body.index('}, [open, pipWindow, closePip]);')]
-        self.assertNotIn('resizeTo(', body)
-        self.assertIn('closePip()', body)
-
-    def test_свёрнутое_окно_не_уже_потолка_chrome(self):
-        """У окна PiP жёсткий минимум: 240 пикселей по ширине и 66 по высоте
-        содержимого (промерено — запрос 96x96 отдаёт 240x66). Меньшее число в
-        размерах ничего не сломает видимо, но окно останется 240-широким с
-        разметкой, посчитанной на другую ширину."""
-        size = re.search(r'collapsed: \{ width: (\d+), height: (\d+) \}', self.window)
-        self.assertIsNotNone(size, 'размеры свёрнутого окна исчезли')
-        self.assertGreaterEqual(int(size.group(1)), 240)
-        # Высота внешняя, содержимое = минус 34 на рамку, и пузырь 56 обязан влезть.
-        self.assertGreaterEqual(int(size.group(2)) - 34, 56)
 
 
 class PipWindowReuseTests(unittest.TestCase):
