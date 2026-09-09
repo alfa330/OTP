@@ -151,7 +151,7 @@ class SheetTests(unittest.TestCase):
         self.assertIn('transform: translateY(100%);', block)
         self.assertIn('transform: translateY(0);', css_block(SHELL_CSS, 'body.mobile-shell .sidebar.mobile-open {'))
         inner = css_block(SHELL_CSS, 'body.mobile-shell .sidebar > div {')
-        self.assertIn('padding-bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));', inner)
+        self.assertIn('calc(var(--mtb-thickness) + env(safe-area-inset-bottom))', inner)
 
     def test_sheet_closes_on_navigation(self):
         """Иначе выбранный раздел открывается за шторкой, и её приходится
@@ -174,16 +174,16 @@ class SheetTests(unittest.TestCase):
 
 
 class SheetAccountTests(unittest.TestCase):
-    """Аккаунт в шапке шторки — вместо пункта «Аккаунт» и «Выхода» внизу."""
+    """Шапка шторки: портрет, имя и действия над своей учёткой."""
 
     def test_account_actions_live_in_the_header(self):
         """Пункт «Аккаунт» раскрывался ВБОК, а вбок на всю ширину экрана
-        раскрываться некуда: на телефоне за сменой пароля пришлось бы
+        раскраваться некуда: на телефоне за сменой пароля пришлось бы
         прокручивать меню до низа и открывать панель, которой не видно."""
         at = APP.index('<div className="mobile-sheet-account">')
-        block = APP[at:at + 6000]
-        for label in ('Логин', 'Пароль', 'Фото', 'Выход'):
-            self.assertIn(f'{label}\n', block, f'действие «{label}» пропало из шапки')
+        block = APP[at:at + 7000]
+        for label in ('Сменить логин', 'Сменить пароль', 'Сменить фотографию', 'Выйти'):
+            self.assertIn(f'<span>{label}</span>', block, f'действие «{label}» пропало из шапки')
         # Установка портала на телефон — там же, своим пунктом.
         self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
         # Смена фото — только тем, кому она разрешена; условие то же, что в меню.
@@ -192,8 +192,8 @@ class SheetAccountTests(unittest.TestCase):
     def test_actions_close_the_sheet(self):
         """Формы смены логина и пароля рисуются в разделе, ПОД шторкой: не
         закрыв её, человек нажимает кнопку и не видит никакого ответа."""
-        at = APP.index('<div className="mobile-sheet-actions">')
-        block = APP[at:at + 3000]
+        at = APP.index('<div className="mobile-sheet-group">')
+        block = APP[at:at + 4000]
         self.assertEqual(block.count('setMobileMenuOpen(false);'), 3)
 
     def test_footer_is_hidden_and_not_duplicated(self):
@@ -202,11 +202,118 @@ class SheetAccountTests(unittest.TestCase):
         self.assertIn('display: none;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar-footer-menu {', 120))
 
     def test_avatar_still_switches_the_dark_theme(self):
-        """Тап по аватару — переключатель тёмного режима у тех, кому он выдан;
+        """Тап по портрету — переключатель тёмного режима у тех, кому он выдан;
         на телефоне это единственное место, где он остался."""
         at = APP.index('<div className="mobile-sheet-account">')
         block = APP[at:at + 1500]
         self.assertIn('onClick={darkThemeAllowed ? toggleDarkTheme : undefined}', block)
+
+
+class SheetLooksTests(unittest.TestCase):
+    """Вид шторки — список настроек телефона, а не тёмный сайдбар.
+
+    Разметка пунктов приходит из общего дерева меню и рассчитана на тёмную
+    полосу слева (белый текст, синяя подсветка). Перекрашивает её оболочка,
+    поэтому проверяем именно те решения, без которых список рассыпается.
+    """
+
+    def test_sheet_is_a_light_settings_list(self):
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar {', 900)
+        self.assertIn('background-color: var(--sheet-bg) !important;', block)
+        self.assertIn('background-image: none !important;', block)
+        self.assertIn('color: var(--sheet-text);', block)
+
+    def test_rows_are_grouped_into_cards(self):
+        """Группы задают те же <hr>, что и в сайдбаре: своей разметки под
+        телефон нет, иначе список пришлось бы поддерживать дважды."""
+        self.assertIn('body.mobile-shell .sidebar-menu-scroll > hr + li > button', SHELL_CSS)
+        self.assertIn('body.mobile-shell .sidebar-menu-scroll > li:has(+ hr) > button', SHELL_CSS)
+        self.assertIn('border-top-left-radius: var(--sheet-radius);', SHELL_CSS)
+
+    def test_icon_tile_wins_over_inline_size(self):
+        """Размер значка приходит инлайном (FaIcon ставит width/height в 1em),
+        а ширину в сайдбаре держит ещё и flex-basis — без обоих перебиваний
+        плитка остаётся 18-пиксельной точкой."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar-menu-scroll button > svg:first-child,', 900)
+        self.assertIn('width: 29px !important;', block)
+        self.assertIn('flex: 0 0 29px !important;', block)
+        self.assertIn('border-radius: 9px;', block)
+
+    def test_whole_sheet_scrolls(self):
+        """Портрет с именем должен уезжать вверх вместе со списком — иначе он
+        занимает треть экрана всегда."""
+        self.assertIn('overflow-y: auto;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar > div {', 400))
+        self.assertIn('overflow: visible !important;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar-menu-scroll {', 300))
+        # Подменю позиционируются посчитанными координатами и обязаны ехать следом.
+        self.assertEqual(APP.count("sheetScrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });"), 2)
+        self.assertEqual(APP.count("sheetScrollEl?.removeEventListener('scroll', scheduleUpdatePos);"), 2)
+
+    def test_every_row_gets_the_same_chevron(self):
+        """Собственная стрелка есть только у пунктов с подменю, и рисуется она
+        значком в 16 px против уголка в 7 px у остальных строк: двумя разными
+        стрелками список выглядит собранным из кусков."""
+        self.assertIn('body.mobile-shell .sidebar-menu-scroll button > svg:not(:first-child) {\n    display: none;', SHELL_CSS)
+        self.assertIn('body.mobile-shell .sidebar-menu-scroll > li > button::after,', SHELL_CSS)
+
+    def test_dark_theme_has_its_own_palette(self):
+        block = css_block(SHELL_CSS, 'html[data-otp-theme="dark"] {', 700)
+        self.assertIn('--sheet-bg: #000000;', block)
+        self.assertIn('--sheet-card: #1c1c1e;', block)
+        self.assertIn('--sheet-text: #ffffff;', block)
+
+
+class SectionLayoutTests(unittest.TestCase):
+    """Общий слой, приводящий содержимое разделов к телефонному формату.
+
+    Разделы свёрстаны под окно компьютера: заголовки в 30–36 px, поля по 32 px,
+    таблицы на восемь колонок, каркасы «панель слева — рабочая область справа».
+    Ловить это в каждом разделе по отдельности — значит пропустить половину.
+    """
+
+    def test_bell_does_not_cover_the_first_row(self):
+        """Колокол висит в правом верхнем углу экрана: без отступа он накрывал
+        бы заголовок раздела и кнопку рядом с ним."""
+        self.assertIn('padding-top: calc(46px + max(10px, env(safe-area-inset-top))) !important;', SHELL_CSS)
+
+    def test_two_column_screens_stack(self):
+        """Иначе правая колонка ужимается до восьмидесяти пикселей, а её
+        содержимое торчит за экран (планировщик смен, учёт часов)."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .flex.items-start:has(> .flex-1),', 400)
+        self.assertIn('flex-direction: column;', block)
+
+    def test_wide_tables_scroll_inside_their_block(self):
+        """Иначе вбок едет весь раздел вместе с шапкой и кнопками."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content *:has(> table) {', 300)
+        self.assertIn('overflow-x: auto;', block)
+
+    def test_button_rows_wrap(self):
+        """flex-wrap срабатывает только при нехватке места, поэтому правило
+        безопасно для рядов, которые и так помещаются."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .flex[class*="gap-"]', 400)
+        self.assertIn('flex-wrap: wrap;', block)
+
+    def test_tab_strips_scroll_instead_of_wrapping(self):
+        """Полосу вкладок («Обзор · Бэклог · Доска») переносом рвать нельзя."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .inline-flex[class*="rounded-"],', 400)
+        self.assertIn('overflow-x: auto;', block)
+        self.assertIn('flex-wrap: nowrap;', block)
+
+    def test_layer_is_locked_to_the_shell(self):
+        """Ни одно правило слоя не должно действовать на компьютере."""
+        start = SHELL_CSS.index('/* ── Содержимое разделов под телефонный формат')
+        end = SHELL_CSS.index('/* Переключение раздела с бара')
+        for rule in SHELL_CSS[start:end].split('}'):
+            selector = rule.split('{')[0].strip()
+            if not selector or selector.startswith(('/*', '@', '*')):
+                continue
+            for part in selector.split(','):
+                part = part.strip()
+                if not part or part.startswith(('/*', '@')):
+                    continue
+                self.assertTrue(
+                    part.startswith('body.mobile-shell') or part.startswith('body[data-tabbar-side'),
+                    f'правило «{part}» действует и на компьютере',
+                )
 
 
 class SubmenuTests(unittest.TestCase):

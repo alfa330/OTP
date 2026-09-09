@@ -22,6 +22,19 @@
     --mtb-idle: #64748b;
     --mtb-surface: rgba(255, 255, 255, 0.88);
     --mtb-border: rgba(15, 23, 42, 0.1);
+    /* Палитра шторки — системного списка настроек: серое полотно, белые
+       карточки строк, приглушённый текст подписи, тонкий разделитель. */
+    --sheet-bg: #f2f2f7;
+    --sheet-card: #ffffff;
+    --sheet-text: #000000;
+    --sheet-muted: #8a8a8e;
+    --sheet-sep: rgba(60, 60, 67, 0.29);
+    --sheet-active: #e5e5ea;
+    --sheet-accent: #0a84ff;
+    --sheet-handle: rgba(60, 60, 67, 0.3);
+    --sheet-chevron: rgba(60, 60, 67, 0.35);
+    --sheet-gutter: 14px;
+    --sheet-radius: 16px;
 }
 
 /* ── Бар ───────────────────────────────────────────────────────────────── */
@@ -227,7 +240,15 @@
 
 /* Это тот же сайдбар: список разделов у роли один, и второй его копии для
    телефона быть не должно — забытый в одной из копий пункт пропадает молча.
-   Меняется только подача: не полоса слева, а лист, выезжающий снизу.
+   Меняется только подача: не тёмно-синяя полоса слева, а список настроек, как
+   в мобильных приложениях, — светлое полотно, группы строк со скруглением,
+   значок в цветной плитке, разделители от текста.
+
+   ВСЁ ЭТО СДЕЛАНО СТИЛЯМИ, А НЕ ВТОРОЙ РАЗМЕТКОЙ. Разметка пунктов рассчитана
+   на тёмный сайдбар (белый текст, синяя подсветка) и приходит из общего дерева
+   меню; здесь она перекрашивается селекторами оболочки. Поэтому правила такие
+   подробные: они обязаны перебивать утилиты Tailwind, стоящие прямо на кнопках.
+
    Бар при этом остаётся видимым (z-index у него выше), как в Telegram.
    ЛИСТ ПРИБИТ К (0,0) ЭКРАНА, а место под бар вычитается внутренним отступом.
    Так надо: transform у листа делает его точкой отсчёта для position: fixed
@@ -246,39 +267,224 @@ body.mobile-shell .sidebar {
     transition: transform 0.34s cubic-bezier(0.32, 0.72, 0, 1);
     overflow: hidden !important;
     box-shadow: none;
+    background-color: var(--sheet-bg) !important;
+    background-image: none !important;
+    color: var(--sheet-text);
 }
 
 body.mobile-shell .sidebar.mobile-open {
     transform: translateY(0);
 }
 
-/* Внутренний контейнер сайдбара (p-4 h-full flex flex-col) — здесь освобождается
-   место под бар и под безопасные зоны, свои для каждого поворота. */
+/* Прокручивается ВЕСЬ лист, а не только список разделов: портрет с именем
+   должен уезжать вверх вместе с ним — иначе он занимает треть экрана всегда.
+   Обработчики подменю знают про эту прокрутку (см. sheetScrollEl в App.jsx):
+   их панели позиционируются посчитанными координатами и обязаны ехать следом. */
 body.mobile-shell .sidebar > div {
-    padding-top: max(0.5rem, env(safe-area-inset-top));
-    padding-bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
+    padding: max(6px, env(safe-area-inset-top)) 0
+             calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
     min-height: 0;
 }
 
 body[data-tabbar-side="right"].mobile-shell .sidebar > div {
     padding-right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
-    /* Боком высоты в обрез, но «Выход» не должен упираться в самый край:
+    /* Боком высоты в обрез, но нижняя строка не должна упираться в самый край:
        кнопка у кромки экрана на телефоне попадает в жест «домой». */
     padding-bottom: max(8px, env(safe-area-inset-bottom));
 }
 
 body[data-tabbar-side="left"].mobile-shell .sidebar > div {
     padding-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
-    /* Боком высоты в обрез, но «Выход» не должен упираться в самый край:
-       кнопка у кромки экрана на телефоне попадает в жест «домой». */
     padding-bottom: max(8px, env(safe-area-inset-bottom));
 }
 
-/* Подписи в шторке видны всегда: свёрнутого состояния на телефоне нет, а класс
-   .collapsed на сайдбаре остаётся — им управляет настольная кнопка. */
+/* Список разделов больше не прокручивается сам — он часть общего полотна. */
+body.mobile-shell .sidebar-menu-scroll {
+    flex: none !important;
+    overflow: visible !important;
+    min-height: 0;
+    padding: 0 var(--sheet-gutter);
+}
+
+body.mobile-shell .sidebar-menu-scroll > * {
+    margin-top: 0 !important;
+}
+
+/* Строка списка. Один вид у пунктов меню, у действий аккаунта и у селектора
+   отдела — в настройках телефона все строки выглядят одинаково. */
+body.mobile-shell .sidebar-menu-scroll > li > button,
+body.mobile-shell .sidebar-menu-scroll > li > div > button,
+body.mobile-shell .sidebar > div > div > button,
+body.mobile-shell .mobile-sheet-group button {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 50px;
+    padding: 9px 14px;
+    border: none;
+    border-radius: 0;
+    background: var(--sheet-card) !important;
+    color: var(--sheet-text) !important;
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1.25;
+    text-align: left;
+}
+
+/* Значок в цветной плитке — то, по чему список настроек узнаётся с одного
+   взгляда. Цвет плитки идёт по кругу: пункты приходят из общего меню, и
+   собственного «цвета раздела» у них нет. */
+body.mobile-shell .sidebar-menu-scroll button > svg:first-child,
+body.mobile-shell .sidebar > div > div > button > svg:first-child,
+body.mobile-shell .mobile-sheet-group button > svg:first-child {
+    /* !important здесь не украшение: размер значка приходит ИНЛАЙНОМ (FaIcon
+       ставит width/height в 1em), а ширину в сайдбаре дополнительно держит
+       flex-basis — без обоих перебиваний плитка остаётся 18-пиксельной. */
+    flex: 0 0 29px !important;
+    width: 29px !important;
+    height: 29px !important;
+    min-width: 29px !important;
+    padding: 5.5px;
+    border-radius: 9px;
+    box-sizing: border-box;
+    background: var(--tint, #0a84ff);
+    color: #fff;
+    margin: 0;
+}
+
+body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 1) button > svg:first-child { --tint: #0a84ff; }
+body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 2) button > svg:first-child { --tint: #34c759; }
+body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 3) button > svg:first-child { --tint: #ff9500; }
+body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 4) button > svg:first-child { --tint: #af52de; }
+body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 5) button > svg:first-child { --tint: #ff3b30; }
+body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n) button > svg:first-child { --tint: #5ac8fa; }
+
+body.mobile-shell [data-tint="blue"] { --tint: #0a84ff; }
+body.mobile-shell [data-tint="green"] { --tint: #34c759; }
+body.mobile-shell [data-tint="gray"] { --tint: #8e8e93; }
+body.mobile-shell [data-tint="red"] { --tint: #ff3b30; }
+
+/* Собственную стрелку пунктов с подменю прячем: она проявляется по наведению
+   (которого на телефоне нет) и рисуется значком в 16 px, тогда как у остальных
+   строк стрелка — уголок в 7 px. Двумя разными стрелками список выглядел бы
+   собранным из кусков; ниже уголок ставится всем одинаковый.
+   Селектор отдела — исключение: у него стрелка «вниз», а не «внутрь». */
+body.mobile-shell .sidebar-menu-scroll button > svg:not(:first-child) {
+    display: none;
+}
+
+body.mobile-shell .sidebar > div > div > button > svg:not(:first-child) {
+    width: 1em;
+    height: 1em;
+    padding: 0;
+    margin-left: auto;
+    border-radius: 0;
+    background: none !important;
+    color: var(--sheet-muted);
+    opacity: 0.55 !important;
+    transform: none !important;
+}
+
 body.mobile-shell .sidebar .sidebar-text {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
     opacity: 1 !important;
     width: auto !important;
+}
+
+/* Стрелка «внутрь» у каждой строки, ведущей в раздел, — по ней список
+   читается как список переходов, а не как набор кнопок. Рисуется уголком, а не
+   значком: свой значок есть только у пунктов с подменю, и добавлять всем
+   остальным по <svg> в общую разметку меню ради телефона незачем.
+   :has() отсекает те строки, где стрелка уже своя. */
+body.mobile-shell .sidebar-menu-scroll > li > button::after,
+body.mobile-shell .sidebar-menu-scroll > li > div > button::after,
+body.mobile-shell .mobile-sheet-group button:not(.mobile-sheet-row--exit)::after {
+    content: '';
+    flex: none;
+    width: 7px;
+    height: 7px;
+    margin-left: auto;
+    border-right: 2px solid var(--sheet-chevron);
+    border-bottom: 2px solid var(--sheet-chevron);
+    border-radius: 1px;
+    transform: rotate(-45deg);
+}
+
+/* Разделитель между строками группы начинается после плитки значка — ровно
+   так он выглядит в системных списках. */
+body.mobile-shell .sidebar-menu-scroll > li + li,
+body.mobile-shell .mobile-sheet-group button + button {
+    position: relative;
+}
+
+body.mobile-shell .sidebar-menu-scroll > li + li::before,
+body.mobile-shell .mobile-sheet-group button + button::before {
+    content: '';
+    position: absolute;
+    left: 55px;
+    right: 0;
+    top: 0;
+    height: 1px;
+    transform: scaleY(0.5);
+    background: var(--sheet-sep);
+    z-index: 1;
+}
+
+body.mobile-shell .sidebar-menu-scroll > hr + li::before {
+    display: none;
+}
+
+/* Скругление группы. Группы задают те же разделители <hr>, что и в сайдбаре, —
+   отдельной разметки под телефон не заводим. */
+body.mobile-shell .sidebar-menu-scroll > li:first-of-type > button,
+body.mobile-shell .sidebar-menu-scroll > li:first-of-type > div > button,
+body.mobile-shell .sidebar-menu-scroll > hr + li > button,
+body.mobile-shell .sidebar-menu-scroll > hr + li > div > button {
+    border-top-left-radius: var(--sheet-radius);
+    border-top-right-radius: var(--sheet-radius);
+}
+
+body.mobile-shell .sidebar-menu-scroll > li:last-of-type > button,
+body.mobile-shell .sidebar-menu-scroll > li:last-of-type > div > button,
+body.mobile-shell .sidebar-menu-scroll > li:has(+ hr) > button,
+body.mobile-shell .sidebar-menu-scroll > li:has(+ hr) > div > button {
+    border-bottom-left-radius: var(--sheet-radius);
+    border-bottom-right-radius: var(--sheet-radius);
+}
+
+/* Разделитель групп — воздух, а не линия: линии здесь рисуют сами карточки. */
+body.mobile-shell .sidebar-menu-scroll > hr {
+    border: none !important;
+    height: 22px;
+    margin: 0;
+    opacity: 1;
+}
+
+/* Открытый раздел. Синей заливки на всю строку в списках настроек не бывает —
+   выделяем строку светлой подложкой и цветом подписи. */
+body.mobile-shell .sidebar-menu-scroll .bg-blue-700,
+body.mobile-shell .sidebar-menu-scroll .bg-blue-800 {
+    background: var(--sheet-active) !important;
+    color: var(--sheet-accent) !important;
+    font-weight: 500;
+}
+
+/* Селектор отдела стоит над списком и живёт в своей карточке. */
+body.mobile-shell .sidebar > div > div.relative {
+    margin: 0 var(--sheet-gutter) 22px;
+    border-radius: var(--sheet-radius);
+    overflow: visible;
+}
+
+body.mobile-shell .sidebar > div > div > button {
+    border-radius: var(--sheet-radius);
 }
 
 body.mobile-shell .sidebar.collapsed {
@@ -300,17 +506,159 @@ body.mobile-shell .sidebar .sidebar-logo-mini {
     display: none !important;
 }
 
-/* Логотип на телефоне ужат: на экране высотой 390 px прежние 54 px вместе с
-   отступом в 24 px съедали строку меню. Сам логотип оставлен — у тех, кто
-   ведёт «4 You», вход в раздел есть ТОЛЬКО через него (пункт меню показан
-   лишь читателям), и убрать его значит отнять раздел. */
+/* Логотип ужат до строки заголовка: на телефоне место занимает портрет, а
+   логотип остаётся ради тех, кто ведёт «4 You» — у них вход в раздел ТОЛЬКО
+   через него (пункт меню показан лишь читателям). */
 body.mobile-shell .sidebar h1 {
-    margin-bottom: 0.5rem;
+    height: 34px;
+    margin: 0 0 6px;
+    transform-origin: center;
+}
+
+body.mobile-shell .sidebar .sidebar-logo-full {
+    transform: scale(0.56);
     transform-origin: center;
 }
 
 body.mobile-shell .sidebar-collapse-btn {
     display: none !important;
+}
+
+/* Ручка листа — короткая полоска сверху. Ничего не делает, но именно она
+   читается как «это выезжающий лист, его можно закрыть». */
+.mobile-sheet-handle {
+    width: 36px;
+    height: 5px;
+    margin: 0 auto 6px;
+    border-radius: 999px;
+    background: var(--sheet-handle);
+    flex: none;
+}
+
+/* Шапка: портрет, имя и логин по центру — как открывается список настроек в
+   мобильных приложениях. */
+.mobile-sheet-account {
+    flex: none;
+    padding: 0 var(--sheet-gutter);
+}
+
+.mobile-sheet-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 8px 18px;
+    text-align: center;
+}
+
+.mobile-sheet-hero__avatar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 86px;
+    height: 86px;
+    margin-bottom: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #0a84ff;
+    color: #fff;
+    font-size: 34px;
+    font-weight: 600;
+    flex: none;
+}
+
+.mobile-sheet-hero__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.mobile-sheet-hero__name {
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+}
+
+.mobile-sheet-hero__login {
+    font-size: 14px;
+    color: var(--sheet-muted);
+}
+
+.mobile-sheet-group {
+    margin-bottom: 22px;
+    border-radius: var(--sheet-radius);
+    overflow: hidden;
+    background: var(--sheet-card);
+}
+
+/* «Установить приложение» приходит готовым пунктом светлого выпадающего меню
+   (свой разделитель, свои отступы) — в группе он должен выглядеть обычной
+   строкой, поэтому разделитель прячем, а вид задаёт правило строки выше. */
+.mobile-sheet-group .border-t {
+    display: none;
+}
+
+.mobile-sheet-row--exit,
+body.mobile-shell .mobile-sheet-group .mobile-sheet-row--exit {
+    color: #ff3b30 !important;
+}
+
+/* Футер сайдбара («Аккаунт» и «Выход») на телефоне не рисуется: оба переехали
+   в шапку. Держать их в двух местах — значит однажды обновить одно из них. */
+body.mobile-shell .sidebar-footer-menu {
+    display: none;
+}
+
+/* ШТОРКА БОКОМ. Высота экрана — 390 px, и портрет в полный рост вместе с
+   логотипом съедал бы её целиком. Боком портрет становится строкой, как в
+   обычном списке контактов. */
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-handle,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-handle {
+    display: none;
+}
+
+body[data-tabbar-side="right"].mobile-shell .sidebar h1,
+body[data-tabbar-side="left"].mobile-shell .sidebar h1 {
+    height: 28px;
+    margin-bottom: 2px;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-hero,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-hero {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 2px 4px 12px;
+    text-align: left;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-hero__avatar,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-hero__avatar {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 0;
+    font-size: 18px;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-hero__login,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-hero__login {
+    margin-right: auto;
+}
+
+/* Затемнение под шторкой. Появляется вместе с ней, а не мгновенно: резкая
+   заливка на телефоне читается как перезагрузка страницы. */
+body.mobile-shell .sidebar-overlay {
+    display: block;
+    z-index: 64;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.28s ease;
+}
+
+body.mobile-shell .sidebar-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
 }
 
 /* Выпадающие подменю («Учет сотрудников», «Расчет ресурсов») в шторке. Их
@@ -329,193 +677,6 @@ body.mobile-shell .sidebar .animate-dropdown-reverse {
 body[data-tabbar-side="right"].mobile-shell .sidebar .animate-dropdown,
 body[data-tabbar-side="right"].mobile-shell .sidebar .animate-dropdown-reverse {
     right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 12px);
-}
-
-/* Ручка листа — короткая полоска сверху. Ничего не делает, но именно она
-   читается как «это выезжающий лист, его можно закрыть». */
-.mobile-sheet-handle {
-    width: 36px;
-    height: 4px;
-    margin: 2px auto 6px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.45);
-    flex: none;
-}
-
-/* Шапка шторки — весь аккаунт целиком: фото, имя, логин и действия над
-   собственной учёткой. На телефоне они живут ЗДЕСЬ, а не в пункте «Аккаунт»
-   внизу списка: тот раскрывался вбок, а вбок на всю ширину экрана раскрываться
-   некуда, и за сменой пароля приходилось прокручивать меню до самого низа. */
-.mobile-sheet-account {
-    flex: none;
-    margin-bottom: 8px;
-    padding: 8px;
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.1);
-}
-
-.mobile-sheet-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 8px;
-}
-
-/* Кнопки действий перекрашиваются селектором контейнера: «Установить
-   приложение» приходит готовым пунктом светлого выпадающего меню (чёрный текст
-   на белом hover), и в тёмно-синей шапке его собственные классы читались бы
-   как дыра. Разделитель того же пункта здесь лишний — кнопки и так стоят
-   отдельными плитками. */
-.mobile-sheet-actions button {
-    flex: 1 1 auto;
-    min-width: 92px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 9px 10px;
-    border-radius: 12px;
-    border: none;
-    background: rgba(255, 255, 255, 0.14);
-    color: #fff;
-    font-size: 12.5px;
-    font-weight: 500;
-    text-align: center;
-    white-space: nowrap;
-}
-
-.mobile-sheet-actions button:hover {
-    background: rgba(255, 255, 255, 0.2);
-}
-
-.mobile-sheet-actions .border-t {
-    display: none;
-}
-
-.mobile-sheet-actions .mobile-sheet-actions__exit,
-.mobile-sheet-actions .mobile-sheet-actions__exit:hover {
-    background: rgba(220, 38, 38, 0.85);
-}
-
-/* Футер сайдбара («Аккаунт» и «Выход») на телефоне не рисуется: оба переехали
-   в шапку. Держать их в двух местах — значит однажды обновить одно из них. */
-body.mobile-shell .sidebar-footer-menu {
-    display: none;
-}
-
-/* Строка профиля в шапке шторки: чей это портал, видно сразу — как в
-   Telegram, где список настроек начинается с самого человека. */
-.mobile-sheet-profile {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 2px 4px;
-    flex: none;
-}
-
-.mobile-sheet-profile__avatar {
-    width: 40px;
-    height: 40px;
-    border-radius: 999px;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #3b82f6;
-    color: #fff;
-    font-weight: 600;
-    border: 1px solid rgba(255, 255, 255, 0.4);
-    flex: none;
-}
-
-.mobile-sheet-profile__avatar img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-}
-
-.mobile-sheet-profile__name {
-    font-size: 14px;
-    font-weight: 600;
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.mobile-sheet-profile__role {
-    font-size: 11.5px;
-    line-height: 1.2;
-    opacity: 0.75;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-/* ШТОРКА БОКОМ. Высота экрана — 390 px, и прежняя шапка (логотип 54 px, строка
-   профиля 56 px) вместе с футером съедала её так, что на список разделов
-   оставалась одна строка. Поэтому боком шапка ужимается: логотип уменьшен
-   вдвое (убрать его нельзя — у тех, кто ведёт «4 You», вход в раздел только
-   через него), строка профиля убрана целиком (её же аватар стоит в баре, в
-   двух шагах), а пункты становятся плотнее. */
-body[data-tabbar-side="right"].mobile-shell .sidebar h1,
-body[data-tabbar-side="left"].mobile-shell .sidebar h1 {
-    height: 36px;
-    margin-bottom: 2px;
-}
-
-body[data-tabbar-side="right"].mobile-shell .sidebar .sidebar-logo-full,
-body[data-tabbar-side="left"].mobile-shell .sidebar .sidebar-logo-full {
-    transform: scale(0.62);
-    transform-origin: center;
-}
-
-/* Боком шапка ужимается до одной строки: имя с логином и плитки действий
-   съедали бы половину экрана высотой 390 px. Сами действия остаются — просто
-   плотнее, в один ряд с прокруткой. */
-body[data-tabbar-side="right"].mobile-shell .mobile-sheet-handle,
-body[data-tabbar-side="left"].mobile-shell .mobile-sheet-handle {
-    display: none;
-}
-
-body[data-tabbar-side="right"].mobile-shell .mobile-sheet-account,
-body[data-tabbar-side="left"].mobile-shell .mobile-sheet-account {
-    margin-bottom: 4px;
-    padding: 4px 6px;
-}
-
-body[data-tabbar-side="right"].mobile-shell .mobile-sheet-actions,
-body[data-tabbar-side="left"].mobile-shell .mobile-sheet-actions {
-    margin-top: 4px;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-}
-
-body[data-tabbar-side="right"].mobile-shell .mobile-sheet-actions button,
-body[data-tabbar-side="left"].mobile-shell .mobile-sheet-actions button {
-    padding: 6px 10px;
-    min-width: auto;
-}
-
-body[data-tabbar-side="right"].mobile-shell .sidebar li > button,
-body[data-tabbar-side="left"].mobile-shell .sidebar li > button {
-    padding-top: 8px;
-    padding-bottom: 8px;
-}
-
-/* Затемнение под шторкой. Появляется вместе с ней, а не мгновенно: резкая
-   заливка на телефоне читается как перезагрузка страницы. */
-body.mobile-shell .sidebar-overlay {
-    display: block;
-    z-index: 64;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.28s ease;
-}
-
-body.mobile-shell .sidebar-overlay.active {
-    opacity: 1;
-    pointer-events: auto;
 }
 
 /* ── Колокол в углу экрана ─────────────────────────────────────────────── */
@@ -629,6 +790,212 @@ body[data-tabbar-side="left"].mobile-shell .main-content {
     padding-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
 }
 
+/* ── Содержимое разделов под телефонный формат ─────────────────────────── */
+
+/* Разделы портала свёрстаны под окно компьютера: заголовки в 30–36 px, карточки
+   с полями по 32 px, таблицы на восемь колонок. На экране в 390 px это даёт
+   заголовок в три строки, поля шириной с палец и содержимое, уезжающее за
+   правый край. Здесь общий слой, который приводит типовые куски к телефонному
+   виду СРАЗУ ВО ВСЕХ разделах: точечно править полтора десятка экранов значит
+   пропустить половину и развести их между собой.
+
+   Всё заперто на body.mobile-shell: настольная вёрстка не затронута. */
+
+body.mobile-shell .main-content {
+    overflow-x: hidden;
+    /* Длинные слова (адреса, идентификаторы, ФИО в одну строку) переносятся, а
+       не растягивают блок за край экрана. */
+    overflow-wrap: break-word;
+}
+
+/* Место под колокол. Он висит в правом верхнем углу ЭКРАНА, и без отступа
+   накрывал бы первую строку раздела — а там у половины экранов заголовок с
+   кнопкой или селектор отдела. Отступ общий: разделов полтора десятка, и
+   ловить перекрытие в каждом по отдельности значит пропустить половину. */
+body.mobile-shell .main-content {
+    padding-top: calc(46px + max(10px, env(safe-area-inset-top))) !important;
+}
+
+/* Ряды кнопок в шапках разделов. На компьютере они в одну строку, на телефоне
+   уезжают за правый край — вместе с «Новой задачей» и «Обновить». */
+body.mobile-shell .main-content [class*="topbar"],
+body.mobile-shell .main-content [class*="toolbar"],
+body.mobile-shell .main-content [class*="-actions"],
+body.mobile-shell .main-content [class*="-filters"],
+body.mobile-shell .main-content [class*="-tabs"] {
+    flex-wrap: wrap !important;
+    row-gap: 8px;
+    max-width: 100%;
+}
+
+/* Крупные раскладки «панель слева — рабочая область справа» (планировщик смен,
+   учёт часов) на телефоне встают колонкой. Признак — items-start/items-stretch
+   рядом с растягивающимся блоком: так свёрстаны именно каркасы экранов, а
+   строки внутри карточек выравнивают по центру и под правило не попадают.
+   Без него правая колонка ужимается до восьмидесяти пикселей, и её содержимое
+   торчит за экран. */
+body.mobile-shell .main-content .flex.items-start:has(> .flex-1),
+body.mobile-shell .main-content .flex.items-stretch:has(> .flex-1) {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+/* Высота в экран у таких каркасов на телефоне превращается в две ленты
+   прокрутки — внешнюю и внутреннюю. Оставляем одну, страничную. */
+body.mobile-shell .main-content [class*="h-[calc"],
+body.mobile-shell .main-content .h-screen:not(.main-content) {
+    height: auto !important;
+    max-height: none !important;
+}
+
+/* Двухколоночные экраны (планировщик смен, учёт часов) складываются в одну
+   колонку. Разложены они по-разному — где сеткой с заданными долями, где рядом
+   блоков с фиксированной шириной, — поэтому правил три: убрать минимальную
+   ширину (она мешает колонке ужаться), ограничить заданную ширину экраном и
+   схлопнуть произвольные сетки. Порядок колонок сохраняется, каждая просто
+   встаёт под предыдущей. */
+body.mobile-shell .main-content [class*="min-w-["] {
+    min-width: 0 !important;
+}
+
+body.mobile-shell .main-content [class*="grid-cols-["] {
+    grid-template-columns: minmax(0, 1fr) !important;
+}
+
+body.mobile-shell .main-content [class*="basis-["],
+body.mobile-shell .main-content [class*="w-["]:not([class*="max-w-"]):not([class*="min-w-"]) {
+    max-width: 100% !important;
+}
+
+/* Ряды кнопок и меток. flex-wrap срабатывает ТОЛЬКО когда содержимое не
+   влезает, поэтому правило безопасно для рядов, которые и так помещаются:
+   на компьютере оно ничего не меняет, а на телефоне вместо уехавшей за край
+   кнопки «Создать» получается вторая строка. */
+body.mobile-shell .main-content .flex[class*="gap-"]:not(.flex-col):not([class*="rounded-"]),
+body.mobile-shell .main-content .flex.items-center.justify-between,
+body.mobile-shell .main-content .flex.items-start.justify-between {
+    flex-wrap: wrap;
+    row-gap: 8px;
+}
+
+/* Выпадающие панели внутри разделов (вкладки «Учета часов», меню фильтров).
+   Их ширина рассчитана на настольное окно, и у правого края экрана они
+   вылезали бы за него целиком. */
+body.mobile-shell .main-content [class*="dropdown"],
+body.mobile-shell .main-content [role="menu"],
+body.mobile-shell .main-content [role="listbox"] {
+    max-width: calc(100vw - 24px) !important;
+}
+
+/* Переключатели вкладок («Обзор · Бэклог · Доска», «Аналитика · Сотрудники»)
+   рвать переносом нельзя — это одна полоса. Их прокручивают вбок, как в
+   мобильных приложениях, а полосу прокрутки прячем. */
+body.mobile-shell .main-content .inline-flex[class*="rounded-"],
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-gray"] {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-wrap: nowrap;
+}
+
+body.mobile-shell .main-content .inline-flex[class*="rounded-"]::-webkit-scrollbar {
+    display: none;
+}
+
+/* Блоки с шириной, заданной в разметке (w-[210px] и подобные), не должны
+   вылезать за экран. */
+body.mobile-shell .main-content [class*="w-["] {
+    max-width: 100%;
+}
+
+/* Широкие сетки — календарь смен, таблица часов — прокручиваются внутри своей
+   обёртки: ими и правда пользуются вбок, ужимать их бессмысленно. */
+body.mobile-shell .main-content *:has(> .min-w-max),
+body.mobile-shell .main-content *:has(> [class*="min-w-["]) {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Заголовки. Настольные размеры на телефоне занимают по три строки и съедают
+   первый экран целиком. */
+body.mobile-shell .main-content h1 {
+    font-size: 22px;
+    line-height: 1.2;
+}
+
+body.mobile-shell .main-content h2 {
+    font-size: 18px;
+    line-height: 1.25;
+}
+
+body.mobile-shell .main-content h3 {
+    font-size: 16px;
+    line-height: 1.3;
+}
+
+/* Поля карточек и разделителей. Утилиты Tailwind стоят прямо на элементах,
+   поэтому перебиваются с !important — специфичности одного класса тут мало. */
+body.mobile-shell .main-content .p-8 { padding: 14px !important; }
+body.mobile-shell .main-content .p-6 { padding: 12px !important; }
+body.mobile-shell .main-content .px-8 { padding-left: 14px !important; padding-right: 14px !important; }
+body.mobile-shell .main-content .px-6 { padding-left: 12px !important; padding-right: 12px !important; }
+body.mobile-shell .main-content .py-8 { padding-top: 14px !important; padding-bottom: 14px !important; }
+body.mobile-shell .main-content .py-6 { padding-top: 12px !important; padding-bottom: 12px !important; }
+body.mobile-shell .main-content .gap-8 { gap: 12px !important; }
+body.mobile-shell .main-content .gap-6 { gap: 10px !important; }
+body.mobile-shell .main-content .mb-8 { margin-bottom: 14px !important; }
+body.mobile-shell .main-content .mt-8 { margin-top: 14px !important; }
+
+/* Таблица прокручивается ВНУТРИ своего блока, а не тянет за собой страницу:
+   иначе весь раздел ездит вбок вместе с шапкой и кнопками. Обёртку выбираем
+   через :has() — оборачивать каждую таблицу руками пришлось бы в полутора
+   десятках разделов. */
+body.mobile-shell .main-content *:has(> table) {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+body.mobile-shell .main-content table {
+    font-size: 13px;
+}
+
+body.mobile-shell .main-content table th,
+body.mobile-shell .main-content table td {
+    white-space: nowrap;
+}
+
+/* Плитки показателей. Четыре-шесть колонок на 390 px — это столбик цифр без
+   подписей; две колонки читаются. */
+body.mobile-shell .main-content .grid-cols-3,
+body.mobile-shell .main-content .grid-cols-4,
+body.mobile-shell .main-content .grid-cols-5,
+body.mobile-shell .main-content .grid-cols-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+/* Ряды фильтров и кнопок переносятся по строкам вместо выезда за край. */
+body.mobile-shell .main-content .flex-nowrap {
+    flex-wrap: wrap !important;
+}
+
+/* Модальные окна и выезжающие панели — во всю ширину экрана с полями. */
+body.mobile-shell .main-content .max-w-lg,
+body.mobile-shell .main-content .max-w-xl,
+body.mobile-shell .main-content .max-w-2xl,
+body.mobile-shell .main-content .max-w-3xl,
+body.mobile-shell .main-content .max-w-4xl {
+    max-width: 100% !important;
+}
+
+/* Картинки и видео не шире экрана — их размеры часто заданы в разметке. */
+body.mobile-shell .main-content img,
+body.mobile-shell .main-content video,
+body.mobile-shell .main-content iframe {
+    max-width: 100%;
+}
+
 /* Переключение раздела с бара — короткое проявление снизу вверх. Класс вешает
    и снимает JS (см. mobileViewSwitchRef в src/App.jsx): анимацию нельзя
    привязать к CSS-состоянию, потому что «раздел только что сменился» —
@@ -670,6 +1037,15 @@ html[data-otp-theme="dark"] {
     --mtb-border: rgba(148, 163, 184, 0.22);
     --mtb-idle: #94a3b8;
     --mtb-accent: #93c5fd;
+    --sheet-bg: #000000;
+    --sheet-card: #1c1c1e;
+    --sheet-text: #ffffff;
+    --sheet-muted: #98989e;
+    --sheet-sep: rgba(84, 84, 88, 0.65);
+    --sheet-active: #2c2c2e;
+    --sheet-accent: #0a84ff;
+    --sheet-handle: rgba(235, 235, 245, 0.3);
+    --sheet-chevron: rgba(235, 235, 245, 0.35);
 }
 
 html[data-otp-theme="dark"] .mtb-item.is-active .mtb-item__icon {

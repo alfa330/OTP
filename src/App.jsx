@@ -40314,6 +40314,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const scrollEl = sidebarMenuScrollRef.current;
                 scrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
+                /* В шторке прокручивается ВЕСЬ лист, а не список разделов: портрет
+                   с именем уезжает вверх вместе с пунктами. Без этого слушателя
+                   панель подменю оставалась бы висеть там, где её открыли. */
+                const sheetScrollEl = scrollEl?.parentElement;
+                sheetScrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
                 window.addEventListener('resize', scheduleUpdatePos);
 
                 const sidebarEl = sidebarEmployeesRef.current?.closest('.sidebar');
@@ -40328,6 +40333,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return () => {
                     if (rafId) cancelAnimationFrame(rafId);
                     scrollEl?.removeEventListener('scroll', scheduleUpdatePos);
+                    sheetScrollEl?.removeEventListener('scroll', scheduleUpdatePos);
                     window.removeEventListener('resize', scheduleUpdatePos);
                     sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
                     ro?.disconnect();
@@ -40362,6 +40368,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const scrollEl = sidebarMenuScrollRef.current;
                 scrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
+                /* В шторке прокручивается ВЕСЬ лист, а не список разделов: портрет
+                   с именем уезжает вверх вместе с пунктами. Без этого слушателя
+                   панель подменю оставалась бы висеть там, где её открыли. */
+                const sheetScrollEl = scrollEl?.parentElement;
+                sheetScrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
                 window.addEventListener('resize', scheduleUpdatePos);
 
                 const sidebarEl = sidebarResourceRef.current?.closest('.sidebar');
@@ -40376,6 +40387,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return () => {
                     if (rafId) cancelAnimationFrame(rafId);
                     scrollEl?.removeEventListener('scroll', scheduleUpdatePos);
+                    sheetScrollEl?.removeEventListener('scroll', scheduleUpdatePos);
                     window.removeEventListener('resize', scheduleUpdatePos);
                     sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
                     ro?.disconnect();
@@ -47192,11 +47204,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     где их можно забыть обновить. */}
                                 {isMobileShell && (
                                     <div className="mobile-sheet-account">
-                                        <div className="mobile-sheet-profile">
-                                            {/* Аватар — переключатель тёмного режима у тех,
+                                        {/* Шапка как в списке настроек телефона: крупный
+                                            портрет, имя и логин по центру — сразу видно,
+                                            чей это портал. */}
+                                        <div className="mobile-sheet-hero">
+                                            {/* Портрет — переключатель тёмного режима у тех,
                                                 кому он выдан; ровно как в настольном меню. */}
                                             <span
-                                                className="mobile-sheet-profile__avatar"
+                                                className="mobile-sheet-hero__avatar"
                                                 title={darkThemeAllowed ? (darkTheme ? 'Светлая тема' : 'Тёмная тема') : undefined}
                                                 style={darkThemeAllowed ? { cursor: 'pointer' } : undefined}
                                                 onClick={darkThemeAllowed ? toggleDarkTheme : undefined}
@@ -47207,18 +47222,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     (user?.name || 'U').charAt(0).toUpperCase()
                                                 )}
                                             </span>
-                                            <span className="min-w-0">
-                                                <span className="mobile-sheet-profile__name block">{user?.name || 'Профиль'}</span>
-                                                {user?.login && (
-                                                    <span className="mobile-sheet-profile__role block">@{user.login}</span>
-                                                )}
-                                            </span>
+                                            <span className="mobile-sheet-hero__name">{user?.name || 'Профиль'}</span>
+                                            {user?.login && (
+                                                <span className="mobile-sheet-hero__login">@{user.login}</span>
+                                            )}
                                         </div>
-                                        {/* Действия закрывают шторку: формы смены логина и
+                                        {/* Действия над своей учёткой — отдельной группой
+                                            строк, как «Мой профиль» и соседи в настройках.
+                                            Каждая закрывает шторку: формы смены логина и
                                             пароля рисуются в разделе, под ней. */}
-                                        <div className="mobile-sheet-actions">
+                                        <div className="mobile-sheet-group">
                                             <button
                                                 type="button"
+                                                className="mobile-sheet-row"
                                                 onClick={() => {
                                                     setShowChangeAvatarForm(false);
                                                     setShowChangePasswordForm(false);
@@ -47226,10 +47242,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setMobileMenuOpen(false);
                                                 }}
                                             >
-                                                <FaIcon className="fas fa-user-edit"></FaIcon> Логин
+                                                <FaIcon className="fas fa-user-edit" data-tint="blue"></FaIcon>
+                                                <span>Сменить логин</span>
                                             </button>
                                             <button
                                                 type="button"
+                                                className="mobile-sheet-row"
                                                 onClick={() => {
                                                     setShowChangeAvatarForm(false);
                                                     setShowChangeLoginForm(false);
@@ -47237,11 +47255,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setMobileMenuOpen(false);
                                                 }}
                                             >
-                                                <FaIcon className="fas fa-lock"></FaIcon> Пароль
+                                                <FaIcon className="fas fa-lock" data-tint="gray"></FaIcon>
+                                                <span>Сменить пароль</span>
                                             </button>
                                             {canChangeAccountAvatar && (
                                                 <button
                                                     type="button"
+                                                    className="mobile-sheet-row"
                                                     onClick={() => {
                                                         setShowChangeLoginForm(false);
                                                         setShowChangePasswordForm(false);
@@ -47249,18 +47269,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setMobileMenuOpen(false);
                                                     }}
                                                 >
-                                                    <FaIcon className="fas fa-camera"></FaIcon> Фото
+                                                    <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
+                                                    <span>Сменить фотографию</span>
                                                 </button>
                                             )}
                                             {/* Пункт сам решает, показываться ли: на уже
                                                 установленном портале не рисует ничего. */}
                                             <InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />
+                                        </div>
+                                        <div className="mobile-sheet-group">
                                             <button
                                                 type="button"
                                                 onClick={stableSidebarHandleLogout}
-                                                className="mobile-sheet-actions__exit"
+                                                className="mobile-sheet-row mobile-sheet-row--exit"
                                             >
-                                                <FaIcon className="fas fa-sign-out-alt"></FaIcon> Выход
+                                                <FaIcon className="fas fa-sign-out-alt" data-tint="red"></FaIcon>
+                                                <span>Выйти</span>
                                             </button>
                                         </div>
                                     </div>
