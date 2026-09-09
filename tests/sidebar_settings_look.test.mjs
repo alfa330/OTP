@@ -749,3 +749,25 @@ test('кнопка поиска проявляется мягко и на ход
     const left = Number(/left: (\d+)px/.exec(rail.body)?.[1]);
     assert.equal(left, 10, `поиск стартует с ${left}px — из-под колокола он должен выезжать с 10`);
 });
+
+test('счётчик уведомлений не уходит под кнопку сворачивания', () => {
+    /* Кнопка сворачивания висит на absolute -right-4 и лежит выше по слою
+       (z-index: 2) — то есть ровно в том углу, где счётчик. В рельсе он
+       пропадал под ней целиком, поэтому там счётчик уезжает внутрь карточки,
+       на угол самой плитки, а слой поднят у него в любом состоянии. */
+    const badge = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar .sidebar-top-row .sidebar-surveys-collapsed-badge');
+    assert.ok(badge, 'нет правила счётчика в шапке');
+    const z = Number(/z-index: (\d+);/.exec(badge.body)?.[1]);
+    const knob = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-collapse-btn');
+    const knobZ = Number(/z-index: (\d+);/.exec(knob.body)?.[1]);
+    assert.ok(Number.isFinite(z) && z > knobZ, `счётчик на слое ${z}, кнопка сворачивания на ${knobZ}`);
+
+    const RAIL = 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open))';
+    const railBadge = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-top-row .sidebar-surveys-collapsed-badge`);
+    assert.ok(railBadge, 'нет положения счётчика в рельсе');
+    const right = Number(/right: (\d+)px/.exec(railBadge.body)?.[1]);
+    /* Правый край счётчика обязан остаться левее кнопки сворачивания: полоса
+       80, карточка 10…70, кнопка от 64. */
+    const badgeRight = 70 - right;
+    assert.ok(badgeRight <= 64, `правый край счётчика на ${badgeRight}px — кнопка сворачивания начинается с 64`);
+});
