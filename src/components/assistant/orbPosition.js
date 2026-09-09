@@ -9,6 +9,8 @@
  * потом уходит в style.left/style.top, и лишнего пересчёта в компоненте нет.
  */
 
+import { TAB_BAR_SIDE, TAB_BAR_THICKNESS, mobileShellReservedBoxes } from '../../utils/mobileShell.js';
+
 /** Диаметр шарика. Совпадает с --aorb-size в assistant-orb.css. */
 export const ORB_SIZE = 56;
 
@@ -29,32 +31,44 @@ export const DOCK_HIDDEN = ORB_SIZE / 2;
 export const DEFAULT_BOTTOM_OFFSET = 96;
 export const DEFAULT_RIGHT_OFFSET = 18;
 
-/* Гамбургер мобильного меню — fixed top:16 left:16, 44×44, z 60. Шарик, севший
-   на него, отнимает у человека единственный вход в навигацию, поэтому левый
-   верхний угол для него закрыт. Порог 768px — тот же, что у медиазапроса
-   .hamburger-btn в src/styles.css. */
-const HAMBURGER_BREAKPOINT = 768;
-const HAMBURGER_BOX = { x: 0, y: 0, width: 76, height: 76 };
+/* Навигация телефона: бар разделов у одной из граней экрана и колокол в правом
+   верхнем углу. Шарик, севший на них, отнимает у человека вход в разделы и в
+   уведомления, поэтому занятые полосы для него закрыты — раньше ровно так же
+   был закрыт левый верхний угол под гамбургером.
+
+   Какая грань занята, знает оболочка (src/utils/mobileShell.js): при повороте
+   телефона бар остаётся у нижней грани КОРПУСА, то есть уезжает вбок. */
+const navInsets = (nav) => {
+    if (!nav?.shell) return { top: 0, right: 0, bottom: 0, left: 0 };
+    if (nav.side === TAB_BAR_SIDE.RIGHT) return { top: 0, right: TAB_BAR_THICKNESS, bottom: 0, left: 0 };
+    if (nav.side === TAB_BAR_SIDE.LEFT) return { top: 0, right: 0, bottom: 0, left: TAB_BAR_THICKNESS };
+    return { top: 0, right: 0, bottom: TAB_BAR_THICKNESS, left: 0 };
+};
 
 const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
 
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 
 /** Прямоугольник, в котором шарику разрешено стоять целиком. */
-const freeBounds = (viewport) => ({
-    minX: EDGE_MARGIN,
-    minY: EDGE_MARGIN,
-    maxX: Math.max(EDGE_MARGIN, viewport.width - ORB_SIZE - EDGE_MARGIN),
-    maxY: Math.max(EDGE_MARGIN, viewport.height - ORB_SIZE - EDGE_MARGIN),
-});
+const freeBounds = (viewport, nav) => {
+    const insets = navInsets(nav);
+    const minX = EDGE_MARGIN + insets.left;
+    const minY = EDGE_MARGIN + insets.top;
+    return {
+        minX,
+        minY,
+        maxX: Math.max(minX, viewport.width - ORB_SIZE - EDGE_MARGIN - insets.right),
+        maxY: Math.max(minY, viewport.height - ORB_SIZE - EDGE_MARGIN - insets.bottom),
+    };
+};
 
 /**
  * Позиция по умолчанию — правый нижний угол, выше тостов.
  * Считается от размеров окна, а не хранится константой: на узком экране
  * фиксированные координаты увели бы шарик за край.
  */
-export const defaultPosition = (viewport) => {
-    const bounds = freeBounds(viewport);
+export const defaultPosition = (viewport, nav) => {
+    const bounds = freeBounds(viewport, nav);
     return {
         x: clamp(viewport.width - ORB_SIZE - DEFAULT_RIGHT_OFFSET, bounds.minX, bounds.maxX),
         y: clamp(viewport.height - ORB_SIZE - DEFAULT_BOTTOM_OFFSET, bounds.minY, bounds.maxY),
@@ -72,13 +86,16 @@ export const defaultPosition = (viewport) => {
  * У прижатого к краю шарика по горизонтали свои границы — он обязан торчать
  * ровно наполовину, и обычный clamp вернул бы его целиком на экран.
  */
-export const clampPosition = (position, viewport) => {
-    const bounds = freeBounds(viewport);
+export const clampPosition = (position, viewport, nav) => {
+    const bounds = freeBounds(viewport, nav);
+    const insets = navInsets(nav);
     const dock = position?.dock === 'left' || position?.dock === 'right' ? position.dock : null;
     const y = clamp(isFiniteNumber(position?.y) ? position.y : bounds.minY, bounds.minY, bounds.maxY);
 
-    if (dock === 'left') return { x: -DOCK_HIDDEN, y, dock };
-    if (dock === 'right') return { x: viewport.width - DOCK_HIDDEN, y, dock };
+    /* Прижатый шарик торчит из-за края наполовину — но из-за края СВОБОДНОГО
+       места, а не экрана: там, где вдоль края стоит бар, он прилипает к бару. */
+    if (dock === 'left') return { x: insets.left - DOCK_HIDDEN, y, dock };
+    if (dock === 'right') return { x: viewport.width - insets.right - DOCK_HIDDEN, y, dock };
 
     return {
         x: clamp(isFiniteNumber(position?.x) ? position.x : bounds.maxX, bounds.minX, bounds.maxX),
@@ -93,13 +110,14 @@ export const clampPosition = (position, viewport) => {
  * Прилипание считается по ЦЕНТРУ шарика, а не по его левому краю: человек
  * тащит за середину, и на край он смотрит тоже серединой.
  */
-export const resolveDock = (position, viewport) => {
+export const resolveDock = (position, viewport, nav) => {
+    const insets = navInsets(nav);
     const centerX = position.x + ORB_SIZE / 2;
-    if (centerX <= SNAP_ZONE) return clampPosition({ ...position, dock: 'left' }, viewport);
-    if (centerX >= viewport.width - SNAP_ZONE) {
-        return clampPosition({ ...position, dock: 'right' }, viewport);
+    if (centerX <= insets.left + SNAP_ZONE) return clampPosition({ ...position, dock: 'left' }, viewport, nav);
+    if (centerX >= viewport.width - insets.right - SNAP_ZONE) {
+        return clampPosition({ ...position, dock: 'right' }, viewport, nav);
     }
-    return clampPosition({ ...position, dock: null }, viewport);
+    return clampPosition({ ...position, dock: null }, viewport, nav);
 };
 
 /**
@@ -107,9 +125,9 @@ export const resolveDock = (position, viewport) => {
  * Панель, раскрытая от наполовину спрятанного шарика, выглядела бы приклеенной
  * к пустому месту, поэтому «показаться» и «открыться» — одно движение.
  */
-export const undock = (position, viewport) => {
+export const undock = (position, viewport, nav) => {
     if (!position?.dock) return position;
-    const bounds = freeBounds(viewport);
+    const bounds = freeBounds(viewport, nav);
     return {
         x: position.dock === 'left' ? bounds.minX : bounds.maxX,
         y: clamp(position.y, bounds.minY, bounds.maxY),
@@ -118,16 +136,18 @@ export const undock = (position, viewport) => {
 };
 
 /**
- * Мешает ли шарик мобильному гамбургеру. Позицию не правим молча — компонент
- * решает сам; функция нужна тестам и подсказке при перетаскивании.
+ * Мешает ли шарик мобильной навигации — бару разделов или колоколу в углу.
+ * Позицию не правим молча (её уже сузил freeBounds), функция отвечает на
+ * вопрос «наехал ли» — для тестов и подсказки при перетаскивании.
  */
-export const overlapsHamburger = (position, viewport) => {
-    if (viewport.width > HAMBURGER_BREAKPOINT) return false;
-    return position.x < HAMBURGER_BOX.x + HAMBURGER_BOX.width
-        && position.x + ORB_SIZE > HAMBURGER_BOX.x
-        && position.y < HAMBURGER_BOX.y + HAMBURGER_BOX.height
-        && position.y + ORB_SIZE > HAMBURGER_BOX.y;
-};
+export const overlapsNavigation = (position, viewport, nav) => (
+    mobileShellReservedBoxes(nav || { shell: false }, viewport).some((box) => (
+        position.x < box.x + box.width
+        && position.x + ORB_SIZE > box.x
+        && position.y < box.y + box.height
+        && position.y + ORB_SIZE > box.y
+    ))
+);
 
 /**
  * Куда поставить панель мини-чата относительно шарика.

@@ -17,7 +17,7 @@ import {
     clampPosition,
     defaultPosition,
     movedEnough,
-    overlapsHamburger,
+    overlapsNavigation,
     panelAnchor,
     resolveDock,
     undock,
@@ -27,6 +27,12 @@ const DESKTOP = { width: 1440, height: 900 };
 const LAPTOP = { width: 1280, height: 720 };
 const PHONE = { width: 375, height: 667 };
 const PANEL = { width: 384, height: 520 };
+/* Мобильная оболочка: бар разделов у одной из граней экрана. Сторона меняется
+   при повороте телефона — бар остаётся у нижней грани КОРПУСА. */
+const NAV_BOTTOM = { shell: true, side: 'bottom' };
+const NAV_RIGHT = { shell: true, side: 'right' };
+const NAV_OFF = { shell: false, side: 'bottom' };
+const PHONE_LANDSCAPE = { width: 667, height: 375 };
 
 test('по умолчанию шарик стоит в правом нижнем углу, но выше тостов', () => {
     const position = defaultPosition(DESKTOP);
@@ -124,9 +130,35 @@ test('на телефоне панель занимает окно, а не 384 
     assert.ok(anchor.top + anchor.height <= PHONE.height - EDGE_MARGIN + 1);
 });
 
-test('на телефоне гамбургер защищён, на десктопе такой зоны нет', () => {
-    // Шарик, севший на гамбургер, отнимает единственный вход в навигацию.
-    assert.equal(overlapsHamburger({ x: 12, y: 12, dock: null }, PHONE), true);
-    assert.equal(overlapsHamburger({ x: 200, y: 400, dock: null }, PHONE), false);
-    assert.equal(overlapsHamburger({ x: 12, y: 12, dock: null }, DESKTOP), false);
+test('на телефоне навигация защищена, на десктопе такой зоны нет', () => {
+    // Шарик, севший на бар разделов или на колокол, отнимает вход в навигацию
+    // и в уведомления — ровно то, чем раньше грозил гамбургер.
+    const onBar = { x: 150, y: PHONE.height - 40, dock: null };
+    const onBell = { x: PHONE.width - 50, y: 6, dock: null };
+    assert.equal(overlapsNavigation(onBar, PHONE, NAV_BOTTOM), true);
+    assert.equal(overlapsNavigation(onBell, PHONE, NAV_BOTTOM), true);
+    assert.equal(overlapsNavigation({ x: 150, y: 300, dock: null }, PHONE, NAV_BOTTOM), false);
+    assert.equal(overlapsNavigation(onBar, PHONE, NAV_OFF), false);
+    assert.equal(overlapsNavigation({ x: 12, y: 12, dock: null }, DESKTOP, NAV_OFF), false);
+});
+
+test('шарик не встаёт под баром разделов ни в одном повороте', () => {
+    /* Полоса бара — единственное место экрана, где шарика быть не должно: под
+       ним он и сам недоступен, и кнопки перекрывает. Проверяем оба поворота:
+       боком бар уезжает к боковой грани, и «просто не ставить внизу» мало. */
+    const low = clampPosition({ x: 100, y: 10000, dock: null }, PHONE, NAV_BOTTOM);
+    assert.ok(low.y + ORB_SIZE <= PHONE.height - 64, `шарик залез на бар: y=${low.y}`);
+
+    const right = clampPosition({ x: 10000, y: 100, dock: null }, PHONE_LANDSCAPE, NAV_RIGHT);
+    assert.ok(
+        right.x + ORB_SIZE <= PHONE_LANDSCAPE.width - 64,
+        `шарик залез на боковой бар: x=${right.x}`,
+    );
+});
+
+test('прижатый шарик липнет к краю свободного места, а не к краю экрана', () => {
+    // Иначе «прижать вправо» на повёрнутом телефоне означало бы «спрятать под бар».
+    const docked = resolveDock({ x: PHONE_LANDSCAPE.width - 60, y: 100, dock: null }, PHONE_LANDSCAPE, NAV_RIGHT);
+    assert.equal(docked.dock, 'right');
+    assert.equal(docked.x, PHONE_LANDSCAPE.width - 64 - DOCK_HIDDEN);
 });

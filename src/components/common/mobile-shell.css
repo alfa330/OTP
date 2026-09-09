@@ -1,0 +1,580 @@
+/* Мобильная оболочка портала: бар разделов снизу, меню — шторкой, колокол — в углу.
+ *
+ * Всё в этом файле включается КЛАССОМ body.mobile-shell, а не медиазапросом.
+ * Условие «мы на телефоне» сложнее ширины окна (телефон боком — это 844×390,
+ * то есть настольная ширина при телефонной высоте), оно живёт одной строкой в
+ * src/utils/mobileShell.js, и второй его копии в CSS быть не должно: разъехавшись,
+ * они дают либо бар без места под него, либо место под бар без бара.
+ *
+ * Настольная вёрстка этим файлом не затронута вовсе: без класса на <body> ни
+ * одно правило отсюда не срабатывает.
+ */
+
+:root {
+    /* Толщина бара без безопасной зоны. Число дублируется в
+       TAB_BAR_THICKNESS (src/utils/mobileShell.js) — там оно нужно геометрии
+       плавающего помощника; равенство сторожит тест. */
+    --mtb-thickness: 64px;
+    /* Длина кнопки вдоль бара. В повёрнутом баре ею становится ВЫСОТА кнопки,
+       поэтому размер общий: одна кнопка — один прямоугольник при любом повороте. */
+    --mtb-item-long: 76px;
+    --mtb-accent: #1d4ed8;
+    --mtb-idle: #64748b;
+    --mtb-surface: rgba(255, 255, 255, 0.88);
+    --mtb-border: rgba(15, 23, 42, 0.1);
+}
+
+/* ── Бар ───────────────────────────────────────────────────────────────── */
+
+.mobile-tabbar {
+    position: fixed;
+    z-index: 70;
+    display: flex;
+    align-items: stretch;
+    background: var(--mtb-surface);
+    /* Матовое стекло, как у системных панелей iOS: под баром едет содержимое
+       раздела, и глухая заливка выглядела бы приклеенной полосой. */
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    /* Панель не двигают пальцем и не выделяют: это навигация, а не текст. */
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Портрет: полоса у нижней грани, кнопки в ряд. */
+.mobile-tabbar[data-side="bottom"] {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+    flex-direction: row;
+    border-top: 1px solid var(--mtb-border);
+}
+
+/* Альбомная ориентация. Бар остаётся у той же грани КОРПУСА, у которой стоял
+   в портрете, — снизу он съел бы шестую часть и без того низкого окна.
+   Сторону считает tabBarSideForAngle: при angle 90 низ корпуса оказывается
+   справа от смотрящего, при 270 — слева. */
+.mobile-tabbar[data-side="right"] {
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: calc(var(--mtb-thickness) + env(safe-area-inset-right));
+    padding-right: env(safe-area-inset-right);
+    flex-direction: column;
+    border-left: 1px solid var(--mtb-border);
+}
+
+/* column-reverse — не декорация: кнопки обязаны идти в том же порядке
+   ОТНОСИТЕЛЬНО КОРПУСА, что и в портрете. При повороте влево направление
+   «слева направо» превращается в «снизу вверх», поэтому первая кнопка внизу. */
+.mobile-tabbar[data-side="left"] {
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+    padding-left: env(safe-area-inset-left);
+    flex-direction: column-reverse;
+    border-right: 1px solid var(--mtb-border);
+}
+
+.mtb-item {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--mtb-idle);
+    cursor: pointer;
+    /* Никаких transition: all — в кадре анимации браузер иначе переоценивает
+       каждое свойство кнопки, а их тут десяток. */
+    transition: color 0.2s ease;
+}
+
+.mtb-item.is-active {
+    color: var(--mtb-accent);
+}
+
+.mtb-item__inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+}
+
+/* Повёрнутый бар: кнопка держит прежний прямоугольник, только он теперь стоит
+   поперёк. Размеры внутренней обёртки заданы явно, потому что rotate() не
+   меняет место, которое элемент занимает в потоке: без этого повёрнутая
+   подпись вылезала бы за полосу. */
+.mobile-tabbar[data-side="right"] .mtb-item,
+.mobile-tabbar[data-side="left"] .mtb-item {
+    flex: 0 1 var(--mtb-item-long);
+    width: 100%;
+}
+
+.mobile-tabbar[data-side="right"] .mtb-item__inner,
+.mobile-tabbar[data-side="left"] .mtb-item__inner {
+    width: var(--mtb-item-long);
+    height: var(--mtb-thickness);
+    flex: none;
+}
+
+.mobile-tabbar[data-side="right"] .mtb-item__inner {
+    transform: rotate(90deg);
+}
+
+.mobile-tabbar[data-side="left"] .mtb-item__inner {
+    transform: rotate(-90deg);
+}
+
+.mtb-item__icon {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 26px;
+    border-radius: 999px;
+    font-size: 19px;
+    transition: background-color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Подсветка активного раздела — пилюля под значком, как в системных барах.
+   Двигается вместе со значком: подъём на пиксель делает переключение
+   заметным движением, а не только сменой цвета. */
+.mtb-item.is-active .mtb-item__icon {
+    background: rgba(29, 78, 216, 0.12);
+    transform: translateY(-1px);
+}
+
+.mtb-item:active .mtb-item__icon {
+    transform: scale(0.92);
+}
+
+.mtb-item__label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10.5px;
+    line-height: 1.1;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+}
+
+.mtb-item.is-active .mtb-item__label {
+    font-weight: 600;
+}
+
+.mtb-badge {
+    position: absolute;
+    top: -4px;
+    right: 2px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 3px;
+    border-radius: 999px;
+    background: #e11d48;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 15px;
+    text-align: center;
+}
+
+.mtb-item__avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #3b82f6;
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+.mtb-item__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.mtb-item__initial {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.mtb-item--profile.is-active .mtb-item__avatar {
+    box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.45);
+}
+
+/* ── Шторка со всеми разделами ─────────────────────────────────────────── */
+
+/* Это тот же сайдбар: список разделов у роли один, и второй его копии для
+   телефона быть не должно — забытый в одной из копий пункт пропадает молча.
+   Меняется только подача: не полоса слева, а лист, выезжающий снизу.
+   Бар при этом остаётся видимым (z-index у него выше), как в Telegram.
+   ЛИСТ ПРИБИТ К (0,0) ЭКРАНА, а место под бар вычитается внутренним отступом.
+   Так надо: transform у листа делает его точкой отсчёта для position: fixed
+   внутри — а там живут выпадающие подменю с посчитанными координатами, и
+   сдвинутый угол увёл бы их мимо своих пунктов. */
+body.mobile-shell .sidebar {
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100% !important;
+    height: 100%;
+    max-height: none;
+    z-index: 65;
+    transform: translateY(100%);
+    transition: transform 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+    overflow: hidden !important;
+    box-shadow: none;
+}
+
+body.mobile-shell .sidebar.mobile-open {
+    transform: translateY(0);
+}
+
+/* Внутренний контейнер сайдбара (p-4 h-full flex flex-col) — здесь освобождается
+   место под бар и под безопасные зоны, свои для каждого поворота. */
+body.mobile-shell .sidebar > div {
+    padding-top: max(0.5rem, env(safe-area-inset-top));
+    padding-bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
+    min-height: 0;
+}
+
+body[data-tabbar-side="right"].mobile-shell .sidebar > div {
+    padding-right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
+    /* Боком высоты в обрез, но «Выход» не должен упираться в самый край:
+       кнопка у кромки экрана на телефоне попадает в жест «домой». */
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+body[data-tabbar-side="left"].mobile-shell .sidebar > div {
+    padding-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+    /* Боком высоты в обрез, но «Выход» не должен упираться в самый край:
+       кнопка у кромки экрана на телефоне попадает в жест «домой». */
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+/* Подписи в шторке видны всегда: свёрнутого состояния на телефоне нет, а класс
+   .collapsed на сайдбаре остаётся — им управляет настольная кнопка. */
+body.mobile-shell .sidebar .sidebar-text {
+    opacity: 1 !important;
+    width: auto !important;
+}
+
+body.mobile-shell .sidebar.collapsed {
+    width: 100% !important;
+}
+
+/* Компактный бейдж для свёрнутого сайдбара в шторке лишний: подписи видны, и
+   рядом с пунктом уже висит обычный бейдж — вместе они читались бы как два
+   разных числа. */
+body.mobile-shell .sidebar .sidebar-surveys-collapsed-badge {
+    display: none !important;
+}
+
+body.mobile-shell .sidebar .sidebar-logo-full {
+    display: flex !important;
+}
+
+body.mobile-shell .sidebar .sidebar-logo-mini {
+    display: none !important;
+}
+
+/* Логотип на телефоне ужат: на экране высотой 390 px прежние 54 px вместе с
+   отступом в 24 px съедали строку меню. Сам логотип оставлен — у тех, кто
+   ведёт «4 You», вход в раздел есть ТОЛЬКО через него (пункт меню показан
+   лишь читателям), и убрать его значит отнять раздел. */
+body.mobile-shell .sidebar h1 {
+    margin-bottom: 0.5rem;
+    transform-origin: center;
+}
+
+body.mobile-shell .sidebar-collapse-btn {
+    display: none !important;
+}
+
+/* Ручка листа — короткая полоска сверху. Ничего не делает, но именно она
+   читается как «это выезжающий лист, его можно закрыть». */
+.mobile-sheet-handle {
+    width: 36px;
+    height: 4px;
+    margin: 2px auto 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.45);
+    flex: none;
+}
+
+/* Строка профиля в шапке шторки: чей это портал, видно сразу — как в
+   Telegram, где список настроек начинается с самого человека. */
+.mobile-sheet-profile {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.1);
+    flex: none;
+}
+
+.mobile-sheet-profile__avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #3b82f6;
+    color: #fff;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    flex: none;
+}
+
+.mobile-sheet-profile__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.mobile-sheet-profile__name {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mobile-sheet-profile__role {
+    font-size: 11.5px;
+    line-height: 1.2;
+    opacity: 0.75;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ШТОРКА БОКОМ. Высота экрана — 390 px, и прежняя шапка (логотип 54 px, строка
+   профиля 56 px) вместе с футером съедала её так, что на список разделов
+   оставалась одна строка. Поэтому боком шапка ужимается: логотип уменьшен
+   вдвое (убрать его нельзя — у тех, кто ведёт «4 You», вход в раздел только
+   через него), строка профиля убрана целиком (её же аватар стоит в баре, в
+   двух шагах), а пункты становятся плотнее. */
+body[data-tabbar-side="right"].mobile-shell .sidebar h1,
+body[data-tabbar-side="left"].mobile-shell .sidebar h1 {
+    height: 36px;
+    margin-bottom: 2px;
+}
+
+body[data-tabbar-side="right"].mobile-shell .sidebar .sidebar-logo-full,
+body[data-tabbar-side="left"].mobile-shell .sidebar .sidebar-logo-full {
+    transform: scale(0.62);
+    transform-origin: center;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-profile,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-profile,
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-handle,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-handle {
+    display: none;
+}
+
+body[data-tabbar-side="right"].mobile-shell .sidebar li > button,
+body[data-tabbar-side="left"].mobile-shell .sidebar li > button {
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+/* Затемнение под шторкой. Появляется вместе с ней, а не мгновенно: резкая
+   заливка на телефоне читается как перезагрузка страницы. */
+body.mobile-shell .sidebar-overlay {
+    display: block;
+    z-index: 64;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.28s ease;
+}
+
+body.mobile-shell .sidebar-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* ── Колокол в углу экрана ─────────────────────────────────────────────── */
+
+/* На телефоне колокол вынут из меню порталом: уведомления должны быть видны
+   всегда, а меню теперь спрятано в шторку. Место — правый верхний угол ЭКРАНА
+   при любом повороте: угол корпуса при повороте уезжает вниз, куда за
+   уведомлениями никто не потянется. */
+.mobile-bell-slot {
+    position: fixed;
+    top: max(10px, env(safe-area-inset-top));
+    right: max(10px, env(safe-area-inset-right));
+    z-index: 71;
+}
+
+/* Бар справа — колокол отходит левее, иначе он висел бы поверх кнопок. */
+body[data-tabbar-side="right"] .mobile-bell-slot {
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 10px);
+}
+
+.mobile-bell-slot > div > button {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    justify-content: center;
+    border-radius: 999px;
+    background: var(--mtb-surface);
+    backdrop-filter: blur(18px) saturate(180%);
+    -webkit-backdrop-filter: blur(18px) saturate(180%);
+    color: #1e3a8a;
+    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18);
+    border: 1px solid var(--mtb-border);
+}
+
+/* hover на телефоне залипает после тапа: браузер держит его до касания в
+   другом месте, и кнопка оставалась бы синей. */
+.mobile-bell-slot > div > button:hover {
+    background: var(--mtb-surface);
+}
+
+/* Подпись и стрелка — части пункта меню; в круглой кнопке им места нет. */
+.mobile-bell-slot .sidebar-text,
+.mobile-bell-slot > div > button > svg:last-child {
+    display: none !important;
+}
+
+.mobile-bell-slot .sidebar-surveys-collapsed-badge {
+    display: inline-flex !important;
+    position: absolute;
+    top: 2px;
+    right: 2px;
+}
+
+/* Панель уведомлений: вправо от колокола выпадать некуда — раскрываем вниз
+   на всю ширину экрана с отступами. */
+.mobile-bell-slot .notifications-dropdown,
+body.mobile-shell .notifications-toast-floating {
+    position: fixed;
+    top: calc(max(10px, env(safe-area-inset-top)) + 52px);
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+    width: auto;
+    max-width: 420px;
+    margin: 0 0 0 auto;
+    max-height: 70vh;
+}
+
+body[data-tabbar-side="right"] .mobile-bell-slot .notifications-dropdown,
+body[data-tabbar-side="right"] .notifications-toast-floating {
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 10px);
+}
+
+body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown,
+body[data-tabbar-side="left"] .notifications-toast-floating {
+    left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 10px);
+}
+
+/* ── Место под бар и переход между разделами ───────────────────────────── */
+
+/* Ширину сайдбара читает не только контент, но и fixed-слои, отрисованные
+   порталом в document.body: окно колонки в «Задачах», панель в «Курсах». В
+   оболочке сайдбара сбоку нет вовсе — переменная обнуляется. Оба селектора
+   вместе: у body.sidebar-collapsed специфичность выше, и одного мало. */
+body.mobile-shell,
+body.mobile-shell.sidebar-collapsed {
+    --app-sidebar-offset: 0px;
+}
+
+body.mobile-shell .main-content {
+    margin-left: 0 !important;
+    padding-bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
+}
+
+/* Боковые поля раздела на телефоне. В разметке у большинства разделов стоит
+   p-8 — 32 px с каждой стороны, то есть шестая часть экрана шириной 390 px
+   уходит в пустоту, а карточки внутри начинают вылезать за край. Разделы со
+   своим макетом (p-0: вики, задачи, аукцион, курсы) не трогаем — там поля
+   расставлены внутри. */
+body.mobile-shell .main-content:not(.p-0) {
+    padding-left: 12px;
+    padding-right: 12px;
+}
+
+body[data-tabbar-side="right"].mobile-shell .main-content {
+    padding-bottom: 0;
+    padding-right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
+}
+
+body[data-tabbar-side="left"].mobile-shell .main-content {
+    padding-bottom: 0;
+    padding-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+}
+
+/* Переключение раздела с бара — короткое проявление снизу вверх. Класс вешает
+   и снимает JS (см. mobileViewSwitchRef в src/App.jsx): анимацию нельзя
+   привязать к CSS-состоянию, потому что «раздел только что сменился» —
+   событие, а не состояние элемента. */
+body.mobile-shell .main-content.mobile-view-switch {
+    animation: mtb-view-in 0.26s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes mtb-view-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+/* Системная настройка «меньше движения» отменяет ровно движения: подсветка
+   активного раздела, шторка и переход остаются, но без поездок и подпрыгиваний. */
+@media (prefers-reduced-motion: reduce) {
+    body.mobile-shell .main-content.mobile-view-switch {
+        animation: none;
+    }
+    body.mobile-shell .sidebar {
+        transition: none;
+    }
+    .mtb-item.is-active .mtb-item__icon,
+    .mtb-item:active .mtb-item__icon {
+        transform: none;
+    }
+}
+
+/* ── Тёмная тема ───────────────────────────────────────────────────────── */
+
+html[data-otp-theme="dark"] {
+    --mtb-surface: rgba(17, 24, 39, 0.9);
+    --mtb-border: rgba(148, 163, 184, 0.22);
+    --mtb-idle: #94a3b8;
+    --mtb-accent: #93c5fd;
+}
+
+html[data-otp-theme="dark"] .mtb-item.is-active .mtb-item__icon {
+    background: rgba(147, 197, 253, 0.16);
+}
+
+html[data-otp-theme="dark"] .mobile-bell-slot > div > button,
+html[data-otp-theme="dark"] .mobile-bell-slot > div > button:hover {
+    background: var(--mtb-surface);
+    color: #e2e8f0;
+}

@@ -390,8 +390,10 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         block = self.SOURCE[start:self.SOURCE.index('const toastNode =', start)]
         self.assertIn('notifications-toast', block)
         self.assertNotIn('notifications-dropdown', block)
-        # На мобильном вправо выпадать некуда — там своё позиционирование.
-        self.assertIn('.sidebar .notifications-toast', self.STYLES)
+        # На телефоне карточка уходит порталом и позиционируется оболочкой —
+        # выпадать вправо ей и там некуда.
+        shell = (ROOT / 'src' / 'components' / 'common' / 'mobile-shell.css').read_text(encoding='utf-8')
+        self.assertIn('body.mobile-shell .notifications-toast-floating', shell)
 
     def test_details_are_shown_on_the_card(self):
         """Ради деталей карточка и раскрывается — в списке им места нет."""
@@ -407,51 +409,70 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         self.assertIn('.notifications-toast', block[:400])
 
 
-class MobileIncomingTest(unittest.TestCase):
-    """Телефон: сайдбар за краем экрана, поэтому сигналит гамбургер.
+class MobilePresenceTest(unittest.TestCase):
+    """Телефон: колокол виден всегда, потому что живёт вне шторки с разделами.
 
-    Без этого уведомление на телефоне не видно вообще: и колокол, и карточка
-    живут внутри сайдбара, который при закрытом меню уехал за экран.
+    Раньше колокол уезжал за экран вместе с сайдбаром, и о новом уведомлении
+    сигналил гамбургер — он на время сам становился колоколом. Гамбургера больше
+    нет: навигация переехала в нижний бар, а колокол висит в правом верхнем углу
+    экрана порталом, мимо шторки. Проверяем именно это, потому что ошибка тут
+    незаметна на рабочем месте: на компьютере всё по-прежнему в сайдбаре.
     """
 
     BELL = BELL_JSX.read_text(encoding='utf-8')
     APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
     STYLES = (ROOT / 'src' / 'styles.css').read_text(encoding='utf-8')
+    SHELL = (ROOT / 'src' / 'components' / 'common' / 'mobile-shell.css').read_text(encoding='utf-8')
 
-    def test_bell_tells_the_app_about_incoming(self):
-        self.assertIn('onIncoming?.();', self.BELL)
-        self.assertIn('onIncoming={stableNotificationsIncoming}', self.APP)
+    def test_bell_moves_to_the_screen_corner_on_a_phone(self):
+        self.assertIn('createPortal(', self.APP)
+        self.assertIn('<div className="mobile-bell-slot">{bell}</div>', self.APP)
+        self.assertIn('if (!isMobileShell) return <div className="mb-2">{bell}</div>;', self.APP)
+        # Угол — правый верхний, при любом повороте экрана.
+        block = self.SHELL[self.SHELL.index('.mobile-bell-slot {'):]
+        self.assertIn('position: fixed;', block[:200])
+        self.assertIn('right: max(10px, env(safe-area-inset-right));', block[:300])
 
-    def test_hamburger_turns_into_a_ringing_bell(self):
-        start = self.APP.index('className={`hamburger-btn')
-        block = self.APP[start:self.APP.index('</button>', start)]
-        # Меню закрыто и что-то пришло — вместо полосок колокол, и он звенит.
-        self.assertIn("mobileIncomingNonce > 0 ? 'fa-bell bell-icon-ring animate-bell-ring'", block)
-        # Открытое меню важнее: там крестик, а не сигнал.
-        self.assertIn("mobileMenuOpen\n                                    ? 'fa-times'", block)
-        # key перезапускает качание на каждом следующем уведомлении.
-        self.assertIn('key={mobileMenuOpen ? \'close\' : `bell-${mobileIncomingNonce}`}', block)
-
-    def test_button_and_card_disappear_together(self):
-        """Иначе колокол остался бы висеть, когда карточка уже пропала."""
-        self.assertIn('const MOBILE_INCOMING_VISIBLE_MS = 7000;', self.APP)
-        self.assertIn('const TOAST_VISIBLE_MS = 7000;', self.BELL)
+    def test_bell_is_rendered_once(self):
+        """Второй экземпляр занял бы второй слот SSE (их BELL_STREAM_LIMIT = 50
+        на весь портал) — на одного человека два канала."""
+        self.assertEqual(self.APP.count('<NotificationsBell'), 1)
 
     def test_card_leaves_the_hidden_sidebar_on_a_phone(self):
-        self.assertIn('const toastDetached = isNarrow && !mobileMenuOpen;', self.BELL)
+        self.assertIn('const toastDetached = isNarrow;', self.BELL)
         self.assertIn('createPortal(toastCard, document.body)', self.BELL)
-        # Тот же порог, что у CSS сайдбара, иначе состояния разъедутся.
-        self.assertIn("matchMedia('(max-width: 768px)')", self.BELL)
-        # И встаёт она ровно под гамбургером (он занимает 16..60px).
-        self.assertIn('.notifications-toast-floating', self.STYLES)
-        block = self.STYLES[self.STYLES.index('.notifications-toast-floating'):]
-        self.assertIn('top: 68px;', block[:260])
+        # Запрос общий с оболочкой: свой, по одной ширине, оставил бы телефон
+        # боком (844×390) вовсе без карточки — она рисовалась бы в закрытой шторке.
+        self.assertIn("import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';", self.BELL)
+        self.assertIn('window.matchMedia(MOBILE_SHELL_QUERY)', self.BELL)
+        self.assertNotIn("matchMedia('(max-width: 768px)')", self.BELL)
 
-    def test_floating_card_is_above_the_hamburger_layer(self):
-        """Гамбургер сидит на z-index 60 — карточка обязана быть выше."""
-        self.assertIn('notifications-toast-floating fixed z-[61]', self.BELL)
-        block = self.STYLES[self.STYLES.index('.hamburger-btn {'):]
-        self.assertIn('z-index: 60;', block[:400])
+    def test_floating_card_is_above_the_phone_navigation(self):
+        """Карточка обязана быть выше бара разделов и самого колокола."""
+        card_z = int(re.search(r'notifications-toast-floating fixed z-\[(\d+)\]', self.BELL).group(1))
+
+        def shell_z(selector):
+            block = self.SHELL[self.SHELL.index(selector):]
+            return int(re.search(r'z-index:\s*(\d+);', block).group(1))
+
+        self.assertGreater(card_z, shell_z('.mobile-tabbar {'), 'карточка уехала под бар разделов')
+        self.assertGreater(card_z, shell_z('.mobile-bell-slot {'), 'карточка уехала под колокол')
+
+    def test_card_hangs_under_the_bell(self):
+        """Карточка выпадает из-под колокола, а не из угла, где его нет."""
+        block = self.SHELL[self.SHELL.index('body.mobile-shell .notifications-toast-floating'):]
+        self.assertIn('position: fixed;', block[:400])
+        self.assertIn('top: calc(max(10px, env(safe-area-inset-top)) + 52px);', block[:400])
+
+    def test_hamburger_is_gone(self):
+        """Кнопка удалена целиком — вместе с сигналом «пришло новое» наружу.
+
+        Проверяем именно отсутствие: пока в CSS или разметке остаётся её след,
+        она может однажды всплыть поверх бара и перехватить нажатие."""
+        self.assertNotIn('hamburger', self.APP)
+        self.assertNotIn('hamburger', self.STYLES)
+        self.assertNotIn('onIncoming', self.BELL)
+        self.assertNotIn('onIncoming', self.APP)
 
 
 class ClientPaginationContractTest(unittest.TestCase):

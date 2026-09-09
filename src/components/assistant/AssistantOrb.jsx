@@ -108,7 +108,7 @@ const viewportSize = () => ({
 export default function AssistantOrb({
     user, view, apiBaseUrl, withAccessTokenHeader, showToast,
     wikiEnabled = true, locked = false, lockChecking = false,
-    onRequestQr, onOpenWikiArticle, onOpenWikiAssistant,
+    onRequestQr, onOpenWikiArticle, onOpenWikiAssistant, mobileNav,
 }) {
     const userId = user?.id;
     const [position, setPosition] = useState(null);   // null — ещё не примерились к окну
@@ -122,6 +122,12 @@ export default function AssistantOrb({
 
     const buttonRef = useRef(null);
     const dragRef = useRef(null);
+    /* Занятые навигацией полосы (нижний бар на телефоне, колокол в углу) держим
+       в ref: их читают обработчики перетаскивания, которые живут в замыкании и
+       пересоздаваться на каждый поворот экрана не должны — иначе слушатели
+       указателя переподписывались бы прямо посреди жеста. */
+    const navRef = useRef(mobileNav);
+    useEffect(() => { navRef.current = mobileNav; }, [mobileNav]);
 
     const base = `${apiBaseUrl}/api/wiki`;
     const headers = useMemo(
@@ -205,8 +211,8 @@ export default function AssistantOrb({
         const stored = readStored(userId);
         setViewport(size);
         setPosition(stored
-            ? clampPosition(stored, size)
-            : defaultPosition(size));
+            ? clampPosition(stored, size, navRef.current)
+            : defaultPosition(size, navRef.current));
     }, [userId]);
 
     /* Изменение размера окна. Шарик едет вместе с краем, а не остаётся висеть
@@ -215,11 +221,17 @@ export default function AssistantOrb({
         const onResize = () => {
             const size = viewportSize();
             setViewport(size);
-            setPosition((prev) => (prev ? clampPosition(prev, size) : prev));
+            setPosition((prev) => (prev ? clampPosition(prev, size, navRef.current) : prev));
         };
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
     }, []);
+
+    /* Бар разделов переехал (телефон повернули) — шарик, стоявший у прежней
+       грани, оказался бы под кнопками. Загоняем его в новые границы. */
+    useEffect(() => {
+        setPosition((prev) => (prev ? clampPosition(prev, viewportSize(), mobileNav) : prev));
+    }, [mobileNav?.shell, mobileNav?.side]);
 
     /* Вкладка ушла в фон — гасим анимацию. Браузер тормозит её и сам, но не
        везде одинаково, а виджет висит всегда и у всех. */
@@ -245,7 +257,7 @@ export default function AssistantOrb({
             } catch (error) { /* окно уже закрыто */ }
             return;
         }
-        setPosition((prev) => undock(prev, viewport || viewportSize()));
+        setPosition((prev) => undock(prev, viewport || viewportSize(), navRef.current));
         setStarted(true);
         setOpen((prev) => !prev);
     }, [pipWindow, viewport]);
@@ -279,14 +291,14 @@ export default function AssistantOrb({
             drag.moved = true;
             setDragging(true);
             // Прижатый шарик, который потащили, сначала выезжает на экран целиком.
-            drag.origin = undock(drag.origin, viewport || viewportSize());
+            drag.origin = undock(drag.origin, viewport || viewportSize(), navRef.current);
         }
         const size = viewport || viewportSize();
         setPosition(clampPosition({
             x: drag.origin.x + (current.x - drag.start.x),
             y: drag.origin.y + (current.y - drag.start.y),
             dock: null,
-        }, size));
+        }, size, navRef.current));
     }, [viewport]);
 
     const finishDrag = useCallback((event) => {
@@ -314,8 +326,8 @@ export default function AssistantOrb({
             x: drag.origin.x + (event.clientX - drag.start.x),
             y: drag.origin.y + (event.clientY - drag.start.y),
             dock: null,
-        }, size);
-        setPosition(resolveDock(dropped, size));
+        }, size, navRef.current);
+        setPosition(resolveDock(dropped, size, navRef.current));
     }, [viewport, toggleOpen]);
 
     /* Клавиатура. Перетаскивание живёт на pointer-событиях, а они с клавиатуры

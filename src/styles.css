@@ -192,26 +192,14 @@
        её метить НЕЛЬЗЯ: он держит свёрнутый сайдбар развёрнутым (правило :has
        выше), и каждое входящее уведомление дёргало бы всю вёрстку. Поэтому
        своё мобильное позиционирование — там вправо выпадать некуда. */
-    @media (max-width: 768px) {
-      .sidebar .notifications-toast {
-        left: 0;
-        right: 0;
-        top: 100%;
-        width: auto;
-        margin-left: 0;
-        margin-top: 8px;
-      }
-    }
-    /* Гамбургер, ставший колоколом: тёплый акцент вместо синего, чтобы кнопка
-       читалась как сигнал, а не как обычное меню. */
-    .hamburger-btn.has-incoming {
-      background: linear-gradient(135deg, #b45309, #f59e0b);
-      box-shadow: 0 4px 16px rgba(245, 158, 11, 0.45);
-    }
-    /* Карточка на телефоне при закрытом меню: сайдбар за краем экрана, поэтому
-       она живёт порталом в body и раскрывается из-под гамбургера — он в этот
-       момент сам показывает колокол. Гамбургер занимает 16..60px по вертикали,
-       начинаем сразу под ним. */
+    /* Мобильное положение карточки — в оболочке (mobile-shell.css): признак
+       телефона там шире, чем max-width, и копии условия расходились бы. */
+    /* Карточка на телефоне при закрытой шторке: сайдбар за краем экрана, и
+       внутри него ей взяться неоткуда — она живёт порталом в body. Точное
+       место задаёт мобильная оболочка (.notifications-toast-floating в
+       src/components/common/mobile-shell.css): карточка выпадает из-под
+       колокола, а тот при повороте экрана меняет угол. Здесь остаётся фолбэк
+       на случай, если оболочка выключена. */
     .notifications-toast-floating {
       top: 68px;
       left: 16px;
@@ -358,15 +346,13 @@
        сворачивания на -right-4 и разворот свёрнутого сайдбара по наведению.
        Пока такое окно открыто, поднимаем сайдбар над ним, оставаясь ниже
        карточки задачи (110) — открытая задача по-прежнему перекрывает всё.
-       Только на десктопе: на мобильном сайдбар уезжает за экран, а поверх
-       контента его открывает гамбургер, который и так под окном.
-       Запрос — точное дополнение мобильного (max-width: 768px), а не «769px»:
-       при зуме и масштабе ОС ширина бывает дробной, и на 768.5px не сработал бы
-       ни один из двух — сайдбар остался бы под окном ровно с той же жалобой. */
-    @media not all and (max-width: 768px) {
-      body.sheet-beside-sidebar .sidebar {
-        z-index: 100;
-      }
+       ТОЛЬКО НА КОМПЬЮТЕРЕ. На телефоне сайдбар — шторка поверх контента, и
+       поднимать её над окном не нужно; больше того, вредно: она встала бы и над
+       нижним баром разделов. Условие — отсутствие класса оболочки, а не «окно
+       шире 768px»: пары медиазапросов при дробной ширине (зум, масштаб ОС)
+       оставляли щель, в которой не срабатывал ни один из двух. */
+    body:not(.mobile-shell).sheet-beside-sidebar .sidebar {
+      z-index: 100;
     }
     .main-content {
       /* Прежнее имя оставлено: его читает панель в LmsView. */
@@ -434,25 +420,6 @@
       will-change: transform, opacity;
     }
 
-    /* Гамбургер кнопка */
-    .hamburger-btn {
-      display: none;
-      position: fixed;
-      top: 16px;
-      left: 16px;
-      z-index: 60;
-      width: 44px;
-      height: 44px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, #1e40af, #3b82f6);
-      color: white;
-      border: none;
-      cursor: pointer;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    }
-    
     /* Overlay для мобильного меню */
     .sidebar-overlay {
       display: none;
@@ -465,76 +432,20 @@
       display: block;
     }
     
-    /* Мобильная версия */
-    @media (max-width: 768px) {
-      .hamburger-btn {
-        display: flex;
-        transition: left 0.3s ease;
-      }
-      .hamburger-btn.menu-open {
-        left: 220px;
-      }
-      .sidebar {
-        width: 256px !important;
-        transform: translateX(-100%);
-        transition: transform 0.3s ease;
-        overflow-y: auto !important;
-        overflow-x: hidden !important;
-        max-height: 100vh;
-      }
-      .sidebar.mobile-open {
-        transform: translateX(0);
-      }
-      .sidebar > div {
-        min-height: min-content;
-        padding-bottom: 20px;
-      }
-      .sidebar.collapsed {
-        width: 256px !important;
-      }
-      .sidebar .sidebar-text {
-        opacity: 1 !important;
-        width: auto !important;
-      }
-      .sidebar .sidebar-logo-full {
-        display: flex !important;
-      }
-      .sidebar .sidebar-logo-mini {
-        display: none !important;
-      }
-      /* На мобильном сайдбар всегда несёт .collapsed (кнопка сворачивания
-         скрыта), а подписи принудительно видимы — без этого правила у пункта
-         с непрочитанным висели бы сразу два бейджа: компактный в углу кнопки
-         и обычный рядом с подписью. */
-      .sidebar .sidebar-surveys-collapsed-badge {
-        display: none !important;
-      }
-      /* Панель колокола: на мобильном сайдбар обрезает всё за своей шириной
-         (overflow-x hidden), вправо ей выпадать некуда — раскрывается вниз
-         под кнопкой на ширину пункта. */
-      .sidebar .notifications-dropdown {
-        left: 0;
-        right: 0;
-        top: 100%;
-        width: auto;
-        margin-left: 0;
-        margin-top: 8px;
-      }
-      /* На мобильном сайдбар выезжает поверх контента, поэтому отступа нет ни у
-         контента, ни у fixed-слоёв. Оба селектора обнуляем вместе: у
-         body.sidebar-collapsed специфичность выше :root, и одного :root не хватит. */
-      :root,
-      body.sidebar-collapsed {
-        --app-sidebar-offset: 0px;
-      }
-      .main-content {
-        margin-left: 0 !important;
-      }
-      .sidebar-collapse-btn {
-        display: none !important;
-      }
-    }
-    
+    /* Мобильная версия.
+
+       Раньше здесь жил весь мобильный сайдбар: полоса шириной 256 px, уезжающая
+       за левый край, и гамбургер, который её выдвигал. Теперь навигация на
+       телефоне — нижний бар разделов, а сайдбар выезжает шторкой снизу; вся
+       вёрстка переехала в src/components/common/mobile-shell.css.
+
+       ПОЧЕМУ НЕ ЗДЕСЬ. Признак «мы на телефоне» перестал быть шириной окна:
+       телефон боком — это 844×390, то есть настольная ширина при телефонной
+       высоте, и на max-width: 768px оболочка при повороте выключалась бы вместе
+       с местом под бар. Условие целиком живёт в src/utils/mobileShell.js и
+       приходит сюда классом body.mobile-shell — одной копией на разметку,
+       стили и геометрию плавающего помощника. */
+
     /* === Экраны входа и проверки сессии === */
     /* ВЫСОТА ЗАДАЁТСЯ ЗДЕСЬ, А НЕ КЛАССОМ min-h-screen. Тот разворачивается в
        100vh, а 100vh на телефоне — это высота экрана БЕЗ панелей браузера:
@@ -691,9 +602,6 @@
        Блок целиком заперт на display-mode: в браузерной вкладке безопасные зоны
        занимает сам браузер своими панелями, и те же отступы стали бы двойными. */
     @media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
-      .hamburger-btn {
-        top: calc(16px + env(safe-area-inset-top));
-      }
       .sidebar > div {
         padding-top: calc(1rem + env(safe-area-inset-top));
       }

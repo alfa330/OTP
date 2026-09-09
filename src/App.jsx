@@ -1,4 +1,5 @@
 ﻿import React, { Suspense, lazy, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -50,6 +51,7 @@ import AssistantOrb from './components/assistant/AssistantOrb';
 import IcoreMark from './components/common/IcoreMark';
 import InstallAppPrompt from './components/common/InstallAppPrompt';
 import InstallAppMenuItem from './components/common/InstallAppMenuItem';
+import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -398,6 +400,51 @@ const SidebarDeptScope = ({ section, activeCode, children }) => {
     if (codes && !codes.includes(activeCode)) return null;
     return children;
 };
+
+/* Что попадает в нижний бар на телефоне.
+ *
+ * Четыре кнопки — разделы, куда ходят КАЖДЫЙ ДЕНЬ (решение владельца
+ * 09.09.2026), а не первые четыре строки сайдбара. Разница принципиальная:
+ * порядок меню живёт своей жизнью — служебные разделы (QR-доступ, «Сессии»,
+ * «Рекрутинг») то поднимаются наверх, то опускаются, и бар, повторяющий верх
+ * списка, менялся бы у людей под руками после каждой такой перестановки.
+ *
+ * ПОЧЕМУ РЕЕСТР, А НЕ ЧТЕНИЕ УЖЕ НАРИСОВАННОГО МЕНЮ. Меню — дерево JSX на
+ * полторы тысячи строк, ветвящееся по ролям; вытаскивать из его DOM подписи и
+ * обработчики значит держать бар на честном слове вёрстки: перенос пункта в
+ * другой <li> ломал бы навигацию молча. Здесь же условия видны глазами, и их
+ * сверяет тест.
+ *
+ * ПОЧЕМУ КАНДИДАТОВ СЕМЬ, А МЕСТ ЧЕТЫРЕ. Набор разделов у ролей разный: у
+ * оператора линии нет «Задач», у бэк-офиса — «Курсов» и «Графиков». Берутся
+ * первые четыре ДОСТУПНЫХ, поэтому пустых кнопок в баре не бывает ни у кого.
+ * Условия доступа ПОВТОРЯЮТ гейты соответствующих пунктов сайдбара дословно:
+ * кнопка в раздел, куда человека не пустят, — это тот же дефект, что был у
+ * «Задач» у оператора линии (коммит 8adf8cac).
+ */
+const MOBILE_TAB_SECTIONS = [
+    { view: 'wiki', label: 'Вики', icon: 'fas fa-book', allowed: (access) => access.wiki },
+    { view: 'tasks', label: 'Задачи', icon: 'fas fa-tasks', allowed: (access) => access.tasks, badge: 'tasks' },
+    { view: 'lms', label: 'Курсы', icon: 'fas fa-graduation-cap', allowed: (access) => access.lms },
+    { view: 'events', label: 'Ивенты', icon: 'fas fa-calendar-days', allowed: () => true, badge: 'events' },
+    { view: 'work_schedules', label: 'Графики', icon: 'fas fa-calendar-alt', allowed: (access) => access.workSchedules },
+    { view: 'surveys', label: 'Опросы', icon: 'fas fa-clipboard-check', allowed: (access) => access.surveys, badge: 'surveys' },
+    { view: 'group_late_bot', label: 'Отметки', icon: 'fas fa-user-clock', allowed: (access) => access.groupLate },
+];
+
+/* Пятое место в баре занято аватаром — он открывает шторку со всеми разделами,
+   и отнимать его у навигации нельзя: иначе часть меню становится недостижимой. */
+const MOBILE_TAB_LIMIT = 4;
+
+const pickMobileTabs = (access, badges = {}) => MOBILE_TAB_SECTIONS
+    .filter((section) => section.allowed(access))
+    .slice(0, MOBILE_TAB_LIMIT)
+    .map((section) => ({
+        view: section.view,
+        label: section.label,
+        icon: section.icon,
+        badge: section.badge ? Math.max(0, Number(badges[section.badge]) || 0) : 0,
+    }));
 
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
@@ -37737,11 +37784,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
         );
 
-        /* Сколько гамбургер побудет колоколом после нового уведомления.
-           Совпадает с TOAST_VISIBLE_MS в NotificationsBell: кнопка и карточка
-           должны гаснуть вместе, иначе колокол останется висеть без повода. */
-        const MOBILE_INCOMING_VISIBLE_MS = 7000;
-
         // Main App
         const App = () => {
             const location = useLocation();
@@ -37951,6 +37993,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Бейдж «Задачи»: сколько задач ждут действия лично от пользователя.
             const [tasksActionRequiredCount, setTasksActionRequiredCount] = useState(0);
             const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
+            /* Четыре кнопки нижнего бара — ежедневные разделы этой роли; какие
+               именно и почему не «верх меню», см. MOBILE_TAB_SECTIONS.
+               Считается всегда, а не только на телефоне: набор нужен и первому
+               кадру после поворота, а стоит оно семи сравнений. */
+            const mobileTabItems = useMemo(() => pickMobileTabs(
+                {
+                    wiki: wikiSectionEnabled,
+                    lms: canAccessLmsSection && departmentAllowsView(user, 'lms'),
+                    groupLate: canAccessGroupLateBotSection,
+                    tasks: isAdminLikeRole
+                        || (isDepartmentManager && !isAdminLikeRole && departmentAllowsView(user, 'tasks'))
+                        || isPlainTrainer
+                        || (isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                            && departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks')),
+                    workSchedules: isAdminLikeRole || isPlainTrainer || departmentAllowsView(user, 'work_schedules'),
+                    surveys: isAdminLikeRole || isDepartmentManager || isPlainTrainer
+                        || departmentAllowsView(user, 'surveys'),
+                },
+                {
+                    events: eventsUnreadCount,
+                    tasks: tasksActionRequiredCount,
+                    surveys: pendingSurveysBadgeCount,
+                },
+            ), [
+                user, wikiSectionEnabled, canAccessLmsSection, canAccessGroupLateBotSection,
+                isAdminLikeRole, isDepartmentManager, isPlainTrainer, currentUserRole,
+                isScopedDepartmentHead, eventsUnreadCount, tasksActionRequiredCount,
+                pendingSurveysBadgeCount,
+            ]);
             /* «Обращения». Бейдж — непрочитанные ответы из Telegram-групп.
                crmRealtimePulse — счётчик «тычков» колокола: раздел перечитывает
                данные по нему, а не по таймеру. Своего SSE-канала раздел не
@@ -38443,6 +38514,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [sidebarDeptFilter, setSidebarDeptFilter] = useState('');
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+            /* Телефон: вместо бокового меню — бар разделов у нижней грани, а сам
+               сайдбар выезжает шторкой по кнопке с аватаром. Хук заодно держит
+               класс на <body>, по которому включается вся мобильная вёрстка;
+               side — сторона бара, она же меняется при повороте экрана. */
+            const { shell: isMobileShell, side: mobileTabSide } = useMobileShell();
+            /* Полосы, занятые навигацией телефона, — для плавающего помощника:
+               шарик, севший на бар, отнимает вход в разделы. Мемоизация не ради
+               скорости: объект уходит в ref помощника и в список зависимостей
+               его эффекта, и новая ссылка на каждый рендер App двигала бы
+               шарик без всякой причины. */
+            const mobileNavGeometry = useMemo(
+                () => ({ shell: isMobileShell, side: mobileTabSide }),
+                [isMobileShell, mobileTabSide],
+            );
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
             const sidebarResourceRef = useRef(null);
@@ -46380,6 +46465,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [user?.id]);
 
+            /* Переход между разделами на телефоне — короткое проявление снизу
+               вверх, как при смене вкладки в мобильном приложении. Без него
+               нажатие на бар выглядит подменой картинки: содержимое меняется
+               мгновенно, и глазу не за что зацепиться.
+
+               Класс вешаем НА УЗЕЛ, а не через состояние React: перерисовывать
+               всё дерево раздела ради декоративной анимации дорого, а перезапуск
+               самой анимации всё равно требует доступа к DOM (см. ниже).
+               На компьютере не работает вовсе: там разделы открывают из
+               сайдбара, и содержимое не «переключается», а просто меняется. */
+            const mainContentRef = useRef(null);
+            const previousViewRef = useRef(view);
+            useEffect(() => {
+                if (previousViewRef.current === view) return undefined;
+                previousViewRef.current = view;
+                if (!isMobileShell) return undefined;
+                const el = mainContentRef.current;
+                if (!el) return undefined;
+                el.classList.remove('mobile-view-switch');
+                /* Чтение offsetWidth — не мусор: без него снятие и возврат
+                   класса схлопываются в один кадр, и браузер считает, что
+                   анимация не менялась, то есть заново её не проигрывает. */
+                void el.offsetWidth;
+                el.classList.add('mobile-view-switch');
+                const done = () => el.classList.remove('mobile-view-switch');
+                el.addEventListener('animationend', done, { once: true });
+                return () => el.removeEventListener('animationend', done);
+            }, [view, isMobileShell]);
+
             /* Ширину сайдбара читают не только обычный контент, но и fixed-слои,
                отрендеренные порталом в document.body (окно статуса в «Задачах»).
                Переменная --app-sidebar-offset живёт на :root, а состояние
@@ -46644,23 +46758,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                   открыт. Иначе при заходе сразу в ?view=events ответ колокола
                   приезжает ПОСЛЕ эффекта, гасящего бейдж, и число залипает
                   ненулевым, пока человек читает те самые посты. */
-            /* Телефон: колокол уехал за экран вместе с сайдбаром, поэтому о
-               новом уведомлении сообщает гамбургер — он на это время сам
-               становится колоколом и звенит. Держим ровно столько же, сколько
-               висит карточка, чтобы кнопка и карточка исчезали вместе. */
-            const [mobileIncomingNonce, setMobileIncomingNonce] = useState(0);
-            const mobileIncomingTimerRef = useRef(null);
-            useEffect(() => () => {
-                if (mobileIncomingTimerRef.current) clearTimeout(mobileIncomingTimerRef.current);
-            }, []);
-            const stableNotificationsIncoming = useCallback(() => {
-                setMobileIncomingNonce((value) => value + 1);
-                if (mobileIncomingTimerRef.current) clearTimeout(mobileIncomingTimerRef.current);
-                mobileIncomingTimerRef.current = setTimeout(() => {
-                    mobileIncomingTimerRef.current = null;
-                    setMobileIncomingNonce(0);
-                }, MOBILE_INCOMING_VISIBLE_MS);
-            }, []);
+            /* Сигнала «пришло новое» наружу больше нет: он существовал ради
+               гамбургера, который на телефоне подменял собой уехавший за экран
+               колокол. Теперь колокол на экране всегда — в правом верхнем углу,
+               порталом мимо шторки, — и звенит он сам. */
 
             const stableNotificationsCounts = useCallback((counts) => {
                 if (!counts || typeof counts !== 'object') return;
@@ -46829,25 +46930,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user={user}
                             getHeaders={stableNotificationsHeaders}
                         />
-                        {/* Гамбургер кнопка для мобильных */}
-                        <button
-                            className={`hamburger-btn ${mobileMenuOpen ? 'menu-open' : ''} ${!mobileMenuOpen && mobileIncomingNonce > 0 ? 'has-incoming' : ''}`}
-                            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                            aria-label={!mobileMenuOpen && mobileIncomingNonce > 0
-                                ? 'Новое уведомление — открыть меню'
-                                : (mobileMenuOpen ? 'Закрыть меню' : 'Открыть меню')}
-                        >
-                            {/* Пришло новое — гамбургер на время становится
-                                колоколом и звенит: сам колокол сейчас за краем
-                                экрана вместе с сайдбаром. key перезапускает
-                                качание на каждом следующем уведомлении. */}
-                            <FaIcon
-                                key={mobileMenuOpen ? 'close' : `bell-${mobileIncomingNonce}`}
-                                className={`fas ${mobileMenuOpen
-                                    ? 'fa-times'
-                                    : (mobileIncomingNonce > 0 ? 'fa-bell bell-icon-ring animate-bell-ring' : 'fa-bars')} text-xl`}
-                            ></FaIcon>
-                        </button>
+                        {/* Гамбургера здесь больше нет: на телефоне навигация
+                            переехала в нижний бар (MobileTabBar), меню открывает
+                            кнопка с аватаром, а колокол виден всегда — он висит
+                            в правом верхнем углу экрана и звенит сам. */}
 
                         {/* Overlay для мобильного меню */}
                         <div
@@ -46865,6 +46951,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <FaIcon className={`fas fa-chevron-${sidebarCollapsed ? 'right' : 'left'} text-sm`}></FaIcon>
                                 </button>
 
+                                {/* Ручка листа — первым элементом: она обозначает
+                                    верхний край выехавшей шторки, и под логотипом
+                                    читалась бы как случайная полоска. */}
+                                {isMobileShell && <div className="mobile-sheet-handle" aria-hidden="true" />}
                                 <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                                   {/* Полный логотип */}
                                   <span className="sidebar-logo-full relative h-[54px] w-[169px] shrink-0 drop-shadow-md">
@@ -46890,21 +46980,62 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </h1>
                                 {/* Колокол — над меню и вне прокручиваемого списка:
                                     он один на весь портал и не должен уезжать
-                                    вместе с разделами. */}
-                                <div className="mb-2">
-                                    <NotificationsBell
-                                        apiBaseUrl={API_BASE_URL}
-                                        user={user}
-                                        getHeaders={stableNotificationsHeaders}
-                                        onNavigate={stableNotificationsNavigate}
-                                        onCounts={stableNotificationsCounts}
-                                        onDigest={stableNotificationsDigest}
-                                        readSource={bellReadSource}
-                                        onIncoming={stableNotificationsIncoming}
-                                        onStreamPoke={emitNewsPoke}
-                                        mobileMenuOpen={mobileMenuOpen}
-                                    />
-                                </div>
+                                    вместе с разделами.
+
+                                    НА ТЕЛЕФОНЕ ОН УХОДИТ ПОРТАЛОМ В УГОЛ ЭКРАНА.
+                                    Меню там спрятано в шторку, а уведомления должны
+                                    быть видны всегда — значит колокол обязан жить
+                                    ВНЕ неё. Портал, а не второй экземпляр рядом:
+                                    колокол держит SSE-канал (их на портал всего
+                                    BELL_STREAM_LIMIT = 50), и дубль занимал бы два
+                                    слота на одного человека.
+
+                                    Элемент один и тот же — на переезде между углом
+                                    и меню React сохраняет его состояние и канал,
+                                    заново подключаться не приходится. */}
+                                {(() => {
+                                    const bell = (
+                                        <NotificationsBell
+                                            apiBaseUrl={API_BASE_URL}
+                                            user={user}
+                                            getHeaders={stableNotificationsHeaders}
+                                            onNavigate={stableNotificationsNavigate}
+                                            onCounts={stableNotificationsCounts}
+                                            onDigest={stableNotificationsDigest}
+                                            readSource={bellReadSource}
+                                            onStreamPoke={emitNewsPoke}
+                                        />
+                                    );
+                                    if (!isMobileShell) return <div className="mb-2">{bell}</div>;
+                                    return createPortal(
+                                        <div className="mobile-bell-slot">{bell}</div>,
+                                        document.body,
+                                    );
+                                })()}
+                                {/* Шапка шторки: чей это портал, видно сразу — как в
+                                    списке настроек телефона. Действия аккаунта
+                                    (логин, пароль, аватар, установка) остаются
+                                    внизу, в своём пункте: дублировать их здесь
+                                    значит завести им второе место жизни. */}
+                                {isMobileShell && (
+                                    <>
+                                        <div className="mobile-sheet-profile">
+                                            <span className="mobile-sheet-profile__avatar">
+                                                {user?.avatar_url ? (
+                                                    <AvatarImage src={user.avatar_url} alt="" className="h-full w-full object-cover" />
+                                                ) : (
+                                                    (user?.name || 'U').charAt(0).toUpperCase()
+                                                )}
+                                            </span>
+                                            <span className="min-w-0">
+                                                <span className="mobile-sheet-profile__name block">{user?.name || 'Профиль'}</span>
+                                                {user?.login && (
+                                                    <span className="mobile-sheet-profile__role block">@{user.login}</span>
+                                                )}
+                                            </span>
+                                        </div>
+                                    </>
+                                )}
                                 {/* Селектор отдела — только у админов и супер-админов:
                                     у них в меню разделы всех семи отделов сразу, и
                                     найти нужный без фильтра трудно. Выпадашка та же,
@@ -48374,6 +48505,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [
                 user,
                 mobileMenuOpen,
+                isMobileShell,
                 sidebarCollapsed,
                 view,
                 currentUserRole,
@@ -48416,7 +48548,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessTouchesSection,
                 canAccessDriverMailings,
                 bellReadSource,
-                mobileIncomingNonce,
                 selectedSvId,
                 selectedReportMonth,
                 selectedMonth,
@@ -48736,6 +48867,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="flex h-screen overflow-hidden">
                     {sidebarTree}
                     <div
+                        ref={mainContentRef}
                         className={`main-content w-full ${
                             isCallEvaluationView
                                 ? 'p-0 h-screen overflow-hidden'
@@ -55625,6 +55757,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     )}
 
+                    {/* Нижний бар разделов — навигация телефона. Сиблинг
+                        main-content по той же причине, что и помощник: на части
+                        разделов у контейнера overflow-hidden, а в вики на нём
+                        живёт zoom, и position: fixed считался бы от него.
+                        Рисуется только в мобильной оболочке: на компьютере
+                        разделы открывает сайдбар, и вторая навигация там лишняя. */}
+                    {isMobileShell && (
+                        <MobileTabBar
+                            items={mobileTabItems}
+                            activeView={view}
+                            onSelect={handleSidebarViewNavigation}
+                            menuOpen={mobileMenuOpen}
+                            onToggleMenu={() => setMobileMenuOpen((open) => !open)}
+                            user={user}
+                            side={mobileTabSide}
+                        />
+                    )}
+
                     <OrazAitSplash
                         open={showOrazAitSplash}
                         onClose={closeOrazAitSplash}
@@ -55643,6 +55793,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <AssistantOrb
                         user={user}
                         view={view}
+                        mobileNav={mobileNavGeometry}
                         apiBaseUrl={API_BASE_URL}
                         withAccessTokenHeader={withAccessTokenHeader}
                         showToast={showToast}

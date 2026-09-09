@@ -1509,8 +1509,14 @@ class ColumnBrowserTests(unittest.TestCase):
         # переменные, объявленные на .main-content.
         self.assertRegex(styles, r":root\s*\{\s*--app-sidebar-offset:\s*256px;")
         self.assertRegex(styles, r"body\.sidebar-collapsed\s*\{\s*--app-sidebar-offset:\s*80px;")
-        # На мобильном обнуляются оба селектора: body-класс перебил бы один :root.
-        self.assertRegex(styles, r":root,\s*body\.sidebar-collapsed\s*\{\s*--app-sidebar-offset:\s*0px;")
+        # На телефоне сайдбара сбоку нет — там он шторка, и отступ обнуляется
+        # мобильной оболочкой. Оба селектора вместе: у body.sidebar-collapsed
+        # специфичность выше, и одного мало.
+        shell = _read(ROOT / "src" / "components" / "common" / "mobile-shell.css")
+        self.assertRegex(
+            shell,
+            r"body\.mobile-shell,\s*body\.mobile-shell\.sidebar-collapsed\s*\{\s*--app-sidebar-offset:\s*0px;",
+        )
         # Старое имя переменной сохранено: его читает панель в LmsView.
         self.assertIn("--main-content-sidebar-offset: var(--app-sidebar-offset);", styles)
         self.assertIn('style={{ left: "var(--main-content-sidebar-offset, 0px)" }}',
@@ -1546,17 +1552,15 @@ class ColumnBrowserTests(unittest.TestCase):
         self.assertIn("if (!open || !offsetLeft) return undefined;", sheet)
 
         styles = _read(ROOT / "src" / "styles.css")
-        # Дополнение мобильного запроса, а не «769px»: при дробной ширине (зум, масштаб
-        # ОС) на 768.5px не сработал бы ни один из двух, и правка молча отключалась бы.
-        mobile_start = styles.rindex("@media (max-width:", 0, styles.index("--app-sidebar-offset: 0px;"))
-        mobile = re.match(r"@media \(max-width: (\d+)px\) \{", styles[mobile_start:])
+        # Подъём отключён ровно там, где включена мобильная оболочка: один и тот
+        # же класс на <body> вместо пары медиазапросов, между которыми при
+        # дробной ширине (зум, масштаб ОС) оставалась щель на 768.5px.
         lifted = re.search(
-            r"@media not all and \(max-width: (\d+)px\) \{\s*body\.sheet-beside-sidebar \.sidebar \{\s*z-index:\s*(\d+);",
+            r"body:not\(\.mobile-shell\)\.sheet-beside-sidebar \.sidebar \{\s*z-index:\s*(\d+);",
             styles,
         )
         self.assertIsNotNone(lifted, 'сайдбар не поднимается над открытым окном')
-        self.assertEqual(lifted.group(1), mobile.group(1), 'между мобильным и десктопным режимом осталась щель')
-        lifted_z = int(lifted.group(2))
+        lifted_z = int(lifted.group(1))
 
         app_src = _read(APP_JSX_PATH)
         sidebar_z = int(re.search(r'className=\{`sidebar fixed[^`]*?\bz-(\d+)\b', app_src).group(1))
@@ -1588,8 +1592,16 @@ class ColumnBrowserTests(unittest.TestCase):
             block = styles[styles.index(selector):]
             return int(re.search(r"z-index:\s*(\d+);", block).group(1))
 
+        shell = _read(ROOT / "src" / "components" / "common" / "mobile-shell.css")
+
+        def shell_z(selector):
+            block = shell[shell.index(selector):]
+            return int(re.search(r"z-index:\s*(\d+);", block).group(1))
+
         self.assertGreater(browser_z, sidebar_z, 'окно уехало под сайдбар')
-        self.assertGreater(browser_z, css_z(".hamburger-btn {"), 'окно уехало под гамбургер')
+        # Навигация телефона: бар разделов и колокол в углу экрана.
+        self.assertGreater(browser_z, shell_z(".mobile-tabbar {"), 'окно уехало под бар разделов')
+        self.assertGreater(browser_z, shell_z(".mobile-bell-slot {"), 'окно уехало под колокол')
         self.assertGreater(browser_z, css_z(".sidebar-overlay {"), 'окно уехало под затемнение меню')
 
     def test_scroll_loads_the_next_page(self):

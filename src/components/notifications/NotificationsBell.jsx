@@ -4,6 +4,7 @@ import axios from 'axios';
 import { Bell, BookLock, Cake, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, ShieldCheck, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
+import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';
 import {
     buildDesktopNotice,
     desktopPermission as browserPermission,
@@ -92,10 +93,6 @@ const fmtWhen = (iso) => {
 /* getHeaders — функция, а не готовый объект: токен доступа обновляется в фоне,
    и объект, собранный один раз, ушёл бы в запрос протухшим. Заодно не даёт
    новой ссылке на каждый рендер сбрасывать зависимости useCallback. */
-/* onIncoming — сигнал наружу «пришло новое». На телефоне сайдбар уехал за
-   экран вместе с колоколом, поэтому звенеть и показывать карточку должен тот,
-   кто виден: гамбургер. mobileMenuOpen говорит, открыто ли меню — при открытом
-   карточка живёт на своём обычном месте, в сайдбаре. */
 /* onDigest — отпечаток состава сводки по источникам: {crm: 'id:at,id:at'}.
    Нужен разделам, которые хотят обновляться «по событию», но НЕ на каждый тычок.
    Тычок бывает широковещательным (новый пост «Ивентов» будит всех), и раздел,
@@ -111,8 +108,8 @@ const fmtWhen = (iso) => {
    занимает нить waitress (их ~96), лимит BELL_STREAM_LIMIT = 50 на весь портал,
    и дубль каналов срезал бы ёмкость реалтайма вдвое. */
 export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate,
-                                            onCounts, onDigest, readSource, onIncoming,
-                                            onStreamPoke, mobileMenuOpen }) {
+                                            onCounts, onDigest, readSource,
+                                            onStreamPoke }) {
     const [open, setOpen] = useState(false);
     /* Колбэк тычка держим в ref: он приходит из App заново на каждом её
        рендере, а список зависимостей эффекта канала — это список причин
@@ -131,12 +128,15 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
        не больше PAGE_SIZE на источник, поэтому без догрузки бейдж «6» висел бы
        над пятью карточками. */
     const [hasMore, setHasMore] = useState(false);
-    /* Телефон: сайдбар уехал за экран, и карточке внутри него взяться неоткуда.
-       Тот же запрос, что и у CSS сайдбара, — иначе состояния разъедутся. */
+    /* Телефон: сам колокол здесь живёт порталом в углу экрана, а сайдбар уехал
+       за край — карточке внутри него взяться неоткуда, она тоже уходит порталом.
+       Запрос ОБЩИЙ с оболочкой (src/utils/mobileShell.js): свой, по одной лишь
+       ширине, оставил бы телефон боком (844×390) без карточки вовсе — она
+       рисовалась бы в закрытой шторке. */
     const [isNarrow, setIsNarrow] = useState(
         () => typeof window !== 'undefined'
             && typeof window.matchMedia === 'function'
-            && window.matchMedia('(max-width: 768px)').matches,
+            && window.matchMedia(MOBILE_SHELL_QUERY).matches,
     );
     /* Пришло новое: колокол звенит, из сайдбара выезжает карточка с ним.
        ringNonce перезапускает анимацию: одинаковый key React бы переиспользовал,
@@ -577,7 +577,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
 
     useEffect(() => {
         if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
-        const query = window.matchMedia('(max-width: 768px)');
+        const query = window.matchMedia(MOBILE_SHELL_QUERY);
         const sync = (event) => setIsNarrow(event.matches);
         setIsNarrow(query.matches);
         // addListener — для старых WebKit, где addEventListener у MediaQueryList нет.
@@ -719,9 +719,6 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             added: nextTotal - prevTotal,
         };
         setToast(notice);
-        // Гамбургер на телефоне узнаёт отсюда, что пора звенеть: сам колокол
-        // в это время за краем экрана вместе с сайдбаром.
-        onIncoming?.();
         // И на рабочий стол — но только если человек сейчас смотрит не сюда,
         // см. shouldNotifyDesktop.
         notifyDesktop(notice);
@@ -730,7 +727,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             toastTimerRef.current = null;
             closeToast();
         }, TOAST_VISIBLE_MS);
-    }, [closeToast, probeBeyondPage, onIncoming, notifyDesktop]);
+    }, [closeToast, probeBeyondPage, notifyDesktop]);
     announceRef.current = announce;
 
     const toggle = () => {
@@ -949,17 +946,17 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const toastItem = toast?.item;
     const toastMeta = toastItem ? (SOURCE_META[toastItem.source] || {}) : {};
     const ToastIcon = toastMeta.icon || Bell;
-    /* На телефоне с закрытым меню сайдбар — за краем экрана, и карточке внутри
-       него взяться неоткуда. Тогда она уходит порталом в body и раскрывается
-       из-под гамбургера, который в этот момент сам стал колоколом. */
-    const toastDetached = isNarrow && !mobileMenuOpen;
+    /* На телефоне карточка всегда уходит порталом в body и раскрывается из-под
+       колокола — тот висит в углу экрана, вне шторки с разделами. Состояние
+       шторки роли не играет: колокол на месте и при открытой, и при закрытой. */
+    const toastDetached = isNarrow;
     const toastCard = toast && !open ? (
         <div
             role="status"
             aria-live="polite"
             style={{ fontFamily: APPLE_FONT }}
             className={`${toastDetached
-                ? 'notifications-toast-floating fixed z-[61] origin-top'
+                ? 'notifications-toast-floating fixed z-[72] origin-top'
                 : 'notifications-toast absolute left-full top-0 z-40 ml-2 w-[320px] origin-top'} overflow-hidden rounded-2xl border border-black/5 bg-white/95 text-slate-900 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${toastClosing ? 'animate-dropdown-reverse' : 'animate-dropdown'}`}
         >
             <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
