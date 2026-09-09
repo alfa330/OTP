@@ -46902,6 +46902,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const codes = SIDEBAR_SECTION_DEPARTMENTS[section];
                     return !codes || codes.includes(activeDeptCode);
                 };
+                /* Непустые ли два первых блока меню. Нужны ЗАРАНЕЕ: черта между
+                   ними — единственная, которой нужны оба соседа, потому что оба
+                   собираются из общей части меню и из ролевых веток сразу.
+                   Условия повторяют гейты самих пунктов; расходиться им нельзя,
+                   иначе вернётся висячая черта. */
+                const menuStaffBlockHasItems = Boolean(
+                    (canAccessGroupLateBotSection && deptAllowsInner('group_late_bot'))
+                    || isAdminLikeRole
+                    || isPlainTrainer
+                    || (isDepartmentManager && !isAdminLikeRole && (
+                        isDepartmentHeadUser
+                        || departmentAllowsView(user, 'manage_operators')
+                        || departmentAllowsView(user, 'qr_access')
+                    )),
+                );
+                const menuDailyBlockHasItems = Boolean(
+                    wikiSectionEnabled
+                    || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
+                    || isAdminLikeRole
+                    || isPlainTrainer
+                    || (isDepartmentManager && !isAdminLikeRole && (
+                        departmentAllowsView(user, 'surveys')
+                        || departmentAllowsView(user, 'tasks')
+                    ))
+                    || (isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
+                        departmentAllowsView(user, 'surveys')
+                        || (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'))
+                    )),
+                );
                 const sidebarDeptOptions = (Array.isArray(departments) ? departments : [])
                     .filter((dept) => dept && dept.code && dept.is_active !== false);
                 const activeDeptName = activeDeptCode
@@ -47276,19 +47305,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
-                                    {renderDividerIfInner(
-                                        canAccessGroupLateBotSection && deptAllowsInner('group_late_bot'),
-                                        isAdminLikeRole,
-                                        isPlainTrainer,
-                                        isDepartmentManager && !isAdminLikeRole && (
-                                            isDepartmentHeadUser
-                                            || departmentAllowsView(user, 'manage_operators')
-                                            || departmentAllowsView(user, 'qr_access')
-                                        ),
-                                    )}
+                                    {/* Единственная черта, которой нужны ОБА блока: она стоит между
+                                        двумя блоками общей части меню, и любой из них бывает пустым.
+                                        У остальных блоков хватает проверки самого блока — выше них
+                                        всегда есть непустой сосед. */}
+                                    {renderDividerIfInner(menuStaffBlockHasItems && menuDailyBlockHasItems)}
 
-                                    {/* Блок 2 — то, куда ходят каждый день. «Вики» и «Курсы» открыты
-                                        всем ролям и объявлены здесь по одному разу; «Задачи» — в каждой
+                                    {/* Блок 2 — то, куда ходят каждый день. «Вики» и «Курсы»
+                                        объявлены здесь по одному разу на все роли; «Задачи» — в каждой
                                         ролевой ветке ниже (пункт с бейджем «ждёт вашего действия», и
                                         тест держит число его копий равным четырём), поэтому они
                                         оказываются сразу за этими двумя. */}
@@ -47721,13 +47745,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
 
-                                            {renderDividerIfInner(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user), canAccessChatAppSection)}
+                                            {renderDividerIfInner(
+                                                canAccessVerifierChatsSection && (isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)),
+                                                canAccessChatAppSection,
+                                            )}
 
-                                            {/* «Чаты Верификаторов» — раздел отдела продаж (переписка Wazzup),
-                                                а не общий: СВ СЗоВ и Тез КЦ он не нужен, у них своя переписка
-                                                (Chat2Desk и «Чаты ChatApp»). Поэтому здесь остался прежний
-                                                предикат СВ ОП, а не общий по разделу «ИИ-оценка». */}
-                                            {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
+                                            {/* «Чаты Верификаторов» — раздел отдела продаж (переписка
+                                                Wazzup): у СЗоВ своя в Chat2Desk, у Тез КЦ — «Чаты ChatApp».
+                                                Второе слагаемое — прежний предикат СВ ОП, а не общий по
+                                                разделу: СВ СЗоВ и Тез КЦ раздел не нужен.
+
+                                                canAccessVerifierChatsSection ПЕРВЫМ — обязателен.
+                                                isAiQaDepartmentHead шире: он собран из
+                                                AI_QA_HEAD_DEPARTMENT_CODES, куда 'tez' попал вместе с
+                                                расширением «ИИ-оценки» на три отдела. Без этого
+                                                множителя глава Тез КЦ видел пункт, а гард видимости
+                                                выкидывал его в «Учет сотрудников» — пункт в никуда.
+                                                Круг самого раздела считает canAccessVerifierChatsForUser,
+                                                его зеркало на бэкенде — _verifier_chats_guard. */}
+                                            {canAccessVerifierChatsSection && (isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
                                             <li>
                                                 <button
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
@@ -47921,17 +47957,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {departmentAllowsView(user, 'contests') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
-                                                </button>
-                                            </li>
-                                            )}
                                             {departmentAllowsView(user, 'salary') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'contests') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
                                                 </button>
                                             </li>
                                             )}
@@ -48223,6 +48259,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {renderDividerIfInner(
                                                 departmentAllowsView(user, 'salary'),
                                                 departmentAllowsView(user, 'contests'),
+                                                // «Группы» — третий пункт этого блока: у главы
+                                                // фронт-офисов только он и остаётся.
+                                                isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups'),
                                             )}
 
                                             {departmentAllowsView(user, 'salary') && (

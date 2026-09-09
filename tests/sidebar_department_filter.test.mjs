@@ -293,6 +293,58 @@ test('оператор линии проходит departmentAllowsView, но н
 });
 
 /**
+ * Гейт пункта меню не должен быть ШИРЕ предиката самого раздела.
+ *
+ * Ровно этим отличался пункт «Чаты Верификаторов» в ветке СВ и глав отделов:
+ * он стоял под `isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)`,
+ * а `isAiQaDepartmentHead` собран из AI_QA_HEAD_DEPARTMENT_CODES, куда 'tez'
+ * попал вместе с расширением «ИИ-оценки» на три отдела. Круг же самого раздела
+ * (canAccessVerifierChatsForUser) 'tez' не пускает — переписка Wazzup это
+ * раздел отдела продаж. Глава Тез КЦ видел пункт, а гард видимости выкидывал
+ * его обратно в «Учет сотрудников»: пункт в никуда.
+ *
+ * Проверяем не поведение (лишний допуск в интерфейсе не проявляется), а то,
+ * что КАЖДОЕ объявление пункта стоит под предикатом раздела.
+ */
+const gateOf = (needle) => {
+    // Гейт пункта — от ближайшего предшествующего `{` до `&& (` перед ним;
+    // тот же приём, что в tests/test_ai_qa_access_controls.py.
+    const out = [];
+    let at = source.indexOf(needle);
+    while (at >= 0) {
+        const andAt = source.lastIndexOf('&& (', at);
+        const braceAt = source.lastIndexOf('{', andAt);
+        out.push(source.slice(braceAt, andAt + 4));
+        at = source.indexOf(needle, at + 1);
+    }
+    return out;
+};
+
+test('каждое объявление «Чатов Верификаторов» стоит под предикатом раздела', () => {
+    const gates = gateOf("handleSidebarViewNavigation(e, 'wazzup_chats')");
+    assert.ok(gates.length >= 3, `объявлений стало ${gates.length} — ветки сайдбара изменились, проверь тест`);
+    for (const gate of gates) {
+        assert.ok(
+            gate.includes('canAccessVerifierChatsSection'),
+            'гейт пункта «Чаты Верификаторов» без canAccessVerifierChatsSection: '
+            + `«${gate.replace(/\s+/g, ' ').slice(0, 160)}». Предикат раздела уже гейта — пункт уедет тому, `
+            + 'кого раздел не пустит (так глава Тез КЦ получал пункт в никуда)',
+        );
+    }
+});
+
+test('«ИИ-оценка» — там же и по тому же правилу', () => {
+    const gates = gateOf("handleSidebarViewNavigation(e, 'ai_qa')");
+    assert.ok(gates.length >= 3, `объявлений стало ${gates.length} — проверь тест`);
+    for (const gate of gates) {
+        assert.ok(
+            /canAccessAiQaSection|isAiQaDepartmentHead|isAiQaSupervisor/.test(gate),
+            `гейт «ИИ-оценки» не спрашивает круг раздела: «${gate.replace(/\s+/g, ' ').slice(0, 160)}»`,
+        );
+    }
+});
+
+/**
  * Полоса прокрутки меню: волосяная и только во время прокрутки.
  *
  * Ломается молча и не там, где ищут: Chrome с версии 121 ОТКЛЮЧАЕТ всю
