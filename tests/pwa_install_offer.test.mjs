@@ -2,10 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    INSTALL_DISMISS_LIMIT,
     INSTALL_SNOOZE_KEY,
     INSTALL_SNOOZE_MS,
     detectInstallPlatform,
     isStandaloneDisplay,
+    noteInstallOfferDismissed,
+    readInstallDismissals,
     readInstallSnoozeUntil,
     shouldOfferInstall,
     snoozeInstallOffer,
@@ -86,7 +89,35 @@ test('уже установленному порталу предлагать н
     );
 });
 
-test('«Позже» молчит трое суток и снова спрашивает после них', () => {
+test('крестик НЕ прячет предложение до следующего открытия страницы', () => {
+    // Дважды закрытая панель обязана вернуться после обновления: ровно на это
+    // владелец жаловался трижды — «уведомление не выходит». Отсрочки нет,
+    // копится только счётчик отказов.
+    const storage = memoryStorage();
+    const now = 1_700_000_000_000;
+    noteInstallOfferDismissed(now, storage);
+    assert.equal(readInstallSnoozeUntil(storage), 0);
+    assert.equal(readInstallDismissals(storage), 1);
+
+    noteInstallOfferDismissed(now, storage);
+    assert.equal(readInstallSnoozeUntil(storage), 0, 'Второй отказ ещё не повод замолчать');
+    assert.equal(shouldOfferInstall({ platform: 'ios', snoozedUntil: readInstallSnoozeUntil(storage), now }), true);
+});
+
+test('три отказа подряд — умолкаем на трое суток', () => {
+    // Иначе «показывать всегда» превращается в навязчивость: человек, который
+    // трижды сказал «нет», сказал это достаточно внятно.
+    const storage = memoryStorage();
+    const now = 1_700_000_000_000;
+    for (let i = 0; i < INSTALL_DISMISS_LIMIT; i += 1) noteInstallOfferDismissed(now, storage);
+
+    const snoozedUntil = readInstallSnoozeUntil(storage);
+    assert.equal(snoozedUntil, now + INSTALL_SNOOZE_MS);
+    assert.equal(shouldOfferInstall({ platform: 'ios', snoozedUntil, now: now + 1000 }), false);
+    assert.equal(readInstallDismissals(storage), 0, 'Счётчик обнуляется вместе с отсрочкой');
+});
+
+test('установленный портал молчит трое суток и снова спрашивает после них', () => {
     const storage = memoryStorage();
     const now = 1_700_000_000_000;
     snoozeInstallOffer(now, storage);
@@ -103,10 +134,13 @@ test('«Позже» молчит трое суток и снова спраши
 
 test('испорченное и пустое хранилище не отменяют предложение', () => {
     // Приватный режим, чужая запись, очищенные данные сайта: отсрочки нет —
-    // значит предложение живо.
+    // значит предложение живо. Отдельно проверяем запись прежнего формата
+    // (голое число): она тоже не должна читаться как отсрочка.
     const storage = memoryStorage();
     assert.equal(readInstallSnoozeUntil(storage), 0);
     storage.setItem(INSTALL_SNOOZE_KEY, 'позже');
+    assert.equal(readInstallSnoozeUntil(storage), 0);
+    storage.setItem(INSTALL_SNOOZE_KEY, '1789197478947');
     assert.equal(readInstallSnoozeUntil(storage), 0);
     assert.equal(readInstallSnoozeUntil(null), 0);
 });

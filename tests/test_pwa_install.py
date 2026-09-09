@@ -336,15 +336,32 @@ class InstallPromptTests(unittest.TestCase):
         self.assertIn("OFFER_HEIGHT_VAR = '--install-offer-height'", self.jsx)
         self.assertIn('ResizeObserver', self.jsx)
 
-    def test_dismiss_is_a_snooze(self):
-        """«Позже» — отсрочка на две недели, а не отказ навсегда."""
-        self.assertIn('snoozeInstallOffer', self.jsx)
+    def test_dismiss_lasts_only_until_the_page_reloads(self):
+        """Крестик закрывает панель на текущую загрузку, а не на дни.
+
+        Прежнее правило (крестик = отсрочка) и было причиной жалобы «после
+        обновления уведомление не выходит»: владелец один раз закрывал панель
+        при проверке. Навязчивость сдерживается счётчиком: три отказа подряд —
+        молчим три дня."""
+        self.assertIn("noteInstallOfferDismissed", self.jsx)
+        self.assertIn("hide('dismissed')", self.jsx)
         util = read(PWA_UTIL)
+        self.assertIn('INSTALL_DISMISS_LIMIT = 3', util)
         self.assertIn('INSTALL_SNOOZE_MS = 3 * 24 * 60 * 60 * 1000', util)
-        # Ключ версионный: при смене срока прежние отсрочки обязаны обнулиться,
-        # иначе закрывшие панель раньше не увидят её ещё две недели.
-        self.assertIn("INSTALL_SNOOZE_KEY = 'otp.install_offer_v2'", util)
-        self.assertIn('LEGACY_SNOOZE_KEYS', util)
+        # Ключ версионный: при смене правила прежние отсрочки обязаны
+        # обнулиться, иначе закрывшие панель вчера не увидят её ещё три дня.
+        self.assertIn("INSTALL_SNOOZE_KEY = 'otp.install_offer_v3'", util)
+        self.assertIn("'otp.install_offer_v2'", util, 'Прежний ключ не подчищается')
+
+    def test_long_snooze_is_only_for_the_installed_portal(self):
+        """Долго молчать можно лишь тогда, когда предлагать больше нечего."""
+        # Долгая отсрочка ставится в одном месте — когда системное окно
+        # вернуло «поставил».
+        self.assertIn("reason === 'installed'", self.jsx)
+        self.assertIn("outcome === 'accepted' ? 'installed' : 'dismissed'", self.jsx)
+        util = read(PWA_UTIL)
+        snooze = util[util.index('export const snoozeInstallOffer'):]
+        self.assertIn('until: now + INSTALL_SNOOZE_MS', snooze[:400])
 
     def test_menu_item_subscribes_itself(self):
         """Пункт живёт в мемоизированном дереве сайдбара: проп бы замёрз."""
@@ -628,7 +645,10 @@ class SafeAreaTests(unittest.TestCase):
         block = block[:block.index('\n    }\n\n')]
         self.assertIn('env(safe-area-inset-top)', block)
         self.assertIn('env(safe-area-inset-bottom)', block)
-        self.assertIn('.hamburger-btn', block)
+        # Раньше здесь проверялся гамбургер; кнопки больше нет — навигация
+        # телефона переехала в нижний бар, и безопасные зоны он считает сам
+        # (см. mobile-shell.css). В блоке остаётся содержимое сайдбара.
+        self.assertIn('.sidebar > div', block)
 
     def test_bottom_inset_is_not_on_body(self):
         """padding-bottom на body добавился бы к 100vh — вечная полоса прокрутки."""

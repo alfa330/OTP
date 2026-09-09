@@ -5,6 +5,7 @@ import InstallGuideSheet from './InstallGuideSheet';
 import './install-app-prompt.css';
 import {
     getInstallState,
+    noteInstallOfferDismissed,
     promptInstall,
     readInstallSnoozeUntil,
     shouldOfferInstall,
@@ -149,8 +150,17 @@ const InstallAppPrompt = () => {
         };
     }, [visible, closing]);
 
-    const hide = useCallback((snooze) => {
-        if (snooze) snoozeInstallOffer();
+    /* `reason` объясняет, ПОЧЕМУ панель уходит, и от этого зависит, когда она
+       вернётся:
+         'dismissed' — закрыли крестиком: на этой загрузке страницы больше не
+            показываем (за это отвечает offerShownThisLoad), но обновление
+            страницы вернёт предложение. Считаем отказы: три подряд — молчим три
+            дня;
+         'installed' — портал поставили: предлагать больше нечего;
+         'quiet'     — уходим молча, ничего не записывая. */
+    const hide = useCallback((reason) => {
+        if (reason === 'dismissed') noteInstallOfferDismissed();
+        if (reason === 'installed') snoozeInstallOffer();
         setClosing(true);
         setTimeout(() => {
             setClosing(false);
@@ -163,9 +173,10 @@ const InstallAppPrompt = () => {
         const outcome = await promptInstall();
         setPending(false);
         setGuideOpen(false);
-        /* Отказ в системном окне откладывает предложение так же, как «Позже»:
-           человек уже ответил, спрашивать его снова завтра — навязчивость. */
-        hide(outcome !== 'accepted');
+        /* Согласились — портал установлен, предлагать нечего. Отказ в системном
+           окне считаем обычным закрытием: человек ответил на сегодня, а не
+           навсегда. */
+        hide(outcome === 'accepted' ? 'installed' : 'dismissed');
     }, [hide]);
 
     const guide = (
@@ -200,7 +211,7 @@ const InstallAppPrompt = () => {
                 >
                     <button
                         type="button"
-                        onClick={() => hide(true)}
+                        onClick={() => hide('dismissed')}
                         className="absolute right-3.5 top-3.5 grid h-8 w-8 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95"
                         aria-label="Закрыть"
                     >
