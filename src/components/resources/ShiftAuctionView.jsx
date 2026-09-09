@@ -580,6 +580,26 @@ const getAuctionLotStartTone = (lot) => {
   };
 };
 
+// Телефонная смена (постановка #304): её ставят руками в «Расчете ресурсов → Чат»,
+// в расчёт она не входит и на всех экранах выделяется зелёным. Признак приезжает
+// из meta исходной смены плана, поэтому у добавленных вручную лотов его нет.
+const isPhoneAuctionLot = (lot) => String(lot?.shift_kind || '') === 'phone';
+
+// Тот же язык, что у синей шкалы старта: чем позже смена начинается, тем темнее.
+// Меняется только семейство цвета — зелёное вместо синего.
+const getAuctionLotPhoneTone = (lot) => {
+  const startMinutes = clockToMinutes(lot?.start_time);
+  const visualStartMinutes = startMinutes < 7 * 60 ? startMinutes + 24 * 60 : startMinutes;
+  const ratio = clampNumber((visualStartMinutes - (7 * 60)) / (17 * 60), 0, 1);
+  const bg = mixChannels([209, 250, 229], [4, 120, 87], ratio);
+  const border = mixChannels([110, 231, 183], [6, 95, 70], ratio);
+  return {
+    backgroundColor: channelRgb(bg),
+    borderColor: channelRgb(border),
+    color: ratio > 0.38 ? '#ffffff' : '#065f46'
+  };
+};
+
 const getAuctionLotPostAuctionTone = (lot) => {
   const startMinutes = clockToMinutes(lot?.start_time);
   const visualStartMinutes = startMinutes < 7 * 60 ? startMinutes + 24 * 60 : startMinutes;
@@ -920,8 +940,12 @@ const AuctionLotCell = ({
   // among ≥2 operators (claimed but in pieces). Such cells get a marker.
   const claimSegments = Array.isArray(lot.claim_segments) ? lot.claim_segments : [];
   const takenInParts = claimSegments.length > 0 && (lot.status !== 'claimed' || claimSegments.length > 1);
-  const startToneStyle = getAuctionLotStartTone(lot);
-  const postAuctionToneStyle = getAuctionLotPostAuctionTone(lot);
+  // Телефонная смена зелёная в любой фазе: и в аукционе, и в доборе. Оранжевый
+  // добора и синяя шкала старта — про фазу и время, а зелёный — про вид смены,
+  // и внутри оранжевого поля добора он как раз и выделяет телефонные.
+  const isPhoneLot = isPhoneAuctionLot(lot);
+  const startToneStyle = isPhoneLot ? getAuctionLotPhoneTone(lot) : getAuctionLotStartTone(lot);
+  const postAuctionToneStyle = isPhoneLot ? getAuctionLotPhoneTone(lot) : getAuctionLotPostAuctionTone(lot);
   const lotStartMs = getLotStartDateTimeMs(lot);
   const hasStarted = lotStartMs !== null && postAuctionNowMs > 0 && lotStartMs <= postAuctionNowMs;
 
@@ -945,7 +969,7 @@ const AuctionLotCell = ({
     : compactLabel;
 
   const title = `${label}${minRate ? ` · ставка ${formatRate(minRate)}`
-    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}${isAddedLot ? ` · добавил ${lot.added_by_name || '—'}` : ''}${isSelfScheduledLot ? ' · свой график' : ''}`;
+    : ''} · в норму ${formatAuctionHours(netMinutes)} ч${breakMinutes ? ` · перерыв ${formatAuctionHours(breakMinutes)} ч` : ''}${breaksLabel ? ` (${breaksLabel})` : ''}${claimBlockReason ? ` · ${claimBlockReason}` : ''}${lot.claimed_by_name ? ` · ${lot.claimed_by_name}` : ''}${postAuctionTakeable ? ` · доступно после аукциона${postAuctionSegment && !postAuctionSegment.isFull ? `: ${postAuctionSegment.start_time}–${postAuctionSegment.end_time}` : ''}` : ''}${formatPostAuctionClaimTitleSuffix(lot)}${isAddedLot ? ` · добавил ${lot.added_by_name || '—'}` : ''}${isSelfScheduledLot ? ' · свой график' : ''}${isPhoneLot ? ' · телефонная смена' : ''}`;
 
   if (postAuctionTakeable) {
     return (
@@ -1018,7 +1042,11 @@ const AuctionLotCell = ({
     // карточка дня.
     tone = lotClaimedByCurrentUser
       ? 'border-emerald-600 bg-emerald-600 text-white'
-      : 'border-slate-200 bg-slate-100 text-slate-400';
+      : isPhoneLot
+        // Чужая взятая смена гасится, но вид смены не теряется: приглушённый
+        // зелёный так же нечитаем как «свободно», как и серый.
+        ? 'border-emerald-200 bg-emerald-50 text-emerald-600'
+        : 'border-slate-200 bg-slate-100 text-slate-400';
   } else if (postAuctionActive && (lot.status === 'available' || lot.status === 'cancelled') && !hasStarted) {
     tone = 'text-orange-900 hover:brightness-95';
   } else if (isAddedLot) {

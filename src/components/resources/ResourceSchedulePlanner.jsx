@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
   ArrowDownUp,
+  ChevronDown,
   Gavel,
   GripVertical,
   LockKeyhole,
@@ -297,6 +298,33 @@ const auctionDirectionFor = (apiPrefix) => (
   String(apiPrefix || '').includes('/chat') ? 'chat' : 'line'
 );
 
+// Телефонные смены (постановка #304, Сабыр Азана). Чат-операторы отдельно
+// закрывают телефон, поэтому такие смены ставятся руками поверх сгенерированного
+// графика, В РАСЧЁТ РЕСУРСОВ НЕ ВХОДЯТ (покрытие и FTE их не видят) и на всех
+// экранах красятся зелёным. Набор жёстко задан постановкой — две смены по 9 часов.
+const PHONE_SHIFT_KIND = 'phone';
+
+const PHONE_SHIFT_TEMPLATES = [
+  { id: 'phone-08-17', label: '8*17', rate: 1 },
+  { id: 'phone-17-02', label: '17*02', rate: 1 },
+];
+
+const isPhoneShift = (shift) => String(shift?.shiftKind || '') === PHONE_SHIFT_KIND;
+
+// Подписи для меню кнопки «+ Линия»: «17*02» человеку ничего не говорит.
+const PHONE_SHIFT_MENU_ITEMS = PHONE_SHIFT_TEMPLATES.map((template) => {
+  const parsed = parseTemplateLabel(template.label);
+  return {
+    ...template,
+    timeLabel: parsed ? `${parsed.start}–${parsed.end}` : template.label,
+    durationLabel: parsed ? formatDurationHours(parsed.durationMinutes) : '',
+  };
+});
+
+// Выбор вида смены нужен только чату: телефон закрывают его операторы. Направление
+// выводим из apiPrefix тем же приёмом, что ключ хранилища, ставки и аукцион выше.
+const phoneShiftsEnabledFor = (apiPrefix) => auctionDirectionFor(apiPrefix) === 'chat';
+
 const loadStoredTemplates = (apiPrefix) => {
   if (typeof window === 'undefined') return [];
   try {
@@ -371,6 +399,7 @@ const plannerDaysSignature = (days) => JSON.stringify(
       label: shift.label,
       source: shift.source,
       tone: shift.tone,
+      shiftKind: shift.shiftKind || '',
       startMinute: shift.startMinute,
       endMinute: shift.endMinute,
       breaks: shift.breaks || [],
@@ -431,6 +460,9 @@ const buildCoverageFromDays = (days) => {
       if (shift && shift.source === 'auction' && shift.auctionStatus !== 'claimed') {
         return;
       }
+      // Телефонная смена закрывает телефон, а не чаты: в расчёт ресурсов она не
+      // входит ни здесь, ни в итогах дня и периода, которые считаются отсюда же.
+      if (isPhoneShift(shift)) return;
       const startAbs = dayIndex * 1440 + Number(shift.startMinute || 0);
       const endAbs = dayIndex * 1440 + Number(shift.endMinute || 0);
       for (let hourIndex = 0; hourIndex < covered.length; hourIndex += 1) {
@@ -864,6 +896,7 @@ const PlannerDayRow = ({
   dayIndex,
   templates,
   selectedTemplateId,
+  phoneShiftsEnabled = false,
   activeDragId,
   selectedShiftKey,
   splitPreview,
@@ -878,6 +911,8 @@ const PlannerDayRow = ({
   const viewportRef = useRef(null);
   const syncedHeaderRef = useRef(null);
   const syncedCoverageRef = useRef(null);
+  const addMenuRef = useRef(null);
+  const [isAddMenuOpen, setIsAddMenuOpen] = useState(false);
   const focusFrameRef = useRef(0);
   const scrollSyncRef = useRef({ active: false, targetLeft: 0, startedAt: 0 });
   const allDays = days.length ? days : [day].filter(Boolean);
@@ -1001,6 +1036,34 @@ const PlannerDayRow = ({
     : null;
   const isReadOnlyDay = Boolean(day?.readOnly || day?.isCoverageProjection);
 
+  useEffect(() => {
+    if (!isAddMenuOpen) return undefined;
+    const onPointerDown = (event) => {
+      if (addMenuRef.current && !addMenuRef.current.contains(event.target)) setIsAddMenuOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setIsAddMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isAddMenuOpen]);
+
+  useEffect(() => {
+    if (isReadOnlyDay) setIsAddMenuOpen(false);
+  }, [isReadOnlyDay]);
+
+  // Пункт «Обычная смена» ставит ровно то, что выбрано в редакторе шаблонов —
+  // подпись показывает какое именно окно, иначе выбор вслепую.
+  const addMenuTemplateLabel = useMemo(() => {
+    const template = templates.find((item) => item.id === selectedTemplateId) || templates[0] || null;
+    const parsed = template ? parseTemplateLabel(template.label) : null;
+    return parsed ? `${parsed.start}–${parsed.end}` : (template?.label || '');
+  }, [selectedTemplateId, templates]);
+
   return (
     <section
       className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
@@ -1019,15 +1082,75 @@ const PlannerDayRow = ({
               Сумма без округления {formatNumber(day.stats?.realCoveredFteHours, 2)} / {formatNumber(day.stats?.realNeededFteHours, 2)} FTE-ч
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => onAddShift(dayIndex, selectedTemplateId)}
-            disabled={!templates.length || isReadOnlyDay}
-            className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Plus size={15} />
-            Линия
-          </button>
+          {phoneShiftsEnabled ? (
+            <div ref={addMenuRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setIsAddMenuOpen((current) => !current)}
+                disabled={!templates.length || isReadOnlyDay}
+                aria-haspopup="menu"
+                aria-expanded={isAddMenuOpen}
+                className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus size={15} />
+                Линия
+                <ChevronDown size={14} className={`text-slate-400 transition ${isAddMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {isAddMenuOpen ? (
+                <div
+                  role="menu"
+                  className="absolute right-0 top-full z-40 mt-1 w-64 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl ring-1 ring-slate-200/70"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsAddMenuOpen(false);
+                      onAddShift(dayIndex, selectedTemplateId);
+                    }}
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 active:scale-[0.98]"
+                  >
+                    <span className="font-medium">Обычная смена</span>
+                    <span className="shrink-0 text-xs tabular-nums text-slate-400">{addMenuTemplateLabel}</span>
+                  </button>
+                  <div className="mt-1 border-t border-slate-100 px-2.5 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                    Телефонная смена
+                  </div>
+                  {PHONE_SHIFT_MENU_ITEMS.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsAddMenuOpen(false);
+                        onAddShift(dayIndex, item.id, { phoneTemplate: item });
+                      }}
+                      className="flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 active:scale-[0.98]"
+                    >
+                      <span className="inline-flex min-w-0 items-center gap-2">
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-sm bg-emerald-500" />
+                        <span className="truncate font-medium tabular-nums">{item.timeLabel}</span>
+                      </span>
+                      <span className="shrink-0 text-xs tabular-nums text-slate-400">{item.durationLabel}</span>
+                    </button>
+                  ))}
+                  <div className="px-2.5 pb-1.5 pt-1 text-[11px] leading-snug text-slate-400">
+                    Телефонные смены не входят в расчет ресурсов.
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onAddShift(dayIndex, selectedTemplateId)}
+              disabled={!templates.length || isReadOnlyDay}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus size={15} />
+              Линия
+            </button>
+          )}
         </div>
       </div>
 
@@ -1113,6 +1236,10 @@ const PlannerDayRow = ({
                   const isAuctionShift = shift.source === 'auction';
                   const isLocked = isAuctionShift || isLockedPlannerShift(shift);
                   const isIncidentUplift = shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald';
+                  // Телефонная смена — сплошной зелёный: постановка #304 просит
+                  // выделить её визуально, а светлый зелёный уже занят доп. сменой
+                  // под прирост, и рядом они бы слились.
+                  const isPhone = isPhoneShift(shift);
                   const isAuctionClaimed = isAuctionShift && shift.auctionStatus === 'claimed';
                   const isAddedAuctionShift = isAuctionShift && shift.isAdded;
                   const isSelected = selectedShiftKey === `${sourceDayIndex}-${shift.id}`;
@@ -1123,7 +1250,11 @@ const PlannerDayRow = ({
                             : 'z-20 cursor-default border-violet-300 bg-violet-50 text-violet-700 border-dashed')
                         : isAuctionClaimed
                           ? 'z-20 cursor-default border-emerald-400 bg-emerald-100 text-emerald-900'
-                          : 'z-20 cursor-default border-blue-300 bg-blue-50 text-blue-700 border-dashed')
+                          : isPhone
+                            ? 'z-20 cursor-default border-emerald-400 bg-emerald-50 text-emerald-700 border-dashed'
+                            : 'z-20 cursor-default border-blue-300 bg-blue-50 text-blue-700 border-dashed')
+                    : isPhone
+                    ? 'z-20 cursor-grab border-emerald-600 bg-emerald-500 text-white hover:bg-emerald-600'
                     : isLockedPlannerShift(shift)
                     ? 'z-20 cursor-default border-slate-300 bg-slate-200 text-slate-700'
                     : isIncidentUplift
@@ -1156,7 +1287,7 @@ const PlannerDayRow = ({
                                 ? `Взято: ${shift.claimedBy || '—'}`
                                 : 'Свободно (никто ещё не выбрал)'
                             }${isAddedAuctionShift ? ` · добавил: ${shift.addedBy || '—'}` : ''}`
-                          : `${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isIncidentUplift ? ' · доп. смена под прирост' : ''}${isLocked ? ' · реальная смена из графика работы' : ''}`
+                          : `${formatTime(start)}-${formatTime(end)} · ${formatDurationHours(duration)} · ${shift.label}${isPhone ? ' · телефонная смена (в расчет ресурсов не входит)' : ''}${isIncidentUplift ? ' · доп. смена под прирост' : ''}${isLocked ? ' · реальная смена из графика работы' : ''}`
                       }
                     >
                       {hasCarryover ? (
@@ -1188,7 +1319,7 @@ const PlannerDayRow = ({
                           : <> · {formatDurationHours(duration)}</>
                         }
                       </span>
-                      {end > 1440 ? <span className={`relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] ${isIncidentUplift ? 'text-emerald-800' : 'text-blue-800'}`}>+1</span> : null}
+                      {end > 1440 ? <span className={`relative z-10 ml-1 shrink-0 rounded bg-white/70 px-1 text-[10px] ${isPhone || isIncidentUplift ? 'text-emerald-800' : 'text-blue-800'}`}>+1</span> : null}
                       {!isLocked ? (
                         <>
                           <button
@@ -1338,6 +1469,7 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
       const incidentShiftCount = (day.shifts || []).filter((shift) => (
         shift.isIncidentUplift || shift.source === 'incident_uplift' || shift.tone === 'emerald'
       )).length;
+      const phoneShiftCount = (day.shifts || []).filter(isPhoneShift).length;
       return (
         <button
           key={day.date || dayIndex}
@@ -1362,6 +1494,12 @@ const PlannerDayCards = ({ days, selectedDayIndex, onSelect }) => (
           {incidentUpliftHours > 0.01 || incidentShiftCount > 0 ? (
             <div className="mt-2 inline-flex items-center rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-emerald-800 shadow-sm">
               +{formatNumber(incidentUpliftHours, 1)} FTE-ч риска · {incidentShiftCount} доп.
+            </div>
+          ) : null}
+          {phoneShiftCount > 0 ? (
+            <div className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-emerald-800 shadow-sm">
+              <span className="h-2 w-2 rounded-sm bg-emerald-500" />
+              {phoneShiftCount} тел.
             </div>
           ) : null}
           <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -1822,6 +1960,9 @@ const ResourceSchedulePlanner = ({
         claimedBy: lot.claimed_by_name || '',
         addedBy: lot.added_by_name || '',
         isAdded: Boolean(lot.added_by),
+        // Вид смены переезжает из аукциона обратно в планировщик: телефонные
+        // и здесь зелёные и так же не попадают в покрытие.
+        shiftKind: String(lot.shift_kind || ''),
         label: status === 'claimed'
           ? (lot.claimed_by_name || 'Занято')
           : 'Свободно'
@@ -1980,6 +2121,7 @@ const ResourceSchedulePlanner = ({
     () => templates.find((template) => template.id === selectedTemplateId) || templates.find((template) => template.enabled !== false) || null,
     [selectedTemplateId, templates],
   );
+  const phoneShiftsEnabled = useMemo(() => phoneShiftsEnabledFor(apiPrefix), [apiPrefix]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -2334,8 +2476,11 @@ const ResourceSchedulePlanner = ({
     ));
   }, [applyPlannerDaysUpdate, pushHistorySnapshot]);
 
-  const addShift = useCallback((dayIndex, templateId) => {
-    const template = templates.find((item) => item.id === templateId) || selectedTemplate;
+  const addShift = useCallback((dayIndex, templateId, options = {}) => {
+    // Телефонная смена приходит СВОИМ шаблоном (её окна заданы постановкой и в
+    // редакторе шаблонов их нет), остальное — как раньше, по выбранному шаблону.
+    const phoneTemplate = options?.phoneTemplate || null;
+    const template = phoneTemplate || templates.find((item) => item.id === templateId) || selectedTemplate;
     const localTemplate = normalizeTemplateForLocalUse(template);
     if (!localTemplate) return;
     pushHistorySnapshot();
@@ -2353,6 +2498,7 @@ const ResourceSchedulePlanner = ({
       durationMinutes: endMinute - startMinute,
       overnight: endMinute > 1440,
       breaks: computeDefaultBreaks(startMinute, endMinute),
+      ...(phoneTemplate ? { shiftKind: PHONE_SHIFT_KIND } : {}),
     };
     applyPlannerDaysUpdate((current) =>
       current.map((day, index) => (
@@ -2717,6 +2863,7 @@ const ResourceSchedulePlanner = ({
               dayIndex={activeDayIndex}
               templates={templates.filter((template) => template.enabled !== false)}
               selectedTemplateId={selectedTemplateId}
+              phoneShiftsEnabled={phoneShiftsEnabled}
               activeDragId={activeDragId}
               selectedShiftKey={selectedShiftKey}
               splitPreview={splitPreview}

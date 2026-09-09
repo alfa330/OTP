@@ -9816,6 +9816,11 @@ class Database:
             "break_rules": direction_rules,
         }
 
+    # Вид смены в сохранённом графике. Телефонная смена ставится руками поверх
+    # сгенерированного графика, не участвует в расчёте ресурсов и на всех экранах
+    # (планировщик, аукцион) рисуется зелёным.
+    RESOURCE_SHIFT_KIND_PHONE = 'phone'
+
     def _normalize_resource_saved_schedule_shifts(self, days, direction_name=None, direction_rules=None):
         rows = []
         for day_index, day in enumerate(days or []):
@@ -9853,6 +9858,15 @@ class Database:
                 }
                 if incoming_breaks:
                     meta["clientBreaks"] = incoming_breaks
+                # Вид смены. Телефонная (постановка #304) в расчёт ресурсов не входит
+                # и красится зелёным, поэтому признак обязан пережить сохранение:
+                # держим его в meta ЯВНО и с проверенным значением, а не «как пришло».
+                shift_kind = str(shift.get("shiftKind") or shift.get("shift_kind") or "").strip().lower()
+                meta.pop("shift_kind", None)
+                if shift_kind == self.RESOURCE_SHIFT_KIND_PHONE:
+                    meta["shiftKind"] = self.RESOURCE_SHIFT_KIND_PHONE
+                else:
+                    meta.pop("shiftKind", None)
                 meta["breakSource"] = "work_schedule_break_rules"
                 if direction_name:
                     meta["breakDirectionName"] = direction_name
@@ -10361,6 +10375,9 @@ class Database:
             "added_by": row[20] if len(row) > 20 else None,
             "added_by_name": (row[21] or "") if len(row) > 21 else "",
             "self_scheduled": bool(row[22]) if len(row) > 22 else False,
+            # Вид исходной смены плана: телефонная (постановка #304) выделяется
+            # зелёным и в сетке аукциона, и обратно в планировщике.
+            "shift_kind": (row[23] or "") if len(row) > 23 else "",
         }
 
     def _get_shift_auction_operator_work_shifts_tx(self, cursor, operator_id, lot_dates=None):
@@ -10538,7 +10555,8 @@ class Database:
                 ), '[]'::jsonb) AS claim_segments,
                 l.added_by,
                 added_user.name AS added_by_name,
-                l.self_scheduled_by
+                l.self_scheduled_by,
+                source_shift.meta->>'shiftKind' AS shift_kind
             FROM shift_auction_test_lots l
             LEFT JOIN users u ON u.id = l.claimed_by
             LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -12945,11 +12963,12 @@ class Database:
                     l.post_claim_end_time,
                     -- Keep column positions aligned with the serializer: row[19] is
                     -- claim_segments (unused here), row[20]/row[21] are added_by info,
-                    -- row[22] marks a self-scheduled shift.
+                    -- row[22] marks a self-scheduled shift, row[23] is the shift kind.
                     '[]'::jsonb AS claim_segments,
                     l.added_by,
                     added_user.name AS added_by_name,
-                    l.self_scheduled_by
+                    l.self_scheduled_by,
+                    source_shift.meta->>'shiftKind' AS shift_kind
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions claimed_dir ON claimed_dir.id = u.direction_id
@@ -13542,7 +13561,8 @@ class Database:
             period_start = period_row[1]
             period_end = period_row[2]
             cursor.execute("""
-                SELECT id, shift_date, start_time, end_time, rate_min, breaks, start_minute, end_minute
+                SELECT id, shift_date, start_time, end_time, rate_min, breaks, start_minute, end_minute,
+                       meta->>'shiftKind' AS shift_kind
                 FROM resource_saved_schedule_shifts
                 WHERE plan_id = %s
                   AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
@@ -13619,6 +13639,7 @@ class Database:
                     "source_end_minute": int(row[7]) if len(row) > 7 and row[7] is not None else None,
                     "claim_start_time": None,
                     "claim_end_time": None,
+                    "shift_kind": (row[8] or "") if len(row) > 8 else "",
                     "preview_only": True,
                 }
                 lots.append(lot)
@@ -14047,7 +14068,8 @@ class Database:
                     l.post_claim_start_time,
                     l.post_claim_end_time,
                     l.added_by,
-                    added_user.name AS added_by_name
+                    added_user.name AS added_by_name,
+                    s.meta->>'shiftKind' AS shift_kind
                 FROM shift_auction_test_lots l
                 LEFT JOIN users u ON u.id = l.claimed_by
                 LEFT JOIN directions cdir ON cdir.id = u.direction_id
@@ -14084,6 +14106,7 @@ class Database:
                     "claim_end_time": row[18].strftime('%H:%M') if row[18] else None,
                     "added_by": row[19] if len(row) > 19 else None,
                     "added_by_name": (row[20] or "") if len(row) > 20 else "",
+                    "shift_kind": (row[21] or "") if len(row) > 21 else "",
                 })
 
             if lots:
@@ -14137,7 +14160,8 @@ class Database:
                     hc.claimed_start_time, hc.claimed_end_time,
                     u.name AS claimed_by_name,
                     u.direction_id AS claimed_by_direction_id,
-                    cdir.name AS claimed_by_direction
+                    cdir.name AS claimed_by_direction,
+                    s.meta->>'shiftKind' AS shift_kind
                 FROM resource_saved_schedule_shifts s
                 LEFT JOIN shift_auction_historical_claims hc
                   ON hc.plan_id = s.plan_id AND hc.source_schedule_shift_id = s.id
@@ -14175,6 +14199,7 @@ class Database:
                     "claimed_by_name": row[13] or "",
                     "claimed_by_direction_id": row[14],
                     "claimed_by_direction": row[15] or "",
+                    "shift_kind": row[16] or "",
                     "preview_only": True,
                 })
 
