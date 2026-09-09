@@ -61,7 +61,7 @@ import { IosTimePicker } from './components/ui/TimePicker';
 import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -39333,6 +39333,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // предикатами не различаются.
             const employeeDeptFieldsForCode = (code) => ({
                 operatorFields: Boolean(code) && !departmentCodeHidesOperatorFields(code),
+                // «Супервайзер» и «SIP» — не про линию целиком, а про две
+                // отдельные особенности отдела: фронт-офисы устроены как линия
+                // (направления, группы, графики, ставка), но супервайзеров в
+                // них нет — людей ведёт глава, — и SIP-номеров нет, звонят они
+                // из кабинета CRM.
+                supervisor: Boolean(code) && !departmentCodeHidesEmployeeSupervisor(code),
+                sip: Boolean(code) && !departmentCodeHidesEmployeeSip(code),
                 jobTitle: Boolean(code) && departmentCodeUsesEmployeeJobTitle(code),
                 city: Boolean(code) && departmentCodeUsesEmployeeCity(code),
                 frontOfficeTraining: Boolean(code) && !departmentCodeHidesFrontOfficeTraining(code),
@@ -39345,6 +39352,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // значением по умолчанию у построителя колонок.
             const employeeDeptFieldsOfViewer = () => ({
                 operatorFields: !departmentHidesOperatorFields(user),
+                supervisor: !departmentHidesEmployeeSupervisor(user),
+                sip: !departmentHidesEmployeeSip(user),
                 jobTitle: departmentUsesEmployeeJobTitle(user),
                 city: departmentUsesEmployeeCity(user),
                 frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),
@@ -39525,13 +39534,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const generalColumns = [
                     nameColumn,
-                    ...(isOperatorVariant ? [
+                    // «Супервайзер» отдельным гейтом от направления: у
+                    // фронт-офисов направление есть, а супервайзеров в отделе
+                    // нет вовсе — людей ведёт глава отдела.
+                    ...(isOperatorVariant && employeeDeptFields.supervisor ? [
                     {
                         key: 'supervisor_name',
                         label: 'Супервайзер',
                         sortField: 'supervisor',
                         render: (employee) => employee?.supervisor_name || '-'
                     },
+                    ] : []),
+                    ...(isOperatorVariant ? [
                     {
                         key: 'direction',
                         label: 'Направление',
@@ -39571,6 +39585,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
                         )
                     },
+                    ] : []),
+                    // SIP тоже отдельным гейтом: телефония есть не у каждого
+                    // отдела с линией — фронт-офисы звонят из кабинета CRM, и
+                    // sip_number у них не заполнен ни у кого.
+                    ...(isOperatorVariant && employeeDeptFields.sip ? [
                     {
                         key: 'sip_number',
                         label: 'SIP',
@@ -50167,7 +50186,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     ? "Поиск по имени..."
                                                     : manageUsersDeptFields.jobTitle
                                                     ? "Поиск по имени или должности..."
-                                                    : "Поиск по имени, направлению или супервайзеру..."}
+                                                    : manageUsersDeptFields.supervisor
+                                                    ? "Поиск по имени, направлению или супервайзеру..."
+                                                    : "Поиск по имени или направлению..."}
                                                 value={manageUsersSearchQuery}
                                                 onChange={(e) => setManageUsersSearchQuery(e.target.value)}
                                                 className="w-full p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"

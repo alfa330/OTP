@@ -277,6 +277,45 @@ export const departmentCodeHidesOperatorFields = (code) => {
 
 export const departmentHidesOperatorFields = (user) => departmentCodeHidesOperatorFields(departmentCodeOf(user));
 
+// Отделы без супервайзеров: людей в них ведёт глава отдела напрямую, роль 'sv'
+// там не заведена вовсе. Проверено по проду 09.09.2026: у всех 22 активных
+// сотрудников фронт-офисов supervisor_id пуст, а людей с ролью sv/supervisor в
+// отделе нет ни одного (они есть только в op, szov и tez). Это же зафиксировано
+// выше в комментарии к FRONT_OFFICE_HEAD_VIEWS — «супервайзеров в отделе нет
+// вовсе, подтверждает глава» — и в SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS,
+// который убирает пункт «Супервайзеры» из выпадашки сайдбара.
+//
+// Фронт-офисы в OPERATOR_FIELDS_HIDDEN_DEPARTMENTS НЕ входят намеренно:
+// направление у них есть (21 из 22), есть группы, графики и ставка — отдел
+// устроен как линия во всём, кроме супервайзеров и телефонии. Три кода
+// бэк-офиса здесь перечислены хотя и лишний раз (их гасит уже
+// departmentCodeHidesOperatorFields), чтобы предикат отвечал верно сам по
+// себе: «есть ли в отделе супервайзеры» — вопрос об отделе, а не о том,
+// в каком порядке сложились гейты в карточке.
+const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing']);
+
+export const departmentCodeHidesEmployeeSupervisor = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS.has(normalized));
+};
+
+export const departmentHidesEmployeeSupervisor = (user) => departmentCodeHidesEmployeeSupervisor(departmentCodeOf(user));
+
+// Отделы без нашей телефонии: SIP-номера сотрудникам не выдаются. У фронт-офисов
+// sip_number пуст у всех 22 активных (прод, 09.09.2026) — звонят они из кабинета
+// CRM yataxi, а их статистика приходит из region-call-stats, а не из Oktell
+// (задача #159). Список тот же, что у супервайзеров, но набор ОТДЕЛЬНЫЙ: это
+// два независимых свойства отдела, и телефонию фронт-офисам могут завести, не
+// заводя супервайзеров.
+const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing']);
+
+export const departmentCodeHidesEmployeeSip = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && EMPLOYEE_SIP_HIDDEN_DEPARTMENTS.has(normalized));
+};
+
+export const departmentHidesEmployeeSip = (user) => departmentCodeHidesEmployeeSip(departmentCodeOf(user));
+
 // Роль, с которой заводится рядовой сотрудник отдела. 'operator' в этой
 // системе означает человека НА ЛИНИИ — с направлением, группой, часами и
 // оценками; бухгалтеру и кадровику она давала бы разделы и поля, которых у

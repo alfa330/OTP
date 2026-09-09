@@ -761,15 +761,15 @@ class EmployeeSectionDeptScopedColumnsTests(unittest.TestCase):
         # нужен явный Boolean(code) в каждом поле, иначе при «Все отделы»
         # вернулись бы «Супервайзер» с «Направлением».
         app = _read(APP_PATH)
-        self.assertIn(
-            "            const employeeDeptFieldsForCode = (code) => ({\n"
-            "                operatorFields: Boolean(code) && !departmentCodeHidesOperatorFields(code),\n"
-            "                jobTitle: Boolean(code) && departmentCodeUsesEmployeeJobTitle(code),\n"
-            "                city: Boolean(code) && departmentCodeUsesEmployeeCity(code),\n"
-            "                frontOfficeTraining: Boolean(code) && !departmentCodeHidesFrontOfficeTraining(code),\n"
-            "            });",
-            app,
-        )
+        for field in (
+            "operatorFields: Boolean(code) && !departmentCodeHidesOperatorFields(code),",
+            "supervisor: Boolean(code) && !departmentCodeHidesEmployeeSupervisor(code),",
+            "sip: Boolean(code) && !departmentCodeHidesEmployeeSip(code),",
+            "jobTitle: Boolean(code) && departmentCodeUsesEmployeeJobTitle(code),",
+            "city: Boolean(code) && departmentCodeUsesEmployeeCity(code),",
+            "frontOfficeTraining: Boolean(code) && !departmentCodeHidesFrontOfficeTraining(code),",
+        ):
+            self.assertIn(f"                {field}", app, field)
         # Вариант обязан учитывать набор полей: иначе call-site с 'operator'
         # вернул бы операторские колонки и при «Все отделы».
         self.assertIn(
@@ -793,6 +793,8 @@ class EmployeeSectionDeptScopedColumnsTests(unittest.TestCase):
         self.assertIn(
             "            const employeeDeptFieldsOfViewer = () => ({\n"
             "                operatorFields: !departmentHidesOperatorFields(user),\n"
+            "                supervisor: !departmentHidesEmployeeSupervisor(user),\n"
+            "                sip: !departmentHidesEmployeeSip(user),\n"
             "                jobTitle: departmentUsesEmployeeJobTitle(user),\n"
             "                city: departmentUsesEmployeeCity(user),\n"
             "                frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),\n"

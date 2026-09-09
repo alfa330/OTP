@@ -177,9 +177,11 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
 
         self.assertIn(
             "import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole,"
+            " departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
             " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
             " departmentEmployeeRole, departmentHidesColleagueSchedules,"
+            " departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor,"
             " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
             " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
             " departmentUsesSimpleEmployeeAccounting, firstAllowedView,"
@@ -354,6 +356,56 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         self.assertIn("label: 'Город',", app)
         self.assertIn("...(employeeDeptFields.frontOfficeTraining ? [", app)
         self.assertIn("...(employeeDeptFields.jobTitle ? [", app)
+
+    def test_front_office_has_no_supervisor_and_no_sip_columns(self):
+        """У фронт-офисов нет ни супервайзеров, ни телефонии — но есть направление.
+
+        Отдел устроен как линия во всём остальном (направления, группы,
+        графики, ставка), поэтому в OPERATOR_FIELDS_HIDDEN_DEPARTMENTS он не
+        входит и до 09.09.2026 получал ВСЕ операторские колонки: «Супервайзер»
+        и «SIP» стояли пустыми у всех 22 сотрудников. Владелец это и увидел.
+        """
+        views = _read(DEPARTMENT_VIEWS_PATH)
+        app = _read(APP_PATH)
+
+        # Фронт-офисы в оба набора входят, а операторские поля целиком у них
+        # НЕ сняты — иначе ушло бы и направление, которое у них есть.
+        self.assertIn(
+            "const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = "
+            "new Set(['front_office', 'accounting', 'hr', 'marketing']);", views)
+        self.assertIn(
+            "const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = "
+            "new Set(['front_office', 'accounting', 'hr', 'marketing']);", views)
+        self.assertIn(
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing']);",
+            views)
+
+        # Колонки: «Супервайзер» и «SIP» — своими гейтами, «Направление» и
+        # «Ставка» — общим операторским.
+        self.assertIn("...(isOperatorVariant && employeeDeptFields.supervisor ? [", app)
+        self.assertIn("...(isOperatorVariant && employeeDeptFields.sip ? [", app)
+        # Направление осталось за пределами гейта супервайзера: между ними
+        # обязан быть закрывающий `] : []),`, иначе оба уедут вместе.
+        # Срез — по блоку колонок «Общего», иначе index() найдёт «Направление»
+        # в другом разделе файла.
+        general = app.split("const generalColumns = [", 1)[1].split("return generalColumns;", 1)[0]
+        supervisor_at = general.index("label: 'Супервайзер',")
+        direction_at = general.index("label: 'Направление',")
+        self.assertLess(supervisor_at, direction_at)
+        self.assertIn("] : []),", general[supervisor_at:direction_at])
+
+        # Плейсхолдер поиска супервайзера фронт-офисам больше не обещает:
+        # это последняя ветвь цепочки, поэтому начинается с «:», не с «?».
+        self.assertIn('                                                    : "Поиск по имени или направлению..."', app)
+        self.assertIn("                                                    : manageUsersDeptFields.supervisor", app)
+
+    def test_front_office_still_has_direction_and_rate(self):
+        # Страховка от чрезмерной правки: направление заполнено у 21 из 22
+        # сотрудников отдела, ставка есть у всех — убирать их нельзя.
+        app = _read(APP_PATH)
+        general = app.split("const generalColumns = [", 1)[1].split("return generalColumns;", 1)[0]
+        self.assertIn("label: 'Направление',", general)
+        self.assertIn("label: 'Ставка',", general)
         # «Город» остаётся ровно у фронт-офисов, «Должность» — у бэк-офиса:
         # набор полей по-прежнему решают карты в departmentViews.
         views = _read(DEPARTMENT_VIEWS_PATH)
