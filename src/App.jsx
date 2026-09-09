@@ -48392,7 +48392,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             iCORE
                           </span>
                           <span className="-ml-px rounded-r-2xl border-b border-r border-t border-indigo-700 bg-white px-2 py-2 text-4xl text-indigo-700">
-                            <IcoreMark className="mr-0.5 h-12 w-12" />
+                            <IcoreMark className="mr-0.5 h-12 w-12 text-indigo-600" />
                           </span>
                         </span>
                       </h1>
@@ -48426,7 +48426,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             iCORE
                           </span>
                           <span className="-ml-px rounded-r-2xl border-b border-r border-t border-indigo-700 bg-white px-2 py-2 text-4xl text-indigo-700">
-                            <IcoreMark className="mr-0.5 h-12 w-12" />
+                            <IcoreMark className="mr-0.5 h-12 w-12 text-indigo-600" />
                           </span>
                         </span>
                       </h1>

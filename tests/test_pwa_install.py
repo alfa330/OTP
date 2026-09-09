@@ -453,8 +453,60 @@ class AuthScreenTests(unittest.TestCase):
         self.assertNotIn('http', card, 'На экране входа появилась внешняя ссылка')
         self.assertIn('<IcoreMark', card)
         mark = read(ROOT / 'src' / 'components' / 'common' / 'IcoreMark.jsx')
-        self.assertIn('linearGradient', mark)
-        self.assertIn('useId', mark, 'Общий id градиента гасит знак у второго экземпляра')
+        self.assertIn('viewBox="0 0 389 389"', mark, 'Знак перестал быть тем же контуром')
+        self.assertNotIn('src=', mark, 'Знак снова тянет файл, а не рисуется разметкой')
+
+    def test_login_mark_is_solid_blue(self):
+        """Знак рядом с плашкой «iCORE» — сплошной синий, а не перелив.
+
+        Градиент с favicon здесь пробовали: рядом с синей плашкой знак уходил
+        в фиолетовый, и две половинки логотипа переставали читаться как одно
+        целое. Владелец вернул сплошной цвет — #4F46E5, он же text-indigo-600:
+        ровно этот синий был у картинки, что висела в шапке до знака.
+
+        Цвет задаётся снаружи (заливка знака — currentColor), поэтому проверять
+        надо оба конца: и что перелив не вернулся в сам знак, и что каждое
+        место, где знак поставлен, назвало ему цвет — иначе он молча возьмёт
+        цвет текста родителя."""
+        mark = read(ROOT / 'src' / 'components' / 'common' / 'IcoreMark.jsx')
+        self.assertNotIn('linearGradient', mark, 'Знак снова залит переливом')
+        fills = set(re.findall(r'fill="([^"]*)"', mark))
+        self.assertEqual(fills, {'currentColor'},
+                         'В знаке появилась своя заливка: %s' % sorted(fills))
+        app = read(APP_JSX)
+        marks = re.findall(r'<IcoreMark className="([^"]*)"', app)
+        self.assertTrue(marks, 'Знак пропал с экрана входа')
+        for classes in marks:
+            self.assertIn('text-indigo-600', classes,
+                          'Знак поставлен без цвета — заливка возьмёт цвет родителя')
+
+    def test_login_card_has_room_on_a_desktop(self):
+        """На большом экране телефонная карточка (380 px) читается зажатой.
+
+        Правило живёт в CSS, а не классами sm: в разметке, потому что условий
+        два. ОДНОЙ ШИРИНЫ МАЛО: у телефона, повёрнутого набок, она тоже
+        «настольная» (844 px), а высоты там 390 px — просторную карточку
+        ставить некуда. И панель установки простор отменяет: на планшете боком
+        она вместе с просторной карточкой уже не помещается, поэтому каждое
+        правило внутри окна начинается с body:not(.has-install-offer).
+
+        Селектор карточки удвоен: у правила и у утилиты Tailwind одинаковый
+        вес, а утилиты в собранном CSS идут позже и выигрывают."""
+        css = read(STYLES)
+        head = '@media (min-width: 640px) and (min-height: 620px)'
+        self.assertIn(head, css, 'Настольные размеры карточки входа исчезли')
+        block = css[css.index(head):]
+        block = block[:block.index('\n    }\n')]
+        self.assertIn('body:not(.has-install-offer) .auth-card.auth-card', block)
+        self.assertIn('max-width: 28rem', block)
+        self.assertIn('padding: 2.5rem', block)
+        selectors = [line.strip().rstrip('{,').strip()
+                     for line in block.splitlines()[1:]
+                     if line.strip().endswith(('{', ',')) and not line.strip().startswith(('/*', '*'))]
+        self.assertTrue(selectors, 'Окно опустело — проверять нечего')
+        for selector in selectors:
+            self.assertTrue(selector.startswith('body:not(.has-install-offer)'),
+                            'Правило сработает и под панелью установки: %s' % selector)
 
     def test_login_inputs_are_mobile_safe(self):
         """Автозаглавная буква и автозамена ломают ввод логина на телефоне."""
