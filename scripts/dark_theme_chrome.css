@@ -38,17 +38,23 @@ html[data-otp-theme="dark"] ::selection {
 }
 
 /* ── Сайдбар ──
-   В светлой теме он синий (from-blue-800 to-blue-900) и остаётся единственным
-   тёмным пятном экрана. В тёмной теме синяя плита перестаёт быть «тёмной
-   стороной» и превращается в самый яркий объект: графит с синим подтоном
-   возвращает ей роль опоры, а не акцента. */
-html[data-otp-theme="dark"] .sidebar {
-    background-image: linear-gradient(to bottom, #1a1d23, #14161b);
-    border-right: 1px solid #24282f;
+   С переходом на список настроек (src/styles.css) полотно, карточки
+   и разделители берутся из палитры --sheet-*, а она уже знает про
+   тёмную тему (объявлена в src/components/common/mobile-shell.css и там же
+   переопределена на чёрное с #1c1c1e). Графитовый градиент сайдбара
+   и градиент футера убраны отсюда именно поэтому: их в любом случае
+   перебивала карточка, и оставаться в файле они могли только как
+   подсказка на ложный след. Здесь осталось то, чего в палитре шторки нет:
+   выделение открытого раздела (на телефоне оно светлое, здесь есть :hover,
+   и они бы спорили) и подсветка «Выхода». */
+html[data-otp-theme="dark"] {
+    --sheet-select: #2c3340;
+    --sheet-select-ink: #e6edf7;
+    --sheet-danger-wash: #3a1d1d;
 }
-html[data-otp-theme="dark"] .sidebar-footer-menu {
-    background: linear-gradient(to bottom, rgba(36, 40, 47, 0.9), rgba(28, 31, 37, 0.96));
-}
+/* Выпадающие панели сайдбара (аккаунт, селектор отдела, подменю):
+   в светлой теме они белые с hover:bg-gray-100 прямо в разметке. Строки
+   самого списка сюда уже не относятся — их hover берёт --sheet-active. */
 html[data-otp-theme="dark"] .sidebar button:hover {
     background-color: #262b33 !important;
 }
@@ -61,8 +67,18 @@ html[data-otp-theme="dark"] .sidebar button.bg-blue-800 {
 html[data-otp-theme="dark"] .sidebar-avatar {
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) !important;
 }
-html[data-otp-theme="dark"] .sidebar-menu-scroll {
-    scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+/* Ползунок прокрутки меню. Правим именно ::-webkit-scrollbar-thumb, а НЕ
+   scrollbar-color: заданное scrollbar-color отключает в Chrome всю
+   webkit-стилизацию, и волосяная полоса из styles.css стала бы штатной
+   толстой ровно в тёмной теме. Виден ползунок только во время прокрутки —
+   класс ставит JS. */
+html[data-otp-theme="dark"] .sidebar-menu-scroll.sidebar-menu-scrolling::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.55);
+}
+@supports not selector(::-webkit-scrollbar) {
+    html[data-otp-theme="dark"] .sidebar-menu-scroll.sidebar-menu-scrolling {
+        scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+    }
 }
 
 /* ── Скелетоны загрузки ── */

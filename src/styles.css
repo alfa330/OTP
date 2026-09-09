@@ -523,11 +523,17 @@
       height: 16px !important;
       min-width: 16px !important;
     }
-    body:not(.mobile-shell) .sidebar-search-btn:hover {
-      background: var(--sheet-active, #e5e5ea);
+    /* Наведение и включённое состояние прописаны через .sidebar и с
+       !important не для красоты: в тёмной теме есть правило
+       `.sidebar button:hover { background-color: #262b33 !important }` для
+       белых выпадающих панелей, и без запаса по весу оно перекрашивало
+       включённую кнопку поиска — акцент под курсором пропадал. */
+    body:not(.mobile-shell) .sidebar .sidebar-search-btn:hover {
+      background: var(--sheet-active, #e5e5ea) !important;
     }
-    body:not(.mobile-shell) .sidebar-search-btn.is-on {
-      background: var(--sheet-select, #1d4ed8);
+    body:not(.mobile-shell) .sidebar .sidebar-search-btn.is-on,
+    body:not(.mobile-shell) .sidebar .sidebar-search-btn.is-on:hover {
+      background: var(--sheet-select, #1d4ed8) !important;
       border-color: var(--sheet-select, #1d4ed8);
       color: var(--sheet-select-ink, #fff);
     }

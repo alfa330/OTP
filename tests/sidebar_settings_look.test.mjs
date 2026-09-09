@@ -435,3 +435,38 @@ test('поиск закрывается и когда окно сужается 
         'в зависимостях эффекта нет isMobileShell — он не сработает на смене оболочки',
     );
 });
+
+test('тёмный слой правится в источнике, а не в собранном файле', () => {
+    /* src/theme-dark.css СОБИРАЕТСЯ scripts/build_dark_theme.py из палитры и
+       рукописной части scripts/dark_theme_chrome.css. Правка, сделанная
+       только в собранном файле, живёт до первого прогона генератора — а он
+       вернул бы и графитовый градиент сайдбара, и старый scrollbar-color.
+       Поэтому участок «Сайдбар» в обоих файлах обязан совпадать дословно. */
+    const chrome = readLf('scripts/dark_theme_chrome.css');
+    const cut = (css, name) => {
+        const from = css.indexOf('/* ── Сайдбар ──');
+        const to = css.indexOf('/* ── Скелетоны загрузки ── */');
+        assert.ok(from > 0 && to > from, `в ${name} не найден участок «Сайдбар»`);
+        return css.slice(from, to).trim();
+    };
+    assert.equal(
+        cut(dark, 'src/theme-dark.css'),
+        cut(chrome, 'scripts/dark_theme_chrome.css'),
+        'участок «Сайдбар» в собранном слое разошёлся с источником: прогон scripts/build_dark_theme.py откатит правку',
+    );
+});
+
+test('включённый поиск не теряет акцент под курсором', () => {
+    /* В тёмной теме есть правило `.sidebar button:hover` с !important — оно
+       написано для белых выпадающих панелей, но по весу перекрывало и
+       включённую кнопку поиска. */
+    const on = rules(styles).find((r) => /\.sidebar-search-btn\.is-on:hover/.test(r.selector));
+    assert.ok(on, 'нет правила для включённой кнопки поиска под курсором');
+    assert.match(on.body, /background: var\(--sheet-select,[^;]*\) !important;/);
+    for (const part of on.selector.split(',')) {
+        assert.ok(
+            part.includes('.sidebar '),
+            `«${part.trim()}» без .sidebar в цепочке — в тёмной теме его перебьёт правило выпадашек`,
+        );
+    }
+});
