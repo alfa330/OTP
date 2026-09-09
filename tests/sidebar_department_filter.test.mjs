@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { DEPARTMENT_VIEW_ALLOWLIST } from '../src/utils/departmentViews.js';
+import {
+    DEPARTMENT_VIEW_ALLOWLIST, departmentAllowsView, departmentRestrictsViews,
+} from '../src/utils/departmentViews.js';
 
 /**
  * Селектор отдела в сайдбаре и карта «раздел → отделы».
@@ -159,6 +161,91 @@ test('разделитель между блоками меню рисуется
         source.split('{renderDividerIfInner(').length - 1 >= 8,
         'условных разделителей стало меньше — проверь, не появилась ли лишняя черта у отдела с коротким меню',
     );
+});
+
+/**
+ * Что видит РЯДОВОЙ сотрудник в меню — и чего он видеть не должен.
+ *
+ * Класс ошибки, из-за которого этот тест и появился: пункт гейтится одним
+ * `departmentAllowsView(user, 'X')`. У отдела БЕЗ ограничений (СЗоВ — он не
+ * значится в DEPARTMENT_VIEW_ALLOWLIST) allowlist'а нет вовсе, и
+ * departmentAllowsView возвращает true на ЛЮБОЙ ключ. Оператор линии получал
+ * «Задачи» в меню, а сам раздел и бэкенд ему отказывали — пункт, ведущий в
+ * отказ, выглядит как сломанный портал, а не как закрытый доступ.
+ *
+ * Лечится вторым условием — departmentRestrictsViews(user) — ровно так, как
+ * уже сделано у «Журнала оценок» и «Деления звонков». Поэтому проверяем не
+ * один раздел, а ВЕСЬ набор: список того, что оператор линии видит, задан
+ * здесь явно и любое пополнение обязано быть осознанным.
+ */
+const RANK_MARKER = "{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (";
+
+// Первая половина — меню, вторая — рендер экранов; так же режут файл
+// tests/test_back_office_department_scope.py и tests/test_marketing_department_scope.py.
+const rankMenuBranch = () => {
+    const parts = source.split(RANK_MARKER);
+    assert.equal(parts.length, 3, 'ветки рядового сотрудника изменились — проверь тест');
+    return parts[1];
+};
+
+// Разделы, которые оператор ЛИНИИ (отдел без ограничений — СЗоВ) видит в меню.
+// Это и есть его рабочий набор: своё, опросы, конкурсы и калькулятор.
+const LINE_OPERATOR_VIEWS = [
+    'ai_feedback',
+    'contests',
+    'evaluation',
+    'hours',
+    'profile',
+    'salary',
+    'shift_auction',
+    'surveys',
+    'work_schedules',
+];
+
+test('оператор линии видит только свои разделы', () => {
+    const menu = rankMenuBranch();
+    // Пункты с ОДИНАРНЫМ гейтом: их видит и отдел без ограничений.
+    const single = [...menu.matchAll(/\{departmentAllowsView\(user, '([a-z_0-9]+)'\) && \(/g)]
+        .map((m) => m[1])
+        .sort();
+    assert.deepEqual(
+        single,
+        LINE_OPERATOR_VIEWS,
+        'изменился набор разделов, видимых оператору линии. Если раздел выдан только отделам '
+        + 'с ограничениями (бэк-офис, «Маркетинг»), гейт обязан быть '
+        + "`departmentRestrictsViews(user) && departmentAllowsView(user, '...')`: без первой "
+        + 'половины departmentAllowsView пропускает СЗоВ, у которого allowlist отсутствует',
+    );
+});
+
+test('«Задачи» рядовому — только в отделах с ограничениями', () => {
+    const menu = rankMenuBranch();
+    assert.ok(
+        menu.includes("{departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks') && ("),
+        'пункт «Задачи» в ветке рядового снова гейтится одним departmentAllowsView — оператор линии '
+        + 'получит пункт, ведущий в отказ бэкенда',
+    );
+    // Гейт пункта, гейт раздела и гейт закреплённой задачи — три копии одного
+    // правила; расходятся они молча, поэтому сверяем их между собой.
+    assert.ok(
+        source.includes("|| (isRankAndFileRole(currentUserRole) && departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));"),
+        'canUsePinnedTasks разошёлся с пунктом меню',
+    );
+    const tasksView = readLf('src/components/tasks/TasksView.jsx');
+    assert.ok(
+        tasksView.includes("|| (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));"),
+        'гейт самого раздела «Задачи» разошёлся с пунктом меню',
+    );
+});
+
+test('оператор линии проходит departmentAllowsView, но не departmentRestrictsViews', () => {
+    // Поведенческая половина: показываем, ПОЧЕМУ одинарного гейта мало.
+    const lineOperator = { id: 1, role: 'operator', department_code: 'szov' };
+    const hrEmployee = { id: 2, role: 'hr_manager', department_code: 'hr' };
+    assert.equal(departmentRestrictsViews(lineOperator), false);
+    assert.equal(departmentAllowsView(lineOperator, 'tasks'), true, 'без allowlist разрешено всё — это и есть ловушка');
+    assert.equal(departmentRestrictsViews(hrEmployee), true);
+    assert.equal(departmentAllowsView(hrEmployee, 'tasks'), true);
 });
 
 /**

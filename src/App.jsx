@@ -47803,7 +47803,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                                         <>
-                                            {departmentAllowsView(user, 'tasks') && (
+                                            {/* «Задачи» рядовому — ТОЛЬКО в отделах с ограничениями
+                                                (бэк-офис, «Маркетинг»): departmentRestrictsViews здесь
+                                                обязателен и один только departmentAllowsView не годится.
+                                                У отдела без ограничений (СЗоВ) allowlist'а нет вовсе, и
+                                                departmentAllowsView возвращает true на ЛЮБОЙ ключ —
+                                                оператор линии получал пункт меню, а раздел и бэкенд ему
+                                                отказывали (_can_access_tasks в bot_schedule2.py).
+                                                Тот же двойной гейт стоит у самого раздела
+                                                (canAccessTasks в TasksView.jsx) и у закреплённой
+                                                задачи (canUsePinnedTasks выше) — расходиться им нельзя,
+                                                это сверяет tests/sidebar_department_filter.test.mjs. */}
+                                            {departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks') && (
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
                                             </li>

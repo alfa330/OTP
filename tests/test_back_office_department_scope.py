@@ -1097,7 +1097,16 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
         self.assertEqual(2, app.count(marker))
         menu_branch = app.split(marker, 1)[1]
         screen_branch = app.split(marker, 2)[2]
-        self.assertIn("{departmentAllowsView(user, 'tasks') && (", menu_branch)
+        # Гейт пункта — ДВОЙНОЙ. Одного departmentAllowsView мало: у отдела без
+        # ограничений (СЗоВ) allowlist'а нет вовсе, и departmentAllowsView
+        # возвращает true на любой ключ — оператор линии получал пункт «Задачи»,
+        # который сам раздел (canAccessTasks в TasksView.jsx) и бэкенд
+        # (_can_access_tasks) ему закрывают. Тот же двойной гейт стоит у
+        # «Журнала оценок» и «Деления звонков» в этой же ветке.
+        self.assertIn(
+            "{departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks') && (",
+            menu_branch,
+        )
         self.assertIn("{renderTasksSidebarButtonInner()}", menu_branch)
         self.assertIn('{( view === "tasks" && (', screen_branch)
         self.assertIn("<TasksView", screen_branch)
