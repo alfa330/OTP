@@ -173,6 +173,69 @@ class SheetTests(unittest.TestCase):
         self.assertIn('body:not(.mobile-shell).sheet-beside-sidebar .sidebar {', STYLES)
 
 
+class SheetAccountTests(unittest.TestCase):
+    """Аккаунт в шапке шторки — вместо пункта «Аккаунт» и «Выхода» внизу."""
+
+    def test_account_actions_live_in_the_header(self):
+        """Пункт «Аккаунт» раскрывался ВБОК, а вбок на всю ширину экрана
+        раскрываться некуда: на телефоне за сменой пароля пришлось бы
+        прокручивать меню до низа и открывать панель, которой не видно."""
+        at = APP.index('<div className="mobile-sheet-account">')
+        block = APP[at:at + 6000]
+        for label in ('Логин', 'Пароль', 'Фото', 'Выход'):
+            self.assertIn(f'{label}\n', block, f'действие «{label}» пропало из шапки')
+        # Установка портала на телефон — там же, своим пунктом.
+        self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
+        # Смена фото — только тем, кому она разрешена; условие то же, что в меню.
+        self.assertIn('{canChangeAccountAvatar && (', block)
+
+    def test_actions_close_the_sheet(self):
+        """Формы смены логина и пароля рисуются в разделе, ПОД шторкой: не
+        закрыв её, человек нажимает кнопку и не видит никакого ответа."""
+        at = APP.index('<div className="mobile-sheet-actions">')
+        block = APP[at:at + 3000]
+        self.assertEqual(block.count('setMobileMenuOpen(false);'), 3)
+
+    def test_footer_is_hidden_and_not_duplicated(self):
+        """Два места жизни у одних и тех же действий — это два места, где их
+        забудут обновить. Футер сайдбара на телефоне не рисуется вовсе."""
+        self.assertIn('display: none;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar-footer-menu {', 120))
+
+    def test_avatar_still_switches_the_dark_theme(self):
+        """Тап по аватару — переключатель тёмного режима у тех, кому он выдан;
+        на телефоне это единственное место, где он остался."""
+        at = APP.index('<div className="mobile-sheet-account">')
+        block = APP[at:at + 1500]
+        self.assertIn('onClick={darkThemeAllowed ? toggleDarkTheme : undefined}', block)
+
+
+class SubmenuTests(unittest.TestCase):
+    """Подменю пунктов («Учет сотрудников», «Расчет ресурсов») в шторке."""
+
+    def test_submenu_opens_below_the_item_on_a_phone(self):
+        """В шторке пункт занимает ВСЮ ширину экрана, и привычное «вправо от
+        пункта» уводит панель за край: снаружи это выглядит как «нажал, а
+        ничего не открылось» — с этого и началась правка."""
+        for ref in ('sidebarEmployeesRef', 'sidebarResourceRef'):
+            at = APP.index(f'const rect = {ref}.current?.getBoundingClientRect();')
+            block = APP[at:at + 700]
+            self.assertIn('const nextTop = isMobileShell ? rect.bottom + 4 : rect.top;', block, ref)
+            self.assertIn('const nextLeft = isMobileShell ? rect.left : rect.right + 8;', block, ref)
+
+    def test_submenu_recalculates_when_the_shell_switches(self):
+        """Иначе панель, открытая до поворота, осталась бы висеть по старым
+        координатам — за краем экрана."""
+        self.assertIn('}, [showSidebarEmployeesDropdown, isEmployeesClosing, isMobileShell]);', APP)
+        self.assertIn('}, [showSidebarResourceDropdown, isResourceClosing, isMobileShell]);', APP)
+
+    def test_submenu_width_is_freed_in_the_shell(self):
+        """В разметке у панели фиксированные 14rem — размер под выпадение сбоку
+        от узкого сайдбара; на телефоне она тянется до края экрана."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar .animate-dropdown,', 400)
+        self.assertIn('width: auto !important;', block)
+        self.assertIn('right: max(12px, env(safe-area-inset-right));', block)
+
+
 class ViewSwitchTests(unittest.TestCase):
     """Переключение раздела с бара — движение, а не подмена картинки."""
 

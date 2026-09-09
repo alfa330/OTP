@@ -182,17 +182,23 @@ test('толщина бара в CSS и в геометрии — одно чи�
     assert.equal(Number(declared[1]), TAB_BAR_THICKNESS);
 });
 
-test('повёрнутый бар разворачивает и содержимое кнопок', () => {
-    // Иконки с подписями поворачиваются вместе с баром — иначе он выглядит
-    // боковой полосой со сплющенными кнопками, а не тем же баром сбоку.
-    assert.match(shellCss, /\[data-side="right"\] \.mtb-item__inner \{\s*transform: rotate\(90deg\);/);
-    assert.match(shellCss, /\[data-side="left"\] \.mtb-item__inner \{\s*transform: rotate\(-90deg\);/);
-    // Порядок кнопок относительно КОРПУСА при этом сохраняется: слева направо
-    // в портрете — снизу вверх у левого бара.
-    const left = shellCss.slice(shellCss.indexOf('.mobile-tabbar[data-side="left"] {'));
-    assert.match(left.slice(0, 400), /flex-direction: column-reverse;/);
+test('повёрнутый бар разворачивает содержимое в ту же сторону, что и корпус', () => {
+    /* ЗНАК ПОВОРОТА ПРОВЕРЕН ТЕЛЕФОНОМ В РУКАХ, а не рассуждением: при angle 90
+       (бар справа) верх корпуса ушёл влево, значит его правая сторона теперь
+       СВЕРХУ экрана — прежнее «слева направо» читается снизу вверх, то есть
+       содержимое повёрнуто против часовой. Обратный знак даёт бар, который
+       выглядит перевёрнутым на 180°; именно на это и была жалоба. */
+    assert.match(shellCss, /\[data-side="right"\] \.mtb-item__inner \{\s*transform: rotate\(-90deg\);/);
+    assert.match(shellCss, /\[data-side="left"\] \.mtb-item__inner \{\s*transform: rotate\(90deg\);/);
+    /* Порядок кнопок обязан совпадать с направлением поворота: у правого бара
+       первая кнопка внизу (column-reverse), у левого — сверху. Разъехавшись со
+       знаком rotate, они дают подписи, читаемые в одну сторону, и порядок —
+       в другую. */
     const right = shellCss.slice(shellCss.indexOf('.mobile-tabbar[data-side="right"] {'));
-    assert.match(right.slice(0, 400), /flex-direction: column;/);
+    assert.match(right.slice(0, 600), /flex-direction: column-reverse;/);
+    const left = shellCss.slice(shellCss.indexOf('.mobile-tabbar[data-side="left"] {'));
+    assert.match(left.slice(0, 600), /flex-direction: column;/);
+    assert.doesNotMatch(left.slice(0, 600), /flex-direction: column-reverse;/);
 });
 
 test('бар не перехватывает повторный тап по открытому разделу', () => {

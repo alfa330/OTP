@@ -63,20 +63,22 @@
     right: 0;
     width: calc(var(--mtb-thickness) + env(safe-area-inset-right));
     padding-right: env(safe-area-inset-right);
-    flex-direction: column;
+    /* column-reverse — не декорация: кнопки обязаны идти в том же порядке
+       ОТНОСИТЕЛЬНО КОРПУСА, что и в портрете. При этом повороте направление
+       «слева направо» превращается в «снизу вверх», поэтому первая кнопка внизу. */
+    flex-direction: column-reverse;
     border-left: 1px solid var(--mtb-border);
 }
 
-/* column-reverse — не декорация: кнопки обязаны идти в том же порядке
-   ОТНОСИТЕЛЬНО КОРПУСА, что и в портрете. При повороте влево направление
-   «слева направо» превращается в «снизу вверх», поэтому первая кнопка внизу. */
+/* Зеркальный поворот: низ корпуса слева, левая его сторона — сверху экрана,
+   значит кнопки идут сверху вниз, как обычная колонка. */
 .mobile-tabbar[data-side="left"] {
     top: 0;
     bottom: 0;
     left: 0;
     width: calc(var(--mtb-thickness) + env(safe-area-inset-left));
     padding-left: env(safe-area-inset-left);
-    flex-direction: column-reverse;
+    flex-direction: column;
     border-right: 1px solid var(--mtb-border);
 }
 
@@ -128,12 +130,17 @@
     flex: none;
 }
 
+/* Знак поворота проверяется телефоном в руках, а не рассуждением: при angle 90
+   (верх корпуса ушёл влево) правая сторона корпуса оказывается СВЕРХУ экрана,
+   поэтому прежнее направление «слева направо» читается снизу вверх, то есть
+   содержимое поворачивается против часовой. Обратный знак давал ровно то, на
+   что жаловались: бар выглядел перевёрнутым. */
 .mobile-tabbar[data-side="right"] .mtb-item__inner {
-    transform: rotate(90deg);
+    transform: rotate(-90deg);
 }
 
 .mobile-tabbar[data-side="left"] .mtb-item__inner {
-    transform: rotate(-90deg);
+    transform: rotate(90deg);
 }
 
 .mtb-item__icon {
@@ -306,6 +313,24 @@ body.mobile-shell .sidebar-collapse-btn {
     display: none !important;
 }
 
+/* Выпадающие подменю («Учет сотрудников», «Расчет ресурсов») в шторке. Их
+   координаты считает JS (см. employeesDropdownPos в App.jsx) и кладёт в inline
+   style, поэтому здесь только ширина: в разметке у панели фиксированные 14rem,
+   рассчитанные на выпадение сбоку от узкого сайдбара. На телефоне панель
+   тянется от левого края пункта до правого края экрана. */
+body.mobile-shell .sidebar .animate-dropdown,
+body.mobile-shell .sidebar .animate-dropdown-reverse {
+    width: auto !important;
+    right: max(12px, env(safe-area-inset-right));
+    max-height: 50vh;
+    overflow-y: auto;
+}
+
+body[data-tabbar-side="right"].mobile-shell .sidebar .animate-dropdown,
+body[data-tabbar-side="right"].mobile-shell .sidebar .animate-dropdown-reverse {
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 12px);
+}
+
 /* Ручка листа — короткая полоска сверху. Ничего не делает, но именно она
    читается как «это выезжающий лист, его можно закрыть». */
 .mobile-sheet-handle {
@@ -317,16 +342,74 @@ body.mobile-shell .sidebar-collapse-btn {
     flex: none;
 }
 
+/* Шапка шторки — весь аккаунт целиком: фото, имя, логин и действия над
+   собственной учёткой. На телефоне они живут ЗДЕСЬ, а не в пункте «Аккаунт»
+   внизу списка: тот раскрывался вбок, а вбок на всю ширину экрана раскрываться
+   некуда, и за сменой пароля приходилось прокручивать меню до самого низа. */
+.mobile-sheet-account {
+    flex: none;
+    margin-bottom: 8px;
+    padding: 8px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.mobile-sheet-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+/* Кнопки действий перекрашиваются селектором контейнера: «Установить
+   приложение» приходит готовым пунктом светлого выпадающего меню (чёрный текст
+   на белом hover), и в тёмно-синей шапке его собственные классы читались бы
+   как дыра. Разделитель того же пункта здесь лишний — кнопки и так стоят
+   отдельными плитками. */
+.mobile-sheet-actions button {
+    flex: 1 1 auto;
+    min-width: 92px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px 10px;
+    border-radius: 12px;
+    border: none;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 500;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.mobile-sheet-actions button:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.mobile-sheet-actions .border-t {
+    display: none;
+}
+
+.mobile-sheet-actions .mobile-sheet-actions__exit,
+.mobile-sheet-actions .mobile-sheet-actions__exit:hover {
+    background: rgba(220, 38, 38, 0.85);
+}
+
+/* Футер сайдбара («Аккаунт» и «Выход») на телефоне не рисуется: оба переехали
+   в шапку. Держать их в двух местах — значит однажды обновить одно из них. */
+body.mobile-shell .sidebar-footer-menu {
+    display: none;
+}
+
 /* Строка профиля в шапке шторки: чей это портал, видно сразу — как в
    Telegram, где список настроек начинается с самого человека. */
 .mobile-sheet-profile {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 10px;
-    margin-bottom: 8px;
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 4px;
     flex: none;
 }
 
@@ -387,11 +470,31 @@ body[data-tabbar-side="left"].mobile-shell .sidebar .sidebar-logo-full {
     transform-origin: center;
 }
 
-body[data-tabbar-side="right"].mobile-shell .mobile-sheet-profile,
-body[data-tabbar-side="left"].mobile-shell .mobile-sheet-profile,
+/* Боком шапка ужимается до одной строки: имя с логином и плитки действий
+   съедали бы половину экрана высотой 390 px. Сами действия остаются — просто
+   плотнее, в один ряд с прокруткой. */
 body[data-tabbar-side="right"].mobile-shell .mobile-sheet-handle,
 body[data-tabbar-side="left"].mobile-shell .mobile-sheet-handle {
     display: none;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-account,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-account {
+    margin-bottom: 4px;
+    padding: 4px 6px;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-actions,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-actions {
+    margin-top: 4px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+}
+
+body[data-tabbar-side="right"].mobile-shell .mobile-sheet-actions button,
+body[data-tabbar-side="left"].mobile-shell .mobile-sheet-actions button {
+    padding: 6px 10px;
+    min-width: auto;
 }
 
 body[data-tabbar-side="right"].mobile-shell .sidebar li > button,

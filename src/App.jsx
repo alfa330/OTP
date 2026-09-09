@@ -40274,8 +40274,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const rect = sidebarEmployeesRef.current?.getBoundingClientRect();
                     if (!rect) return;
 
-                    const nextTop = rect.top;
-                    const nextLeft = rect.right + 8;
+                    /* В шторке пункт занимает ВСЮ ширину экрана, и привычное «вправо
+                       от пункта» уводит подменю за край — снаружи это выглядит как
+                       «нажал, а ничего не открылось». На телефоне раскрываем вниз,
+                       под самим пунктом; ширину задаёт CSS оболочки. */
+                    const nextTop = isMobileShell ? rect.bottom + 4 : rect.top;
+                    const nextLeft = isMobileShell ? rect.left : rect.right + 8;
                     setEmployeesDropdownPos((prev) => {
                         if (prev.top === nextTop && prev.left === nextLeft) return prev;
                         return { top: nextTop, left: nextLeft };
@@ -40309,7 +40313,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
                     ro?.disconnect();
                 };
-            }, [showSidebarEmployeesDropdown, isEmployeesClosing]);
+            }, [showSidebarEmployeesDropdown, isEmployeesClosing, isMobileShell]);
 
             // Меню «Расчет ресурсов» рисуется position:fixed, поэтому его координаты
             // надо пересчитывать при скролле меню, ресайзе и сворачивании сайдбара —
@@ -40321,8 +40325,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const updatePos = () => {
                     const rect = sidebarResourceRef.current?.getBoundingClientRect();
                     if (!rect) return;
-                    const nextTop = rect.top;
-                    const nextLeft = rect.right + 8;
+                    // То же, что у «Учета сотрудников»: в шторке — вниз под пункт.
+                    const nextTop = isMobileShell ? rect.bottom + 4 : rect.top;
+                    const nextLeft = isMobileShell ? rect.left : rect.right + 8;
                     setResourceDropdownPos((prev) => {
                         if (prev.top === nextTop && prev.left === nextLeft) return prev;
                         return { top: nextTop, left: nextLeft };
@@ -40356,7 +40361,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
                     ro?.disconnect();
                 };
-            }, [showSidebarResourceDropdown, isResourceClosing]);
+            }, [showSidebarResourceDropdown, isResourceClosing, isMobileShell]);
 
             function TrainingModal({
                 isOpen,
@@ -47157,15 +47162,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         document.body,
                                     );
                                 })()}
-                                {/* Шапка шторки: чей это портал, видно сразу — как в
-                                    списке настроек телефона. Действия аккаунта
-                                    (логин, пароль, аватар, установка) остаются
-                                    внизу, в своём пункте: дублировать их здесь
-                                    значит завести им второе место жизни. */}
+                                {/* Шапка шторки. На телефоне это ВЕСЬ аккаунт: фото, имя,
+                                    логин и действия над собственной учёткой. Раньше они
+                                    жили внизу, в пункте «Аккаунт», который раскрывался
+                                    вбок — на всю ширину экрана раскрываться некуда, да и
+                                    тянуться к низу списка за сменой пароля незачем.
+                                    Пункт «Аккаунт» и кнопка «Выход» из футера убраны
+                                    (см. .sidebar-footer-menu в mobile-shell.css): второе
+                                    место жизни у одних и тех же действий — это два места,
+                                    где их можно забыть обновить. */}
                                 {isMobileShell && (
-                                    <>
+                                    <div className="mobile-sheet-account">
                                         <div className="mobile-sheet-profile">
-                                            <span className="mobile-sheet-profile__avatar">
+                                            {/* Аватар — переключатель тёмного режима у тех,
+                                                кому он выдан; ровно как в настольном меню. */}
+                                            <span
+                                                className="mobile-sheet-profile__avatar"
+                                                title={darkThemeAllowed ? (darkTheme ? 'Светлая тема' : 'Тёмная тема') : undefined}
+                                                style={darkThemeAllowed ? { cursor: 'pointer' } : undefined}
+                                                onClick={darkThemeAllowed ? toggleDarkTheme : undefined}
+                                            >
                                                 {user?.avatar_url ? (
                                                     <AvatarImage src={user.avatar_url} alt="" className="h-full w-full object-cover" />
                                                 ) : (
@@ -47179,7 +47195,56 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 )}
                                             </span>
                                         </div>
-                                    </>
+                                        {/* Действия закрывают шторку: формы смены логина и
+                                            пароля рисуются в разделе, под ней. */}
+                                        <div className="mobile-sheet-actions">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setShowChangeAvatarForm(false);
+                                                    setShowChangePasswordForm(false);
+                                                    setShowChangeLoginForm(true);
+                                                    setMobileMenuOpen(false);
+                                                }}
+                                            >
+                                                <FaIcon className="fas fa-user-edit"></FaIcon> Логин
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setShowChangeAvatarForm(false);
+                                                    setShowChangeLoginForm(false);
+                                                    setShowChangePasswordForm(true);
+                                                    setMobileMenuOpen(false);
+                                                }}
+                                            >
+                                                <FaIcon className="fas fa-lock"></FaIcon> Пароль
+                                            </button>
+                                            {canChangeAccountAvatar && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setShowChangeLoginForm(false);
+                                                        setShowChangePasswordForm(false);
+                                                        setShowChangeAvatarForm(true);
+                                                        setMobileMenuOpen(false);
+                                                    }}
+                                                >
+                                                    <FaIcon className="fas fa-camera"></FaIcon> Фото
+                                                </button>
+                                            )}
+                                            {/* Пункт сам решает, показываться ли: на уже
+                                                установленном портале не рисует ничего. */}
+                                            <InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />
+                                            <button
+                                                type="button"
+                                                onClick={stableSidebarHandleLogout}
+                                                className="mobile-sheet-actions__exit"
+                                            >
+                                                <FaIcon className="fas fa-sign-out-alt"></FaIcon> Выход
+                                            </button>
+                                        </div>
+                                    </div>
                                 )}
                                 {/* Селектор отдела — только у админов и супер-админов:
                                     у них в меню разделы всех семи отделов сразу, и
