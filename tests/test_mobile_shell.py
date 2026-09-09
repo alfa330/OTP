@@ -142,16 +142,33 @@ class SheetTests(unittest.TestCase):
         self.assertNotIn('MobileMenuList', APP)
 
     def test_sheet_is_anchored_to_the_screen_corner(self):
-        """transform делает лист точкой отсчёта для fixed-подменю внутри:
-        сдвинутый угол увёл бы «Учет сотрудников» и «Расчет ресурсов» мимо
-        своих пунктов. Поэтому лист в (0,0), а место под бар — отступом."""
-        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar {')
+        """Лист прибит к (0,0), а место под бар вычитается отступом: в открытом
+        состоянии у него transform: none, потому что ЛЮБОЙ transform делает его
+        точкой отсчёта для position: fixed внутри — а там выпадающие подменю с
+        посчитанными координатами."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar {', 1400)
         self.assertIn('top: 0;', block)
         self.assertIn('left: 0;', block)
-        self.assertIn('transform: translateY(100%);', block)
-        self.assertIn('transform: translateY(0);', css_block(SHELL_CSS, 'body.mobile-shell .sidebar.mobile-open {'))
+        self.assertIn('transform: none;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar.mobile-open {'))
         inner = css_block(SHELL_CSS, 'body.mobile-shell .sidebar > div {')
         self.assertIn('calc(var(--mtb-thickness) + env(safe-area-inset-bottom))', inner)
+
+    def test_sheet_appears_instead_of_flying_from_the_bottom(self):
+        """Лист занимает весь экран, и поездка от нижнего края читалась как
+        «страница прилетела откуда-то издалека» (решение владельца)."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar {', 1400)
+        self.assertNotIn('translateY(100%)', block)
+        self.assertIn('opacity: 0;', block)
+        self.assertIn('transform: scale(0.97);', block)
+
+    def test_exit_sits_at_the_very_bottom(self):
+        """«Выйти» — под всеми разделами: так его не нажимают случайно,
+        разыскивая раздел."""
+        exit_at = APP.index('mobile-sheet-row--exit')
+        list_end = APP.index('<ul className="sidebar-footer-menu')
+        menu_start = APP.index('<ul ref={sidebarMenuScrollRef}')
+        self.assertTrue(menu_start < exit_at < list_end, '«Выйти» не в хвосте листа')
+        self.assertIn('.mobile-sheet-account--tail', SHELL_CSS)
 
     def test_sheet_closes_on_navigation(self):
         """Иначе выбранный раздел открывается за шторкой, и её приходится
@@ -159,13 +176,21 @@ class SheetTests(unittest.TestCase):
         at = APP.index('const navigateToView = useCallback((nextView) => {')
         self.assertIn('setMobileMenuOpen(false);', APP[at:at + 600])
 
-    def test_logo_survives_on_a_phone(self):
-        """У тех, кто ведёт «4 You», вход в раздел только через логотип: пункт
-        меню показан лишь читателям (canAccessFourYouSection && !canManage...).
-        Спрятать логотип на телефоне значит отнять у них раздел целиком."""
-        self.assertIn('.sidebar-logo-full', SHELL_CSS)
-        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar .sidebar-logo-full {')
-        self.assertIn('display: flex !important;', block)
+    def test_hidden_logo_does_not_take_away_four_you(self):
+        """Логотип над портретом убран (решение владельца), а вход в «4 You» на
+        компьютере есть ТОЛЬКО через него: пункт меню показан лишь читателям
+        (canAccessFourYouSection && !canManage...). Значит тем, кто раздел
+        ведёт, нужна своя строка в шапке — иначе раздел пропадает молча."""
+        self.assertIn('display: none;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar h1 {', 200))
+        at = APP.index('{canManageFourYouSection && (')
+        block = APP[at:at + 700]
+        self.assertIn("handleSidebarViewNavigation(e, 'four_you')", block)
+        self.assertIn('<span>4 You</span>', block)
+
+    def test_orb_is_off_on_a_phone(self):
+        """Плавающий помощник на экране 390 px закрывает собой раздел и
+        читается как случайно прилипший пузырь."""
+        self.assertIn('{!isMobileShell && (\n                    <AssistantOrb', APP)
 
     def test_desktop_sidebar_lift_is_off_on_a_phone(self):
         """Подъём сайдбара над окном «Задач» (z 100) на телефоне поднял бы
@@ -182,7 +207,8 @@ class SheetAccountTests(unittest.TestCase):
         прокручивать меню до низа и открывать панель, которой не видно."""
         at = APP.index('<div className="mobile-sheet-account">')
         block = APP[at:at + 7000]
-        for label in ('Сменить логин', 'Сменить пароль', 'Сменить фотографию', 'Выйти'):
+        # «Выйти» переехал в хвост листа — его проверяет test_exit_sits_at_the_very_bottom.
+        for label in ('Сменить логин', 'Сменить пароль', 'Сменить фотографию'):
             self.assertIn(f'<span>{label}</span>', block, f'действие «{label}» пропало из шапки')
         # Установка портала на телефон — там же, своим пунктом.
         self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
@@ -218,7 +244,7 @@ class SheetLooksTests(unittest.TestCase):
     """
 
     def test_sheet_is_a_light_settings_list(self):
-        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar {', 900)
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar {', 1500)
         self.assertIn('background-color: var(--sheet-bg) !important;', block)
         self.assertIn('background-image: none !important;', block)
         self.assertIn('color: var(--sheet-text);', block)
@@ -269,6 +295,22 @@ class SectionLayoutTests(unittest.TestCase):
     таблицы на восемь колонок, каркасы «панель слева — рабочая область справа».
     Ловить это в каждом разделе по отдельности — значит пропустить половину.
     """
+
+    def test_page_scrolls_instead_of_the_section(self):
+        """Внутренняя прокрутка раздела давала полосу сбоку, не давала браузеру
+        прятать адресную строку и обрывала инерцию пальца."""
+        self.assertIn('overflow: visible !important;',
+                      css_block(SHELL_CSS, 'body.mobile-shell .flex.h-screen.overflow-hidden {', 300))
+        # Правил с этим селектором два (место под бар и прокрутка) — ищем по файлу.
+        self.assertIn('overflow: visible !important;\n    height: auto !important;', SHELL_CSS)
+        self.assertIn('width: 0 !important;', css_block(SHELL_CSS, 'body.mobile-shell ::-webkit-scrollbar {', 200))
+
+    def test_section_frame_is_dropped(self):
+        """Карточка раздела на телефоне занимает весь экран, и её обводка
+        превращается в лишнюю линию вдоль краёв."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content > div,', 400)
+        self.assertIn('border-width: 0 !important;', block)
+        self.assertIn('box-shadow: none !important;', block)
 
     def test_bell_does_not_cover_the_first_row(self):
         """Колокол висит в правом верхнем углу экрана: без отступа он накрывал
@@ -341,6 +383,50 @@ class SubmenuTests(unittest.TestCase):
         block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar .animate-dropdown,', 400)
         self.assertIn('width: auto !important;', block)
         self.assertIn('right: max(12px, env(safe-area-inset-right));', block)
+
+
+class NotificationsSheetTests(unittest.TestCase):
+    """Колокол на телефоне — лист у нижнего края, а не выпадающее меню."""
+
+    BELL = (ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx').read_text(encoding='utf-8')
+
+    def test_panel_is_a_bottom_sheet(self):
+        """Вправо от колокола выпадать некуда, а до списка под самым верхом
+        экрана не дотянуться большим пальцем."""
+        block = css_block(SHELL_CSS, '.mobile-bell-slot .notifications-dropdown {', 900)
+        self.assertIn('position: fixed;', block)
+        self.assertIn('top: auto;', block)
+        self.assertIn('bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + 8px);', block)
+        self.assertIn('backdrop-filter: blur(30px) saturate(180%);', block)
+
+    def test_sheet_moves_aside_from_a_side_bar(self):
+        """Боком бар занимает край экрана — лист обязан отойти от него."""
+        self.assertIn('body[data-tabbar-side="right"] .mobile-bell-slot .notifications-dropdown', SHELL_CSS)
+        self.assertIn('body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown', SHELL_CSS)
+
+    def test_backdrop_and_done_button_exist(self):
+        """Лист занимает почти весь экран: без подложки непонятно, что портал
+        под ним жив, а без «Готово» — как закрыть список."""
+        self.assertIn("const backdrop = isNarrow && (open || closing)", self.BELL)
+        self.assertIn('createPortal(', self.BELL)
+        self.assertIn('className={`notifications-backdrop${open && !closing ? \' is-open\' : \'\'}`}', self.BELL)
+        self.assertIn('{isNarrow && (', self.BELL)
+        self.assertIn('Готово', self.BELL)
+
+    def test_dark_sheet_repaints_the_light_markup(self):
+        """Разметка панели написана под светлую подложку (text-slate-900,
+        text-slate-500): на чёрном листе «Всё прочитано» становилось чёрным на
+        чёрном."""
+        self.assertIn('html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-9"]', SHELL_CSS)
+        self.assertIn('color: var(--sheet-text) !important;', SHELL_CSS)
+        self.assertIn('color: var(--sheet-muted) !important;', SHELL_CSS)
+
+    def test_backdrop_sits_under_the_sheet_and_over_the_bar(self):
+        backdrop_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.notifications-backdrop {', 400)).group(1))
+        slot_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-bell-slot {', 400)).group(1))
+        bar_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-tabbar {', 400)).group(1))
+        self.assertLess(backdrop_z, slot_z, 'подложка накрыла бы сам колокол')
+        self.assertLess(bar_z, slot_z, 'лист уехал бы под бар разделов')
 
 
 class ViewSwitchTests(unittest.TestCase):

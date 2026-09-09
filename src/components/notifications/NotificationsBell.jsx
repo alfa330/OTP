@@ -854,17 +854,31 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             style={{ fontFamily: APPLE_FONT }}
             className={`notifications-dropdown absolute left-full top-0 z-40 ml-2 flex w-[360px] origin-top flex-col max-h-[70vh] overflow-hidden rounded-2xl border border-black/5 bg-white/95 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${open && !closing ? 'animate-dropdown' : 'animate-dropdown-reverse'}`}
         >
-            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-                <div className="text-[15px] font-semibold text-slate-900">Уведомления</div>
-                {clearable.length > 0 && (
-                    <button
-                        type="button"
-                        onClick={markSeen}
-                        className="rounded-full px-2.5 py-1 text-[12px] font-medium text-blue-600 transition hover:bg-blue-50"
-                    >
-                        Отметить прочитанным
-                    </button>
-                )}
+            <div className="notifications-head flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+                <div className="notifications-title text-[15px] font-semibold text-slate-900">Уведомления</div>
+                <div className="notifications-head-actions flex items-center gap-1">
+                    {clearable.length > 0 && (
+                        <button
+                            type="button"
+                            onClick={markSeen}
+                            className="rounded-full px-2.5 py-1 text-[12px] font-medium text-blue-600 transition hover:bg-blue-50"
+                        >
+                            Отметить прочитанным
+                        </button>
+                    )}
+                    {/* «Готово» — только на телефоне: там панель занимает почти весь
+                        экран, и закрыть её иначе можно лишь тапом мимо, о котором
+                        никто не догадывается. На компьютере панель гасит клик вне её. */}
+                    {isNarrow && (
+                        <button
+                            type="button"
+                            onClick={close}
+                            className="notifications-done rounded-full px-2.5 py-1 text-[13px] font-semibold text-blue-600"
+                        >
+                            Готово
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* min-h-0 вместо вычитания высоты шапки: на узком пункте (мобильный,
@@ -939,6 +953,21 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             {desktopRow}
         </div>
     ) : null;
+
+    /* Затемнение под листом уведомлений — только на телефоне. Лист там занимает
+       почти весь экран, и без подложки непонятно, что портал под ним жив и
+       нажатие мимо закрывает список. Уходит порталом в body: внутри углового
+       слота колокола оно накрыло бы сам колокол, а не экран. */
+    const backdrop = isNarrow && (open || closing)
+        ? createPortal(
+            <div
+                className={`notifications-backdrop${open && !closing ? ' is-open' : ''}`}
+                onClick={close}
+                aria-hidden="true"
+            />,
+            document.body,
+        )
+        : null;
 
     /* Карточка входящего уведомления — то же выпадение из сайдбара, что у
        списка, но с одним пришедшим и его деталями. Показывается только при
@@ -1052,6 +1081,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 </span>
                 <ChevronRight size={14} className="sidebar-text ml-auto translate-x-2 opacity-0 transition-all duration-300 group-hover:translate-x-0 group-hover:opacity-100" />
             </button>
+            {backdrop}
             {panel}
             {toastNode}
         </div>

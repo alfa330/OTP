@@ -33,6 +33,7 @@
     --sheet-accent: #0a84ff;
     --sheet-handle: rgba(60, 60, 67, 0.3);
     --sheet-chevron: rgba(60, 60, 67, 0.35);
+    --sheet-glass: rgba(250, 250, 252, 0.92);
     --sheet-gutter: 14px;
     --sheet-radius: 16px;
 }
@@ -263,8 +264,18 @@ body.mobile-shell .sidebar {
     height: 100%;
     max-height: none;
     z-index: 65;
-    transform: translateY(100%);
-    transition: transform 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+    /* ПОЯВЛЕНИЕ, А НЕ ВЫЕЗД СНИЗУ. Лист занимает весь экран, и поездка от
+       нижнего края читалась как «страница прилетела откуда-то издалека»
+       (решение владельца 09.09.2026). Теперь он проявляется на месте с
+       коротким приближением — так открываются экраны в мобильных приложениях.
+       В открытом состоянии transform: none — это важно: любой другой transform
+       делает лист точкой отсчёта для position: fixed внутри, а там выпадающие
+       подменю с посчитанными координатами. */
+    opacity: 0;
+    visibility: hidden;
+    transform: scale(0.97);
+    transition: opacity 0.2s ease, transform 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s linear 0.22s;
     overflow: hidden !important;
     box-shadow: none;
     background-color: var(--sheet-bg) !important;
@@ -273,7 +284,11 @@ body.mobile-shell .sidebar {
 }
 
 body.mobile-shell .sidebar.mobile-open {
-    transform: translateY(0);
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition: opacity 0.2s ease, transform 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s;
 }
 
 /* Прокручивается ВЕСЬ лист, а не только список разделов: портрет с именем
@@ -281,7 +296,9 @@ body.mobile-shell .sidebar.mobile-open {
    Обработчики подменю знают про эту прокрутку (см. sheetScrollEl в App.jsx):
    их панели позиционируются посчитанными координатами и обязаны ехать следом. */
 body.mobile-shell .sidebar > div {
-    padding: max(6px, env(safe-area-inset-top)) 0
+    /* Сверху добавлено место под колокол: он висит в углу экрана, и портрет,
+       прижатый к самому верху, оказывался бы под ним. */
+    padding: calc(max(10px, env(safe-area-inset-top)) + 8px) 0
              calc(var(--mtb-thickness) + env(safe-area-inset-bottom));
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -506,18 +523,17 @@ body.mobile-shell .sidebar .sidebar-logo-mini {
     display: none !important;
 }
 
-/* Логотип ужат до строки заголовка: на телефоне место занимает портрет, а
-   логотип остаётся ради тех, кто ведёт «4 You» — у них вход в раздел ТОЛЬКО
-   через него (пункт меню показан лишь читателям). */
+/* Логотип над портретом убран (решение владельца 09.09.2026): в списке
+   настроек телефона место наверху принадлежит человеку, а не марке. Вход в
+   «4 You» при этом не потерян — тем, кто раздел ведёт, он выдан отдельной
+   строкой в шапке (см. canManageFourYouSection в App.jsx). */
 body.mobile-shell .sidebar h1 {
-    height: 34px;
-    margin: 0 0 6px;
-    transform-origin: center;
+    display: none;
 }
 
-body.mobile-shell .sidebar .sidebar-logo-full {
-    transform: scale(0.56);
-    transform-origin: center;
+/* Ручка листа тоже не нужна: лист больше не выезжает снизу, а проявляется. */
+body.mobile-shell .mobile-sheet-handle {
+    display: none;
 }
 
 body.mobile-shell .sidebar-collapse-btn {
@@ -583,6 +599,12 @@ body.mobile-shell .sidebar-collapse-btn {
 .mobile-sheet-hero__login {
     font-size: 14px;
     color: var(--sheet-muted);
+}
+
+/* Хвост листа — «Выйти» под всеми разделами. Отступ сверху отделяет его от
+   последней группы меню, снизу — от бара. */
+.mobile-sheet-account--tail {
+    margin-top: 22px;
 }
 
 .mobile-sheet-group {
@@ -730,9 +752,178 @@ body[data-tabbar-side="right"] .mobile-bell-slot {
     right: 2px;
 }
 
-/* Панель уведомлений: вправо от колокола выпадать некуда — раскрываем вниз
-   на всю ширину экрана с отступами. */
-.mobile-bell-slot .notifications-dropdown,
+/* ── Уведомления: лист в стиле системного центра уведомлений ───────────── */
+
+/* Панель колокола на телефоне — не выпадающее меню, а лист у нижнего края:
+   вправо от колокола выпадать некуда, а сверху до списка не дотянуться большим
+   пальцем. Матовое стекло, крупное скругление, ручка сверху, «Готово» справа —
+   как в системных листах.
+
+   Позиционируется относительно ЭКРАНА, хотя лежит внутри углового слота: у
+   слота нет transform, поэтому position: fixed внутри него считается от окна. */
+.mobile-bell-slot .notifications-dropdown {
+    position: fixed;
+    top: auto;
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + 8px);
+    width: auto !important;
+    max-width: none;
+    margin: 0;
+    max-height: min(72vh, 560px);
+    border: none;
+    border-radius: 22px;
+    background: var(--sheet-glass);
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+    animation: mtb-sheet-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) !important;
+}
+
+body[data-tabbar-side="right"] .mobile-bell-slot .notifications-dropdown {
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 8px);
+    bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown {
+    left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 8px);
+    bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+@keyframes mtb-sheet-in {
+    from {
+        opacity: 0;
+        transform: translateY(16px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+/* Ручка листа — та же подсказка «это можно закрыть», что и у шторки разделов. */
+.mobile-bell-slot .notifications-dropdown::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    width: 36px;
+    height: 5px;
+    margin-left: -18px;
+    border-radius: 999px;
+    background: var(--sheet-handle);
+    z-index: 2;
+}
+
+.mobile-bell-slot .notifications-head {
+    padding: 20px 14px 10px;
+    border-bottom: 1px solid var(--sheet-sep);
+    background: none;
+}
+
+.mobile-bell-slot .notifications-title {
+    font-size: 17px !important;
+    font-weight: 600;
+    color: var(--sheet-text);
+}
+
+.mobile-bell-slot .notifications-head-actions button {
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 13px;
+}
+
+/* Строки списка — как в системных уведомлениях: цветная плитка, заголовок,
+   пояснение под ним, время справа. */
+.mobile-bell-slot .notifications-scroll > button {
+    align-items: center;
+    gap: 12px;
+    padding: 11px 14px;
+    border-bottom: none;
+    background: none;
+}
+
+.mobile-bell-slot .notifications-scroll > button + button {
+    box-shadow: inset 58px 0.5px 0 -57.5px var(--sheet-sep);
+}
+
+.mobile-bell-slot .notifications-scroll > button > span:first-child {
+    width: 34px;
+    height: 34px;
+    margin-top: 0;
+    border-radius: 10px;
+}
+
+.mobile-bell-slot .notifications-scroll > button > span:first-child svg {
+    width: 17px;
+    height: 17px;
+}
+
+.mobile-bell-slot .notifications-scroll > button .truncate:first-child,
+.mobile-bell-slot .notifications-scroll > button span[class*="text-[13.5px]"] {
+    font-size: 15px !important;
+    color: var(--sheet-text) !important;
+}
+
+.mobile-bell-slot .notifications-scroll > button span[class*="text-[12px]"],
+.mobile-bell-slot .notifications-scroll > button span[class*="text-[11px]"] {
+    font-size: 12.5px !important;
+}
+
+/* Нажатие подсвечивает строку — на телефоне это единственный отклик, hover
+   там не срабатывает вовсе. */
+.mobile-bell-slot .notifications-scroll > button:active {
+    background: var(--sheet-active) !important;
+}
+
+/* Переключатель уведомлений рабочего стола на телефоне не показываем: он про
+   окно браузера на компьютере, а место в листе дорогое. */
+.mobile-bell-slot .notifications-dropdown > div:last-child:not(.notifications-scroll):not(.notifications-head) {
+    display: none;
+}
+
+/* Тёмный режим листа. Разметка панели написана под светлую подложку —
+   заголовки text-slate-900, подписи text-slate-500 — и на тёмном полотне
+   заголовок «Всё прочитано» становился почти чёрным на чёрном. Перекрашиваем
+   типовые классы в палитру листа. */
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-9"],
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-8"],
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-7"] {
+    color: var(--sheet-text) !important;
+}
+
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-6"],
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-5"],
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="text-slate-4"] {
+    color: var(--sheet-muted) !important;
+}
+
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-dropdown [class*="bg-slate-1"] {
+    background: rgba(120, 120, 128, 0.24) !important;
+    color: var(--sheet-muted) !important;
+}
+
+html[data-otp-theme="dark"] .mobile-bell-slot .notifications-head {
+    border-bottom-color: var(--sheet-sep);
+}
+
+/* Подложка под листом. Гасит содержимое портала и ловит нажатие мимо. */
+.notifications-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 69;
+    background: rgba(0, 0, 0, 0.28);
+    opacity: 0;
+    transition: opacity 0.22s ease;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.notifications-backdrop.is-open {
+    opacity: 1;
+}
+
+/* Карточка нового уведомления живёт по тем же правилам, только вверху экрана —
+   она приходит сама и не должна перекрывать содержимое раздела. */
 body.mobile-shell .notifications-toast-floating {
     position: fixed;
     top: calc(max(10px, env(safe-area-inset-top)) + 52px);
@@ -741,15 +932,16 @@ body.mobile-shell .notifications-toast-floating {
     width: auto;
     max-width: 420px;
     margin: 0 0 0 auto;
-    max-height: 70vh;
+    border-radius: 18px;
+    border: none;
+    background: var(--sheet-glass);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
 }
 
-body[data-tabbar-side="right"] .mobile-bell-slot .notifications-dropdown,
 body[data-tabbar-side="right"] .notifications-toast-floating {
     right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 10px);
 }
 
-body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown,
 body[data-tabbar-side="left"] .notifications-toast-floating {
     left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 10px);
 }
@@ -776,8 +968,8 @@ body.mobile-shell .main-content {
    своим макетом (p-0: вики, задачи, аукцион, курсы) не трогаем — там поля
    расставлены внутри. */
 body.mobile-shell .main-content:not(.p-0) {
-    padding-left: 12px;
-    padding-right: 12px;
+    padding-left: 0;
+    padding-right: 0;
 }
 
 body[data-tabbar-side="right"].mobile-shell .main-content {
@@ -801,11 +993,50 @@ body[data-tabbar-side="left"].mobile-shell .main-content {
 
    Всё заперто на body.mobile-shell: настольная вёрстка не затронута. */
 
+/* СТРАНИЧНАЯ ПРОКРУТКА ВМЕСТО ВНУТРЕННЕЙ. На компьютере портал устроен как
+   приложение: корневой блок ровно в высоту окна, прокручивается содержимое
+   раздела внутри себя. На телефоне это даёт полосу прокрутки сбоку У РАЗДЕЛА
+   (её и просили убрать), не даёт браузеру прятать адресную строку и ломает
+   инерцию: палец «упирается» в конец внутреннего блока. Здесь прокрутку
+   возвращаем странице целиком. */
+body.mobile-shell .flex.h-screen.overflow-hidden {
+    display: block !important;
+    height: auto !important;
+    min-height: 100dvh;
+    overflow: visible !important;
+}
+
 body.mobile-shell .main-content {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 100dvh;
     overflow-x: hidden;
     /* Длинные слова (адреса, идентификаторы, ФИО в одну строку) переносятся, а
        не растягивают блок за край экрана. */
     overflow-wrap: break-word;
+}
+
+/* Полосы прокрутки внутри разделов (таблицы, ленты вкладок) на телефоне не
+   рисуем: их и так не тянут мышью, а видимая полоса съедает строку и выглядит
+   настольным элементом. Прокрутка пальцем остаётся. */
+body.mobile-shell ::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+}
+
+/* РАМКИ КОРНЕВЫХ КОНТЕЙНЕРОВ. Раздел на компьютере — карточка с обводкой и
+   тенью посреди серого полотна. На телефоне карточка занимает весь экран, и её
+   рамка превращается в лишнюю линию вдоль краёв (решение владельца
+   09.09.2026): содержимое идёт от края до края, как в мобильных приложениях.
+   Правило бьёт только по ВЕРХНЕМУ уровню раздела — карточки внутри (плитки
+   показателей, строки списков) свои рамки сохраняют. */
+body.mobile-shell .main-content > div,
+body.mobile-shell .main-content > section,
+body.mobile-shell .main-content > div > div:first-child:last-child {
+    border-width: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
 }
 
 /* Место под колокол. Он висит в правом верхнем углу ЭКРАНА, и без отступа
@@ -1046,6 +1277,7 @@ html[data-otp-theme="dark"] {
     --sheet-accent: #0a84ff;
     --sheet-handle: rgba(235, 235, 245, 0.3);
     --sheet-chevron: rgba(235, 235, 245, 0.35);
+    --sheet-glass: rgba(28, 28, 30, 0.94);
 }
 
 html[data-otp-theme="dark"] .mtb-item.is-active .mtb-item__icon {

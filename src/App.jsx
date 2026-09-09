@@ -47277,16 +47277,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 установленном портале не рисует ничего. */}
                                             <InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />
                                         </div>
-                                        <div className="mobile-sheet-group">
-                                            <button
-                                                type="button"
-                                                onClick={stableSidebarHandleLogout}
-                                                className="mobile-sheet-row mobile-sheet-row--exit"
-                                            >
-                                                <FaIcon className="fas fa-sign-out-alt" data-tint="red"></FaIcon>
-                                                <span>Выйти</span>
-                                            </button>
-                                        </div>
+                                        {/* «4 You» на телефоне живёт здесь: логотип, через
+                                            который в раздел входят на компьютере, на узком
+                                            экране убран, а пункт меню показан только
+                                            читателям — у тех, кто раздел ВЕДЁТ, другого
+                                            входа нет. */}
+                                        {canManageFourYouSection && (
+                                            <div className="mobile-sheet-group">
+                                                <button
+                                                    type="button"
+                                                    className="mobile-sheet-row"
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'four_you')}
+                                                >
+                                                    <FaIcon className="fas fa-heart" data-tint="red"></FaIcon>
+                                                    <span>4 You</span>
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                                 {/* Селектор отдела — только у админов и супер-админов:
@@ -48661,6 +48668,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </SidebarDeptScope>
                                     )}
                                 </ul>
+                                {/* «Выйти» — в самом низу листа, под всеми разделами:
+                                    так его не нажимают случайно, разыскивая раздел, и
+                                    так же он стоит в списках настроек телефона. */}
+                                {isMobileShell && (
+                                    <div className="mobile-sheet-account mobile-sheet-account--tail">
+                                        <div className="mobile-sheet-group">
+                                            <button
+                                                type="button"
+                                                onClick={stableSidebarHandleLogout}
+                                                className="mobile-sheet-row mobile-sheet-row--exit"
+                                            >
+                                                <FaIcon className="fas fa-sign-out-alt" data-tint="red"></FaIcon>
+                                                <span>Выйти</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                                 <ul className="sidebar-footer-menu mt-3 pt-3 border-t border-white/30 space-y-2">
                                     <li className="relative" ref={sidebarAccountRef}>
                                         <button
@@ -56060,6 +56084,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         и position: fixed считался бы от масштабированного
                         предка. Логин и сплэш отсекаются сами — до них дело не
                         доходит, оба уходят ранним return выше. */}
+                    {/* Плавающий помощник — только на компьютере. На телефоне он
+                        закрывает собой содержимое раздела: экран 390 px, и шарик
+                        поверх него читается как случайно прилипший пузырь
+                        (решение владельца 09.09.2026). */}
+                    {!isMobileShell && (
                     <AssistantOrb
                         user={user}
                         view={view}
@@ -56080,6 +56109,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }}
                         onOpenWikiAssistant={() => navigateToView('wiki')}
                     />
+                    )}
                     {/* Предложение установить портал на телефон. Стоит здесь по
                         той же причине, что и шарик: сиблингом main-content, мимо
                         overflow-hidden разделов и zoom вики. На экране входа его
