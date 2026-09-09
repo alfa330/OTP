@@ -48204,8 +48204,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
 
                                         {(showSidebarAccountDropdown || isClosing) && (
+                                            /* Раскрывается ВВЕРХ: «Аккаунт» стоит у самого низа
+                                               сайдбара, и меню, растущее вниз, уезжало за край
+                                               окна. Низ панели прибит к низу пункта (bottom-0),
+                                               а scaleY тянется от нижней грани (origin-bottom). */
                                             <div
-                                                className={`absolute left-full top-0 ml-2 w-56 origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                                className={`absolute left-full bottom-0 ml-2 w-56 origin-bottom bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
                                             ${showSidebarAccountDropdown && !isClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                             >
                                                 <button
