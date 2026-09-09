@@ -185,7 +185,7 @@ test('поле поиска не пересобирает дерево меню'
     );
     // Свернули сайдбар — поиск закрывается: поля не видно, а фильтр остался бы.
     assert.ok(
-        app.includes('if (sidebarCollapsed && showSidebarSearch) handleToggleSidebarSearch();'),
+        app.includes('if ((sidebarCollapsed || isMobileShell) && showSidebarSearch) handleToggleSidebarSearch();'),
         'при сворачивании сайдбара поиск не закрывается',
     );
     // Проход повторяется после каждой пересборки меню (сменилась роль, отдел
@@ -281,7 +281,7 @@ test('поиск и колокол видны и в свёрнутом рель�
         'поиск в рельсе обязан разворачивать сайдбар — искать по невидимым подписям нельзя',
     );
     assert.ok(
-        app.includes('if (sidebarCollapsed && showSidebarSearch) handleToggleSidebarSearch();'),
+        app.includes('if ((sidebarCollapsed || isMobileShell) && showSidebarSearch) handleToggleSidebarSearch();'),
         'обратный ход потерян: свернули — поиск должен закрыться',
     );
 });
@@ -397,4 +397,41 @@ test('ни один селектор сайдбара не требует .sideb
             }
         }
     }
+});
+
+test('кнопка сворачивания лежит НАД шапкой', () => {
+    /* Кнопка позиционирована (absolute) и стоит в разметке РАНЬШЕ шапки, а
+       шапка тоже позиционирована — от неё считаются координаты поиска и
+       колокола. Среди позиционированных элементов с z-index: auto порядок
+       рисования и попадания курсора — порядок разметки, поэтому шапка
+       накрывала кнопку и съедала ровно ту её половину, что лежит внутри
+       полосы: 16 px из 32. Клик по ней не сворачивал сайдбар и даже не
+       подсвечивал кнопку. */
+    const btn = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-collapse-btn');
+    assert.ok(btn, 'не найдено правило кнопки сворачивания');
+    const z = Number(/z-index: (\d+)/.exec(btn.body)?.[1]);
+    assert.ok(Number.isFinite(z) && z >= 1, 'у кнопки сворачивания нет z-index — шапка накроет её половину');
+    // Но не выше выпадашек и панели колокола, иначе кнопка полезет на них.
+    assert.ok(z < 40, `z-index кнопки сворачивания ${z} — она перекроет выпадашки (у них 40 и выше)`);
+    const row = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-top-row');
+    assert.ok(row && /position: relative;/.test(row.body), 'шапка перестала быть точкой отсчёта — координаты кнопок поедут от .sidebar');
+    assert.ok(
+        !/z-index/.test(row.body),
+        'у шапки появился z-index: тогда сравнение с кнопкой сворачивания нужно пересчитать',
+    );
+});
+
+test('поиск закрывается и когда окно сужается до шторки', () => {
+    /* И кнопка, и поле закрыты гейтом !isMobileShell, а список разделов на
+       телефоне остаётся — шторкой. Без сброса он оставался бы отфильтрованным
+       по запросу, которого не видно; оболочка переключается на живой resize,
+       то есть прямо под руками. */
+    assert.ok(
+        app.includes('if ((sidebarCollapsed || isMobileShell) && showSidebarSearch) handleToggleSidebarSearch();'),
+        'поиск не закрывается при переходе в мобильную оболочку',
+    );
+    assert.ok(
+        app.includes('}, [sidebarCollapsed, isMobileShell, showSidebarSearch, handleToggleSidebarSearch]);'),
+        'в зависимостях эффекта нет isMobileShell — он не сработает на смене оболочки',
+    );
 });

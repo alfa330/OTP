@@ -39963,12 +39963,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (showSidebarSearch) sidebarSearchInputRef.current?.focus();
             }, [showSidebarSearch]);
 
-            /* Свернули сайдбар — поиск закрывается вместе с ним. В рельсе ни
-               поля, ни подписей не видно, и список остался бы отфильтрованным
-               по запросу, которого человек уже не видит. */
+            /* Поиск живёт только там, где его видно, и закрывается сам в двух
+               случаях: свернули сайдбар (в рельсе ни поля, ни подписей нет) и
+               окно сузилось до телефонной оболочки (там и кнопка, и поле
+               закрыты гейтом !isMobileShell, а список разделов остаётся —
+               шторкой). Иначе список остался бы отфильтрованным по запросу,
+               которого человек уже не видит. Оболочка переключается на живой
+               resize, то есть прямо под руками — см. subscribeMobileShell. */
             useEffect(() => {
-                if (sidebarCollapsed && showSidebarSearch) handleToggleSidebarSearch();
-            }, [sidebarCollapsed, showSidebarSearch, handleToggleSidebarSearch]);
+                if ((sidebarCollapsed || isMobileShell) && showSidebarSearch) handleToggleSidebarSearch();
+            }, [sidebarCollapsed, isMobileShell, showSidebarSearch, handleToggleSidebarSearch]);
 
             const openAppViewInNewTab = useCallback((nextView) => {
                 if (!nextView || typeof window === 'undefined') return;
