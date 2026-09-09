@@ -290,11 +290,24 @@ class InstallPromptTests(unittest.TestCase):
         self.assertGreater(layer, 84, 'Панель ушла под шарик помощника')
         self.assertLess(layer, 100, 'Панель накрыла бы «Новость дня» и карточку задачи')
 
-    def test_panel_waits_before_showing(self):
-        """Панель в первую секунду закрывают не читая."""
+    def test_panel_appears_right_after_load(self):
+        """Панель приходит сразу — решение владельца 09.09.2026.
+
+        Прежние девять секунд означали, что до предложения чаще всего не
+        доживали. Пауза оставлена крошечная и техническая: в нулевом кадре
+        портал ещё меряет высоту панели для экрана входа, и выехавшая панель
+        успевала мигнуть не на своём месте."""
         self.assertIn('APPEAR_DELAY_MS', self.jsx)
         delay = int(re.search(r'APPEAR_DELAY_MS = (\d+)', self.jsx).group(1))
-        self.assertGreaterEqual(delay, 5000)
+        self.assertGreater(delay, 0, 'Нулевая задержка ловит первый кадр портала')
+        self.assertLessEqual(delay, 2000, 'Панель снова приходит поздно')
+
+    def test_panel_shows_once_per_page_load(self):
+        """Экран входа и портал — разные монтирования одной панели.
+
+        Без отметки панель, закрытая до входа, тут же выезжала бы снова после
+        него. Обновление страницы отметку сбрасывает — этого и просили."""
+        self.assertIn('offerShownThisLoad', self.jsx)
 
     def test_install_button_only_where_it_can_open_something(self):
         """Кнопки установки на iOS не существует: обещать её нельзя.
@@ -327,7 +340,11 @@ class InstallPromptTests(unittest.TestCase):
         """«Позже» — отсрочка на две недели, а не отказ навсегда."""
         self.assertIn('snoozeInstallOffer', self.jsx)
         util = read(PWA_UTIL)
-        self.assertIn('INSTALL_SNOOZE_MS = 14 * 24 * 60 * 60 * 1000', util)
+        self.assertIn('INSTALL_SNOOZE_MS = 3 * 24 * 60 * 60 * 1000', util)
+        # Ключ версионный: при смене срока прежние отсрочки обязаны обнулиться,
+        # иначе закрывшие панель раньше не увидят её ещё две недели.
+        self.assertIn("INSTALL_SNOOZE_KEY = 'otp.install_offer_v2'", util)
+        self.assertIn('LEGACY_SNOOZE_KEYS', util)
 
     def test_menu_item_subscribes_itself(self):
         """Пункт живёт в мемоизированном дереве сайдбара: проп бы замёрз."""
@@ -414,8 +431,9 @@ class AuthScreenTests(unittest.TestCase):
     def test_login_screen_offers_installation_too(self):
         """С домашнего экрана человек попадает сразу сюда."""
         app = read(APP_JSX)
-        self.assertEqual(2, app.count('<InstallAppPrompt />'),
-                         'Панель должна стоять и на экране входа, и в портале')
+        self.assertEqual(3, app.count('<InstallAppPrompt />'),
+                         'Панель должна стоять на проверке сессии, на входе и в портале: '
+                         'первый экран после сна сервера живёт десятки секунд')
 
     def test_login_screen_lifts_above_the_panel(self):
         """Иначе панель накрывает кнопку «Войти» — форма центрована."""

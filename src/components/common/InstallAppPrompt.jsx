@@ -44,10 +44,21 @@ import {
  * высоту, экран поднимает форму ровно настолько, насколько нужно.
  */
 
-/* Сколько ждать перед появлением. Девять секунд — это «человек уже открыл
-   раздел и что-то в нём делает», но ещё не «человек забыл, что открывал
-   портал». */
-const APPEAR_DELAY_MS = 9000;
+/* Сколько ждать перед появлением. Панель приходит СРАЗУ после загрузки — так
+   попросил владелец: прежние девять секунд означали, что до неё чаще всего
+   просто не доживали, человек успевал уйти в свой раздел и уехать по делу.
+
+   Полсекунды — не «пауза для приличия», а техническая: в первые кадры портал
+   ещё монтирует раздел и меряет высоту панели для экрана входа
+   (--install-offer-height). Панель, выехавшая в нулевом кадре, успевает
+   мигнуть на неверном месте. */
+const APPEAR_DELAY_MS = 500;
+
+/* Показываем ОДИН раз за загрузку страницы. Экран входа и сам портал — это два
+   разных монтирования одного и того же предложения: без этой отметки панель,
+   закрытая до входа, тут же выезжала бы снова после него. Обновление страницы
+   отметку сбрасывает — этого и просили: «после обновления пусть выходит». */
+let offerShownThisLoad = false;
 
 /* Длительность уезда панели — ровно как в install-app-prompt.css. */
 const CLOSE_ANIMATION_MS = 180;
@@ -83,7 +94,7 @@ const InstallAppPrompt = () => {
     }, [install.manualGuideRequests]);
 
     useEffect(() => {
-        if (visible || install.standalone) return undefined;
+        if (visible || offerShownThisLoad || install.standalone) return undefined;
         const offer = shouldOfferInstall({
             standalone: install.standalone,
             platform: install.platform,
@@ -92,7 +103,10 @@ const InstallAppPrompt = () => {
             now: Date.now(),
         });
         if (!offer) return undefined;
-        const timer = setTimeout(() => setVisible(true), APPEAR_DELAY_MS);
+        const timer = setTimeout(() => {
+            offerShownThisLoad = true;
+            setVisible(true);
+        }, APPEAR_DELAY_MS);
         return () => clearTimeout(timer);
     }, [visible, install.standalone, install.platform, install.canPrompt]);
 
