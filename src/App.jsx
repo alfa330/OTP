@@ -37894,6 +37894,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showOrazAitSplash, setShowOrazAitSplash] = useState(false);
             const [login, setLogin] = useState('');
             const [password, setPassword] = useState('');
+            /* «Показать пароль» на экране входа. Живёт здесь, рядом с самим
+               паролем: экран входа — это ранний return из этого же компонента,
+               своего состояния у него нет. */
+            const [showLoginPassword, setShowLoginPassword] = useState(false);
             const [toasts, setToasts] = useState([]);
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
@@ -48291,24 +48295,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (isAuthInitializing) {
                 return (
-                  <div className="auth-screen min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                    <div className="bg-white p-6 sm:p-10 rounded-2xl shadow-2xl w-full max-w-md transition-all duration-300 text-center">
-                      <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
-                        <span className="flex">
-                          <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
-                            iCORE
-                          </span>
-                          <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
-                            <img
-                              src="https://iili.io/KfNE2qv.png"
-                              alt="Site Icon"
-                              className="w-12 h-12 object-contain mr-0.5"
-                            />
-                          </span>
+                  /* Тот же экран, что и вход, только вместо формы — ожидание:
+                     между ними человек моргает и не должен увидеть смены
+                     оформления. Про отсутствие min-h-screen — см. экран входа
+                     ниже. */
+                  <div className="auth-screen bg-gradient-to-br from-blue-100 to-purple-100">
+                    <div className="auth-card w-full max-w-[380px] rounded-[28px] bg-white/95 px-6 py-7 text-center shadow-[0_24px_60px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/5 backdrop-blur-xl">
+                      <div className="flex flex-col items-center">
+                        <span
+                          className="auth-card__mark grid h-[68px] w-[68px] place-items-center rounded-[20px] shadow-[0_8px_22px_rgba(34,64,155,0.28)]"
+                          style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
+                          aria-hidden="true"
+                        >
+                          <img src={sidebarLogoMark} alt="" className="h-[40px] w-[40px]" />
                         </span>
-                      </h1>
-                      <div className="flex items-center justify-center gap-3 text-gray-700">
-                        <FaIcon className="fas fa-spinner fa-spin text-blue-600"></FaIcon>
+                        <h1 className="mt-3.5 text-[24px] font-semibold tracking-tight text-slate-900">iCORE</h1>
+                      </div>
+                      <div className="mt-5 flex items-center justify-center gap-2.5 text-[13.5px] text-slate-500">
+                        <FaIcon className="fas fa-spinner fa-spin text-indigo-600"></FaIcon>
                         <span>Проверка сессии...</span>
                       </div>
                     </div>
@@ -48318,24 +48322,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!user) {
                 return (
-                  <div className="auth-screen min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                    <div className="bg-white p-6 sm:p-10 rounded-2xl shadow-2xl w-full max-w-md transition-all duration-300">
-                      <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
-                        <span className="flex">
-                          <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
-                            iCORE
-                          </span>
-                          <span className="bg-white text-indigo-700 px-2 py-2 rounded-r-2xl border-t border-b border-r border-indigo-700 text-4xl -ml-px">
-                            <img
-                              src="https://iili.io/KfNE2qv.png"
-                              alt="Site Icon"
-                              className="w-12 h-12 object-contain mr-0.5"
-                            />
-                          </span>
+                  /* Экран входа. Класса min-h-screen здесь намеренно НЕТ: 100vh
+                     на телефоне — это высота экрана БЕЗ панелей браузера, то
+                     есть всегда больше видимой части, и страница получала
+                     вечную полосу прокрутки на пустом месте. Высоту задаёт
+                     .auth-screen в src/styles.css через 100dvh — «сколько
+                     видно сейчас». */
+                  <div className="auth-screen bg-gradient-to-br from-blue-100 to-purple-100">
+                    <div className="auth-card w-full max-w-[380px] rounded-[28px] bg-white/95 px-6 py-7 shadow-[0_24px_60px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/5 backdrop-blur-xl">
+                      {/* Знак портала — тот же, что станет иконкой на домашнем
+                          экране: человек, поставивший портал приложением, видит
+                          при запуске ровно то, по чему тыкнул. Раньше здесь
+                          лежала картинка с внешнего хостинга (iili.io) — без
+                          интернета и при его блокировке экран входа встречал
+                          битой картинкой. */}
+                      <div className="flex flex-col items-center">
+                        <span
+                          className="auth-card__mark grid h-[68px] w-[68px] place-items-center rounded-[20px] shadow-[0_8px_22px_rgba(34,64,155,0.28)]"
+                          style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
+                          aria-hidden="true"
+                        >
+                          <img src={sidebarLogoMark} alt="" className="h-[40px] w-[40px]" />
                         </span>
-                      </h1>
-                
+                        <h1 className="mt-3.5 text-[24px] font-semibold tracking-tight text-slate-900">iCORE</h1>
+                        <p className="auth-card__subtitle mt-1 text-[13px] text-slate-500">Рабочий портал</p>
+                      </div>
+
                       <form
+                        className="mt-6"
                         onSubmit={(e) => {
                           e.preventDefault();
                           if (!isLoading) {
@@ -48345,55 +48359,82 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       >
                         {/* autoCapitalize/autoCorrect: на телефоне клавиатура
                             иначе поднимает первую букву логина и «исправляет»
-                            его на похожее слово — человек видит «Верно введён»
-                            логин, которого в системе нет. */}
-                        <input
-                          type="text"
-                          placeholder="Логин"
-                          value={login}
-                          onChange={(e) => setLogin(e.target.value)}
-                          className="w-full p-3 mb-4 text-base border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                          disabled={isLoading}
-                          autoComplete="username"
-                          autoCapitalize="none"
-                          autoCorrect="off"
-                          spellCheck={false}
-                        />
-                  
-                        <input
-                          type="password"
-                          placeholder="Пароль"
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          className="w-full p-3 mb-2 text-base border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
-                          disabled={isLoading}
-                          autoComplete="off"
-                        />
-                  
-                        {/* Контейнер под сообщение всегда занимает место */}
-                        <div className="auth-error-slot min-h-[2rem] flex items-center justify-center mb-4">
+                            его на похожее слово — человек видит «неверный
+                            логин» там, где всё ввёл правильно.
+                            Размер шрифта 16px (text-base) обязателен: при
+                            меньшем Safari приближает страницу на фокусе, и
+                            форма уезжает за край. */}
+                        <label className="relative block">
+                          <span className="sr-only">Логин</span>
+                          <FaIcon className="fas fa-user pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></FaIcon>
+                          <input
+                            type="text"
+                            placeholder="Логин"
+                            value={login}
+                            onChange={(e) => setLogin(e.target.value)}
+                            className="h-12 w-full rounded-[14px] bg-slate-100 pl-11 pr-4 text-base text-slate-900 placeholder-slate-400 outline-none transition focus:bg-white focus:ring-2 focus:ring-indigo-500/70"
+                            disabled={isLoading}
+                            autoComplete="username"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
+                          />
+                        </label>
+
+                        <label className="relative mt-2.5 block">
+                          <span className="sr-only">Пароль</span>
+                          <FaIcon className="fas fa-lock pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"></FaIcon>
+                          <input
+                            type={showLoginPassword ? 'text' : 'password'}
+                            placeholder="Пароль"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className="h-12 w-full rounded-[14px] bg-slate-100 pl-11 pr-12 text-base text-slate-900 placeholder-slate-400 outline-none transition focus:bg-white focus:ring-2 focus:ring-indigo-500/70"
+                            disabled={isLoading}
+                            autoComplete="off"
+                            enterKeyHint="go"
+                          />
+                          {/* Глаз рядом с полем: пароль на телефоне набирают
+                              вслепую по одной букве, и опечатка стоит целого
+                              повтора входа. */}
+                          <button
+                            type="button"
+                            onClick={() => setShowLoginPassword((value) => !value)}
+                            className="absolute right-2 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200/70 hover:text-slate-600"
+                            aria-label={showLoginPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                            tabIndex={-1}
+                          >
+                            <FaIcon className={`fas ${showLoginPassword ? 'fa-eye-slash' : 'fa-eye'}`}></FaIcon>
+                          </button>
+                        </label>
+
+                        {/* Контейнер под сообщение всегда занимает место —
+                            иначе кнопка «Войти» прыгает вниз ровно в момент
+                            ошибки, под уже нажимающий палец. */}
+                        <div className="auth-error-slot flex min-h-[2.25rem] items-center justify-center">
                           {errorMessage && (
-                            <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
+                            <p className="w-full rounded-xl bg-red-50 px-3 py-2 text-center text-[13px] font-medium text-red-600 animate-fade-in-out">
                               {errorMessage}
                             </p>
                           )}
                         </div>
-                  
+
                         <button
                           type="submit"
-                          className={`w-full bg-indigo-600 text-white p-3 rounded-lg hover:bg-indigo-700 transition-all duration-200 ${
-                            isLoading ? "cursor-not-allowed opacity-50" : ""
+                          className={`flex h-12 w-full items-center justify-center gap-2 rounded-[14px] bg-indigo-600 text-[15px] font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.99] ${
+                            isLoading ? "cursor-not-allowed opacity-60" : ""
                           }`}
                           disabled={isLoading}
                         >
+                          {isLoading && <FaIcon className="fas fa-spinner fa-spin"></FaIcon>}
                           {isLoading ? "Вход..." : "Войти"}
                         </button>
                       </form>
-                
-                      <div className="mt-4 text-center">
+
+                      <div className="mt-3.5 text-center">
                         <button
                           onClick={() => console.log("Forgot password clicked")}
-                          className="text-sm text-indigo-600 hover:underline"
+                          className="text-[13px] font-medium text-indigo-600 hover:underline"
                         >
                           Забыл пароль?
                         </button>

@@ -532,17 +532,41 @@
     }
     
     /* === Экраны входа и проверки сессии === */
-    /* Оба экрана — это одна карточка по центру пустого экрана, и на телефоне у
-       неё две беды: она прилипает к краям (у контейнера не было горизонтальных
-       полей вовсе) и в установленном приложении заезжает под вырез и полосу
-       «домой». Поля берутся как max(обычное, безопасная зона): в браузере
-       env() равен нулю, и остаётся обычный отступ. */
+    /* ВЫСОТА ЗАДАЁТСЯ ЗДЕСЬ, А НЕ КЛАССОМ min-h-screen. Тот разворачивается в
+       100vh, а 100vh на телефоне — это высота экрана БЕЗ панелей браузера:
+       адресная строка и нижняя панель Safari в неё не входят, страница
+       оказывается на сотню пикселей длиннее видимой части, и экран входа
+       получал полосу прокрутки на ровном месте — прокручивать там нечего.
+       100dvh — «сколько видно прямо сейчас», он же сам ужимается, когда
+       поднимается клавиатура. Строка с vh оставлена фолбэком для браузеров
+       старше 2022 года.
+
+       Поля берутся как max(обычное, безопасная зона): в браузере env() равен
+       нулю, а в установленном приложении отступ отодвигает карточку от выреза
+       и полосы «домой». */
     .auth-screen {
+      /* height, а не min-height: страница обязана быть РОВНО в экран, чтобы
+         прокручивать было нечего. Если содержимое всё же не влезло (совсем
+         маленький экран, поднятая клавиатура), прокрутка живёт ВНУТРИ этого
+         блока и не растягивает документ. */
+      display: flex;
+      height: 100vh;
+      height: 100dvh;
+      overflow-y: auto;
+      overscroll-behavior: contain;
       padding-top: max(1.5rem, env(safe-area-inset-top));
       padding-right: max(1rem, env(safe-area-inset-right));
       padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
       padding-left: max(1rem, env(safe-area-inset-left));
       transition: padding-bottom 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Центрирование через margin: auto, а не items-center. У flex-контейнера с
+       прокруткой items-center при нехватке места выпихивает содержимое за ОБА
+       края, и верх карточки становится недостижим; margin: auto центрует так
+       же, но переполнение уводит только вниз — до него можно доскроллить. */
+    .auth-card {
+      margin: auto;
     }
 
     /* Панель установки стоит внизу поверх страницы, а карточка входа
@@ -556,53 +580,59 @@
     }
 
     /* Невысокий экран, и на нём одновременно карточка входа и панель установки.
-       Замерено: карточка 405 px + панель 292 px + поля не помещаются в 667 px
-       (iPhone SE), и кнопка «Войти» уходила под панель. Панель ужимается сама
-       (см. install-app-prompt.css), а здесь ужимается карточка — за счёт
-       заголовка с логотипом и высоты полей, но не за счёт размера шрифта в
-       полях: меньше 16 px iOS начинает приближать страницу при вводе.
-       Правила действуют ТОЛЬКО когда панель на экране: без неё карточке места
-       хватает, и трогать её незачем. */
+       Уплотняем карточку (панель ужимается сама, см. install-app-prompt.css) —
+       но не за счёт размера шрифта в полях: меньше 16 px Safari начинает
+       приближать страницу при вводе. Уходит только воздух.
+       Селекторы удвоены (.auth-card.auth-card): у правила и у утилиты Tailwind
+       одинаковый вес, а утилиты в собранном CSS идут позже и выигрывают. */
     @media (max-height: 760px) {
-      body.has-install-offer .auth-screen h1 {
-        margin-bottom: 0.75rem;
+      body.has-install-offer .auth-card.auth-card {
+        padding-top: 1.25rem;
+        padding-bottom: 1.25rem;
       }
-      body.has-install-offer .auth-screen h1 span {
-        font-size: 1.75rem;
+      body.has-install-offer .auth-card .auth-card__mark {
+        width: 56px;
+        height: 56px;
+        border-radius: 17px;
       }
-      body.has-install-offer .auth-screen h1 img {
-        width: 2.25rem;
-        height: 2.25rem;
+      body.has-install-offer .auth-card .auth-card__mark img {
+        width: 33px;
+        height: 33px;
       }
-      body.has-install-offer .auth-screen input {
-        padding-top: 0.625rem;
-        padding-bottom: 0.625rem;
-        margin-bottom: 0.625rem;
+      body.has-install-offer .auth-card h1 {
+        margin-top: 0.625rem;
+        font-size: 21px;
+      }
+      body.has-install-offer .auth-card form {
+        margin-top: 1.125rem;
+      }
+      body.has-install-offer .auth-card .auth-error-slot {
+        min-height: 1.75rem;
       }
     }
 
     /* Совсем низкий экран (iPhone SE 1-го поколения, бюджетные Android 640 px,
-       любой телефон с поднятой клавиатурой). Замерено: даже после первого
-       уплотнения карточка на 28 px залезала под панель. Здесь ужимаемся до
-       предела, ниже которого форма перестаёт быть удобной: поля остаются
-       крупными, уходит только воздух. */
+       любой телефон с поднятой клавиатурой). */
     @media (max-height: 700px) {
-      body.has-install-offer .auth-screen h1 {
-        margin-bottom: 0.5rem;
+      body.has-install-offer .auth-card .auth-card__mark {
+        width: 48px;
+        height: 48px;
+        border-radius: 15px;
       }
-      body.has-install-offer .auth-screen h1 span {
-        font-size: 1.5rem;
+      body.has-install-offer .auth-card .auth-card__mark img {
+        width: 28px;
+        height: 28px;
       }
-      body.has-install-offer .auth-screen h1 img {
-        width: 2rem;
-        height: 2rem;
-      }
-      body.has-install-offer .auth-screen input {
-        margin-bottom: 0.5rem;
-      }
-      body.has-install-offer .auth-screen .auth-error-slot {
+      body.has-install-offer .auth-card .auth-error-slot {
         min-height: 1.25rem;
-        margin-bottom: 0.5rem;
+      }
+      body.has-install-offer .auth-card form {
+        margin-top: 0.875rem;
+      }
+      /* Подпись «Рабочий портал» — единственное, что здесь можно убрать без
+         потери смысла: название и знак над ней говорят то же самое. */
+      body.has-install-offer .auth-card .auth-card__subtitle {
+        display: none;
       }
     }
 

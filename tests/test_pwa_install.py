@@ -361,6 +361,27 @@ class InstallGuideTests(unittest.TestCase):
         self.assertIn('const androidSteps = (hasInstallButton) =>', self.jsx)
         self.assertIn('три точки', self.jsx)
 
+    def test_guide_shows_steps_as_cards_with_mockups(self):
+        """Устройство взято с образца владельца: карточка шага = макет + текст."""
+        self.assertIn('Шаг {index}', self.jsx)
+        self.assertIn('PhoneBottom', self.jsx)
+        self.assertIn('PhoneTop', self.jsx)
+        self.assertIn('AccentArrow', self.jsx)
+
+    def test_guide_warns_before_the_steps(self):
+        """Две заметки идут ДО шагов: обе про то, из-за чего установка сорвётся."""
+        self.assertIn('NOTES', self.jsx)
+        notes = self.jsx[self.jsx.index('const NOTES = {'):self.jsx.index('const BENEFITS')]
+        self.assertIn('App Store', notes)
+        self.assertIn('Google Play', notes)
+        self.assertIn('Safari', notes)
+        self.assertIn('Chrome', notes)
+
+    def test_mockups_are_drawn_not_photographed(self):
+        """Снимок экрана устареет с ближайшим обновлением iOS или Chrome."""
+        self.assertNotIn('.png', self.jsx)
+        self.assertNotIn('.jpg', self.jsx)
+
     def test_guide_layer_is_above_the_offer_panel(self):
         """Инструкция открывается ИЗ панели и обязана лечь поверх неё."""
         layers = [int(value) for value in re.findall(r'z-\[(\d+)\]', self.jsx)]
@@ -389,6 +410,44 @@ class AuthScreenTests(unittest.TestCase):
         block = block[:block.index('}')]
         for side in ('top', 'right', 'bottom', 'left'):
             self.assertIn('env(safe-area-inset-%s)' % side, block)
+
+    def test_auth_screen_is_exactly_the_viewport(self):
+        """Прокручивать на экране входа нечего — значит и полосы быть не должно.
+
+        Класс min-h-screen разворачивается в 100vh, а 100vh на телефоне не
+        учитывает панели браузера: страница выходила длиннее видимой части и
+        скроллилась впустую. Высота задаётся в CSS через 100dvh, а переполнение
+        (клавиатура, крошечный экран) остаётся ВНУТРИ блока."""
+        app = read(APP_JSX)
+        for match in re.finditer(r'className="auth-screen([^"]*)"', app):
+            self.assertNotIn('min-h-screen', match.group(1),
+                             'Экран входа снова растягивается на 100vh')
+        css = read(STYLES)
+        block = css[css.index('.auth-screen {'):]
+        block = block[:block.index('}')]
+        self.assertIn('height: 100dvh', block)
+        self.assertIn('overflow-y: auto', block)
+
+    def test_login_card_is_centred_by_margin(self):
+        """items-center у прокручиваемого контейнера прячет верх карточки."""
+        css = read(STYLES)
+        block = css[css.index('.auth-card {'):]
+        block = block[:block.index('}')]
+        self.assertIn('margin: auto', block)
+
+    def test_login_has_a_password_reveal(self):
+        """Пароль на телефоне набирают вслепую: опечатка стоит повтора входа."""
+        app = read(APP_JSX)
+        self.assertIn('showLoginPassword', app)
+        self.assertIn("showLoginPassword ? 'text' : 'password'", app)
+
+    def test_login_logo_is_local(self):
+        """Картинка с внешнего хостинга встречала бы битым значком без сети."""
+        app = read(APP_JSX)
+        card = app[app.index('className="auth-card'):]
+        card = card[:card.index('</form>')]
+        self.assertNotIn('http', card, 'На экране входа появилась внешняя ссылка')
+        self.assertIn('sidebarLogoMark', card)
 
     def test_login_inputs_are_mobile_safe(self):
         """Автозаглавная буква и автозамена ломают ввод логина на телефоне."""
