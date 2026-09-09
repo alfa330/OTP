@@ -336,22 +336,27 @@ class InstallPromptTests(unittest.TestCase):
         self.assertIn("OFFER_HEIGHT_VAR = '--install-offer-height'", self.jsx)
         self.assertIn('ResizeObserver', self.jsx)
 
-    def test_dismiss_lasts_only_until_the_page_reloads(self):
-        """Крестик закрывает панель на текущую загрузку, а не на дни.
+    def test_dismiss_writes_nothing_at_all(self):
+        """Крестик закрывает панель на текущую загрузку — и только.
 
-        Прежнее правило (крестик = отсрочка) и было причиной жалобы «после
-        обновления уведомление не выходит»: владелец один раз закрывал панель
-        при проверке. Навязчивость сдерживается счётчиком: три отказа подряд —
-        молчим три дня."""
-        self.assertIn("noteInstallOfferDismissed", self.jsx)
+        Это четвёртая редакция правила и первая без исключений. Три предыдущие
+        (две недели, три дня, «три закрытия подряд») давали одну и ту же
+        жалобу: «после обновления уведомление не выходит». Проверяем главное —
+        что закрытие вообще ничего не пишет в хранилище."""
         self.assertIn("hide('dismissed')", self.jsx)
+        hide_body = self.jsx[self.jsx.index('const hide = useCallback'):]
+        hide_body = hide_body[:hide_body.index('}, []);')]
+        self.assertIn("if (reason === 'installed') snoozeInstallOffer();", hide_body)
+        self.assertEqual(1, hide_body.count('snoozeInstallOffer'),
+                         'В закрытии панели появилась вторая запись в хранилище')
+        self.assertNotIn('noteInstallOfferDismissed', self.jsx, 'Счётчик отказов вернулся')
         util = read(PWA_UTIL)
-        self.assertIn('INSTALL_DISMISS_LIMIT = 3', util)
-        self.assertIn('INSTALL_SNOOZE_MS = 3 * 24 * 60 * 60 * 1000', util)
+        self.assertNotIn('INSTALL_DISMISS_LIMIT', util, 'Счётчик отказов вернулся')
         # Ключ версионный: при смене правила прежние отсрочки обязаны
         # обнулиться, иначе закрывшие панель вчера не увидят её ещё три дня.
-        self.assertIn("INSTALL_SNOOZE_KEY = 'otp.install_offer_v3'", util)
-        self.assertIn("'otp.install_offer_v2'", util, 'Прежний ключ не подчищается')
+        self.assertIn("INSTALL_SNOOZE_KEY = 'otp.install_offer_v4'", util)
+        for legacy in ("'otp.install_offer_v2'", "'otp.install_offer_v3'"):
+            self.assertIn(legacy, util, 'Прежний ключ %s не подчищается' % legacy)
 
     def test_long_snooze_is_only_for_the_installed_portal(self):
         """Долго молчать можно лишь тогда, когда предлагать больше нечего."""

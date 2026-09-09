@@ -2,13 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    INSTALL_DISMISS_LIMIT,
     INSTALL_SNOOZE_KEY,
     INSTALL_SNOOZE_MS,
     detectInstallPlatform,
     isStandaloneDisplay,
-    noteInstallOfferDismissed,
-    readInstallDismissals,
     readInstallSnoozeUntil,
     shouldOfferInstall,
     snoozeInstallOffer,
@@ -87,34 +84,6 @@ test('уже установленному порталу предлагать н
         shouldOfferInstall({ standalone: true, platform: 'ios', canPrompt: true, snoozedUntil: 0, now: 1_000 }),
         false,
     );
-});
-
-test('крестик НЕ прячет предложение до следующего открытия страницы', () => {
-    // Дважды закрытая панель обязана вернуться после обновления: ровно на это
-    // владелец жаловался трижды — «уведомление не выходит». Отсрочки нет,
-    // копится только счётчик отказов.
-    const storage = memoryStorage();
-    const now = 1_700_000_000_000;
-    noteInstallOfferDismissed(now, storage);
-    assert.equal(readInstallSnoozeUntil(storage), 0);
-    assert.equal(readInstallDismissals(storage), 1);
-
-    noteInstallOfferDismissed(now, storage);
-    assert.equal(readInstallSnoozeUntil(storage), 0, 'Второй отказ ещё не повод замолчать');
-    assert.equal(shouldOfferInstall({ platform: 'ios', snoozedUntil: readInstallSnoozeUntil(storage), now }), true);
-});
-
-test('три отказа подряд — умолкаем на трое суток', () => {
-    // Иначе «показывать всегда» превращается в навязчивость: человек, который
-    // трижды сказал «нет», сказал это достаточно внятно.
-    const storage = memoryStorage();
-    const now = 1_700_000_000_000;
-    for (let i = 0; i < INSTALL_DISMISS_LIMIT; i += 1) noteInstallOfferDismissed(now, storage);
-
-    const snoozedUntil = readInstallSnoozeUntil(storage);
-    assert.equal(snoozedUntil, now + INSTALL_SNOOZE_MS);
-    assert.equal(shouldOfferInstall({ platform: 'ios', snoozedUntil, now: now + 1000 }), false);
-    assert.equal(readInstallDismissals(storage), 0, 'Счётчик обнуляется вместе с отсрочкой');
 });
 
 test('установленный портал молчит трое суток и снова спрашивает после них', () => {

@@ -27,32 +27,37 @@
  * зависимостей на сорок значений.
  */
 
-/* ЗАКРЫТИЕ ПАНЕЛИ КРЕСТИКОМ БОЛЬШЕ НЕ ПРЯЧЕТ ЕЁ НАДОЛГО.
+/* КРЕСТИК НЕ ПРЯЧЕТ ПРЕДЛОЖЕНИЕ НАДОЛГО. СОВСЕМ.
  *
- * История правила. Сначала крестик прятал предложение на две недели, потом на
- * три дня — и оба раза владелец возвращался с одним и тем же: «после обновления
- * страницы уведомление не выходит». Причина каждый раз была не в коде: он один
- * раз закрывал панель при проверке, и она честно замолкала на весь срок.
- * Воспроизведено на живом портале 09.09.2026: чистый профиль — панель есть,
- * крестик — в localStorage ложится отсрочка на три дня, обновление — пусто.
+ * История правила — это история четырёх одинаковых жалоб владельца: «после
+ * обновления страницы уведомление не выходит». Сначала крестик прятал панель на
+ * две недели, потом на три дня, потом «три закрытия подряд — три дня»; каждый
+ * раз причиной оказывался не показ, а закрытие, и каждая следующая правка
+ * лечила его наполовину. Последняя версия ловила ровно того, кто проверяет:
+ * обновил-закрыл три раза — и панель замолчала.
  *
- * Теперь крестик закрывает панель ТОЛЬКО НА ТЕКУЩУЮ ЗАГРУЗКУ страницы
- * (отметка живёт в памяти вкладки, см. InstallAppPrompt). Обновил страницу —
- * предложение снова здесь, как и просили.
+ * Теперь правило одно и без исключений: крестик закрывает панель ТОЛЬКО на
+ * текущую загрузку страницы (отметка живёт в памяти вкладки, см.
+ * InstallAppPrompt). Любое обновление возвращает предложение.
  *
- * Чтобы это не превратилось в навязчивость, считаем закрытия: три подряд — и
- * панель умолкает на три дня. Три раза человек уже сказал «нет» достаточно
- * внятно, а один случайный тычок больше не стоит ему потерянной недели.
+ * Единственная долгая отсрочка — когда портал УСТАНОВЛЕН (событие
+ * appinstalled): предлагать больше нечего, а запущенный с иконки портал и так
+ * отсекается признаком standalone.
  *
- * Долгая отсрочка ставится ещё в одном случае — когда портал установлен
- * (событие appinstalled): предлагать больше нечего. */
-export const INSTALL_SNOOZE_KEY = 'otp.install_offer_v3';
+ * Цена решения названа честно: человек, который ставить не собирается, будет
+ * видеть панель после каждого обновления, пока не закроет её очередной раз. Это
+ * решение владельца; если операторы пожалуются, правильный ответ — не новая
+ * тихая отсрочка, а явная кнопка «больше не предлагать». */
+export const INSTALL_SNOOZE_KEY = 'otp.install_offer_v4';
 export const INSTALL_SNOOZE_MS = 3 * 24 * 60 * 60 * 1000;
-export const INSTALL_DISMISS_LIMIT = 3;
 
 /* Ключи прошлых версий: в них лежат отсрочки по прежним правилам, и без
    подчистки те, кто закрыл панель вчера, не увидели бы её ещё три дня. */
-const LEGACY_SNOOZE_KEYS = ['otp.install_offer_v1', 'otp.install_offer_v2'];
+const LEGACY_SNOOZE_KEYS = [
+    'otp.install_offer_v1',
+    'otp.install_offer_v2',
+    'otp.install_offer_v3',
+];
 
 /* Встроенные браузеры мессенджеров и соцсетей. В них «Добавить на экран
    Домой» нет ни в каком виде, и подсказка про «Поделиться» отправила бы
@@ -112,15 +117,11 @@ const safeLocalStorage = () => {
 const readInstallOfferState = (storage = safeLocalStorage()) => {
     try {
         const parsed = JSON.parse(storage && storage.getItem(INSTALL_SNOOZE_KEY));
-        if (!parsed || typeof parsed !== 'object') return { dismissals: 0, until: 0 };
-        const dismissals = Number(parsed.dismissals);
+        if (!parsed || typeof parsed !== 'object') return { until: 0 };
         const until = Number(parsed.until);
-        return {
-            dismissals: Number.isFinite(dismissals) && dismissals > 0 ? dismissals : 0,
-            until: Number.isFinite(until) && until > 0 ? until : 0,
-        };
+        return { until: Number.isFinite(until) && until > 0 ? until : 0 };
     } catch (error) {
-        return { dismissals: 0, until: 0 };
+        return { until: 0 };
     }
 };
 
@@ -136,28 +137,10 @@ const writeInstallOfferState = (state, storage = safeLocalStorage()) => {
 /** До какого момента предложение отложено (мс эпохи; 0 — не откладывали). */
 export const readInstallSnoozeUntil = (storage = safeLocalStorage()) => readInstallOfferState(storage).until;
 
-/** Сколько раз панель закрывали крестиком. */
-export const readInstallDismissals = (storage = safeLocalStorage()) => readInstallOfferState(storage).dismissals;
-
-/**
- * Панель закрыли крестиком. На текущей загрузке страницы её больше не
- * показывают (это решает сам компонент), а здесь считаем отказы: три подряд —
- * и умолкаем на три дня.
- */
-export const noteInstallOfferDismissed = (now = Date.now(), storage = safeLocalStorage()) => {
-    const state = readInstallOfferState(storage);
-    const dismissals = state.dismissals + 1;
-    if (dismissals >= INSTALL_DISMISS_LIMIT) {
-        writeInstallOfferState({ dismissals: 0, until: now + INSTALL_SNOOZE_MS }, storage);
-        return;
-    }
-    writeInstallOfferState({ dismissals, until: state.until }, storage);
-};
-
-/** Долгая отсрочка. Ставится, когда предлагать больше нечего — портал уже
-    установлен. */
+/** Долгая отсрочка. Ставится в одном-единственном случае: портал установлен,
+    и предлагать больше нечего. Закрытие крестиком сюда НЕ ходит. */
 export const snoozeInstallOffer = (now = Date.now(), storage = safeLocalStorage()) => {
-    writeInstallOfferState({ dismissals: 0, until: now + INSTALL_SNOOZE_MS }, storage);
+    writeInstallOfferState({ until: now + INSTALL_SNOOZE_MS }, storage);
 };
 
 /**

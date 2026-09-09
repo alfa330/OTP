@@ -5,7 +5,6 @@ import InstallGuideSheet from './InstallGuideSheet';
 import './install-app-prompt.css';
 import {
     getInstallState,
-    noteInstallOfferDismissed,
     promptInstall,
     readInstallSnoozeUntil,
     shouldOfferInstall,
@@ -153,13 +152,10 @@ const InstallAppPrompt = () => {
     /* `reason` объясняет, ПОЧЕМУ панель уходит, и от этого зависит, когда она
        вернётся:
          'dismissed' — закрыли крестиком: на этой загрузке страницы больше не
-            показываем (за это отвечает offerShownThisLoad), но обновление
-            страницы вернёт предложение. Считаем отказы: три подряд — молчим три
-            дня;
-         'installed' — портал поставили: предлагать больше нечего;
-         'quiet'     — уходим молча, ничего не записывая. */
+            показываем (за это отвечает offerShownThisLoad), и НИЧЕГО не
+            записываем — обновление страницы вернёт предложение;
+         'installed' — портал поставили: предлагать больше нечего. */
     const hide = useCallback((reason) => {
-        if (reason === 'dismissed') noteInstallOfferDismissed();
         if (reason === 'installed') snoozeInstallOffer();
         setClosing(true);
         setTimeout(() => {
