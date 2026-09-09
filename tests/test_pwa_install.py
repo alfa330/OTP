@@ -418,6 +418,45 @@ class InstallGuideTests(unittest.TestCase):
         self.assertNotIn('.png', self.jsx)
         self.assertNotIn('.jpg', self.jsx)
 
+    def test_guide_height_follows_the_visible_viewport(self):
+        """92vh на телефоне считаются от экрана БЕЗ панелей браузера.
+
+        Окно оказывалось выше видимой части, и его шапка с крестиком уезжала
+        под адресную строку — видно на снимке с живого iPhone 09.09.2026."""
+        # Комментарии вырезаем: в них это имя класса упомянуто как раз ради
+        # объяснения, почему его здесь быть не должно.
+        markup = re.sub(r'/\*.*?\*/', '', self.jsx, flags=re.S)
+        self.assertNotIn('max-h-[92vh]', markup, 'Высота снова задана утилитой vh')
+        css = read(ROOT / 'src' / 'components' / 'common' / 'install-app-prompt.css')
+        block = css[css.index('.iap-guide {'):]
+        block = block[:block.index('}')]
+        self.assertIn('max-height: 92dvh', block)
+
+    def test_guide_does_not_look_finished_before_the_end(self):
+        """Липкая кнопка внизу читалась как дно окна, и до шагов не доходили.
+
+        «Понятно» ушло в конец содержимого, липкой осталась только «Установить»
+        (это действие, ради которого экран открыт), а у нижнего края, пока не
+        докрутили, лежит растушёвка."""
+        self.assertIn('atBottom', self.jsx)
+        self.assertIn('bg-gradient-to-t', self.jsx)
+        tail = self.jsx[self.jsx.index('Понятно') - 900:]
+        self.assertIn('showInstallButton && (', tail)
+
+    def test_mark_fills_the_tile_like_the_real_icon(self):
+        """Знак в плитке был вдвое меньше, чем на самой иконке (85 % стороны).
+
+        Плитка в панели и в инструкции — это обещание того, что появится на
+        домашнем экране; мелкий знак внутри делал её чужой."""
+        for path, tile, mark in (
+            (PROMPT, 84, 71),
+            (GUIDE, 84, 71),
+        ):
+            jsx = read(path)
+            self.assertIn('h-[%dpx] w-[%dpx]' % (tile, tile), jsx)
+            self.assertIn('h-[%dpx] w-[%dpx]' % (mark, mark), jsx)
+            self.assertGreater(mark / tile, 0.8, 'Знак в плитке снова мелкий')
+
     def test_guide_layer_is_above_the_offer_panel(self):
         """Инструкция открывается ИЗ панели и обязана лечь поверх неё."""
         layers = [int(value) for value in re.findall(r'z-\[(\d+)\]', self.jsx)]

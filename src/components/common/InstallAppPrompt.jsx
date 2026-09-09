@@ -209,12 +209,16 @@ const InstallAppPrompt = () => {
 
                     {/* Значок — тот самый, что появится на домашнем экране:
                         человек должен узнать его среди своих приложений. */}
+                    {/* Плитка ровно та же, что появится на домашнем экране:
+                        и размер знака внутри — те же 85 % стороны, что в
+                        scripts/build_pwa_icons.py. На панели он был вдвое
+                        меньше положенного, и значок читался чужим. */}
                     <span
-                        className="iap-sheet__icon mx-auto grid h-[76px] w-[76px] place-items-center rounded-[22px] shadow-[0_8px_22px_rgba(34,64,155,0.28)]"
+                        className="iap-sheet__icon mx-auto grid h-[84px] w-[84px] place-items-center rounded-[24px] shadow-[0_8px_22px_rgba(34,64,155,0.28)]"
                         style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
                         aria-hidden="true"
                     >
-                        <img src={markUrl} alt="" className="iap-sheet__mark h-[42px] w-[42px]" />
+                        <img src={markUrl} alt="" className="iap-sheet__mark h-[71px] w-[71px]" />
                     </span>
 
                     <h2

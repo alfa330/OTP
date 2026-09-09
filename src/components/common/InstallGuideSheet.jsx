@@ -132,7 +132,7 @@ const ShareSheetHeader = () => (
             style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
             aria-hidden="true"
         >
-            <img src={markUrl} alt="" className="h-5 w-5" />
+            <img src={markUrl} alt="" className="h-6 w-6" />
         </span>
         <span className="min-w-0">
             <span className="block truncate text-[9.5px] font-semibold text-slate-800">iCORE — рабочий портал</span>
@@ -143,22 +143,30 @@ const ShareSheetHeader = () => (
 
 /* Домашний экран: значок в лучах — так в образце показан итог установки. */
 const HomeScreenIcon = () => (
-    <div className="relative flex flex-col items-center pb-2 pt-3">
-        <span
-            className="pointer-events-none absolute inset-x-0 top-0 h-[92px] opacity-70"
-            style={{
-                background: 'repeating-conic-gradient(from 0deg at 50% 60%, #e0e7ff 0deg 7deg, #ffffff 7deg 14deg)',
-                WebkitMaskImage: 'radial-gradient(circle at 50% 60%, #000 10%, transparent 72%)',
-                maskImage: 'radial-gradient(circle at 50% 60%, #000 10%, transparent 72%)',
-            }}
-            aria-hidden="true"
-        />
-        <span
-            className="relative grid h-12 w-12 place-items-center rounded-[13px] shadow-[0_6px_16px_rgba(34,64,155,0.3)]"
-            style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
-            aria-hidden="true"
-        >
-            <img src={markUrl} alt="" className="h-[41px] w-[41px]" />
+    <div className="flex flex-col items-center pb-2 pt-4">
+        {/* Лучи и значок лежат в ОДНОЙ коробке размером со значок: центр
+            конического градиента и центр плитки — одна точка. Первая версия
+            рисовала лучи в отдельной полосе сверху, и они расходились из точки
+            под значком — выглядело так, будто светит что-то другое. Лучи идут
+            раньше плитки по разметке, поэтому она рисуется поверх них без
+            возни с z-index; лишнее обрезает корпус телефона. */}
+        <span className="relative grid h-12 w-12 place-items-center">
+            <span
+                className="pointer-events-none absolute left-1/2 top-1/2 h-[132px] w-[132px] -translate-x-1/2 -translate-y-1/2"
+                style={{
+                    background: 'repeating-conic-gradient(from 0deg at 50% 50%, #dbe3ff 0deg 6deg, #ffffff 6deg 13deg)',
+                    WebkitMaskImage: 'radial-gradient(circle at 50% 50%, #000 18%, transparent 70%)',
+                    maskImage: 'radial-gradient(circle at 50% 50%, #000 18%, transparent 70%)',
+                }}
+                aria-hidden="true"
+            />
+            <span
+                className="relative grid h-12 w-12 place-items-center rounded-[13px] shadow-[0_6px_16px_rgba(34,64,155,0.3)]"
+                style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
+                aria-hidden="true"
+            >
+                <img src={markUrl} alt="" className="h-[41px] w-[41px]" />
+            </span>
         </span>
         <span className="relative mt-1.5 text-[9px] font-medium text-slate-600">iCORE</span>
     </div>
@@ -249,7 +257,7 @@ const IOS_STEPS = [
                             style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
                             aria-hidden="true"
                         >
-                            <img src={markUrl} alt="" className="h-3.5 w-3.5" />
+                            <img src={markUrl} alt="" className="h-[17px] w-[17px]" />
                         </span>
                         <span className="text-[9px] font-medium text-slate-700">iCORE</span>
                     </div>
@@ -345,7 +353,15 @@ const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false,
     /* Своя система открывается первой, но переключатель остаётся: инструкцию
        часто показывают коллеге с другим телефоном. */
     const [tab, setTab] = useState(platform === 'android' ? 'android' : 'ios');
+    /* Докручено ли до конца. Нужно ради подсказки внизу: без неё нижний край
+       окна читается как конец экрана, и до карточек с шагами не доходят. */
+    const [atBottom, setAtBottom] = useState(false);
     const stepsRef = useRef(null);
+
+    const handleScroll = (event) => {
+        const el = event.currentTarget;
+        setAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 8);
+    };
 
     useEffect(() => {
         if (open) setTab(platform === 'android' ? 'android' : 'ios');
@@ -392,7 +408,12 @@ const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false,
                 aria-label="Закрыть инструкцию"
             />
 
-            <div className="iap-guide relative flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-[28px] bg-white shadow-[0_-8px_40px_rgba(15,23,42,0.24)] sm:max-w-[430px] sm:rounded-[28px]">
+            {/* Высота задана в install-app-prompt.css через dvh, а не классом
+                max-h-[92vh]: 92vh на iOS считаются от экрана БЕЗ панелей
+                браузера, окно оказывалось выше видимой части, и его шапка
+                («Установка на телефон» с крестиком) уезжала под адресную
+                строку. */}
+            <div className="iap-guide relative flex w-full flex-col overflow-hidden rounded-t-[28px] bg-white shadow-[0_-8px_40px_rgba(15,23,42,0.24)] sm:max-w-[430px] sm:rounded-[28px]">
                 {/* Полоска-ручка — так на iOS выглядит окно, которое тянут снизу. */}
                 <div className="flex justify-center pt-2.5 sm:hidden">
                     <span className="h-1.5 w-9 rounded-full bg-slate-300" aria-hidden="true" />
@@ -412,7 +433,12 @@ const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false,
                     </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto overscroll-contain px-4 pb-4">
+                {/* Прокручиваемый блок — САМ гибкий элемент, без обёртки:
+                    обёртка с flex-1 и вложенный h-full ломали прокрутку —
+                    процентная высота внутри элемента без определённой высоты
+                    считается как auto, содержимое переставало помещаться и
+                    просто обрезалось. */}
+                <div onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-4">
                     {/* Шапка: значок ровно такой, каким станет на домашнем экране. */}
                     <div className="flex flex-col items-center pt-1 text-center">
                         <span
@@ -420,7 +446,7 @@ const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false,
                             style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
                             aria-hidden="true"
                         >
-                            <img src={markUrl} alt="" className="h-[48px] w-[48px]" />
+                            <img src={markUrl} alt="" className="h-[71px] w-[71px]" />
                         </span>
                         <p className="mt-3.5 text-[21px] font-semibold leading-tight tracking-tight text-slate-900">
                             Установите iCORE
@@ -520,10 +546,38 @@ const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false,
                             <StepCard key={step.text} index={index + 1} text={step.text} art={step.art} />
                         ))}
                     </ol>
+
+                    {/* «Понятно» стоит В КОНЦЕ содержимого, а не липкой полосой
+                        внизу. Липкая кнопка честно выглядела дном окна: под ней
+                        не видно, что дальше есть шаги, и до них не доходили.
+                        Липкой остаётся только «Установить» — это действие, ради
+                        которого экран открыт, и оно должно быть под рукой. */}
+                    {!showInstallButton && (
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="mt-6 h-12 w-full rounded-[14px] bg-slate-100 text-[15px] font-semibold text-slate-700 transition-all hover:bg-slate-200 active:scale-[0.99]"
+                        >
+                            Понятно
+                        </button>
+                    )}
                 </div>
 
-                <div className="border-t border-slate-100 px-4 py-3 pb-[max(0.875rem,env(safe-area-inset-bottom))]">
-                    {showInstallButton ? (
+                {/* Растушёвка у нижнего края: пока не докрутили, край окна не
+                    должен выглядеть законченным. Отсчитывается от самого окна,
+                    а не от прокручиваемого блока, и поднимается над липкой
+                    кнопкой установки, когда та есть. */}
+                {!atBottom && (
+                    <div
+                        className={`pointer-events-none absolute inset-x-0 h-12 bg-gradient-to-t from-white via-white/80 to-transparent ${
+                            showInstallButton ? 'bottom-[72px]' : 'bottom-0'
+                        }`}
+                        aria-hidden="true"
+                    />
+                )}
+
+                {showInstallButton && (
+                    <div className="border-t border-slate-100 px-4 py-3 pb-[max(0.875rem,env(safe-area-inset-bottom))]">
                         <button
                             type="button"
                             onClick={onInstall}
@@ -532,16 +586,8 @@ const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false,
                             <Plus className="h-4 w-4" aria-hidden="true" />
                             Установить
                         </button>
-                    ) : (
-                        <button
-                            type="button"
-                            onClick={onClose}
-                            className="h-12 w-full rounded-[14px] bg-slate-100 text-[15px] font-semibold text-slate-700 transition-all hover:bg-slate-200 active:scale-[0.99]"
-                        >
-                            Понятно
-                        </button>
-                    )}
-                </div>
+                    </div>
+                )}
             </div>
         </div>
     );

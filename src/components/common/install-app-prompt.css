@@ -53,6 +53,12 @@
 
 .iap-guide {
     animation: iap-guide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+    /* Высота — здесь, а не утилитой max-h-[92vh]: 92vh на телефоне считаются
+       от экрана БЕЗ панелей браузера, окно получалось выше видимой части и его
+       шапка уезжала под адресную строку. dvh — «сколько видно сейчас».
+       Первая строка остаётся фолбэком для браузеров старше 2022 года. */
+    max-height: 92vh;
+    max-height: 92dvh;
 }
 
 @media (min-width: 640px) {
@@ -87,13 +93,14 @@
         padding-bottom: 0.875rem;
     }
     .iap-sheet .iap-sheet__icon {
-        width: 56px;
-        height: 56px;
+        width: 60px;
+        height: 60px;
         border-radius: 17px;
     }
+    /* Доля знака в плитке та же, что у настоящей иконки, — 85 %. */
     .iap-sheet .iap-sheet__mark {
-        width: 31px;
-        height: 31px;
+        width: 51px;
+        height: 51px;
     }
     .iap-sheet .iap-sheet__title {
         margin-top: 0.625rem;
