@@ -292,6 +292,99 @@ const SIP_SETTINGS_BINOTEL_DEPARTMENT_CODES = new Set(['tez']);
 // Отдел ТЭЗ КЦ — тот же, что у «Чатов ChatApp». Код 'tez' в карточке отдела
 // проставлен не у всех записей, поэтому главу проверяем и по id (как там же).
 const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
+
+/* === Сайдбар: привязка разделов к отделам ===
+ *
+ * Раздел → отделы, к которым он относится. Карта нужна ТОЛЬКО селектору
+ * отдела в сайдбаре (он есть у админов и супер-админов): выбрав отдел, админ
+ * видит его разделы, а не все шестьдесят сразу.
+ *
+ * Раздела в карте НЕТ => он общефирменный и селектором не скрывается никогда
+ * (Задачи, Опросы, Ивенты, Вики, Отделы, Группы, Сессии, QR доступ, учёт
+ * сотрудников, аккаунт). Это осознанно безопасная сторона ошибки: забыть
+ * вписать раздел — значит оставить его на виду, а не потерять.
+ *
+ * Карта НЕ является доступом и не заменяет ни DEPARTMENT_VIEW_ALLOWLIST
+ * (src/utils/departmentViews.js), ни предикаты canAccess*ForUser выше: она
+ * решает лишь «показывать ли пункт при выбранном отделе». Права считает
+ * бэкенд, у каждого раздела свой access.py. Состав отделов у каждой строки
+ * взят из предиката самого раздела, а не придуман:
+ *   oktell_guard/fleet_edm/crm_tickets/driver_chats/szov_wallboard — 'szov'
+ *   (OKTELL_GUARD_DEPARTMENT_CODE и соседние константы);
+ *   chatapp_chats/tez_wallboard — 'tez' (CHATAPP_DEPARTMENT_CODE);
+ *   touches — 'op' (TOUCHES_SECTION_DEPARTMENT_CODE);
+ *   olx_leads — OLX_LEADS_HEAD_DEPARTMENT_CODES;
+ *   wazzup_chats — VERIFIER_CHATS_HEAD_DEPARTMENT_CODES;
+ *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
+ *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
+ *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
+ *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
+ *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
+ *   работа с линией (графики, часы, оценки, шкала, зарплата) — по
+ *   DEPARTMENT_VIEW_ALLOWLIST: у бэк-офиса и маркетинга ни смен, ни часов,
+ *   ни оценок нет.
+ */
+const SIDEBAR_SECTION_DEPARTMENTS = {
+    // Качество обслуживания
+    call_evaluation: ['szov', 'op', 'tez', 'marketing'],
+    call_division: ['szov', 'op', 'tez', 'marketing'],
+    monitoring_scale: ['szov', 'op', 'tez'],
+    ai_qa: ['szov', 'op', 'tez', 'marketing'],
+    // Диалоги
+    crm_tickets: ['szov'],
+    wazzup_chats: ['op', 'szov', 'marketing'],
+    chatapp_chats: ['tez'],
+    driver_chats: ['szov'],
+    olx_leads: ['op', 'marketing'],
+    touches: ['op'],
+    // Смены, часы, ресурсы
+    work_schedules: ['szov', 'op', 'tez', 'front_office'],
+    sv_hours: ['szov', 'op', 'tez'],
+    resource_fte: ['szov'],
+    shift_auction: ['szov'],
+    technical_issues: ['szov', 'op'],
+    group_late_bot: ['front_office', 'hr'],
+    // Табло
+    szov_wallboard: ['szov'],
+    tez_wallboard: ['tez'],
+    // Телефония и программы
+    sip_settings: ['szov', 'op', 'tez'],
+    oktell_guard: ['szov'],
+    fleet_edm: ['szov'],
+    driver_mailings: ['szov'],
+    download_icore_phone: ['op', 'tez'],
+    download_oktell: ['szov'],
+    // Обучение
+    trainings: ['szov', 'op'],
+    voice_trainer: ['szov'],
+    // Оплата и мотивация
+    salary: ['szov', 'op', 'tez'],
+    contests: ['szov'],
+    // Реестры
+    parcels: ['front_office', 'szov'],
+};
+
+// Выбранный в сайдбаре отдел живёт в localStorage: админ работает по одному
+// отделу днями, и терять выбор на каждой перезагрузке незачем. Ключ с id
+// пользователя — на одной машине сидят по очереди несколько админов.
+const sidebarDeptFilterStorageKey = (userId) => `otp:sidebarDeptFilter:${userId ?? 'anon'}`;
+
+/* Обёртка пункта меню: «относится ли раздел к выбранному отделу».
+ *
+ * Стоит ВНУТРИ условия видимости пункта, а не рядом с ним, намеренно: гейт
+ * доступа остаётся ровно той строкой, какой был, и читается там же, где
+ * читался. Пришив фильтр к самому условию, мы бы переписали шесть десятков
+ * гейтов ради того, что доступом не является, — а половина из них дословно
+ * сверяется тестами с зеркалом на бэкенде.
+ *
+ * activeCode пустой (не админ или выбраны «Все отделы») => пункт как был. */
+const SidebarDeptScope = ({ section, activeCode, children }) => {
+    if (!activeCode || !section) return children;
+    const codes = SIDEBAR_SECTION_DEPARTMENTS[section];
+    if (codes && !codes.includes(activeCode)) return null;
+    return children;
+};
+
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -38325,11 +38418,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, []);
             const [showSidebarEmployeesDropdown, setShowSidebarEmployeesDropdown] = useState(false);
             const [showSidebarResourceDropdown, setShowSidebarResourceDropdown] = useState(false);
+            // Селектор отдела над меню (только у админов). Пустая строка —
+            // «Все отделы», то есть поведение сайдбара как до селектора.
+            const [showSidebarDeptFilter, setShowSidebarDeptFilter] = useState(false);
+            const [isDeptFilterClosing, setIsDeptFilterClosing] = useState(false);
+            const [sidebarDeptFilter, setSidebarDeptFilter] = useState('');
             const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
             const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
             const sidebarResourceRef = useRef(null);
+            const sidebarDeptFilterRef = useRef(null);
             const sidebarMenuScrollRef = useRef(null);
             const [employeesDropdownPos, setEmployeesDropdownPos] = useState({ top: 0, left: 0 });
             const [resourceDropdownPos, setResourceDropdownPos] = useState({ top: 0, left: 0 });
@@ -39399,6 +39498,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setIsEmployeesClosing(false);
                 setShowSidebarResourceDropdown(false);
                 setIsResourceClosing(false);
+                setShowSidebarDeptFilter(false);
+                setIsDeptFilterClosing(false);
                 setShowSidebarAccountDropdown(true);
             }
             };
@@ -39424,6 +39525,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setIsClosing(false);
                 setShowSidebarResourceDropdown(false);
                 setIsResourceClosing(false);
+                setShowSidebarDeptFilter(false);
+                setIsDeptFilterClosing(false);
                 setShowSidebarEmployeesDropdown(true);
             }
             };
@@ -39451,8 +39554,59 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setIsClosing(false);
                 setShowSidebarEmployeesDropdown(false);
                 setIsEmployeesClosing(false);
+                setShowSidebarDeptFilter(false);
+                setIsDeptFilterClosing(false);
                 setShowSidebarResourceDropdown(true);
             }
+            };
+
+            /* Селектор отдела над меню — та же выпадашка, что у «Аккаунта»,
+               «Учета сотрудников» и «Расчета ресурсов»: 200 мс совпадают с
+               анимацией dropdown-reverse (tailwind.config.cjs), поэтому
+               элемент снимается ровно в момент её конца. Панель этого
+               селектора стоит ВНЕ прокручиваемого списка разделов, поэтому
+               ей, в отличие от тех двух, не нужны измеренные координаты. */
+            const handleToggleDeptFilterDropdown = (forceClose = null) => {
+            if (forceClose === true) {
+                setIsDeptFilterClosing(true);
+                setTimeout(() => {
+                setShowSidebarDeptFilter(false);
+                setIsDeptFilterClosing(false);
+                }, 200);
+                return;
+            }
+
+            if (showSidebarDeptFilter) {
+                setIsDeptFilterClosing(true);
+                setTimeout(() => {
+                setShowSidebarDeptFilter(false);
+                setIsDeptFilterClosing(false);
+                }, 200);
+            } else {
+                setShowSidebarAccountDropdown(false);
+                setIsClosing(false);
+                setShowSidebarEmployeesDropdown(false);
+                setIsEmployeesClosing(false);
+                setShowSidebarResourceDropdown(false);
+                setIsResourceClosing(false);
+                setShowSidebarDeptFilter(true);
+            }
+            };
+
+            // Выбор отдела: сохраняем сразу, иначе выбор терялся бы на
+            // перезагрузке — а админ работает по одному отделу днями.
+            const handleSelectSidebarDept = (code) => {
+                const next = code || '';
+                setSidebarDeptFilter(next);
+                try {
+                    const key = sidebarDeptFilterStorageKey(user?.id);
+                    if (next) localStorage.setItem(key, next);
+                    else localStorage.removeItem(key);
+                } catch (e) {
+                    /* приватный режим или запрет на хранилище — выбор просто
+                       не переживёт перезагрузку, работать это не мешает */
+                }
+                handleToggleDeptFilterDropdown(true);
             };
 
             const openAppViewInNewTab = useCallback((nextView) => {
@@ -39914,10 +40068,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     handleToggleResourceDropdown(true);
                 }
                 }
+                if (sidebarDeptFilterRef.current && !sidebarDeptFilterRef.current.contains(e.target)) {
+                if (showSidebarDeptFilter) {
+                    handleToggleDeptFilterDropdown(true);
+                }
+                }
             }
             document.addEventListener("mousedown", handleClickOutside);
             return () => document.removeEventListener("mousedown", handleClickOutside);
-            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown, showSidebarResourceDropdown]);
+            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown, showSidebarResourceDropdown, showSidebarDeptFilter]);
 
             useEffect(() => {
                 if (!showSidebarEmployeesDropdown && !isEmployeesClosing) return;
@@ -45988,6 +46147,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
             }, [clearSensitiveQrPolling, stopQrScanner]);
 
+            /* Восстановление выбранного отдела. Только для админов: у
+               остальных фильтра нет, а оставшееся в хранилище значение от
+               прошлого хозяина машины молча урезало бы им меню. */
+            useEffect(() => {
+                if (!user?.id || !isAdminLikeRole) {
+                    setSidebarDeptFilter('');
+                    return;
+                }
+                try {
+                    setSidebarDeptFilter(localStorage.getItem(sidebarDeptFilterStorageKey(user.id)) || '');
+                } catch (e) {
+                    setSidebarDeptFilter('');
+                }
+            }, [user?.id, isAdminLikeRole]);
+
             useEffect(() => {
                 if (!user || !user.id) return;
 
@@ -46326,6 +46500,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 handleToggleDropdown,
                 handleToggleEmployeesDropdown,
                 handleToggleResourceDropdown,
+                handleToggleDeptFilterDropdown,
+                handleSelectSidebarDept,
                 handleLogout,
                 openCallEvaluationSection,
                 fetchDirections,
@@ -46339,6 +46515,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const stableSidebarHandleToggleDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleDropdown(arg), []);
             const stableSidebarHandleToggleEmployeesDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleEmployeesDropdown(arg), []);
             const stableSidebarHandleToggleResourceDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleResourceDropdown(arg), []);
+            const stableSidebarHandleToggleDeptFilter = useCallback((arg) => sidebarLatestRef.current.handleToggleDeptFilterDropdown(arg), []);
+            const stableSidebarSelectDept = useCallback((code) => sidebarLatestRef.current.handleSelectSidebarDept(code), []);
             const stableSidebarHandleLogout = useCallback(() => sidebarLatestRef.current.handleLogout(), []);
             const stableSidebarOpenCallEvaluationSection = useCallback((opts) => sidebarLatestRef.current.openCallEvaluationSection(opts), []);
             const stableSidebarFetchDirections = useCallback(() => sidebarLatestRef.current.fetchDirections(), []);
@@ -46478,6 +46656,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const renderSidebarDividerInner = () => (
                     <hr className="border-t border-white-700 my-2 opacity-40" />
                 );
+                /* Разделитель между блоками меню. Рисуется, только если в
+                   блоке ниже есть хоть один пункт: набор разделов у отдела и
+                   роли разный, и безусловная черта оставляла бы у половины
+                   аудитории две линии подряд или линию в конце списка. */
+                const renderDividerIfInner = (...flags) => (
+                    flags.some(Boolean) ? renderSidebarDividerInner() : null
+                );
                 const renderSurveysSidebarLabelInner = () => (
                     <span className="sidebar-text inline-flex items-center gap-2">
                         <span>Опросы</span>
@@ -46554,6 +46739,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </button>
                     </li>
                 );
+                /* Селектор отдела над меню. Пустое значение — «Все отделы»,
+                   то есть меню ведёт себя как до селектора; поэтому у не-админа
+                   активного отдела нет никогда и фильтр для него отключён
+                   целиком (см. SIDEBAR_SECTION_DEPARTMENTS). */
+                const activeDeptCode = isAdminLikeRole ? (sidebarDeptFilter || null) : null;
+                /* Тот же ответ, что даёт SidebarDeptScope самому пункту, но
+                   нужен ЗАРАНЕЕ: по нему решается, рисовать ли черту перед
+                   блоком. Без этого блок, опустевший из-за выбранного отдела,
+                   оставлял свою черту — и у отдела кадров их шло пять подряд. */
+                const deptAllowsInner = (section) => {
+                    if (!activeDeptCode) return true;
+                    const codes = SIDEBAR_SECTION_DEPARTMENTS[section];
+                    return !codes || codes.includes(activeDeptCode);
+                };
+                const sidebarDeptOptions = (Array.isArray(departments) ? departments : [])
+                    .filter((dept) => dept && dept.code && dept.is_active !== false);
+                const activeDeptName = activeDeptCode
+                    ? (sidebarDeptOptions.find((dept) => String(dept.code).toLowerCase() === activeDeptCode)?.name
+                        || activeDeptCode)
+                    : 'Все отделы';
+
                 return (
                     <>
                         {/* Окно «Новость дня» — поверх всего портала и вне
@@ -46651,6 +46857,56 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         mobileMenuOpen={mobileMenuOpen}
                                     />
                                 </div>
+                                {/* Селектор отдела — только у админов и супер-админов:
+                                    у них в меню разделы всех семи отделов сразу, и
+                                    найти нужный без фильтра трудно. Выпадашка та же,
+                                    что у «Учета сотрудников», но стоит ВНЕ
+                                    прокручиваемого списка, поэтому обходится обычным
+                                    absolute вместо измеренных координат. */}
+                                {isAdminLikeRole && (
+                                    <div className="mb-2 relative" ref={sidebarDeptFilterRef}>
+                                        <button
+                                            type="button"
+                                            onClick={stableSidebarHandleToggleDeptFilter}
+                                            aria-expanded={showSidebarDeptFilter}
+                                            aria-haspopup="menu"
+                                            title={activeDeptCode ? `Разделы отдела: ${activeDeptName}` : 'Показаны разделы всех отделов'}
+                                            className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${activeDeptCode ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-building"></FaIcon>
+                                            <span className="sidebar-text truncate">{activeDeptName}</span>
+                                            <FaIcon className="fas fa-chevron-down ml-auto opacity-70 sidebar-text"></FaIcon>
+                                        </button>
+
+                                        {(showSidebarDeptFilter || isDeptFilterClosing) && (
+                                            <div
+                                                className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 max-h-96 overflow-y-auto thin-scroll ${showSidebarDeptFilter && !isDeptFilterClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 9999 }}
+                                            >
+                                                <button
+                                                    onClick={() => stableSidebarSelectDept('')}
+                                                    className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${!activeDeptCode ? 'bg-gray-100 font-medium' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-layer-group mr-2"></FaIcon> Все отделы
+                                                </button>
+                                                {sidebarDeptOptions.map((dept) => {
+                                                    const code = String(dept.code).toLowerCase();
+                                                    return (
+                                                        <React.Fragment key={code}>
+                                                            <div className="border-t border-gray-200" />
+                                                            <button
+                                                                onClick={() => stableSidebarSelectDept(code)}
+                                                                className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${activeDeptCode === code ? 'bg-gray-100 font-medium' : ''}`}
+                                                            >
+                                                                <FaIcon className="fas fa-building mr-2"></FaIcon> {dept.name || code}
+                                                            </button>
+                                                        </React.Fragment>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
                                     {canAccessLmsSection && departmentAllowsView(user, 'lms') && (
                                         <>
@@ -46664,24 +46920,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
+
                                     {/* «Отметки» стоят в ОБЩЕЙ части меню, а не в ветке роли: раздел выдаётся
                                         разнородной аудитории (глобальные админы, глава фронт-офисов, весь отдел
                                         кадрового учёта), и ни одна ветка сайдбара их всех не покрывает — у роли
                                         hr_manager своей ветки нет вовсе, и пункт просто не отрисовался бы.
                                         Правило «пункт в двух ветках» относится к разделам одной роли. */}
                                     {canAccessGroupLateBotSection && (
-                                        <li>
-                                            <button
-                                                onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
-                                                className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
-                                            >
-                                                <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Отметки</span>
-                                            </button>
-                                        </li>
+                                        <SidebarDeptScope section="group_late_bot" activeCode={activeDeptCode}>
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Отметки</span>
+                                                </button>
+                                            </li>
+                                        </SidebarDeptScope>
                                     )}
                                     {isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && renderSidebarDividerInner()}
+                                            {/* Блок 1 — сотрудники, оргструктура и доступ. */}
                                             <li className="relative" ref={sidebarEmployeesRef}>
                                                 <button
                                                     onClick={stableSidebarHandleToggleEmployeesDropdown}
@@ -46747,8 +47007,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'admin_sessions')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-laptop-house"></FaIcon> <span className="sidebar-text">Сессии</span>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'departments')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'departments' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
+                                                </button>
+                                            </li>
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
                                                 </button>
                                             </li>
                                             <li>
@@ -46756,148 +47021,207 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
                                                 </button>
                                             </li>
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'admin_sessions')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-laptop-house"></FaIcon> <span className="sidebar-text">Сессии</span>
+                                                </button>
+                                            </li>
 
-                                            {renderSidebarDividerInner()}
+                                            {renderDividerIfInner(deptAllowsInner('call_evaluation'), deptAllowsInner('ai_qa'), deptAllowsInner('call_division'), deptAllowsInner('monitoring_scale'))}
 
-                                            <li>
-                                                <button
-                                                    onClick={(e) => stableSidebarOpenCallEvaluationSection({
-                                                        supervisorId: selectedSvId || null,
-                                                        month: selectedReportMonth || selectedMonth,
-                                                        openInNewTab: isNewTabNavigationEvent(e)
-                                                    })}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'monitoring_scale', { onNavigate: () => stableSidebarFetchDirections() })}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
-                                                </button>
-                                            </li>
-                                            {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
+                                            {/* Блок 2 — качество обслуживания: оценки звонков и шкала. */}
+                                            <SidebarDeptScope section="call_evaluation" activeCode={activeDeptCode}>
                                                 <li>
                                                     <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
+                                                        onClick={(e) => stableSidebarOpenCallEvaluationSection({
+                                                            supervisorId: selectedSvId || null,
+                                                            month: selectedReportMonth || selectedMonth,
+                                                            openInNewTab: isNewTabNavigationEvent(e)
+                                                        })}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                                     >
-                                                        <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                        <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
                                                     </button>
                                                 </li>
-                                            )}
-                                            {canAccessOktellGuard && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
-                                                    </button>
-                                                </li>
-                                            )}
-                                            {canAccessFleetEdm && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
-                                                    </button>
-                                                </li>
-                                            )}
-                                            {canAccessDriverMailings && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
-                                                    </button>
-                                                </li>
-                                            )}
+                                            </SidebarDeptScope>
                                             {canAccessAiQaSection && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
-                                                    </button>
-                                                </li>
+                                                <SidebarDeptScope section="ai_qa" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
                                             )}
-                                            {canAccessVerifierChatsSection && (
+                                            <SidebarDeptScope section="call_division" activeCode={activeDeptCode}>
                                                 <li>
                                                     <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'call_division')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_division' ? 'bg-blue-700' : ''}`}
                                                     >
-                                                        <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                        <FaIcon className="fas fa-random" /> <span className="sidebar-text">Деление звонков</span>
                                                     </button>
                                                 </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="monitoring_scale" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'monitoring_scale', { onNavigate: () => stableSidebarFetchDirections() })}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'monitoring_scale' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-sliders-h"></FaIcon> <span className="sidebar-text">Мониторинговая шкала</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+
+                                            {renderDividerIfInner(canAccessVerifierChatsSection && deptAllowsInner('wazzup_chats'), canAccessChatAppSection && deptAllowsInner('chatapp_chats'))}
+
+                                            {/* Блок 3 — переписка с клиентами по мессенджерам. */}
+                                            {canAccessVerifierChatsSection && (
+                                                <SidebarDeptScope section="wazzup_chats" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
                                             )}
                                             {canAccessChatAppSection && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'chatapp_chats')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
-                                                    </button>
-                                                </li>
+                                                <SidebarDeptScope section="chatapp_chats" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'chatapp_chats')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
                                             )}
 
+                                            {renderDividerIfInner(canAccessSzovWallboardSection && deptAllowsInner('szov_wallboard'), canAccessTezWallboardSection && deptAllowsInner('tez_wallboard'))}
+
+                                            {/* Блок 4 — табло онлайн-нагрузки. */}
                                             {canAccessSzovWallboardSection && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'szov_wallboard')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
-                                                    </button>
-                                                </li>
+                                                <SidebarDeptScope section="szov_wallboard" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'szov_wallboard')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
                                             )}
                                             {canAccessTezWallboardSection && (
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'tez_wallboard')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_wallboard' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Табло Тез КЦ</span>
-                                                    </button>
-                                                </li>
+                                                <SidebarDeptScope section="tez_wallboard" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'tez_wallboard')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_wallboard' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Табло Тез КЦ</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
                                             )}
 
-                                            {renderSidebarDividerInner()}
+                                            {renderDividerIfInner(
+                                                (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
+                                                canAccessOktellGuard && deptAllowsInner('oktell_guard'),
+                                                canAccessFleetEdm && deptAllowsInner('fleet_edm'),
+                                                canAccessDriverMailings && deptAllowsInner('driver_mailings'),
+                                            )}
 
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
-                                                </button>
-                                            </li>
+                                            {/* Блок 5 — телефония, интеграции и рассылки водителям. */}
+                                            {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
+                                                <SidebarDeptScope section="sip_settings" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessOktellGuard && (
+                                                <SidebarDeptScope section="oktell_guard" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessFleetEdm && (
+                                                <SidebarDeptScope section="fleet_edm" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessDriverMailings && (
+                                                <SidebarDeptScope section="driver_mailings" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'driver_mailings')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+
+                                            {renderDividerIfInner(
+                                                deptAllowsInner('work_schedules'),
+                                                deptAllowsInner('sv_hours'),
+                                                canAccessResourceFteSection && deptAllowsInner('resource_fte'),
+                                                deptAllowsInner('shift_auction'),
+                                                deptAllowsInner('trainings'),
+                                                deptAllowsInner('technical_issues'),
+                                            )}
+
+                                            {/* Блок 6 — смены, часы и ресурсы линии. */}
+                                            <SidebarDeptScope section="work_schedules" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="sv_hours" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sv_hours')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sv_hours' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-clock" /> <span className="sidebar-text">Учет часов</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
                                             {canAccessResourceFteSection && (
+                                                <SidebarDeptScope section="resource_fte" activeCode={activeDeptCode}>
                                                 <li className="relative" ref={sidebarResourceRef}>
                                                     <button
                                                         onClick={stableSidebarHandleToggleResourceDropdown}
@@ -46936,63 +47260,61 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </div>
                                                     )}
                                                 </li>
+                                                </SidebarDeptScope>
                                             )}
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
-                                                </button>
-                                            </li>
+                                            <SidebarDeptScope section="shift_auction" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="trainings" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'trainings')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'trainings' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Учет тренингов</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="technical_issues" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'technical_issues')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'technical_issues' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-tools"></FaIcon> <span className="sidebar-text">Тех причины</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
 
                                             {renderSidebarDividerInner()}
 
+                                            {/* Блок 7 — задачи, опросы и мотивация. */}
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
-                                            </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
-                                                </button>
                                             </li>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
                                                 </button>
                                             </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
-                                                </button>
-                                            </li>
-                                            {isAdminLikeRole && (
-                                                <>
-                                                    {renderSidebarDividerInner()}
-                                                    <li>
-                                                        <button onClick={(e) => handleSidebarViewNavigation(e, 'departments')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'departments' ? 'bg-blue-700' : ''}`}>
-                                                            <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
-                                                        </button>
-                                                    </li>
-                                                    <li>
-                                                        <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
-                                                            <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
-                                                        </button>
-                                                    </li>
-                                                </>
-                                            )}
+                                            <SidebarDeptScope section="salary" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'salary')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'salary' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-calculator"></FaIcon> <span className="sidebar-text">Калькулятор зарплаты</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
+                                            <SidebarDeptScope section="contests" activeCode={activeDeptCode}>
+                                                <li>
+                                                    <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                                        <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
+                                                    </button>
+                                                </li>
+                                            </SidebarDeptScope>
                                         </>
                                     )}
+
                                     {isDepartmentHead(user) && !isAdminLikeRole && !isScopedDepartmentHead && (
                                         <>
                                             {renderSidebarDividerInner()}
@@ -47003,9 +47325,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
+
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {/* Порядок блоков тот же, что в ветке админов, — чтобы
+                                                раздел искали в одном и том же месте, кем бы ни зашли. */}
                                             {isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}>
@@ -47081,7 +47406,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
+
+                                            {renderDividerIfInner(
+                                                departmentAllowsView(user, 'call_evaluation'),
+                                                departmentAllowsView(user, 'call_division'),
+                                                isDepartmentHeadUser && departmentAllowsView(user, 'monitoring_scale'),
+                                                isAiQaDepartmentHead(user) || isAiQaSupervisor(user),
+                                            )}
+
                                             {departmentAllowsView(user, 'call_evaluation') && (
                                             <li>
                                                 <button
@@ -47092,6 +47424,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'call_evaluation' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-clipboard-check"></FaIcon> <span className="sidebar-text">Журнал оценок</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {(isAiQaDepartmentHead(user) || isAiQaSupervisor(user)) && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47115,6 +47457,60 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+
+                                            {renderDividerIfInner(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user), canAccessChatAppSection)}
+
+                                            {/* «Чаты Верификаторов» — раздел отдела продаж (переписка Wazzup),
+                                                а не общий: СВ СЗоВ и Тез КЦ он не нужен, у них своя переписка
+                                                (Chat2Desk и «Чаты ChatApp»). Поэтому здесь остался прежний
+                                                предикат СВ ОП, а не общий по разделу «ИИ-оценка». */}
+                                            {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {/* СВ и глава отдела ТЭЗ: админы видят этот пункт в своей ветке выше */}
+                                            {canAccessChatAppSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'chatapp_chats')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
+                                                </button>
+                                            </li>
+                                            )}
+
+                                            {renderDividerIfInner(canAccessSzovWallboardSection, canAccessTezWallboardSection)}
+
+                                            {canAccessSzovWallboardSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'szov_wallboard')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessTezWallboardSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'tez_wallboard')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_wallboard' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Табло Тез КЦ</span>
+                                                </button>
+                                            </li>
+                                            )}
+
+                                            {renderDividerIfInner(canAccessSipSettingsFleet || canAccessSipSettingsTez, canAccessOktellGuard, canAccessFleetEdm, canAccessDriverMailings)}
+
                                             {(canAccessSipSettingsFleet || canAccessSipSettingsTez) && (
                                             <li>
                                                 <button
@@ -47162,62 +47558,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {(isAiQaDepartmentHead(user) || isAiQaSupervisor(user)) && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'ai_qa')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'ai_qa' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-robot"></FaIcon> <span className="sidebar-text">ИИ-оценка</span>
-                                                </button>
-                                            </li>
+
+                                            {renderDividerIfInner(
+                                                departmentAllowsView(user, 'work_schedules'),
+                                                departmentAllowsView(user, 'sv_hours'),
+                                                canAccessResourceFteSection && departmentAllowsView(user, 'resource_fte'),
+                                                departmentAllowsView(user, 'shift_auction'),
+                                                departmentAllowsView(user, 'trainings'),
+                                                departmentAllowsView(user, 'technical_issues'),
                                             )}
-                                            {/* «Чаты Верификаторов» — раздел отдела продаж (переписка Wazzup),
-                                                а не общий: СВ СЗоВ и Тез КЦ он не нужен, у них своя переписка
-                                                (Chat2Desk и «Чаты ChatApp»). Поэтому здесь остался прежний
-                                                предикат СВ ОП, а не общий по разделу «ИИ-оценка». */}
-                                            {(isAiQaDepartmentHead(user) || isOpSalesSupervisorForAiQa(user)) && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'wazzup_chats')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wazzup_chats' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-comments"></FaIcon> <span className="sidebar-text">Чаты Верификаторов</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {/* СВ и глава отдела ТЭЗ: админы видят этот пункт в своей ветке выше */}
-                                            {canAccessChatAppSection && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'chatapp_chats')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {canAccessSzovWallboardSection && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'szov_wallboard')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {canAccessTezWallboardSection && (
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'tez_wallboard')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_wallboard' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Табло Тез КЦ</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
+
                                             {departmentAllowsView(user, 'work_schedules') && (
                                             <li>
                                                 <button
@@ -47302,23 +47652,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
-                                            {!departmentRestrictsViews(user) && renderSidebarDividerInner()}
-                                            {departmentAllowsView(user, 'surveys') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
-                                                </button>
-                                            </li>
+
+                                            {renderDividerIfInner(
+                                                departmentAllowsView(user, 'tasks'),
+                                                departmentAllowsView(user, 'surveys'),
+                                                departmentAllowsView(user, 'salary'),
+                                                departmentAllowsView(user, 'contests'),
                                             )}
+
                                             {departmentAllowsView(user, 'tasks') && (
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
                                             )}
-                                            {departmentAllowsView(user, 'contests') && (
+                                            {departmentAllowsView(user, 'surveys') && (
                                             <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
                                                 </button>
                                             </li>
                                             )}
@@ -47329,8 +47679,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {departmentAllowsView(user, 'contests') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'contests')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'contests' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-award"></FaIcon> <span className="sidebar-text">Конкурсы</span>
+                                                </button>
+                                            </li>
+                                            )}
                                         </>
                                     )}
+
                                     {isPlainTrainer && (
                                         <>
                                             <li>
@@ -47361,6 +47719,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </>
                                     )}
+
                                     {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                                         <>
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
@@ -47461,6 +47820,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </>
                                     )}
+
                                     {/* Запрещающий список: сюда проваливается любая роль, которую
                                         забыли перечислить, — так «Калькулятор зарплаты» и открылся
                                         сотрудникам бэк-офиса. Рядовых отсекаем предикатом, он растёт
@@ -47476,7 +47836,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
-                                    {/* «Ивенты» — общий пункт для всех ролей (вне role-веток). */}
+                                    {/* «Ивенты» и «Вики» — общие для всех ролей, поэтому
+                                        объявлены здесь, а не по ролевым ветвям. */}
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
 
@@ -47495,168 +47856,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
-                                    {/* «Обращения» — заявки в рабочие Telegram-группы.
-                                        На время выката пункт видят СЗоВ (глава и СВ), админы и
-                                        пилотный оператор; периметр внутри (свои / группы / отдел)
-                                        считает бэкенд. Бейдж — непрочитанные ответы, из колокола.
-                                        Пункт объявлен ОДИН раз в общей части меню, а не по ролевым
-                                        ветвям: иначе его легко забыть в одной из них. */}
-                                    {canAccessCrmSection && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'crm_tickets')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'crm_tickets' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-headset"></FaIcon>
-                                            <span className="sidebar-text">Обращения</span>
-                                            {crmUnreadCount > 0 && (
-                                                <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-white/90 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-blue-700">
-                                                    {crmUnreadCount}
-                                                </span>
-                                            )}
-                                        </button>
-                                    </li>
+                                    {renderDividerIfInner(
+                                        canAccessCrmSection && deptAllowsInner('crm_tickets'),
+                                        canAccessParcelsSection && deptAllowsInner('parcels'),
+                                        canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
+                                        canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
+                                        canAccessTouchesSection && deptAllowsInner('touches'),
+                                        canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user),
+                                        canAccessVerifierChatsSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user),
                                     )}
 
-                                    {/* «Посылки» — реестр невостребованных посылок фронт-офисов.
-                                        Раздел общий для двух отделов (фронт-офисы пишут, СЗоВ
-                                        читает), поэтому пункт объявлен ОДИН раз здесь, в общей
-                                        части меню, а не по ролевым ветвям — как «Вики» и
-                                        «Обращения». Кто что может внутри, считает бэкенд. */}
-                                    {canAccessParcelsSection && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'parcels')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'parcels' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-box"></FaIcon>
-                                            <span className="sidebar-text">Посылки</span>
-                                        </button>
-                                    </li>
-                                    )}
-
-                                    {/* «Чаты водителей» — поиск переписки водителя по
-                                        номеру и передача её чат-менеджеру (задача #271).
-                                        Пункт объявлен ОДИН раз здесь, в общей части
-                                        меню, как «Вики», «Обращения» и «Посылки»:
-                                        аудитория одна (СЗоВ), но внутри неё есть и
-                                        операторы, и супервайзеры, и глава отдела, а
-                                        чат-менеджеры исключены — по ролевым ветвям это
-                                        не выражается. Кто что может внутри, считает
-                                        бэкенд. */}
-                                    {canAccessDriverChatsSection && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'driver_chats')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_chats' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-comments"></FaIcon>
-                                            <span className="sidebar-text">Чаты водителей</span>
-                                        </button>
-                                    </li>
-                                    )}
-
-                                    {/* «Лиды OLX» — журнал робота, который переносит
-                                        отклики из чатов девяти кабинетов OLX в amoCRM
-                                        (задача #223). Пункт объявлен ОДИН раз здесь, в
-                                        общей части меню, как «Вики», «Обращения» и
-                                        «Посылки»: аудитория разнородная (глобальные
-                                        админы, глава «Маркетинга», глава ОП), и по
-                                        ролевым ветвям его легко забыть в одной из них. */}
-                                    {canAccessOlxLeadsSection && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'olx_leads')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'olx_leads' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-right-left"></FaIcon>
-                                            <span className="sidebar-text">Лиды OLX</span>
-                                        </button>
-                                    </li>
-                                    )}
-
-                                    {/* «Касания» — звонки отдела продаж из CDR АТС.
-                                        Пункт объявлен ОДИН раз здесь, в общей части
-                                        меню, как «Вики», «Обращения» и «Посылки»:
-                                        аудитория разнородная (глобальные админы, глава
-                                        ОП, СВ ОП), и по ролевым ветвям его легко забыть
-                                        в одной — так уже было с «Ботом опозданий».
-                                        Кто что может внутри, считает бэкенд. */}
-                                    {canAccessTouchesSection && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'touches')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'touches' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-phone-volume"></FaIcon>
-                                            <span className="sidebar-text">Касания</span>
-                                        </button>
-                                    </li>
-                                    )}
-
-                                    {/* «Тренажёр» — голосовой разговор с ИИ и разбор после него.
-                                        Раздел тестовый: тратит платные квоты и раздаёт браузеру
-                                        ключи к внешним сервисам, поэтому только супер-админ.
-                                        Гейт продублирован на сервере — спрятанный пункт меню
-                                        доступом не является, раздел открывается и прямым адресом.
-                                        Объявлен ОДИН раз в общей части, как «Вики» и «Обращения». */}
-                                    {isSuperAdmin && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'voice_trainer')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'voice_trainer' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-microphone"></FaIcon>
-                                            <span className="sidebar-text">Тренажёр</span>
-                                        </button>
-                                    </li>
-                                    )}
-
-                                    {/* «Скачать iCore Phone» — программа телефона сотруднику.
-                                        Только отделы продаж и Тез КЦ, а также админы: раздаётся он там.
-                                        Названо именем самой программы, а не «телефон»: у СЗоВ
-                                        рядом стоит «Скачать Oktell», и два безымянных «телефона»
-                                        в одном меню человек различить не сможет.
-                                        Объявлен ОДИН раз в общей части меню, а не по ролевым
-                                        ветвям. Это не переход в раздел, а действие: ссылка на
-                                        файл в GCS подписана на час, поэтому берётся свежей по
-                                        нажатию. Само ограничение проверяет бэкенд. */}
-                                    {canDownloadIcorePhone && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={downloadIcorePhone}
-                                            className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
-                                        >
-                                            <FaIcon className="fas fa-download"></FaIcon>
-                                            <span className="sidebar-text">Скачать iCore Phone</span>
-                                        </button>
-                                    </li>
-                                    )}
-
-                                    {/* «Скачать Oktell» — то же действие для СЗоВ: их телефон
-                                        это веб-клиент Oktell, а вместе с ним ставится и
-                                        ограничитель «Перезвона». Круг шире раздела —
-                                        каждый оператор отдела (can_download_agent на бэкенде). */}
-                                    {canDownloadOktellAgent && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={downloadOktellAgent}
-                                            className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
-                                        >
-                                            <FaIcon className="fas fa-download"></FaIcon>
-                                            <span className="sidebar-text">Скачать Oktell</span>
-                                        </button>
-                                    </li>
-                                    )}
-
+                                    {/* Работа с водителем и качество обслуживания: разделы,
+                                        выданные отделу или поимённо, а не роли. */}
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user) && (
                                         <li>
                                             <button
@@ -47681,6 +47892,193 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                     )}
+
+                                    {/* «Обращения» — заявки в рабочие Telegram-группы.
+                                        На время выката пункт видят СЗоВ (глава и СВ), админы и
+                                        пилотный оператор; периметр внутри (свои / группы / отдел)
+                                        считает бэкенд. Бейдж — непрочитанные ответы, из колокола.
+                                        Пункт объявлен ОДИН раз в общей части меню, а не по ролевым
+                                        ветвям: иначе его легко забыть в одной из них. */}
+                                    {canAccessCrmSection && (
+                                    <SidebarDeptScope section="crm_tickets" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'crm_tickets')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'crm_tickets' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-headset"></FaIcon>
+                                                <span className="sidebar-text">Обращения</span>
+                                                {crmUnreadCount > 0 && (
+                                                    <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-white/90 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-blue-700">
+                                                        {crmUnreadCount}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Посылки» — реестр невостребованных посылок фронт-офисов.
+                                        Раздел общий для двух отделов (фронт-офисы пишут, СЗоВ
+                                        читает), поэтому пункт объявлен ОДИН раз здесь, в общей
+                                        части меню, а не по ролевым ветвям — как «Вики» и
+                                        «Обращения». Кто что может внутри, считает бэкенд. */}
+                                    {canAccessParcelsSection && (
+                                    <SidebarDeptScope section="parcels" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'parcels')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'parcels' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-box"></FaIcon>
+                                                <span className="sidebar-text">Посылки</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Чаты водителей» — поиск переписки водителя по
+                                        номеру и передача её чат-менеджеру (задача #271).
+                                        Пункт объявлен ОДИН раз здесь, в общей части
+                                        меню, как «Вики», «Обращения» и «Посылки»:
+                                        аудитория одна (СЗоВ), но внутри неё есть и
+                                        операторы, и супервайзеры, и глава отдела, а
+                                        чат-менеджеры исключены — по ролевым ветвям это
+                                        не выражается. Кто что может внутри, считает
+                                        бэкенд. */}
+                                    {canAccessDriverChatsSection && (
+                                    <SidebarDeptScope section="driver_chats" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'driver_chats')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_chats' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-comments"></FaIcon>
+                                                <span className="sidebar-text">Чаты водителей</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Лиды OLX» — журнал робота, который переносит
+                                        отклики из чатов девяти кабинетов OLX в amoCRM
+                                        (задача #223). Пункт объявлен ОДИН раз здесь, в
+                                        общей части меню, как «Вики», «Обращения» и
+                                        «Посылки»: аудитория разнородная (глобальные
+                                        админы, глава «Маркетинга», глава ОП), и по
+                                        ролевым ветвям его легко забыть в одной из них. */}
+                                    {canAccessOlxLeadsSection && (
+                                    <SidebarDeptScope section="olx_leads" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'olx_leads')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'olx_leads' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-right-left"></FaIcon>
+                                                <span className="sidebar-text">Лиды OLX</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Касания» — звонки отдела продаж из CDR АТС.
+                                        Пункт объявлен ОДИН раз здесь, в общей части
+                                        меню, как «Вики», «Обращения» и «Посылки»:
+                                        аудитория разнородная (глобальные админы, глава
+                                        ОП, СВ ОП), и по ролевым ветвям его легко забыть
+                                        в одной — так уже было с «Ботом опозданий».
+                                        Кто что может внутри, считает бэкенд. */}
+                                    {canAccessTouchesSection && (
+                                    <SidebarDeptScope section="touches" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'touches')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'touches' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-phone-volume"></FaIcon>
+                                                <span className="sidebar-text">Касания</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {renderDividerIfInner(
+                                        isSuperAdmin && deptAllowsInner('voice_trainer'),
+                                        canDownloadIcorePhone && deptAllowsInner('download_icore_phone'),
+                                        canDownloadOktellAgent && deptAllowsInner('download_oktell'),
+                                    )}
+
+                                    {/* Тренажёр и программы на машину сотрудника. */}
+                                    {/* «Тренажёр» — голосовой разговор с ИИ и разбор после него.
+                                        Раздел тестовый: тратит платные квоты и раздаёт браузеру
+                                        ключи к внешним сервисам, поэтому только супер-админ.
+                                        Гейт продублирован на сервере — спрятанный пункт меню
+                                        доступом не является, раздел открывается и прямым адресом.
+                                        Объявлен ОДИН раз в общей части, как «Вики» и «Обращения». */}
+                                    {isSuperAdmin && (
+                                    <SidebarDeptScope section="voice_trainer" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'voice_trainer')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'voice_trainer' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-microphone"></FaIcon>
+                                                <span className="sidebar-text">Тренажёр</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Скачать iCore Phone» — программа телефона сотруднику.
+                                        Только отделы продаж и Тез КЦ, а также админы: раздаётся он там.
+                                        Названо именем самой программы, а не «телефон»: у СЗоВ
+                                        рядом стоит «Скачать Oktell», и два безымянных «телефона»
+                                        в одном меню человек различить не сможет.
+                                        Объявлен ОДИН раз в общей части меню, а не по ролевым
+                                        ветвям. Это не переход в раздел, а действие: ссылка на
+                                        файл в GCS подписана на час, поэтому берётся свежей по
+                                        нажатию. Само ограничение проверяет бэкенд. */}
+                                    {canDownloadIcorePhone && (
+                                    <SidebarDeptScope section="download_icore_phone" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={downloadIcorePhone}
+                                                className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                            >
+                                                <FaIcon className="fas fa-download"></FaIcon>
+                                                <span className="sidebar-text">Скачать iCore Phone</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Скачать Oktell» — то же действие для СЗоВ: их телефон
+                                        это веб-клиент Oktell, а вместе с ним ставится и
+                                        ограничитель «Перезвона». Круг шире раздела —
+                                        каждый оператор отдела (can_download_agent на бэкенде). */}
+                                    {canDownloadOktellAgent && (
+                                    <SidebarDeptScope section="download_oktell" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={downloadOktellAgent}
+                                                className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                            >
+                                                <FaIcon className="fas fa-download"></FaIcon>
+                                                <span className="sidebar-text">Скачать Oktell</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {renderDividerIfInner(canAccessFourYouSection && !canManageFourYouSection, canAccessDevLetterSection)}
 
                                     {canAccessFourYouSection && !canManageFourYouSection && (
                                         <li>
@@ -47848,9 +48246,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 showSidebarAccountDropdown,
                 showSidebarEmployeesDropdown,
                 showSidebarResourceDropdown,
+                showSidebarDeptFilter,
                 isClosing,
                 isEmployeesClosing,
                 isResourceClosing,
+                isDeptFilterClosing,
+                // Селектор отдела: список отделов и выбранный код решают,
+                // какие пункты меню вообще отрисованы.
+                departments,
+                sidebarDeptFilter,
                 employeesDropdownPos,
                 resourceDropdownPos,
                 pendingSurveysBadgeCount,
@@ -47871,6 +48275,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 stableSidebarHandleToggleDropdown,
                 stableSidebarHandleToggleEmployeesDropdown,
                 stableSidebarHandleToggleResourceDropdown,
+                stableSidebarHandleToggleDeptFilter,
+                stableSidebarSelectDept,
                 stableSidebarHandleLogout,
                 stableSidebarOpenCallEvaluationSection,
                 stableSidebarFetchDirections,
