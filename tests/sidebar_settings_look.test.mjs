@@ -119,14 +119,19 @@ test('плитка значка перебивает и инлайн-разме�
     assert.match(tile.body, /width: 26px !important;/);
     assert.match(tile.body, /height: 26px !important;/);
     assert.match(tile.body, /flex: 0 0 26px !important;/);
-    assert.match(tile.body, /background: var\(--tint,/, 'цвет плитки обязан читаться из --tint');
+    /* Оттенок один на все разделы — часть выбранной палитры «синяя плита»:
+       цветные плитки на синем тонут или лезут вперёд. Цвет по блокам (--tint)
+       остался мобильной шторке, у неё полотно светлое. */
+    assert.match(tile.body, /background: var\(--otp-bar-tile,/, 'плитка красится не из палитры панели');
     assert.match(tile.body, /border-radius: 7px;/);
 });
 
-test('цвет плитки один и тот же на телефоне и на компьютере', () => {
-    /* Цвет раздаёт проход по списку в App.jsx — по БЛОКАМ. Круг из шести
-       оттенков через nth-of-type считает СТРОКИ, и один раздел оказывался
-       на телефоне и на компьютере разного цвета. */
+test('цвет плитки по блокам остался мобильной шторке', () => {
+    /* Проход по списку в App.jsx раздаёт цвет по БЛОКАМ, и этим цветом
+       красится шторка телефона. Круг из шести оттенков через nth-of-type там
+       считал СТРОКИ, из-за чего цвета блоков не совпадали ни с чем; проход
+       считает именно блоки. На компьютере плитки одноцветные — палитра
+       «синяя плита», — но механизм общий, и ломать его нельзя. */
     assert.ok(
         !/sidebar-menu-scroll > li:nth-of-type\(6n/.test(shell),
         'в мобильной шторке вернулся круг цветов по строкам — цвета разъедутся с настольными',
@@ -227,7 +232,7 @@ test('поле поиска не пересобирает дерево меню'
     );
 });
 
-test('тёмная тема не оставляет за собой синюю плиту', () => {
+test('тёмная тема — графит, а не синяя плита', () => {
     /* Полотно, карточки и разделители берутся из палитры --sheet-*, а она
        уже знает про тёмную тему. Градиенты сайдбара и футера в theme-dark
        перебивались бы карточкой и жили бы только как ложный след. */
@@ -239,39 +244,52 @@ test('тёмная тема не оставляет за собой синюю �
         !/\.sidebar-footer-menu \{[^}]*linear-gradient/.test(dark),
         'в тёмной теме вернулся градиент футера',
     );
-    for (const token of ['--sheet-select:', '--sheet-select-ink:', '--sheet-danger-wash:']) {
-        assert.ok(dark.includes(token), `${token} не переопределён для тёмной темы`);
-        assert.ok(styles.includes(token), `${token} не задан в светлой теме`);
-    }
+    /* В темноте панель графитовая: синий нужен против светлой страницы, а
+       тёмная страница и так другая поверхность. */
+    const at = dark.indexOf('--otp-bar-bg:');
+    assert.ok(at > 0, 'в тёмной теме нет полотна панели');
+    const block = dark.slice(at, at + 700);
+    assert.match(block, /--otp-bar-bg: #000000;/, 'в темноте полотно перестало быть чёрным');
+    assert.match(block, /--otp-bar-card: #1c1c1e;/, 'в темноте карточки перестали быть графитовыми');
 });
 
-test('полотно и карточки — из палитры шторки, без своих цветов', () => {
-    /* Один и тот же язык на телефоне и на компьютере: палитра --sheet-*
-       объявлена в mobile-shell.css на :root и там же переопределена для
-       тёмной темы. Свой набор цветов здесь означал бы два экрана из разных
-       приложений. */
+test('у панели своя палитра, у шторки своя', () => {
+    /* Настольная панель — «синяя плита портала», мобильная шторка — светлый
+       список настроек телефона. Разъехались они не по недосмотру: шторка
+       занимает весь экран, ей не нужно отделяться от страницы. Поэтому и
+       наборы токенов разные, и пересекаться им нельзя — иначе правка одного
+       экрана молча перекрашивает другой. */
     const bar = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar');
     assert.ok(bar, 'не найдено правило полотна сайдбара');
-    /* Полотно панели — СВОЙ токен: общий --sheet-bg делят с мобильной
-       шторкой, а голубизна нужна против светлой страницы, чего на телефоне
-       нет вовсе (шторка занимает весь экран). */
     assert.match(bar.body, /background-color: var\(--otp-bar-bg,/);
     assert.match(bar.body, /border-right: 1px solid var\(--otp-bar-edge,/);
-    for (const token of ['--otp-bar-bg:', '--otp-bar-edge:']) {
-        assert.ok(styles.includes(token), `${token} не задан в светлой теме`);
-        assert.ok(dark.includes(token), `${token} не переопределён для тёмной темы`);
-    }
-    assert.ok(
-        !/--otp-bar-bg/.test(shell),
-        'полотно настольной панели протекло в мобильную шторку — там свой --sheet-bg',
-    );
     assert.match(bar.body, /background-image: none !important;/, 'синий градиент из разметки обязан гаситься');
-    assert.match(bar.body, /color: var\(--sheet-text,/);
+    assert.match(bar.body, /color: var\(--otp-bar-ink,/);
+
+    // Весь набор объявлен в светлой теме и переопределён в тёмной.
+    const TOKENS = [
+        '--otp-bar-bg', '--otp-bar-edge', '--otp-bar-card', '--otp-bar-ink',
+        '--otp-bar-muted', '--otp-bar-sep', '--otp-bar-hover', '--otp-bar-tile',
+        '--otp-bar-select', '--otp-bar-select-ink', '--otp-bar-danger',
+        '--otp-bar-danger-wash', '--otp-bar-thumb',
+    ];
+    for (const token of TOKENS) {
+        assert.ok(styles.includes(`${token}:`), `${token} не задан в светлой теме`);
+        assert.ok(dark.includes(`${token}:`), `${token} не переопределён для тёмной темы`);
+    }
+    // Ни один настольный токен не протёк в шторку и наоборот.
+    assert.ok(!/--otp-bar-/.test(shell), 'палитра настольной панели протекла в мобильную шторку');
+    const desktop = rules(styles).filter((r) => r.selector.startsWith('body:not(.mobile-shell)'));
+    for (const rule of desktop) {
+        assert.ok(
+            !/var\(--sheet-/.test(rule.body),
+            `«${rule.selector}» красится палитрой шторки — правка телефона перекрасит панель`,
+        );
+    }
     for (const token of ['--sheet-bg', '--sheet-card', '--sheet-sep', '--sheet-active']) {
-        assert.ok(shell.includes(`${token}:`), `${token} пропал из палитры шторки — сайдбар останется без цвета`);
+        assert.ok(shell.includes(`${token}:`), `${token} пропал из палитры шторки`);
     }
 });
-
 test('правила строк списка не достают до выпадашек', () => {
     /* Панели «Учета сотрудников» и «Расчета ресурсов» лежат ВНУТРИ своего
        <li>, поэтому селектор `> li > div > button` попадал в их пункты: те
@@ -600,7 +618,7 @@ test('включённый поиск не теряет акцент под ку
        включённую кнопку поиска. */
     const on = rules(styles).find((r) => /\.sidebar-search-btn\.is-on:hover/.test(r.selector));
     assert.ok(on, 'нет правила для включённой кнопки поиска под курсором');
-    assert.match(on.body, /background: var\(--sheet-select,[^;]*\) !important;/);
+    assert.match(on.body, /background: var\(--otp-bar-select,[^;]*\) !important;/);
     for (const part of on.selector.split(',')) {
         assert.ok(
             part.includes('.sidebar '),

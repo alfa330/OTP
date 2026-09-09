@@ -345,7 +345,7 @@
       border-radius: 9999px;
     }
     .sidebar-menu-scroll.sidebar-menu-scrolling::-webkit-scrollbar-thumb {
-      background: rgba(60, 60, 67, 0.36);
+      background: var(--otp-bar-thumb, rgba(255, 255, 255, 0.42));
     }
     @supports not selector(::-webkit-scrollbar) {
       .sidebar-menu-scroll {
@@ -353,7 +353,7 @@
         scrollbar-color: transparent transparent;
       }
       .sidebar-menu-scroll.sidebar-menu-scrolling {
-        scrollbar-color: rgba(60, 60, 67, 0.36) transparent;
+        scrollbar-color: var(--otp-bar-thumb, rgba(255, 255, 255, 0.42)) transparent;
       }
     }
     /* === Сайдбар как список настроек ===================================
@@ -382,29 +382,41 @@
        текст, синяя подсветка, утилиты Tailwind прямо на кнопках. Отсюда
        подробность селекторов и `!important` в нескольких местах. */
     :root {
-      /* Открытый раздел. Отдельные токены, а не --sheet-accent: в списке
-         настроек телефона выделяют светлой подложкой, а здесь есть :hover,
-         и подложке пришлось бы спорить с ним — открытый раздел красим
-         синим портала. Тёмная тема переопределяет оба (src/theme-dark.css). */
-      /* Полотно настольной панели и её правая кромка — «Небесный», выбор
-         владельца 09.09.2026 из шести показанных тонов. Своими токенами, а не
-         общим --sheet-bg: тот делят с мобильной шторкой, а голубизна нужна
-         ровно затем, чтобы панель не сливалась со СТРАНИЦЕЙ (у неё
-         bg-gray-50, #f9fafb) — на телефоне шторка занимает весь экран, и
-         этой задачи там нет. Карточки остаются белыми (--sheet-card): плитки
-         значков лежат на них, поэтому тон полотна цвета значков не касается.
-         Тёмная тема переопределяет оба (src/theme-dark.css). */
-      --otp-bar-bg: #d3e5f6;
-      --otp-bar-edge: #b9d2e9;
-      --sheet-select: #1d4ed8;
-      --sheet-select-ink: #ffffff;
-      /* Подсветка «Выхода» под курсором. */
-      --sheet-danger-wash: #fef2f2;
+      /* ПАЛИТРА НАСТОЛЬНОЙ ПАНЕЛИ — «синяя плита портала», выбор владельца
+         09.09.2026 из шести показанных вариантов. Прежний облик портала
+         (синий боковик) со новой структурой карточек.
+
+         СВОИ ТОКЕНЫ, А НЕ ОБЩИЕ --sheet-*: те делят с мобильной шторкой, где
+         остаётся светлый список настроек телефона. Разъехались они не по
+         недосмотру: на телефоне шторка занимает весь экран, ей не нужно
+         отделяться от страницы, и светлый список там уместнее.
+
+         Тёмная тема переопределяет весь набор (src/theme-dark.css, источник —
+         scripts/dark_theme_chrome.css).
+
+         Плитки значков здесь ОДНОГО оттенка — это часть выбранного варианта:
+         цветные плитки на синем дают худшую мешанину (синие тонут, оранжевые
+         лезут вперёд), из-за чего от них и отказались. Цвет по блокам остался
+         мобильной шторке: на её светлом полотне он работает. */
+      --otp-bar-bg: #1e3a8a;
+      --otp-bar-edge: rgba(255, 255, 255, 0.12);
+      --otp-bar-card: rgba(255, 255, 255, 0.10);
+      --otp-bar-ink: #eef2ff;
+      --otp-bar-muted: rgba(238, 242, 255, 0.62);
+      --otp-bar-sep: rgba(255, 255, 255, 0.12);
+      --otp-bar-hover: rgba(255, 255, 255, 0.16);
+      --otp-bar-tile: rgba(255, 255, 255, 0.16);
+      --otp-bar-select: #3b82f6;
+      --otp-bar-select-ink: #ffffff;
+      --otp-bar-danger: #fecaca;
+      --otp-bar-danger-wash: rgba(254, 202, 202, 0.14);
+      /* Ползунок прокрутки меню: на синей плите он светлый. */
+      --otp-bar-thumb: rgba(255, 255, 255, 0.42);
     }
     body:not(.mobile-shell) .sidebar {
       background-color: var(--otp-bar-bg, #d3e5f6) !important;
       background-image: none !important;
-      color: var(--sheet-text, #111827);
+      color: var(--otp-bar-ink, #eef2ff);
       border-right: 1px solid var(--otp-bar-edge, #b9d2e9);
       box-shadow: none;
     }
@@ -545,9 +557,9 @@
       padding: 0;
       justify-content: center;
       border-radius: 9px;
-      background: var(--sheet-card, #fff);
-      border: 1px solid var(--sheet-sep, #e5e7eb);
-      color: var(--sheet-text, #111827);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+      border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
+      color: var(--otp-bar-ink, #eef2ff);
       transition: border-radius 0.3s ease, background-color 0.2s ease, color 0.2s ease;
     }
     /* Значок: у развёрнутой панели — просто значок в 18 px, в рельсе — плитка
@@ -581,11 +593,11 @@
       color: #fff;
     }
     body:not(.mobile-shell) .sidebar-bell-slot > div > button:hover {
-      background: var(--sheet-active, #e5e5ea) !important;
+      background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
     }
     body:not(.mobile-shell) .sidebar-bell-slot > div > button.bg-blue-700 {
-      background: var(--sheet-select, #1d4ed8) !important;
-      color: var(--sheet-select-ink, #fff) !important;
+      background: var(--otp-bar-select, #3b82f6) !important;
+      color: var(--otp-bar-select-ink, #fff) !important;
     }
     /* Подпись «Уведомления» и стрелка подменю в шапке лишние: там значок. */
     body:not(.mobile-shell) .sidebar .sidebar-top-row .sidebar-text {
@@ -610,9 +622,9 @@
       align-items: center;
       justify-content: center;
       border-radius: 9px;
-      background: var(--sheet-card, #fff);
-      border: 1px solid var(--sheet-sep, #e5e7eb);
-      color: var(--sheet-text, #111827);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+      border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
+      color: var(--otp-bar-ink, #eef2ff);
     }
     body:not(.mobile-shell) .sidebar-search-btn > svg {
       flex: 0 0 16px !important;
@@ -626,13 +638,13 @@
        белых выпадающих панелей, и без запаса по весу оно перекрашивало
        включённую кнопку поиска — акцент под курсором пропадал. */
     body:not(.mobile-shell) .sidebar .sidebar-search-btn:hover {
-      background: var(--sheet-active, #e5e5ea) !important;
+      background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
     }
     body:not(.mobile-shell) .sidebar .sidebar-search-btn.is-on,
     body:not(.mobile-shell) .sidebar .sidebar-search-btn.is-on:hover {
-      background: var(--sheet-select, #1d4ed8) !important;
-      border-color: var(--sheet-select, #1d4ed8);
-      color: var(--sheet-select-ink, #fff);
+      background: var(--otp-bar-select, #3b82f6) !important;
+      border-color: var(--otp-bar-select, #3b82f6);
+      color: var(--otp-bar-select-ink, #fff);
     }
     body:not(.mobile-shell) .sidebar-search-row {
       padding: 0 10px;
@@ -645,9 +657,9 @@
       height: 34px;
       padding: 0 10px;
       border-radius: 10px;
-      background: var(--sheet-card, #fff);
-      border: 1px solid var(--sheet-sep, #e5e7eb);
-      color: var(--sheet-muted, #8a8a8e);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+      border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
+      color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
       font-size: 14px;
     }
     body:not(.mobile-shell) .sidebar-search-field input {
@@ -658,10 +670,10 @@
       background: transparent;
       font-size: 14px;
       line-height: 20px;
-      color: var(--sheet-text, #111827);
+      color: var(--otp-bar-ink, #eef2ff);
     }
     body:not(.mobile-shell) .sidebar-search-field input::placeholder {
-      color: var(--sheet-muted, #8a8a8e);
+      color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
     }
     /* Селектор отдела — такая же строка, но своей карточкой: он не раздел, и
        в общий блок с разделами его вставлять нельзя. Рамки у него нет: с
@@ -672,11 +684,11 @@
     }
     body:not(.mobile-shell) .sidebar-dept-filter > button {
       border-radius: 11px;
-      background: var(--sheet-card, #fff) !important;
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10)) !important;
       border: 0;
     }
     body:not(.mobile-shell) .sidebar-dept-filter > button > svg:first-child {
-      --tint: var(--sheet-muted, #8a8a8e);
+      --tint: var(--otp-bar-tile, rgba(255, 255, 255, 0.16));
     }
     body:not(.mobile-shell) .sidebar-dept-filter > button.bg-blue-700 > svg:first-child {
       --tint: rgba(255, 255, 255, 0.24);
@@ -708,8 +720,8 @@
       gap: 10px;
       width: 100%;
       padding: 8px 10px;
-      background: var(--sheet-card, #fff);
-      color: var(--sheet-text, #111827);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+      color: var(--otp-bar-ink, #eef2ff);
       font-size: 14px;
       line-height: 20px;
       font-weight: 400;
@@ -736,7 +748,7 @@
     }
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button:hover,
     body:not(.mobile-shell) .sidebar-dept-filter > button:hover {
-      background: var(--sheet-active, #e5e5ea) !important;
+      background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
     }
     /* Скругление карточки — по классам, которые ставит проход из App.jsx, а
        НЕ по `hr + li` и `li:has(+ hr)`, как на телефоне. Поиск по разделам
@@ -764,7 +776,7 @@
       left: 46px;
       right: 0;
       height: 1px;
-      background: var(--sheet-sep, #e5e7eb);
+      background: var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
       z-index: 1;
     }
     /* Значок в цветной плитке — то, по чему список узнаётся с одного взгляда.
@@ -773,10 +785,10 @@
        `.sidebar button > svg` выше — без обоих перебиваний плитка остаётся
        18-пиксельной точкой.
 
-       Цвет берётся из --tint. Его ставит проход по списку в App.jsx — свой
-       на каждый блок: пункты приходят из общего дерева меню, «цвета раздела»
-       у них нет, а состав блока зависит от роли и выбранного отдела, так что
-       посчитать блок в CSS (nth-of-type по <hr>) нельзя. */
+       Оттенок ОДИН на все разделы (--otp-bar-tile) — часть выбранной палитры
+       «синяя плита»: цветные плитки на синем тонут или лезут вперёд. Цвет по
+       блокам (--tint, его ставит проход по списку в App.jsx) остался
+       мобильной шторке, где полотно светлое. */
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button > svg:first-child,
     body:not(.mobile-shell) .sidebar-dept-filter > button > svg:first-child {
       flex: 0 0 26px !important;
@@ -786,20 +798,20 @@
       padding: 5.5px;
       border-radius: 7px;
       box-sizing: border-box;
-      background: var(--tint, #0a84ff);
+      background: var(--otp-bar-tile, rgba(255, 255, 255, 0.16));
       color: #fff;
       margin: 0;
     }
     /* Открытый раздел. Класс bg-blue-700 приходит из разметки — по нему и
-       красим; плитка гасится до полупрозрачной белой, иначе цветной квадрат
-       спорит с залитой строкой. */
+       красим; плитка становится чуть заметнее, иначе на залитой строке она
+       пропадает совсем. */
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700,
     body:not(.mobile-shell) .sidebar-dept-filter > button.bg-blue-700 {
-      background: var(--sheet-select, #1d4ed8) !important;
-      color: var(--sheet-select-ink, #fff) !important;
+      background: var(--otp-bar-select, #3b82f6) !important;
+      color: var(--otp-bar-select-ink, #fff) !important;
     }
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700 > svg:first-child {
-      background: rgba(255, 255, 255, 0.24) !important;
+      background: rgba(255, 255, 255, 0.28) !important;
     }
     /* Вторая иконка строки — стрелка подменю, плиткой не становится. */
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button > svg:not(:first-child),
@@ -811,7 +823,7 @@
       padding: 0;
       border-radius: 0;
       background: none;
-      color: var(--sheet-muted, #8a8a8e);
+      color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
     }
     body:not(.mobile-shell) .sidebar .sidebar-text {
       flex: 1;
@@ -985,8 +997,8 @@
       margin: 0 10px;
       padding: 14px 10px;
       border-radius: 11px;
-      background: var(--sheet-card, #fff);
-      color: var(--sheet-muted, #8a8a8e);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+      color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
       font-size: 14px;
       line-height: 20px;
     }
@@ -998,9 +1010,9 @@
     body:not(.mobile-shell) .sidebar-footer-menu {
       margin: 12px 10px 0;
       padding-top: 0;
-      border: 1px solid var(--sheet-sep, #e5e7eb);
+      border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
       border-radius: 11px;
-      background: var(--sheet-card, #fff);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li:first-child > button {
       border-top-left-radius: 10px;
@@ -1026,7 +1038,7 @@
       left: 46px;
       right: 0;
       height: 1px;
-      background: var(--sheet-sep, #e5e7eb);
+      background: var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
       z-index: 1;
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li > button {
@@ -1036,14 +1048,14 @@
       width: 100%;
       padding: 8px 10px;
       border-radius: 0;
-      background: var(--sheet-card, #fff);
-      color: var(--sheet-text, #111827);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+      color: var(--otp-bar-ink, #eef2ff);
       font-size: 14px;
       line-height: 20px;
       text-align: left;
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li > button:hover {
-      background: var(--sheet-active, #e5e5ea) !important;
+      background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li > button > svg:first-child {
       flex: 0 0 26px !important;
@@ -1053,21 +1065,22 @@
       padding: 5.5px;
       border-radius: 7px;
       box-sizing: border-box;
-      background: var(--sheet-muted, #8a8a8e);
+      background: var(--otp-bar-tile, rgba(255, 255, 255, 0.16));
       color: #fff;
       margin: 0;
     }
     /* «Выход» остаётся красным, но строкой списка: алая полоса на светлом
        полотне перетягивала на себя весь экран. */
     body:not(.mobile-shell) .sidebar-footer-menu > li > button.bg-red-600 {
-      background: var(--sheet-card, #fff) !important;
-      color: #dc2626 !important;
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10)) !important;
+      color: var(--otp-bar-danger, #fecaca) !important;
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li > button.bg-red-600:hover {
-      background: var(--sheet-danger-wash, #fef2f2) !important;
+      background: var(--otp-bar-danger-wash, rgba(254, 202, 202, 0.14)) !important;
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li > button.bg-red-600 > svg:first-child {
-      background: #dc2626 !important;
+      background: rgba(254, 202, 202, 0.22) !important;
+      color: var(--otp-bar-danger, #fecaca) !important;
     }
     /* Аватар остаётся круглым, но встаёт на место плитки: отрицательные поля
        из общего правила сдвигали бы подпись относительно остальных строк. */
@@ -1092,13 +1105,13 @@
        Двойки достаточно: список меню лежит на 1, выпадашки — на 40 и выше. */
     body:not(.mobile-shell) .sidebar-collapse-btn {
       z-index: 2;
-      background: var(--sheet-card, #fff) !important;
-      border: 1px solid var(--sheet-sep, #e5e7eb) !important;
-      color: var(--sheet-muted, #8a8a8e);
+      background: var(--otp-bar-card, rgba(255, 255, 255, 0.10)) !important;
+      border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12)) !important;
+      color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
       box-shadow: 0 1px 2px rgba(17, 24, 39, 0.08);
     }
     body:not(.mobile-shell) .sidebar-collapse-btn:hover {
-      background: var(--sheet-active, #e5e5ea) !important;
+      background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
     }
     /* Выпадающие панели сайдбара скруглены (rounded-md), но содержимое по
        этому скруглению не обрезают: у выделенного пункта фон bg-gray-100
