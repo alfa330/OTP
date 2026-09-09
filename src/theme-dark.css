@@ -75,6 +75,8 @@ html[data-otp-theme="dark"] {
     --otp-bar-select-ink: #e6edf7;
     --otp-bar-danger: #f87171;
     --otp-bar-danger-wash: #3a1d1d;
+    --otp-bar-knob: #262b33;
+    --otp-bar-knob-ink: #e6e9ef;
     --otp-bar-thumb: rgba(148, 163, 184, 0.55);
 }
 /* Выпадающие панели сайдбара (аккаунт, селектор отдела, подменю):

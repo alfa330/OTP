@@ -413,44 +413,37 @@ test('колокол переезжает и меняет размер, а на 
     assert.ok(logoBtn && /pointer-events: auto;/.test(logoBtn.body), 'вход в «4 You» внутри логотипа перестал кликаться');
 });
 
-test('кромки списка растворяются, а не обрываются', () => {
-    /* Список прокручивается, и на кромках карточки обрезались посередине
-       строки. Владелец: «сделать типо чуть прозрачным как на виндовс, что бы
-       не было такого резкого разрыва». Полоски — липкие псевдоэлементы САМОГО
-       списка: маска (mask-image) обрезала бы и выпадающие панели, которые
-       живут внутри строк на position: fixed, а наложения на селекторе отдела
-       не годятся — у неадминских ролей селектора нет вовсе. */
-    const shared = rules(styles).find((r) => /\.sidebar-menu-scroll::before,[\s\S]*\.sidebar-menu-scroll::after/.test(r.selector));
-    assert.ok(shared, 'кромки списка описаны не вместе');
+test('кромки списка ничем не прикрыты', () => {
+    /* Здесь стояли липкие полоски цвета полотна — сначала градиентом, потом
+       ровной прозрачной полосой. На синей плите владелец их забраковал: полоса
+       читалась тёмным пятном поверх первой строки. Сторожим, что их не
+       вернули молча, и заодно что маску по-прежнему не берут: маска на списке
+       обрежет выпадающие панели, они внутри строк на position: fixed. */
     for (const which of ['::before', '::after']) {
-        const edge = rules(styles).find((r) => r.selector === `body:not(.mobile-shell) .sidebar-menu-scroll${which}`);
-        assert.ok(edge, `нет ${which} кромки списка`);
-        assert.match(edge.body, /margin-(top|bottom): -16px;/, `${which}: кромка занимает место в потоке`);
+        const edge = rules(styles).find((r) => r.selector.includes(`.sidebar-menu-scroll${which}`));
+        assert.ok(!edge, `вернулась полоска ${which} на кромке списка`);
     }
-    /* Полоса ровная и чуть прозрачная. Ни градиента (растворение вместо
-       кромки), ни зерна с размытием — решение владельца после сравнения
-       шести вариантов. */
-    assert.ok(
-        !/linear-gradient/.test(shared.body),
-        'кромка снова растворяется градиентом — просили ровный край',
-    );
-    assert.match(shared.body, /background: var\(--otp-bar-bg/, 'кромка красится не цветом полотна');
-    const alpha = Number(/opacity: (0\.\d+);/.exec(shared.body)?.[1]);
-    assert.ok(alpha >= 0.7 && alpha <= 0.95, `прозрачность кромки ${alpha} — строка под ней либо пропадёт, либо не приглушится`);
-    assert.ok(
-        !/backdrop-filter|feTurbulence/.test(shared.body),
-        'вернулось размытие или зерно — от них отказались',
-    );
-
-    assert.match(shared.body, /position: sticky;/, 'кромки должны быть липкими, иначе уедут вместе с содержимым');
-    assert.match(shared.body, /pointer-events: none;/, 'кромки перехватывают клики по строкам');
-    /* Проверяем КОД, а не пояснения: слово mask-image стоит и в комментарии
-       рядом с этими правилами — там объяснено, почему маску брать нельзя. */
     const code = styles.replace(/\/\*[\s\S]*?\*\//g, '');
     assert.ok(
         !/mask-image|-webkit-mask/.test(code),
         'маска на списке обрежет выпадающие панели: они внутри строк на position: fixed',
     );
+});
+
+test('кнопка сворачивания непрозрачна', () => {
+    /* Она висит на -right-4, то есть половиной лежит уже на странице. С цветом
+       карточки (на синей плите это белый на 10%) её просвечивало насквозь. */
+    const knob = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-collapse-btn');
+    assert.ok(knob, 'нет правила кнопки сворачивания');
+    assert.match(knob.body, /background: var\(--otp-bar-knob,/, 'кнопке вернули полупрозрачный цвет карточки');
+    for (const token of ['--otp-bar-knob:', '--otp-bar-knob-ink:']) {
+        assert.ok(styles.includes(token), `${token} не задан в светлой теме`);
+        assert.ok(dark.includes(token), `${token} не переопределён для тёмной темы`);
+    }
+    /* Значение обязано быть непрозрачным: rgba с альфой ниже единицы —
+       ровно тот дефект, из-за которого правило и переписано. */
+    const value = /--otp-bar-knob: ([^;]+);/.exec(styles)[1];
+    assert.ok(/^#[0-9a-f]{6}$/i.test(value.trim()), `цвет кнопки «${value}» не непрозрачный`);
 });
 
 test('на компьютере знак «4 You» в шапке не показывается', () => {
