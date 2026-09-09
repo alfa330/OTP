@@ -135,10 +135,12 @@ const state = {
     standalone: isStandaloneDisplay(),
     platform: detectInstallPlatform(),
     canPrompt: false,
-    /* Счётчик просьб открыть экран установки руками — из пункта меню
-       «Установить приложение». Счётчик, а не флаг: повторный тычок после
-       закрытия обязан открыть экран снова. */
+    /* Счётчики просьб открыть установку руками — из пункта меню «Установить
+       приложение». Счётчики, а не флаги: повторный тычок после закрытия обязан
+       открыть экран снова. Их два, потому что просьбы разные: показать панель
+       с предложением и сразу открыть подробную инструкцию. */
     manualRequests: 0,
+    manualGuideRequests: 0,
 };
 
 let deferredPrompt = null;
@@ -162,9 +164,15 @@ export const subscribeToInstallState = (listener) => {
     return () => listeners.delete(listener);
 };
 
-/** Открыть экран установки по просьбе человека — мимо отложенного «Позже». */
+/** Открыть панель с предложением по просьбе человека — мимо «Позже». */
 export const requestInstallSheet = () => {
     state.manualRequests += 1;
+    publish();
+};
+
+/** Открыть подробную инструкцию, минуя панель. */
+export const requestInstallGuide = () => {
+    state.manualGuideRequests += 1;
     publish();
 };
 

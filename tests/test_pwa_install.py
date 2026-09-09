@@ -50,6 +50,7 @@ STYLES = ROOT / 'src' / 'styles.css'
 PWA_UTIL = ROOT / 'src' / 'utils' / 'pwa.js'
 PROMPT = ROOT / 'src' / 'components' / 'common' / 'InstallAppPrompt.jsx'
 MENU_ITEM = ROOT / 'src' / 'components' / 'common' / 'InstallAppMenuItem.jsx'
+GUIDE = ROOT / 'src' / 'components' / 'common' / 'InstallGuideSheet.jsx'
 APP_JSX = ROOT / 'src' / 'App.jsx'
 
 
@@ -272,9 +273,11 @@ class InstallPromptTests(unittest.TestCase):
         """Внутри main-content position: fixed считался бы от чужого предка."""
         app = read(APP_JSX)
         self.assertIn('<InstallAppPrompt />', app)
+        # Панелей две: на экране входа (он уходит ранним return выше) и в самом
+        # портале. Соседство с шариком проверяется у ВТОРОЙ.
         self.assertLess(
             app.index('<AssistantOrb'),
-            app.index('<InstallAppPrompt />'),
+            app.rindex('<InstallAppPrompt />'),
             'Панель уехала из соседей шарика — проверьте, что она не внутри '
             'разделов с overflow-hidden и zoom',
         )
@@ -293,13 +296,32 @@ class InstallPromptTests(unittest.TestCase):
         delay = int(re.search(r'APPEAR_DELAY_MS = (\d+)', self.jsx).group(1))
         self.assertGreaterEqual(delay, 5000)
 
-    def test_ios_branch_never_shows_a_fake_install_button(self):
-        """Кнопки установки на iOS не существует: обещать её нельзя."""
-        ios_block = self.jsx[self.jsx.index('iosFlow ? ('):self.jsx.index(') : (')]
-        self.assertNotIn('Установить', ios_block)
-        steps = self.jsx[self.jsx.index('IOS_STEPS = ['):self.jsx.index('];')]
-        self.assertIn('Поделиться', steps)
-        self.assertIn('На экран', steps)
+    def test_install_button_only_where_it_can_open_something(self):
+        """Кнопки установки на iOS не существует: обещать её нельзя.
+
+        Панель рисует «Установить» ровно при `canInstallHere`, и это условие —
+        главное во всём компоненте: кнопка, которая на iPhone не открывает
+        ничего, читается как сломанный портал."""
+        self.assertIn(
+            "const canInstallHere = install.platform !== 'ios' && install.canPrompt;",
+            self.jsx,
+        )
+        # Якорь — сама кнопка (по обработчику), а не слово «Установить»: оно
+        # встречается и в комментариях, объясняющих, почему её нет на iPhone.
+        button = self.jsx.index('onClick={handleInstall}\n                                disabled={pending}')
+        guard = self.jsx.index('{canInstallHere && (')
+        self.assertLess(guard, button, 'Кнопка «Установить» вышла из-под условия')
+
+    def test_panel_shows_the_steps_and_the_details_button(self):
+        """Панель читается за две секунды: шаги строкой и «Подробнее»."""
+        self.assertIn('Подробнее', self.jsx)
+        self.assertIn('Поделиться', self.jsx)
+        self.assertIn('на главный экран', self.jsx)
+
+    def test_panel_reports_its_height_to_the_page(self):
+        """Экран входа поднимает форму на высоту панели, а не на константу."""
+        self.assertIn("OFFER_HEIGHT_VAR = '--install-offer-height'", self.jsx)
+        self.assertIn('ResizeObserver', self.jsx)
 
     def test_dismiss_is_a_snooze(self):
         """«Позже» — отсрочка на две недели, а не отказ навсегда."""
@@ -313,6 +335,68 @@ class InstallPromptTests(unittest.TestCase):
         self.assertIn('subscribeToInstallState', menu)
         self.assertIn('Установить приложение', menu)
         self.assertIn('<InstallAppMenuItem', read(APP_JSX))
+
+
+class InstallGuideTests(unittest.TestCase):
+    def setUp(self):
+        self.jsx = read(GUIDE)
+
+    def test_both_systems_are_switchable(self):
+        """Инструкцию открывают, чтобы объяснить коллеге с другим телефоном."""
+        self.assertIn("'ios'", self.jsx)
+        self.assertIn("'android'", self.jsx)
+        self.assertIn('iPhone', self.jsx)
+        self.assertIn('Android', self.jsx)
+
+    def test_ios_warns_that_only_safari_can_install(self):
+        """В Chrome и внутри Telegram пункта «На экран „Домой“» нет вовсе."""
+        self.assertIn('Safari', self.jsx)
+
+    def test_ios_warns_about_the_hidden_menu_item(self):
+        """Пункт лежит ниже видимой части меню — без этого шага люди сдаются."""
+        self.assertIn('Пролистайте', self.jsx)
+
+    def test_android_step_matches_the_button_on_screen(self):
+        """«Нажмите „Установить“ ниже» под пустым местом — худшая инструкция."""
+        self.assertIn('const androidSteps = (hasInstallButton) =>', self.jsx)
+        self.assertIn('три точки', self.jsx)
+
+    def test_guide_layer_is_above_the_offer_panel(self):
+        """Инструкция открывается ИЗ панели и обязана лечь поверх неё."""
+        layers = [int(value) for value in re.findall(r'z-\[(\d+)\]', self.jsx)]
+        self.assertTrue(layers, 'У инструкции пропал слой')
+        panel_layer = int(re.search(r'z-\[(\d+)\]', read(PROMPT)).group(1))
+        self.assertGreater(min(layers), panel_layer)
+        self.assertLess(max(layers), 100, 'Инструкция накрыла бы полноэкранные окна')
+
+
+class AuthScreenTests(unittest.TestCase):
+    def test_login_screen_offers_installation_too(self):
+        """С домашнего экрана человек попадает сразу сюда."""
+        app = read(APP_JSX)
+        self.assertEqual(2, app.count('<InstallAppPrompt />'),
+                         'Панель должна стоять и на экране входа, и в портале')
+
+    def test_login_screen_lifts_above_the_panel(self):
+        """Иначе панель накрывает кнопку «Войти» — форма центрована."""
+        css = read(STYLES)
+        self.assertIn('body.has-install-offer .auth-screen', css)
+        self.assertIn('var(--install-offer-height', css)
+
+    def test_auth_screens_keep_away_from_the_edges_and_the_notch(self):
+        css = read(STYLES)
+        block = css[css.index('.auth-screen {'):]
+        block = block[:block.index('}')]
+        for side in ('top', 'right', 'bottom', 'left'):
+            self.assertIn('env(safe-area-inset-%s)' % side, block)
+
+    def test_login_inputs_are_mobile_safe(self):
+        """Автозаглавная буква и автозамена ломают ввод логина на телефоне."""
+        app = read(APP_JSX)
+        login_input = app[app.index('placeholder="Логин"'):]
+        login_input = login_input[:login_input.index('/>')]
+        self.assertIn('autoCapitalize="none"', login_input)
+        self.assertIn('autoCorrect="off"', login_input)
 
 
 class SafeAreaTests(unittest.TestCase):

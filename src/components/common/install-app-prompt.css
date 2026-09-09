@@ -37,3 +37,77 @@
         animation-duration: 0.01ms;
     }
 }
+
+/* Подробная инструкция. На телефоне это лист, приезжающий снизу до самого края
+ * экрана; на большом экране — окно по центру, поэтому и появление у него
+ * другое: снизу ехать некуда, окно просто проявляется с лёгким ростом. */
+@keyframes iap-guide-in {
+    from { opacity: 0; transform: translateY(40px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes iap-guide-pop {
+    from { opacity: 0; transform: scale(0.97); }
+    to   { opacity: 1; transform: scale(1); }
+}
+
+.iap-guide {
+    animation: iap-guide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (min-width: 640px) {
+    .iap-guide {
+        animation: iap-guide-pop 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .iap-guide {
+        animation-duration: 0.01ms;
+    }
+}
+
+/* Невысокий экран (iPhone SE, старые Android, телефон с открытой клавиатурой).
+ *
+ * Замерено: панель в полный рост — 292 px, карточка входа — 405 px, вместе с
+ * полями это 733 px. На экране 667 px панель накрывала кнопку «Войти», и
+ * человек видел предложение установки вместо формы, ради которой пришёл.
+ * Уплотняем ОБЕ стороны: здесь панель, в styles.css — карточку входа.
+ * Порог 760 px, а не 700: между ними лежат самые ходовые SE и Android-бюджетники.
+ */
+@media (max-height: 760px) {
+    /* Селекторы намеренно удвоены (.iap-sheet.iap-sheet) и вложены
+       (.iap-sheet .iap-sheet__icon). Причина: тот же вес, что у утилит
+       Tailwind, здесь проигрывает — утилиты в собранном CSS идут ПОЗЖЕ этого
+       файла, и при равной специфичности побеждают они. Первая версия правил
+       была написана одним классом и не сработала вовсе: панель осталась
+       прежней высоты, а «уплотнение» выглядело сделанным. */
+    .iap-sheet.iap-sheet {
+        padding-top: 1rem;
+        padding-bottom: 0.875rem;
+    }
+    .iap-sheet .iap-sheet__icon {
+        width: 56px;
+        height: 56px;
+        border-radius: 17px;
+    }
+    .iap-sheet .iap-sheet__mark {
+        width: 31px;
+        height: 31px;
+    }
+    .iap-sheet .iap-sheet__title {
+        margin-top: 0.625rem;
+        font-size: 17px;
+    }
+    .iap-sheet .iap-sheet__text {
+        margin-top: 0.375rem;
+        font-size: 12.5px;
+    }
+    .iap-sheet .iap-sheet__actions {
+        margin-top: 0.75rem;
+    }
+    .iap-sheet .iap-sheet__actions button {
+        height: 2.75rem;
+        font-size: 14.5px;
+    }
+}

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import FaIcon from './FaIcon';
-import { getInstallState, promptInstall, requestInstallSheet, subscribeToInstallState } from '../../utils/pwa';
+import { getInstallState, promptInstall, requestInstallGuide, subscribeToInstallState } from '../../utils/pwa';
 
 /*
  * Пункт «Установить приложение» в меню аккаунта.
@@ -30,9 +30,10 @@ const InstallAppMenuItem = ({ onPicked }) => {
         if (onPicked) onPicked();
         /* Есть системное окно — открываем его сразу: лишний экран с кнопкой
            «Установить» перед кнопкой «Установить» никому не нужен. На iPhone
-           окна нет, показываем панель с двумя шагами. */
+           окна нет — открываем пошаговую инструкцию, а не панель-предложение:
+           человек уже согласился ставить, ему нужны шаги, а не уговоры. */
         if (install.canPrompt) promptInstall();
-        else requestInstallSheet();
+        else requestInstallGuide();
     };
 
     return (

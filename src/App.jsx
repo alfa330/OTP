@@ -47879,8 +47879,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (isAuthInitializing) {
                 return (
-                  <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                    <div className="bg-white p-10 rounded-xl shadow-2xl w-full max-w-md transition-all duration-300 text-center">
+                  <div className="auth-screen min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
+                    <div className="bg-white p-6 sm:p-10 rounded-2xl shadow-2xl w-full max-w-md transition-all duration-300 text-center">
                       <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                         <span className="flex">
                           <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
@@ -47906,8 +47906,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!user) {
                 return (
-                  <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
-                    <div className="bg-white p-10 rounded-xl shadow-2xl w-full max-w-md transition-all duration-300">
+                  <div className="auth-screen min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-100 to-purple-100">
+                    <div className="bg-white p-6 sm:p-10 rounded-2xl shadow-2xl w-full max-w-md transition-all duration-300">
                       <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                         <span className="flex">
                           <span className="bg-indigo-700 text-white px-3 py-2 rounded-l-2xl shadow-lg text-4xl border border-indigo-700">
@@ -47931,14 +47931,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                           }
                         }}
                       >
+                        {/* autoCapitalize/autoCorrect: на телефоне клавиатура
+                            иначе поднимает первую букву логина и «исправляет»
+                            его на похожее слово — человек видит «Верно введён»
+                            логин, которого в системе нет. */}
                         <input
                           type="text"
                           placeholder="Логин"
                           value={login}
                           onChange={(e) => setLogin(e.target.value)}
-                          className="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                          className="w-full p-3 mb-4 text-base border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                           disabled={isLoading}
                           autoComplete="username"
+                          autoCapitalize="none"
+                          autoCorrect="off"
+                          spellCheck={false}
                         />
                   
                         <input
@@ -47946,13 +47953,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                           placeholder="Пароль"
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
-                          className="w-full p-3 mb-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
+                          className="w-full p-3 mb-2 text-base border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-200"
                           disabled={isLoading}
                           autoComplete="off"
                         />
                   
                         {/* Контейнер под сообщение всегда занимает место */}
-                        <div className="min-h-[2rem] flex items-center justify-center mb-4">
+                        <div className="auth-error-slot min-h-[2rem] flex items-center justify-center mb-4">
                           {errorMessage && (
                             <p className="text-red-500 text-center p-2 border border-red-500 rounded-lg bg-red-50 animate-fade-in-out">
                               {errorMessage}
@@ -47980,6 +47987,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </button>
                       </div>
                     </div>
+
+                    {/* Предложение установить портал живёт и здесь: до входа
+                        человек проводит на этом экране столько же времени, а с
+                        домашнего экрана он попадёт СРАЗУ сюда. Форму панель не
+                        накрывает — она отдаёт свою высоту переменной
+                        --install-offer-height, и .auth-screen поднимает
+                        карточку ровно на неё (см. src/styles.css). */}
+                    <InstallAppPrompt />
                   </div>
                 );
             }
