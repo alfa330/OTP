@@ -47,6 +47,7 @@ import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip
 import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/schedule/shiftHistoryFormat';
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import AssistantOrb from './components/assistant/AssistantOrb';
+import IcoreMark from './components/common/IcoreMark';
 import InstallAppPrompt from './components/common/InstallAppPrompt';
 import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import sidebarLogo from './components/common/sidebar-logo.svg';
@@ -48301,17 +48302,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                      ниже. */
                   <div className="auth-screen bg-gradient-to-br from-blue-100 to-purple-100">
                     <div className="auth-card w-full max-w-[380px] rounded-[28px] bg-white/95 px-6 py-7 text-center shadow-[0_24px_60px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/5 backdrop-blur-xl">
-                      <div className="flex flex-col items-center">
-                        <span
-                          className="auth-card__mark grid h-[68px] w-[68px] place-items-center rounded-[20px] shadow-[0_8px_22px_rgba(34,64,155,0.28)]"
-                          style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
-                          aria-hidden="true"
-                        >
-                          <img src={sidebarLogoMark} alt="" className="h-[40px] w-[40px]" />
+                      {/* Шапка — прежняя: плашка «iCORE» и фирменный знак
+                          рядом с ней. Знак рисуется разметкой (IcoreMark), а не
+                          картинкой: раньше здесь висел файл с посторонним
+                          хостингом, и без интернета вход встречал битым
+                          значком. */}
+                      <h1 className="mb-6 flex items-center justify-center text-5xl font-extrabold">
+                        <span className="flex">
+                          <span className="rounded-l-2xl border border-indigo-700 bg-indigo-700 px-3 py-2 text-4xl text-white shadow-lg">
+                            iCORE
+                          </span>
+                          <span className="-ml-px rounded-r-2xl border-b border-r border-t border-indigo-700 bg-white px-2 py-2 text-4xl text-indigo-700">
+                            <IcoreMark className="mr-0.5 h-12 w-12" />
+                          </span>
                         </span>
-                        <h1 className="mt-3.5 text-[24px] font-semibold tracking-tight text-slate-900">iCORE</h1>
-                      </div>
-                      <div className="mt-5 flex items-center justify-center gap-2.5 text-[13.5px] text-slate-500">
+                      </h1>
+                      <div className="flex items-center justify-center gap-2.5 text-[13.5px] text-slate-500">
                         <FaIcon className="fas fa-spinner fa-spin text-indigo-600"></FaIcon>
                         <span>Проверка сессии...</span>
                       </div>
@@ -48330,26 +48336,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                      видно сейчас». */
                   <div className="auth-screen bg-gradient-to-br from-blue-100 to-purple-100">
                     <div className="auth-card w-full max-w-[380px] rounded-[28px] bg-white/95 px-6 py-7 shadow-[0_24px_60px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/5 backdrop-blur-xl">
-                      {/* Знак портала — тот же, что станет иконкой на домашнем
-                          экране: человек, поставивший портал приложением, видит
-                          при запуске ровно то, по чему тыкнул. Раньше здесь
-                          лежала картинка с внешнего хостинга (iili.io) — без
-                          интернета и при его блокировке экран входа встречал
-                          битой картинкой. */}
-                      <div className="flex flex-col items-center">
-                        <span
-                          className="auth-card__mark grid h-[68px] w-[68px] place-items-center rounded-[20px] shadow-[0_8px_22px_rgba(34,64,155,0.28)]"
-                          style={{ background: 'linear-gradient(150deg, #22409B 0%, #4A3A96 45%, #7B2E92 100%)' }}
-                          aria-hidden="true"
-                        >
-                          <img src={sidebarLogoMark} alt="" className="h-[40px] w-[40px]" />
+                      {/* Шапка — прежняя: плашка «iCORE» и фирменный знак
+                          рядом с ней. Знак рисуется разметкой (IcoreMark), а не
+                          картинкой: раньше здесь висел файл с посторонним
+                          хостингом, и без интернета вход встречал битым
+                          значком. */}
+                      <h1 className="mb-6 flex items-center justify-center text-5xl font-extrabold">
+                        <span className="flex">
+                          <span className="rounded-l-2xl border border-indigo-700 bg-indigo-700 px-3 py-2 text-4xl text-white shadow-lg">
+                            iCORE
+                          </span>
+                          <span className="-ml-px rounded-r-2xl border-b border-r border-t border-indigo-700 bg-white px-2 py-2 text-4xl text-indigo-700">
+                            <IcoreMark className="mr-0.5 h-12 w-12" />
+                          </span>
                         </span>
-                        <h1 className="mt-3.5 text-[24px] font-semibold tracking-tight text-slate-900">iCORE</h1>
-                        <p className="auth-card__subtitle mt-1 text-[13px] text-slate-500">Рабочий портал</p>
-                      </div>
+                      </h1>
 
                       <form
-                        className="mt-6"
                         onSubmit={(e) => {
                           e.preventDefault();
                           if (!isLoading) {

@@ -582,7 +582,7 @@
     /* Невысокий экран, и на нём одновременно карточка входа и панель установки.
        Уплотняем карточку (панель ужимается сама, см. install-app-prompt.css) —
        но не за счёт размера шрифта в полях: меньше 16 px Safari начинает
-       приближать страницу при вводе. Уходит только воздух.
+       приближать страницу при вводе. Уходит только воздух и величина шапки.
        Селекторы удвоены (.auth-card.auth-card): у правила и у утилиты Tailwind
        одинаковый вес, а утилиты в собранном CSS идут позже и выигрывают. */
     @media (max-height: 760px) {
@@ -590,21 +590,15 @@
         padding-top: 1.25rem;
         padding-bottom: 1.25rem;
       }
-      body.has-install-offer .auth-card .auth-card__mark {
-        width: 56px;
-        height: 56px;
-        border-radius: 17px;
-      }
-      body.has-install-offer .auth-card .auth-card__mark img {
-        width: 33px;
-        height: 33px;
-      }
       body.has-install-offer .auth-card h1 {
-        margin-top: 0.625rem;
-        font-size: 21px;
+        margin-bottom: 1rem;
       }
-      body.has-install-offer .auth-card form {
-        margin-top: 1.125rem;
+      body.has-install-offer .auth-card h1 span {
+        font-size: 1.75rem;
+      }
+      body.has-install-offer .auth-card h1 svg {
+        width: 2.25rem;
+        height: 2.25rem;
       }
       body.has-install-offer .auth-card .auth-error-slot {
         min-height: 1.75rem;
@@ -614,25 +608,18 @@
     /* Совсем низкий экран (iPhone SE 1-го поколения, бюджетные Android 640 px,
        любой телефон с поднятой клавиатурой). */
     @media (max-height: 700px) {
-      body.has-install-offer .auth-card .auth-card__mark {
-        width: 48px;
-        height: 48px;
-        border-radius: 15px;
+      body.has-install-offer .auth-card h1 {
+        margin-bottom: 0.75rem;
       }
-      body.has-install-offer .auth-card .auth-card__mark img {
-        width: 28px;
-        height: 28px;
+      body.has-install-offer .auth-card h1 span {
+        font-size: 1.5rem;
+      }
+      body.has-install-offer .auth-card h1 svg {
+        width: 2rem;
+        height: 2rem;
       }
       body.has-install-offer .auth-card .auth-error-slot {
         min-height: 1.25rem;
-      }
-      body.has-install-offer .auth-card form {
-        margin-top: 0.875rem;
-      }
-      /* Подпись «Рабочий портал» — единственное, что здесь можно убрать без
-         потери смысла: название и знак над ней говорят то же самое. */
-      body.has-install-offer .auth-card .auth-card__subtitle {
-        display: none;
       }
     }
 

@@ -442,12 +442,19 @@ class AuthScreenTests(unittest.TestCase):
         self.assertIn("showLoginPassword ? 'text' : 'password'", app)
 
     def test_login_logo_is_local(self):
-        """Картинка с внешнего хостинга встречала бы битым значком без сети."""
+        """Картинка с внешнего хостинга встречала бы битым значком без сети.
+
+        Знак в шапке рисуется разметкой (IcoreMark) ровно поэтому: файл в
+        сайдбаре залит белым и на белой карточке невидим, а <img> его не
+        перекрасить — прежняя шапка тянула картинку с iili.io."""
         app = read(APP_JSX)
         card = app[app.index('className="auth-card'):]
         card = card[:card.index('</form>')]
         self.assertNotIn('http', card, 'На экране входа появилась внешняя ссылка')
-        self.assertIn('sidebarLogoMark', card)
+        self.assertIn('<IcoreMark', card)
+        mark = read(ROOT / 'src' / 'components' / 'common' / 'IcoreMark.jsx')
+        self.assertIn('linearGradient', mark)
+        self.assertIn('useId', mark, 'Общий id градиента гасит знак у второго экземпляра')
 
     def test_login_inputs_are_mobile_safe(self):
         """Автозаглавная буква и автозамена ломают ввод логина на телефоне."""
