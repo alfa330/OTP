@@ -39942,11 +39942,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             /* Строка поиска и её запрос живут только вместе, поэтому запрос
                сбрасывается в любую сторону: закрыли — фильтр снят, открыли —
                поле пересоздаётся пустым (defaultValue), и прежний запрос
-               фильтровал бы список под пустым полем. */
+               фильтровал бы список под пустым полем.
+
+               Открыли в свёрнутом рельсе — рельс разворачивается сам: искать
+               по подписям, которых не видно, нельзя, а поле в 60 px было бы
+               издевательством. Обратный ход делает эффект ниже: свернули —
+               поиск закрылся. */
             const handleToggleSidebarSearch = useCallback(() => {
                 sidebarSearchQueryRef.current = '';
-                setShowSidebarSearch((prev) => !prev);
-            }, []);
+                if (!showSidebarSearch) setSidebarCollapsed(false);
+                setShowSidebarSearch(!showSidebarSearch);
+            }, [showSidebarSearch]);
 
             const handleSidebarSearchInput = useCallback((e) => {
                 sidebarSearchQueryRef.current = e.target.value || '';
@@ -47274,7 +47280,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <div className="p-4 h-full flex flex-col">
                                 {/* Кнопка сворачивания для десктопа */}
                                 <button
-                                    className="sidebar-collapse-btn absolute top-4 -right-4 w-8 h-8 rounded-full bg-blue-700 hover:bg-blue-600 flex items-center justify-center transition-all shadow-lg border-2 border-white"
+                                    /* Синего круга с белой обводкой здесь больше нет:
+                                       на светлом полотне он читался наклейкой, вид
+                                       кнопки задаёт .sidebar-collapse-btn в styles.css.
+                                       Утилиты bg-blue-700/hover:bg-blue-600 убраны не
+                                       для красоты: пока они висели на кнопке, её
+                                       красило правило тёмной темы для открытых
+                                       разделов (`.sidebar button.bg-blue-700`), и в
+                                       темноте кнопка отличалась от карточек без всякой
+                                       причины. */
+                                    className="sidebar-collapse-btn absolute top-4 -right-4 w-8 h-8 rounded-full flex items-center justify-center transition-all"
                                     onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
                                 >
                                     <FaIcon className={`fas fa-chevron-${sidebarCollapsed ? 'right' : 'left'} text-sm`}></FaIcon>
@@ -47360,7 +47375,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             onStreamPoke={emitNewsPoke}
                                         />
                                     );
-                                    if (!isMobileShell) return <div className="mb-2">{bell}</div>;
+                                    if (!isMobileShell) return <div className="sidebar-bell-slot">{bell}</div>;
                                     return createPortal(
                                         <div className="mobile-bell-slot">{bell}</div>,
                                         document.body,
@@ -47506,13 +47521,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         >
                                             <FaIcon className="fas fa-building"></FaIcon>
                                             <span className="sidebar-text truncate">{activeDeptName}</span>
-                                            <FaIcon className="fas fa-chevron-down ml-auto opacity-70 sidebar-text"></FaIcon>
+                                            {/* Стрелка показывает туда, куда откроется список:
+                                                на компьютере вбок, на телефоне вниз. */}
+                                            <FaIcon className={`fas fa-chevron-${isMobileShell ? 'down' : 'right'} ml-auto opacity-70 sidebar-text`}></FaIcon>
                                         </button>
 
                                         {(showSidebarDeptFilter || isDeptFilterClosing) && (
                                             <div
                                                 className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 max-h-96 overflow-y-auto thin-scroll ${showSidebarDeptFilter && !isDeptFilterClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                                style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 9999 }}
+                                                /* НА КОМПЬЮТЕРЕ ОТКРЫВАЕТСЯ ВБОК, как «Аккаунт» и
+                                                   «Учет сотрудников» (решение владельца 09.09.2026):
+                                                   вниз она накрывала верх списка разделов, и выбор
+                                                   отдела приходилось делать поверх того, что он
+                                                   меняет. Обходится обычным absolute без измеренных
+                                                   координат — селектор живёт ВНЕ прокручиваемого
+                                                   списка. На телефоне вбок выпадать некуда: там
+                                                   шторка занимает весь экран. */
+                                                style={isMobileShell
+                                                    ? { position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 9999 }
+                                                    : { position: 'absolute', top: 0, left: '100%', marginLeft: 8, zIndex: 9999 }}
                                             >
                                                 <button
                                                     onClick={() => stableSidebarSelectDept('')}

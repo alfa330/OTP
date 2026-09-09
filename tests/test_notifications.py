@@ -427,7 +427,10 @@ class MobilePresenceTest(unittest.TestCase):
     def test_bell_moves_to_the_screen_corner_on_a_phone(self):
         self.assertIn('createPortal(', self.APP)
         self.assertIn('<div className="mobile-bell-slot">{bell}</div>', self.APP)
-        self.assertIn('if (!isMobileShell) return <div className="mb-2">{bell}</div>;', self.APP)
+        # На компьютере колокол остаётся в шапке сайдбара. Имя обёртки не
+        # косметика: её положение (в рельсе под знаком, у развёрнутого — в
+        # правом верхнем углу) задают стили по этому классу.
+        self.assertIn('if (!isMobileShell) return <div className="sidebar-bell-slot">{bell}</div>;', self.APP)
         # Угол — правый верхний, при любом повороте экрана.
         block = self.SHELL[self.SHELL.index('.mobile-bell-slot {'):]
         self.assertIn('position: fixed;', block[:200])

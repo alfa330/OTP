@@ -376,41 +376,104 @@
     body:not(.mobile-shell) .sidebar > div {
       padding: 14px 0 12px;
     }
-    /* Шапка: логотип слева, поиск и колокол справа — просил владелец.
-       Справа поле шире обычных 10 px: там висит кнопка сворачивания
-       (absolute top-4 -right-4, её левый край — ширина сайдбара минус 16),
-       и без запаса колокол оказывался ровно под ней.
+    /* ── Шапка: логотип, поиск, колокол ──────────────────────────────
+       Поиск и колокол видны В ЛЮБОМ состоянии сайдбара и переезжают между
+       двумя местами: в рельсе стоят столбиком под знаком, у развёрнутого —
+       строкой в правом верхнем углу (решение владельца 09.09.2026). Раньше
+       в рельсе поиск был спрятан, а колокол растянут полноширинной строкой
+       меню — до них нельзя было дотянуться, не разворачивая панель.
 
-       СТРОКОЙ ШАПКА СТАНОВИТСЯ ТОЛЬКО У РАЗВЁРНУТОГО САЙДБАРА — по классу
-       состояния, а НЕ по :hover. Свёрнутый рельс разъезжается по наведению
-       за 0,3 с, и всё, что прижато к правому краю, проезжает под курсором:
-       курсор, пришедший к кнопке сворачивания, ловил по дороге колокол и
-       открывал панель уведомлений «сам». В рельсе шапка остаётся такой,
-       какой была до переделки: логотип, под ним колокол строкой меню. */
+       ПЕРЕЕЗД СДЕЛАН АБСОЛЮТНЫМИ КООРДИНАТАМИ, А НЕ ПЕРЕКЛАДКОЙ FLEX.
+       flex-direction не анимируется: столбик превращался бы в строку
+       рывком посреди плавного разъезда сайдбара. Обе кнопки вынуты из
+       потока и анимируют top/right — те же 0,3 с, что и ширина сайдбара,
+       так что они едут вместе с ним. Место под них в рельсе держит высота
+       самой шапки (она тоже анимируется).
+
+       ПУТЬ ВЫБРАН ТАК, ЧТОБЫ НЕ ПРОХОДИТЬ ПОД КУРСОРОМ, ПРИШЕДШИМ К КНОПКЕ
+       СВОРАЧИВАНИЯ. Она висит на absolute top-4 -right-4, у свёрнутого
+       рельса это точка (64…96, 16…48). Кнопки едут по диагонали — вверх и
+       вправо одновременно, — и в тот момент, когда их x доходит до правого
+       края рельса, их y ещё далеко ниже кнопки сворачивания. Раньше
+       колокол приезжал ровно под курсор, и панель уведомлений открывалась
+       «сама». К правому краю колокол прижат не вплотную, а на 24 px: у
+       развёрнутого сайдбара левый край кнопки сворачивания — это ширина
+       минус 16, и без запаса они снова наложились бы. */
     body:not(.mobile-shell) .sidebar-top-row {
+      position: relative;
+      height: 54px;
+      padding: 0 10px;
       margin-bottom: 10px;
+      transition: height 0.3s ease;
     }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row {
+    body:not(.mobile-shell) .sidebar-top-row > h1 {
       display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 0 26px 0 10px;
-    }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > h1 {
-      flex: 1;
-      min-width: 0;
       justify-content: flex-start;
       margin: 0;
+      /* Заголовок растянут на всю строку шапки и лежит НАД кнопкой
+         сворачивания (она absolute и стоит раньше в разметке), а прозрачный
+         фон клики всё равно принимает — без этого правила у кнопки
+         сворачивания пропадала левая шестая часть. Кликается в логотипе
+         только вход в «4 You», ему события возвращаем. */
+      pointer-events: none;
     }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div {
+    body:not(.mobile-shell) .sidebar-top-row > h1 button {
+      pointer-events: auto;
+    }
+    body:not(.mobile-shell) .sidebar-search-btn,
+    body:not(.mobile-shell) .sidebar-bell-slot {
+      position: absolute;
+      top: 12px;
       margin: 0;
+      transition: top 0.3s ease, right 0.3s ease;
+    }
+    body:not(.mobile-shell) .sidebar-search-btn {
+      right: 62px;
+    }
+    body:not(.mobile-shell) .sidebar-bell-slot {
+      right: 24px;
+    }
+    /* Рельс: знак сверху, под ним столбик из двух кнопок — всё по центру
+       80-пиксельной полосы и левее кнопки сворачивания. */
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-top-row {
+      height: 118px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-top-row > h1 {
+      justify-content: center;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-search-btn {
+      top: 54px;
+      right: 25px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-bell-slot {
+      top: 88px;
+      right: 25px;
+    }
+    /* Панель колокола держит свёрнутый сайдбар развёрнутым (правило :has
+       выше) — значит и шапка обязана стоять как у развёрнутого, иначе
+       панель уехала бы вместе с кнопкой из-под курсора. Специфичность
+       равна правилам :not(:hover), поэтому это ПОСЛЕ них, порядком. */
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-top-row {
+      height: 54px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-top-row > h1 {
+      justify-content: flex-start;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-search-btn {
+      top: 12px;
+      right: 62px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-bell-slot {
+      top: 12px;
+      right: 24px;
     }
     /* Колокол в шапке — значок, а не строка меню. Его разметка одна на три
-       места (строка сайдбара, угол экрана на телефоне, теперь шапка), и
+       места (шапка, угол экрана на телефоне, панель уведомлений внутри), и
        каждое место подгоняет её стилями — так же сделан мобильный угол
-       (.mobile-bell-slot в mobile-shell.css). Подпись и стрелку убираем,
-       счётчик берём тот, что рисуется для свёрнутого рельса. */
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div > button {
+       (.mobile-bell-slot в mobile-shell.css). Селектор бьёт ТОЛЬКО в саму
+       кнопку-триггер (`.sidebar-bell-slot > div > button`): рядом с ней в
+       том же контейнере живёт панель, и её кнопки красить нельзя. */
+    body:not(.mobile-shell) .sidebar-bell-slot > div > button {
       width: 30px;
       height: 30px;
       padding: 0;
@@ -420,17 +483,22 @@
       border: 1px solid var(--sheet-sep, #e5e7eb);
       color: var(--sheet-text, #111827);
     }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div > button:hover {
+    body:not(.mobile-shell) .sidebar-bell-slot > div > button:hover {
       background: var(--sheet-active, #e5e5ea) !important;
     }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div > button.bg-blue-700 {
+    body:not(.mobile-shell) .sidebar-bell-slot > div > button.bg-blue-700 {
       background: var(--sheet-select, #1d4ed8) !important;
       color: var(--sheet-select-ink, #fff) !important;
     }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row .sidebar-text {
+    /* Подпись «Уведомления» и стрелка подменю в шапке лишние: там значок. */
+    body:not(.mobile-shell) .sidebar .sidebar-top-row .sidebar-text {
       display: none;
     }
-    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row .sidebar-surveys-collapsed-badge {
+    /* Счётчик — уголком кнопки. Тот же, что рисуется для свёрнутого рельса
+       (.sidebar-surveys-collapsed-badge): второй его вид, с числом внутри
+       подписи, в шапке негде показать. Правило перебивает и общее
+       `display: none`, и `.collapsed:hover { display: none }`. */
+    body:not(.mobile-shell) .sidebar .sidebar-top-row .sidebar-surveys-collapsed-badge {
       display: inline-flex;
       top: -5px;
       right: -5px;
@@ -440,7 +508,6 @@
     }
     body:not(.mobile-shell) .sidebar-search-btn {
       display: inline-flex;
-      flex: 0 0 30px;
       width: 30px;
       height: 30px;
       align-items: center;
@@ -494,14 +561,16 @@
       color: var(--sheet-muted, #8a8a8e);
     }
     /* Селектор отдела — такая же строка, но своей карточкой: он не раздел, и
-       в общий блок с разделами его вставлять нельзя. */
+       в общий блок с разделами его вставлять нельзя. Рамки у него нет: с
+       рамкой он читался полем ввода, хотя ведёт себя как «Учет
+       сотрудников» — строка, открывающая список вбок. */
     body:not(.mobile-shell) .sidebar-dept-filter {
       margin: 0 10px 10px;
     }
     body:not(.mobile-shell) .sidebar-dept-filter > button {
       border-radius: 11px;
       background: var(--sheet-card, #fff) !important;
-      border: 1px solid var(--sheet-sep, #e5e7eb);
+      border: 0;
     }
     body:not(.mobile-shell) .sidebar-dept-filter > button > svg:first-child {
       --tint: var(--sheet-muted, #8a8a8e);
@@ -524,16 +593,18 @@
       margin: 0;
       opacity: 1;
     }
-    /* Строка. Один вид у пунктов меню и у селектора отдела. */
+    /* Строка. Один вид у пунктов меню и у селектора отдела. Скругление
+       здесь НЕ задаётся: у строк списка его считает проход по блокам
+       (классы sidebar-run-*), у селектора отдела он свой — карточка из одной
+       строки. Общее `border-radius: 0` в этом правиле гасило бы и то и
+       другое, потому что стоит ниже них в файле. */
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button,
     body:not(.mobile-shell) .sidebar-dept-filter > button {
       display: flex;
       align-items: center;
       gap: 10px;
       width: 100%;
       padding: 8px 10px;
-      border-radius: 0;
       background: var(--sheet-card, #fff);
       color: var(--sheet-text, #111827);
       font-size: 14px;
@@ -541,8 +612,13 @@
       font-weight: 400;
       text-align: left;
     }
+    /* Углы строки внутри карточки — прямые: скругляются только края блока
+       (правила sidebar-run-* ниже). Утилита rounded-lg стоит прямо на
+       кнопках, поэтому её приходится гасить явно. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button {
+      border-radius: 0;
+    }
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button:hover,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button:hover,
     body:not(.mobile-shell) .sidebar-dept-filter > button:hover {
       background: var(--sheet-active, #e5e5ea) !important;
     }
@@ -551,13 +627,11 @@
        гасит строки через display:none, и структура начинает врать: скругление
        досталось бы спрятанной строке, а видимая осталась бы с прямым углом.
        Классы же считаются по ВИДИМЫМ строкам. */
-    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-first > button,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-first > div > button {
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-first > button {
       border-top-left-radius: 11px;
       border-top-right-radius: 11px;
     }
-    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-last > button,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-last > div > button {
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-last > button {
       border-bottom-left-radius: 11px;
       border-bottom-right-radius: 11px;
     }
@@ -588,7 +662,6 @@
        у них нет, а состав блока зависит от роли и выбранного отдела, так что
        посчитать блок в CSS (nth-of-type по <hr>) нельзя. */
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button > svg:first-child,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button > svg:first-child,
     body:not(.mobile-shell) .sidebar-dept-filter > button > svg:first-child {
       flex: 0 0 26px !important;
       width: 26px !important;
@@ -605,17 +678,15 @@
        красим; плитка гасится до полупрозрачной белой, иначе цветной квадрат
        спорит с залитой строкой. */
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button.bg-blue-700,
     body:not(.mobile-shell) .sidebar-dept-filter > button.bg-blue-700 {
       background: var(--sheet-select, #1d4ed8) !important;
       color: var(--sheet-select-ink, #fff) !important;
     }
-    body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700 > svg:first-child,
-    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button.bg-blue-700 > svg:first-child {
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700 > svg:first-child {
       background: rgba(255, 255, 255, 0.24) !important;
     }
     /* Вторая иконка строки — стрелка подменю, плиткой не становится. */
-    body:not(.mobile-shell) .sidebar-menu-scroll button > svg:not(:first-child),
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button > svg:not(:first-child),
     body:not(.mobile-shell) .sidebar-dept-filter > button > svg:not(:first-child) {
       flex: 0 0 auto;
       width: 1em;
@@ -632,32 +703,67 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Свёрнутый рельс. Поиск скрыт целиком: подписей не видно, искать
-       нечего, — а само поле в 60 px пустой строкой. Заодно поиск закрывается
-       при сворачивании (см. App.jsx): иначе список остался бы
-       отфильтрованным по невидимому запросу. Линии между строками
-       сдвигаются к краю плитки. */
-    body:not(.mobile-shell) .sidebar.collapsed .sidebar-search-btn,
+    /* Свёрнутый рельс. Спрятано только ПОЛЕ поиска: в 60 px оно было бы
+       пустой строкой. Сама кнопка видна всегда и разворачивает сайдбар
+       (см. handleToggleSidebarSearch в App.jsx), а обратный ход — эффект
+       «свернули, значит поиск закрылся»: иначе список остался бы
+       отфильтрованным по невидимому запросу. */
     body:not(.mobile-shell) .sidebar.collapsed .sidebar-search-row {
       display: none;
     }
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > button,
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > div > button,
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-footer-menu > li > button,
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-dept-filter > button {
       justify-content: center;
       padding: 8px 4px;
+      /* Промежутка нет намеренно. В строке рядом с плиткой остаются подпись и
+         стрелка подменю — они нулевой ширины (правила выше), но всё ещё
+         элементы флекса, и промежуток по 10 px до каждой сдвигал плитку от
+         центра карточки на 8-13 px, по-разному в строках с подменю и без. */
+      gap: 0;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before {
-      left: 10px;
+    /* Стрелка подменю прижата к правому краю утилитой ml-auto. Автоотступ
+       съедает всё свободное место, и выравнивание по центру перестаёт
+       работать вовсе: плитка уезжает к левому краю. */
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > button > svg:not(:first-child),
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-footer-menu > li > button > svg:not(:first-child),
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-dept-filter > button > svg:not(:first-child) {
+      margin-left: 0;
+    }
+    /* Подпись в рельсе не просто спрятана — она обязана НЕ РАСТИ: с
+       flex: 1 (правило выше) невидимый спан забирал всё свободное место и
+       выдавливал плитку к левому краю карточки, хотя строка выровнена по
+       центру. */
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-text {
+      flex: 0 0 0;
+    }
+    /* Разделителей между строками в рельсе нет вовсе. Они начинаются от
+       подписи (46 px), а подписи в рельсе нет — черта висела в воздухе, не
+       доходя до краёв карточки. Столбик плиток и без неё читается как
+       группа: её границы рисует сама карточка. */
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before,
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-footer-menu > li + li::before {
+      content: none;
     }
     /* Панель колокола держит свёрнутый сайдбар развёрнутым (правило :has
        выше) — значит и строки обязаны остаться с подписями слева.
        Специфичность равна правилам :not(:hover), поэтому это ПОСЛЕ них,
        порядком. */
     body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > button,
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > div > button {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-footer-menu > li > button {
       justify-content: flex-start;
       padding: 8px 10px;
+      gap: 10px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > button > svg:not(:first-child) {
+      margin-left: auto;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-text {
+      flex: 1;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before,
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-footer-menu > li + li::before {
+      content: '';
     }
     /* Знак «4 You» в свёрнутом рельсе — белый: он рисовался на синей плите
        и на светлом полотне исчезал совсем. Даём ему свою плитку цветом
@@ -769,6 +875,17 @@
     }
     body:not(.mobile-shell) .sidebar-collapse-btn:hover {
       background: var(--sheet-active, #e5e5ea) !important;
+    }
+    /* Выпадающие панели сайдбара скруглены (rounded-md), но содержимое по
+       этому скруглению не обрезают: у выделенного пункта фон bg-gray-100
+       закрывает угол квадратом, и панель читается прямоугольной. Тем, кто
+       прокручивается (селектор отдела: max-h-96 overflow-y-auto), обрезка
+       уже досталась от самой прокрутки — их не трогаем, иначе прокрутка
+       сломается. Панель уведомлений обрезает себя сама (overflow-hidden в
+       разметке), так что это правило до неё не доходит. */
+    body:not(.mobile-shell) .sidebar .animate-dropdown:not(.overflow-y-auto),
+    body:not(.mobile-shell) .sidebar .animate-dropdown-reverse:not(.overflow-y-auto) {
+      overflow: hidden;
     }
     /* Пункт, спрятанный поиском по разделам. Класс ставит проход в App.jsx —
        текст пункта в CSS не прочитать. */
