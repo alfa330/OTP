@@ -47532,7 +47532,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         {(showSidebarDeptFilter || isDeptFilterClosing) && (
                                             <div
-                                                className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 max-h-96 overflow-y-auto thin-scroll ${showSidebarDeptFilter && !isDeptFilterClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                /* sidebar-holds-open: пока список открыт, свёрнутый
+                                                   сайдбар не схлопывается. Панель прижата к строке
+                                                   (left: 100%), и без удержания она прыгала на 220 px
+                                                   влево, стоило увести курсор с полосы. */
+                                                className={`sidebar-holds-open origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 max-h-96 overflow-y-auto thin-scroll ${showSidebarDeptFilter && !isDeptFilterClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                                 /* НА КОМПЬЮТЕРЕ ОТКРЫВАЕТСЯ ВБОК, как «Аккаунт» и
                                                    «Учет сотрудников» (решение владельца 09.09.2026):
                                                    вниз она накрывала верх списка разделов, и выбор
@@ -48896,7 +48900,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     по строкам. Видимость переключает paintSidebarMenu
                                     через ref — состояние React ради одной строки
                                     пересобирало бы всё дерево меню. */}
-                                <div ref={sidebarMenuEmptyRef} className="sidebar-menu-empty" hidden>
+                                <div ref={sidebarMenuEmptyRef} className="sidebar-menu-empty" role="status" hidden>
                                     Ничего не нашлось
                                 </div>
                                 {/* «Выйти» — в самом низу листа, под всеми разделами:
@@ -48953,7 +48957,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                окна. Низ панели прибит к низу пункта (bottom-0),
                                                а scaleY тянется от нижней грани (origin-bottom). */
                                             <div
-                                                className={`absolute left-full bottom-0 ml-2 w-56 origin-bottom bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
+                                                className={`sidebar-holds-open absolute left-full bottom-0 ml-2 w-56 origin-bottom bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 z-40
                                             ${showSidebarAccountDropdown && !isClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
                                             >
                                                 <button

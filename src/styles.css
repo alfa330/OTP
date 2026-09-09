@@ -164,24 +164,33 @@
     .sidebar.collapsed:hover .sidebar-logo-mini {
       display: none;
     }
-    /* Пока панель колокола открыта, свёрнутый сайдбар удерживается развёрнутым.
-       Панель — потомок сайдбара и потому сама держит его :hover: без удержания
-       уход мыши сжимал бы сайдбар с открытой панелью, а повторное наведение на
-       неё вновь разворачивал — панель дёргалась бы на 176px вбок из-под курсора. */
-    .sidebar.collapsed:has(.notifications-dropdown) {
+    /* Пока в сайдбаре открыта панель, свёрнутый сайдбар удерживается
+       развёрнутым. Панель — потомок сайдбара и потому сама держит его :hover:
+       без удержания уход мыши сжимал бы сайдбар с открытой панелью, а
+       повторное наведение на неё вновь разворачивал — панель дёргалась бы
+       вбок из-под курсора.
+
+       Признак — класс .sidebar-holds-open. Он висит на трёх панелях, каждая
+       из которых прижата к своей строке и потому едет вместе с шириной:
+       уведомления (NotificationsBell.jsx), список отделов и меню аккаунта.
+       Всплывающая карточка нового уведомления его НЕ носит намеренно: она
+       приходит сама, и каждое уведомление дёргало бы всю вёрстку. Панели
+       «Учета сотрудников» и «Расчета ресурсов» тоже не носят — они стоят на
+       посчитанных координатах и обновляют их сами. */
+    .sidebar.collapsed:has(.sidebar-holds-open) {
       width: 300px;
     }
-    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-text {
+    .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-text {
       opacity: 1;
       width: auto;
     }
-    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-surveys-collapsed-badge {
+    .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-surveys-collapsed-badge {
       display: none;
     }
-    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-logo-full {
+    .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-full {
       display: flex;
     }
-    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-logo-mini {
+    .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-mini {
       display: none;
     }
     /* Колокол качается вокруг точки крепления, а не вокруг центра значка. */
@@ -213,6 +222,20 @@
       .notifications-toast,
       .notifications-toast-floating {
         animation: none !important;
+      }
+      /* Переезд поиска и колокола между рельсом и шапкой — 76 px по вертикали
+         за 0,3 с. Тем, кто просил меньше движения, кнопки просто оказываются
+         на новом месте. Ширина сайдбара и так анимируется (.sidebar выше) —
+         её гасим здесь же, иначе кнопки стоят, а полоса едет. */
+      .sidebar,
+      .sidebar-top-row,
+      .sidebar-search-btn,
+      .sidebar-bell-slot,
+      .sidebar-logo-full,
+      .sidebar-logo-mini,
+      .sidebar .sidebar-text,
+      .sidebar-menu-scroll > li > button {
+        transition: none !important;
       }
     }
 
@@ -410,11 +433,12 @@
       display: flex;
       justify-content: flex-start;
       margin: 0;
-      /* Заголовок растянут на всю строку шапки и лежит НАД кнопкой
-         сворачивания (она absolute и стоит раньше в разметке), а прозрачный
-         фон клики всё равно принимает — без этого правила у кнопки
-         сворачивания пропадала левая шестая часть. Кликается в логотипе
-         только вход в «4 You», ему события возвращаем. */
+      /* Заголовок растянут на всю строку шапки и накрывает собой и кнопку
+         сворачивания, и кнопки шапки. Клики ему не нужны: единственное
+         кликаемое внутри — вход в «4 You», ему события возвращаем ниже.
+         Кнопку сворачивания держит НЕ это правило, а её z-index (см. ниже):
+         прозрачный фон принимает клики, и без запаса по слою она теряла
+         половину площади. */
       pointer-events: none;
     }
     body:not(.mobile-shell) .sidebar-top-row > h1 button {
@@ -425,7 +449,11 @@
       position: absolute;
       top: 12px;
       margin: 0;
-      transition: top 0.3s ease, right 0.3s ease;
+      /* Цвета здесь же: одно свойство transition затирает список из утилиты
+         transition-colors, которая стоит на кнопке в разметке, и подсветка
+         начинала меняться рывком. */
+      transition: top 0.3s ease, right 0.3s ease,
+                  background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
     }
     body:not(.mobile-shell) .sidebar-search-btn {
       right: 62px;
@@ -453,17 +481,17 @@
        выше) — значит и шапка обязана стоять как у развёрнутого, иначе
        панель уехала бы вместе с кнопкой из-под курсора. Специфичность
        равна правилам :not(:hover), поэтому это ПОСЛЕ них, порядком. */
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-top-row {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-top-row {
       height: 54px;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-top-row > h1 {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-top-row > h1 {
       justify-content: flex-start;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-search-btn {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-search-btn {
       top: 12px;
       right: 62px;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-bell-slot {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-bell-slot {
       top: 12px;
       right: 24px;
     }
@@ -624,6 +652,19 @@
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button {
       border-radius: 0;
     }
+    /* Отступ строки едет вместе с шириной панели — им набирается центр в
+       рельсе (см. ниже). Цвета в том же списке: одиночный transition затирает
+       свойства из утилиты transition-all, стоящей на кнопке в разметке, и
+       подсветка под курсором начинала меняться рывком. Подпись обрезается
+       краем карточки, поэтому overflow: hidden — она гаснет, а панель
+       съезжает по ней. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button,
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button,
+    body:not(.mobile-shell) .sidebar-dept-filter > button {
+      overflow: hidden;
+      transition: padding-left 0.3s ease, padding-right 0.3s ease,
+                  background-color 0.2s ease, color 0.2s ease;
+    }
     body:not(.mobile-shell) .sidebar-menu-scroll > li > button:hover,
     body:not(.mobile-shell) .sidebar-dept-filter > button:hover {
       background: var(--sheet-active, #e5e5ea) !important;
@@ -717,31 +758,44 @@
     body:not(.mobile-shell) .sidebar.collapsed .sidebar-search-row {
       display: none;
     }
+    /* В рельсе плитка стоит по центру карточки, и центр набирается ОТСТУПОМ,
+       а не justify-content: center. Разница видна при уходе курсора:
+       выравнивание применяется в тот же кадр, когда карточка ещё во всю
+       ширину, — плитка улетала к центру 300-пиксельной строки и лишь потом
+       «возвращалась» вместе со сжатием. Отступ же едет вместе с шириной:
+       10 px → 17 px, то есть плитка смещается на 7 px и никуда не прыгает.
+       17 = (60 − 26) / 2, где 60 — карточка в рельсе, 26 — плитка. */
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > button,
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-footer-menu > li > button,
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-dept-filter > button {
-      justify-content: center;
-      padding: 8px 4px;
-      /* Промежутка нет намеренно. В строке рядом с плиткой остаются подпись и
-         стрелка подменю — они нулевой ширины (правила выше), но всё ещё
-         элементы флекса, и промежуток по 10 px до каждой сдвигал плитку от
-         центра карточки на 8-13 px, по-разному в строках с подменю и без. */
+      padding-left: 17px;
+      padding-right: 4px;
+      /* Промежутка нет намеренно: подпись рядом с плиткой ещё занимает место
+         (она гаснет, а не исчезает), и промежуток до неё сдвинул бы плитку. */
       gap: 0;
     }
-    /* Стрелка подменю прижата к правому краю утилитой ml-auto. Автоотступ
-       съедает всё свободное место, и выравнивание по центру перестаёт
-       работать вовсе: плитка уезжает к левому краю. */
+    /* Стрелки подменю в рельсе не видно вовсе — как и в шторке телефона.
+       Места под неё нет, а появляется она всё равно только по наведению, то
+       есть уже у развёрнутой панели. Прятать обязательно: даже нулевой
+       ml-auto съедает свободное место, а 16-пиксельная стрелка сдвигает
+       плитку от центра карточки на 7 px. */
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > button > svg:not(:first-child),
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-footer-menu > li > button > svg:not(:first-child),
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-dept-filter > button > svg:not(:first-child) {
-      margin-left: 0;
+      display: none;
     }
     /* Подпись в рельсе не просто спрятана — она обязана НЕ РАСТИ: с
        flex: 1 (правило выше) невидимый спан забирал всё свободное место и
        выдавливал плитку к левому краю карточки, хотя строка выровнена по
        центру. */
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-text {
-      flex: 0 0 0;
+    /* Подпись в рельсе НЕ обнуляется по ширине: width: 0 обрезает текст в тот
+       же кадр, и слова пропадали рывком, хотя рядом всё ещё едет панель.
+       Теперь текст остаётся на месте и гаснет за 0,2 с (правило прозрачности
+       общее, выше), а край карточки съезжает по нему. Расти подписи всё так же
+       нельзя — иначе она выдавит плитку из центра. */
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) span.sidebar-text {
+      flex: 0 0 auto;
+      width: auto;
     }
     /* Разделителей между строками в рельсе нет вовсе. Они начинаются от
        подписи (46 px), а подписи в рельсе нет — черта висела в воздухе, не
@@ -755,26 +809,86 @@
        выше) — значит и строки обязаны остаться с подписями слева.
        Специфичность равна правилам :not(:hover), поэтому это ПОСЛЕ них,
        порядком. */
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > button,
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-footer-menu > li > button {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-menu-scroll > li > button,
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-footer-menu > li > button,
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-dept-filter > button {
       justify-content: flex-start;
       padding: 8px 10px;
       gap: 10px;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > button > svg:not(:first-child) {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-menu-scroll > li > button > svg:not(:first-child),
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-footer-menu > li > button > svg:not(:first-child),
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-dept-filter > button > svg:not(:first-child) {
+      display: inline-block;
       margin-left: auto;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-text {
+    /* Именно span: класс sidebar-text носит и стрелка подменю (<svg>), и с
+       flex: 1 она забирала половину строки, обрезая подпись вдвое. */
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) span.sidebar-text {
       flex: 1;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before,
-    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-footer-menu > li + li::before {
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before,
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-footer-menu > li + li::before {
       content: '';
+    }
+    /* ЛОГОТИП ПЕРЕКРЕЩИВАЕТСЯ, А НЕ МИГАЕТ. Общие правила сайдбара меняют
+       знак и полное написание через display: none/flex — то есть в один кадр,
+       посреди плавного сжатия панели. Владелец назвал это «резко появляется и
+       резко исчезает» (09.09.2026). На компьютере оба лежат друг на друге в
+       левом краю шапки и меняются прозрачностью за те же 0,2 с, что гаснут
+       подписи.
+
+       display: flex !important — чтобы погасить восемь общих правил со
+       swap'ом display; мобильная шторка их себе оставляет, у неё свои
+       (body.mobile-shell), и до них это правило не достаёт.
+
+       visibility в списке переходов с задержкой: спрятанный знак сначала
+       гаснет и только потом уходит из хит-теста — иначе клик по «4 You»
+       доставался бы уже прозрачному, но ещё живому знаку. */
+    body:not(.mobile-shell) .sidebar .sidebar-logo-full,
+    body:not(.mobile-shell) .sidebar .sidebar-logo-mini {
+      display: flex !important;
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      margin: 0;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0s linear 0.2s;
+    }
+    body:not(.mobile-shell) .sidebar .sidebar-logo-full {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 0.2s ease, visibility 0s;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-logo-full {
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0s linear 0.2s;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-logo-mini {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 0.2s ease, visibility 0s;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-full {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 0.2s ease, visibility 0s;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-mini {
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0s linear 0.2s;
     }
     /* Знак «4 You» в свёрнутом рельсе — белый: он рисовался на синей плите
        и на светлом полотне исчезал совсем. Даём ему свою плитку цветом
        логотипа; цвет один на обе темы — белый знак читается на нём и в
        тёмной, а тема логотипа не меняет. */
+    body:not(.mobile-shell) .sidebar .sidebar-logo-mini {
+      margin-bottom: 0;
+    }
     body:not(.mobile-shell) .sidebar-logo-mini > button {
       display: inline-flex;
       align-items: center;
@@ -807,6 +921,12 @@
       border-radius: 11px;
       background: var(--sheet-card, #fff);
       overflow: hidden;
+    }
+    /* Утилита space-y-2 на самом <ul> ставит второй строке margin-top: 8px —
+       внутри карточки это разрыв, а волосяная линия оказывается на его
+       верхней кромке, в отрыве от строк. */
+    body:not(.mobile-shell) .sidebar-footer-menu > * {
+      margin-top: 0 !important;
     }
     body:not(.mobile-shell) .sidebar-footer-menu > li {
       position: relative;

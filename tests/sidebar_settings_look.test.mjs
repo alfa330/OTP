@@ -31,7 +31,32 @@ const shell = readLf('src/components/common/mobile-shell.css');
 const rules = (css) => [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*?)\{([^{}]*)\}/g)].map((m) => ({
     selector: m[1].trim(),
     body: m[2],
+    at: m.index,
 }));
+
+/* Границы блоков @media (prefers-reduced-motion): правила внутри них
+   намеренно общие для компьютера и телефона — «не двигай» относится ко всем,
+   и запирать их в body:not(.mobile-shell) было бы ошибкой. */
+const reducedMotionRanges = (css) => {
+    const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const out = [];
+    const marker = '@media (prefers-reduced-motion';
+    let at = clean.indexOf(marker);
+    while (at !== -1) {
+        let depth = 0;
+        let i = clean.indexOf('{', at);
+        for (; i < clean.length; i += 1) {
+            if (clean[i] === '{') depth += 1;
+            else if (clean[i] === '}') {
+                depth -= 1;
+                if (depth === 0) break;
+            }
+        }
+        out.push([at, i]);
+        at = clean.indexOf(marker, i);
+    }
+    return out;
+};
 
 test('отступ контента равен ширине сайдбара', () => {
     /* --app-sidebar-offset читают и обычные разделы (margin-left), и слои,
@@ -53,7 +78,7 @@ test('отступ контента равен ширине сайдбара', (
         'ширина развёрнутого по наведению сайдбара отстала от основной',
     );
     assert.ok(
-        styles.includes(`.sidebar.collapsed:has(.notifications-dropdown) {\n      width: ${width[1]}px;\n    }`),
+        styles.includes(`.sidebar.collapsed:has(.sidebar-holds-open) {\n      width: ${width[1]}px;\n    }`),
         'ширина сайдбара с открытой панелью колокола отстала от основной',
     );
 });
@@ -72,8 +97,10 @@ test('вид списка настроек не достаёт до мобиль
         'sidebar-menu-empty',
         'sidebar-menu-scroll >',
     ];
+    const noMotion = reducedMotionRanges(styles);
     for (const rule of rules(styles)) {
         if (!marks.some((m) => rule.selector.includes(m))) continue;
+        if (noMotion.some(([from, to]) => rule.at > from && rule.at < to)) continue;
         for (const part of rule.selector.split(',')) {
             assert.ok(
                 part.trim().startsWith('body:not(.mobile-shell)'),
@@ -298,8 +325,14 @@ test('кнопки шапки переезжают анимацией и не в
     assert.match(moving.body, /position: absolute;/, 'переезд между двумя местами держится на absolute');
     assert.match(
         moving.body,
-        /transition: top 0\.3s ease, right 0\.3s ease;/,
-        'потерян плавный переезд наверх (0,3 с — столько же едет ширина сайдбара)',
+        /transition:[^;]*\btop 0\.3s ease\b/,
+        'потерян плавный переезд наверх по вертикали (0,3 с — столько же едет ширина сайдбара)',
+    );
+    assert.match(moving.body, /transition:[^;]*\bright 0\.3s ease\b/, 'потерян переезд по горизонтали');
+    assert.match(
+        moving.body,
+        /transition:[^;]*background-color/,
+        'один transition затирает список из утилиты transition-colors — подсветка кнопки начнёт меняться рывком',
     );
 
     const RAIL = 80;
@@ -343,12 +376,38 @@ test('в рельсе плитки по центру карточки', () => {
        краю: в строках с подменю и без — по-разному. */
     const railRow = rules(styles).find((r) => /\.sidebar\.collapsed:not\(:hover\) \.sidebar-menu-scroll > li > button/.test(r.selector));
     assert.ok(railRow, 'нет правила строки в рельсе');
-    assert.match(railRow.body, /justify-content: center;/);
-    assert.match(railRow.body, /gap: 0;/, 'без gap: 0 промежутки до пустых элементов сдвигают плитку');
+    /* Центр набирается ОТСТУПОМ, а не justify-content: выравнивание
+       применяется в тот же кадр, когда карточка ещё во всю ширину, и плитка
+       улетала к центру 300-пиксельной строки, а потом «возвращалась» вместе
+       со сжатием — владелец назвал это прыжками. Отступ едет вместе с
+       шириной. Число обязано быть половиной разницы карточки и плитки. */
+    assert.ok(
+        !/justify-content: center;/.test(railRow.body),
+        'выравнивание по центру возвращает прыжок плитки при уходе курсора',
+    );
+    const pad = Number(/padding-left: (\d+)px/.exec(railRow.body)?.[1]);
+    assert.equal(pad, 17, `отступ строки в рельсе ${pad}px — плитка встанет не по центру карточки (60 − 26) / 2 = 17`);
+    assert.match(railRow.body, /gap: 0;/, 'без gap: 0 промежутки до подписи сдвигают плитку');
+    /* Отступ и подпись обязаны ЕХАТЬ, иначе рывок вернётся. */
+    const moving = rules(styles).find((r) => /\.sidebar-menu-scroll > li > button,[\s\S]*\.sidebar-dept-filter > button/.test(r.selector)
+        && /transition:/.test(r.body));
+    assert.ok(moving, 'у строк нет перехода отступа');
+    assert.match(moving.body, /transition:[^;]*padding-left 0\.3s/, 'отступ строки не едет — плитка снова будет прыгать');
+    assert.match(moving.body, /overflow: hidden;/, 'без обрезки подпись вылезет за карточку в рельсе');
+    /* Стрелку подменю в рельсе прячем совсем: 16 пикселей рядом с плиткой
+       сдвигают её от центра карточки на 7, а появляется стрелка всё равно
+       только по наведению, то есть уже у развёрнутой панели. */
     const arrow = rules(styles).find((r) => /\.sidebar\.collapsed:not\(:hover\)[^,{]*svg:not\(:first-child\)/.test(r.selector));
-    assert.ok(arrow && /margin-left: 0;/.test(arrow.body), 'ml-auto у стрелки подменю съедает свободное место');
-    const text = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-text');
-    assert.ok(text && /flex: 0 0 0;/.test(text.body), 'подпись в рельсе снова растёт и выдавливает плитку');
+    assert.ok(arrow && /display: none;/.test(arrow.body), 'стрелка подменю в рельсе сдвинет плитку от центра');
+    const back = rules(styles).find((r) => /:has\(\.sidebar-holds-open\)[^,{]*svg:not\(:first-child\)/.test(r.selector));
+    assert.ok(back && /display: inline-block;/.test(back.body), 'в состоянии «панель открыта» стрелка обязана вернуться');
+    const text = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover) span.sidebar-text');
+    /* Подпись в рельсе не растёт (иначе выдавит плитку из центра), но и не
+       обнуляется по ширине: width: 0 обрезает текст в тот же кадр, и слова
+       пропадали рывком вместо того, чтобы погаснуть. */
+    assert.ok(text, 'нет правила подписи в рельсе');
+    assert.match(text.body, /flex: 0 0 auto;/, 'подпись в рельсе снова растёт и выдавливает плитку');
+    assert.match(text.body, /width: auto;/, 'подпись снова обнуляется по ширине — слова пропадут рывком');
     // Разделителей в рельсе нет: они начинаются от подписи, которой там нет.
     const sep = rules(styles).find((r) => /\.sidebar\.collapsed:not\(:hover\)[^,{]*:not\(\.sidebar-run-first\)::before/.test(r.selector));
     assert.ok(sep && /content: none;/.test(sep.body), 'в рельсе вернулась черта, висящая в воздухе');
@@ -469,4 +528,79 @@ test('включённый поиск не теряет акцент под ку
             `«${part.trim()}» без .sidebar в цепочке — в тёмной теме его перебьёт правило выпадашек`,
         );
     }
+});
+
+test('открытая панель держит рельс развёрнутым — и её признак висит на всех трёх', () => {
+    /* Панели уведомлений, отделов и аккаунта прижаты к своим строкам
+       (left: 100%), поэтому едут вместе с шириной сайдбара. Без удержания
+       уход курсора с полосы схлопывал рельс, и панель прыгала на 220 px
+       влево из-под курсора. Всплывающая карточка нового уведомления признак
+       НЕ носит намеренно — она приходит сама. */
+    const bell = readLf('src/components/notifications/NotificationsBell.jsx');
+    assert.ok(
+        /notifications-dropdown sidebar-holds-open/.test(bell),
+        'панель уведомлений потеряла признак «держу рельс развёрнутым»',
+    );
+    assert.equal(
+        (app.match(/sidebar-holds-open/g) || []).length,
+        3,
+        'признак должен стоять ровно на двух панелях App.jsx (отделы и аккаунт) и один раз в пояснении',
+    );
+    assert.ok(
+        !/:has\(\.notifications-dropdown\)/.test(styles),
+        'в правилах остался старый признак — список отделов снова будет прыгать',
+    );
+    /* Для состояния «панель открыта» вид обязан быть как у развёрнутого — во
+       ВСЕХ трёх местах: строки списка, футер и селектор отдела. */
+    const held = rules(styles).filter((r) => /:has\(\.sidebar-holds-open\)/.test(r.selector));
+    assert.ok(held.length >= 10, `правил для состояния «панель открыта» всего ${held.length}`);
+    const rowRule = held.find((r) => /justify-content: flex-start/.test(r.body)
+        && r.selector.includes('.sidebar-menu-scroll > li > button'));
+    assert.ok(rowRule, 'нет правила, возвращающего строкам выравнивание по левому краю');
+    for (const mark of ['.sidebar-menu-scroll > li > button', '.sidebar-footer-menu > li > button', '.sidebar-dept-filter > button']) {
+        assert.ok(rowRule.selector.includes(mark), `в состоянии «панель открыта» забыт ${mark} — он останется сжатым`);
+    }
+});
+
+test('флекс достаётся подписи, а не стрелке подменю', () => {
+    /* Класс sidebar-text носят оба: подпись (<span>) и стрелка (<svg>). С
+       flex: 1 стрелка забирает половину строки и подпись обрезается вдвое. */
+    for (const rule of rules(styles)) {
+        // Внутри :not(...) класс стоит как исключение — такие правила не в счёт.
+        const bare = rule.selector.replace(/:not\([^)]*\)/g, '');
+        if (!/\.sidebar-text/.test(bare)) continue;
+        if (!/flex:/.test(rule.body)) continue;
+        assert.ok(
+            /span\.sidebar-text/.test(rule.selector) || /\.sidebar \.sidebar-text/.test(rule.selector),
+            `«${rule.selector}» задаёт flex всем .sidebar-text, включая стрелку подменю`,
+        );
+    }
+});
+
+test('карточка футера не разрывается утилитой space-y-2', () => {
+    /* На самом <ul> стоит space-y-2 — второй строке достаётся margin-top: 8px.
+       Внутри карточки это разрыв, а волосяная линия оказывается на его
+       верхней кромке, в отрыве от строк. */
+    const reset = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-footer-menu > *');
+    assert.ok(reset, 'нет сброса отступов у строк футера');
+    assert.match(reset.body, /margin-top: 0 !important;/);
+});
+
+test('«меньше движения» гасит и переезд шапки', () => {
+    const at = styles.indexOf('@media (prefers-reduced-motion: reduce)');
+    assert.ok(at > 0, 'нет блока prefers-reduced-motion');
+    const block = styles.slice(at, styles.indexOf('\n    }\n', at) + 6);
+    for (const sel of ['.sidebar-search-btn', '.sidebar-bell-slot', '.sidebar-top-row', '.sidebar,']) {
+        assert.ok(block.includes(sel), `${sel} не гасится при «меньше движения» — кнопки продолжат ехать 76 px`);
+    }
+    assert.match(block, /transition: none !important;/);
+});
+
+test('«ничего не нашлось» объявляется программе чтения экрана', () => {
+    /* Строку показывает и прячет проход по DOM, а не разметка: без role
+       незрячий не узнаёт, что поиск ничего не дал. */
+    assert.ok(
+        app.includes('className="sidebar-menu-empty" role="status" hidden'),
+        'у строки «ничего не нашлось» нет role="status"',
+    );
 });

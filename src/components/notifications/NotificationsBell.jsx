@@ -852,7 +852,11 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             role="dialog"
             aria-label="Уведомления"
             style={{ fontFamily: APPLE_FONT }}
-            className={`notifications-dropdown absolute left-full top-0 z-40 ml-2 flex w-[360px] origin-top flex-col max-h-[70vh] overflow-hidden rounded-2xl border border-black/5 bg-white/95 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${open && !closing ? 'animate-dropdown' : 'animate-dropdown-reverse'}`}
+            /* sidebar-holds-open — признак «в сайдбаре открыта панель»: пока
+               он есть, свёрнутый рельс держится развёрнутым (см. правило :has
+               в src/styles.css). Класс .notifications-dropdown остаётся: по
+               нему панель находят мобильные стили. */
+            className={`notifications-dropdown sidebar-holds-open absolute left-full top-0 z-40 ml-2 flex w-[360px] origin-top flex-col max-h-[70vh] overflow-hidden rounded-2xl border border-black/5 bg-white/95 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${open && !closing ? 'animate-dropdown' : 'animate-dropdown-reverse'}`}
         >
             <div className="notifications-head flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
                 <div className="notifications-title text-[15px] font-semibold text-slate-900">Уведомления</div>
