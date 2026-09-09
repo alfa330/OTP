@@ -489,10 +489,11 @@
       width: 100%;
       height: 100%;
     }
-    /* Поиск и логотип не ездят — они проявляются, и проявляются ПОЗЖЕ, когда
-       панель уже почти разъехалась: появись они сразу, поиск на 208 px и
-       написание на 169 висели бы за кромкой узкой панели. Гаснут наоборот
-       сразу — уходящая панель не должна тащить их за собой. */
+    /* Поиск ЕДЕТ вместе с колоколом и одновременно проявляется. Так его и
+       просили помягче: раньше он проявлялся на месте, коротким фейдом и с
+       задержкой — то есть выскакивал на готовой панели. Ехать он начинает
+       из-под колокола (left: 10px), поэтому за кромку узкой панели не
+       выглядывает, и задержка больше не нужна. */
     body:not(.mobile-shell) .sidebar-search-btn {
       position: absolute;
       top: 12px;
@@ -500,13 +501,14 @@
       margin: 0;
       opacity: 1;
       visibility: visible;
-      transition: opacity 0.16s ease 0.16s, visibility 0s,
+      transition: left 0.3s ease, opacity 0.3s ease, visibility 0s,
                   background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
     }
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-search-btn {
+      left: 10px;
       opacity: 0;
       visibility: hidden;
-      transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+      transition: left 0.3s ease, opacity 0.2s ease, visibility 0s linear 0.2s;
     }
     /* Шапка в рельсе — ровно одна строка: 42 px, как карточка раздела. */
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-top-row {
@@ -930,7 +932,7 @@
       margin: 0;
       opacity: 1;
       visibility: visible;
-      transition: opacity 0.18s ease 0.14s, visibility 0s;
+      transition: opacity 0.26s ease 0.06s, visibility 0s;
     }
     body:not(.mobile-shell) .sidebar .sidebar-logo-mini {
       display: none !important;
@@ -983,13 +985,24 @@
       line-height: 20px;
     }
     /* Футер аккаунта — такая же карточка, без синего градиента. */
+    /* ОБРЕЗКИ ЗДЕСЬ БЫТЬ НЕ МОЖЕТ. Меню «Аккаунта» раскрывается ВБОК
+       (absolute left-full внутри своей строки), и overflow: hidden на
+       карточке съедал его целиком: панель открывалась, но её не было видно.
+       Скругление даём самим строкам — первой сверху, последней снизу. */
     body:not(.mobile-shell) .sidebar-footer-menu {
       margin: 12px 10px 0;
       padding-top: 0;
       border: 1px solid var(--sheet-sep, #e5e7eb);
       border-radius: 11px;
       background: var(--sheet-card, #fff);
-      overflow: hidden;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li:first-child > button {
+      border-top-left-radius: 10px;
+      border-top-right-radius: 10px;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li:last-child > button {
+      border-bottom-left-radius: 10px;
+      border-bottom-right-radius: 10px;
     }
     /* Утилита space-y-2 на самом <ul> ставит второй строке margin-top: 8px —
        внутри карточки это разрыв, а волосяная линия оказывается на его

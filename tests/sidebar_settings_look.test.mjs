@@ -684,5 +684,43 @@ test('логотип отсчитывается от верха шапки', () 
     assert.match(logo.body, /height: 54px;/, 'у логотипа нет своей полосы — он поедет по высоте шапки');
     /* Проявляется ПОЗЖЕ, чем начинает разъезжаться панель: написание в 169 px
        иначе выглядывает за её кромку. */
-    assert.match(logo.body, /transition: opacity 0\.18s ease 0\.14s/, 'логотип проявляется без задержки — выглянет за кромку');
+    /* Проявляется он мягко и почти без задержки: за кромку узкой панели
+       написание всё равно не вылезет — заголовок его обрезает. */
+    const fade = /transition: opacity (0\.\d+)s ease( (0\.\d+)s)?/.exec(logo.body);
+    assert.ok(fade, 'у логотипа нет перехода прозрачности');
+    assert.ok(Number(fade[1]) >= 0.22, `логотип проявляется за ${fade[1]}с — слишком резко`);
+});
+
+test('карточка футера не обрезает меню аккаунта', () => {
+    /* Меню «Аккаунта» раскрывается ВБОК — absolute left-full внутри своей
+       строки, — и overflow: hidden на карточке футера съедал его целиком:
+       панель открывалась, но её не было видно. Скругление дают сами строки. */
+    const card = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-footer-menu');
+    assert.ok(card, 'нет правила карточки футера');
+    assert.ok(
+        !/overflow:/.test(card.body),
+        'на карточке футера снова обрезка — меню «Аккаунта» пропадёт целиком',
+    );
+    const first = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-footer-menu > li:first-child > button');
+    const last = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-footer-menu > li:last-child > button');
+    assert.ok(first && /border-top-left-radius/.test(first.body), 'верх карточки футера перестал скругляться');
+    assert.ok(last && /border-bottom-left-radius/.test(last.body), 'низ карточки футера перестал скругляться');
+});
+
+test('кнопка поиска проявляется мягко и на ходу', () => {
+    /* Раньше она проявлялась на месте, коротким фейдом и с задержкой — то
+       есть выскакивала на готовой панели. Теперь едет из-под колокола и
+       гаснет-проявляется втрое дольше; за кромку узкой панели при этом не
+       выглядывает, потому что стартует слева. */
+    const btn = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-search-btn');
+    assert.ok(btn, 'нет правила кнопки поиска');
+    const fade = /transition:[^;]*opacity (0\.\d+)s/.exec(btn.body);
+    assert.ok(fade, 'у кнопки поиска нет перехода прозрачности');
+    assert.ok(Number(fade[1]) >= 0.28, `поиск проявляется за ${fade[1]}с — слишком резко`);
+    assert.match(btn.body, /transition:[^;]*left 0\.3s/, 'поиск больше не едет, а появляется на месте');
+    const RAIL = 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open))';
+    const rail = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-search-btn`);
+    assert.ok(rail, 'нет положения кнопки поиска в рельсе');
+    const left = Number(/left: (\d+)px/.exec(rail.body)?.[1]);
+    assert.equal(left, 10, `поиск стартует с ${left}px — из-под колокола он должен выезжать с 10`);
 });
