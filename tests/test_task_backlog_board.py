@@ -1507,7 +1507,7 @@ class ColumnBrowserTests(unittest.TestCase):
         styles = _read(ROOT / "src" / "styles.css")
         # Переменная обязана жить на :root — портал в document.body не видит
         # переменные, объявленные на .main-content.
-        self.assertRegex(styles, r":root\s*\{\s*--app-sidebar-offset:\s*256px;")
+        self.assertRegex(styles, r":root\s*\{\s*--app-sidebar-offset:\s*300px;")
         self.assertRegex(styles, r"body\.sidebar-collapsed\s*\{\s*--app-sidebar-offset:\s*80px;")
         # На телефоне сайдбара сбоку нет — там он шторка, и отступ обнуляется
         # мобильной оболочкой. Оба селектора вместе: у body.sidebar-collapsed

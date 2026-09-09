@@ -352,8 +352,11 @@ body.mobile-shell .mobile-sheet-group button {
 }
 
 /* Значок в цветной плитке — то, по чему список настроек узнаётся с одного
-   взгляда. Цвет плитки идёт по кругу: пункты приходят из общего меню, и
-   собственного «цвета раздела» у них нет. */
+   взгляда. Цвет берётся из --tint: его раздаёт блокам меню проход по списку
+   в src/App.jsx (paintSidebarMenu) — свой цвет на каждую карточку, общий с
+   настольным сайдбаром. Раньше цвет шёл по кругу шестью оттенками через
+   nth-of-type, но круг считает СТРОКИ, а не блоки, и один и тот же раздел
+   оказывался на телефоне и на компьютере разного цвета. */
 body.mobile-shell .sidebar-menu-scroll button > svg:first-child,
 body.mobile-shell .sidebar > div > div > button > svg:first-child,
 body.mobile-shell .mobile-sheet-group button > svg:first-child {
@@ -371,13 +374,6 @@ body.mobile-shell .mobile-sheet-group button > svg:first-child {
     color: #fff;
     margin: 0;
 }
-
-body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 1) button > svg:first-child { --tint: #0a84ff; }
-body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 2) button > svg:first-child { --tint: #34c759; }
-body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 3) button > svg:first-child { --tint: #ff9500; }
-body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 4) button > svg:first-child { --tint: #af52de; }
-body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n + 5) button > svg:first-child { --tint: #ff3b30; }
-body.mobile-shell .sidebar-menu-scroll > li:nth-of-type(6n) button > svg:first-child { --tint: #5ac8fa; }
 
 body.mobile-shell [data-tint="blue"] { --tint: #0a84ff; }
 body.mobile-shell [data-tint="green"] { --tint: #34c759; }

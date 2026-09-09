@@ -380,6 +380,34 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     parcels: ['front_office', 'szov'],
 };
 
+/* Цвет плитки значка — свой на каждый блок меню.
+ *
+ * Оттенки 600 из палитры Tailwind, на которой стоит портал: плитки обязаны
+ * читаться как его цвета, а не как чужие. Порядок — порядок блоков сверху
+ * вниз у супер-админа, у остальных ролей блоков меньше и цвета просто
+ * начинаются с той же головы списка.
+ *
+ * ЦВЕТА РАЗДАЁТ JS, А НЕ CSS (см. paintSidebarMenu ниже). В разметке пункта
+ * нет ни блока, ни цвета: пункты приходят из общего дерева меню, а границы
+ * блоков задают <hr>, которых у разных ролей и отделов разное число — то
+ * есть посчитать блок селектором (nth-of-type) нельзя, счёт сбивается на
+ * первом же скрытом разделе.
+ */
+const SIDEBAR_BLOCK_TINTS = [
+    '#4f46e5', // сотрудники
+    '#2563eb', // каждый день
+    '#0d9488', // качество обслуживания
+    '#d97706', // смены и часы
+    '#16a34a', // диалоги
+    '#0284c7', // онлайн-нагрузка
+    '#ea580c', // работа с водителем
+    '#7c3aed', // телефония и рассылки
+    '#059669', // оплата и мотивация
+    '#475569', // инструменты
+    '#6b7280', // настройка портала
+    '#e11d48', // прочее
+];
+
 // Выбранный в сайдбаре отдел живёт в localStorage: админ работает по одному
 // отделу днями, и терять выбор на каждой перезагрузке незачем. Ключ с id
 // пользователя — на одной машине сидят по очереди несколько админов.
@@ -38533,6 +38561,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const sidebarResourceRef = useRef(null);
             const sidebarDeptFilterRef = useRef(null);
             const sidebarMenuScrollRef = useRef(null);
+            /* Поиск по разделам — рядом с колоколом, как просил владелец.
+               Открыт/закрыт — состояние (от него зависит разметка), а САМ
+               ЗАПРОС живёт в ref: фильтрует его проход по DOM, и состояние
+               на каждое нажатие клавиши пересобирало бы всё дерево меню —
+               45 пунктов в четырёх ветвях, специально завёрнутые в useMemo. */
+            const [showSidebarSearch, setShowSidebarSearch] = useState(false);
+            const sidebarSearchInputRef = useRef(null);
+            const sidebarSearchQueryRef = useRef('');
+            const sidebarMenuEmptyRef = useRef(null);
             const [employeesDropdownPos, setEmployeesDropdownPos] = useState({ top: 0, left: 0 });
             const [resourceDropdownPos, setResourceDropdownPos] = useState({ top: 0, left: 0 });
             const [modalError, setModalError] = useState("");
@@ -39815,6 +39852,117 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 handleToggleDeptFilterDropdown(true);
             };
+
+            /* Один проход по списку разделов. Делает две вещи, потому что обе
+               требуют одного и того же: знать, где кончается блок.
+
+               1. Раздаёт блокам цвет плитки значка (--tint, см. styles.css).
+               2. Прячет строки, не подходящие под поиск, и вместе с ними
+                  разделители блоков, у которых не осталось ни одной строки, —
+                  иначе от пустого блока остаётся щель или двойной пробел.
+
+               ПОЧЕМУ DOM, А НЕ СОСТОЯНИЕ. Пункты приходят из общего дерева
+               меню: четыре ролевые ветви, у каждого пункта свой гейт доступа,
+               и половина гейтов дословно сверяется тестами с бэкендом. Чтобы
+               фильтровать список в React, каждому из 45 пунктов пришлось бы
+               дописать признак «подходит под запрос» — то есть переписать все
+               гейты ради поиска. Проход по готовым строкам не трогает разметку
+               вовсе и заодно видит РЕАЛЬНЫЙ состав блоков: то, что осталось
+               после ролевых гейтов и фильтра по отделу.
+
+               Класс на строку, а не стиль: display:none живёт в CSS рядом с
+               остальным видом списка. React эти классы не сотрёт — className
+               у <li> он не задаёт вообще, а после перерисовки дерева проход
+               повторяется (эффект висит на самом дереве). */
+            const paintSidebarMenu = useCallback(() => {
+                const list = sidebarMenuScrollRef.current;
+                if (!list) return;
+                const query = sidebarSearchQueryRef.current.trim().toLowerCase();
+                /* Блок — прогон <li> до ближайшего <hr>. Разделитель без
+                   строк перед ним (такое бывает у ролей, где блок вырезан
+                   целиком) не открывает блок, а прячется сам. */
+                const blocks = [];
+                const strays = [];
+                let run = { rows: [], divider: null };
+                for (const node of list.children) {
+                    if (node.tagName === 'LI') {
+                        run.rows.push(node);
+                    } else if (node.tagName === 'HR') {
+                        if (!run.rows.length) {
+                            strays.push(node);
+                        } else {
+                            run.divider = node;
+                            blocks.push(run);
+                            run = { rows: [], divider: null };
+                        }
+                    }
+                }
+                if (run.rows.length) blocks.push(run);
+
+                blocks.forEach((block, index) => {
+                    const tint = SIDEBAR_BLOCK_TINTS[index % SIDEBAR_BLOCK_TINTS.length];
+                    let first = null;
+                    let last = null;
+                    block.rows.forEach((row) => {
+                        const hit = !query || (row.textContent || '').toLowerCase().includes(query);
+                        row.classList.toggle('sidebar-menu-hidden', !hit);
+                        row.style.setProperty('--tint', tint);
+                        if (!hit) return;
+                        if (!first) first = row;
+                        last = row;
+                    });
+                    /* Скругления карточки считаются по ВИДИМЫМ строкам:
+                       структурные `hr + li` и `li:has(+ hr)` при поиске врут. */
+                    block.rows.forEach((row) => {
+                        row.classList.toggle('sidebar-run-first', row === first);
+                        row.classList.toggle('sidebar-run-last', row === last);
+                    });
+                    block.shown = Boolean(first);
+                });
+
+                /* Разделитель нужен только МЕЖДУ двумя видимыми блоками —
+                   идём с конца, чтобы знать, есть ли ниже хоть один. */
+                let laterShown = false;
+                for (let i = blocks.length - 1; i >= 0; i -= 1) {
+                    const block = blocks[i];
+                    if (block.divider) {
+                        block.divider.classList.toggle(
+                            'sidebar-menu-hidden',
+                            !(block.shown && laterShown),
+                        );
+                    }
+                    if (block.shown) laterShown = true;
+                }
+                strays.forEach((hr) => hr.classList.add('sidebar-menu-hidden'));
+
+                const empty = sidebarMenuEmptyRef.current;
+                if (empty) empty.hidden = !(query && !blocks.some((block) => block.shown));
+            }, []);
+
+            /* Строка поиска и её запрос живут только вместе, поэтому запрос
+               сбрасывается в любую сторону: закрыли — фильтр снят, открыли —
+               поле пересоздаётся пустым (defaultValue), и прежний запрос
+               фильтровал бы список под пустым полем. */
+            const handleToggleSidebarSearch = useCallback(() => {
+                sidebarSearchQueryRef.current = '';
+                setShowSidebarSearch((prev) => !prev);
+            }, []);
+
+            const handleSidebarSearchInput = useCallback((e) => {
+                sidebarSearchQueryRef.current = e.target.value || '';
+                paintSidebarMenu();
+            }, [paintSidebarMenu]);
+
+            useEffect(() => {
+                if (showSidebarSearch) sidebarSearchInputRef.current?.focus();
+            }, [showSidebarSearch]);
+
+            /* Свернули сайдбар — поиск закрывается вместе с ним. В рельсе ни
+               поля, ни подписей не видно, и список остался бы отфильтрованным
+               по запросу, которого человек уже не видит. */
+            useEffect(() => {
+                if (sidebarCollapsed && showSidebarSearch) handleToggleSidebarSearch();
+            }, [sidebarCollapsed, showSidebarSearch, handleToggleSidebarSearch]);
 
             const openAppViewInNewTab = useCallback((nextView) => {
                 if (!nextView || typeof window === 'undefined') return;
@@ -47136,6 +47284,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     верхний край выехавшей шторки, и под логотипом
                                     читалась бы как случайная полоска. */}
                                 {isMobileShell && <div className="mobile-sheet-handle" aria-hidden="true" />}
+                                {/* Шапка сайдбара: логотип слева, поиск и колокол
+                                    справа (решение владельца 09.09.2026). Отдельной
+                                    полосы над разделами в портале нет, и ради двух
+                                    кнопок пришлось бы сдвигать шапки всех разделов
+                                    вместе с прилипшими заголовками таблиц.
+
+                                    Отступы внутри оставлены как были: перенабрать
+                                    их — переписать шестьдесят строк, которые прямо
+                                    сейчас правит вторая машина. */}
+                                <div className="sidebar-top-row">
                                 <h1 className="text-5xl font-extrabold mb-6 flex items-center justify-center">
                                   {/* Полный логотип */}
                                   <span className="sidebar-logo-full relative h-[54px] w-[169px] shrink-0 drop-shadow-md">
@@ -47159,6 +47317,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </button>
                                   </span>
                                 </h1>
+                                {/* Поиск по разделам. Только на компьютере: на
+                                    телефоне разделы открывает нижний бар, а список
+                                    в шторке и без поиска обозрим. */}
+                                {!isMobileShell && (
+                                    <button
+                                        type="button"
+                                        onClick={handleToggleSidebarSearch}
+                                        aria-expanded={showSidebarSearch}
+                                        aria-label="Поиск по разделам"
+                                        title="Поиск по разделам"
+                                        className={`sidebar-search-btn shrink-0 transition-colors ${showSidebarSearch ? 'is-on' : ''}`}
+                                    >
+                                        <FaIcon className="fas fa-search"></FaIcon>
+                                    </button>
+                                )}
                                 {/* Колокол — над меню и вне прокручиваемого списка:
                                     он один на весь портал и не должен уезжать
                                     вместе с разделами.
@@ -47193,6 +47366,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         document.body,
                                     );
                                 })()}
+                                </div>
+                                {/* Поле поиска. Значение НЕ в состоянии React —
+                                    список фильтрует paintSidebarMenu; поле поэтому
+                                    неуправляемое (defaultValue + onInput). */}
+                                {!isMobileShell && showSidebarSearch && (
+                                    <div className="sidebar-search-row">
+                                        <div className="sidebar-search-field">
+                                            <FaIcon className="fas fa-search"></FaIcon>
+                                            <input
+                                                ref={sidebarSearchInputRef}
+                                                type="text"
+                                                defaultValue=""
+                                                placeholder="Раздел"
+                                                aria-label="Поиск по разделам"
+                                                onInput={handleSidebarSearchInput}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
                                 {/* Шапка шторки. На телефоне это ВЕСЬ аккаунт: фото, имя,
                                     логин и действия над собственной учёткой. Раньше они
                                     жили внизу, в пункте «Аккаунт», который раскрывался
@@ -47303,7 +47495,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     прокручиваемого списка, поэтому обходится обычным
                                     absolute вместо измеренных координат. */}
                                 {isAdminLikeRole && (
-                                    <div className="mb-2 relative" ref={sidebarDeptFilterRef}>
+                                    <div className="sidebar-dept-filter mb-2 relative" ref={sidebarDeptFilterRef}>
                                         <button
                                             type="button"
                                             onClick={stableSidebarHandleToggleDeptFilter}
@@ -48668,6 +48860,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </SidebarDeptScope>
                                     )}
                                 </ul>
+                                {/* Пусто по запросу поиска. Живёт ВНЕ списка: внутри
+                                    он попал бы в карточку последнего блока и в проход
+                                    по строкам. Видимость переключает paintSidebarMenu
+                                    через ref — состояние React ради одной строки
+                                    пересобирало бы всё дерево меню. */}
+                                <div ref={sidebarMenuEmptyRef} className="sidebar-menu-empty" hidden>
+                                    Ничего не нашлось
+                                </div>
                                 {/* «Выйти» — в самом низу листа, под всеми разделами:
                                     так его не нажимают случайно, разыскивая раздел, и
                                     так же он стоит в списках настроек телефона. */}
@@ -48848,7 +49048,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 stableSidebarOpenCallEvaluationSection,
                 stableSidebarFetchDirections,
                 stableSidebarShowToast,
+                showSidebarSearch,
+                handleToggleSidebarSearch,
+                handleSidebarSearchInput,
             ]);
+
+            /* Плитки и фильтр поиска — после каждой пересборки меню. Дерево
+               мемоизировано, поэтому смена его ссылки и есть «разметка списка
+               изменилась»: сменилась роль, отдел в селекторе, открылась строка
+               поиска. Именно useLayoutEffect — иначе первый кадр показывал бы
+               список без плиток и с уже снятым фильтром. */
+            useLayoutEffect(() => {
+                paintSidebarMenu();
+            }, [paintSidebarMenu, sidebarTree]);
 
             if (isAuthInitializing) {
                 return (

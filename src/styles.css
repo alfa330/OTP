@@ -104,14 +104,14 @@
     
     /* === Сворачиваемый сайдбар === */
     .sidebar {
-      width: 256px;
+      width: 300px;
       transition: width 0.3s ease;
     }
     .sidebar.collapsed {
       width: 80px;
     }
     .sidebar.collapsed:hover {
-      width: 256px;
+      width: 300px;
     }
     .sidebar .sidebar-text {
       opacity: 1;
@@ -169,7 +169,7 @@
        уход мыши сжимал бы сайдбар с открытой панелью, а повторное наведение на
        неё вновь разворачивал — панель дёргалась бы на 176px вбок из-под курсора. */
     .sidebar.collapsed:has(.notifications-dropdown) {
-      width: 256px;
+      width: 300px;
     }
     .sidebar.collapsed:has(.notifications-dropdown) .sidebar-text {
       opacity: 1;
@@ -282,16 +282,14 @@
       position: relative;
       z-index: 1;
     }
+    /* Слой и изоляция — здесь: они нужны в любой теме и на любом экране
+       (дропдаун аккаунта раскрывается вверх и обязан лежать выше меню).
+       Цвет и скругление футера — ниже, в правилах списка настроек: на
+       телефоне футера нет вовсе (display: none в mobile-shell.css). */
     .sidebar-footer-menu {
       position: relative;
       z-index: 6;
       isolation: isolate;
-      background: linear-gradient(
-        to bottom,
-        rgba(30, 64, 175, 0.9),
-        rgba(30, 58, 138, 0.96)
-      );
-      border-radius: 0.75rem;
     }
     /* Полоса прокрутки меню — волосяная, и видна только пока меню
        прокручивают. Класс `sidebar-menu-scrolling` ставит и снимает JS: в CSS
@@ -320,7 +318,7 @@
       border-radius: 9999px;
     }
     .sidebar-menu-scroll.sidebar-menu-scrolling::-webkit-scrollbar-thumb {
-      background: rgba(147, 197, 253, 0.85);
+      background: rgba(60, 60, 67, 0.36);
     }
     @supports not selector(::-webkit-scrollbar) {
       .sidebar-menu-scroll {
@@ -328,15 +326,461 @@
         scrollbar-color: transparent transparent;
       }
       .sidebar-menu-scroll.sidebar-menu-scrolling {
-        scrollbar-color: rgba(147, 197, 253, 0.85) transparent;
+        scrollbar-color: rgba(60, 60, 67, 0.36) transparent;
       }
+    }
+    /* === Сайдбар как список настроек ===================================
+       Светлое полотно, белые карточки блоков, значок в цветной плитке.
+       Решение владельца 09.09.2026 по макету «Настройки».
+
+       Причина не во вкусе: у супер-админа 45 пунктов одним столбцом, все
+       белым текстом на синем и со значками одного веса и цвета, — различать
+       их было нечем. Цвет и форма плитки опознаются раньше, чем прочитана
+       подпись, а карточка показывает границы блока без подписи над ним
+       (подписи блоков владелец не захотел).
+
+       ТОТ ЖЕ ЯЗЫК УЖЕ СОБРАН ДЛЯ МОБИЛЬНОЙ ШТОРКИ — src/components/common/
+       mobile-shell.css. Оттуда же берётся палитра --sheet-*: она объявлена
+       на :root и там же переопределена для тёмной темы, поэтому здесь ни
+       одного своего цвета полотна, карточки и разделителя. Разъехавшись,
+       лист телефона и сайдбар выглядели бы из разных приложений.
+
+       Все правила заперты в `body:not(.mobile-shell)`. Мобильные стоят на
+       `body.mobile-shell` и по специфичности равны — полагаться на порядок
+       файлов нельзя: одно `!important` с любой стороны, и лист телефона
+       поедет. Явное исключение надёжнее подсчёта весов.
+
+       Разметку пунктов эти правила НЕ МЕНЯЮТ. Она приходит из общего дерева
+       меню (четыре ролевые ветви) и рассчитана на тёмную полосу: белый
+       текст, синяя подсветка, утилиты Tailwind прямо на кнопках. Отсюда
+       подробность селекторов и `!important` в нескольких местах. */
+    :root {
+      /* Открытый раздел. Отдельные токены, а не --sheet-accent: в списке
+         настроек телефона выделяют светлой подложкой, а здесь есть :hover,
+         и подложке пришлось бы спорить с ним — открытый раздел красим
+         синим портала. Тёмная тема переопределяет оба (src/theme-dark.css). */
+      --sheet-select: #1d4ed8;
+      --sheet-select-ink: #ffffff;
+      /* Подсветка «Выхода» под курсором. */
+      --sheet-danger-wash: #fef2f2;
+    }
+    body:not(.mobile-shell) .sidebar {
+      background-color: var(--sheet-bg, #f2f2f7) !important;
+      background-image: none !important;
+      color: var(--sheet-text, #111827);
+      border-right: 1px solid var(--sheet-sep, #e5e7eb);
+      box-shadow: none;
+    }
+    /* Боковые поля переехали к самим блокам: полотно должно доходить до
+       кромки, иначе карточки висят в рамке из отступов. */
+    body:not(.mobile-shell) .sidebar > div {
+      padding: 14px 0 12px;
+    }
+    /* Шапка: логотип слева, поиск и колокол справа — просил владелец.
+       Справа поле шире обычных 10 px: там висит кнопка сворачивания
+       (absolute top-4 -right-4, её левый край — ширина сайдбара минус 16),
+       и без запаса колокол оказывался ровно под ней.
+
+       СТРОКОЙ ШАПКА СТАНОВИТСЯ ТОЛЬКО У РАЗВЁРНУТОГО САЙДБАРА — по классу
+       состояния, а НЕ по :hover. Свёрнутый рельс разъезжается по наведению
+       за 0,3 с, и всё, что прижато к правому краю, проезжает под курсором:
+       курсор, пришедший к кнопке сворачивания, ловил по дороге колокол и
+       открывал панель уведомлений «сам». В рельсе шапка остаётся такой,
+       какой была до переделки: логотип, под ним колокол строкой меню. */
+    body:not(.mobile-shell) .sidebar-top-row {
+      margin-bottom: 10px;
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 26px 0 10px;
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > h1 {
+      flex: 1;
+      min-width: 0;
+      justify-content: flex-start;
+      margin: 0;
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div {
+      margin: 0;
+    }
+    /* Колокол в шапке — значок, а не строка меню. Его разметка одна на три
+       места (строка сайдбара, угол экрана на телефоне, теперь шапка), и
+       каждое место подгоняет её стилями — так же сделан мобильный угол
+       (.mobile-bell-slot в mobile-shell.css). Подпись и стрелку убираем,
+       счётчик берём тот, что рисуется для свёрнутого рельса. */
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div > button {
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      justify-content: center;
+      border-radius: 9px;
+      background: var(--sheet-card, #fff);
+      border: 1px solid var(--sheet-sep, #e5e7eb);
+      color: var(--sheet-text, #111827);
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div > button:hover {
+      background: var(--sheet-active, #e5e5ea) !important;
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row > div > button.bg-blue-700 {
+      background: var(--sheet-select, #1d4ed8) !important;
+      color: var(--sheet-select-ink, #fff) !important;
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row .sidebar-text {
+      display: none;
+    }
+    body:not(.mobile-shell) .sidebar:not(.collapsed) .sidebar-top-row .sidebar-surveys-collapsed-badge {
+      display: inline-flex;
+      top: -5px;
+      right: -5px;
+      /* Обводка цветом полотна: счётчик вылезает за кнопку и без неё
+         сливается с её рамкой. */
+      box-shadow: 0 0 0 2px var(--sheet-bg, #f2f2f7);
+    }
+    body:not(.mobile-shell) .sidebar-search-btn {
+      display: inline-flex;
+      flex: 0 0 30px;
+      width: 30px;
+      height: 30px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9px;
+      background: var(--sheet-card, #fff);
+      border: 1px solid var(--sheet-sep, #e5e7eb);
+      color: var(--sheet-text, #111827);
+    }
+    body:not(.mobile-shell) .sidebar-search-btn > svg {
+      flex: 0 0 16px !important;
+      width: 16px !important;
+      height: 16px !important;
+      min-width: 16px !important;
+    }
+    body:not(.mobile-shell) .sidebar-search-btn:hover {
+      background: var(--sheet-active, #e5e5ea);
+    }
+    body:not(.mobile-shell) .sidebar-search-btn.is-on {
+      background: var(--sheet-select, #1d4ed8);
+      border-color: var(--sheet-select, #1d4ed8);
+      color: var(--sheet-select-ink, #fff);
+    }
+    body:not(.mobile-shell) .sidebar-search-row {
+      padding: 0 10px;
+      margin-bottom: 10px;
+    }
+    body:not(.mobile-shell) .sidebar-search-field {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 34px;
+      padding: 0 10px;
+      border-radius: 10px;
+      background: var(--sheet-card, #fff);
+      border: 1px solid var(--sheet-sep, #e5e7eb);
+      color: var(--sheet-muted, #8a8a8e);
+      font-size: 14px;
+    }
+    body:not(.mobile-shell) .sidebar-search-field input {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      outline: none;
+      background: transparent;
+      font-size: 14px;
+      line-height: 20px;
+      color: var(--sheet-text, #111827);
+    }
+    body:not(.mobile-shell) .sidebar-search-field input::placeholder {
+      color: var(--sheet-muted, #8a8a8e);
+    }
+    /* Селектор отдела — такая же строка, но своей карточкой: он не раздел, и
+       в общий блок с разделами его вставлять нельзя. */
+    body:not(.mobile-shell) .sidebar-dept-filter {
+      margin: 0 10px 10px;
+    }
+    body:not(.mobile-shell) .sidebar-dept-filter > button {
+      border-radius: 11px;
+      background: var(--sheet-card, #fff) !important;
+      border: 1px solid var(--sheet-sep, #e5e7eb);
+    }
+    body:not(.mobile-shell) .sidebar-dept-filter > button > svg:first-child {
+      --tint: var(--sheet-muted, #8a8a8e);
+    }
+    body:not(.mobile-shell) .sidebar-dept-filter > button.bg-blue-700 > svg:first-child {
+      --tint: rgba(255, 255, 255, 0.24);
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll {
+      padding: 0 10px;
+    }
+    /* Утилита space-y-2 на самом <ul> раздвигала бы строки внутри карточки. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > * {
+      margin-top: 0 !important;
+    }
+    /* Разделитель блоков — воздух, а не черта: границы блока рисует сама
+       карточка. 10 px, а не 22 как на телефоне: владелец просил плотнее. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > hr {
+      border: 0;
+      height: 10px;
+      margin: 0;
+      opacity: 1;
+    }
+    /* Строка. Один вид у пунктов меню и у селектора отдела. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button,
+    body:not(.mobile-shell) .sidebar-dept-filter > button {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 0;
+      background: var(--sheet-card, #fff);
+      color: var(--sheet-text, #111827);
+      font-size: 14px;
+      line-height: 20px;
+      font-weight: 400;
+      text-align: left;
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button:hover,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button:hover,
+    body:not(.mobile-shell) .sidebar-dept-filter > button:hover {
+      background: var(--sheet-active, #e5e5ea) !important;
+    }
+    /* Скругление карточки — по классам, которые ставит проход из App.jsx, а
+       НЕ по `hr + li` и `li:has(+ hr)`, как на телефоне. Поиск по разделам
+       гасит строки через display:none, и структура начинает врать: скругление
+       досталось бы спрятанной строке, а видимая осталась бы с прямым углом.
+       Классы же считаются по ВИДИМЫМ строкам. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-first > button,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-first > div > button {
+      border-top-left-radius: 11px;
+      border-top-right-radius: 11px;
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-last > button,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sidebar-run-last > div > button {
+      border-bottom-left-radius: 11px;
+      border-bottom-right-radius: 11px;
+    }
+    /* Волосяная линия между строками одного блока — от подписи, как в
+       системных списках. Первой строке блока она не нужна: там край карточки.
+       ::before, а не border, чтобы не спорить со скруглениями. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li {
+      position: relative;
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 46px;
+      right: 0;
+      height: 1px;
+      background: var(--sheet-sep, #e5e7eb);
+      z-index: 1;
+    }
+    /* Значок в цветной плитке — то, по чему список узнаётся с одного взгляда.
+       !important не украшение: размер приходит ИНЛАЙНОМ (FaIcon ставит
+       width/height в 1em), а ширину держит ещё и flex-basis из правила
+       `.sidebar button > svg` выше — без обоих перебиваний плитка остаётся
+       18-пиксельной точкой.
+
+       Цвет берётся из --tint. Его ставит проход по списку в App.jsx — свой
+       на каждый блок: пункты приходят из общего дерева меню, «цвета раздела»
+       у них нет, а состав блока зависит от роли и выбранного отдела, так что
+       посчитать блок в CSS (nth-of-type по <hr>) нельзя. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button > svg:first-child,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button > svg:first-child,
+    body:not(.mobile-shell) .sidebar-dept-filter > button > svg:first-child {
+      flex: 0 0 26px !important;
+      width: 26px !important;
+      height: 26px !important;
+      min-width: 26px !important;
+      padding: 5.5px;
+      border-radius: 7px;
+      box-sizing: border-box;
+      background: var(--tint, #0a84ff);
+      color: #fff;
+      margin: 0;
+    }
+    /* Открытый раздел. Класс bg-blue-700 приходит из разметки — по нему и
+       красим; плитка гасится до полупрозрачной белой, иначе цветной квадрат
+       спорит с залитой строкой. */
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button.bg-blue-700,
+    body:not(.mobile-shell) .sidebar-dept-filter > button.bg-blue-700 {
+      background: var(--sheet-select, #1d4ed8) !important;
+      color: var(--sheet-select-ink, #fff) !important;
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > button.bg-blue-700 > svg:first-child,
+    body:not(.mobile-shell) .sidebar-menu-scroll > li > div > button.bg-blue-700 > svg:first-child {
+      background: rgba(255, 255, 255, 0.24) !important;
+    }
+    /* Вторая иконка строки — стрелка подменю, плиткой не становится. */
+    body:not(.mobile-shell) .sidebar-menu-scroll button > svg:not(:first-child),
+    body:not(.mobile-shell) .sidebar-dept-filter > button > svg:not(:first-child) {
+      flex: 0 0 auto;
+      width: 1em;
+      height: 1em;
+      min-width: 0;
+      padding: 0;
+      border-radius: 0;
+      background: none;
+      color: var(--sheet-muted, #8a8a8e);
+    }
+    body:not(.mobile-shell) .sidebar .sidebar-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Свёрнутый рельс. Поиск скрыт целиком: подписей не видно, искать
+       нечего, — а само поле в 60 px пустой строкой. Заодно поиск закрывается
+       при сворачивании (см. App.jsx): иначе список остался бы
+       отфильтрованным по невидимому запросу. Линии между строками
+       сдвигаются к краю плитки. */
+    body:not(.mobile-shell) .sidebar.collapsed .sidebar-search-btn,
+    body:not(.mobile-shell) .sidebar.collapsed .sidebar-search-row {
+      display: none;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > button,
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li > div > button,
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-dept-filter > button {
+      justify-content: center;
+      padding: 8px 4px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-menu-scroll > li:not(.sidebar-run-first)::before {
+      left: 10px;
+    }
+    /* Панель колокола держит свёрнутый сайдбар развёрнутым (правило :has
+       выше) — значит и строки обязаны остаться с подписями слева.
+       Специфичность равна правилам :not(:hover), поэтому это ПОСЛЕ них,
+       порядком. */
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > button,
+    body:not(.mobile-shell) .sidebar.collapsed:has(.notifications-dropdown) .sidebar-menu-scroll > li > div > button {
+      justify-content: flex-start;
+      padding: 8px 10px;
+    }
+    /* Знак «4 You» в свёрнутом рельсе — белый: он рисовался на синей плите
+       и на светлом полотне исчезал совсем. Даём ему свою плитку цветом
+       логотипа; цвет один на обе темы — белый знак читается на нём и в
+       тёмной, а тема логотипа не меняет. */
+    body:not(.mobile-shell) .sidebar-logo-mini > button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 11px;
+      background: #3730a3;
+    }
+    body:not(.mobile-shell) .sidebar-logo-mini > button > img {
+      width: 30px;
+      height: 30px;
+    }
+    /* Строка «ничего не нашлось» — вне списка, поэтому не попадает ни в
+       карточки, ни под проход по строкам. */
+    body:not(.mobile-shell) .sidebar-menu-empty {
+      margin: 0 10px;
+      padding: 14px 10px;
+      border-radius: 11px;
+      background: var(--sheet-card, #fff);
+      color: var(--sheet-muted, #8a8a8e);
+      font-size: 14px;
+      line-height: 20px;
+    }
+    /* Футер аккаунта — такая же карточка, без синего градиента. */
+    body:not(.mobile-shell) .sidebar-footer-menu {
+      margin: 12px 10px 0;
+      padding-top: 0;
+      border: 1px solid var(--sheet-sep, #e5e7eb);
+      border-radius: 11px;
+      background: var(--sheet-card, #fff);
+      overflow: hidden;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li {
+      position: relative;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li + li::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 46px;
+      right: 0;
+      height: 1px;
+      background: var(--sheet-sep, #e5e7eb);
+      z-index: 1;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 0;
+      background: var(--sheet-card, #fff);
+      color: var(--sheet-text, #111827);
+      font-size: 14px;
+      line-height: 20px;
+      text-align: left;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button:hover {
+      background: var(--sheet-active, #e5e5ea) !important;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button > svg:first-child {
+      flex: 0 0 26px !important;
+      width: 26px !important;
+      height: 26px !important;
+      min-width: 26px !important;
+      padding: 5.5px;
+      border-radius: 7px;
+      box-sizing: border-box;
+      background: var(--sheet-muted, #8a8a8e);
+      color: #fff;
+      margin: 0;
+    }
+    /* «Выход» остаётся красным, но строкой списка: алая полоса на светлом
+       полотне перетягивала на себя весь экран. */
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button.bg-red-600 {
+      background: var(--sheet-card, #fff) !important;
+      color: #dc2626 !important;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button.bg-red-600:hover {
+      background: var(--sheet-danger-wash, #fef2f2) !important;
+    }
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button.bg-red-600 > svg:first-child {
+      background: #dc2626 !important;
+    }
+    /* Аватар остаётся круглым, но встаёт на место плитки: отрицательные поля
+       из общего правила сдвигали бы подпись относительно остальных строк. */
+    body:not(.mobile-shell) .sidebar-footer-menu > li > button > .sidebar-avatar {
+      flex: 0 0 26px;
+      width: 26px;
+      height: 26px;
+      min-width: 26px;
+      margin: 0;
+      box-shadow: none;
+    }
+    /* Кнопка сворачивания: синий круг с белой обводкой на светлом полотне
+       читался наклейкой. */
+    body:not(.mobile-shell) .sidebar-collapse-btn {
+      background: var(--sheet-card, #fff) !important;
+      border: 1px solid var(--sheet-sep, #e5e7eb) !important;
+      color: var(--sheet-muted, #8a8a8e);
+      box-shadow: 0 1px 2px rgba(17, 24, 39, 0.08);
+    }
+    body:not(.mobile-shell) .sidebar-collapse-btn:hover {
+      background: var(--sheet-active, #e5e5ea) !important;
+    }
+    /* Пункт, спрятанный поиском по разделам. Класс ставит проход в App.jsx —
+       текст пункта в CSS не прочитать. */
+    .sidebar-menu-hidden {
+      display: none !important;
     }
     /* Ширина сайдбара живёт на :root, чтобы её видели и обычный контент, и
        fixed-слои, отрендеренные порталом в document.body (окно статуса задач,
        панели разделов). Класс на <body> синхронизирует App с состоянием
        сворачивания — см. useLayoutEffect рядом с sidebarCollapsed. */
     :root {
-      --app-sidebar-offset: 256px;
+      --app-sidebar-offset: 300px;
     }
     body.sidebar-collapsed {
       --app-sidebar-offset: 80px;
