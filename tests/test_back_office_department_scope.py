@@ -710,6 +710,11 @@ class ProfileSectionTests(unittest.TestCase):
     def test_columns_use_the_staff_variant_for_back_office(self):
         # «Супервайзер», «Направление», «Ставка», «SIP» и «Вод. права» —
         # операторские колонки; вариант 'staff' их уже не рисует.
+        #
+        # Этот набор кормит «Операторов» у СВ и тренера (manage_operators) и
+        # списки супервайзеров/тренеров/админов — экраны, где отдел один и
+        # берётся у смотрящего. У «Учета сотрудников» с его фильтром по
+        # отделу — свой набор, см. EmployeeSectionDeptScopedColumnsTests.
         app = _read(APP_PATH)
         self.assertIn(
             "const employeeSectionColumns = buildEmployeeSectionColumns(\n"
@@ -719,41 +724,167 @@ class ProfileSectionTests(unittest.TestCase):
         )
 
 
-class EmployeeSectionWordingTests(unittest.TestCase):
-    """В разделе сотрудников бэк-офиса не должно быть слова «операторы».
+class EmployeeSectionDeptScopedColumnsTests(unittest.TestCase):
+    """Колонки «Учета сотрудников» следуют за ОТДЕЛОМ, ВЫБРАННЫМ в фильтре.
 
-    Заголовок и кнопку «Добавить» переключал departmentUsesSimpleEmployeeAccounting
-    и раньше, но подпись виджета дней рождения, пустое состояние, плейсхолдер
-    поиска и текст QR-доступа остались операторскими — их и видел владелец.
+    До 09.09.2026 набор полей задавал отдел СМОТРЯЩЕГО. У админа своего кода
+    из {accounting, hr, marketing, front_office} нет — значит он никогда не
+    видел «Должность» и «Город» ни при каком фильтре, зато всегда видел
+    «Супервайзера», «Направление», «Ставку» и «SIP», пустые у половины строк.
+    Владелец потребовал обратного: при «Все отделы» — только общие поля, а
+    отдельские — когда отдел в фильтре выбран.
     """
 
-    def test_no_hardcoded_operator_wording_in_the_section(self):
+    def test_selected_department_has_three_branches(self):
+        # «Не выбран» и «не может выбрать» — разные вещи. Без третьей ветки
+        # глава фронт-офиса потерял бы «Город», глава Бухгалтерии —
+        # «Должность», а СВ — «Супервайзера»: фильтр им не рисуется вовсе,
+        # и значение фильтра у них навсегда пустое.
+        app = _read(APP_PATH)
+        self.assertIn("const manageUsersSelectedDeptCode = (() => {", app)
+        self.assertIn("                if (manageUsersDeptFilter) {", app)
+        self.assertIn("                if (canFilterByDepartment) return null;", app)
+        # Фолбэк на собственный отдел: isScopedDepartmentHead считается по
+        # headed_department_ID, а код — отдельное поле профиля. Пустой код без
+        # фолбэка молча дал бы главе набор «Все отделы».
+        self.assertIn(
+            "                if (isScopedDepartmentHead) {\n"
+            "                    return user?.headed_department_code ?? user?.headedDepartmentCode ?? ownDeptCode;\n"
+            "                }\n"
+            "                return ownDeptCode;",
+            app,
+        )
+
+    def test_all_departments_hides_every_department_field(self):
+        # На null все departmentCode* возвращают false, поэтому «прячь
+        # операторские поля» и «отдел не выбран» предикатами не различаются —
+        # нужен явный Boolean(code) в каждом поле, иначе при «Все отделы»
+        # вернулись бы «Супервайзер» с «Направлением».
+        app = _read(APP_PATH)
+        self.assertIn(
+            "            const employeeDeptFieldsForCode = (code) => ({\n"
+            "                operatorFields: Boolean(code) && !departmentCodeHidesOperatorFields(code),\n"
+            "                jobTitle: Boolean(code) && departmentCodeUsesEmployeeJobTitle(code),\n"
+            "                city: Boolean(code) && departmentCodeUsesEmployeeCity(code),\n"
+            "                frontOfficeTraining: Boolean(code) && !departmentCodeHidesFrontOfficeTraining(code),\n"
+            "            });",
+            app,
+        )
+        # Вариант обязан учитывать набор полей: иначе call-site с 'operator'
+        # вернул бы операторские колонки и при «Все отделы».
+        self.assertIn(
+            "const isOperatorVariant = variant === 'operator' && employeeDeptFields.operatorFields;",
+            app,
+        )
+
+    def test_legacy_screens_keep_the_viewer_department(self):
+        # Второй аргумент необязателен: списки СВ/тренеров/админов
+        # (renderEmployeeDirectorySection) его не передают, и набор полей у
+        # них остаётся прежним — иначе три экрана потеряли бы колонки молча.
+        app = _read(APP_PATH)
+        self.assertIn(
+            "const buildEmployeeSectionColumns = (variant = 'operator', deptFields = null) => {",
+            app,
+        )
+        self.assertIn(
+            "const employeeDeptFields = deptFields || employeeDeptFieldsOfViewer();",
+            app,
+        )
+        self.assertIn(
+            "            const employeeDeptFieldsOfViewer = () => ({\n"
+            "                operatorFields: !departmentHidesOperatorFields(user),\n"
+            "                jobTitle: departmentUsesEmployeeJobTitle(user),\n"
+            "                city: departmentUsesEmployeeCity(user),\n"
+            "                frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),\n"
+            "            });",
+            app,
+        )
+        self.assertIn("buildEmployeeSectionColumns(role === 'operator' ? 'operator' : 'staff')", app)
+
+    def test_section_table_reads_its_own_columns(self):
+        # Один набор кормил два раздела с ДВУМЯ разными фильтрами отдела.
+        # Все три точки таблицы «Учета сотрудников» — шапка, строки и
+        # colSpan подвала — обязаны читать свой.
+        app = _read(APP_PATH)
+        section = app.split("{(view === 'manage_users' || view === 'employees') && (", 1)[1]
+        section = section.split("{view === 'manage_admins'", 1)[0]
+        self.assertEqual(3, section.count("manageUsersSectionColumns"))
+        self.assertNotIn("employeeSectionColumns", section)
+        # Отказ /api/admin/departments не должен стоить админу колонок:
+        # выбрать отдел без списка нельзя, и без этой ветки он до перезагрузки
+        # остался бы с набором «Все отделы».
+        self.assertIn(
+            "            const manageUsersDeptFields = (canFilterByDepartment && (departments || []).length === 0)\n"
+            "                ? employeeDeptFieldsOfViewer()\n"
+            "                : employeeDeptFieldsForCode(manageUsersSelectedDeptCode);",
+            app,
+        )
+
+
+class EmployeeSectionWordingTests(unittest.TestCase):
+    """В разделе «Учет сотрудников» слова «операторы» нет вовсе.
+
+    Сначала заголовок и кнопку «Добавить» переключал
+    departmentUsesSimpleEmployeeAccounting: отделам без линии показывали
+    «Сотрудников», остальным — «Операторов». Владелец 09.09.2026 отменил
+    развилку: раздел называется «Сотрудники» для всех, потому что портал
+    ведёт и бэк-офис, и фронт-офисы, и маркетинг, а не только линию.
+    Предикат остался жив для СТРУКТУРЫ (выпадашка сайдбара, набор полей),
+    но подписей больше не выбирает.
+    """
+
+    def test_no_operator_wording_in_the_section(self):
         app = _read(APP_PATH)
         section = app.split("{(view === 'manage_users' || view === 'employees') && (", 1)[1]
         section = section.split("{view === 'manage_admins'", 1)[0]
 
-        # Каждое упоминание операторов в разделе обязано быть под предикатом.
-        for phrase in ("'Операторы'", "'Добавить оператора'", "'Операторы не найдены.'"):
-            self.assertIn(phrase, section, phrase)
-            for line in section.splitlines():
-                if phrase in line:
-                    self.assertIn(
-                        "departmentUsesSimpleEmployeeAccounting(user) ?", line,
-                        f"{phrase} без переключателя: {line.strip()[:100]}",
-                    )
+        # Ни под предикатом, ни без него: в разделе этих слов быть не должно.
+        for phrase in ("'Операторы'", "Операторы<", "'Добавить оператора'",
+                       "Добавить оператора", "'Операторы не найдены.'",
+                       "Операторы не найдены."):
+            self.assertNotIn(phrase, section, phrase)
+
+        # И то, что должно стоять на их месте.
+        self.assertIn('text-gray-800">Сотрудники</h2>', section)
+        self.assertIn('<FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника', section)
+        self.assertIn("Сотрудники не найдены.", section)
+
+    def test_sidebar_dropdown_item_is_named_employees(self):
+        # Пункт, которым владелец и открывает раздел: две ветки выпадашки —
+        # админская и главы отдела (см. sidebar-item-must-be-in-two-branches).
+        app = _read(APP_PATH)
+        self.assertEqual(
+            2, app.count('<FaIcon className="fas fa-user-cog mr-2"></FaIcon> Сотрудники')
+        )
+        self.assertNotIn('<FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы', app)
 
     def test_birthdays_widget_caption_and_sublabel(self):
         app = _read(APP_PATH)
-        # Подпись виджета — та, что владелец увидел как «ОПЕРАТОРЫ».
+        # Подпись виджета — та, что владелец увидел как «ОПЕРАТОРЫ»
+        # (renderUpcomingBirthdaysCard рисует её капсом).
         self.assertIn(
-            "                                        departmentUsesSimpleEmployeeAccounting(user) "
-            "? 'Сотрудники' : 'Операторы',",
+            "                                    {renderUpcomingBirthdaysCard(\n"
+            "                                        upcomingManageUsersBirthdays,\n"
+            "                                        'Сотрудники',\n"
+            "                                    )}",
             app,
         )
         # Подстрочник карточки: направления у бэк-офиса нет, есть должность.
-        self.assertIn("const manageUsersBirthdayLabel = useCallback((employee) => (", app)
+        # Признак — по отделу САМОГО СОТРУДНИКА: карточка фильтр отдела не
+        # применяет, и по отделу смотрящего (или по выбранному в фильтре)
+        # половина строк получала бы подпись чужого отдела.
+        self.assertIn("const manageUsersBirthdayLabel = useCallback((employee) => {", app)
+        self.assertIn(
+            "                const employeeDeptCode = (departments || []).find(\n"
+            "                    (dep) => Number(dep?.id) === Number(employee?.department_id),\n"
+            "                )?.code ?? null;\n"
+            "                return departmentCodeUsesEmployeeJobTitle(employeeDeptCode)",
+            app,
+        )
         self.assertIn("? (employee?.job_title || 'Должность не указана')", app)
         self.assertIn(": (employee?.direction || 'Без направления')", app)
+        # Отдел смотрящего из подстрочника ушёл совсем.
+        self.assertNotIn("                departmentHidesOperatorFields(user)\n", app)
         self.assertNotIn(
             "buildUpcomingBirthdays(operatorUsers, (employee) => employee?.direction || 'Без направления', 14)",
             app,
@@ -774,17 +905,38 @@ class EmployeeSectionWordingTests(unittest.TestCase):
 
     def test_bulk_panel_drops_group_and_direction(self):
         # Оба списка у бэк-офиса пустые: групп и направлений в отделе нет.
+        # Гейт теперь по ОТДЕЛУ, ВЫБРАННОМУ в фильтре, а не по отделу
+        # смотрящего: при «Все отделы» одна группа с одним направлением
+        # подошли бы не всем, и селекты уходят вместе с колонками.
         app = _read(APP_PATH)
         self.assertIn(
-            "<div className={`grid grid-cols-1 gap-3 ${departmentHidesOperatorFields(user) "
+            "<div className={`grid grid-cols-1 gap-3 ${!manageUsersDeptFields.operatorFields "
             "? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>",
             app,
         )
         bulk = app.split("Зажмите <span className=\"font-semibold\">Ctrl</span>", 1)[1]
         bulk = bulk.split("Применить массово", 1)[0]
-        self.assertEqual(2, bulk.count("{!departmentHidesOperatorFields(user) && ("))
+        self.assertEqual(2, bulk.count("{manageUsersDeptFields.operatorFields && ("))
         # Ставка остаётся — она есть у всех.
         self.assertIn("Ставка: не менять", bulk)
+
+    def test_bulk_draft_resets_when_the_department_filter_changes(self):
+        # Выбор строк подрезается только по operatorUsers, а он по отделу не
+        # фильтрован: без сброса можно было применить правку к строкам,
+        # которых на экране уже нет, и увезти на сервер значение селекта,
+        # который при «Все отделы» с экрана ушёл.
+        app = _read(APP_PATH)
+        self.assertIn(
+            "            useEffect(() => {\n"
+            "                setSelectedManageUsersIds((prev) => (prev.size ? new Set() : prev));\n"
+            "                setBulkManageUsersChanges((prev) => (\n"
+            "                    (prev.group_id || prev.direction_id || prev.rate)\n"
+            "                        ? { group_id: '', direction_id: '', rate: '' }\n"
+            "                        : prev\n"
+            "                ));\n"
+            "            }, [manageUsersDeptFilter]);",
+            app,
+        )
 
 
 class RankAndFileGatesTests(unittest.TestCase):

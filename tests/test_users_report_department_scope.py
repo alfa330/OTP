@@ -238,7 +238,9 @@ class UsersReportImplementationContractTests(unittest.TestCase):
         self.assertIn("departmentId: ''", source)
         self.assertIn("departmentId: isAdminLikeRole ? (manageUsersDeptFilter || '') : ''", source)
         self.assertIn("params.set('department_id', exportOptions.departmentId)", source)
-        self.assertIn("Будут выгружены только операторы вашего отдела.", source)
+        # Модалка называется «Параметры выгрузки сотрудников», и её открывает
+        # глава бэк-офиса и фронт-офиса, где операторов нет вовсе.
+        self.assertIn("Будут выгружены только сотрудники вашего отдела.", source)
         self.assertIn('<option value="">Все отделы</option>', source)
 
     def test_frontend_gives_supervisors_their_own_export_entry_point(self):

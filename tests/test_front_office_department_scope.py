@@ -112,8 +112,13 @@ class FrontOfficeHeadSidebarTests(unittest.TestCase):
             "else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');",
             app,
         )
-        self.assertIn("{departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники' : 'Операторы'}", app)
-        self.assertIn("{departmentUsesSimpleEmployeeAccounting(user) ? 'Добавить сотрудника' : 'Добавить оператора'}", app)
+        # Подписи развилкой больше не выбираются: владелец 09.09.2026 назвал
+        # раздел «Сотрудниками» для всех отделов. Предикат остался нужен для
+        # СТРУКТУРЫ — выпадашка сайдбара против одного пункта (гейты выше).
+        self.assertIn('text-gray-800">Сотрудники</h2>', app)
+        self.assertIn('<FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника', app)
+        self.assertNotIn("? 'Сотрудники' : 'Операторы'", app)
+        self.assertNotIn("? 'Добавить сотрудника' : 'Добавить оператора'", app)
 
     def test_groups_section_for_restricted_department_head(self):
         app = _read(APP_PATH)
@@ -172,6 +177,8 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
 
         self.assertIn(
             "import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole,"
+            " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
+            " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
             " departmentEmployeeRole, departmentHidesColleagueSchedules,"
             " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
             " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
@@ -339,9 +346,18 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
     def test_employee_table_swaps_columns_for_front_office(self):
         app = _read(APP_PATH)
 
-        self.assertIn("...(departmentUsesEmployeeCity(user) ? [", app)
+        # Гейты берут набор полей ОТДЕЛА (employeeDeptFieldsForCode для
+        # «Учета сотрудников», отдел смотрящего — для остальных экранов), а
+        # не предикат по user: иначе «Город» показывался бы главе
+        # фронт-офиса, но не админу, выбравшему этот отдел в фильтре.
+        self.assertIn("...(employeeDeptFields.city ? [", app)
         self.assertIn("label: 'Город',", app)
-        self.assertIn("...(departmentHidesFrontOfficeTraining(user) ? [] : [", app)
+        self.assertIn("...(employeeDeptFields.frontOfficeTraining ? [", app)
+        self.assertIn("...(employeeDeptFields.jobTitle ? [", app)
+        # «Город» остаётся ровно у фронт-офисов, «Должность» — у бэк-офиса:
+        # набор полей по-прежнему решают карты в departmentViews.
+        views = _read(DEPARTMENT_VIEWS_PATH)
+        self.assertIn("const EMPLOYEE_CITY_DEPARTMENTS = new Set(['front_office']);", views)
 
     def test_backend_stores_and_returns_city(self):
         bot = _read(BOT_PATH)

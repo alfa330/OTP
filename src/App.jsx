@@ -61,7 +61,7 @@ import { IosTimePicker } from './components/ui/TimePicker';
 import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
@@ -39317,8 +39317,46 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             );
 
-            const buildEmployeeSectionColumns = (variant = 'operator') => {
-                const isOperatorVariant = variant === 'operator';
+            // Набор полей, ПРИСУЩИХ ОТДЕЛУ: «Супервайзер», «Направление»,
+            // «Ставка», «SIP», «Вод. права» — у отделов с линией; «Должность» —
+            // у бэк-офиса; «Город» — у фронт-офисов; «Обучение ФО» — у тех, кто
+            // на линию выходит. Отдел здесь тот, что ВЫБРАН в фильтре раздела,
+            // а не отдел смотрящего: в «Учете сотрудников» видны люди из разных
+            // отделов, и набор полей у них разный.
+            //
+            // code === null означает «Все отделы»: в таблице тогда люди из
+            // отделов с разным устройством, и любое отдельское поле у части
+            // строк пусто не потому что его забыли заполнить, а потому что в
+            // отделе его нет вовсе. Показываем только общие поля. Отдельный
+            // флаг нужен именно потому, что на null все departmentCode*
+            // возвращают false — «прячь операторские поля» и «отдел не выбран»
+            // предикатами не различаются.
+            const employeeDeptFieldsForCode = (code) => ({
+                operatorFields: Boolean(code) && !departmentCodeHidesOperatorFields(code),
+                jobTitle: Boolean(code) && departmentCodeUsesEmployeeJobTitle(code),
+                city: Boolean(code) && departmentCodeUsesEmployeeCity(code),
+                frontOfficeTraining: Boolean(code) && !departmentCodeHidesFrontOfficeTraining(code),
+            });
+
+            // Набор полей по отделу СМОТРЯЩЕГО — для экранов без фильтра по
+            // отделу (списки супервайзеров, тренеров, админов и «Операторы» у
+            // СВ): там раздел показывает собственных сотрудников, и отдел
+            // ровно один. Это поведение до появления фильтра, и оно остаётся
+            // значением по умолчанию у построителя колонок.
+            const employeeDeptFieldsOfViewer = () => ({
+                operatorFields: !departmentHidesOperatorFields(user),
+                jobTitle: departmentUsesEmployeeJobTitle(user),
+                city: departmentUsesEmployeeCity(user),
+                frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),
+            });
+
+            const buildEmployeeSectionColumns = (variant = 'operator', deptFields = null) => {
+                const employeeDeptFields = deptFields || employeeDeptFieldsOfViewer();
+                // Вариант задаёт вызывающий (у списков СВ/тренеров/админов он
+                // 'staff' по роли), но операторских колонок не бывает там, где
+                // их нет у отдела, — иначе при «Все отделы» вернулись бы
+                // «Супервайзер» и «Направление», пустые у половины строк.
+                const isOperatorVariant = variant === 'operator' && employeeDeptFields.operatorFields;
                 const nameColumn = {
                     key: 'name',
                     label: 'Имя',
@@ -39436,14 +39474,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             sortField: 'hire_date',
                             render: (employee) => formatEmployeeTableDate(employee?.hire_date)
                         },
-                        ...(departmentUsesEmployeeJobTitle(user) ? [
+                        ...(employeeDeptFields.jobTitle ? [
                         {
                             key: 'job_title',
                             label: 'Должность',
                             render: (employee) => employee?.job_title || '-'
                         }
                         ] : []),
-                        ...(departmentUsesEmployeeCity(user) ? [
+                        ...(employeeDeptFields.city ? [
                         {
                             key: 'city',
                             label: 'Город',
@@ -39465,7 +39503,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             label: 'Практика',
                             render: (employee) => formatEmployeeBoolLabel(employee?.internship_in_company)
                         },
-                        ...(departmentHidesFrontOfficeTraining(user) ? [] : [
+                        ...(employeeDeptFields.frontOfficeTraining ? [
                         {
                             key: 'front_office_training',
                             label: 'Обучение ФО',
@@ -39476,7 +39514,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             label: 'Дата обучения',
                             render: (employee) => formatEmployeeTableDate(employee?.front_office_training_date)
                         }
-                        ]),
+                        ] : []),
                         {
                             key: 'taxipro_id',
                             label: 'ID таксипро',
@@ -39543,12 +39581,59 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return generalColumns;
             };
 
+            // Колонки «Операторов» у СВ и тренера (view === 'manage_operators') и
+            // списков супервайзеров/тренеров/админов. Здесь отдел берём у
+            // СМОТРЯЩЕГО — раздел показывает его собственных сотрудников. У
+            // «Учета сотрудников» (manage_users/employees) свой набор ниже: там
+            // есть фильтр по отделу, и колонки следуют за ним.
+            //
             // Вариант 'staff' уже умеет то, что нужно бэк-офису: без «Супервайзера»,
-            // «Направления», «Ставки», «SIP» и «Вод. прав». Отдел берём у СМОТРЯЩЕГО
-            // — раздел показывает его собственных сотрудников (так же устроены
-            // колонки «Город» и «Должность»).
+            // «Направления», «Ставки», «SIP» и «Вод. прав».
             const employeeSectionColumns = buildEmployeeSectionColumns(
                 departmentHidesOperatorFields(user) ? 'staff' : 'operator'
+            );
+
+            // Отдел, по которому настраиваем колонки «Учета сотрудников». Три
+            // ветки, а не две: «не выбран» и «не может выбрать» — разные вещи.
+            //   выбран в фильтре            → его код;
+            //   фильтр есть, но не выбран   → null, то есть «Все отделы»;
+            //   фильтра нет (глава, СВ)     → собственный отдел смотрящего.
+            // Без третьей ветки глава фронт-офиса потерял бы «Город», глава
+            // Бухгалтерии — «Должность», а СВ — «Супервайзера» и «Ставку»:
+            // фильтр им не рисуется (canFilterByDepartment), и значение
+            // фильтра у них навсегда пустое.
+            const manageUsersSelectedDeptCode = (() => {
+                if (manageUsersDeptFilter) {
+                    return (departments || []).find(
+                        (dep) => Number(dep?.id) === Number(manageUsersDeptFilter),
+                    )?.code ?? null;
+                }
+                if (canFilterByDepartment) return null;
+                const ownDeptCode = user?.department_code ?? user?.departmentCode ?? null;
+                // Глава может возглавлять отдел, отличный от собственного —
+                // тот же порядок, что у кнопки «Добавить сотрудника». Фолбэк
+                // на собственный отдел обязателен: isScopedDepartmentHead
+                // считается по headed_department_ID, а код — отдельное поле
+                // профиля, и без фолбэка пустой код молча дал бы главе набор
+                // «Все отделы», то есть отнял «Должность» или «Город».
+                if (isScopedDepartmentHead) {
+                    return user?.headed_department_code ?? user?.headedDepartmentCode ?? ownDeptCode;
+                }
+                return ownDeptCode;
+            })();
+
+            // Если /api/admin/departments не ответил, список отделов пуст:
+            // селект не рисуется, выбрать отдел физически нельзя, и без этой
+            // ветки админ до перезагрузки остался бы с набором «Все отделы»,
+            // то есть отказ ручки стоил бы семи колонок. Отдаём прежний набор
+            // по отделу смотрящего — ровно то, что было до появления фильтра.
+            const manageUsersDeptFields = (canFilterByDepartment && (departments || []).length === 0)
+                ? employeeDeptFieldsOfViewer()
+                : employeeDeptFieldsForCode(manageUsersSelectedDeptCode);
+
+            const manageUsersSectionColumns = buildEmployeeSectionColumns(
+                'operator',
+                manageUsersDeptFields,
             );
 
             const activeEmployeeTableSection = EMPLOYEE_TABLE_SECTIONS.find((tab) => tab.key === employeeTableSection) || EMPLOYEE_TABLE_SECTIONS[0];
@@ -41407,13 +41492,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return isBackOfficeEmployeeRole(draftRole) ? 'operator' : draftRole;
             }, [departments]);
 
-            // Подстрочник в карточке дня рождения: у операторов это направление,
-            // у бэк-офиса его нет вовсе — там человека определяет должность.
-            const manageUsersBirthdayLabel = useCallback((employee) => (
-                departmentHidesOperatorFields(user)
+            // Подстрочник в карточке дня рождения: у людей на линии это
+            // направление, у бэк-офиса его нет вовсе — там человека определяет
+            // должность.
+            //
+            // Признак берём по отделу САМОГО СОТРУДНИКА — не по отделу
+            // смотрящего и не по выбранному в фильтре. Карточка считается по
+            // всем сотрудникам и фильтр отдела не применяет (см.
+            // upcomingManageUsersBirthdays ниже), поэтому в ней рядом стоят
+            // люди из отделов с разным устройством: по отделу смотрящего
+            // бухгалтеру подписали бы «Без направления», а по выбранному в
+            // фильтре — то же самое достали бы оператору линии.
+            const manageUsersBirthdayLabel = useCallback((employee) => {
+                const employeeDeptCode = (departments || []).find(
+                    (dep) => Number(dep?.id) === Number(employee?.department_id),
+                )?.code ?? null;
+                return departmentCodeUsesEmployeeJobTitle(employeeDeptCode)
                     ? (employee?.job_title || 'Должность не указана')
-                    : (employee?.direction || 'Без направления')
-            ), [user]);
+                    : (employee?.direction || 'Без направления');
+            }, [departments]);
 
             const upcomingManageUsersBirthdays = useMemo(() => (
                 buildUpcomingBirthdays(operatorUsers, manageUsersBirthdayLabel, 14)
@@ -45220,6 +45317,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [view, clearManageUsersSelection]);
 
+            // Смена отдела в фильтре обнуляет и выбор строк, и черновик
+            // массовой правки. Выбор подрезается только по operatorUsers, а он
+            // по отделу не фильтрован: выбрав людей в одном отделе и
+            // переключившись на другой, можно было применить правку к строкам,
+            // которых на экране уже нет. А «Группа» и «Направление» при «Все
+            // отделы» с экрана уходят вовсе — выбранное в них значение иначе
+            // осталось бы в черновике и уехало на сервер невидимым.
+            // Сеттеры функциональные и с бейлаутом: эффект срабатывает и на
+            // монтировании, а безусловный new Set()/новый объект давали бы
+            // лишний ре-рендер App каждому пользователю на каждом входе.
+            useEffect(() => {
+                setSelectedManageUsersIds((prev) => (prev.size ? new Set() : prev));
+                setBulkManageUsersChanges((prev) => (
+                    (prev.group_id || prev.direction_id || prev.rate)
+                        ? { group_id: '', direction_id: '', rate: '' }
+                        : prev
+                ));
+            }, [manageUsersDeptFilter]);
+
             const fetchProfileData = async () => {
                 setIsLoading(true);
                 
@@ -47180,7 +47296,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             onClick={(e) => handleSidebarViewNavigation(e, isSuperAdmin ? 'employees' : 'manage_users', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
                                                             className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${(view === 'manage_users' || view === 'employees') ? 'bg-gray-100 font-medium' : ''}`}
                                                         >
-                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Сотрудники
                                                         </button>
 
                                                         <div className="border-t border-gray-200" />
@@ -47264,7 +47380,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             onClick={(e) => handleSidebarViewNavigation(e, 'manage_users', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
                                                             className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
                                                         >
-                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Сотрудники
                                                         </button>
 
                                                         <div className="border-t border-gray-200" />
@@ -49852,7 +49968,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {(view === 'manage_users' || view === 'employees') && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-2xl font-semibold text-gray-800">{departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники' : 'Операторы'}</h2>
+                                    <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
 
                                     <div className="flex items-center gap-3">
                                         {canFilterByDepartment && (departments || []).length > 0 && (
@@ -49898,7 +50014,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         }}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
-                                        <FaIcon className="fas fa-user-plus"></FaIcon> {departmentUsesSimpleEmployeeAccounting(user) ? 'Добавить сотрудника' : 'Добавить оператора'}
+                                        <FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника
                                         </button>
 
                                         {/* Generate Report Button */}
@@ -49917,7 +50033,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {renderUpcomingBirthdaysCard(
                                         upcomingManageUsersBirthdays,
-                                        departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники' : 'Операторы',
+                                        'Сотрудники',
                                     )}
 
                                     {/* Tabs */}
@@ -49957,7 +50073,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         if (filteredByStatus.length === 0) {
                                         return <p className="text-center text-gray-600">
-                                            {departmentUsesSimpleEmployeeAccounting(user) ? 'Сотрудники не найдены.' : 'Операторы не найдены.'}
+                                            Сотрудники не найдены.
                                         </p>;
                                         }
 
@@ -49982,7 +50098,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <div className="mb-4">
                                             <input
                                                 type="text"
-                                                placeholder={departmentHidesOperatorFields(user)
+                                                placeholder={!manageUsersSelectedDeptCode
+                                                    ? "Поиск по имени..."
+                                                    : manageUsersDeptFields.jobTitle
                                                     ? "Поиск по имени или должности..."
                                                     : "Поиск по имени, направлению или супервайзеру..."}
                                                 value={manageUsersSearchQuery}
@@ -50009,9 +50127,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                                         {/* Группа и направление — операторские поля: у бэк-офиса
                                                             оба списка пустые, и выбирать в них не из чего. Колонок
-                                                            под них тогда тоже не нужно. */}
-                                                        <div className={`grid grid-cols-1 gap-3 ${departmentHidesOperatorFields(user) ? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>
-                                                            {!departmentHidesOperatorFields(user) && (
+                                                            под них тогда тоже не нужно. При «Все отделы» их тоже
+                                                            нет: в выборке лежат люди из разных отделов, и одна
+                                                            группа с одним направлением подошли бы не всем. Ставка
+                                                            остаётся — она есть у каждого. */}
+                                                        <div className={`grid grid-cols-1 gap-3 ${!manageUsersDeptFields.operatorFields ? 'md:grid-cols-2' : 'md:grid-cols-4'}`}>
+                                                            {manageUsersDeptFields.operatorFields && (
                                                             <select
                                                                 value={bulkManageUsersChanges.group_id}
                                                                 onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, group_id: e.target.value }))}
@@ -50028,7 +50149,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             </select>
                                                             )}
 
-                                                            {!departmentHidesOperatorFields(user) && (
+                                                            {manageUsersDeptFields.operatorFields && (
                                                             <select
                                                                 value={bulkManageUsersChanges.direction_id}
                                                                 onChange={(e) => setBulkManageUsersChanges((prev) => ({ ...prev, direction_id: e.target.value }))}
@@ -50083,7 +50204,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <table className="min-w-full border rounded-lg w-full">
                                                     <thead className="bg-gray-50">
                                                     <tr>
-                                                        {employeeSectionColumns.map((column) => {
+                                                        {manageUsersSectionColumns.map((column) => {
                                                             const isSortable = !!column.sortField;
                                                             return (
                                                                 <th
@@ -50114,7 +50235,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             }`}
                                                             title="Для мультивыбора: Ctrl + клик"
                                                         >
-                                                            {employeeSectionColumns.map((column) => (
+                                                            {manageUsersSectionColumns.map((column) => (
                                                                 <td
                                                                     key={column.key}
                                                                     className={`px-6 py-4 text-sm text-gray-900 align-top break-words ${column.cellClassName || ''}`}
@@ -50211,7 +50332,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         <td className="px-6 py-3 font-medium text-gray-700">
                                                             {svUsers.length} сотрудников
                                                         </td>
-                                                        <td colSpan={employeeSectionColumns.length} className="px-6 py-3 text-sm text-gray-600">
+                                                        <td colSpan={manageUsersSectionColumns.length} className="px-6 py-3 text-sm text-gray-600">
                                                             Показан раздел: {activeEmployeeTableSection.label}
                                                         </td>
                                                     </tr>
@@ -54904,7 +55025,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         ) : (
                                             <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
                                                 <FaIcon className="fas fa-building text-slate-400" />
-                                                <span>Будут выгружены только операторы вашего отдела.</span>
+                                                <span>Будут выгружены только сотрудники вашего отдела.</span>
                                             </div>
                                         )}
 
