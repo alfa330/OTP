@@ -23,6 +23,15 @@
  *    приходом стилей экран моргнул бы светлым.
  */
 
+import { setThemeColorMeta } from './pwa';
+
+/* Цвет строки состояния установленного портала. Светлый совпадает с фоном
+   портала (bg-gray-50), тёмный — с холстом тёмного слоя: у приложения на
+   домашнем экране строка состояния красится этим значением, и в тёмном
+   режиме светлая полоса поверх экрана выглядела бы обрезком чужой темы. */
+const THEME_COLOR_LIGHT = '#f9fafb';
+const THEME_COLOR_DARK = '#17191e';
+
 export const DARK_THEME_ATTRIBUTE = 'data-otp-theme';
 export const DARK_THEME_STORAGE_KEY = 'otp.theme';
 
@@ -52,6 +61,7 @@ export const applyDarkTheme = async (enabled, isStale) => {
     if (!root) return;
     if (!enabled) {
         root.removeAttribute(DARK_THEME_ATTRIBUTE);
+        setThemeColorMeta(THEME_COLOR_LIGHT);
         return;
     }
     try {
@@ -64,6 +74,7 @@ export const applyDarkTheme = async (enabled, isStale) => {
     }
     if (typeof isStale === 'function' && isStale()) return;
     root.setAttribute(DARK_THEME_ATTRIBUTE, 'dark');
+    setThemeColorMeta(THEME_COLOR_DARK);
 };
 
 export const readStoredDarkTheme = () => {

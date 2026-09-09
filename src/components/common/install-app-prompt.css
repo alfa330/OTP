@@ -1,0 +1,39 @@
+/* Экран «установите портал на телефон».
+ *
+ * В файле только движение и то, что нельзя выразить утилитой: цвета и отступы
+ * остаются на Tailwind, как во всех окнах портала.
+ *
+ * Панель ВЫЕЗЖАЕТ СНИЗУ, а не проявляется по прозрачности: снизу приходят все
+ * системные листы на телефоне, и такое появление читается как «система
+ * что-то предлагает», а не как «на странице что-то мигнуло». Уезжает она тем
+ * же путём — исчезнуть на месте значит оставить вопрос «куда делось».
+ */
+
+@keyframes iap-sheet-in {
+    from { opacity: 0; transform: translateY(24px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes iap-sheet-out {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(24px) scale(0.98); }
+}
+
+.iap-sheet {
+    /* Кривая та же, что у модалок портала (IOS_MODAL_MOTION): быстрый старт,
+       мягкое приземление — характер macOS. */
+    animation: iap-sheet-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.iap-sheet--out {
+    animation: iap-sheet-out 0.18s ease-in both;
+}
+
+/* Уважение к системной настройке «уменьшить движение»: панель нужна, поездка —
+   нет. */
+@media (prefers-reduced-motion: reduce) {
+    .iap-sheet,
+    .iap-sheet--out {
+        animation-duration: 0.01ms;
+    }
+}

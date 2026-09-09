@@ -2,7 +2,7 @@
 <html lang="ru" translate="no" class="notranslate">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <!--
       Защита от встроенного переводчика браузера. Он подменяет текстовые узлы
       обёртками <font>, после чего React пытается удалить узел, которого у
@@ -17,6 +17,32 @@
     <meta name="google" content="notranslate" />
     <title>iCORE</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
+
+    <!--
+      Портал как приложение на телефоне (PWA). Значок на домашнем экране,
+      запуск без адресной строки, работа с плохой сетью — см. public/sw.js,
+      public/manifest.webmanifest и src/utils/pwa.js.
+
+      Пути даны от корня (/manifest.webmanifest): Vite при сборке подставляет
+      в них base, а на GitHub Pages портал живёт не в корне, а в /OTP/.
+      Относительный путь здесь написать НЕЛЬЗЯ — документ по внутреннему адресу
+      (/OTP/wiki/...) считал бы его от своего каталога, и манифест не нашёлся бы.
+      Внутри самого манифеста, наоборот, всё относительное: он один и тот же
+      для корня и для подкаталога.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- Цвет строки состояния в установленном приложении. Совпадает с фоном
+         портала (bg-gray-50) — строка состояния должна продолжать страницу, а
+         не отрезать её полосой. Для тёмного режима значение подменяется на
+         ходу, см. applyDarkTheme в src/utils/darkTheme.js. -->
+    <meta name="theme-color" content="#f9fafb" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- iOS манифест читает не полностью: полноэкранный запуск с домашнего
+         экрана там до сих пор включается этими двумя метками. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="iCORE" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <!-- Google tag (gtag.js) -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-DDGZC3W1MZ"></script>
     <script>

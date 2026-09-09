@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
+﻿import React, { Suspense, lazy, useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import _ from 'lodash';
@@ -47,6 +47,8 @@ import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip
 import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/schedule/shiftHistoryFormat';
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import AssistantOrb from './components/assistant/AssistantOrb';
+import InstallAppPrompt from './components/common/InstallAppPrompt';
+import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -47801,6 +47803,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 >
                                                     <FaIcon className="fas fa-lock mr-2"></FaIcon> Смена пароля
                                                 </button>
+
+                                                {/* Пункт сам решает, показываться ли: на уже
+                                                    установленном портале и там, где установка
+                                                    браузером не предложена, он не рисует ничего —
+                                                    вместе со своим разделителем. */}
+                                                <InstallAppMenuItem
+                                                    onPicked={() => stableSidebarHandleToggleDropdown(true)}
+                                                />
                                             </div>
                                         )}
                                     </li>
@@ -55022,6 +55032,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }}
                         onOpenWikiAssistant={() => navigateToView('wiki')}
                     />
+                    {/* Предложение установить портал на телефон. Стоит здесь по
+                        той же причине, что и шарик: сиблингом main-content, мимо
+                        overflow-hidden разделов и zoom вики. На экране входа его
+                        нет сам собой — тот уходит ранним return выше, и
+                        предлагать установку до входа незачем. */}
+                    <InstallAppPrompt />
                     <ToastContainer toasts={toasts} removeToast={removeToast} setToasts={setToasts} />
                 </div>
             );

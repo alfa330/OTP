@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App, { ErrorBoundary } from './App';
 import { cleanTechnicalQueryParamsFromAddressBar } from './utils/urlHygiene';
+import { startPwaRuntime } from './utils/pwa';
 import './styles.css';
 
 try {
@@ -12,6 +13,13 @@ try {
      и не уезжали в ссылки, которыми делятся. */
   cleanTechnicalQueryParamsFromAddressBar();
   const routerBase = import.meta.env.BASE_URL || '/';
+  /* Портал как приложение на телефоне: значок на домашнем экране, запуск во
+     весь экран, живучесть на плохой сети. Ставится ДО отрисовки: событие
+     `beforeinstallprompt` браузер присылает когда захочет, и подписчик должен
+     ждать его с первой секунды жизни страницы, а не с появления дерева.
+     Сервис-воркер — только в собранной версии: на разработке он отдавал бы из
+     кэша файлы, которые Vite только что пересобрал. */
+  startPwaRuntime({ baseUrl: routerBase, withServiceWorker: import.meta.env.PROD });
   const root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(
     <BrowserRouter basename={routerBase}>
