@@ -231,11 +231,15 @@
       .sidebar-top-row,
       .sidebar-search-btn,
       .sidebar-bell-slot,
+      .sidebar-bell-slot > div > button,
+      .sidebar-bell-slot > div > button > svg,
       .sidebar-logo-full,
-      .sidebar-logo-mini,
       .sidebar .sidebar-text,
       .sidebar-menu-scroll > li > button {
         transition: none !important;
+        /* Заодно снимаем задержку на клик по колоколу: ехать ему больше
+           некуда, значит и ждать нечего. */
+        animation: none !important;
       }
     }
 
@@ -439,10 +443,24 @@
       margin-bottom: 10px;
       transition: height 0.3s ease;
     }
+    /* Рельс: в шапке остаётся ОДИН колокол, ростом со строку раздела.
+       Условие выписано целиком — `свёрнут И курсора нет И панель не открыта`, —
+       а не парой правил с перекрытием по порядку: у каждого свойства здесь по
+       два значения (место, размер, скругление, плитка), и парный приём дал бы
+       вдвое больше правил, в которых легко забыть одно. */
     body:not(.mobile-shell) .sidebar-top-row > h1 {
       display: flex;
       justify-content: flex-start;
       margin: 0;
+      /* Своя система координат и обрезка по краю: логотип лежит внутри
+         заголовка абсолютом, а полное написание шире узкой панели — посреди
+         разъезда оно вылезало за её кромку (у сайдбара overflow-visible ради
+         выпадашек, так что спрятать это иначе нечем). */
+      position: relative;
+      /* Во всю высоту шапки: в рельсе она 42 px, и заголовок не должен
+         торчать над списком. */
+      height: 100%;
+      overflow: hidden;
       /* Заголовок растянут на всю строку шапки и накрывает собой и кнопку
          сворачивания, и кнопки шапки. Клики ему не нужны: единственное
          кликаемое внутри — вход в «4 You», ему события возвращаем ниже.
@@ -454,56 +472,64 @@
     body:not(.mobile-shell) .sidebar-top-row > h1 button {
       pointer-events: auto;
     }
-    body:not(.mobile-shell) .sidebar-search-btn,
+    /* Колокол переезжает и меняет размер, поэтому и место, и габариты
+       задаются одной парой свойств (left + width), а не right: над-заданный
+       блок игнорировал бы right, и анимация шла бы рывком. 246 = 300 − 24 − 30:
+       те же 24 px запаса от кромки, где стоит кнопка сворачивания. */
     body:not(.mobile-shell) .sidebar-bell-slot {
       position: absolute;
       top: 12px;
+      left: 246px;
+      width: 30px;
+      height: 30px;
       margin: 0;
-      /* Цвета здесь же: одно свойство transition затирает список из утилиты
-         transition-colors, которая стоит на кнопке в разметке, и подсветка
-         начинала меняться рывком. */
-      transition: top 0.3s ease, right 0.3s ease,
+      transition: left 0.3s ease, top 0.3s ease, width 0.3s ease, height 0.3s ease;
+    }
+    body:not(.mobile-shell) .sidebar-bell-slot > div {
+      width: 100%;
+      height: 100%;
+    }
+    /* Поиск и логотип не ездят — они проявляются, и проявляются ПОЗЖЕ, когда
+       панель уже почти разъехалась: появись они сразу, поиск на 208 px и
+       написание на 169 висели бы за кромкой узкой панели. Гаснут наоборот
+       сразу — уходящая панель не должна тащить их за собой. */
+    body:not(.mobile-shell) .sidebar-search-btn {
+      position: absolute;
+      top: 12px;
+      left: 208px;
+      margin: 0;
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 0.16s ease 0.16s, visibility 0s,
                   background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
     }
-    body:not(.mobile-shell) .sidebar-search-btn {
-      right: 62px;
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-search-btn {
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.12s ease, visibility 0s linear 0.12s;
     }
-    body:not(.mobile-shell) .sidebar-bell-slot {
-      right: 24px;
+    /* Шапка в рельсе — ровно одна строка: 42 px, как карточка раздела. */
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-top-row {
+      height: 42px;
     }
-    /* Рельс: знак сверху, под ним столбик из двух кнопок — всё по центру
-       80-пиксельной полосы и левее кнопки сворачивания. */
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-top-row {
-      height: 118px;
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot {
+      left: 10px;
+      top: 0;
+      width: 60px;
+      height: 42px;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-top-row > h1 {
-      justify-content: center;
+    /* Пока колокол едет, он не принимает клик. Курсор идёт к кнопке
+       сворачивания у правой кромки, а колокол проезжает мимо этой точки —
+       и панель уведомлений открывалась «сама». Держим 0,35 с: чуть дольше
+       переезда. step-end оставляет pointer-events: none до самого конца
+       кадра, а потом возвращает обычное значение. */
+    @keyframes otp-bell-arm {
+      from { pointer-events: none; }
+      to { pointer-events: auto; }
     }
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-search-btn {
-      top: 54px;
-      right: 25px;
-    }
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-bell-slot {
-      top: 88px;
-      right: 25px;
-    }
-    /* Панель колокола держит свёрнутый сайдбар развёрнутым (правило :has
-       выше) — значит и шапка обязана стоять как у развёрнутого, иначе
-       панель уехала бы вместе с кнопкой из-под курсора. Специфичность
-       равна правилам :not(:hover), поэтому это ПОСЛЕ них, порядком. */
-    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-top-row {
-      height: 54px;
-    }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-top-row > h1 {
-      justify-content: flex-start;
-    }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-search-btn {
-      top: 12px;
-      right: 62px;
-    }
+    body:not(.mobile-shell) .sidebar.collapsed:hover .sidebar-bell-slot,
     body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-bell-slot {
-      top: 12px;
-      right: 24px;
+      animation: otp-bell-arm 0.35s step-end;
     }
     /* Колокол в шапке — значок, а не строка меню. Его разметка одна на три
        места (шапка, угол экрана на телефоне, панель уведомлений внутри), и
@@ -512,14 +538,45 @@
        кнопку-триггер (`.sidebar-bell-slot > div > button`): рядом с ней в
        том же контейнере живёт панель, и её кнопки красить нельзя. */
     body:not(.mobile-shell) .sidebar-bell-slot > div > button {
-      width: 30px;
-      height: 30px;
+      width: 100%;
+      height: 100%;
       padding: 0;
       justify-content: center;
       border-radius: 9px;
       background: var(--sheet-card, #fff);
       border: 1px solid var(--sheet-sep, #e5e7eb);
       color: var(--sheet-text, #111827);
+      transition: border-radius 0.3s ease, background-color 0.2s ease, color 0.2s ease;
+    }
+    /* Значок: у развёрнутой панели — просто значок в 18 px, в рельсе — плитка
+       26 px, как у разделов. Размер приходит инлайном (FaIcon ставит 1em),
+       поэтому !important; переходы на !important-значениях работают. */
+    body:not(.mobile-shell) .sidebar-bell-slot > div > button > svg:first-child {
+      flex: 0 0 18px !important;
+      width: 18px !important;
+      height: 18px !important;
+      min-width: 18px !important;
+      padding: 0;
+      border-radius: 7px;
+      box-sizing: border-box;
+      background: transparent;
+      color: inherit;
+      transition: width 0.3s ease, height 0.3s ease, flex-basis 0.3s ease,
+                  padding 0.3s ease, background-color 0.3s ease, color 0.2s ease;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot > div > button {
+      border-radius: 11px;
+    }
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot > div > button > svg:first-child {
+      flex: 0 0 26px !important;
+      width: 26px !important;
+      height: 26px !important;
+      min-width: 26px !important;
+      padding: 5.5px;
+      /* Синий из той же палитры, что плитки разделов: колокол в рельсе —
+         единственное, что должно замечаться. */
+      background: #2563eb;
+      color: #fff;
     }
     body:not(.mobile-shell) .sidebar-bell-slot > div > button:hover {
       background: var(--sheet-active, #e5e5ea) !important;
@@ -760,11 +817,11 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Свёрнутый рельс. Спрятано только ПОЛЕ поиска: в 60 px оно было бы
-       пустой строкой. Сама кнопка видна всегда и разворачивает сайдбар
-       (см. handleToggleSidebarSearch в App.jsx), а обратный ход — эффект
-       «свернули, значит поиск закрылся»: иначе список остался бы
-       отфильтрованным по невидимому запросу. */
+    /* Поле поиска в рельсе спрятано совсем: в 60 px оно было бы пустой
+       строкой. Кнопка поиска там тоже не показывается (решение владельца —
+       в шапке остаётся один колокол), но саму кнопку это не отменяет: она
+       разворачивает панель, см. handleToggleSidebarSearch в App.jsx, а
+       обратный ход — эффект «свернули, значит поиск закрылся». */
     body:not(.mobile-shell) .sidebar.collapsed .sidebar-search-row {
       display: none;
     }
@@ -855,73 +912,64 @@
        visibility в списке переходов с задержкой: спрятанный знак сначала
        гаснет и только потом уходит из хит-теста — иначе клик по «4 You»
        доставался бы уже прозрачному, но ещё живому знаку. */
-    body:not(.mobile-shell) .sidebar .sidebar-logo-full,
-    body:not(.mobile-shell) .sidebar .sidebar-logo-mini {
+    /* Логотип: одно начертание, полное. Отсчёт от ВЕРХА заголовка, у него же
+       и обрезка. Знак «4 You» (.sidebar-logo-mini) в рельсе больше не
+       показывается: решение владельца — там остаётся только колокол. Вход в
+       раздел не потерян, панель разъезжается по наведению.
+
+       Проявляется логотип позже, чем начинает разъезжаться панель: полное
+       написание шириной 169 px иначе выглядывало бы за её кромку. Гаснет
+       наоборот сразу. */
+    body:not(.mobile-shell) .sidebar .sidebar-logo-full {
       display: flex !important;
       align-items: center;
       position: absolute;
-      /* Отсчёт от ВЕРХА шапки и своя полоса в 54 px — ровно под логотип.
-         Ни top: 50%, ни transform здесь нельзя: высота шапки разная (54 px у
-         развёрнутой панели и 118 в рельсе, где под знаком стоят ещё поиск и
-         колокол), и знак уезжал на середину этой высоты — прямо на кнопку
-         поиска. Слева 10 px — тот же отступ, что у карточек; в рельсе знак
-         встаёт по центру полосы (правило ниже), и переезд едет вместе с
-         шириной. Абсолютные координаты считаются от padding-бокса шапки,
-         поэтому её собственные 10 px отступа сюда НЕ прибавляются. */
-      left: 10px;
+      left: 0;
       top: 0;
       height: 54px;
       margin: 0;
-      opacity: 0;
-      visibility: hidden;
-      transition: opacity 0.2s ease, visibility 0s linear 0.2s, left 0.3s ease;
-    }
-    body:not(.mobile-shell) .sidebar .sidebar-logo-full {
       opacity: 1;
       visibility: visible;
-      transition: opacity 0.2s ease, visibility 0s;
+      transition: opacity 0.18s ease 0.14s, visibility 0s;
     }
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-logo-full {
-      opacity: 0;
-      visibility: hidden;
-      transition: opacity 0.2s ease, visibility 0s linear 0.2s;
-    }
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-logo-mini {
-      opacity: 1;
-      visibility: visible;
-      /* 20 = (80 − 40) / 2: знак по центру полосы, как плитки разделов. */
-      left: 20px;
-      transition: opacity 0.2s ease, visibility 0s, left 0.3s ease;
-    }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-full {
-      opacity: 1;
-      visibility: visible;
-      transition: opacity 0.2s ease, visibility 0s;
-    }
-    body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-logo-mini {
-      opacity: 0;
-      visibility: hidden;
-      transition: opacity 0.2s ease, visibility 0s linear 0.2s;
-    }
-    /* Знак «4 You» в свёрнутом рельсе — белый: он рисовался на синей плите
-       и на светлом полотне исчезал совсем. Даём ему свою плитку цветом
-       логотипа; цвет один на обе темы — белый знак читается на нём и в
-       тёмной, а тема логотипа не меняет. */
     body:not(.mobile-shell) .sidebar .sidebar-logo-mini {
-      margin-bottom: 0;
+      display: none !important;
     }
-    body:not(.mobile-shell) .sidebar-logo-mini > button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      border-radius: 11px;
-      background: #3730a3;
+    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-logo-full {
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.12s ease, visibility 0s linear 0.12s;
     }
-    body:not(.mobile-shell) .sidebar-logo-mini > button > img {
-      width: 30px;
-      height: 30px;
+    /* МЯГКИЕ КРОМКИ СПИСКА — под селектором отдела и над футером аккаунта.
+       Список прокручивается, и на кромках карточки обрезались посередине
+       строки: резкий разрыв, о котором сказал владелец (09.09.2026, «сделать
+       типо чуть прозрачным как на виндовс»). Теперь на кромках содержимое
+       растворяется в полотне.
+
+       Полоски — липкие псевдоэлементы САМОГО списка, а не маска на нём и не
+       наложения на соседях. Маска (mask-image) обрезала бы и выпадающие
+       панели: они живут внутри строк списка на position: fixed. Наложения на
+       селекторе отдела не годятся: у неадминских ролей селектора нет вовсе, а
+       кромка нужна всем. Из потока полоски вынуты отрицательным отступом,
+       поэтому места не занимают и в проход по строкам (children) не попадают. */
+    body:not(.mobile-shell) .sidebar-menu-scroll::before,
+    body:not(.mobile-shell) .sidebar-menu-scroll::after {
+      content: '';
+      display: block;
+      position: sticky;
+      height: 12px;
+      z-index: 3;
+      pointer-events: none;
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll::before {
+      top: 0;
+      margin-bottom: -12px;
+      background: linear-gradient(to bottom, var(--otp-bar-bg, #d3e5f6), transparent);
+    }
+    body:not(.mobile-shell) .sidebar-menu-scroll::after {
+      bottom: 0;
+      margin-top: -12px;
+      background: linear-gradient(to top, var(--otp-bar-bg, #d3e5f6), transparent);
     }
     /* Строка «ничего не нашлось» — вне списка, поэтому не попадает ни в
        карточки, ни под проход по строкам. */

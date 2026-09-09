@@ -303,21 +303,31 @@ test('правила строк списка не достают до выпад
     );
 });
 
-test('поиск и колокол видны и в свёрнутом рельсе', () => {
-    /* Решение владельца 09.09.2026: до них нельзя было дотянуться, не
-       разворачивая панель. Спрятано только ПОЛЕ поиска — в 60 px оно пустая
-       строка, — а кнопка сама разворачивает сайдбар. */
-    const hidden = rules(styles).filter((r) => /\.sidebar\.collapsed[^,{]*\.sidebar-search/.test(r.selector)
-        && /display: none/.test(r.body));
-    for (const rule of hidden) {
+test('в свёрнутом рельсе шапка — один колокол', () => {
+    /* Решение владельца 09.09.2026: «в завернутом режиме лучше оставить
+       колокол и сделать его в таком же размере как остальные блоки, а при
+       раскрытии уже отображать лого и поиск как есть». Поэтому в рельсе
+       логотип и кнопка поиска гаснут, а колокол становится карточкой ростом
+       со строку раздела. Прячем прозрачностью, а не display: display не
+       анимируется, и всё это должно проявляться плавно. */
+    const RAIL = 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open))';
+    const railSearch = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-search-btn`);
+    assert.ok(railSearch, 'кнопка поиска в рельсе не спрятана — там остаётся только колокол');
+    assert.match(railSearch.body, /opacity: 0;/);
+    assert.match(railSearch.body, /visibility: hidden;/);
+    const railLogo = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-logo-full`);
+    assert.ok(railLogo, 'логотип в рельсе не спрятан');
+    assert.match(railLogo.body, /opacity: 0;/);
+    for (const rule of [railSearch, railLogo]) {
         assert.ok(
-            !/\.sidebar-search-btn/.test(rule.selector),
-            `«${rule.selector}» снова прячет кнопку поиска в рельсе`,
+            !/display: none/.test(rule.body),
+            `«${rule.selector}» прячет через display — проявиться плавно уже не сможет`,
         );
     }
+    // Поиск при этом никуда не делся: он разворачивает панель и закрывается сам.
     assert.ok(
         app.includes('if (!showSidebarSearch) setSidebarCollapsed(false);'),
-        'поиск в рельсе обязан разворачивать сайдбар — искать по невидимым подписям нельзя',
+        'поиск обязан разворачивать сайдбар — в рельсе его кнопки не видно',
     );
     assert.ok(
         app.includes('if ((sidebarCollapsed || isMobileShell) && showSidebarSearch) handleToggleSidebarSearch();'),
@@ -325,60 +335,103 @@ test('поиск и колокол видны и в свёрнутом рель�
     );
 });
 
-test('кнопки шапки переезжают анимацией и не встают под кнопку сворачивания', () => {
-    /* Кнопка сворачивания висит на absolute top-4 -right-4: у рельса это
-       (64…96, 16…48). Кнопки шапки едут по диагонали — вверх и вправо, — и
-       когда их x доходит до правого края рельса, их y уже далеко ниже. Стоило
-       колоколу приехать прямо под курсор, и панель уведомлений открывалась
-       «сама». Здесь сторожим обе половины: и объявленную анимацию, и то, что
-       в самом рельсе кнопки левее кнопки сворачивания. */
-    const moving = rules(styles).find((r) => /\.sidebar-search-btn,\s*body:not\(\.mobile-shell\) \.sidebar-bell-slot/.test(r.selector));
-    assert.ok(moving, 'кнопки шапки больше не позиционируются вместе');
-    assert.match(moving.body, /position: absolute;/, 'переезд между двумя местами держится на absolute');
-    assert.match(
-        moving.body,
-        /transition:[^;]*\btop 0\.3s ease\b/,
-        'потерян плавный переезд наверх по вертикали (0,3 с — столько же едет ширина сайдбара)',
-    );
-    assert.match(moving.body, /transition:[^;]*\bright 0\.3s ease\b/, 'потерян переезд по горизонтали');
-    assert.match(
-        moving.body,
-        /transition:[^;]*background-color/,
-        'один transition затирает список из утилиты transition-colors — подсветка кнопки начнёт меняться рывком',
-    );
-
-    const RAIL = 80;
-    const BTN = 30;
-    // Левый край кнопки сворачивания у рельса: ширина минус её вылет (16 px).
-    const COLLAPSE_LEFT = RAIL - 16;
-    for (const name of ['sidebar-search-btn', 'sidebar-bell-slot']) {
-        const rail = rules(styles).find((r) => r.selector.includes(`.sidebar.collapsed:not(:hover) .${name}`));
-        assert.ok(rail, `нет положения ${name} в рельсе`);
-        const right = Number(/right: (\d+)px/.exec(rail.body)?.[1]);
-        const top = Number(/top: (\d+)px/.exec(rail.body)?.[1]);
-        assert.ok(Number.isFinite(right) && Number.isFinite(top), `${name} в рельсе без координат`);
-        assert.ok(RAIL - right <= COLLAPSE_LEFT, `${name} в рельсе залезает под кнопку сворачивания`);
-        assert.ok(RAIL - right - BTN >= 0, `${name} в рельсе вылезает за левый край`);
-        // По центру полосы: отступы слева и справа равны.
-        assert.equal(RAIL - right - BTN, right, `${name} в рельсе стоит не по центру полосы`);
-        assert.ok(top >= 54, `${name} в рельсе наезжает на логотип (top: ${top})`);
+test('колокол переезжает и меняет размер, а на ходу не принимает клик', () => {
+    /* Место и габариты задаются одной парой свойств (left + width): при
+       заданных сразу left и right блок над-задан, right игнорируется, и
+       анимация шла бы рывком. 246 = 300 − 24 − 30 — те же 24 px запаса от
+       кромки, где висит кнопка сворачивания. */
+    const slot = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-bell-slot');
+    assert.ok(slot, 'нет правила слота колокола');
+    assert.match(slot.body, /position: absolute;/);
+    for (const prop of ['left 0.3s ease', 'top 0.3s ease', 'width 0.3s ease', 'height 0.3s ease']) {
+        assert.ok(slot.body.includes(prop), `в переезде колокола потерялось «${prop}»`);
     }
-    // Высота шапки в рельсе обязана держать место под столбик кнопок.
-    const railRow = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover) .sidebar-top-row');
+    assert.ok(!/right:/.test(slot.body), 'слот колокола задан и слева, и справа — анимация размера сорвётся');
+    const open = { left: Number(/left: (\d+)px/.exec(slot.body)[1]), width: Number(/width: (\d+)px/.exec(slot.body)[1]) };
+    assert.equal(open.left + open.width, 276, 'колокол у развёрнутой панели должен кончаться за 24 px до кромки');
+
+    const RAIL = 'body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open))';
+    const railSlot = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-bell-slot`);
+    assert.ok(railSlot, 'нет положения колокола в рельсе');
+    const railW = Number(/width: (\d+)px/.exec(railSlot.body)[1]);
+    const railH = Number(/height: (\d+)px/.exec(railSlot.body)[1]);
+    const railLeft = Number(/left: (\d+)px/.exec(railSlot.body)[1]);
+    // Тот же размер, что у строки раздела: полоса 80 минус поля по 10.
+    assert.equal(railLeft, 10, `колокол в рельсе на ${railLeft}px — не по краю карточек`);
+    assert.equal(railW, 60, `колокол в рельсе шириной ${railW} — карточка раздела 60`);
+    const railRow = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-top-row`);
     assert.ok(railRow, 'нет высоты шапки в рельсе');
-    const railH = Number(/height: (\d+)px/.exec(railRow.body)?.[1]);
-    const bellTop = Number(/top: (\d+)px/.exec(
-        rules(styles).find((r) => r.selector.includes('.sidebar.collapsed:not(:hover) .sidebar-bell-slot')).body,
-    )[1]);
-    assert.ok(railH >= bellTop + BTN, `шапка в рельсе (${railH}px) не держит место под колокол (${bellTop}+${BTN})`);
+    const rowH = Number(/height: (\d+)px/.exec(railRow.body)[1]);
+    assert.equal(rowH, railH, `шапка в рельсе ${rowH}px, а колокол ${railH}px — они обязаны совпадать`);
+
+    // Плитка значка: 18 px у развёрнутой панели, 26 в рельсе — как у разделов.
+    const tile = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-bell-slot > div > button > svg:first-child');
+    assert.ok(tile, 'нет правила значка колокола');
+    assert.match(tile.body, /width: 18px !important;/);
+    assert.match(tile.body, /transition:[^;]*width 0\.3s/, 'значок меняет размер рывком');
+    const railTile = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-bell-slot > div > button > svg:first-child`);
+    assert.ok(railTile, 'нет плитки колокола в рельсе');
+    assert.match(railTile.body, /width: 26px !important;/);
+
+    /* Пока колокол едет, он не принимает клик: курсор идёт к кнопке
+       сворачивания у правой кромки, а колокол проезжает мимо этой точки — и
+       панель уведомлений открывалась «сама». */
+    assert.ok(styles.includes('@keyframes otp-bell-arm'), 'потеряна пауза на клик по едущему колоколу');
+    const arm = rules(styles).find((r) => /\.sidebar\.collapsed:hover \.sidebar-bell-slot/.test(r.selector));
+    assert.ok(arm && /animation: otp-bell-arm 0\.35s step-end;/.test(arm.body), 'пауза не навешена на переезд');
+    assert.ok(
+        /from \{ pointer-events: none; \}/.test(styles),
+        'пауза должна снимать pointer-events, иначе клик по едущему колоколу останется',
+    );
 
     // Строка заголовка растянута на всю шапку и обязана не принимать клики:
     // она лежит НАД кнопкой сворачивания (та absolute и стоит раньше).
     const logo = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-top-row > h1');
     assert.ok(logo, 'нет правила строки заголовка');
     assert.match(logo.body, /pointer-events: none;/);
+    assert.match(logo.body, /overflow: hidden;/, 'без обрезки полное написание вылезает за узкую панель');
+    assert.match(logo.body, /height: 100%;/, 'заголовок обязан быть ростом с шапку, иначе торчит над списком');
     const logoBtn = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-top-row > h1 button');
     assert.ok(logoBtn && /pointer-events: auto;/.test(logoBtn.body), 'вход в «4 You» внутри логотипа перестал кликаться');
+});
+
+test('кромки списка растворяются, а не обрываются', () => {
+    /* Список прокручивается, и на кромках карточки обрезались посередине
+       строки. Владелец: «сделать типо чуть прозрачным как на виндовс, что бы
+       не было такого резкого разрыва». Полоски — липкие псевдоэлементы САМОГО
+       списка: маска (mask-image) обрезала бы и выпадающие панели, которые
+       живут внутри строк на position: fixed, а наложения на селекторе отдела
+       не годятся — у неадминских ролей селектора нет вовсе. */
+    for (const which of ['::before', '::after']) {
+        const edge = rules(styles).find((r) => r.selector === `body:not(.mobile-shell) .sidebar-menu-scroll${which}`);
+        assert.ok(edge, `нет ${which} кромки списка`);
+        assert.match(edge.body, /linear-gradient\(to (bottom|top), var\(--otp-bar-bg/, `${which}: кромка красится не цветом полотна`);
+        assert.match(edge.body, /margin-(top|bottom): -12px;/, `${which}: кромка занимает место в потоке`);
+    }
+    const shared = rules(styles).find((r) => /\.sidebar-menu-scroll::before,[\s\S]*\.sidebar-menu-scroll::after/.test(r.selector));
+    assert.ok(shared, 'кромки списка описаны не вместе');
+    assert.match(shared.body, /position: sticky;/, 'кромки должны быть липкими, иначе уедут вместе с содержимым');
+    assert.match(shared.body, /pointer-events: none;/, 'кромки перехватывают клики по строкам');
+    /* Проверяем КОД, а не пояснения: слово mask-image стоит и в комментарии
+       рядом с этими правилами — там объяснено, почему маску брать нельзя. */
+    const code = styles.replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.ok(
+        !/mask-image|-webkit-mask/.test(code),
+        'маска на списке обрежет выпадающие панели: они внутри строк на position: fixed',
+    );
+});
+
+test('на компьютере знак «4 You» в шапке не показывается', () => {
+    /* В рельсе шапка это колокол, а у развёрнутой панели — полное написание.
+       Знак остался только мобильной шторке, поэтому на компьютере он выключен
+       совсем: иначе его невидимая кнопка ловила бы клики поверх логотипа. */
+    const mini = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar .sidebar-logo-mini');
+    assert.ok(mini, 'нет правила знака «4 You» для компьютера');
+    assert.match(mini.body, /display: none !important;/);
+    assert.ok(
+        !/sidebar-logo-mini > button/.test(styles),
+        'плитка знака осталась в стилях, хотя сам знак на компьютере выключен',
+    );
 });
 
 test('в рельсе плитки по центру карточки', () => {
@@ -617,22 +670,19 @@ test('«ничего не нашлось» объявляется програм
     );
 });
 
-test('логотип стоит в своей полосе, а не по середине шапки', () => {
-    /* Оба начертания вынуты из потока (они перекрещиваются прозрачностью), и
-       высота шапки у двух состояний разная: 54 px у развёрнутой панели и
-       118 в рельсе, где под знаком стоят ещё поиск и колокол. С top: 50% знак
-       уезжал на середину этой высоты — прямо на кнопку поиска, — да ещё к
-       самому краю полосы: абсолютные координаты считаются от padding-бокса
-       шапки, и её собственные 10 px отступа не прибавляются. */
-    const logo = rules(styles).find((r) => /\.sidebar-logo-full,[\s\S]*\.sidebar-logo-mini/.test(r.selector)
-        && /position: absolute/.test(r.body));
-    assert.ok(logo, 'не найдено общее правило начертаний логотипа');
-    assert.match(logo.body, /top: 0;/, 'знак снова отсчитывается от середины шапки');
-    assert.ok(!/top: 50%/.test(logo.body), 'top: 50% уводит знак на кнопку поиска в рельсе');
+test('логотип отсчитывается от верха шапки', () => {
+    /* Логотип вынут из потока (он гаснет прозрачностью), а высота шапки у
+       двух состояний разная: 54 px у развёрнутой панели и 42 в рельсе. С
+       top: 50% он уезжал на середину этой высоты — прямо на кнопку. Отсчёт
+       идёт от заголовка, у него же и обрезка. */
+    const logo = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar .sidebar-logo-full');
+    assert.ok(logo, 'не найдено правило логотипа');
+    assert.match(logo.body, /position: absolute;/);
+    assert.match(logo.body, /top: 0;/, 'логотип снова отсчитывается от середины шапки');
+    assert.ok(!/top: 50%/.test(logo.body), 'top: 50% уводит логотип на кнопки шапки');
+    assert.match(logo.body, /left: 0;/, 'логотип обязан вставать по краю заголовка, а тот уже отступает на 10 px');
     assert.match(logo.body, /height: 54px;/, 'у логотипа нет своей полосы — он поедет по высоте шапки');
-    assert.match(logo.body, /left: 10px;/, 'знак прижат к кромке полосы вместо отступа карточек');
-    const railLogo = rules(styles).find((r) => r.selector.includes('.sidebar.collapsed:not(:hover) .sidebar-logo-mini'));
-    assert.ok(railLogo, 'нет положения знака в рельсе');
-    const left = Number(/left: (\d+)px/.exec(railLogo.body)?.[1]);
-    assert.equal(left, 20, `знак в рельсе на ${left}px — не по центру полосы (80 − 40) / 2 = 20`);
+    /* Проявляется ПОЗЖЕ, чем начинает разъезжаться панель: написание в 169 px
+       иначе выглядывает за её кромку. */
+    assert.match(logo.body, /transition: opacity 0\.18s ease 0\.14s/, 'логотип проявляется без задержки — выглянет за кромку');
 });
