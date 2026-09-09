@@ -73,8 +73,18 @@ html[data-otp-theme="dark"] .sidebar button.bg-blue-800 {
 html[data-otp-theme="dark"] .sidebar-avatar {
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) !important;
 }
-html[data-otp-theme="dark"] .sidebar-menu-scroll {
-    scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+/* Ползунок прокрутки меню. Правим именно ::-webkit-scrollbar-thumb, а НЕ
+   scrollbar-color: заданное scrollbar-color отключает в Chrome всю
+   webkit-стилизацию, и волосяная полоса из styles.css стала бы штатной
+   толстой ровно в тёмной теме. Виден ползунок только во время прокрутки —
+   класс ставит JS. */
+html[data-otp-theme="dark"] .sidebar-menu-scroll.sidebar-menu-scrolling::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.55);
+}
+@supports not selector(::-webkit-scrollbar) {
+    html[data-otp-theme="dark"] .sidebar-menu-scroll.sidebar-menu-scrolling {
+        scrollbar-color: rgba(148, 163, 184, 0.55) transparent;
+    }
 }
 
 /* ── Скелетоны загрузки ── */

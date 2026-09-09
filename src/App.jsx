@@ -46383,6 +46383,36 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return () => document.body.classList.remove('sidebar-collapsed');
             }, [sidebarCollapsed]);
 
+            /* Ползунок прокрутки меню видно только пока меню прокручивают.
+               Класс ставит JS, потому что «прокрутка идёт прямо сейчас» — не
+               состояние элемента, и селектора для него в CSS нет: :hover
+               зажигал бы полосу от простого наведения на меню, чего как раз и
+               не просили. Сам вид полосы — в src/styles.css рядом с
+               .sidebar-menu-scroll.
+
+               Класс кладём на DOM-узел напрямую, а не через состояние React:
+               это чистая декорация, а перерисовка сайдбара на каждое событие
+               прокрутки — самое дорогое, что можно придумать (дерево меню
+               специально завёрнуто в useMemo). Полсекунды — задержка, после
+               которой полоса гаснет; ровно так ведут себя системные полосы
+               в macOS и в мобильных браузерах. */
+            useEffect(() => {
+                const el = sidebarMenuScrollRef.current;
+                if (!el) return undefined;
+                let hideTimer = null;
+                const handleScroll = () => {
+                    el.classList.add('sidebar-menu-scrolling');
+                    if (hideTimer) clearTimeout(hideTimer);
+                    hideTimer = setTimeout(() => el.classList.remove('sidebar-menu-scrolling'), 500);
+                };
+                el.addEventListener('scroll', handleScroll, { passive: true });
+                return () => {
+                    el.removeEventListener('scroll', handleScroll);
+                    if (hideTimer) clearTimeout(hideTimer);
+                    el.classList.remove('sidebar-menu-scrolling');
+                };
+            }, [user?.id]);
+
             /* Ушли из вики раньше, чем библиотека успела смонтироваться и
                погасить slug — значение обязано сброситься здесь. Иначе
                следующий обычный заход в раздел открыл бы чужую статью вместо
@@ -46917,6 +46947,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 )}
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
+                                    {/* «Вики» и «Ивенты» — общие для всех ролей, поэтому объявлены
+                                        здесь, в начале меню, а не по ролевым ветвям: забыть пункт в
+                                        одной из ветвей — известная ошибка (см. «Бот опозданий»).
+                                        Периметр внутри «Вики» считает бэкенд. */}
+                                    {wikiSectionEnabled && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'wiki')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wiki' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {renderEventsSidebarItemInner()}
+
                                     {canAccessLmsSection && departmentAllowsView(user, 'lms') && (
                                         <>
                                             <li>
@@ -46949,6 +46996,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {isAdminLikeRole && (
                                         <>
+                                            <li>
+                                                {renderTasksSidebarButtonInner()}
+                                            </li>
                                             {canAccessLmsSection && renderSidebarDividerInner()}
                                             {/* Блок 1 — сотрудники, оргструктура и доступ. */}
                                             <li className="relative" ref={sidebarEmployeesRef}>
@@ -47017,16 +47067,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             </SidebarDeptScope>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'departments')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'departments' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
-                                                </button>
-                                            </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
-                                                </button>
-                                            </li>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
@@ -47300,10 +47340,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                             {renderSidebarDividerInner()}
 
-                                            {/* Блок 7 — задачи, опросы и мотивация. */}
-                                            <li>
-                                                {renderTasksSidebarButtonInner()}
-                                            </li>
+                                            {/* Блок 7 — опросы и мотивация. */}
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-list-alt"></FaIcon> {renderSurveysSidebarCompactBadgeInner()} {renderSurveysSidebarLabelInner()}
@@ -47339,6 +47376,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isDepartmentManager && !isAdminLikeRole && (
                                         <>
+                                            {departmentAllowsView(user, 'tasks') && (
+                                            <li>
+                                                {renderTasksSidebarButtonInner()}
+                                            </li>
+                                            )}
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {/* Порядок блоков тот же, что в ветке админов, — чтобы
                                                 раздел искали в одном и том же месте, кем бы ни зашли. */}
@@ -47398,15 +47440,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {/* «Группы» у главы: только если отдел явно разрешает раздел в своём
-                                                allowlist (front_office); бэкенд /api/groups и так режет по отделу. */}
-                                            {isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47671,11 +47704,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 departmentAllowsView(user, 'contests'),
                                             )}
 
-                                            {departmentAllowsView(user, 'tasks') && (
-                                            <li>
-                                                {renderTasksSidebarButtonInner()}
-                                            </li>
-                                            )}
                                             {departmentAllowsView(user, 'surveys') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
@@ -47697,11 +47725,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {/* «Группы» у главы: только если отдел явно разрешает раздел в своём
+                                                allowlist (front_office); бэкенд /api/groups и так режет по отделу. */}
+                                            {isDepartmentHeadUser && departmentRestrictsViews(user) && departmentAllowsView(user, 'groups') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
+                                                </button>
+                                            </li>
+                                            )}
                                         </>
                                     )}
 
                                     {isPlainTrainer && (
                                         <>
+                                            <li>
+                                                {renderTasksSidebarButtonInner()}
+                                            </li>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
@@ -47711,9 +47751,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
                                                 </button>
-                                            </li>
-                                            <li>
-                                                {renderTasksSidebarButtonInner()}
                                             </li>
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'surveys')} className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'surveys' ? 'bg-blue-700' : ''}`}>
@@ -47733,6 +47770,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                     {isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                                         <>
+                                            {departmentAllowsView(user, 'tasks') && (
+                                            <li>
+                                                {renderTasksSidebarButtonInner()}
+                                            </li>
+                                            )}
                                             {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
                                             {departmentAllowsView(user, 'profile') && (
                                             <li>
@@ -47790,11 +47832,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {/* Порядок как в ветке СВ: «Опросы» → «Задачи» → «Конкурсы».
                                                 Кнопка берётся тем же хелпером, что и у остальных ролей, —
                                                 иначе рядовой не увидит бейдж «задача ждёт вашего действия». */}
-                                            {departmentAllowsView(user, 'tasks') && (
-                                            <li>
-                                                {renderTasksSidebarButtonInner()}
-                                            </li>
-                                            )}
                                             {/* «Журнал оценок» и «Деление звонков» у рядового: до отдела
                                                 «Маркетинг» эти два пункта жили только в ветках админа и
                                                 руководителя. Условие двойное, и departmentRestrictsViews
@@ -47845,26 +47882,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                         </>
-                                    )}
-
-                                    {/* «Ивенты» и «Вики» — общие для всех ролей, поэтому
-                                        объявлены здесь, а не по ролевым ветвям. */}
-                                    {renderSidebarDividerInner()}
-                                    {renderEventsSidebarItemInner()}
-
-                                    {/* «Вики» — база знаний, открыта всем ролям, поэтому пункт
-                                        объявлен один раз здесь, а не продублирован по ролевым
-                                        веткам. Периметр внутри раздела считает бэкенд. */}
-                                    {wikiSectionEnabled && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'wiki')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wiki' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
-                                        </button>
-                                    </li>
                                     )}
 
                                     {renderDividerIfInner(
@@ -48087,6 +48104,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
+                                    )}
+
+
+                                    {renderDividerIfInner(isAdminLikeRole)}
+
+                                    {/* Настройка портала. Стоит в самом низу и объявлена в ОБЩЕЙ части
+                                        меню, а не в админской ветке: справочники отделов и групп
+                                        открывают раз в месяц, и наверху они занимали место разделов,
+                                        куда ходят каждый день. Гейт тот же — isAdminLikeRole. */}
+                                    {isAdminLikeRole && (
+                                        <>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'departments')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'departments' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-layer-group"></FaIcon> <span className="sidebar-text">Отделы</span>
+                                            </button>
+                                        </li>
+                                        <li>
+                                            <button onClick={(e) => handleSidebarViewNavigation(e, 'groups')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'groups' ? 'bg-blue-700' : ''}`}>
+                                                <FaIcon className="fas fa-object-group"></FaIcon> <span className="sidebar-text">Группы</span>
+                                            </button>
+                                        </li>
+                                        </>
                                     )}
 
                                     {renderDividerIfInner(canAccessFourYouSection && !canManageFourYouSection, canAccessDevLetterSection)}

@@ -293,8 +293,6 @@
       overflow-x: hidden;
       position: relative;
       z-index: 1;
-      -ms-overflow-style: none;
-      scrollbar-width: none;
     }
     .sidebar-footer-menu {
       position: relative;
@@ -307,8 +305,24 @@
       );
       border-radius: 0.75rem;
     }
+    /* Полоса прокрутки меню — волосяная, и видна только пока меню
+       прокручивают. Класс `sidebar-menu-scrolling` ставит и снимает JS: в CSS
+       нет способа узнать «прокрутка идёт прямо сейчас» — см. useEffect рядом с
+       sidebarMenuScrollRef в src/App.jsx.
+
+       scrollbar-width и scrollbar-color здесь НЕ задаются НАМЕРЕННО: Chrome с
+       версии 121 отключает ::-webkit-scrollbar, если у элемента задано хоть
+       одно из этих двух свойств, и рисует штатную «тонкую» полосу — те самые
+       ~11 px, из-за которых меню и выглядело с толстым скроллом, хотя рядом
+       стояла ширина 1px. То же предупреждение уже висит ниже, у .thin-scroll.
+       Firefox про ::-webkit-scrollbar не знает вовсе — ему стандартные
+       свойства отдаём отдельным блоком @supports.
+
+       Прячем именно ПОЛЗУНОК, а не полосу целиком: дорожка прозрачная и
+       ширину не меняет, поэтому пункты меню не дёргаются при каждой
+       прокрутке. */
     .sidebar-menu-scroll::-webkit-scrollbar {
-      width: 0;
+      width: 3px;
     }
     .sidebar-menu-scroll::-webkit-scrollbar-track {
       background: transparent;
@@ -317,27 +331,17 @@
       background: transparent;
       border-radius: 9999px;
     }
-    .sidebar:not(.collapsed) .sidebar-menu-scroll,
-    .sidebar.collapsed:hover .sidebar-menu-scroll,
-    .sidebar.mobile-open .sidebar-menu-scroll {
-      -ms-overflow-style: auto;
-      scrollbar-width: thin;
-      scrollbar-color: rgba(125, 211, 252, 0.6) transparent;
+    .sidebar-menu-scroll.sidebar-menu-scrolling::-webkit-scrollbar-thumb {
+      background: rgba(147, 197, 253, 0.85);
     }
-    .sidebar:not(.collapsed) .sidebar-menu-scroll::-webkit-scrollbar,
-    .sidebar.collapsed:hover .sidebar-menu-scroll::-webkit-scrollbar,
-    .sidebar.mobile-open .sidebar-menu-scroll::-webkit-scrollbar {
-      width: 1px;
-    }
-    .sidebar:not(.collapsed) .sidebar-menu-scroll::-webkit-scrollbar-thumb,
-    .sidebar.collapsed:hover .sidebar-menu-scroll::-webkit-scrollbar-thumb,
-    .sidebar.mobile-open .sidebar-menu-scroll::-webkit-scrollbar-thumb {
-      background: rgba(125, 211, 252, 0.65);
-    }
-    .sidebar:not(.collapsed) .sidebar-menu-scroll::-webkit-scrollbar-thumb:hover,
-    .sidebar.collapsed:hover .sidebar-menu-scroll::-webkit-scrollbar-thumb:hover,
-    .sidebar.mobile-open .sidebar-menu-scroll::-webkit-scrollbar-thumb:hover {
-      background: rgba(147, 197, 253, 0.9);
+    @supports not selector(::-webkit-scrollbar) {
+      .sidebar-menu-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: transparent transparent;
+      }
+      .sidebar-menu-scroll.sidebar-menu-scrolling {
+        scrollbar-color: rgba(147, 197, 253, 0.85) transparent;
+      }
     }
     /* Ширина сайдбара живёт на :root, чтобы её видели и обычный контент, и
        fixed-слои, отрендеренные порталом в document.body (окно статуса задач,

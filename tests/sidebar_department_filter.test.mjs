@@ -22,7 +22,13 @@ import { DEPARTMENT_VIEW_ALLOWLIST } from '../src/utils/departmentViews.js';
  * Объявления достаём из src/App.jsx: файл монолитный и не импортируется, а
  * переписать карту в тест значит проверять копию вместо кода.
  */
-const source = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+/* Читаем с нормализацией переводов строк: на Windows core.autocrlf=true
+   отдаёт файлы с CRLF, а сравнения ниже многострочные — без этого тест
+   краснел бы от переводов строк, а не от правки. */
+const readLf = (name) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
+    .split('\r\n').join('\n');
+
+const source = readLf('src/App.jsx');
 
 /* Объявление `const NAME ...;` целиком: от имени до точки с запятой на нулевой
    глубине скобок — тот же приём, что в verifier_chats_access.test.mjs. */
@@ -152,5 +158,89 @@ test('разделитель между блоками меню рисуется
     assert.ok(
         source.split('{renderDividerIfInner(').length - 1 >= 8,
         'условных разделителей стало меньше — проверь, не появилась ли лишняя черта у отдела с коротким меню',
+    );
+});
+
+/**
+ * Полоса прокрутки меню: волосяная и только во время прокрутки.
+ *
+ * Ломается молча и не там, где ищут: Chrome с версии 121 ОТКЛЮЧАЕТ всю
+ * ::-webkit-scrollbar-стилизацию элемента, если у него задано хоть одно из
+ * scrollbar-width / scrollbar-color. Одна такая строка (в том числе в тёмной
+ * теме) возвращает штатную «тонкую» полосу в ~11 px вместо трёх — при этом
+ * правило `width: 3px` остаётся в файле и выглядит работающим.
+ */
+const stylesCss = readLf('src/styles.css');
+const darkCss = readLf('src/theme-dark.css');
+
+/* Диапазоны блоков @supports not selector(::-webkit-scrollbar) — внутри них
+   стандартные свойства как раз и нужны (это ветка для Firefox). Считаем по
+   балансу фигурных скобок, а не «до первой закрывающей»: внутри блока лежат
+   вложенные правила. */
+const supportsRanges = (css) => {
+    const ranges = [];
+    const marker = '@supports not selector(::-webkit-scrollbar)';
+    let at = css.indexOf(marker);
+    while (at >= 0) {
+        let depth = 0;
+        let i = css.indexOf('{', at);
+        for (; i < css.length; i += 1) {
+            if (css[i] === '{') depth += 1;
+            else if (css[i] === '}') {
+                depth -= 1;
+                if (depth === 0) break;
+            }
+        }
+        ranges.push([at, i]);
+        at = css.indexOf(marker, i);
+    }
+    return ranges;
+};
+
+test('стандартные свойства полосы меню заданы только внутри @supports', () => {
+    for (const [name, css] of [['styles.css', stylesCss], ['theme-dark.css', darkCss]]) {
+        const ranges = supportsRanges(css);
+        const blocks = [...css.matchAll(/([^{}]*?)\{([^{}]*)\}/g)];
+        for (const block of blocks) {
+            const [selector, body] = [block[1], block[2]];
+            if (!/sidebar-menu-scroll/.test(selector)) continue;
+            if (!/scrollbar-width|scrollbar-color/.test(body)) continue;
+            const inside = ranges.some(([from, to]) => block.index > from && block.index < to);
+            assert.ok(
+                inside,
+                `${name}: «${selector.trim()}» задаёт scrollbar-width/color вне @supports — Chrome отключит ::-webkit-scrollbar и полоса снова станет толстой`,
+            );
+        }
+    }
+});
+
+test('полоса прокрутки меню шириной 3 px и без ползунка в покое', () => {
+    assert.ok(
+        stylesCss.includes('.sidebar-menu-scroll::-webkit-scrollbar {\n      width: 3px;\n    }'),
+        'ширина полосы меню перестала быть 3 px',
+    );
+    assert.ok(
+        stylesCss.includes('.sidebar-menu-scroll::-webkit-scrollbar-thumb {\n      background: transparent;'),
+        'ползунок в покое обязан быть прозрачным — иначе полоса видна всегда',
+    );
+    assert.ok(
+        stylesCss.includes('.sidebar-menu-scroll.sidebar-menu-scrolling::-webkit-scrollbar-thumb {'),
+        'нет правила, зажигающего ползунок во время прокрутки',
+    );
+});
+
+test('класс прокрутки ставит и снимает обработчик в App.jsx', () => {
+    assert.ok(source.includes("el.classList.add('sidebar-menu-scrolling');"), 'класс не ставится');
+    assert.ok(
+        source.includes("hideTimer = setTimeout(() => el.classList.remove('sidebar-menu-scrolling'), 500);"),
+        'класс не снимается по таймеру — полоса останется висеть после прокрутки',
+    );
+    assert.ok(
+        source.includes("el.addEventListener('scroll', handleScroll, { passive: true });"),
+        'слушатель прокрутки должен быть passive — иначе он тормозит саму прокрутку',
+    );
+    assert.ok(
+        source.includes("el.removeEventListener('scroll', handleScroll);"),
+        'слушатель не снимается при размонтировании',
     );
 });
