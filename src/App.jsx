@@ -46947,36 +46947,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                 )}
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
-                                    {/* «Вики» и «Ивенты» — общие для всех ролей, поэтому объявлены
-                                        здесь, в начале меню, а не по ролевым ветвям: забыть пункт в
-                                        одной из ветвей — известная ошибка (см. «Бот опозданий»).
-                                        Периметр внутри «Вики» считает бэкенд. */}
-                                    {wikiSectionEnabled && (
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'wiki')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wiki' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
-                                        </button>
-                                    </li>
-                                    )}
-                                    {renderEventsSidebarItemInner()}
-
-                                    {canAccessLmsSection && departmentAllowsView(user, 'lms') && (
-                                        <>
-                                            <li>
-                                                <button
-                                                    onClick={(e) => handleSidebarViewNavigation(e, 'lms')}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'lms' ? 'bg-blue-700' : ''}`}
-                                                >
-                                                    <FaIcon className="fas fa-graduation-cap"></FaIcon> <span className="sidebar-text">Курсы</span>
-                                                </button>
-                                            </li>
-                                        </>
-                                    )}
-
                                     {/* «Отметки» стоят в ОБЩЕЙ части меню, а не в ветке роли: раздел выдаётся
                                         разнородной аудитории (глобальные админы, глава фронт-офисов, весь отдел
                                         кадрового учёта), и ни одна ветка сайдбара их всех не покрывает — у роли
@@ -46994,13 +46964,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                         </SidebarDeptScope>
                                     )}
+
+                                    {/* Блок 1 — учёт сотрудников и доступ. Пункты вынесены из ролевых
+                                        веток в общую часть меню: у админа, у СВ и у тренера это один и
+                                        тот же блок, и собрать его в одном месте — единственный способ
+                                        поставить рядом «Отметки», которые ни в одну ветку не помещаются
+                                        (их аудитория — админы, глава фронт-офисов и весь отдел кадров,
+                                        у роли hr_manager своей ветки нет вовсе).
+
+                                        «Отметки» стоят ПЕРВЫМИ, а не вторыми: пункт обязан идти до
+                                        первой ролевой ветки — это проверяет
+                                        tests/test_group_late_bot_department_scope.py, и проверяет по делу
+                                        (раздел уже терялся, когда его пытались объявить внутри ветки). */}
                                     {isAdminLikeRole && (
                                         <>
-                                            <li>
-                                                {renderTasksSidebarButtonInner()}
-                                            </li>
-                                            {canAccessLmsSection && renderSidebarDividerInner()}
-                                            {/* Блок 1 — сотрудники, оргструктура и доступ. */}
                                             <li className="relative" ref={sidebarEmployeesRef}>
                                                 <button
                                                     onClick={stableSidebarHandleToggleEmployeesDropdown}
@@ -47076,6 +47053,133 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'admin_sessions')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'admin_sessions' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-laptop-house"></FaIcon> <span className="sidebar-text">Сессии</span>
                                                 </button>
+                                            </li>
+                                        </>
+                                    )}
+                                    {isDepartmentManager && !isAdminLikeRole && (
+                                        <>
+                                            {isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (
+                                            <li className="relative" ref={sidebarEmployeesRef}>
+                                                <button
+                                                    onClick={stableSidebarHandleToggleEmployeesDropdown}
+                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}
+                                                    aria-expanded={showSidebarEmployeesDropdown}
+                                                    aria-haspopup="menu"
+                                                >
+                                                    <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                    <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
+                                                </button>
+
+                                                {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
+                                                    <div
+                                                        className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                        style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
+                                                    >
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'sv_list', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'sv_list' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-users mr-2"></FaIcon> Супервайзеры
+                                                        </button>
+
+                                                        <div className="border-t border-gray-200" />
+
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_users', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
+                                                        </button>
+
+                                                        <div className="border-t border-gray-200" />
+
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_trainers', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
+                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_trainers' ? 'bg-gray-100 font-medium' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'manage_operators') && !isDepartmentHeadUser && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {departmentAllowsView(user, 'qr_access') && (
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                        </>
+                                    )}
+                                    {isPlainTrainer && (
+                                        <>
+                                            <li>
+                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
+                                                    <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
+                                                </button>
+                                            </li>
+                                        </>
+                                    )}
+
+                                    {renderDividerIfInner(
+                                        canAccessGroupLateBotSection && deptAllowsInner('group_late_bot'),
+                                        isAdminLikeRole,
+                                        isPlainTrainer,
+                                        isDepartmentManager && !isAdminLikeRole && (
+                                            isDepartmentHeadUser
+                                            || departmentAllowsView(user, 'manage_operators')
+                                            || departmentAllowsView(user, 'qr_access')
+                                        ),
+                                    )}
+
+                                    {/* Блок 2 — то, куда ходят каждый день. «Вики» и «Курсы» открыты
+                                        всем ролям и объявлены здесь по одному разу; «Задачи» — в каждой
+                                        ролевой ветке ниже (пункт с бейджем «ждёт вашего действия», и
+                                        тест держит число его копий равным четырём), поэтому они
+                                        оказываются сразу за этими двумя. */}
+                                    {wikiSectionEnabled && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'wiki')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wiki' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {canAccessLmsSection && departmentAllowsView(user, 'lms') && (
+                                        <>
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'lms')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'lms' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-graduation-cap"></FaIcon> <span className="sidebar-text">Курсы</span>
+                                                </button>
+                                            </li>
+                                        </>
+                                    )}
+
+                                    {isAdminLikeRole && (
+                                        <>
+                                            <li>
+                                                {renderTasksSidebarButtonInner()}
                                             </li>
 
                                             {renderDividerIfInner(deptAllowsInner('call_evaluation'), deptAllowsInner('ai_qa'), deptAllowsInner('call_division'), deptAllowsInner('monitoring_scale'))}
@@ -47381,75 +47485,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
                                             )}
-                                            {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
-                                            {/* Порядок блоков тот же, что в ветке админов, — чтобы
-                                                раздел искали в одном и том же месте, кем бы ни зашли. */}
-                                            {isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_users')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (
-                                            <li className="relative" ref={sidebarEmployeesRef}>
-                                                <button
-                                                    onClick={stableSidebarHandleToggleEmployeesDropdown}
-                                                    className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${['sv_list', 'manage_users', 'manage_trainers'].includes(view) ? 'bg-blue-700' : ''}`}
-                                                    aria-expanded={showSidebarEmployeesDropdown}
-                                                    aria-haspopup="menu"
-                                                >
-                                                    <FaIcon className="fas fa-user-cog"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
-                                                    <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
-                                                </button>
-
-                                                {(showSidebarEmployeesDropdown || isEmployeesClosing) && (
-                                                    <div
-                                                        className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200 w-56 ${showSidebarEmployeesDropdown && !isEmployeesClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
-                                                        style={{ position: 'fixed', top: employeesDropdownPos.top, left: employeesDropdownPos.left, zIndex: 9999 }}
-                                                    >
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'sv_list', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
-                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'sv_list' ? 'bg-gray-100 font-medium' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-users mr-2"></FaIcon> Супервайзеры
-                                                        </button>
-
-                                                        <div className="border-t border-gray-200" />
-
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_users', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
-                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_users' ? 'bg-gray-100 font-medium' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-user-cog mr-2"></FaIcon> Операторы
-                                                        </button>
-
-                                                        <div className="border-t border-gray-200" />
-
-                                                        <button
-                                                            onClick={(e) => handleSidebarViewNavigation(e, 'manage_trainers', { onNavigate: () => stableSidebarHandleToggleEmployeesDropdown(true) })}
-                                                            className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'manage_trainers' ? 'bg-gray-100 font-medium' : ''}`}
-                                                        >
-                                                            <FaIcon className="fas fa-book mr-2"></FaIcon> Тренеры
-                                                        </button>
-                                                    </div>
-                                                )}
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'manage_operators') && !isDepartmentHeadUser && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
-                                                </button>
-                                            </li>
-                                            )}
-                                            {departmentAllowsView(user, 'qr_access') && (
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'qr_access')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'qr_access' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-qrcode"></FaIcon> <span className="sidebar-text">QR доступ</span>
-                                                </button>
-                                            </li>
-                                            )}
 
                                             {renderDividerIfInner(
                                                 departmentAllowsView(user, 'call_evaluation'),
@@ -47742,11 +47777,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
-                                            <li>
-                                                <button onClick={(e) => handleSidebarViewNavigation(e, 'manage_operators')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'manage_operators' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-user-edit"></FaIcon> <span className="sidebar-text">Учет сотрудников</span>
-                                                </button>
-                                            </li>
+
+                                            {renderSidebarDividerInner()}
+
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
                                                     <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
@@ -47775,7 +47808,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
                                             )}
-                                            {canAccessLmsSection && !departmentRestrictsViews(user) && renderSidebarDividerInner()}
+                                            {renderDividerIfInner(
+                                                departmentAllowsView(user, 'profile'),
+                                                departmentAllowsView(user, 'hours'),
+                                                departmentAllowsView(user, 'work_schedules'),
+                                                departmentAllowsView(user, 'shift_auction'),
+                                                departmentAllowsView(user, 'evaluation'),
+                                                departmentAllowsView(user, 'ai_feedback'),
+                                            )}
                                             {departmentAllowsView(user, 'profile') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'profile')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'profile' ? 'bg-blue-700' : ''}`}>
@@ -47884,15 +47924,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </>
                                     )}
 
-                                    {renderDividerIfInner(
-                                        canAccessCrmSection && deptAllowsInner('crm_tickets'),
-                                        canAccessParcelsSection && deptAllowsInner('parcels'),
-                                        canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
-                                        canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
-                                        canAccessTouchesSection && deptAllowsInner('touches'),
-                                        canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user),
-                                        canAccessVerifierChatsSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user),
-                                    )}
+                                    {/* «Ивенты» — общая лента компании, открыта всем ролям, поэтому
+                                        объявлена один раз здесь, а не по ролевым ветвям. Ниже — разделы,
+                                        выданные отделу или поимённо. */}
+                                    {renderSidebarDividerInner()}
+                                    {renderEventsSidebarItemInner()}
 
                                     {/* Работа с водителем и качество обслуживания: разделы,
                                         выданные отделу или поимённо, а не роли. */}
