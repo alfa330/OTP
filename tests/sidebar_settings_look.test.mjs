@@ -252,7 +252,19 @@ test('полотно и карточки — из палитры шторки, �
        приложений. */
     const bar = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar');
     assert.ok(bar, 'не найдено правило полотна сайдбара');
-    assert.match(bar.body, /background-color: var\(--sheet-bg,/);
+    /* Полотно панели — СВОЙ токен: общий --sheet-bg делят с мобильной
+       шторкой, а голубизна нужна против светлой страницы, чего на телефоне
+       нет вовсе (шторка занимает весь экран). */
+    assert.match(bar.body, /background-color: var\(--otp-bar-bg,/);
+    assert.match(bar.body, /border-right: 1px solid var\(--otp-bar-edge,/);
+    for (const token of ['--otp-bar-bg:', '--otp-bar-edge:']) {
+        assert.ok(styles.includes(token), `${token} не задан в светлой теме`);
+        assert.ok(dark.includes(token), `${token} не переопределён для тёмной темы`);
+    }
+    assert.ok(
+        !/--otp-bar-bg/.test(shell),
+        'полотно настольной панели протекло в мобильную шторку — там свой --sheet-bg',
+    );
     assert.match(bar.body, /background-image: none !important;/, 'синий градиент из разметки обязан гаситься');
     assert.match(bar.body, /color: var\(--sheet-text,/);
     for (const token of ['--sheet-bg', '--sheet-card', '--sheet-sep', '--sheet-active']) {

@@ -382,16 +382,26 @@
          настроек телефона выделяют светлой подложкой, а здесь есть :hover,
          и подложке пришлось бы спорить с ним — открытый раздел красим
          синим портала. Тёмная тема переопределяет оба (src/theme-dark.css). */
+      /* Полотно настольной панели и её правая кромка — «Небесный», выбор
+         владельца 09.09.2026 из шести показанных тонов. Своими токенами, а не
+         общим --sheet-bg: тот делят с мобильной шторкой, а голубизна нужна
+         ровно затем, чтобы панель не сливалась со СТРАНИЦЕЙ (у неё
+         bg-gray-50, #f9fafb) — на телефоне шторка занимает весь экран, и
+         этой задачи там нет. Карточки остаются белыми (--sheet-card): плитки
+         значков лежат на них, поэтому тон полотна цвета значков не касается.
+         Тёмная тема переопределяет оба (src/theme-dark.css). */
+      --otp-bar-bg: #d3e5f6;
+      --otp-bar-edge: #b9d2e9;
       --sheet-select: #1d4ed8;
       --sheet-select-ink: #ffffff;
       /* Подсветка «Выхода» под курсором. */
       --sheet-danger-wash: #fef2f2;
     }
     body:not(.mobile-shell) .sidebar {
-      background-color: var(--sheet-bg, #f2f2f7) !important;
+      background-color: var(--otp-bar-bg, #d3e5f6) !important;
       background-image: none !important;
       color: var(--sheet-text, #111827);
-      border-right: 1px solid var(--sheet-sep, #e5e7eb);
+      border-right: 1px solid var(--otp-bar-edge, #b9d2e9);
       box-shadow: none;
     }
     /* Боковые поля переехали к самим блокам: полотно должно доходить до
@@ -532,7 +542,7 @@
       right: -5px;
       /* Обводка цветом полотна: счётчик вылезает за кнопку и без неё
          сливается с её рамкой. */
-      box-shadow: 0 0 0 2px var(--sheet-bg, #f2f2f7);
+      box-shadow: 0 0 0 2px var(--otp-bar-bg, #d3e5f6);
     }
     body:not(.mobile-shell) .sidebar-search-btn {
       display: inline-flex;
