@@ -959,19 +959,25 @@
       content: '';
       display: block;
       position: sticky;
-      height: 12px;
+      height: 16px;
       z-index: 3;
       pointer-events: none;
+      /* Чуть прозрачная полоса цвета полотна с РОВНЫМ краем: строка под ней
+         приглушена, но видна, а обрыв читается сразу. Решение владельца
+         09.09.2026 после сравнения шести вариантов: ни плавного градиента
+         (растворение вместо кромки), ни зерна с размытием — просто
+         прозрачность. Прозрачность даёт opacity, а не color-mix: полотно
+         приходит переменной, и так оно остаётся одним значением на обе темы. */
+      background: var(--otp-bar-bg, #d3e5f6);
+      opacity: 0.85;
     }
     body:not(.mobile-shell) .sidebar-menu-scroll::before {
       top: 0;
-      margin-bottom: -12px;
-      background: linear-gradient(to bottom, var(--otp-bar-bg, #d3e5f6), transparent);
+      margin-bottom: -16px;
     }
     body:not(.mobile-shell) .sidebar-menu-scroll::after {
       bottom: 0;
-      margin-top: -12px;
-      background: linear-gradient(to top, var(--otp-bar-bg, #d3e5f6), transparent);
+      margin-top: -16px;
     }
     /* Строка «ничего не нашлось» — вне списка, поэтому не попадает ни в
        карточки, ни под проход по строкам. */

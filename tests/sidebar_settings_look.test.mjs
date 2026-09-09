@@ -402,14 +402,28 @@ test('кромки списка растворяются, а не обрываю
        списка: маска (mask-image) обрезала бы и выпадающие панели, которые
        живут внутри строк на position: fixed, а наложения на селекторе отдела
        не годятся — у неадминских ролей селектора нет вовсе. */
+    const shared = rules(styles).find((r) => /\.sidebar-menu-scroll::before,[\s\S]*\.sidebar-menu-scroll::after/.test(r.selector));
+    assert.ok(shared, 'кромки списка описаны не вместе');
     for (const which of ['::before', '::after']) {
         const edge = rules(styles).find((r) => r.selector === `body:not(.mobile-shell) .sidebar-menu-scroll${which}`);
         assert.ok(edge, `нет ${which} кромки списка`);
-        assert.match(edge.body, /linear-gradient\(to (bottom|top), var\(--otp-bar-bg/, `${which}: кромка красится не цветом полотна`);
-        assert.match(edge.body, /margin-(top|bottom): -12px;/, `${which}: кромка занимает место в потоке`);
+        assert.match(edge.body, /margin-(top|bottom): -16px;/, `${which}: кромка занимает место в потоке`);
     }
-    const shared = rules(styles).find((r) => /\.sidebar-menu-scroll::before,[\s\S]*\.sidebar-menu-scroll::after/.test(r.selector));
-    assert.ok(shared, 'кромки списка описаны не вместе');
+    /* Полоса ровная и чуть прозрачная. Ни градиента (растворение вместо
+       кромки), ни зерна с размытием — решение владельца после сравнения
+       шести вариантов. */
+    assert.ok(
+        !/linear-gradient/.test(shared.body),
+        'кромка снова растворяется градиентом — просили ровный край',
+    );
+    assert.match(shared.body, /background: var\(--otp-bar-bg/, 'кромка красится не цветом полотна');
+    const alpha = Number(/opacity: (0\.\d+);/.exec(shared.body)?.[1]);
+    assert.ok(alpha >= 0.7 && alpha <= 0.95, `прозрачность кромки ${alpha} — строка под ней либо пропадёт, либо не приглушится`);
+    assert.ok(
+        !/backdrop-filter|feTurbulence/.test(shared.body),
+        'вернулось размытие или зерно — от них отказались',
+    );
+
     assert.match(shared.body, /position: sticky;/, 'кромки должны быть липкими, иначе уедут вместе с содержимым');
     assert.match(shared.body, /pointer-events: none;/, 'кромки перехватывают клики по строкам');
     /* Проверяем КОД, а не пояснения: слово mask-image стоит и в комментарии
