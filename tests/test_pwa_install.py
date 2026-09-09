@@ -369,13 +369,32 @@ class InstallGuideTests(unittest.TestCase):
         self.assertIn('AccentArrow', self.jsx)
 
     def test_guide_warns_before_the_steps(self):
-        """Две заметки идут ДО шагов: обе про то, из-за чего установка сорвётся."""
-        self.assertIn('NOTES', self.jsx)
-        notes = self.jsx[self.jsx.index('const NOTES = {'):self.jsx.index('const BENEFITS')]
-        self.assertIn('App Store', notes)
-        self.assertIn('Google Play', notes)
-        self.assertIn('Safari', notes)
-        self.assertIn('Chrome', notes)
+        """Предупреждение стоит ДО шагов, в том же блоке, что короткий список.
+
+        Оно единственное, которое нельзя сократить: человек, открывший портал в
+        Chrome на iPhone или в браузере Telegram, будет искать пункт, которого
+        там нет вовсе, и решит, что инструкция врёт."""
+        # Якорь — сама голубая подложка, а конец — кнопка ПОСЛЕ неё: название
+        # кнопки встречается ещё и в шапке файла, где объясняется её роль.
+        start = self.jsx.index('rounded-[22px] bg-blue-50')
+        card = self.jsx[start:self.jsx.index('Подробная инструкция', start)]
+        self.assertIn('Safari', card)
+        self.assertIn('Telegram', card)
+        self.assertIn('Chrome', card)
+
+    def test_guide_opens_with_a_short_list(self):
+        """Список читается за пять секунд — им и ставят те, кто уже понял."""
+        self.assertIn('IOS_SUMMARY', self.jsx)
+        self.assertIn('androidSummary', self.jsx)
+        self.assertIn('Подробная инструкция', self.jsx)
+        self.assertIn('scrollIntoView', self.jsx)
+
+    def test_guide_shows_a_qr_for_another_phone(self):
+        """Инструкцию смотрят и не с того устройства, куда ставят."""
+        self.assertIn('install-qr.svg', self.jsx)
+        qr = ROOT / 'src' / 'components' / 'common' / 'install-qr.svg'
+        self.assertTrue(qr.exists(), 'QR не собран: python3 scripts/build_install_qr.py')
+        self.assertIn('alfa330.github.io', read(ROOT / 'scripts' / 'build_install_qr.py'))
 
     def test_mockups_are_drawn_not_photographed(self):
         """Снимок экрана устареет с ближайшим обновлением iOS или Chrome."""
