@@ -37,6 +37,7 @@ ROLES_PATH = ROOT / "src" / "utils" / "roles.js"
 WIKI_ACCESS_PATH = ROOT / "wiki" / "access.py"
 APP_PATH = ROOT / "src" / "App.jsx"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
+QR_VIEW_PATH = ROOT / "src" / "components" / "qr" / "QrAccessView.jsx"
 NODE_TEST = ROOT / "tests" / "back_office_department_views.test.mjs"
 
 
@@ -900,10 +901,15 @@ class EmployeeSectionWordingTests(unittest.TestCase):
         self.assertIn('? "Поиск по имени или должности..."', app)
 
     def test_qr_screen_talks_about_employees(self):
-        # Экран отрисован в двух ветках (админ и менеджер) — обе.
+        # Экран раздела — один компонент (10.09.2026): в App.jsx его разметка
+        # лежала ДВУМЯ копиями, и слово из подписи приходилось считать по две
+        # штуки. У бэк-офиса линии нет вовсе, поэтому «оператора» на экране
+        # быть не должно ни в одном падеже.
         app = _read(APP_PATH)
+        view = _read(QR_VIEW_PATH)
         self.assertNotIn("Отсканируйте QR оператора", app)
-        self.assertEqual(2, app.count("Отсканируйте QR сотрудника или вставьте токен вручную."))
+        self.assertNotIn("оператор", view.lower())
+        self.assertIn("код сотрудника", view)
 
     def test_bulk_panel_drops_group_and_direction(self):
         # Оба списка у бэк-офиса пустые: групп и направлений в отделе нет.
@@ -1077,11 +1083,22 @@ class SensitiveQrRolesSingleSourceTests(unittest.TestCase):
         for role in ("'operator'", "'trainee'", "'hr_manager'", "'accounting_manager'"):
             self.assertNotIn(role, line)
 
-    def test_all_three_endpoints_use_it(self):
+    def test_every_endpoint_uses_it(self):
+        # Подтверждение и предпросмотр («кому открываем?») сверяют роль не
+        # сами: обе ручки ходят через общий _resolve_sensitive_qr_target, и
+        # список читает он. Своя проверка в любой из них — это ровно та копия,
+        # ради ухода от которой правило и заведено.
         for name in ("request_sensitive_access_qr", "get_sensitive_access_status",
-                     "approve_sensitive_access"):
+                     "_resolve_sensitive_qr_target"):
             endpoint = _function_source(BOT_PATH, name)
             self.assertIn("SENSITIVE_QR_GATED_ROLES", endpoint, name)
+            self.assertNotIn("== 'operator'", endpoint, name)
+            self.assertNotIn("!= 'operator'", endpoint, name)
+
+        for name in ("approve_sensitive_access", "preview_sensitive_access_qr"):
+            endpoint = _function_source(BOT_PATH, name)
+            self.assertIn("_resolve_sensitive_qr_target", endpoint, name)
+            self.assertNotIn("SENSITIVE_QR_GATED_ROLES", endpoint, name)
             self.assertNotIn("== 'operator'", endpoint, name)
             self.assertNotIn("!= 'operator'", endpoint, name)
 

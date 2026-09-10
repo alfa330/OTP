@@ -11860,6 +11860,157 @@ def revoke_sensitive_access():
         return jsonify({"error": "Internal server error"}), 500
 
 
+# Что показать человеку, когда QR негоден. Экран подтверждения на телефоне
+# печатает ровно эту строку, и «Invalid QR token signature» на нём означает
+# для супервайзера только то, что что-то сломалось. Технический текст остаётся
+# в исключении и уходит в лог.
+SENSITIVE_QR_TOKEN_MESSAGES = {
+    "QR token expired": "Срок действия кода истёк — попросите обновить QR",
+}
+SENSITIVE_QR_TOKEN_FALLBACK_MESSAGE = "Это не QR-код доступа портала"
+
+
+def _normalize_sensitive_qr_token(raw_value):
+    """Строка, снятая с камеры, → сам токен.
+
+    В коде нарисовано «OTP-SENSITIVE:<токен>», но в поле ручного ввода
+    приносят и ссылку с ?token=, и голый токен. Разбор ОДИН на предпросмотр и
+    на подтверждение: разъехавшись, они дали бы карточку одного человека и
+    открытый доступ у другого.
+    """
+    token = (raw_value or '').strip()
+    if not token:
+        return ''
+    if token.upper().startswith('OTP-SENSITIVE:'):
+        token = token.split(':', 1)[1].strip()
+    if 'token=' in token and ('http://' in token or 'https://' in token):
+        try:
+            parsed = urlparse(token)
+            query_token = parse_qs(parsed.query).get('token', [''])[0]
+            if query_token:
+                token = query_token.strip()
+        except Exception:
+            pass
+    return token
+
+
+def _resolve_sensitive_qr_target(approver_id, raw_value):
+    """Кому открывает доступ эта строка из QR и вправе ли это сделать зовущий.
+
+    Возвращает (context, error): context — approver, operator, claims, session;
+    error — готовая пара (сообщение, код ответа). Ничего не меняет.
+
+    ОДНА функция на предпросмотр и на подтверждение — и это главное здесь.
+    Экран подтверждения показывает имя и спрашивает «открыть доступ ему?»;
+    если он проверяет периметр не тем же правилом, что сама выдача, человек
+    жмёт «Открыть доступ» и получает отказ — или, что хуже, читает имя
+    сотрудника чужого отдела, которого видеть не должен.
+    """
+    approver = db.get_user(id=approver_id)
+    # Главу отдела пускаем сюда независимо от базовой роли: назначение главой
+    # заменяет её, и глава с ролью оператора отвечает за отдел так же.
+    approver_headed_ids = [d['id'] for d in
+                           (db.get_headed_departments_for_user(approver_id) or [])]
+    if not approver or not (_is_privileged_role(approver[3]) or approver_headed_ids):
+        return None, ("Подтвердить доступ может администратор, супервайзер или глава отдела", 403)
+
+    token = _normalize_sensitive_qr_token(raw_value)
+    if not token:
+        return None, ("Пустой код", 400)
+
+    try:
+        claims = _decode_sensitive_qr_token(token)
+    except ValueError as token_error:
+        logging.info(f"sensitive QR rejected: {token_error}")
+        return None, (
+            SENSITIVE_QR_TOKEN_MESSAGES.get(str(token_error), SENSITIVE_QR_TOKEN_FALLBACK_MESSAGE),
+            400,
+        )
+
+    operator_id = claims["user_id"]
+    operator = db.get_user(id=operator_id)
+    if not operator or _normalize_user_role(operator[3]) not in SENSITIVE_QR_GATED_ROLES:
+        return None, ("Этому сотруднику подтверждение не нужно — разделы у него открыты", 400)
+
+    session = db.get_user_session(session_id=claims["session_id"], user_id=operator_id)
+    if not session or session["revoked_at"] is not None:
+        return None, ("Сессия сотрудника уже завершена — пусть войдёт заново и покажет новый код", 410)
+
+    # Периметр подтверждения — свой отдел. Считается одной функцией, чтобы
+    # правило жило в одном месте и проверялось тестом без Flask и базы.
+    perimeter_error = _sensitive_access_approval_error(
+        approver_role=approver[3],
+        approver_id=approver_id,
+        approver_department_id=db.get_user_department_id(approver_id),
+        approver_headed_department_ids=approver_headed_ids,
+        operator_department_id=db.get_user_department_id(operator_id),
+        operator_supervisor_id=operator[6] if len(operator) > 6 else None,
+    )
+    if perimeter_error:
+        return None, perimeter_error
+
+    return {
+        "approver": approver,
+        "approver_headed_department_ids": approver_headed_ids,
+        "operator": operator,
+        "claims": claims,
+        "session": session,
+    }, None
+
+
+@app.route('/api/sensitive-access/qr/preview', methods=['POST', 'OPTIONS'])
+@require_api_key
+def preview_sensitive_access_qr():
+    """Кому мы собираемся открыть доступ. НИЧЕГО не меняет.
+
+    Раздел «QR доступ» на телефоне работает как сканер в мессенджере: навёл
+    камеру — и сразу спрашивается «открыть доступ такому-то?». Спросить по
+    имени можно, только зная имя, а узнать его до выдачи было негде: ручка
+    подтверждения возвращала имя уже ПОСЛЕ того, как доступ открыт, и человек
+    подтверждал строку токена, ничего не говорящую о том, кого он пускает.
+
+    Проверки здесь те же и той же функцией, что у подтверждения, включая
+    периметр отдела: карточка чужого сотрудника — это утечка имени, даже если
+    доступ ему потом и не откроется.
+    """
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        approver_id = getattr(g, 'user_id', None)
+        if not approver_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        data = request.get_json(silent=True) or {}
+        context, error = _resolve_sensitive_qr_target(approver_id, data.get('token'))
+        if error:
+            message, status = error
+            return jsonify({"error": message}), status
+
+        operator = context["operator"]
+        claims = context["claims"]
+        department_id = db.get_user_department_id(operator[0])
+        department = db.get_department_by_id(department_id) if department_id else None
+
+        return jsonify({
+            "status": "success",
+            "operator_id": operator[0],
+            "operator_name": operator[2],
+            "operator_login": operator[7],
+            "operator_direction": operator[4],
+            "operator_department": (department or {}).get('name'),
+            "avatar_url": _build_avatar_signed_url(operator[15], operator[16]),
+            # Код уже подтверждён этой же сессии — повторное нажатие ничего не
+            # сломает, но человеку честнее сказать заранее.
+            "already_granted": bool(_is_sensitive_access_unlocked(operator[0], claims["session_id"])),
+            "session_id": claims["session_id"],
+            "token_expires_at": claims["expires_at"].isoformat().replace("+00:00", "Z"),
+        }), 200
+    except Exception as e:
+        logging.error(f"preview_sensitive_access_qr error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/sensitive-access/approve', methods=['POST', 'OPTIONS'])
 @require_api_key
 def approve_sensitive_access():
@@ -11871,56 +12022,16 @@ def approve_sensitive_access():
         if not approver_id:
             return jsonify({"error": "Unauthorized"}), 401
 
-        approver = db.get_user(id=approver_id)
-        # Главу отдела пускаем сюда независимо от базовой роли: назначение главой
-        # заменяет её, и глава с ролью оператора отвечает за отдел так же.
-        approver_headed_ids = [d['id'] for d in
-                               (db.get_headed_departments_for_user(approver_id) or [])]
-        if not approver or not (_is_privileged_role(approver[3]) or approver_headed_ids):
-            return jsonify({
-                "error": "Подтвердить доступ может администратор, супервайзер или глава отдела"
-            }), 403
-
         data = request.get_json(silent=True) or {}
-        raw_token = (data.get('token') or '').strip()
-        if not raw_token:
-            return jsonify({"error": "Missing token"}), 400
-
-        token = raw_token
-        if raw_token.upper().startswith('OTP-SENSITIVE:'):
-            token = raw_token.split(':', 1)[1].strip()
-        if 'token=' in token and ('http://' in token or 'https://' in token):
-            try:
-                parsed = urlparse(token)
-                query_token = parse_qs(parsed.query).get('token', [''])[0]
-                if query_token:
-                    token = query_token.strip()
-            except Exception:
-                pass
-
-        claims = _decode_sensitive_qr_token(token)
-        operator_id = claims["user_id"]
-        operator = db.get_user(id=operator_id)
-        if not operator or _normalize_user_role(operator[3]) not in SENSITIVE_QR_GATED_ROLES:
-            return jsonify({"error": "QR token does not belong to a session that needs confirmation"}), 400
-
-        session = db.get_user_session(session_id=claims["session_id"], user_id=operator_id)
-        if not session or session["revoked_at"] is not None:
-            return jsonify({"error": "Operator session not found or revoked"}), 410
-
-        # Периметр подтверждения — свой отдел. Считается одной функцией, чтобы
-        # правило жило в одном месте и проверялось тестом без Flask и базы.
-        perimeter_error = _sensitive_access_approval_error(
-            approver_role=approver[3],
-            approver_id=approver_id,
-            approver_department_id=db.get_user_department_id(approver_id),
-            approver_headed_department_ids=approver_headed_ids,
-            operator_department_id=db.get_user_department_id(operator_id),
-            operator_supervisor_id=operator[6] if len(operator) > 6 else None,
-        )
-        if perimeter_error:
-            message, status = perimeter_error
+        context, error = _resolve_sensitive_qr_target(approver_id, data.get('token'))
+        if error:
+            message, status = error
             return jsonify({"error": message}), status
+
+        approver = context["approver"]
+        operator = context["operator"]
+        claims = context["claims"]
+        operator_id = operator[0]
 
         updated = db.set_session_sensitive_access(
             session_id=claims["session_id"],
@@ -11962,8 +12073,6 @@ def approve_sensitive_access():
             "approved_by": approver[2],
             "approved_by_role": approver[3]
         }), 200
-    except ValueError as token_error:
-        return jsonify({"error": str(token_error)}), 400
     except Exception as e:
         logging.error(f"approve_sensitive_access error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
