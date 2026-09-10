@@ -1062,14 +1062,70 @@ body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
     letter-spacing: normal;
 }
 
-/* ── Шапка, проявляющаяся при прокрутке ────────────────────────────────── */
+/* ── Верхняя полоса: матовое стекло вместо мёртвого поля под вырезом ────── */
 
-/* Полоса с портретом и именем поверх раздела: пока крупное имя видно, её нет,
-   а как только оно уходит вверх — проявляется матовым стеклом с волосяной
-   линией снизу. Ровно то же делают «Настройки» и Telegram.
+/* Место под угловой колокол оболочка отбивает верхним отступом у .main-content,
+   и полоса красилась ЕГО фоном — серым. Раздел под ней почти всегда своего
+   цвета (у «Профиля» белый), поэтому сверху шла чужеродная полоса поперёк
+   экрана, а в установленном приложении в неё попадал ещё и вырез. Лечится это
+   двумя независимыми вещами, и обе нужны:
 
-   z-index 68 — НИЖЕ колокола (71) и его листа: колокол висит в том же углу и
-   обязан оставаться нажимаемым. Место под него освобождает padding-right. */
+   1. ЦВЕТ СТРАНИЦЫ. --mobile-page-bg проставляет MobileTopBar, прочитав
+      вычисленный фон корневого блока раздела. Пока переменной нет, остаётся
+      прежний серый — и шва всё равно не будет: у такого раздела корень
+      прозрачный, то есть под полосой и под ним один и тот же цвет.
+   2. СТЕКЛО поверх. Пока не прокручено, за ним ровный цвет страницы и полосы
+      не видно вовсе; стоит прокрутить — под неё уезжает содержимое раздела,
+      стекло набирает его цвета и снизу проявляется волосяная линия. Полоса не
+      крашена заранее, а показывает то, что под ней, — это и просили. */
+.mobile-top-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 67;
+    height: calc(46px + max(10px, env(safe-area-inset-top)));
+    /* Событий не ловит: под ней содержимое раздела, и невидимая полоса,
+       перехватывающая нажатия, была бы хуже её отсутствия. */
+    pointer-events: none;
+    /* Пока страница не тронута, стекло не мутит: под ним ровный цвет
+       страницы, и размывать там нечего, а полупрозрачная плёнка поверх
+       ровного цвета дала бы ровно тот оттеночный шов, от которого уходим. */
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+body[data-mobile-scrolled] .mobile-top-bar {
+    background: color-mix(in srgb, var(--mobile-page-bg, #f9fafb) 72%, transparent);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    box-shadow: 0 0.5px 0 var(--sheet-sep);
+}
+
+/* Бар сбоку (телефон боком) — полоса отступает от него, а не подлезает под
+   кнопки. */
+body[data-tabbar-side="right"] .mobile-top-bar,
+body[data-tabbar-side="right"] .mobile-scroll-title {
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
+}
+
+body[data-tabbar-side="left"] .mobile-top-bar,
+body[data-tabbar-side="left"] .mobile-scroll-title {
+    left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+}
+
+/* ── Имя в шапке при прокрутке ─────────────────────────────────────────── */
+
+/* Лежит НАД стеклом (68 против 67) и ниже колокола (71): колокол висит в том
+   же углу и обязан оставаться нажимаемым, место под него освобождает правое
+   поле. Своего фона у имени нет — стекло приходит от полосы под ним.
+
+   Показывается признаком body[data-mobile-scrolled], который поднимает
+   MobileTopBar: своего состояния и своей подписки у имени нет вовсе, поэтому
+   прокрутка не вызывает перерисовок. */
 .mobile-scroll-title {
     position: fixed;
     top: 0;
@@ -1082,34 +1138,28 @@ body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
     gap: 8px;
     height: calc(46px + max(10px, env(safe-area-inset-top)));
     padding: max(10px, env(safe-area-inset-top)) 62px 0 16px;
-    background: var(--sheet-glass);
-    backdrop-filter: blur(24px) saturate(180%);
-    -webkit-backdrop-filter: blur(24px) saturate(180%);
-    box-shadow: 0 0.5px 0 var(--sheet-sep);
     opacity: 0;
-    /* Не display: none — иначе не из чего анимировать проявление. Событий
-       шапка не ловит вовсе: под ней содержимое раздела, и невидимая полоса,
-       перехватывающая нажатия, была бы хуже её отсутствия. */
+    /* Не display: none — иначе не из чего анимировать проявление. */
     pointer-events: none;
     transform: translateY(-6px);
     transition: opacity 0.22s ease, transform 0.22s ease;
 }
 
-.mobile-scroll-title.is-shown {
+body[data-mobile-scrolled] .mobile-scroll-title {
     opacity: 1;
     transform: none;
 }
 
-/* Бар сбоку (телефон боком) — шапка отступает от него, а не подлезает под
-   кнопки. Колокол в этом случае тоже отъезжает, поэтому правое поле меняется
-   вместе с ним. */
-body[data-tabbar-side="right"] .mobile-scroll-title {
-    right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
-    padding-right: 62px;
-}
-
-body[data-tabbar-side="left"] .mobile-scroll-title {
-    left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+/* Пока открыта шторка разделов, ни полосы, ни имени быть не должно: у шторки
+   своя шапка с портретом, а признак «страница прокручена» остаётся от раздела
+   под ней — стекло легло бы поперёк чужого списка. */
+body.mobile-shell:has(.sidebar.mobile-open) .mobile-top-bar,
+body.mobile-shell:has(.sidebar.mobile-open) .mobile-scroll-title {
+    opacity: 0;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow: none;
 }
 
 .mobile-scroll-title__avatar {
@@ -1179,6 +1229,147 @@ body[data-tabbar-side="left"].mobile-shell .main-content {
     padding-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
 }
 
+/* ── Модальные окна поверх оболочки ────────────────────────────────────── */
+
+/* ОКНО НА ТЕЛЕФОНЕ — ЭКРАН, А НЕ КАРТОЧКА (решение владельца 10.09.2026:
+   «убрать все модалки и вместо них плавное переключение 1 в 1 как в
+   телеграмме — модалка на мобильном выглядит не очень»).
+
+   Во-первых, экран обязан накрывать и бар разделов, и колокол. Настольные
+   z-index'ы (у SimpleModal — 50, у IosModal — 90) писались, когда ни бара
+   (70), ни углового колокола (71) не было вовсе, и на телефоне бар срезал
+   подвал окна с главной кнопкой, а колокол висел поверх шапки, ровно на
+   крестике закрытия.
+
+   Во-вторых, карточка посреди затемнённого экрана — приём настольный. На
+   телефоне она и так занимает весь экран, поэтому от окна остаются только
+   его приметы: затемнение по краям, скругление, тень и ring — мусор вокруг
+   содержимого. Здесь всё это снимается, и экран въезжает справа, как переход
+   между экранами в мессенджере.
+
+   Разница целиком в стилях: разметка окон одна и та же, и на компьютере ни
+   одно правило отсюда не срабатывает. */
+body.mobile-shell .otp-modal-root {
+    z-index: 120;
+    padding: 0 !important;
+    align-items: stretch !important;
+    justify-content: flex-start !important;
+    animation: otp-screen-in 0.32s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* Колокол, пока окно открыто, не показываем совсем. Поднять его ещё выше
+   нельзя: он остался бы плавать поверх чужого экрана, а нажать на него,
+   не закрыв окно, всё равно некуда — лист уведомлений вышел бы из-под окна.
+   Метку ставят все три примитива окон: SimpleModal, IosModal, FullscreenSheet. */
+body.mobile-shell:has(.otp-modal-root) .mobile-bell-slot {
+    display: none;
+}
+
+/* Подвал окна прижат к нижней грани экрана, и на телефонах с домашней
+   полосой кнопка попадала бы прямо под неё. */
+body.mobile-shell .otp-modal-root .otp-modal-footer {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+/* Уход. Разметку на это время держат в дереве сами примитивы (leaving у
+   IosModal, show у SimpleModal) — иначе анимировать было бы нечего.
+   Длительность равна SCREEN_LEAVE_MS в src/components/ui/ios.jsx. */
+body.mobile-shell .otp-modal-root.is-leaving {
+    animation: otp-screen-out 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
+    pointer-events: none;
+}
+
+@keyframes otp-screen-in {
+    from { transform: translateX(100%); }
+    to { transform: none; }
+}
+
+@keyframes otp-screen-out {
+    from { transform: none; }
+    to { transform: translateX(100%); }
+}
+
+/* Затемнение. У IosModal оно на самом корне, у SimpleModal — отдельным слоем
+   внутри; метка одна, поэтому и правило одно. Экрану затемнение не нужно: под
+   ним ничего не видно, а полупрозрачная плёнка по краям выдаёт «окно». */
+body.mobile-shell .otp-modal-dim {
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+/* Полотно экрана. Скругление, тень и ring — приметы окна; на весь экран они
+   превращаются в тёмные полоски по краям и обрезанные углы. */
+body.mobile-shell .otp-modal-root .otp-modal-panel {
+    width: 100% !important;
+    max-width: none !important;
+    height: 100% !important;
+    max-height: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    /* У SimpleModal полотно ещё и само анимируется (opacity + сдвиг + scale):
+       на экране это второй, лишний ход поверх въезда справа. */
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+}
+
+/* Форма-обёртка между полотном и телом окна. На компьютере полотно ростом по
+   содержимому, и обёртка ничего не меняет; на экране во весь рост она сама
+   остаётся высотой с содержимое, тело перестаёт растягиваться, и подвал
+   зависает посреди экрана с пустым полем под ним (так было в «Новой задаче»).
+   Пропускаем рост сквозь неё. */
+body.mobile-shell .otp-modal-root .otp-modal-panel > form {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* Окна разделов, свёрстанные не общим примитивом (смена фото, карточка
+   сотрудника, история правок, спор по часам). Их внутреннее устройство разное:
+   где карточка на flex-колонке со своей полосой прокрутки, где обычный блок с
+   overflow-hidden. Поэтому им — своё, щадящее правило: полотно во весь экран,
+   но высота НЕ фиксируется. Жёсткое height: 100% у блочной карточки с
+   overflow-hidden срезало бы её содержимое без всякой возможности
+   прокрутить — а с min-height карточка растёт по содержимому, и прокручивает
+   её сам экран. */
+body.mobile-shell .otp-modal-root .otp-modal-card {
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 100%;
+    max-height: none !important;
+    border-radius: 0 !important;
+    border-width: 0 !important;
+    box-shadow: none !important;
+    /* Полотно доходит до самой верхней грани, а там на телефонах вырез. */
+    padding-top: env(safe-area-inset-top);
+}
+
+body.mobile-shell .otp-modal-root:has(.otp-modal-card) {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    /* Полотно под карточкой. Полотна этих окон полупрозрачны (bg-white/95) —
+       на затемнённой подложке это читалось как матовое стекло, а без неё
+       сквозь экран просвечивал живой раздел со своими кнопками. Кладём под
+       карточку цвет страницы: прозрачность остаётся, а просвечивать нечему. */
+    background: var(--mobile-page-bg, #f9fafb);
+}
+
+/* Шапка экрана начинается от самой верхней грани, а там на телефонах вырез.
+   Без отступа «Назад» и заголовок уходят под него. */
+body.mobile-shell .otp-modal-root .otp-modal-head {
+    padding-top: calc(0.75rem + env(safe-area-inset-top));
+}
+
+/* Кнопка «Назад» в шапке экрана — шеврон с подписью у левого края, как в
+   мессенджере. Отдельного правила требует только отступ: в разметке у неё
+   компактный вид кнопки-кружка, который на экране не нужен. */
+body.mobile-shell .otp-modal-back {
+    margin-left: -2px;
+    font-weight: 400;
+}
+
 /* ── Содержимое разделов под телефонный формат ─────────────────────────── */
 
 /* Разделы портала свёрстаны под окно компьютера: заголовки в 30–36 px, карточки
@@ -1208,6 +1399,11 @@ body.mobile-shell .main-content {
     height: auto !important;
     max-height: none !important;
     min-height: 100dvh;
+    /* Цвет текущего раздела — им же красится полоса под вырезом, чтобы сверху
+       не шла чужеродная полоса поперёк экрана. Переменную проставляет
+       MobileTopBar, прочитав вычисленный фон корневого блока раздела; пока её
+       нет, остаётся прежний серый. Подробности — в секции верхней полосы. */
+    background: var(--mobile-page-bg, transparent);
     /* Длинные слова (адреса, идентификаторы, ФИО в одну строку) переносятся, а
        не растягивают блок за край экрана. */
     overflow-wrap: break-word;
@@ -1251,31 +1447,6 @@ body.mobile-shell .main-content > div > div:first-child:last-child {
    ловить перекрытие в каждом по отдельности значит пропустить половину. */
 body.mobile-shell .main-content {
     padding-top: calc(46px + max(10px, env(safe-area-inset-top))) !important;
-}
-
-/* ── Модальные окна поверх оболочки ────────────────────────────────────── */
-
-/* Окно на телефоне — это отдельный экран, а не карточка посреди раздела:
-   оно обязано накрывать и бар разделов, и колокол. Настольные z-index'ы
-   (у SimpleModal — 50, у IosModal — 90) писались, когда ни бара (70), ни
-   углового колокола (71) не было вовсе, и на телефоне бар срезал подвал окна
-   с главной кнопкой, а колокол висел поверх шапки, ровно на крестике. */
-body.mobile-shell .otp-modal-root {
-    z-index: 120;
-}
-
-/* Колокол, пока окно открыто, не показываем совсем. Поднять его ещё выше
-   нельзя: он остался бы плавать поверх чужого экрана, а нажать на него,
-   не закрыв окно, всё равно некуда — лист уведомлений вышел бы из-под окна.
-   Метку ставят все три примитива окон: SimpleModal, IosModal, FullscreenSheet. */
-body.mobile-shell:has(.otp-modal-root) .mobile-bell-slot {
-    display: none;
-}
-
-/* Подвал окна прижат к нижней грани экрана, и на телефонах с домашней
-   полосой кнопка попадала бы прямо под неё. */
-body.mobile-shell .otp-modal-root .otp-modal-footer {
-    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 
 /* Ряды кнопок в шапках разделов. На компьютере они в одну строку, на телефоне

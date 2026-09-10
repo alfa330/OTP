@@ -64,18 +64,18 @@ return (
     <>
     {/* Backdrop */}
     <div
-        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-200"
+        className="otp-modal-dim fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-200"
         onClick={onClose}
         aria-hidden="true"
     />
 
     {/* Modal */}
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4">
         <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="history-modal-title"
-        className="w-full max-w-4xl bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
+        className="otp-modal-card w-full max-w-4xl bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
         onClick={(e) => e.stopPropagation()}
         >
         <div className="px-6 py-4">

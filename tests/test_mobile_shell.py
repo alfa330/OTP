@@ -583,13 +583,29 @@ class ScrollTitleTests(unittest.TestCase):
     показывается сверху»)."""
 
     TITLE = (ROOT / 'src' / 'components' / 'common' / 'MobileScrollTitle.jsx').read_text(encoding='utf-8')
+    TOPBAR = (ROOT / 'src' / 'components' / 'common' / 'MobileTopBar.jsx').read_text(encoding='utf-8')
 
-    def test_it_watches_instead_of_listening_to_scroll(self):
-        """onscroll на телефоне зовётся на каждый кадр движения пальца, и
-        setState в нём — это перерисовка раздела шестьдесят раз в секунду.
-        Наблюдатель будит нас ровно дважды: имя скрылось и вернулось."""
-        self.assertIn('new IntersectionObserver(', self.TITLE)
+    def test_trigger_is_reachable_at_all(self):
+        """Первая версия ждала, когда крупное имя уедет ПОД шапку, — и не
+        срабатывала НИ РАЗУ: у «Профиля» вся страница на телефоне 1011 px при
+        экране 844, прокрутить её можно на 167 px, а крупное имя стоит на
+        435-м. Владелец так и сказал: «имя не прокручивается». Признак теперь
+        один и достижимый — страница сдвинулась больше чем на дрожь пальца."""
+        self.assertNotIn('IntersectionObserver', self.TITLE)
+        self.assertIn('const SCROLLED_AT = ', self.TOPBAR)
+        threshold = int(re.search(r'const SCROLLED_AT = (\d+);', self.TOPBAR).group(1))
+        self.assertLessEqual(threshold, 60, 'порог выше сотни пикселей у «Профиля» недостижим')
+
+    def test_one_passive_listener_for_the_whole_shell(self):
+        """onscroll на телефоне зовётся на каждый кадр движения пальца.
+        Слушатель один на всю оболочку, пассивный, и трогает состояние только
+        на ПЕРЕХОДЕ через порог; само имя подписки не имеет вовсе и читает
+        признак стилями."""
+        self.assertIn("window.addEventListener('scroll', sync, { passive: true });", self.TOPBAR)
+        self.assertIn('if (next === scrolled) return;', self.TOPBAR)
         self.assertNotIn("addEventListener('scroll'", self.TITLE)
+        self.assertNotIn('useState', self.TOPBAR)
+        self.assertIn('body[data-mobile-scrolled] .mobile-scroll-title', SHELL_CSS)
 
     def test_bar_goes_through_a_portal(self):
         """Внутри .main-content шапке мешают двое: свой overflow-x у раздела
@@ -600,26 +616,150 @@ class ScrollTitleTests(unittest.TestCase):
 
     def test_bar_is_mobile_only(self):
         """На компьютере имя и так на виду, а раздел не прокручивается
-        страницей — наблюдать не за чем."""
+        страницей — показывать нечего."""
         self.assertIn('if (!active', self.TITLE)
         self.assertIn('active={isMobileShell}', APP)
 
     def test_bar_leaves_room_for_the_corner_bell(self):
         """Колокол висит в том же углу: без запаса длинное имя заезжало бы
         прямо под него, а сам колокол обязан оставаться нажимаемым."""
-        block = css_block(SHELL_CSS, '.mobile-scroll-title {', 900)
+        block = css_block(SHELL_CSS, '\n.mobile-scroll-title {', 900)
         bar_z = int(re.search(r'z-index:\s*(\d+);', block).group(1))
         slot_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-bell-slot {', 400)).group(1))
         self.assertLess(bar_z, slot_z)
         self.assertIn('pointer-events: none;', block)
         self.assertIn('62px', block)
 
-    def test_profile_hero_is_the_watched_element(self):
-        """Наблюдать надо именно за крупным портретом с именем: шапка
-        появляется тогда, когда он уходит ПОД неё."""
-        self.assertIn('const profileHeroRef = useRef(null);', APP)
-        self.assertIn('watch={profileHeroRef}', APP)
-        self.assertIn('<div ref={profileHeroRef} className="flex flex-col sm:flex-row items-center', APP)
+
+class TopBarTests(unittest.TestCase):
+    """Верхняя полоса: матовое стекло вместо мёртвого поля под вырезом.
+
+    Владелец 10.09.2026: «сверху есть чёлка другого цвета, нужно чтобы он
+    подстраивался под страницу, то есть как ликвид гласс». Место под угловой
+    колокол оболочка отбивает верхним отступом у .main-content, и полоса
+    красилась ЕГО фоном — серым, а раздел под ней почти всегда своего цвета.
+    """
+
+    TOPBAR = (ROOT / 'src' / 'components' / 'common' / 'MobileTopBar.jsx').read_text(encoding='utf-8')
+
+    def test_page_colour_is_read_from_the_section_itself(self):
+        """Списка «какой раздел какого цвета» быть не должно: у разделов
+        разные классы (bg-white, bg-slate-50, градиент), и список разъедется
+        с разметкой на первой же правке. Читаем вычисленный стиль."""
+        self.assertIn("document.querySelector('.main-content')?.firstElementChild", self.TOPBAR)
+        self.assertIn('getComputedStyle(root).backgroundColor', self.TOPBAR)
+        self.assertIn("body.style.setProperty('--mobile-page-bg', color)", self.TOPBAR)
+        self.assertIn('background: var(--mobile-page-bg, transparent);', SHELL_CSS)
+
+    def test_transparent_section_keeps_the_old_colour(self):
+        """У раздела с прозрачным корнем шва и так не будет: под полосой и под
+        ним один и тот же цвет. Красить полосу цветом карточки внутри раздела
+        было бы хуже, чем не красить вовсе."""
+        self.assertIn('const isOpaque = (color) =>', self.TOPBAR)
+        self.assertIn("body.style.removeProperty('--mobile-page-bg')", self.TOPBAR)
+
+    def test_glass_turns_on_only_when_scrolled(self):
+        """Пока страница не тронута, за полосой ровный цвет страницы: мутить
+        там нечего, а полупрозрачная плёнка поверх ровного цвета дала бы ровно
+        тот оттеночный шов, от которого уходим."""
+        rest = css_block(SHELL_CSS, '.mobile-top-bar {', 900)
+        self.assertIn('background: transparent;', rest)
+        self.assertIn('backdrop-filter: none;', rest)
+        scrolled = css_block(SHELL_CSS, 'body[data-mobile-scrolled] .mobile-top-bar {', 400)
+        self.assertIn('backdrop-filter: blur(', scrolled)
+        self.assertIn('var(--mobile-page-bg', scrolled)
+
+    def test_bar_catches_no_taps(self):
+        """Под полосой содержимое раздела: невидимая полоса, перехватывающая
+        нажатия, была бы хуже её отсутствия."""
+        self.assertIn('pointer-events: none;', css_block(SHELL_CSS, '.mobile-top-bar {', 900))
+
+    def test_bar_is_mobile_only(self):
+        self.assertIn('if (!active', self.TOPBAR)
+        self.assertIn('<MobileTopBar active={isMobileShell}', APP)
+
+
+class ModalScreenTests(unittest.TestCase):
+    """Окна на телефоне — экраны с плавным переходом, а не карточки.
+
+    Решение владельца 10.09.2026: «убрать все модалки и вместо них сделать
+    плавное переключение 1 в 1 как в телеграмме, так как модалка на мобильном
+    устройстве выглядит не очень». Карточка посреди затемнённого экрана —
+    приём настольный: на телефоне она и так во весь экран, и от окна остаются
+    только приметы — затемнение по краям, скругление, тень.
+    """
+
+    IOS = (ROOT / 'src' / 'components' / 'ui' / 'ios.jsx').read_text(encoding='utf-8')
+
+    def test_screen_slides_in_and_out(self):
+        block = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root {', 400)
+        self.assertIn('animation: otp-screen-in', block)
+        self.assertIn('padding: 0 !important;', block)
+        leaving = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root.is-leaving {', 300)
+        self.assertIn('animation: otp-screen-out', leaving)
+        self.assertIn('@keyframes otp-screen-in', SHELL_CSS)
+        self.assertIn('@keyframes otp-screen-out', SHELL_CSS)
+
+    def test_exit_timing_matches_the_unmount_delay(self):
+        """Разойдясь, они дадут либо обрубленную анимацию, либо застывший на
+        кадр пустой экран."""
+        js_ms = int(re.search(r'const SCREEN_LEAVE_MS = (\d+);', self.IOS).group(1))
+        css_s = float(re.search(r'animation: otp-screen-out ([\d.]+)s', SHELL_CSS).group(1))
+        self.assertEqual(js_ms, round(css_s * 1000))
+
+    def test_markup_stays_while_the_screen_leaves(self):
+        """Иначе анимировать нечего: разметку снимают в тот же кадр."""
+        self.assertIn('if (!open && !leaving) return null;', self.IOS)
+        self.assertIn("${leaving ? ' is-leaving' : ''}", self.IOS)
+
+    def test_leaving_delay_is_mobile_only(self):
+        """На компьютере лишний кадр жизни закрытого окна ничем не оправдан —
+        и правка мобильной оболочки не должна менять настольное поведение."""
+        self.assertIn('if (!wasOpen.current || !isNarrow)', self.IOS)
+
+    def test_dim_is_off_and_panel_fills_the_screen(self):
+        self.assertIn('body.mobile-shell .otp-modal-dim', SHELL_CSS)
+        panel = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-panel {', 600)
+        self.assertIn('border-radius: 0 !important;', panel)
+        self.assertIn('box-shadow: none !important;', panel)
+        self.assertIn('height: 100% !important;', panel)
+
+    def test_bespoke_windows_get_a_gentler_rule(self):
+        """У окон разделов внутреннее устройство разное: где карточка на
+        flex-колонке со своей полосой прокрутки, где обычный блок с
+        overflow-hidden. Жёсткое height: 100% срезало бы содержимое второго без
+        всякой возможности прокрутить."""
+        card = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-card {', 600)
+        self.assertIn('min-height: 100%;', card)
+        self.assertNotIn('height: 100% !important;', card)
+        for name in ('AccountAvatarModal', 'UserEditModal', 'HistoryModal', 'DisputeModal'):
+            source = (ROOT / 'src' / 'components' / 'modals' / f'{name}.jsx').read_text(encoding='utf-8')
+            self.assertIn('otp-modal-root', source, name)
+            self.assertIn('otp-modal-card', source, name)
+
+    def test_back_chevron_replaces_the_cross_on_a_phone(self):
+        """Крестик в правом углу читается как «отменить»; уход с экрана в
+        мессенджере делают шевроном слева. Двух кнопок «закрыть» в одной шапке
+        быть не должно."""
+        self.assertIn('{(onBack || isNarrow) && (', self.IOS)
+        self.assertIn('{!onBack && isNarrow && <span>Назад</span>}', self.IOS)
+        self.assertIn('{!isNarrow && (', self.IOS)
+        self.assertIn('otp-modal-back', APP)
+        self.assertIn('{!isNarrowShell && (', APP)
+
+    def test_head_clears_the_notch(self):
+        """Шапка экрана начинается от самой верхней грани, а там вырез."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-head {', 200)
+        self.assertIn('env(safe-area-inset-top)', block)
+
+    def test_shell_flag_comes_from_the_single_query(self):
+        """Второй копии условия «мы на телефоне» быть не должно, а звать
+        useMobileShell из примитива нельзя: тот ещё и ставит класс оболочки на
+        <body> и гасил бы её на чужих размонтированиях."""
+        hook = (ROOT / 'src' / 'components' / 'common' / 'useIsMobileShell.js').read_text(encoding='utf-8')
+        self.assertIn('MOBILE_SHELL_QUERY', hook)
+        self.assertNotIn('MOBILE_SHELL_CLASS', hook)
+        self.assertIn("import useIsMobileShell from '../common/useIsMobileShell';", self.IOS)
 
 
 class GestureTests(unittest.TestCase):

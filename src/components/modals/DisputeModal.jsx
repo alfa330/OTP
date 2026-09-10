@@ -52,13 +52,13 @@ const DisputeModal = ({
 
   return (
     <div
-      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999] p-2 sm:p-4"
+      className="otp-modal-root otp-modal-dim fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999] p-2 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="dispute-modal-title"
       onClick={handleBackdropClick}
     >
-      <div className="workhours-modal bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
+      <div className="otp-modal-card workhours-modal bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
         <div className="flex-shrink-0 p-4 sm:p-6 pb-0 border-b border-gray-100">
           <div className="flex items-center justify-between">
             <h3 id="dispute-modal-title" className="text-lg sm:text-xl font-bold text-gray-800">

@@ -55,6 +55,8 @@ import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
 import MobileBellSlot from './components/common/MobileBellSlot';
 import { holdPageScroll } from './utils/pageScrollLock';
+import MobileTopBar from './components/common/MobileTopBar';
+import useIsMobileShell from './components/common/useIsMobileShell';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -14614,21 +14616,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                по ней окно поднимается над баром разделов и угловым колоколом, а
                сам колокол на это время прячется. Без метки колокол (z-index 71)
                висел бы поверх шапки окна и накрывал крестик закрытия, а бар
-               разделов (70) срезал бы подвал с кнопкой действия. */
+               разделов (70) срезал бы подвал с кнопкой действия.
+
+               is-leaving — то же, что у IosModal: пока идёт уход, разметка
+               остаётся в дереве, и на телефоне экран уезжает вправо, а не
+               пропадает. Состояние здесь уже было (show), новой механики не
+               заводим — только имя класса, по которому стили это видят. */
             const wrapperClass = fullScreenOnMobile
-                ? 'otp-modal-root fixed inset-0 z-50 flex items-stretch sm:items-center sm:justify-center'
-                : 'otp-modal-root fixed inset-0 z-50 flex items-center justify-center';
+                ? `otp-modal-root fixed inset-0 z-50 flex items-stretch sm:items-center sm:justify-center${show ? '' : ' is-leaving'}`
+                : `otp-modal-root fixed inset-0 z-50 flex items-center justify-center${show ? '' : ' is-leaving'}`;
 
             const panelBaseClass = fullScreenOnMobile
-                ? `bg-white z-60 w-full h-full sm:h-auto rounded-none sm:rounded p-0 sm:max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`
-                : `bg-white rounded p-4 z-60 max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`;
+                ? `otp-modal-panel bg-white z-60 w-full h-full sm:h-auto rounded-none sm:rounded p-0 sm:max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`
+                : `otp-modal-panel bg-white rounded p-4 z-60 max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`;
 
             const panelResolvedClass = panelClassName || (fullScreenOnMobile ? 'sm:w-[720px] sm:max-w-[calc(100vw-1rem)]' : 'w-[720px] max-w-[calc(100vw-1rem)]');
 
             return (
                 <div className={wrapperClass}>
                 <div
-                    className={`absolute inset-0 bg-black/40 transition-opacity duration-200 ${show ? 'opacity-100' : 'opacity-0'}`}
+                    /* otp-modal-dim — слой затемнения. На телефоне окно
+                       превращается в экран, и затемнения у него нет вовсе:
+                       по этой метке его гасит mobile-shell.css. */
+                    className={`otp-modal-dim absolute inset-0 bg-black/40 transition-opacity duration-200 ${show ? 'opacity-100' : 'opacity-0'}`}
                     onClick={onClose}
                 />
                 <div
@@ -14643,6 +14653,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
         function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null }) {
+            /* «Мы на телефоне» — только для шапки окна «Запроса на замену»: там
+               окно едет отдельным экраном, и уход с него делает шеврон «Назад»
+               слева вместо крестика справа. Читающий хук, а не useMobileShell:
+               тот ещё и ставит класс оболочки на <body>, и звать его из раздела
+               значит гасить оболочку на каждом его размонтировании. */
+            const isNarrowShell = useIsMobileShell();
             // Отдел ЗРИТЕЛЯ. Набор действий раздела зависит не от него, а от
             // отдела, который выбран в шапке (plannerScopeDepartmentCode ниже):
             // у глобального админа своего отдела может не быть вовсе, а список
@@ -26149,10 +26165,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <div style={{ fontFamily: IOS_FONT }} className="flex h-full flex-col overflow-hidden bg-slate-50 sm:h-auto sm:max-h-[calc(100vh-2rem)]">
                                                     {/* ── Шапка ── */}
-                                                    <div className="flex items-center gap-3 border-b border-slate-200/70 bg-white/85 px-4 py-3 backdrop-blur-xl">
+                                                    {/* otp-modal-head — метка для мобильной оболочки: на телефоне
+                                                        окно становится экраном во весь экран, и шапке нужен отступ
+                                                        под вырез, иначе кнопки уходят под него. */}
+                                                    <div className="otp-modal-head flex items-center gap-3 border-b border-slate-200/70 bg-white/85 px-4 py-3 backdrop-blur-xl">
+                                                        {/* На телефоне окно едет отдельным экраном, и уход с него —
+                                                            шеврон «Назад» слева, как в мессенджере. Значок запроса
+                                                            там уступает ему место: две приметы окна в одной строке
+                                                            (плитка слева и крестик справа) на экране только шумят. */}
+                                                        {isNarrowShell ? (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setShowSwapCreateModal(false);
+                                                                    setShowSwapTargetSegmentsModal(false);
+                                                                    setSwapCandidatesSearch('');
+                                                                    swapExchangePromptHandledRef.current.clear();
+                                                                }}
+                                                                className="otp-modal-back -ml-1 flex shrink-0 items-center gap-0.5 pr-1 text-[17px] text-blue-600 active:opacity-60"
+                                                                aria-label="Назад"
+                                                            >
+                                                                <FaIcon className="fas fa-chevron-left text-[15px]"></FaIcon>
+                                                                <span>Назад</span>
+                                                            </button>
+                                                        ) : (
                                                         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${isSwapExchangeMode ? 'bg-emerald-500' : 'bg-blue-600'}`}>
                                                             <FaIcon className={`fas ${isSwapExchangeMode ? 'fa-right-left' : 'fa-user-clock'} text-xs`}></FaIcon>
                                                         </div>
+                                                        )}
                                                         <div className="min-w-0 flex-1">
                                                             <div className="text-[15px] font-semibold leading-tight text-slate-900">
                                                                 {isSwapExchangeMode ? 'Запрос на обмен' : 'Запрос на замену'}
@@ -26167,6 +26207,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             : (isSwapExchangeMode ? 'Выберите коллегу для обмена' : 'Выберите коллегу для замены')))}
                                                             </div>
                                                         </div>
+                                                        {/* Крестик — только на компьютере: на телефоне уход уже
+                                                            сделан шевроном слева, а две кнопки «закрыть» в одной
+                                                            шапке лишние. */}
+                                                        {!isNarrowShell && (
                                                         <button
                                                             type="button"
                                                             onClick={() => {
@@ -26180,6 +26224,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         >
                                                             <FaIcon className="fas fa-times text-sm"></FaIcon>
                                                         </button>
+                                                        )}
                                                     </div>
 
                                                     {/* ── Тело ── */}
@@ -38633,10 +38678,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => ({ shell: isMobileShell, side: mobileTabSide }),
                 [isMobileShell, mobileTabSide],
             );
-            /* Крупный портрет с именем в «Профиле». По нему проявляющаяся
-               шапка понимает, что имя уехало вверх и его пора показать
-               строкой — см. MobileScrollTitle. */
-            const profileHeroRef = useRef(null);
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
             const sidebarResourceRef = useRef(null);
@@ -52585,20 +52626,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       <ProfilePageSkeleton />
                                     ) : profileData ? (
                                       <div className="space-y-6">
-                                        {/* Проявляющаяся шапка с именем — как в Telegram: пока
-                                            крупный портрет виден, верх экрана пуст, а стоит ему
-                                            уехать вверх, имя появляется строкой в шапке. Только на
+                                        {/* Имя в шапке при прокрутке — как в Telegram. Только на
                                             телефоне: на компьютере имя и так на виду, а раздел не
                                             прокручивается страницей. */}
                                         <MobileScrollTitle
                                           active={isMobileShell}
-                                          watch={profileHeroRef}
                                           title={profileData.name || ''}
                                           avatarUrl={profileData.avatar_url}
                                           initial={profileData.name}
                                         />
                                         {/* Profile header - avatar and name */}
-                                        <div ref={profileHeroRef} className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
+                                        <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
                                           <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg overflow-hidden">
                                             {profileData.avatar_url ? (
                                                 <AvatarImage
@@ -56403,6 +56441,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         живёт zoom, и position: fixed считался бы от него.
                         Рисуется только в мобильной оболочке: на компьютере
                         разделы открывает сайдбар, и вторая навигация там лишняя. */}
+                    {/* Верхняя полоса — матовое стекло вместо мёртвого поля под
+                        вырезом; она же задаёт .main-content цвет текущего раздела,
+                        чтобы сверху не шла чужеродная полоса поперёк экрана.
+                        Сиблинг main-content по той же причине, что бар и помощник. */}
+                    <MobileTopBar active={isMobileShell} view={view} />
+
                     {isMobileShell && (
                         <MobileTabBar
                             items={mobileTabItems}

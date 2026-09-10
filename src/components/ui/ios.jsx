@@ -1,5 +1,11 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
+import useIsMobileShell from '../common/useIsMobileShell';
+
+/* Сколько экран уезжает вправо при закрытии. Дублируется в mobile-shell.css
+   (анимация otp-screen-out) — равенство сторожит тест: разойдясь, они дадут
+   либо обрубленную анимацию, либо застывший на кадр пустой экран. */
+const SCREEN_LEAVE_MS = 260;
 
 /*
  * Общие iOS / macOS примитивы дизайн-системы.
@@ -370,32 +376,73 @@ export const IosBadge = ({ tone = 'slate', children, className = '', ...props })
  * подвал и содержимое, а окно остаётся одно.
  */
 export const IosModal = ({ open, onClose, onBack = null, title, subtitle, children, footer = null, maxWidth = 'max-w-lg' }) => {
-    if (!open) return null;
+    /* НА ТЕЛЕФОНЕ ЭТО НЕ ОКНО, А ЭКРАН. Решение владельца 10.09.2026: «убрать
+       все модалки и вместо них сделать плавное переключение 1 в 1 как в
+       телеграмме — модалка на мобильном выглядит не очень». Карточка посреди
+       затемнённого экрана — приём настольный: на телефоне она всё равно
+       занимает весь экран, а затемнение по краям и тень читаются как мусор.
+       Поэтому там окно въезжает справа во весь экран, без затемнения, и
+       уезжает обратно — как переход между экранами в мессенджере.
+       Вся разница живёт в стилях (mobile-shell.css, .otp-modal-root), здесь —
+       только две вещи, которых стилями не сделать: задержка размонтирования
+       под анимацию ухода и шеврон «назад» вместо крестика.
+
+       На компьютере ничего не изменилось: там isNarrow всегда false, окно
+       появляется и исчезает мгновенно, как раньше. */
+    const isNarrow = useIsMobileShell();
+    /* Пока идёт анимация ухода, разметка обязана оставаться в дереве — иначе
+       анимировать нечего. Держим её только на телефоне: на компьютере лишний
+       кадр жизни закрытого окна ничем не оправдан. */
+    const [leaving, setLeaving] = React.useState(false);
+    const wasOpen = React.useRef(open);
+    React.useEffect(() => {
+        if (open) { wasOpen.current = true; setLeaving(false); return undefined; }
+        if (!wasOpen.current || !isNarrow) { wasOpen.current = false; setLeaving(false); return undefined; }
+        wasOpen.current = false;
+        setLeaving(true);
+        const timer = setTimeout(() => setLeaving(false), SCREEN_LEAVE_MS);
+        return () => clearTimeout(timer);
+    }, [open, isNarrow]);
+
+    if (!open && !leaving) return null;
     return (
         <div
             /* otp-modal-root — метка для мобильной оболочки: по ней окно
-               поднимается над баром разделов и угловым колоколом, а колокол
-               на это время прячется (см. mobile-shell.css). */
-            className="otp-modal-root fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6"
+               поднимается над баром разделов и угловым колоколом, колокол
+               на это время прячется, а само окно превращается в экран
+               (см. mobile-shell.css). */
+            className={`otp-modal-root otp-modal-dim fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6${leaving ? ' is-leaving' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
             onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
         >
-            <div className={`flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
-                <div className="relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
-                    {onBack && (
+            <div className={`otp-modal-panel flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
+                <div className="otp-modal-head relative flex items-center gap-2 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
+                    {/* Шеврон «назад» слева — на телефоне он и закрывает экран:
+                        крестик в правом углу читается как «отменить», а уход с
+                        экрана в мессенджере делают именно им. Внутренний onBack
+                        (второй уровень ВНУТРИ окна) старше: пока он есть, шеврон
+                        ведёт на предыдущий уровень, а не наружу. */}
+                    {(onBack || isNarrow) && (
                         <button
                             type="button"
-                            onClick={onBack}
-                            className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95"
+                            onClick={onBack || onClose}
+                            className={onBack || !isNarrow
+                                ? 'grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95'
+                                : 'otp-modal-back -ml-1 flex shrink-0 items-center gap-0.5 pr-1 text-[17px] text-blue-600 active:opacity-60'}
                             aria-label="Назад"
                         >
                             <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                            {!onBack && isNarrow && <span>Назад</span>}
                         </button>
                     )}
                     <div className="min-w-0 flex-1">
                         <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
                         {subtitle && <p className="truncate text-[12px] text-slate-500">{subtitle}</p>}
                     </div>
+                    {/* Крестик на телефоне не нужен: уход с экрана уже сделан
+                        шевроном слева, а две кнопки «закрыть» в одной шапке —
+                        лишний шум ровно там, где место дороже всего. */}
+                    {!isNarrow && (
                     <button
                         type="button"
                         onClick={onClose}
@@ -404,6 +451,7 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                     >
                         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
                     </button>
+                    )}
                 </div>
                 {/* overflow-x-hidden: экраны второго уровня въезжают сдвигом по
                     горизонтали, и без этого сдвиг на 16px давал бы полосу

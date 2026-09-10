@@ -8338,9 +8338,9 @@ const TasksView = ({
 
       {/* Create Modal */}
       {createOpen && (
-        <div className="tv-modal-overlay" onClick={() => setCreateOpen(false)}>
-          <div className="tv-modal" onClick={e => e.stopPropagation()}>
-            <div className="tv-modal-header">
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={() => setCreateOpen(false)}>
+          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
+            <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">{form.isBacklog ? 'Новая задача в бэклог' : 'Новая задача'}</h3>
               <button className="tv-close-btn" onClick={() => setCreateOpen(false)}><CloseIcon /></button>
             </div>
@@ -8373,9 +8373,9 @@ const TasksView = ({
 
       {/* Edit Modal */}
       {editModal.open && (
-        <div className="tv-modal-overlay" onClick={closeEditModal}>
-          <div className="tv-modal" onClick={e => e.stopPropagation()}>
-            <div className="tv-modal-header">
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeEditModal}>
+          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
+            <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Редактирование задачи</h3>
               <button className="tv-close-btn" onClick={closeEditModal}><CloseIcon /></button>
             </div>
@@ -8417,9 +8417,9 @@ const TasksView = ({
 
       {/* Delete Confirm Modal */}
       {deleteModal.open && (
-        <div className="tv-modal-overlay" onClick={closeDeleteModal}>
-          <div className="tv-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 500 }}>
-            <div className="tv-modal-header">
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeDeleteModal}>
+          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()} style={{ maxWidth: 500 }}>
+            <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Подтверждение удаления</h3>
               <button className="tv-close-btn" type="button" onClick={closeDeleteModal} disabled={!!actionLoadingKey}>
                 <CloseIcon />
@@ -8474,9 +8474,9 @@ const TasksView = ({
 
       {/* Complete Modal */}
       {completeModal.open && (
-        <div className="tv-modal-overlay" onClick={closeCompleteModal}>
-          <div className="tv-modal" onClick={e => e.stopPropagation()}>
-            <div className="tv-modal-header">
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeCompleteModal}>
+          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
+            <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Завершение задачи</h3>
               <button className="tv-close-btn" onClick={closeCompleteModal}><CloseIcon /></button>
             </div>
@@ -8551,9 +8551,9 @@ const TasksView = ({
 
       {/* Status Modal */}
       {statusModal.open && (
-        <div className="tv-modal-overlay" onClick={closeStatusModal}>
-          <div className="tv-modal" onClick={e => e.stopPropagation()}>
-            <div className="tv-modal-header">
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeStatusModal}>
+          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
+            <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">{statusModalTitle}</h3>
               <button className="tv-close-btn" onClick={closeStatusModal}><CloseIcon /></button>
             </div>

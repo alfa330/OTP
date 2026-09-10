@@ -1049,7 +1049,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         <>
         {/* Backdrop */}
         <div
-            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
+            className="otp-modal-dim fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
             onClick={() => {
             setModalError("");
             setCreatedCredentials(null);
@@ -1061,7 +1061,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
         {/* Modal container (catch Escape) */}
         <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            className="otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4"
             tabIndex={-1}
             onKeyDown={(e) => {
             if (e.key === "Escape") {
@@ -1076,7 +1076,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             role="dialog"
             aria-modal="true"
             aria-labelledby="edit-user-title"
-            className="pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
+            className="otp-modal-card pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
             onClick={(e) => e.stopPropagation()}
             >
             <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
@@ -2695,9 +2695,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             </div>
         </div>
         {avatarCropState && (
-            <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+            <div className="otp-modal-root fixed inset-0 z-[70] flex items-center justify-center p-4">
                 <div
-                    className="absolute inset-0 bg-slate-900/65 backdrop-blur-[1px]"
+                    className="otp-modal-dim absolute inset-0 bg-slate-900/65 backdrop-blur-[1px]"
                     onClick={handleAvatarCropCancel}
                     aria-hidden="true"
                 />

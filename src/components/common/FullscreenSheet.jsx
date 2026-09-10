@@ -83,7 +83,9 @@ const FullscreenSheet = ({
       }}
     >
       <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6">
+        {/* otp-modal-head — метка для мобильной оболочки: там окно едет
+             экраном во весь экран, и шапке нужен отступ под вырез. */}
+        <div className="otp-modal-head flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
               <FaIcon className={`fas ${icon}`} aria-hidden="true" />

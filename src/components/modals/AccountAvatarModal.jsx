@@ -422,13 +422,13 @@ const AccountAvatarModal = ({
     return (
         <>
             <div
-                className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
+                className="otp-modal-dim fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
                 onClick={handleClose}
                 aria-hidden="true"
             />
 
             <div
-                className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                className="otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4"
                 tabIndex={-1}
                 onKeyDown={(e) => {
                     if (e.key === 'Escape') {
@@ -440,7 +440,7 @@ const AccountAvatarModal = ({
                     role="dialog"
                     aria-modal="true"
                     aria-labelledby="change-avatar-title"
-                    className="pointer-events-auto w-full max-w-md bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
+                    className="otp-modal-card pointer-events-auto w-full max-w-md bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
                     onClick={(e) => e.stopPropagation()}
                 >
                     <div className="px-6 py-5">
@@ -556,14 +556,14 @@ const AccountAvatarModal = ({
             </div>
 
             {avatarCropState && (
-                <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+                <div className="otp-modal-root fixed inset-0 z-[70] flex items-center justify-center p-4">
                     <div
-                        className="absolute inset-0 bg-slate-900/65 backdrop-blur-[1px]"
+                        className="otp-modal-dim absolute inset-0 bg-slate-900/65 backdrop-blur-[1px]"
                         onClick={handleAvatarCropCancel}
                         aria-hidden="true"
                     />
                     <div
-                        className="relative w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
+                        className="otp-modal-card relative w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start justify-between gap-3">
