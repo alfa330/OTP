@@ -340,6 +340,27 @@ _MEMBERSHIP_OVERLAPS_MONTH_OF = (
     "gom.start_date <= (date_trunc('month', {day}) + INTERVAL '1 month - 1 day')::date"
     " AND (gom.end_date IS NULL OR gom.end_date >= date_trunc('month', {day})::date)")
 
+# Группа субъекта — РОВНО ОДНА: сперва членство, покрывающее сам день, иначе
+# ближайшее из пересекающих тот же месяц. Это правило учёта часов
+# (database.MEMBERSHIP_DAY_DISTANCE_SQL), и здесь оно нужно по той же причине.
+#
+# Пока предикат просто спрашивал «есть ли у человека членство в этой группе»,
+# сотрудник, сменивший группу посреди месяца, попадал в ОБЕ, и один и тот же
+# разговор считался дважды: на проде у ОП выходило 122 по группам + 375 без
+# группы = 497 против 490 всех оценок. Разрез, который не сходится с целым,
+# читается как потерянные (или удвоенные) данные, и проверить его нечем.
+_SUBJECT_GROUP_ID = """(SELECT gom.group_id
+      FROM group_operator_memberships gom
+     WHERE gom.operator_id = {op}
+       AND gom.start_date <= (date_trunc('month', {day}) + INTERVAL '1 month - 1 day')::date
+       AND (gom.end_date IS NULL OR gom.end_date >= date_trunc('month', {day})::date)
+     ORDER BY CASE WHEN gom.start_date > {day} THEN gom.start_date - {day}
+                   WHEN gom.end_date IS NOT NULL AND gom.end_date < {day}
+                        THEN {day} - gom.end_date
+                   ELSE 0 END,
+              gom.start_date DESC, gom.id DESC
+     LIMIT 1)"""
+
 # А вот в СПРАВОЧНИКЕ фильтров рядом с фамилией стоит группа на сегодня: там это
 # ответ на вопрос «кто где сейчас», а не разбор прошлого периода.
 _MEMBERSHIP_TODAY = ("gom.start_date <= CURRENT_DATE"
@@ -432,18 +453,14 @@ def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department
 
     group_id = filters.get('group_id')
     if group_id is not None:
-        membership = _MEMBERSHIP_OVERLAPS_MONTH_OF.format(day=_SUBJECT_DAY)
+        group_of = _SUBJECT_GROUP_ID.format(op=_SUBJECT_OPERATOR_ID, day=_SUBJECT_DAY)
         if group_id == 'none':
-            # NOT EXISTS верно и для строки БЕЗ учётной записи (звонок из АТС, у
-            # которого осталось одно имя): сравнение с NULL не выполняется ни
-            # для одного членства, и такая строка попадает сюда — куда и должна.
-            sql += (" AND NOT EXISTS (SELECT 1 FROM group_operator_memberships gom"
-                    f" WHERE gom.operator_id = {_SUBJECT_OPERATOR_ID}"
-                    f" AND {membership})")
+            # IS NULL верно и для строки БЕЗ учётной записи (звонок из АТС, у
+            # которого осталось одно имя): подзапрос по NULL-оператору не вернёт
+            # ничего, и такая строка попадает сюда — куда и должна.
+            sql += f" AND {group_of} IS NULL"
         else:
-            sql += (" AND EXISTS (SELECT 1 FROM group_operator_memberships gom"
-                    f" WHERE gom.operator_id = {_SUBJECT_OPERATOR_ID}"
-                    f" AND gom.group_id = %s AND {membership})")
+            sql += f" AND {group_of} = %s"
             params.append(int(group_id))
 
     operator_id = filters.get('operator_id')
@@ -3518,14 +3535,13 @@ def _pick_filters_predicate(filters, *, operator_col, day_expr, direction_expr):
         params.append(int(operator_id))
     group_id = filters.get('group_id')
     if group_id is not None:
-        membership = _MEMBERSHIP_OVERLAPS_MONTH_OF.format(day=day_expr)
+        # Та же «ровно одна группа», что у списков: подбор обязан брать из того
+        # же множества, которое человек видит в списке под фильтром.
+        group_of = _SUBJECT_GROUP_ID.format(op=operator_col, day=day_expr)
         if group_id == 'none':
-            sql += (" AND NOT EXISTS (SELECT 1 FROM group_operator_memberships gom"
-                    f" WHERE gom.operator_id = {operator_col} AND {membership})")
+            sql += f" AND {group_of} IS NULL"
         else:
-            sql += (" AND EXISTS (SELECT 1 FROM group_operator_memberships gom"
-                    f" WHERE gom.operator_id = {operator_col}"
-                    f" AND gom.group_id = %s AND {membership})")
+            sql += f" AND {group_of} = %s"
             params.append(int(group_id))
     direction_id = filters.get('direction_id')
     if direction_id is not None:
@@ -4016,12 +4032,29 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
             cur.close(); conn.close()
             return {"directions": [], "groups": [], "operators": []}
 
+        # ТОЛЬКО живые направления — то же определение, что у админских списков
+        # (_ai_qa_live_direction_ids): canonical_id IS NULL И is_active.
+        #
+        # Семья, по которой режется раздел, намеренно включает архивные версии
+        # шкалы — оценки, сделанные по прежней редакции, обязаны находиться. Но
+        # ВЫБИРАТЬ архивную версию человеку незачем, и группировки по
+        # каноническому id тут мало: старый механизм версий заводил новую строку
+        # на каждую правку, и у 41 архивной строки СЗоВ canonical_id не проставлен
+        # вовсе — каждая становилась отдельным пунктом. В списке выходило
+        # семнадцать «Модераторов» подряд, причём у этого направления нет ни одной
+        # действующей строки: оно давно закрыто.
+        #
+        # Фильтр от этого не теряет оценки: выбранный живой id раскрывается в свою
+        # семью (_scope_family: id = ANY OR canonical_id = ANY), а направление
+        # субъекта у СЗоВ и Тез КЦ берётся у оператора (users.direction_id), где
+        # всегда стоит живая строка.
         cur.execute(
-            """SELECT COALESCE(d.canonical_id, d.id), MIN(d.name)
+            """SELECT d.id, d.name
                  FROM directions d
                 WHERE d.id = ANY(%s)
-                GROUP BY COALESCE(d.canonical_id, d.id)
-                ORDER BY MIN(d.name)""", (family,))
+                  AND d.canonical_id IS NULL
+                  AND COALESCE(d.is_active, TRUE)
+                ORDER BY d.name""", (family,))
         directions = [{"id": int(r[0]), "name": r[1] or "—"} for r in cur.fetchall()]
 
         cur.execute(

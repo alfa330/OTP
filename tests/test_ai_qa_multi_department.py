@@ -162,6 +162,49 @@ class QueueSqlTests(unittest.TestCase):
         self.assertIn("imported_call_id", self.api._SUBJECT_HUMAN_SCORE)
         self.assertIn("c2d_snapshot_id", self.api._SUBJECT_HUMAN_SCORE)
 
+    def test_group_of_a_subject_is_exactly_one(self):
+        """Разрез по группам обязан складываться в целое.
+
+        Пока предикат спрашивал «есть ли у человека членство в этой группе»,
+        сотрудник, сменивший группу посреди месяца, попадал в ОБЕ, и один
+        разговор считался дважды: на проде у ОП выходило 122 по группам + 375
+        без группы = 497 против 490 всех оценок. Берём РОВНО ОДНО членство —
+        покрывающее день, иначе ближайшее из пересекающих тот же месяц (правило
+        учёта часов, database.MEMBERSHIP_DAY_DISTANCE_SQL)."""
+        expression = self.api._SUBJECT_GROUP_ID
+        self.assertIn("LIMIT 1", expression)
+        self.assertIn("ORDER BY", expression)
+        self.assertIn("date_trunc('month'", expression)
+        # Ни списки, ни подбор не должны спрашивать «существует ли членство»:
+        # такой предикат и давал двойной счёт.
+        source = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig")
+        for builder in ("_list_filters_predicate", "_pick_filters_predicate"):
+            body = source[source.index(f"def {builder}("):]
+            body = body[:body.index("\ndef ", 1)]
+            with self.subTest(builder=builder):
+                self.assertIn("_SUBJECT_GROUP_ID", body)
+                self.assertNotIn("EXISTS (SELECT 1 FROM group_operator_memberships", body)
+
+    def test_direction_picker_offers_only_live_directions(self):
+        """В списке направлений — только действующие.
+
+        Семья, по которой режется раздел, включает архивные версии шкалы (оценки
+        по прежней редакции обязаны находиться), но ВЫБИРАТЬ их незачем.
+        Группировки по каноническому id мало: старый механизм версий заводил
+        строку на каждую правку, и у 41 архивной строки СЗоВ canonical_id не
+        проставлен — в списке выходил 71 пункт, включая семнадцать «Модераторов»
+        подряд у направления без единой действующей строки."""
+        source = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig")
+        body = source[source.index("def filter_options("):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("d.canonical_id IS NULL", body)
+        self.assertIn("COALESCE(d.is_active, TRUE)", body)
+        # То же определение «живого», что у админских списков раздела.
+        live = source[source.index("def _ai_qa_live_direction_ids("):]
+        live = live[:live.index("\ndef ", 1)]
+        self.assertIn("d.canonical_id IS NULL", live)
+        self.assertIn("COALESCE(d.is_active, TRUE)", live)
+
     def test_every_moment_on_screen_is_converted_to_almaty(self):
         """Сервер и база живут в UTC, смотрят из Алматы (UTC+5).
 
