@@ -1076,14 +1076,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             role="dialog"
             aria-modal="true"
             aria-labelledby="edit-user-title"
-            className="pointer-events-auto w-full max-w-lg bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
+            className="pointer-events-auto w-full max-w-lg bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
             onClick={(e) => e.stopPropagation()}
             >
             <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
                 {/* Header */}
                 <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-col gap-0.5">
-                    <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+                    <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 flex items-center gap-2">
                     {isCreateMode ?  <FaIcon className="fas fa-user-edit text-blue-600"></FaIcon> : <FaIcon className="fas fa-pen text-blue-600"></FaIcon>}
                     {isCreateMode ? "Добавить сотрудника" : "Редактировать сотрудника"}
                     </h2>
@@ -1101,7 +1101,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     onClose();
                     }}
                     aria-label="Закрыть"
-                    className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                    className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
                 >
                     <FaIcon className="fas fa-times text-lg" />
                 </button>
@@ -1135,19 +1135,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <>
                     {renderAvatarEditor()}
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
                         <input
                         ref={nameRef}
                         type="text"
                         value={editedUser?.name || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Пол</label>
                         <CustomSelect
                         value={editedUser?.gender || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, gender: v })}
@@ -1162,19 +1162,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата рождения</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Дата рождения</label>
                         <input
                         type="date"
                         value={toDateInputValue(editedUser?.birth_date)}
                         max={todayInputDate()}
                         onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Место учебы</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Место учебы</label>
                         <input
                         type="text"
                         value={editedUser?.study_place || ""}
@@ -1184,37 +1184,37 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             // Стёрли место учёбы — специальность уходит вместе с ним
                             study_specialty: e.target.value.trim() ? (editedUser?.study_specialty || "") : ""
                         })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     {hasStudyPlace && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование специальности</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Наименование специальности</label>
                         <input
                         type="text"
                         value={editedUser?.study_specialty || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_specialty: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
                     )}
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Курс</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Курс</label>
                         <input
                         type="text"
                         value={editedUser?.study_course || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                         <input
                             type="checkbox"
                             checked={!!editedUser?.study_completed}
@@ -1227,7 +1227,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Год завершения/план</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Год завершения/план</label>
                         <input
                         type="number"
                         min="1900"
@@ -1235,18 +1235,18 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         step="1"
                         value={editedUser?.study_completion_year ?? ""}
                         onChange={(e) => setEditedUser({ ...editedUser, study_completion_year: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер карты</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Номер карты</label>
                         <input
                         type="text"
                         value={editedUser?.card_number || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, card_number: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
@@ -1256,12 +1256,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {activeTab === "contacts" && (
                     <>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер телефона</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Номер телефона</label>
                         <input
                         type="text"
                         value={editedUser?.phone || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         placeholder={KZ_PHONE_PLACEHOLDER}
                         maxLength={12}
@@ -1270,45 +1270,45 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Почта</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Почта</label>
                         <input
                         type="email"
                         value={editedUser?.email || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Личный Email</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Личный Email</label>
                         <input
                         type="email"
                         value={editedUser?.personal_email || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, personal_email: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Инстаграм</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Инстаграм</label>
                         <input
                         type="text"
                         value={editedUser?.instagram || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, instagram: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ник Telegram</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Ник Telegram</label>
                         <input
                         type="text"
                         value={editedUser?.telegram_nick || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, telegram_nick: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         placeholder="@username"
                         />
@@ -1318,32 +1318,32 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 1</summary>
                         <div className="mt-3 space-y-3">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Кем приходится</label>
                                 <input
                                 type="text"
                                 value={editedUser?.close_contact_1_relation || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
                                 <input
                                 type="text"
                                 value={editedUser?.close_contact_1_full_name || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Номер</label>
                                 <input
                                 type="text"
                                 value={editedUser?.close_contact_1_phone || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading || !!createdCredentials}
                                 placeholder={KZ_PHONE_PLACEHOLDER}
                                 maxLength={12}
@@ -1357,32 +1357,32 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 2</summary>
                         <div className="mt-3 space-y-3">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Кем приходится</label>
                                 <input
                                 type="text"
                                 value={editedUser?.close_contact_2_relation || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
                                 <input
                                 type="text"
                                 value={editedUser?.close_contact_2_full_name || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Номер</label>
                                 <input
                                 type="text"
                                 value={editedUser?.close_contact_2_phone || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading || !!createdCredentials}
                                 placeholder={KZ_PHONE_PLACEHOLDER}
                                 maxLength={12}
@@ -1397,25 +1397,25 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {activeTab === "corporate" && (
                     <>
                     <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата найма</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата найма</label>
                     <input
                         type="date"
                         value={toDateInputValue(editedUser?.hire_date)}
                         onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                     />
                     </div>
 
                     {showEmployeeJobTitle && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Должность</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Должность</label>
                         <input
                         type="text"
                         value={editedUser?.job_title || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
                         placeholder="Например, бухгалтер по расчётам"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
@@ -1423,7 +1423,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     {showEmployeeCity && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Город</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Город</label>
                         <CustomSelect
                         value={editedUser?.city || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, city: v })}
@@ -1438,18 +1438,18 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     )}
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Наименование ТОО/ИП</label>
                         <input
                         type="text"
                         value={editedUser?.company_name || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен как</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Оформлен как</label>
                         <CustomSelect
                         value={editedUser?.employment_type || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, employment_type: v })}
@@ -1465,7 +1465,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
 
                     <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                         <input
                             type="checkbox"
                             checked={!!editedUser?.internship_in_company}
@@ -1480,7 +1480,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {showFrontOfficeTraining && (
                     <>
                     <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                         <input
                             type="checkbox"
                             checked={!!editedUser?.front_office_training}
@@ -1498,12 +1498,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     {editedUser?.front_office_training && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Когда был на обучении</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Когда был на обучении</label>
                         <input
                         type="date"
                         value={toDateInputValue(editedUser?.front_office_training_date)}
                         onChange={(e) => setEditedUser({ ...editedUser, front_office_training_date: e.target.value || "" })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
@@ -1512,12 +1512,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     )}
 
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ID таксипро</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">ID таксипро</label>
                         <input
                         type="text"
                         value={editedUser?.taxipro_id || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, taxipro_id: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
@@ -1527,7 +1527,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 {activeTab === "general" && (
                     <>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Статус</label>
                         <CustomSelect
                         value={editedUser?.status || "working"}
                         onChange={(nextStatus) => {
@@ -1559,7 +1559,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
                         <div className={`grid grid-cols-1 ${shouldShowStatusPeriodEndDate(editedUser) ? 'sm:grid-cols-2' : ''} gap-3`}>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата начала</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Дата начала</label>
                                 <input
                                     type="date"
                                     value={editedUser?.status_period_start_date || ""}
@@ -1571,13 +1571,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                             ? e.target.value
                                             : editedUser?.status_period_end_date
                                     })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
                             {shouldShowStatusPeriodEndDate(editedUser) && (
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
                                     {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необ.)' : 'Дата окончания'}
                                 </label>
                                 <input
@@ -1585,7 +1585,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     value={editedUser?.status_period_end_date || ""}
                                     min={editedUser?.status_period_start_date || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, status_period_end_date: e.target.value, use_schedule_status_period: true })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
@@ -1594,7 +1594,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         {isDismissalLikeStatus(editedUser?.status) && (
                             <>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Причина увольнения</label>
                                 <CustomSelect
                                     value={editedUser?.status_period_dismissal_reason || ""}
                                     onChange={(nextReason) => {
@@ -1616,7 +1616,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 />
                             </div>
                             <div>
-                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                                     <input
                                         type="checkbox"
                                         checked={!!editedUser?.status_period_is_blacklist}
@@ -1633,12 +1633,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </label>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий (обязательно)</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий (обязательно)</label>
                                 <textarea
                                     value={editedUser?.status_period_comment || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, status_period_comment: e.target.value, use_schedule_status_period: true })}
                                     rows={3}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading || !!createdCredentials}
                                 />
                             </div>
@@ -1652,7 +1652,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     {(isAdminLikeRequester || isDeptScoped) && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Отдел</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Отдел</label>
                         <CustomSelect
                         value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
                         onChange={handleDepartmentChange}
@@ -1674,7 +1674,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     {isOperatorDraft(editedUser) && showOperatorLineFields && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Группа</label>
                         <CustomSelect
                         value={editedUser?.group_id || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, group_id: v })}
@@ -1702,7 +1702,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     {(!isPureSupervisorRequester || isOperatorDraft(editedUser)) && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Ставка</label>
                         <CustomSelect
                         value={editedUser?.rate ?? 1.0}
                         onChange={(v) => setEditedUser({ ...editedUser, rate: Number(v) })}
@@ -1723,7 +1723,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                     {isOperatorDraft(editedUser) && showOperatorLineFields && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Направление</label>
                         <CustomSelect
                         value={editedUser?.direction_id || ""}
                         onChange={(v) => setEditedUser({ ...editedUser, direction_id: v })}
@@ -1740,7 +1740,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {canUseProxyCard(editedUser) && (
                     <>
                     <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                         <input
                             type="checkbox"
                             checked={!!editedUser?.has_proxy}
@@ -1753,13 +1753,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     {editedUser?.has_proxy && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер прокси карты</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Номер прокси карты</label>
                         <input
                         type="text"
                         value={editedUser?.proxy_card_number || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, proxy_card_number: e.target.value })}
                         placeholder="Можно указать не полностью"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
@@ -1767,7 +1767,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </>
                     )}
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус прокси</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Статус прокси</label>
                         <CustomSelect
                         value={normalizeProxyStatus(editedUser?.proxy_status)}
                         onChange={(v) => setEditedUser({ ...editedUser, proxy_status: v })}
@@ -1782,7 +1782,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {isOperatorDraft(editedUser) && (
                     <>
                     <div>
-                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                        <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                         <input
                             type="checkbox"
                             checked={!!editedUser?.has_driver_license}
@@ -1795,12 +1795,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     {showOperatorLineFields && (
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">SIP номер</label>
                         <input
                         type="text"
                         value={editedUser?.sip_number || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
@@ -1826,23 +1826,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <>
                         {renderAvatarEditor()}
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
                             <input
                             ref={nameRef}
                             type="text"
                             value={editedUser?.name || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, name: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Пол</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Пол</label>
                             <select
                             value={editedUser?.gender || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, gender: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             >
                             <option value="">Не указан</option>
@@ -1852,7 +1852,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label htmlFor="birthDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                            <label htmlFor="birthDate" className="block text-sm font-medium text-gray-700 mb-1">
                             Дата рождения
                             </label>
                             <div className="flex items-center gap-2">
@@ -1862,7 +1862,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 value={toDateInputValue(editedUser?.birth_date)}
                                 max={todayInputDate()}
                                 onChange={(e) => setEditedUser({ ...editedUser, birth_date: e.target.value || null })}
-                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                             />
                             {editedUser?.birth_date && (
@@ -1874,7 +1874,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Место учебы</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Место учебы</label>
                             <input
                             type="text"
                             value={editedUser?.study_place || ""}
@@ -1884,37 +1884,37 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 // Стёрли место учёбы — специальность уходит вместе с ним
                                 study_specialty: e.target.value.trim() ? (editedUser?.study_specialty || "") : ""
                             })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         {hasStudyPlace && (
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование специальности</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Наименование специальности</label>
                             <input
                             type="text"
                             value={editedUser?.study_specialty || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_specialty: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
                         )}
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Курс</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Курс</label>
                             <input
                             type="text"
                             value={editedUser?.study_course || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_course: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                             <input
                                 type="checkbox"
                                 checked={!!editedUser?.study_completed}
@@ -1927,7 +1927,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Год завершения/план</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Год завершения/план</label>
                             <input
                             type="number"
                             min="1900"
@@ -1935,18 +1935,18 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             step="1"
                             value={editedUser?.study_completion_year ?? ""}
                             onChange={(e) => setEditedUser({ ...editedUser, study_completion_year: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер карты</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Номер карты</label>
                             <input
                             type="text"
                             value={editedUser?.card_number || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, card_number: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
@@ -1956,12 +1956,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {activeTab === "contacts" && (
                         <>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер телефона</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Номер телефона</label>
                             <input
                             type="text"
                             value={editedUser?.phone || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, phone: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             placeholder={KZ_PHONE_PLACEHOLDER}
                             maxLength={12}
@@ -1970,45 +1970,45 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Почта</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Почта</label>
                             <input
                             type="email"
                             value={editedUser?.email || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, email: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Личный Email</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Личный Email</label>
                             <input
                             type="email"
                             value={editedUser?.personal_email || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, personal_email: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Инстаграм</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Инстаграм</label>
                             <input
                             type="text"
                             value={editedUser?.instagram || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, instagram: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ник Telegram</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Ник Telegram</label>
                             <input
                             type="text"
                             value={editedUser?.telegram_nick || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, telegram_nick: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             placeholder="@username"
                             />
@@ -2018,32 +2018,32 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 1</summary>
                             <div className="mt-3 space-y-3">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Кем приходится</label>
                                     <input
                                     type="text"
                                     value={editedUser?.close_contact_1_relation || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_relation: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
                                     <input
                                     type="text"
                                     value={editedUser?.close_contact_1_full_name || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_full_name: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Номер</label>
                                     <input
                                     type="text"
                                     value={editedUser?.close_contact_1_phone || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_1_phone: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     placeholder={KZ_PHONE_PLACEHOLDER}
                                     maxLength={12}
@@ -2057,32 +2057,32 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             <summary className="cursor-pointer text-sm font-medium text-slate-700">Близкий контакт 2</summary>
                             <div className="mt-3 space-y-3">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Кем приходится</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Кем приходится</label>
                                     <input
                                     type="text"
                                     value={editedUser?.close_contact_2_relation || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_relation: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ФИО</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
                                     <input
                                     type="text"
                                     value={editedUser?.close_contact_2_full_name || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_full_name: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Номер</label>
                                     <input
                                     type="text"
                                     value={editedUser?.close_contact_2_phone || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, close_contact_2_phone: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     placeholder={KZ_PHONE_PLACEHOLDER}
                                     maxLength={12}
@@ -2097,7 +2097,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {activeTab === "corporate" && (
                         <>
                         <div>
-                            <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                            <label htmlFor="hireDate" className="block text-sm font-medium text-gray-700 mb-1">
                             Дата найма
                             </label>
                             <div className="flex items-center gap-2">
@@ -2106,7 +2106,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 id="hireDate"
                                 value={toDateInputValue(editedUser?.hire_date)}
                                 onChange={(e) => setEditedUser({ ...editedUser, hire_date: e.target.value || null })}
-                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                             />
                             {editedUser?.hire_date && (
@@ -2119,13 +2119,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                         {showEmployeeJobTitle && (
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Должность</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Должность</label>
                             <input
                             type="text"
                             value={editedUser?.job_title || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
                             placeholder="Например, бухгалтер по расчётам"
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
@@ -2133,7 +2133,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                         {showEmployeeCity && (
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Город</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Город</label>
                             <CustomSelect
                             value={editedUser?.city || ""}
                             onChange={(v) => setEditedUser({ ...editedUser, city: v })}
@@ -2148,22 +2148,22 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         )}
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Наименование ТОО/ИП</label>
                             <input
                             type="text"
                             value={editedUser?.company_name || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, company_name: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Оформлен как</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Оформлен как</label>
                             <select
                             value={editedUser?.employment_type || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, employment_type: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             >
                             <option value="">Не указано</option>
@@ -2174,7 +2174,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                             <input
                                 type="checkbox"
                                 checked={!!editedUser?.internship_in_company}
@@ -2189,7 +2189,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         {showFrontOfficeTraining && (
                         <>
                         <div>
-                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                            <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                             <input
                                 type="checkbox"
                                 checked={!!editedUser?.front_office_training}
@@ -2207,12 +2207,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                         {editedUser?.front_office_training && (
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Когда был на обучении</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Когда был на обучении</label>
                             <input
                             type="date"
                             value={toDateInputValue(editedUser?.front_office_training_date)}
                             onChange={(e) => setEditedUser({ ...editedUser, front_office_training_date: e.target.value || "" })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
@@ -2221,12 +2221,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         )}
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">ID таксипро</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">ID таксипро</label>
                             <input
                             type="text"
                             value={editedUser?.taxipro_id || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, taxipro_id: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
@@ -2236,7 +2236,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {activeTab === "general" && (
                         <>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Статус</label>
                             <select
                             value={editedUser?.status || "working"}
                             onChange={(e) => {
@@ -2251,7 +2251,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     use_schedule_status_period: usesScheduleStatusPeriodForm(nextStatus) ? true : editedUser?.use_schedule_status_period
                                 });
                             }}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             >
                             <option value="working">Работает</option>
@@ -2269,7 +2269,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             <div className={`grid grid-cols-1 ${shouldShowStatusPeriodEndDate(editedUser) ? 'sm:grid-cols-2' : ''} gap-3`}>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Дата начала</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата начала</label>
                                     <input
                                         type="date"
                                         value={editedUser?.status_period_start_date || ""}
@@ -2281,13 +2281,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                                 ? e.target.value
                                                 : editedUser?.status_period_end_date
                                         })}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                         disabled={isLoading}
                                     />
                                 </div>
                                 {shouldShowStatusPeriodEndDate(editedUser) && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">
                                         {isDismissalLikeStatus(editedUser?.status) ? 'Дата окончания (необ.)' : 'Дата окончания'}
                                     </label>
                                     <input
@@ -2295,7 +2295,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                         value={editedUser?.status_period_end_date || ""}
                                         min={editedUser?.status_period_start_date || ""}
                                         onChange={(e) => setEditedUser({ ...editedUser, status_period_end_date: e.target.value, use_schedule_status_period: true })}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                         disabled={isLoading}
                                     />
                                 </div>
@@ -2304,7 +2304,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             {isDismissalLikeStatus(editedUser?.status) && (
                                 <>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Причина увольнения</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Причина увольнения</label>
                                     <select
                                         value={editedUser?.status_period_dismissal_reason || ""}
                                     onChange={(e) => {
@@ -2318,7 +2318,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                                     : ''
                                             }));
                                         }}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                         disabled={isLoading}
                                     >
                                         <option value="">Выберите причину</option>
@@ -2328,7 +2328,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                    <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                                         <input
                                             type="checkbox"
                                             checked={!!editedUser?.status_period_is_blacklist}
@@ -2345,12 +2345,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     </label>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий (обязательно)</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий (обязательно)</label>
                                     <textarea
                                         value={editedUser?.status_period_comment || ""}
                                         onChange={(e) => setEditedUser({ ...editedUser, status_period_comment: e.target.value, use_schedule_status_period: true })}
                                         rows={3}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                         disabled={isLoading}
                                     />
                                 </div>
@@ -2364,7 +2364,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                             {(isAdminLikeRequester || isDeptScoped) && (
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Отдел</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Отдел</label>
                                 <CustomSelect
                                 value={editedUser?.department_id || (isDeptScoped ? requesterScopeDeptId : "")}
                                 onChange={handleDepartmentChange}
@@ -2390,11 +2390,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     прежнюю смену направления (задача #228). */}
                                 {isOperatorDraft(editedUser) && showOperatorLineFields && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Группа</label>
                                     <select
                                     value={editedUser?.group_id || ""}
                                     onChange={(e) => setEditedUser({ ...editedUser, group_id: e.target.value })}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     >
                                     {/* «Без группы» — только админу и главе отдела: СВ переводит
@@ -2433,14 +2433,14 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 )}
 
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Ставка</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Ставка</label>
                                     <select
                                     value={editedUser?.rate || 1.0}
                                     onChange={(e) => setEditedUser({ ...editedUser, rate: parseFloat(e.target.value) })}
                                     className={`w-full px-3 py-2 border rounded-lg shadow-sm focus:outline-none transition-all ${
                                         isSupervisorRateLocked
-                                            ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-400'
-                                            : 'border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100'
+                                            ? 'border-slate-200 bg-slate-100 text-slate-400 cursor-not-allowed'
+                                            : 'border-gray-300 focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900'
                                     }`}
                                     disabled={isLoading || isSupervisorRateLocked}
                                     >
@@ -2461,11 +2461,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 вместо него смена группы (задача #228). */}
                             {isOperatorDraft(editedUser) && !isPureSupervisorRequester && showOperatorLineFields && (
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Направление</label>
                                 <select
                                 value={editedUser?.direction_id || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 >
                                 <option value="">Выберите направление</option>
@@ -2481,7 +2481,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             {canUseProxyCard(editedUser) && (
                             <>
                             <div>
-                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                                 <input
                                     type="checkbox"
                                     checked={!!editedUser?.has_proxy}
@@ -2494,13 +2494,13 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                             {editedUser?.has_proxy && (
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Номер прокси карты</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Номер прокси карты</label>
                                 <input
                                 type="text"
                                 value={editedUser?.proxy_card_number || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, proxy_card_number: e.target.value })}
                                 placeholder="Можно указать не полностью"
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 />
                             </div>
@@ -2508,11 +2508,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </>
                             )}
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Статус прокси</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Статус прокси</label>
                                 <select
                                 value={normalizeProxyStatus(editedUser?.proxy_status)}
                                 onChange={(e) => setEditedUser({ ...editedUser, proxy_status: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 >
                                 <option value="">Не указан</option>
@@ -2524,7 +2524,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             {isOperatorDraft(editedUser) && (
                             <>
                             <div>
-                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
+                                <label className="inline-flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
                                 <input
                                     type="checkbox"
                                     checked={!!editedUser?.has_driver_license}
@@ -2538,7 +2538,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             {showOperatorLineFields && (
                             <div>
                                 <div className="flex items-end justify-between gap-2 mb-1">
-                                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">SIP номер</label>
+                                    <label className="block text-sm font-medium text-gray-700">SIP номер</label>
                                     {/* Только ссылка в раздел, без паролей и учётки кабинета:
                                         карточка сохраняется через /api/admin/update_user, куда
                                         проходит глава ЛЮБОГО отдела, — класть секреты телефонии
@@ -2559,7 +2559,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 type="text"
                                 value={editedUser?.sip_number || ""}
                                 onChange={(e) => setEditedUser({ ...editedUser, sip_number: e.target.value })}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 />
                             </div>
@@ -2576,23 +2576,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый логин</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Новый логин</label>
                             <input
                             type="text"
                             value={editedUser?.new_login || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, new_login: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Новый пароль</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Новый пароль</label>
                             <input
                             type="password"
                             value={editedUser?.new_password || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, new_password: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={isLoading}
                             />
                         </div>
@@ -2644,7 +2644,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                 {/* Error message */}
                 <div aria-live="polite" className="min-h-[1.25rem]">
-                    {modalError && <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>}
+                    {modalError && <p className="text-sm text-red-600">{modalError}</p>}
                 </div>
 
                 {/* Actions */}

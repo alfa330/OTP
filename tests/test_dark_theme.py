@@ -165,3 +165,73 @@ class DarkThemeAccessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SystemThemeNeverLeaksIntoLightTests(unittest.TestCase):
+    """Портал светлый по умолчанию — и должен оставаться светлым на тёмном маке.
+
+    Тёмный режим здесь ОДИН и он личный: атрибут `data-otp-theme="dark"`,
+    выданный по логину. Второго входа в темноту — от оформления системы — быть
+    не должно, а он открывался двумя разными путями, и оба вели к одному и тому
+    же: белый портал с тёмными окнами внутри.
+    """
+
+    #: `dark:bg-slate-800`, `dark:hover:bg-slate-700` — но не `dark: {` (ключ
+    #: объекта в JS) и не `dark:*` из текста комментария.
+    TAILWIND_DARK_CLASS = re.compile(r"\bdark:[A-Za-z0-9\[-]")
+
+    def test_no_tailwind_dark_variants_in_the_source(self):
+        """Классов `dark:*` в исходниках нет.
+
+        darkMode в tailwind.config.cjs не задан, значит Tailwind собирает их в
+        режиме media — под `@media (prefers-color-scheme: dark)`. Такой класс
+        срабатывает от ОФОРМЛЕНИЯ СИСТЕМЫ и никак не связан с темой портала:
+        на маке с ночным оформлением модалки «Редактирование пользователя»,
+        «Смена логина», «История» и ещё десяток окон выходили тёмными посреди
+        светлого сайта.
+        """
+        self.assertNotIn("darkMode", read(ROOT / "tailwind.config.cjs"))
+        offenders = []
+        for path in (ROOT / "src").rglob("*"):
+            if path.suffix not in (".js", ".jsx", ".css", ".ts", ".tsx"):
+                continue
+            if path.name == "theme-dark.css":
+                continue
+            for number, line in enumerate(read(path).splitlines(), 1):
+                if self.TAILWIND_DARK_CLASS.search(line):
+                    offenders.append("%s:%d" % (path.relative_to(ROOT), number))
+        self.assertEqual(offenders, [], "Классы dark:* сработают от темы системы: %s"
+                         % ", ".join(offenders))
+
+    def test_stylesheets_never_branch_on_the_system_theme(self):
+        """Медиазапрос prefers-color-scheme — тот же вход в темноту мимо атрибута."""
+        for path in (ROOT / "src").rglob("*.css"):
+            if path.name == "theme-dark.css":
+                continue
+            self.assertNotIn("prefers-color-scheme", read(path),
+                             "Ветка по теме системы в %s" % path.relative_to(ROOT))
+
+    def test_both_documents_declare_the_light_scheme(self):
+        """Системные элементы рисует браузер, и ему надо СКАЗАТЬ, что тут светло.
+
+        Полосы прокрутки, календарь `<input type="date">`, выпадающий список
+        `<select>` и подсветка автозаполнения без объявления берут тему
+        системы — на тёмном маке они выходили чёрными поверх белых страниц.
+        Документа два: сам портал и «Журнал оценок» в рамке.
+        """
+        for path in (ROOT / "src" / "styles.css",
+                     ROOT / "src" / "call_evaluation" / "styles.css"):
+            css = re.sub(r"/\*.*?\*/", "", read(path), flags=re.S)
+            self.assertRegex(css, r"html\s*\{[^}]*color-scheme:\s*light",
+                             "Нет color-scheme: light в %s" % path.relative_to(ROOT))
+
+    def test_dark_layer_still_outweighs_the_light_declaration(self):
+        """У слоя своя строка color-scheme, и она обязана перебивать светлую.
+
+        Селектор с атрибутом весомее голого `html`, поэтому порядок подключения
+        слоя роли не играет — но если строку из слоя уберут, тёмный режим
+        получит белые полосы прокрутки и белый календарь.
+        """
+        css = read(THEME_CSS)
+        head = css[:css.index("}", css.index(SCOPE))]
+        self.assertIn("color-scheme: dark", head)

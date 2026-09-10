@@ -75,7 +75,7 @@ return (
         role="dialog"
         aria-modal="true"
         aria-labelledby="history-modal-title"
-        className="w-full max-w-4xl bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
+        className="w-full max-w-4xl bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
         onClick={(e) => e.stopPropagation()}
         >
         <div className="px-6 py-4">
@@ -84,11 +84,11 @@ return (
             <div className="flex items-start gap-3">
                 <FaIcon className="fas fa-history text-xl text-blue-700 mt-1" aria-hidden="true" />
                 <div className="flex flex-col">
-                <span id="history-modal-title" className="text-xl font-semibold text-blue-800 dark:text-blue-100">
+                <span id="history-modal-title" className="text-xl font-semibold text-blue-800">
                     История
                 </span>
                 {subjectName && (
-                    <span className="text-xl text-gray-600 dark:text-gray-400 mt-1">
+                    <span className="text-xl text-gray-600 mt-1">
                     {subjectName}
                     </span>
                 )}
@@ -102,7 +102,7 @@ return (
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Поиск по полю, значению, пользователю или дате..."
-                className="px-3 py-2 border border-gray-300 rounded-lg w-80 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                className="px-3 py-2 border border-gray-300 rounded-lg w-80 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900"
                 aria-label="Поиск в истории"
                 />
                 <button

@@ -440,25 +440,25 @@ const AccountAvatarModal = ({
                     role="dialog"
                     aria-modal="true"
                     aria-labelledby="change-avatar-title"
-                    className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
+                    className="pointer-events-auto w-full max-w-md bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 animate-scale-in"
                     onClick={(e) => e.stopPropagation()}
                 >
                     <div className="px-6 py-5">
                         <div className="flex items-start justify-between gap-4">
-                            <h2 id="change-avatar-title" className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                            <h2 id="change-avatar-title" className="text-lg font-semibold text-gray-900">
                                 Смена аватара
                             </h2>
                             <button
                                 type="button"
                                 onClick={handleClose}
                                 aria-label="Закрыть"
-                                className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                                className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
                             >
                                 <FaIcon className="fas fa-times text-lg" />
                             </button>
                         </div>
 
-                        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                        <p className="mt-2 text-sm text-gray-600">
                             Загрузите фото, при необходимости подрежьте и сохраните.
                         </p>
 
@@ -524,7 +524,7 @@ const AccountAvatarModal = ({
                         </div>
 
                         <div aria-live="polite" className="mt-4 min-h-[1.25rem]">
-                            {modalError && <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>}
+                            {modalError && <p className="text-sm text-red-600">{modalError}</p>}
                         </div>
 
                         <div className="mt-4 flex justify-end items-center gap-3">

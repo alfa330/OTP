@@ -40803,12 +40803,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="training-modal-title"
-                        className="w-full max-w-md bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
+                        className="w-full max-w-md bg-white/95 rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-200"
                         onClick={(e) => e.stopPropagation()}
                         >
                         <div className="px-6 py-5">
                             <div className="flex items-start justify-between">
-                            <h2 id="training-modal-title" className="text-lg font-semibold text-gray-800 dark:text-gray-100">
+                            <h2 id="training-modal-title" className="text-lg font-semibold text-gray-800">
                                 {initialData.id ? "Редактировать тренинг" : "Добавить тренинг"}
                             </h2>
                             <button
@@ -40818,7 +40818,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 onClose();
                                 }}
                                 aria-label="Закрыть"
-                                className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                                className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
                             >
                                 <FaIcon className="fas fa-times" />
                             </button>
@@ -40849,7 +40849,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
 
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
                                 Дата тренинга <span className="text-red-500">*</span>
                                 </label>
                                 <input
@@ -40857,34 +40857,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 type="date"
                                 value={date}
                                 onChange={(e) => setDate(e.target.value)}
-                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 />
                             </div>
 
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
                                     Время начала <span className="text-red-500">*</span>
                                 </label>
                                 <input
                                     type="time"
                                     value={startTime}
                                     onChange={(e) => setStartTime(e.target.value)}
-                                    className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                 />
                                 </div>
 
                                 <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
                                     Время окончания <span className="text-red-500">*</span>
                                 </label>
                                 <input
                                     type="time"
                                     value={endTime}
                                     onChange={(e) => setEndTime(e.target.value)}
-                                    className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                 />
                                 </div>
@@ -40923,13 +40923,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
 
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
                                 Причина <span className="text-red-500">*</span>
                                 </label>
                                 <select
                                 value={reason}
                                 onChange={(e) => setReason(e.target.value)}
-                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 >
                                 <option value="">Выберите причину</option>
@@ -40942,12 +40942,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </div>
 
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Комментарий</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий</label>
                                 <textarea
                                 value={comment}
                                 onChange={(e) => setComment(e.target.value)}
                                 placeholder="Комментарий к тренингу (необязательно)"
-                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/90 text-gray-900"
                                 rows={3}
                                 disabled={isLoading}
                                 />
@@ -40963,7 +40963,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 disabled={isLoading}
                                 className="w-4 h-4"
                             />
-                            <label htmlFor="count-in-hours" className="text-sm text-gray-700 dark:text-gray-200">
+                            <label htmlFor="count-in-hours" className="text-sm text-gray-700">
                                 Засчитывать в часы
                             </label>
                             </div>
@@ -49341,7 +49341,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     onClick={() => setShowLogoutConfirm(false)} 
                 >
                     <div
-                    className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6 transform animate-scale-in text-center"
+                    className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 transform animate-scale-in text-center"
                     onClick={(e) => e.stopPropagation()} 
                     role="dialog"
                     aria-modal="true"
@@ -49349,11 +49349,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     >
                     <h2
                         id="logout-title"
-                        className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-3"
+                        className="text-lg font-semibold text-gray-900 mb-3"
                     >
                         Подтверждение выхода
                     </h2>
-                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+                    <p className="text-sm text-gray-600 mb-6">
                         Вы уверены, что хотите выйти из аккаунта?
                     </p>
 
@@ -49361,7 +49361,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <button
                         onClick={() => setShowLogoutConfirm(false)}
                         className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 
-                                    dark:bg-slate-800 dark:text-gray-300 dark:hover:bg-slate-700 transition"
+                                    transition"
                         >
                         Отмена
                         </button>
@@ -55885,7 +55885,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 role="dialog"
                                 aria-modal="true"
                                 aria-labelledby="change-login-title"
-                                className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 
+                                className="pointer-events-auto w-full max-w-md bg-white/95 
                                             rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 
                                             animate-scale-in"
                                 onClick={(e) => e.stopPropagation()}
@@ -55900,13 +55900,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         type="button"
                                         onClick={() => { setShowChangeLoginForm(false); setModalError(""); }}
                                         aria-label="Закрыть"
-                                        className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                                        className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
                                     >
                                         <FaIcon className="fas fa-times text-lg" />
                                     </button>
                                     </div>
 
-                                    <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                                    <p className="mt-2 text-sm text-gray-600">
                                     Придумайте логин (без пробелов).
                                     </p>
 
@@ -55929,7 +55929,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div>
                                     <label
                                         htmlFor="new-login"
-                                        className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2"
+                                        className="block text-sm font-medium text-gray-700 mb-2"
                                     >
                                         Новый логин
                                     </label>
@@ -55950,15 +55950,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         }
                                         className="w-full pl-10 p-3 border border-gray-300 rounded-lg 
                                                     focus:outline-none focus:ring-2 focus:ring-blue-500 
-                                                    transition-all duration-150 bg-white/90 dark:bg-slate-800 
-                                                    text-gray-900 dark:text-gray-100"
+                                                    transition-all duration-150 bg-white/90 
+                                                    text-gray-900"
                                         disabled={isLoading}
                                         autoFocus
                                         minLength={3}
                                         />
                                     </div>
 
-                                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                                    <p className="mt-1 text-xs text-gray-500">
                                         Разрешены буквы, цифры и символы (без пробелов).
                                     </p>
                                     </div>
@@ -55966,7 +55966,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <div>
                                     <label
                                         htmlFor="confirm-login"
-                                        className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2"
+                                        className="block text-sm font-medium text-gray-700 mb-2"
                                     >
                                         Подтвердите логин
                                     </label>
@@ -55986,8 +55986,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         }
                                         className="w-full pl-10 p-3 border border-gray-300 rounded-lg 
                                                     focus:outline-none focus:ring-2 focus:ring-blue-500 
-                                                    transition-all duration-150 bg-white/90 dark:bg-slate-800 
-                                                    text-gray-900 dark:text-gray-100"
+                                                    transition-all duration-150 bg-white/90 
+                                                    text-gray-900"
                                         disabled={isLoading}
                                         minLength={3}
                                         />
@@ -55995,7 +55995,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     <div aria-live="polite" className="min-h-[1.25rem]">
-                                        {modalError && <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>}
+                                        {modalError && <p className="text-sm text-red-600">{modalError}</p>}
                                     </div>
 
                                     {/* Эргономичная панель — только кнопка обновить, выровнена вправо */}
@@ -56025,7 +56025,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 role="dialog"
                                 aria-modal="true"
                                 aria-labelledby="change-password-title"
-                                className="pointer-events-auto w-full max-w-md bg-white/95 dark:bg-slate-900/95 
+                                className="pointer-events-auto w-full max-w-md bg-white/95 
                                             rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 
                                             animate-scale-in"
                                 >
@@ -56038,13 +56038,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         type="button"
                                         onClick={() => { setShowChangePasswordForm(false); setModalError(""); }}
                                         aria-label="Закрыть"
-                                        className="rounded-md p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-slate-800 transition"
+                                        className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
                                     >
                                         <FaIcon className="fas fa-times text-lg" />
                                     </button>
                                     </div>
 
-                                    <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Введите новый пароль и подтвердите.</p>
+                                    <p className="mt-2 text-sm text-gray-600">Введите новый пароль и подтвердите.</p>
 
                                     <form
                                     className="mt-5 space-y-4"
@@ -56062,7 +56062,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     }}
                                     >
                                     <div className="relative">
-                                        <label htmlFor="new-password" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                                        <label htmlFor="new-password" className="block text-sm font-medium text-gray-700 mb-2">
                                         Новый пароль
                                         </label>
                                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6 pointer-events-none">
@@ -56074,7 +56074,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         placeholder="Введите новый пароль"
                                         value={passwordData.new_password}
                                         onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
-                                        className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 bg-white/90 text-gray-900"
                                         disabled={isLoading}
                                         minLength={6}
                                         autoFocus={showChangePasswordForm && !showChangeLoginForm}
@@ -56082,7 +56082,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     <div className="relative">
-                                        <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-2">
+                                        <label htmlFor="confirm-password" className="block text-sm font-medium text-gray-700 mb-2">
                                         Подтвердите пароль
                                         </label>
                                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 mt-6 pointer-events-none">
@@ -56094,14 +56094,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         placeholder="Повторите пароль"
                                         value={passwordData.confirm_password}
                                         onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
-                                        className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                                        className="w-full pl-10 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all duration-150 bg-white/90 text-gray-900"
                                         disabled={isLoading}
                                         minLength={6}
                                         />
                                     </div>
 
                                     <div aria-live="polite" className="min-h-[1.25rem]">
-                                        {modalError && <p className="text-sm text-red-600 dark:text-red-400">{modalError}</p>}
+                                        {modalError && <p className="text-sm text-red-600">{modalError}</p>}
                                     </div>
 
                                     {/* Только кнопка "Обновить", выровнена вправо */}

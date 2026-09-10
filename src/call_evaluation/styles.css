@@ -1,5 +1,11 @@
 ﻿*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Журнал светлый (тёмный режим приходит меткой ?theme=dark и ставит на html
+   data-otp-theme="dark" — та строка весомее и перебивает эту). Без объявления
+   системные элементы — полосы прокрутки, календарь, список <select> — брали бы
+   тему системы и выходили тёмными в светлом журнале. */
+html { color-scheme: light; }
+
         :root {
             --bg: #f9fafb;
             --surface: #ffffff;
