@@ -36,6 +36,7 @@ from wiki.access import QR_GATED_ROLES  # noqa: E402
 BOT_PATH = ROOT / 'bot_schedule2.py'
 APP_PATH = ROOT / 'src' / 'App.jsx'
 VIEW_PATH = ROOT / 'src' / 'components' / 'qr' / 'QrAccessView.jsx'
+CSS_PATH = ROOT / 'src' / 'components' / 'qr' / 'qr-access.css'
 
 SZOV, OP = 1, 367
 
@@ -268,6 +269,36 @@ class SectionMarkupTests(unittest.TestCase):
         self.assertIn('avatar_url', view)
         self.assertNotIn('pendingTokenRef.current}', view,
                          'токен на экране ничего не говорит о том, кого пускают')
+
+    def test_column_is_centred_against_the_window(self):
+        """Колонка раздела стоит по центру ЭКРАНА, а не области контента.
+
+        Слева от контента живёт сайдбар (80 px свёрнутый, 300 px развёрнутый),
+        и одного `mx-auto` мало: на 1440 px колонка отставала от левого края
+        окна на 424 px, а от правого — на 344, то есть заметно жалась вправо;
+        с развёрнутым сайдбаром разрыв доходил до 534 против 234. То же боком
+        на телефоне, где навигацию держит бар у боковой грани. Поле с
+        ПРОТИВОПОЛОЖНОЙ стороны ровно возвращает середину окна.
+
+        Поле обязано жить на ОТДЕЛЬНОЙ обёртке: у самой колонки свои `px-4` из
+        утилит, и правило из файла раздела спорило бы с ними при равном весе,
+        проигрывая (утилиты в бандле ниже) — см. [[component-css-loses-to-tailwind]].
+        """
+        view = VIEW_PATH.read_text(encoding='utf-8-sig')
+        css = CSS_PATH.read_text(encoding='utf-8-sig')
+
+        self.assertIn('<div className="qr-access-stage">', view)
+        stage_line = next(l for l in view.splitlines() if 'qr-access-stage' in l)
+        self.assertNotIn('px-', stage_line, 'поля колонки и компенсация — разные элементы')
+
+        rule = css.split('.qr-access-stage {', 1)[1].split('}', 1)[0]
+        self.assertIn('padding-right: var(--app-sidebar-offset', rule)
+        # Сайдбар сворачивается с переходом — колонка обязана ехать вместе с ним.
+        self.assertIn('transition: padding-right', rule)
+        for side, prop in (('left', 'padding-right'), ('right', 'padding-left')):
+            block = css.split(f'body[data-tabbar-side="{side}"] .qr-access-stage {{', 1)[1].split('}', 1)[0]
+            self.assertIn(f'{prop}: var(--mtb-thickness', block,
+                          f'бар у грани {side}: поле ставится не с той стороны')
 
     def test_returning_does_not_switch_the_camera_on_by_itself(self):
         """Кто выключил камеру, тому её обратно не включают.

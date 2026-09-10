@@ -352,6 +352,9 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
     const closeSheet = granting ? () => {} : resumeScanning;
 
     return (
+        /* Внешняя обёртка только двигает колонку в центр ЭКРАНА мимо сайдбара
+           и бокового бара — вся вёрстка внутри (см. .qr-access-stage). */
+        <div className="qr-access-stage">
         <div
             className={`mx-auto w-full max-w-2xl ${isNarrow ? 'px-4 pb-4' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
@@ -636,6 +639,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                 )}
                 </div>
             </IosModal>
+        </div>
         </div>
     );
 };
