@@ -9,7 +9,7 @@
  * потом уходит в style.left/style.top, и лишнего пересчёта в компоненте нет.
  */
 
-import { TAB_BAR_SIDE, TAB_BAR_THICKNESS, mobileShellReservedBoxes } from '../../utils/mobileShell.js';
+import { mobileShellReservedBoxes, tabBarInsets } from '../../utils/mobileShell.js';
 
 /** Диаметр шарика. Совпадает с --aorb-size в assistant-orb.css. */
 export const ORB_SIZE = 56;
@@ -38,12 +38,7 @@ export const DEFAULT_RIGHT_OFFSET = 18;
 
    Какая грань занята, знает оболочка (src/utils/mobileShell.js): при повороте
    телефона бар остаётся у нижней грани КОРПУСА, то есть уезжает вбок. */
-const navInsets = (nav) => {
-    if (!nav?.shell) return { top: 0, right: 0, bottom: 0, left: 0 };
-    if (nav.side === TAB_BAR_SIDE.RIGHT) return { top: 0, right: TAB_BAR_THICKNESS, bottom: 0, left: 0 };
-    if (nav.side === TAB_BAR_SIDE.LEFT) return { top: 0, right: 0, bottom: 0, left: TAB_BAR_THICKNESS };
-    return { top: 0, right: 0, bottom: TAB_BAR_THICKNESS, left: 0 };
-};
+const navInsets = tabBarInsets;
 
 const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
 
@@ -204,11 +199,7 @@ export const panelAnchor = (position, viewport, panel) => {
     };
 };
 
-/* Клик или перетаскивание — решается пройденным расстоянием, а не таймером.
-   Порог в 4 пикселя пропускает дрожание руки на нажатии (особенно на тачскрине)
-   и при этом не съедает намеренный короткий сдвиг. */
-export const DRAG_THRESHOLD = 4;
-
-export const movedEnough = (from, to) => (
-    Math.abs(to.x - from.x) >= DRAG_THRESHOLD || Math.abs(to.y - from.y) >= DRAG_THRESHOLD
-);
+/* Порог «нажали или потащили» — общий для всех плавающих элементов портала
+   (шарик здесь, колокол в углу телефона), поэтому живёт в utils/dragGesture.js.
+   Реэкспорт оставлен ради тех, кто уже импортирует его отсюда. */
+export { DRAG_THRESHOLD, movedEnough } from '../../utils/dragGesture.js';

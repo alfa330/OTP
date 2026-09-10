@@ -154,3 +154,52 @@ export const mobileShellReservedBoxes = ({ shell, side }, viewport) => {
     });
     return boxes;
 };
+
+/**
+ * Отступы, которые бар разделов съедает у каждой грани окна.
+ *
+ * Один ответ на вопрос «где стоит бар» для всех, кому нельзя на него наезжать:
+ * шарика помощника (src/components/assistant/orbPosition.js) и колокола,
+ * который на телефоне можно таскать по экрану. Разъехавшись, они дают элемент,
+ * севший на навигацию, — то есть отнявший у человека вход в разделы.
+ */
+export const tabBarInsets = (state) => {
+    if (!state?.shell) return { top: 0, right: 0, bottom: 0, left: 0 };
+    if (state.side === TAB_BAR_SIDE.RIGHT) return { top: 0, right: TAB_BAR_THICKNESS, bottom: 0, left: 0 };
+    if (state.side === TAB_BAR_SIDE.LEFT) return { top: 0, right: 0, bottom: 0, left: TAB_BAR_THICKNESS };
+    return { top: 0, right: 0, bottom: TAB_BAR_THICKNESS, left: 0 };
+};
+
+/** Диаметр круглой кнопки колокола. Совпадает с .mobile-bell-slot в mobile-shell.css. */
+export const BELL_SIZE = 44;
+
+/** Отступ колокола от края экрана — тот же, что у него в CSS по умолчанию. */
+export const BELL_EDGE_MARGIN = 10;
+
+/**
+ * Загнать перетаскиваемый колокол внутрь экрана.
+ *
+ * Считается при КАЖДОМ появлении, а не только на перетаскивании: позиция
+ * пережила поворот телефона и смену устройства, и y=800, сохранённый в
+ * портрете, в альбомной ориентации означал бы колокол за нижней гранью — то
+ * есть уведомления, до которых уже не дотянуться и которые поэтому нельзя
+ * вернуть на место.
+ *
+ * safeArea — вырезы и «дом-бар» устройства (env(safe-area-inset-*), их читает
+ * компонент: в CSS они есть, а в JS их приходится замерять пробником). Без них
+ * колокол на iPhone паркуется под чёлкой.
+ */
+export const clampBellPosition = (position, viewport, side, safeArea = null) => {
+    const bar = tabBarInsets({ shell: true, side });
+    const safe = safeArea || { top: 0, right: 0, bottom: 0, left: 0 };
+    const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+    const minX = BELL_EDGE_MARGIN + Math.max(bar.left, safe.left);
+    const minY = BELL_EDGE_MARGIN + Math.max(bar.top, safe.top);
+    const maxX = Math.max(minX, viewport.width - BELL_SIZE - BELL_EDGE_MARGIN - Math.max(bar.right, safe.right));
+    const maxY = Math.max(minY, viewport.height - BELL_SIZE - BELL_EDGE_MARGIN - Math.max(bar.bottom, safe.bottom));
+    const num = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+    return {
+        x: clamp(num(position?.x, maxX), minX, maxX),
+        y: clamp(num(position?.y, minY), minY, maxY),
+    };
+};

@@ -53,6 +53,7 @@ import InstallAppPrompt from './components/common/InstallAppPrompt';
 import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
+import MobileBellSlot from './components/common/MobileBellSlot';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -47430,8 +47431,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     );
                                     if (!isMobileShell) return <div className="sidebar-bell-slot">{bell}</div>;
+                                    /* Слот в углу — отдельным компонентом: колокол
+                                       на телефоне ПЕРЕТАСКИВАЕТСЯ. Он висит поверх
+                                       содержимого и в правом верхнем углу закрывает
+                                       собой кнопки разделов — у инструкции аукциона
+                                       смен под ним оказался крестик, и закрыть её
+                                       было нельзя вовсе. */
                                     return createPortal(
-                                        <div className="mobile-bell-slot">{bell}</div>,
+                                        <MobileBellSlot userId={user?.id} side={mobileTabSide}>{bell}</MobileBellSlot>,
                                         document.body,
                                     );
                                 })()}

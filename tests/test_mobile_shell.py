@@ -553,6 +553,18 @@ class NotificationsSheetTests(unittest.TestCase):
         self.assertIn('color: var(--sheet-text) !important;', SHELL_CSS)
         self.assertIn('color: var(--sheet-muted) !important;', SHELL_CSS)
 
+    def test_bell_can_be_dragged_away(self):
+        """Колокол висит ПОВЕРХ содержимого, и правый верхний угол занимает не
+        только он: у инструкции аукциона смен там крестик, и закрыть её на
+        телефоне было нельзя вовсе — тап приходил колоколу. Поэтому колокол
+        двигается; подробности жеста стережёт tests/mobile_bell_drag.test.mjs."""
+        self.assertIn('<MobileBellSlot userId={user?.id} side={mobileTabSide}>{bell}</MobileBellSlot>', APP)
+        self.assertNotIn('<div className="mobile-bell-slot">', APP)
+        # Запрет прокрутки — только под кнопкой: лист уведомлений лежит внутри
+        # того же слота, и запрет на слоте убил бы прокрутку списка.
+        self.assertIn('.mobile-bell-slot > div > button *', SHELL_CSS)
+        self.assertNotIn('touch-action', css_block(SHELL_CSS, '.mobile-bell-slot {', 200))
+
     def test_backdrop_sits_under_the_sheet_and_over_the_bar(self):
         backdrop_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.notifications-backdrop {', 400)).group(1))
         slot_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-bell-slot {', 400)).group(1))
