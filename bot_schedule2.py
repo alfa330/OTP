@@ -642,6 +642,39 @@ shift_auction_event_buffer_ready = False
 shift_auction_event_listener_started = False
 shift_auction_event_listener_lock = threading.Lock()
 
+# Потолок одновременных SSE-потоков аукциона. Каждый поток занимает нить waitress
+# на всё время соединения, а нитей на весь портал около 96 — и колокол со своим
+# BELL_STREAM_LIMIT берёт из того же бюджета. Без потолка достаточно одной вкладки
+# на каждом мониторе живого аукциона, чтобы нити кончились и портал перестал
+# отвечать целиком: не деградация раздела, а остановка всего.
+# Сверх потолка отдаём 503 — фронт продолжает жить перечиткой лотов по кнопке.
+SHIFT_AUCTION_STREAM_LIMIT = _env_int('SHIFT_AUCTION_STREAM_LIMIT', 50, minimum=10, maximum=120)
+shift_auction_stream_lock = threading.Lock()
+shift_auction_active_streams = 0
+
+
+def _try_acquire_shift_auction_stream_slot(limit=None):
+    """Занять место под SSE-поток. False — мест нет, звать поток нельзя."""
+    global shift_auction_active_streams
+    ceiling = int(SHIFT_AUCTION_STREAM_LIMIT if limit is None else limit)
+    with shift_auction_stream_lock:
+        if shift_auction_active_streams >= ceiling:
+            return False
+        shift_auction_active_streams += 1
+        return True
+
+
+def _release_shift_auction_stream_slot():
+    """Освободить место. Вызывается на закрытии ответа, в том числе при обрыве."""
+    global shift_auction_active_streams
+    with shift_auction_stream_lock:
+        shift_auction_active_streams = max(0, shift_auction_active_streams - 1)
+
+
+def _shift_auction_active_stream_count():
+    with shift_auction_stream_lock:
+        return shift_auction_active_streams
+
 
 def _build_postgres_connection_params():
     return {
@@ -10968,6 +11001,16 @@ def api_shift_auction_test_events():
 
     _ensure_shift_auction_event_listener_started()
 
+    # Место занимаем ДО того, как отдан поток: иначе нить waitress уже занята,
+    # и считать её поздно. Освобождаем на закрытии ответа — см. call_on_close ниже.
+    if not _try_acquire_shift_auction_stream_slot():
+        logging.warning(
+            "Аукцион: SSE-поток отклонён, занято мест %d из %d",
+            _shift_auction_active_stream_count(), SHIFT_AUCTION_STREAM_LIMIT)
+        busy = jsonify({"status": "busy"})
+        busy.headers['Retry-After'] = '60'
+        return busy, 503
+
     @stream_with_context
     def generate():
         nonlocal last_event_id
@@ -11009,6 +11052,10 @@ def api_shift_auction_test_events():
     response = Response(generate(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'
+    # Единственное место, которое отдаёт слот обратно. Срабатывает и на штатном
+    # закрытии, и на обрыве соединения — без него счётчик уполз бы вверх навсегда
+    # и через несколько суток раздел перестал бы принимать кого-либо.
+    response.call_on_close(_release_shift_auction_stream_slot)
     return response
 
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
