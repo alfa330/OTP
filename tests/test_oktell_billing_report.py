@@ -29,6 +29,7 @@ FUNCTION_NAMES = [
     "_oktell_billing_range_exceeds_limit",
     "_oktell_billing_parse_date_args",
     "_oktell_billing_parse_time",
+    "_oktell_billing_line_key",
     "_oktell_billing_minute_filter",
     "_oktell_billing_sql",
     "_oktell_fetch_billing_rows",
@@ -284,7 +285,7 @@ class BillingDetailTests(unittest.TestCase):
             "id": 42,
             "occurred_at": "2026-07-15 10:20:30",
             "park": "iTaxi",
-            "line": "+77075050880",
+            "line": "7075050880",
             "driver_number": "+77071234567",
             "ivr_drop": 0,
             "queue_drop": 1,
@@ -395,12 +396,59 @@ class BuildReportTests(unittest.TestCase):
         day_rows = report["days"][0]["parks"]
         self.assertEqual(
             [(r["park"], r["line"]) for r in day_rows],
-            [("iTaxi", "+77075050880"), ("Честный", "+77003330402"), ("Честный", "+77001110200")],
+            [("iTaxi", "7075050880"), ("Честный", "7003330402"), ("Честный", "7001110200")],
         )
         # итог дня объединяет обе линии парка
         self.assertEqual(report["days"][0]["totals"]["arrived"], 63)
         parks = {(p["park"], p["line"]) for p in report["parks"]}
         self.assertEqual(len(parks), 3)
+
+    def test_same_line_in_different_formats_is_one_row(self):
+        """Oktell пишет набранную линию то с кодом страны, то без него, а иногда портит
+        значение. Раньше отчёт группировал по сырой строке, а показывал последние 10 цифр —
+        один номер давал несколько строк (задача #308). Теперь ключ один."""
+        build = self.ns["_oktell_billing_build_report"]
+        report = build([
+            self._row("2026-06-01", "iTaxi", arrived=100, served=90, line_number="+77075050880"),
+            self._row("2026-06-01", "iTaxi", arrived=40, served=35, line_number="7075050880"),
+            self._row("2026-06-01", "iTaxi", arrived=7, served=6, line_number="87075050880"),
+            self._row("2026-06-01", "Бизнес партнер", arrived=5, served=5, line_number="+77771442288"),
+            self._row("2026-06-01", "Бизнес партнер", arrived=1, served=1, line_number="Sp7771442288"),
+        ], include_line=True)
+        rows = {(r["park"], r["line"]): r for r in report["parks"]}
+        self.assertEqual(sorted(rows), [("iTaxi", "7075050880"), ("Бизнес партнер", "7771442288")])
+        self.assertEqual(rows[("iTaxi", "7075050880")]["arrived"], 147)
+        self.assertEqual(rows[("Бизнес партнер", "7771442288")]["arrived"], 6)
+        # ничего не потеряли по дороге
+        self.assertEqual(report["totals"]["arrived"], 153)
+
+    def test_unusable_line_value_does_not_become_a_fake_number(self):
+        """'7639iTaxi' раньше показывался как несуществующий номер «87639» вместо парка
+        «Такси 24» (задача #308). 10 цифр не набирается — значит линия не определена."""
+        build = self.ns["_oktell_billing_build_report"]
+        report = build([
+            self._row("2026-06-01", "Taxi24", arrived=429, served=391, line_number="+77074777639"),
+            self._row("2026-06-01", "Taxi24", arrived=19, served=18, line_number="7639iTaxi"),
+        ], include_line=True)
+        rows = {(r["park"], r["line"]): r["arrived"] for r in report["parks"]}
+        self.assertEqual(rows, {("Taxi24", "7074777639"): 429, ("Taxi24", ""): 19})
+        self.assertEqual(self.ns["_oktell_billing_line_digits"]("7639iTaxi"), "")
+        # сумма по номерам сходится с итогом парка из отчёта Oktell
+        self.assertEqual(report["totals"]["arrived"], 448)
+
+    def test_line_key_normalisation(self):
+        key = self.ns["_oktell_billing_line_key"]
+        self.assertEqual(key("+77075050880"), "7075050880")
+        self.assertEqual(key("77075050880"), "7075050880")
+        self.assertEqual(key("87075050880"), "7075050880")
+        self.assertEqual(key("7075050880"), "7075050880")
+        self.assertEqual(key("+7 (707) 505-08-80"), "7075050880")
+        self.assertEqual(key("Sp7771442288"), "7771442288")
+        # короче 10 цифр — номер не собирается, выдумывать его нельзя
+        self.assertEqual(key("7639iTaxi"), "")
+        self.assertEqual(key("6610"), "")
+        self.assertEqual(key(""), "")
+        self.assertEqual(key(None), "")
 
     def test_without_line_flag_lines_merge(self):
         build = self.ns["_oktell_billing_build_report"]

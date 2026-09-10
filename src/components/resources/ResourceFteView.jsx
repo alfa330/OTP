@@ -393,13 +393,19 @@ const BILLING_LINE_LABELS = {
   7003838240: 'iTaxi VIP',
 };
 
-const billingLineLabel = (line) => {
-  const digits = String(line || '').replace(/\D/g, '').slice(-10);
-  return BILLING_LINE_LABELS[digits] || '';
+// Канонический ключ SIP-линии — последние 10 цифр номера. Oktell пишет набранную линию
+// в разных форматах ('+77075050880' и '7075050880') и изредка портит значение ('7639iTaxi'),
+// поэтому группировка на бэкенде и подпись здесь берут ОДИН ключ (_oktell_billing_line_key
+// в bot_schedule2.py). Меньше 10 цифр — линия не определена, номер не выдумываем.
+const billingLineKey = (line) => {
+  const digits = String(line || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
 };
 
+const billingLineLabel = (line) => BILLING_LINE_LABELS[billingLineKey(line)] || '';
+
 const billingLineDisplayNumber = (line) => {
-  const digits = String(line || '').replace(/\D/g, '').slice(-10);
+  const digits = billingLineKey(line);
   return digits ? `8${digits}` : '';
 };
 
@@ -2469,7 +2475,7 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
               {mode === 'line' ? (
                 <td className="px-3 py-2.5">
                   <div className="font-medium text-slate-900">
-                    {billingLineLabel(item.line) || billingLineDisplayNumber(item.line) || `${billingParkLabel(item.park)} (без номера)`}
+                    {billingLineLabel(item.line) || billingLineDisplayNumber(item.line) || 'Номер не определён'}
                   </div>
                   <div className="text-xs text-slate-400">
                     {billingLineDisplayNumber(item.line) ? `${billingLineDisplayNumber(item.line)} · ${billingParkLabel(item.park)}` : billingParkLabel(item.park)}

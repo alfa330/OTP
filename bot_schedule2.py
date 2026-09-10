@@ -34927,6 +34927,24 @@ _OKTELL_BILLING_METRICS = (
 )
 
 
+def _oktell_billing_line_key(value):
+    """Канонический ключ SIP-линии — последние 10 цифр номера, иначе ''.
+
+    Oktell пишет набранную линию в разных форматах: до 02.06.2026 массово встречался
+    вариант без кода страны ('7075050880' рядом с '+77075050880'), изредка попадаются
+    испорченные значения ('7639iTaxi', 'Sp7771442288'). Отчёт группировал строки по СЫРОМУ
+    значению, а показывал последние 10 цифр — поэтому одна и та же линия давала несколько
+    строк («по одному номеру два разных значения»), а из '7639iTaxi' получался
+    несуществующий номер «87639». Ключ группировки и ключ показа теперь один и тот же.
+
+    Значение, из которого 10 цифр не набирается, линией не считается: такие звонки идут
+    в строку «(без номера)» своего парка. Догадываться, какая это была линия, нельзя —
+    отчёт биллинговый.
+    """
+    digits = re.sub(r'\D', '', str(value or ''))
+    return digits[-10:] if len(digits) >= 10 else ''
+
+
 def _oktell_billing_parse_time(value):
     """'HH:MM' -> минуты от полуночи (0..1439), иначе None."""
     text = str(value or '').strip()
@@ -35047,7 +35065,7 @@ def _oktell_billing_build_report(raw_rows, include_line=False):
         park = str(raw.get('taxi_park') or '').strip()
         if not report_date or not park:
             continue
-        key = (park, str(raw.get('line_number') or '').strip()) if include_line else (park, '')
+        key = (park, _oktell_billing_line_key(raw.get('line_number'))) if include_line else (park, '')
         arrived = max(0, _oktell_billing_int(raw.get('arrived')))
         served = max(0, _oktell_billing_int(raw.get('served')))
         row = {
@@ -35186,7 +35204,7 @@ def _oktell_billing_detail_row(raw):
         'id': max(0, _oktell_billing_int(raw.get('call_id'))),
         'occurred_at': str(raw.get('occurred_at') or '').strip(),
         'park': str(raw.get('taxi_park') or '').strip(),
-        'line': str(raw.get('line_number') or '').strip(),
+        'line': _oktell_billing_line_key(raw.get('line_number')),
         'driver_number': str(raw.get('driver_number') or '').strip(),
         'ivr_drop': 1 if _oktell_billing_int(raw.get('ivr_drop')) else 0,
         'queue_drop': 1 if _oktell_billing_int(raw.get('queue_drop')) else 0,
@@ -35458,8 +35476,7 @@ def _oktell_billing_park_label(park):
 
 
 def _oktell_billing_line_digits(line):
-    digits = re.sub(r'\D', '', str(line or ''))[-10:]
-    return digits
+    return _oktell_billing_line_key(line)
 
 
 def _oktell_billing_phone_display(value):
