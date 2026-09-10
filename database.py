@@ -32485,7 +32485,13 @@ class Database:
                     u.scores_table_url,
                     u.hours_table_url,
                     d.name AS direction_name,
-                    d.calculation_model_code
+                    d.calculation_model_code,
+                    -- Статус нужен сопоставлению имён из телефонии: уволенный
+                    -- тёзка делает совпадение НЕОДНОЗНАЧНЫМ, и резолвер молча
+                    -- выбрасывает звонки живого сотрудника (см.
+                    -- _status_import_build_operator_lookup(exclude_fired)).
+                    -- Колонка добавлена В КОНЕЦ: строки читают по номерам.
+                    u.status
                 FROM users u
                 LEFT JOIN directions d ON d.id = u.direction_id
                 WHERE u.role = 'operator'

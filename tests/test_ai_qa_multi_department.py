@@ -629,6 +629,9 @@ class RoutesTests(unittest.TestCase):
         scoped = {
             "api_ai_qa_review_queue", "api_ai_qa_evaluations", "api_ai_qa_stats",
             "api_ai_qa_random_call", "api_ai_qa_random_chat", "api_ai_qa_chat_overview",
+            # Справочник фильтров тоже показывает людей отдела: забыв здесь
+            # department, он предложил бы главе СЗоВ выбрать сотрудника Тез КЦ.
+            "api_ai_qa_filter_options",
         }
         functions = {
             node.name: ast.get_source_segment(self.api_source, node)
@@ -853,7 +856,32 @@ class PullCallTests(unittest.TestCase):
     def test_only_an_empty_window_moves_on_to_the_next_operator(self):
         """404 — «у этого пусто», её лечит следующий человек. 502/503 — авария
         самой АТС, и перебор превратил бы один сбой в десять запросов к ней."""
-        self.assertIn("status != 404 or explicit_operator", self.body)
+        self.assertIn("status != 404", self.body)
+        self.assertIn("explicit_operator", self.body)
+        # Авария АТС кандидатом не лечится: пропускаемых кодов ровно один.
+        self.assertIn("AI_QA_PULL_SKIPPABLE_CODES = frozenset({'no_sip'})", self.api_source)
+
+    def test_unusable_operator_is_skipped_instead_of_aborting_the_sweep(self):
+        """Сотрудник без внутреннего номера — не авария, а «этот не годится».
+
+        Пока перебор выходил на ЛЮБОМ не-404, один такой человек в случайной
+        выборке обрывал всё: кнопка отвечала «У оператора не указан внутренний
+        номер» про того, кого никто не выбирал."""
+        self.assertIn("AI_QA_PULL_SKIPPABLE_CODES", self.body)
+        self.assertIn("_ai_qa_pull_response_code(response)", self.body)
+        self.assertIn('"code": "no_sip"', self.api_source)
+
+    def test_pull_does_not_pay_for_the_hangup_side(self):
+        """Сторона завершения разговора берётся логином в кабинет Binotel и двумя
+        CSV-экспортами — на КАЖДОГО проверяемого кандидата. Разделу она не нужна
+        вовсе, а её сбор и делал «Из АТС» у Тез КЦ висящей кнопкой."""
+        self.assertIn("fetch_end_parties=False", self.body)
+        self.assertIn("fetch_end_parties=True", self.api_source)
+
+    def test_empty_window_and_exhausted_pool_are_told_apart(self):
+        """«Звонков нет» лечится периодом пошире, «все уже подтянуты» — нет."""
+        self.assertIn('"code": "pool_exhausted"', self.body)
+        self.assertIn('"code": "empty_window"', self.body)
 
     def test_explicit_operator_is_never_silently_replaced(self):
         """Назвали человека — отвечаем про НЕГО, а не подсовываем соседа."""

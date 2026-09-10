@@ -338,7 +338,12 @@ class TezBinotelRandomCallTests(unittest.TestCase):
     def test_random_call_matches_by_name_and_uses_recording_status(self):
         bot_src = _read(BOT_PATH)
         self.assertIn("def _binotel_random_call(", bot_src)
-        func = bot_src[bot_src.index("def _binotel_random_call("):][:4500]
+        # Функция целиком, а не первые N символов: срез по длине молча обрезал
+        # проверку, как только в функцию добавили комментарий, — тест краснел не
+        # от пропавшего условия, а от выросшего пояснения.
+        start = bot_src.index("def _binotel_random_call(")
+        end = bot_src.index("\n@app.route", start)
+        func = bot_src[start:end]
         # Матчинг звонка с оператором — по имени тем же резолвером, что и в ветке Oktell.
         self.assertIn("_status_import_build_operator_lookup", func)
         self.assertIn("_status_import_resolve_operator_matches", func)
@@ -400,11 +405,33 @@ class TezBinotelRandomCallTests(unittest.TestCase):
     def test_audio_endpoint_has_on_demand_fetch(self):
         bot_src = _read(BOT_PATH)
         self.assertIn("def _binotel_store_record(", bot_src)   # синхронное ядро докачки
+        # Докачка по требованию живёт в общем helper'е, а не внутри ручки: ею
+        # пользуется и раздел «ИИ-оценка», где карточка звонка из АТС открывалась
+        # раньше, чем фоновый поток успевал скачать запись.
+        helper_start = bot_src.index("def _ensure_imported_call_audio(")
+        helper_end = bot_src.index("\n@app.route('/api/imported_calls/", helper_start)
+        helper = bot_src[helper_start:helper_end]
+        self.assertIn("_binotel_store_record(", helper)
+        self.assertIn("_oktell_store_record(", helper)
+
         ep_start = bot_src.index("def get_imported_call_audio_file(")
         ep_end = bot_src.index("\n@app.route('/api/admin/shuffle'", ep_start)
         ep = bot_src[ep_start:ep_end]
-        self.assertIn("_binotel_store_record(", ep)            # докачка по требованию
+        self.assertIn("_ensure_imported_call_audio(", ep)
         self.assertIn("AUDIO_NOT_READY", ep)
+
+    def test_ai_qa_card_also_backfills_the_recording(self):
+        """Карточка раздела открывалась раньше, чем запись Binotel доезжала.
+
+        Пул подтягивается фоновым потоком без гарантии срока, а карточка шла в
+        subjects._load_imported_call и получала «у звонка нет записи» → 404.
+        На глаз это выглядело как сломанная ИИ-оценка Тез КЦ."""
+        bot_src = _read(BOT_PATH)
+        start = bot_src.index("def api_ai_qa_call(")
+        end = bot_src.index("\n@app.route('/api/ai-qa/adjudicate'", start)
+        route = bot_src[start:end]
+        self.assertIn("_ensure_imported_call_audio(call_id)", route)
+        self.assertIn("SUBJECT_IMPORTED_CALL", route)
 
 
 if __name__ == "__main__":

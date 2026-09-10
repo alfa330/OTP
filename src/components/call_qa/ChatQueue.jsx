@@ -4,6 +4,7 @@ import { MessageSquare, Loader2, AlertCircle, Users, Sparkles } from 'lucide-rea
 import { iosCard, iosBtnPrimary, IosBadge } from '../ui/ios';
 import EvaluationsList from './EvaluationsList';
 import { chatSubjectOf, SUBJECT_C2D_SNAPSHOT, SOURCE_LABEL } from './subjects';
+import { filtersToParams } from './filters';
 
 /* Вкладка «Чаты» раздела ИИ-оценки: сводка пригодности, подбор новой переписки
  * и уже оценённые.
@@ -32,7 +33,8 @@ const OverviewTile = ({ label, value, tone = 'slate', hint }) => (
     </div>
 );
 
-export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast, onOpen, department }) {
+export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast, onOpen, department,
+                                    filters = null, onResetFilters = null }) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [overview, setOverview] = useState(null);
     const [randomBusy, setRandomBusy] = useState(false);
@@ -75,8 +77,10 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
         randomRequest.current = { id: requestId, controller };
         setRandomBusy(true);
         try {
+            // Подбор идёт по тому же отбору, что и список под ним: выбрав
+            // сотрудника и период, человек ждёт переписку именно оттуда.
             const r = await axios.get(`${apiBaseUrl}/api/ai-qa/random-chat`,
-                { params: { ...(department ? { department } : {}) },
+                { params: { ...(department ? { department } : {}), ...filtersToParams(filters) },
                   headers: headers(), signal: controller.signal });
             if (requestId !== randomRequest.current.id
                 || departmentRef.current !== requestedDepartment) return;
@@ -149,7 +153,8 @@ export default function ChatQueue({ apiBaseUrl, withAccessTokenHeader, showToast
                 «Очереди ревью» вместе со звонками — второй очереди здесь не нужно. */}
             <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              onOpen={onOpen} showToast={showToast} subject={subject}
-                             department={department} />
+                             department={department}
+                             filters={filters} onResetFilters={onResetFilters} />
         </div>
     );
 }

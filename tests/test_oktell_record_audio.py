@@ -205,11 +205,18 @@ class OktellRecordAudioTests(unittest.TestCase):
 
     def test_old_imports_can_fetch_oktell_audio_on_demand(self):
         source = BOT_PATH.read_text(encoding="utf-8")
+        # Докачка вынесена в общий helper: ею пользуется и раздел «ИИ-оценка»,
+        # где карточка звонка из АТС открывалась раньше, чем запись доезжала.
+        helper_start = source.index("def _ensure_imported_call_audio(")
+        helper_end = source.index("\n@app.route('/api/imported_calls/", helper_start)
+        helper = source[helper_start:helper_end]
+        self.assertIn("_oktell_store_record(imported_id, str(ext_id))", helper)
+        self.assertIn("OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE", helper)
+
         start = source.index("def get_imported_call_audio_file(")
         end = source.index("\n@app.route('/api/admin/shuffle'", start)
         endpoint = source[start:end]
-        self.assertIn("_oktell_store_record(imported_id, str(ext_id))", endpoint)
-        self.assertIn("OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE", endpoint)
+        self.assertIn("_ensure_imported_call_audio(", endpoint)
 
         frontend = FRONTEND_PATH.read_text(encoding="utf-8")
         effect_start = frontend.index("// Для старых импортов audio_path")

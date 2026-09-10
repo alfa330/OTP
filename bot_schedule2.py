@@ -408,6 +408,9 @@ AI_QA_PULL_CALL_MAX_OPERATORS = _env_int('AI_QA_PULL_CALL_MAX_OPERATORS', 8,
 # раздел «ИИ-оценка» — 'aiqa:<id>:<атс>'. Разный маркер нужен, чтобы подтяжки
 # раздела были отличимы в пуле (у журнала это план прослушки, у раздела — нет).
 AI_QA_PULL_CALL_SOURCE = 'aiqa'
+# Отказы, означающие «этот сотрудник не годится», а не «АТС недоступна»: на них
+# перебор кандидатов в «Из АТС» берёт следующего человека, а не бросает всё.
+AI_QA_PULL_SKIPPABLE_CODES = frozenset({'no_sip'})
 
 # «Деление звонков» — раздел общий для всех отделов: норма, пул и оценки считаются
 # по НАШИМ таблицам и от телефонии не зависят, поэтому статус видит каждый отдел
@@ -5349,6 +5352,54 @@ def _ai_qa_subject_filter(value):
     return _qa_subjects.normalise_kinds(raw) or None
 
 
+def _ai_qa_list_filters():
+    """Фильтры списка из query-строки → (filters, None) либо (None, ответ 400).
+
+    Разбор один на обе ручки списков: очередь и оценки обязаны понимать фильтры
+    ОДИНАКОВО, иначе один и тот же набор в панели давал бы на двух вкладках
+    разные выборки. Права фильтры не решают — их накладывает скоуп раздела,
+    см. call_qa.api._list_filters_predicate."""
+    from call_qa.api import normalise_list_filters
+    try:
+        return normalise_list_filters({key: request.args.get(key) for key in (
+            'direction_id', 'group_id', 'operator_id', 'date_from', 'date_to',
+            'reviewed', 'score_min', 'score_max', 'q')}), None
+    except ValueError as error:
+        # Молча снятый фильтр страшнее отказа: список выглядел бы рабочим, только
+        # показывал бы чужие строки.
+        return None, (jsonify({"error": str(error)}), 400)
+
+
+@app.route('/api/ai-qa/filter-options', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_ai_qa_filter_options():
+    """Справочник для панели фильтров и диалога «Из АТС»: направления, группы, люди.
+
+    Своя ручка, а не общие /api/groups и /api/admin/users: те живут по своим
+    правам, и часть зрителей раздела (наблюдатель «Маркетинга», доступ по
+    whitelist) до них не допущена — панель фильтров у них была бы пустой при
+    полном списке оценок. Здесь тот же скоуп, что у самих списков."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _ai_qa_guard()
+    if err:
+        return err
+    try:
+        from call_qa.api import filter_options
+        department, dept_err = _ai_qa_requested_department(requester_id)
+        if dept_err:
+            return dept_err
+        subject = _ai_qa_subject_filter(request.args.get('subject'))
+        scope = _ai_qa_direction_scope(requester_id)
+        return jsonify({"status": "success", "department": department,
+                        **filter_options(allowed_direction_ids=scope,
+                                         department=department,
+                                         subject_kind=subject)}), 200
+    except Exception as error:
+        logging.exception("ai-qa filter-options failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/ai-qa/review-queue', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_review_queue():
@@ -5366,10 +5417,14 @@ def api_ai_qa_review_queue():
         limit = int(request.args.get('limit', 30))
         offset = int(request.args.get('offset', 0))
         subject = _ai_qa_subject_filter(request.args.get('subject'))
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
         items = review_queue_list(limit=limit, offset=offset, allowed_direction_ids=scope,
-                                  subject_kind=subject, department=department)
+                                  subject_kind=subject, department=department,
+                                  filters=filters)
         total = review_queue_count(allowed_direction_ids=scope, subject_kind=subject,
-                                   department=department)
+                                   department=department, filters=filters)
         return jsonify({"status": "success", "items": items, "subject": subject,
                         "department": department,
                         "total": total, "limit": limit, "offset": offset}), 200
@@ -5403,6 +5458,13 @@ def api_ai_qa_call(call_id):
         if not _ai_qa_direction_department_allowed(
                 requester_id, subject_direction_id(call_id, subject)):
             return jsonify({"error": "субъект вне вашего отдела"}), 403
+        # Запись звонка из АТС могла ещё не доехать: Binotel отдаёт ссылку не
+        # мгновенно, а качает её фоновый daemon-поток без ретраев. Раздел брал
+        # строку как есть и отвечал «у звонка нет записи» — чаще всего сразу
+        # после кнопки «Из АТС», то есть ровно тогда, когда человек ждёт оценку.
+        # Докачиваем по требованию тем же путём, что аудио-ручка журнала.
+        if subject == _qa_config.SUBJECT_IMPORTED_CALL:
+            _ensure_imported_call_audio(call_id)
         return jsonify({"status": "success",
                         "call": review_payload(call_id, refresh=refresh,
                                                subject_kind=subject)}), 200
@@ -5672,10 +5734,15 @@ def api_ai_qa_random_call():
         department, dept_err = _ai_qa_requested_department(requester_id)
         if dept_err:
             return dept_err
+        # Подбор идёт ПО ТОМУ ЖЕ отбору, что и список: кнопка, игнорирующая
+        # выставленные рядом фильтры, читается как сломанная.
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
         return jsonify({"status": "success", "department": department,
                         "call": random_call(
                             allowed_direction_ids=_ai_qa_direction_scope(requester_id),
-                            department=department)}), 200
+                            department=department, filters=filters)}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 404
     except Exception:
@@ -5701,9 +5768,15 @@ def api_ai_qa_random_chat():
         if dept_err:
             return dept_err
         scope = _ai_qa_direction_scope(requester_id)
+        # Как и у звонков: подбор идёт по отбору панели, иначе фильтр рядом с
+        # кнопкой выглядит настройкой, которую кнопка не читает.
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
         return jsonify({"status": "success", "department": department,
                         "call": random_chat_episode(allowed_direction_ids=scope,
-                                                    department=department)}), 200
+                                                    department=department,
+                                                    filters=filters)}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 404
     except Exception:
@@ -5842,6 +5915,7 @@ def api_ai_qa_pull_call():
 
         empty_window = None   # последний честный 404 «за период записей нет»
         checked = 0
+        exhausted = 0         # у скольких кандидатов звонки были, но все уже в пуле
         for operator_id in candidates:
             operator = db.get_user(id=operator_id)
             if not operator:
@@ -5887,26 +5961,51 @@ def api_ai_qa_pull_call():
                     min_duration_sec=body.get('min_duration_sec',
                                               settings.get('min_duration_sec')),
                     max_duration_sec=body.get('max_duration_sec',
-                                              settings.get('max_duration_sec')), **kwargs)
+                                              settings.get('max_duration_sec')),
+                    # Сторона завершения разговора разделу не нужна, а стоит
+                    # логина в кабинет Binotel и двух CSV-экспортов — на КАЖДОГО
+                    # проверяемого кандидата. Именно это делало «Из АТС» у Тез КЦ
+                    # висящей кнопкой.
+                    fetch_end_parties=False, **kwargs)
             else:
                 response = _oktell_random_call(**kwargs)
 
             status = response[1] if isinstance(response, tuple) else 200
-            # Следующего оператора пробуем ТОЛЬКО на 404 «у этого пусто». Отказ
-            # самой АТС (502/503) или запроса (400) от смены человека не лечится,
-            # а перебор превратил бы одну аварию в десять запросов к упавшей АТС.
-            if status != 404 or explicit_operator:
+            # Следующего оператора пробуем на 404 «у этого пусто» и на явно
+            # помеченных «этот человек не годится» отказах. Отказ самой АТС
+            # (502/503) от смены человека не лечится, а перебор превратил бы одну
+            # аварию в десять запросов к упавшей АТС.
+            #
+            # Раньше здесь стоял голый `status != 404`, и ОДИН сотрудник без
+            # внутреннего номера (400 «не указан sip_number») обрывал весь
+            # перебор — кнопка отвечала про чужого человека, которого никто не
+            # выбирал, и выглядела сломанной.
+            code = _ai_qa_pull_response_code(response)
+            if explicit_operator or (status != 404
+                                     and code not in AI_QA_PULL_SKIPPABLE_CODES):
                 return response
-            empty_window = response
+            if status == 404:
+                empty_window = response
+                if code == 'pool_exhausted':
+                    exhausted += 1
 
         if empty_window is not None:
             # У всех проверенных окно пустое. Голое «звонков нет» читалось как
             # случайный сбой — говорим, скольких проверили и за какой период,
-            # чтобы человек видел, что дело в окне, а не в кнопке.
+            # чтобы человек видел, что дело в окне, а не в кнопке. Исчерпанный пул
+            # называем своим именем: совет «задайте период пошире» там бесполезен,
+            # звонки нашлись — их уже все подтянули раньше.
+            if exhausted:
+                return jsonify({"error": f"За период {date_from} — {date_to} все найденные "
+                                         f"звонки уже подтянуты в раздел (проверено "
+                                         f"{checked} операторов). Оцените то, что уже "
+                                         f"в списке, или возьмите другой период.",
+                                "code": "pool_exhausted"}), 404
             return jsonify({"error": f"За период {date_from} — {date_to} записей нет "
                                      f"ни у одного из {checked} проверенных операторов "
                                      f"отдела. Выберите оператора вручную или задайте "
-                                     f"период пошире."}), 404
+                                     f"период пошире.",
+                            "code": "empty_window"}), 404
         return jsonify({"error": "Среди операторов отдела нет ни одного, "
                                  "доступного вам для прослушивания"}), 403
     except ValueError as error:
@@ -5914,6 +6013,15 @@ def api_ai_qa_pull_call():
     except Exception:
         logging.exception("ai-qa pull-call failed")
         return jsonify({"error": "не удалось подтянуть звонок из АТС (детали в логах)"}), 500
+
+
+def _ai_qa_pull_response_code(response):
+    """Машинный код отказа из ответа подтяжки ('' — кода нет)."""
+    payload = response[0] if isinstance(response, tuple) else response
+    try:
+        return str((payload.get_json(silent=True) or {}).get('code') or '')
+    except Exception:
+        return ''
 
 
 def _ai_qa_department_operator_candidates(requester_id, department, limit=1):
@@ -6110,10 +6218,14 @@ def api_ai_qa_evaluations():
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         subject = _ai_qa_subject_filter(request.args.get('subject'))
+        filters, filters_err = _ai_qa_list_filters()
+        if filters_err:
+            return filters_err
         items = evaluations_list(limit=limit, offset=offset, allowed_direction_ids=scope,
-                                 subject_kind=subject, department=department)
+                                 subject_kind=subject, department=department,
+                                 filters=filters)
         total = evaluations_count(allowed_direction_ids=scope, subject_kind=subject,
-                                  department=department)
+                                  department=department, filters=filters)
         return jsonify({"status": "success", "items": items, "subject": subject,
                         "department": department,
                         "total": total, "limit": limit, "offset": offset}), 200
@@ -25220,7 +25332,7 @@ def _binotel_store_record_async(imported_id, general_call_id):
 
 def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
                          date_from, date_to, min_duration_sec=None, max_duration_sec=None,
-                         count=1, source='random'):
+                         count=1, source='random', fetch_end_parties=True):
     """«Случайный звонок» для TEZ через Binotel API 4.0. Возвращает Flask-ответ.
 
     Список звонков берём по sip (internalNumber — это параметр API), но каждый
@@ -25240,7 +25352,12 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
     sip = db.get_user_sip_number(operator_id)
     if not sip:
-        return jsonify({"error": "У оператора не указан внутренний номер (sip_number)"}), 400
+        # `code` — чтобы перебор кандидатов в «Из АТС» отличил «этот человек не
+        # годится» от настоящего отказа. Без него ОДИН сотрудник без внутреннего
+        # номера обрывал весь перебор: 400 — не 404, и ручка возвращала его
+        # текст вместо того, чтобы попробовать следующего.
+        return jsonify({"error": "У оператора не указан внутренний номер (sip_number)",
+                        "code": "no_sip"}), 400
 
     try:
         start_ts, stop_ts = tez_binotel_calls._day_bounds_unix(date_from, date_to, cfg['tz'])
@@ -25281,14 +25398,30 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         return jsonify({"error": "Не удалось обратиться к Binotel, попробуйте ещё раз"}), 502
 
     # Матчинг по имени (sip делят разные операторы) — тот же резолвер, что у Oktell.
-    operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+    # Уволенных из lookup выбрасываем: звонок семидневной давности им принадлежать
+    # не может, а вот сделать имя живого сотрудника неоднозначным уволенный
+    # однофамилец мог — и тогда ВСЕ его звонки молча уходили в «не подошли».
+    operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True,
+                                                           exclude_fired=True)
+
+    skipped_reasons = {'no_name': 0, 'unknown_name': 0, 'ambiguous_name': 0, 'other_operator': 0}
 
     def _call_belongs_to_operator(call):
         name = str(call.get('employee_name') or '').strip()
         if not name:
+            skipped_reasons['no_name'] += 1
             return False
         matches = _status_import_resolve_operator_matches(name, operator_lookup)
-        return len(matches) == 1 and int(matches[0]['id']) == operator_id
+        if not matches:
+            skipped_reasons['unknown_name'] += 1
+            return False
+        if len(matches) > 1:
+            skipped_reasons['ambiguous_name'] += 1
+            return False
+        if int(matches[0]['id']) != operator_id:
+            skipped_reasons['other_operator'] += 1
+            return False
+        return True
 
     candidates = []
     skipped_other_operator = 0
@@ -25317,14 +25450,24 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             continue
         candidates.append(c)
 
+    # Логируем ВСЕГДА и с разбивкой по причине, а не только когда не осталось ни
+    # одного кандидата: «имя не найдено» и «имя неоднозначно» — это дефект
+    # справочника, который чинится, а «закреплён за другим» — норма общего sip.
+    # Пока счётчик писался лишь в тупиковой ветке, разобраться было не по чему.
+    if skipped_other_operator:
+        logging.info(
+            "binotel random_call: %d из %d звонков по sip=%s не подошли (%s); оператор_id=%s '%s'",
+            skipped_other_operator, len(calls), sip,
+            ', '.join(f"{key}={value}" for key, value in skipped_reasons.items() if value),
+            operator_id, operator_name,
+        )
     if not candidates:
-        if skipped_other_operator:
-            logging.info(
-                "binotel random_call: %d звонков по sip=%s отброшены (закреплены за другим/неизвестным "
-                "оператором по имени); оператор_id=%s '%s'",
-                skipped_other_operator, sip, operator_id, operator_name,
-            )
-        return jsonify({"error": "За выбранный период у оператора нет подходящих звонков по этим критериям"}), 404
+        return jsonify({"error": "За выбранный период у оператора нет подходящих звонков по этим критериям",
+                        "code": "empty_window",
+                        # Видно в ответе, а не только в логе: «звонки есть, но все
+                        # чужие по имени» — совсем не то же самое, что «звонков нет».
+                        "skipped": {"total": skipped_other_operator, **skipped_reasons},
+                        "fetched": len(calls)}), 404
 
     existing = db.get_imported_call_external_ids_for_operator(operator_id)
     random.shuffle(candidates)
@@ -25332,8 +25475,10 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
         candidates = candidates[:TEZ_BINOTEL_SAMPLE_CAP]
 
     # Сторона завершения разговора: публичный API её не отдаёт, берём из кабинета.
-    # Период тут не больше 7 дней, так что это два быстрых запроса.
-    end_parties = _binotel_panel_call_end_parties(date_from, date_to)
+    # Раздел «ИИ-оценка» её не спрашивает вовсе (fetch_end_parties=False): для
+    # оценки она не нужна, а стоит логина в кабинет и двух CSV-экспортов. Пустое
+    # значение не теряется — его добирает ночной backfill_binotel_call_end_parties.
+    end_parties = _binotel_panel_call_end_parties(date_from, date_to) if fetch_end_parties else {}
 
     created_list = []
     for c in candidates:
@@ -25377,7 +25522,12 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
             })
 
     if not created_list:
-        return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках"}), 404
+        # Отдельный код: «окно пустое» и «пул исчерпан» лечатся по-разному —
+        # первое расширением периода, второе оценкой того, что уже лежит в пуле.
+        # Раньше оба случая приводили к совету «задайте период пошире», который
+        # во втором случае не помогает никогда.
+        return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках",
+                        "code": "pool_exhausted"}), 404
 
     return jsonify({
         "status": "success",
@@ -25650,6 +25800,57 @@ def get_audio_file(evaluation_id):
         logging.error(f"Error generating signed audio URL: {e}")
         return jsonify({"error": f"Internal server error"}), 500
 
+def _ensure_imported_call_audio(imported_id, rec=None):
+    """Докачать запись звонка из АТС по требованию. Возвращает audio_path или None.
+
+    Фоновый поток, который качает запись сразу после подтяжки, — не гарантия:
+    Binotel отдаёт ссылку не мгновенно, поток daemon-ный и умирает вместе с
+    процессом при деплое, ретраев у него нет. Поэтому запись добирается ещё и в
+    момент, когда она реально понадобилась.
+
+    Раньше эта самолечёбка жила ТОЛЬКО внутри аудио-ручки журнала, и раздел
+    «ИИ-оценка» ею не пользовался: карточка звонка, подтянутого кнопкой «Из
+    АТС», открывалась раньше, чем поток успевал скачать mp3, и человек получал
+    «у звонка нет записи» — на глаз это выглядело как сломанная оценка Тез КЦ.
+
+    Источник определяем по хвосту notes (':binotel' / ':oktell'), а если его нет
+    (старые строки) — по отделу оператора."""
+    rec = rec or db.get_imported_call_audio(imported_id)
+    if not rec:
+        return None
+    if rec.get('audio_path'):
+        return rec['audio_path']
+    ext_id = rec.get('external_id')
+    if not ext_id:
+        return None
+    notes = str(rec.get('notes') or '')
+    if notes.endswith(':binotel'):
+        try:
+            return _binotel_store_record(imported_id, str(ext_id))
+        except Exception:
+            logging.exception("binotel on-demand record fetch failed (imported_call=%s)", imported_id)
+            return None
+    is_oktell = notes.endswith(':oktell')
+    if not is_oktell:
+        try:
+            _dept_id, dept_code = db.get_user_department(rec["operator_id"])
+            is_oktell = (str(dept_code or '').strip().lower()
+                         == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+        except Exception:
+            logging.exception("failed to resolve imported-call source (imported_call=%s)",
+                              imported_id)
+    if not is_oktell:
+        return None
+    try:
+        return _oktell_store_record(imported_id, str(ext_id))
+    except (TypeError, ValueError):
+        logging.warning("invalid Oktell conn_id on imported call %s: %s", imported_id, ext_id)
+        return None
+    except Exception:
+        logging.exception("oktell on-demand record fetch failed (imported_call=%s)", imported_id)
+        return None
+
+
 @app.route('/api/imported_calls/<int:imported_id>/audio', methods=['GET'])
 @require_api_key
 def get_imported_call_audio_file(imported_id):
@@ -25684,50 +25885,10 @@ def get_imported_call_audio_file(imported_id):
         if not _ensure_call_access_for_requester(rec["operator_id"], requester, requester_id):
             return jsonify({"error": "Unauthorized to access this audio"}), 403
 
-        audio_path = rec.get('audio_path')
+        audio_path = rec.get('audio_path') or _ensure_imported_call_audio(imported_id, rec)
         if not audio_path:
-            ext_id = rec.get('external_id')
-            notes = str(rec.get('notes') or '')
-            if ext_id:
-                if notes.endswith(':binotel'):
-                    try:
-                        audio_path = _binotel_store_record(imported_id, str(ext_id))
-                    except Exception:
-                        logging.exception("binotel on-demand record fetch failed (imported_call=%s)", imported_id)
-                        audio_path = None
-                else:
-                    is_oktell = notes.endswith(':oktell')
-                    if not is_oktell:
-                        try:
-                            _dept_id, dept_code = db.get_user_department(rec["operator_id"])
-                            is_oktell = (
-                                str(dept_code or '').strip().lower()
-                                == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE
-                            )
-                        except Exception:
-                            logging.exception(
-                                "failed to resolve imported-call source (imported_call=%s)",
-                                imported_id,
-                            )
-                    if is_oktell:
-                        try:
-                            audio_path = _oktell_store_record(imported_id, str(ext_id))
-                        except (TypeError, ValueError):
-                            logging.warning(
-                                "invalid Oktell conn_id on imported call %s: %s",
-                                imported_id,
-                                ext_id,
-                            )
-                            audio_path = None
-                        except Exception:
-                            logging.exception(
-                                "oktell on-demand record fetch failed (imported_call=%s)",
-                                imported_id,
-                            )
-                            audio_path = None
-            if not audio_path:
-                return jsonify({"error": "Запись ещё готовится или недоступна",
-                                "code": "AUDIO_NOT_READY"}), 404
+            return jsonify({"error": "Запись ещё готовится или недоступна",
+                            "code": "AUDIO_NOT_READY"}), 404
 
         path_parts = str(audio_path).split('/', 1)
         if len(path_parts) != 2:
@@ -31405,8 +31566,16 @@ def _operator_info_is_chat_manager(operator_info):
     return direction_key in ('чат менеджер', 'chat manager')
 
 
-def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_to_ids=None):
+def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_to_ids=None,
+                                         exclude_fired=False):
     """Строит lookup «имя -> оператор(ы)» для матчинга строк импорта/синка.
+
+    exclude_fired — выбросить уволенных. Нужен ТОЛЬКО там, где сопоставляются
+    СВЕЖИЕ звонки из телефонии: резолвер принимает совпадение лишь когда оно
+    единственное, поэтому уволенный однофамилец делал имя неоднозначным и молча
+    отбрасывал ВСЕ звонки живого сотрудника (у Тез КЦ это и выглядело как
+    «Binotel подтягивает через раз»). Импортам статусов за прошлые периоды
+    уволенные, наоборот, нужны — там они и работали, — поэтому по умолчанию off.
 
     restrict_to_ids — если задан, в lookup попадают ТОЛЬКО операторы с этими id.
     Синк Oktell передаёт сюда набор операторов, у которых в периоде есть хотя бы
@@ -31432,6 +31601,8 @@ def _status_import_build_operator_lookup(exclude_chat_managers=False, restrict_t
             'calculation_model_code': str(row[8] or '').strip().lower() if len(row) > 8 else ''
         }
         if exclude_chat_managers and _operator_info_is_chat_manager(operator_info):
+            continue
+        if exclude_fired and len(row) > 9 and str(row[9] or '').strip() in ('fired', 'dismissal'):
             continue
         for key in _status_import_operator_name_variants(operator_name):
             lookup.setdefault(key, [])
@@ -41149,8 +41320,22 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
 BINOTEL_EVAL_SYNC_LOCK = threading.Lock()
 
 
+_BINOTEL_PANEL_PARTIES_CACHE = {}
+_BINOTEL_PANEL_PARTIES_LOCK = threading.Lock()
+_BINOTEL_PANEL_PARTIES_TTL = 600   # секунд
+
+
 def _binotel_panel_call_end_parties(date_from, date_to):
     """{generalCallID: 'operator'|'client'|'system'} из КАБИНЕТА Binotel за период.
+
+    Ответ на период КЭШИРУЕТСЯ на 10 минут. Один вызов — это логин в кабинет плюс
+    два CSV-экспорта за весь период, а зовут его на КАЖДОГО проверяемого
+    оператора: подтяжка «Из АТС» перебирает до восьми человек подряд, и один
+    клик стоил до восьми логинов и шестнадцати экспортов. Именно это и делало
+    кнопку у Тез КЦ «висящей»: полезной работы там на секунды, а ожидания —
+    на минуты. Период у всех кандидатов одного клика общий, поэтому попадание в
+    кэш стопроцентное, а 10 минут — заведомо меньше суток, за которые сторона
+    завершения в кабинете уже не меняется.
 
     Зачем отдельный источник: публичный Binotel API 4.0 сторону завершения разговора
     не отдаёт — поле whoHungUp в ответе есть, но пустое во всех методах раздела STATS
@@ -41165,6 +41350,12 @@ def _binotel_panel_call_end_parties(date_from, date_to):
     """
     import tez_binotel_calls
     import tez_status_sync
+    cache_key = (str(date_from), str(date_to))
+    now = time.time()
+    with _BINOTEL_PANEL_PARTIES_LOCK:
+        cached = _BINOTEL_PANEL_PARTIES_CACHE.get(cache_key)
+        if cached and now - cached[0] < _BINOTEL_PANEL_PARTIES_TTL:
+            return cached[1]
     try:
         raw = tez_status_sync.fetch_call_end_parties(date_from, date_to)
     except Exception:
@@ -41178,6 +41369,14 @@ def _binotel_panel_call_end_parties(date_from, date_to):
         party = tez_binotel_calls.normalize_call_end_party(value)
         if party != 'unknown':
             parties[str(call_id)] = party
+    with _BINOTEL_PANEL_PARTIES_LOCK:
+        # Кэшируем только удачный ответ: пустой словарь при сбое сети запер бы
+        # сторону завершения на десять минут вперёд для всех.
+        _BINOTEL_PANEL_PARTIES_CACHE[cache_key] = (now, parties)
+        if len(_BINOTEL_PANEL_PARTIES_CACHE) > 32:
+            oldest = min(_BINOTEL_PANEL_PARTIES_CACHE,
+                         key=lambda k: _BINOTEL_PANEL_PARTIES_CACHE[k][0])
+            _BINOTEL_PANEL_PARTIES_CACHE.pop(oldest, None)
     return parties
 
 

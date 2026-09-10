@@ -77,7 +77,8 @@
     "test:cdr-touches": "node --test tests/cdr_touch_meta.test.mjs",
     "test:olx-leads": "node --test tests/olx_leads_view.test.mjs",
     "test:driver-mailings": "node --test tests/driver_mailings_text.test.mjs",
-    "test:pwa-install": "node --test tests/pwa_install_offer.test.mjs"
+    "test:pwa-install": "node --test tests/pwa_install_offer.test.mjs",
+    "test:ai-qa-filters": "node --test tests/ai_qa_filters.test.mjs"
   },
   "dependencies": {
     "@tiptap/extension-highlight": "^3.29.2",

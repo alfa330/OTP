@@ -6,6 +6,7 @@ import logging
 import tempfile
 import threading
 import uuid
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from psycopg2.extras import Json
 
@@ -266,8 +267,197 @@ def _subject_kind_predicate(subject_kind, column: str = "rc.subject_kind"):
     return f" AND {column} = ANY(%s)", (kinds,)
 
 
+# ── Фильтры списков: группа, сотрудник, направление, период, балл ─────────────
+#
+# ПРАВА фильтры не решают и решать не должны: предикат скоупа
+# (_direction_predicate) стоит в том же WHERE, и любой фильтр добавляется к нему
+# через AND, то есть может только СУЗИТЬ уже разрешённое. Подставленный чужой
+# operator_id или group_id поэтому не показывает ничего, а не чужие строки.
+# Исключение одно — направление: его нужно свести к СЕМЬЕ (живая строка шкалы +
+# её архивные версии), иначе фильтр по направлению терял бы оценки, сделанные по
+# прежней редакции шкалы, — ровно так же, как это делает _scoped_qa_family.
+
+# id сотрудника у любого из пяти видов субъекта. У звонка из АТС оператор может
+# быть не привязан к учётной записи — от него осталось только имя (см.
+# _SUBJECT_OPERATOR). Фильтр по человеку такие строки отсекает, и это верно:
+# выбрать в списке можно лишь того, кто заведён в портале.
+_SUBJECT_OPERATOR_ID = ("COALESCE(c.operator_id, e.operator_user_id, ic.operator_id,"
+                        " cs.operator_id, ce.operator_user_id)")
+
+# День субъекта — РОВНО тот, что стоит в подписи строки (_SUBJECT_DATETIME).
+# Приведения разные не по небрежности: calls.created_at — naive timestamp и
+# показывается как есть, у остальных источников время в UTC и переводится в
+# Алматы. Считай фильтр время иначе, чем подпись, — человек выбирал бы «12 мая»
+# и не находил карточку, на которой написано «12.05».
+_SUBJECT_DAY = ("COALESCE(c.created_at::date,"
+                " (e.ended_at AT TIME ZONE 'Asia/Almaty')::date,"
+                " (ic.datetime_raw AT TIME ZONE 'Asia/Almaty')::date,"
+                " cs.day,"
+                " (ce.ended_at AT TIME ZONE 'Asia/Almaty')::date)")
+
+# Балл ИИ лежит в JSON строкой. Проверка регуляркой — не украшение: у части
+# карточек ai_score отсутствует или записан как 'null', и голый ::numeric ронял
+# бы ВЕСЬ запрос ошибкой приведения, а не отсеивал одну строку.
+_SUBJECT_AI_SCORE = (r"(CASE WHEN rc.payload->>'ai_score' ~ '^-?[0-9]+(\.[0-9]+)?$'"
+                     r" THEN (rc.payload->>'ai_score')::numeric END)")
+
+# Колонки group_id у сотрудника нет — есть история членств
+# (group_operator_memberships), и «группа» всегда означает «на какую дату».
+#
+# В СПИСКАХ берём членство, пересекающее МЕСЯЦ разговора, — та же мерка, что у
+# часов (database.MEMBERSHIP_MONTH_OVERLAP_SQL) и у обучений. «Текущая группа»
+# была бы проще, но переезд одного человека переписывал бы прошлое: майские
+# звонки уехали бы в июньскую группу, и два отчёта за май перестали бы
+# сходиться. Месяц, а не день, — потому что дырка в членстве (человека завели в
+# группу с опозданием) иначе выбрасывает его звонки из ЛЮБОЙ группы.
+_MEMBERSHIP_OVERLAPS_MONTH_OF = (
+    "gom.start_date <= (date_trunc('month', {day}) + INTERVAL '1 month - 1 day')::date"
+    " AND (gom.end_date IS NULL OR gom.end_date >= date_trunc('month', {day})::date)")
+
+# А вот в СПРАВОЧНИКЕ фильтров рядом с фамилией стоит группа на сегодня: там это
+# ответ на вопрос «кто где сейчас», а не разбор прошлого периода.
+_MEMBERSHIP_TODAY = ("gom.start_date <= CURRENT_DATE"
+                     " AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)")
+
+
+def normalise_list_filters(raw: dict | None) -> dict:
+    """Фильтры списков раздела из запроса → проверенные значения нужных типов.
+
+    Неверное значение — ValueError (ручка отвечает 400), а не «фильтр молча
+    снят»: список без обещанного фильтра выглядит рабочим, только показывает
+    чужие строки, и человек читает это как потерянные оценки."""
+    raw = raw or {}
+    out: dict = {}
+    for key in ('direction_id', 'group_id', 'operator_id'):
+        value = raw.get(key)
+        if value in (None, '', 'all'):
+            continue
+        # «Без группы» — не пустой фильтр, а отдельная корзина. Операторов без
+        # действующего членства на проде много, а у звонка из АТС учётной записи
+        # может не быть вовсе (осталось только имя из телефонии): без этой
+        # корзины такие строки просто пропадали бы из любого разреза по группам,
+        # и сумма по группам не сходилась бы с общим числом оценок.
+        if key == 'group_id' and str(value).strip().lower() == 'none':
+            out[key] = 'none'
+            continue
+        try:
+            out[key] = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key}: ожидается число")
+    for key in ('date_from', 'date_to'):
+        value = str(raw.get(key) or '').strip()
+        if not value:
+            continue
+        try:
+            out[key] = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"{key}: ожидается дата в формате ГГГГ-ММ-ДД")
+    if out.get('date_from') and out.get('date_to') and out['date_from'] > out['date_to']:
+        # Перевёрнутый диапазон — опечатка, а не «ничего не нашлось»: пустой
+        # список человек читает как «за этот период оценок нет».
+        raise ValueError("начало периода позже его конца")
+    reviewed = str(raw.get('reviewed') or '').strip().lower()
+    if reviewed in ('yes', 'no'):
+        out['reviewed'] = reviewed
+    elif reviewed not in ('', 'all', 'any'):
+        raise ValueError("reviewed: допустимы yes, no или пусто")
+    for key in ('score_min', 'score_max'):
+        value = raw.get(key)
+        if value in (None, ''):
+            continue
+        try:
+            out[key] = max(0, min(100, int(float(value))))
+        except (TypeError, ValueError):
+            raise ValueError(f"{key}: ожидается число от 0 до 100")
+    if out.get('score_min') is not None and out.get('score_max') is not None \
+            and out['score_min'] > out['score_max']:
+        out['score_min'], out['score_max'] = out['score_max'], out['score_min']
+    query = str(raw.get('q') or '').strip()
+    if query:
+        out['q'] = query[:120]
+    return out
+
+
+def _like_pattern(text: str) -> str:
+    """Подстрока для ILIKE: собственные % и _ человека — это буквы, а не шаблон."""
+    escaped = str(text).replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
+    return f"%{escaped}%"
+
+
+def _list_filters_predicate(cur, filters, allowed_direction_ids=None, department=None):
+    """(sql, params) для фильтров списка; (None, ()) — «показывать нечего».
+
+    Соглашение о (None, ()) то же, что у _direction_predicate: вызывающий отдаёт
+    пустой список и ноль, не выполняя запрос."""
+    filters = filters or {}
+    if not filters:
+        return "", ()
+    sql = ""
+    params: list = []
+
+    direction_id = filters.get('direction_id')
+    if direction_id is not None:
+        allowed = set(_scoped_qa_family(cur, allowed_direction_ids, department=department))
+        family = [i for i in _scope_family(cur, [direction_id]) if i in allowed]
+        if not family:
+            return None, ()
+        sql += f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
+        params.append(family)
+
+    group_id = filters.get('group_id')
+    if group_id is not None:
+        membership = _MEMBERSHIP_OVERLAPS_MONTH_OF.format(day=_SUBJECT_DAY)
+        if group_id == 'none':
+            # NOT EXISTS верно и для строки БЕЗ учётной записи (звонок из АТС, у
+            # которого осталось одно имя): сравнение с NULL не выполняется ни
+            # для одного членства, и такая строка попадает сюда — куда и должна.
+            sql += (" AND NOT EXISTS (SELECT 1 FROM group_operator_memberships gom"
+                    f" WHERE gom.operator_id = {_SUBJECT_OPERATOR_ID}"
+                    f" AND {membership})")
+        else:
+            sql += (" AND EXISTS (SELECT 1 FROM group_operator_memberships gom"
+                    f" WHERE gom.operator_id = {_SUBJECT_OPERATOR_ID}"
+                    f" AND gom.group_id = %s AND {membership})")
+            params.append(int(group_id))
+
+    operator_id = filters.get('operator_id')
+    if operator_id is not None:
+        sql += f" AND {_SUBJECT_OPERATOR_ID} = %s"
+        params.append(int(operator_id))
+
+    if filters.get('date_from') is not None:
+        sql += f" AND {_SUBJECT_DAY} >= %s"
+        params.append(filters['date_from'])
+    if filters.get('date_to') is not None:
+        sql += f" AND {_SUBJECT_DAY} <= %s"
+        params.append(filters['date_to'])
+
+    reviewed = filters.get('reviewed')
+    if reviewed == 'yes':
+        sql += f" AND {_SUBJECT_HUMAN_SCORE} IS NOT NULL"
+    elif reviewed == 'no':
+        sql += f" AND {_SUBJECT_HUMAN_SCORE} IS NULL"
+
+    if filters.get('score_min') is not None:
+        sql += f" AND {_SUBJECT_AI_SCORE} >= %s"
+        params.append(int(filters['score_min']))
+    if filters.get('score_max') is not None:
+        sql += f" AND {_SUBJECT_AI_SCORE} <= %s"
+        params.append(int(filters['score_max']))
+
+    query = filters.get('q')
+    if query:
+        # Ищем и по имени сотрудника, и по номеру субъекта: в разделе на карточку
+        # ссылаются именно номером («посмотри звонок 40812»), и поиск, который его
+        # не находит, человек считает сломанным.
+        sql += f" AND ({_SUBJECT_OPERATOR} ILIKE %s OR rc.call_id::text = %s)"
+        params.extend([_like_pattern(query), query])
+
+    return sql, tuple(params)
+
+
 def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=None,
-                      subject_kind=None, department=None) -> list[dict]:
+                      subject_kind=None, department=None, filters=None) -> list[dict]:
     """Очередь ревью: ИИ-оценённые звонки (текущий тег модели), которые человек ещё не
     проверял. Причины считаются из сохранённой карточки; сортировка — сначала критичное,
     внутри — свежее; постранично (limit/offset) поверх глобального порядка. stale=True —
@@ -287,6 +477,11 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
             cur.close(); conn.close()
             return []
         kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+        filter_sql, filter_params = _list_filters_predicate(
+            cur, filters, allowed_direction_ids, department)
+        if filter_sql is None:
+            cur.close(); conn.close()
+            return []
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR}, {_SUBJECT_DATETIME}, {_SUBJECT_HUMAN_SCORE},
                       rc.payload->'criteria', rc.payload->'asr_mean_conf', rc.created_at,
@@ -307,9 +502,10 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
                       LIMIT 1
                  ) run ON true
                 WHERE rc.model = %s AND m.review_outcome IS NULL"""
-            + _SUBJECT_EXISTS + scope_sql + kind_sql + """
+            + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + """
                 ORDER BY rc.created_at DESC LIMIT %s""",
-            (config.CLAUDE_MODEL, *scope_params, *kind_params, _QUEUE_FETCH_CAP),
+            (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params,
+             _QUEUE_FETCH_CAP),
         )
         rows = cur.fetchall(); cur.close(); conn.close()
         prio = review_queue.REASON_PRIORITY
@@ -337,6 +533,10 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
         return items
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
+            # Режим совместимости отдаёт «последние звонки» и фильтров не знает
+            # вовсе (_recent_calls_fallback игнорирует даже вид субъекта). Это
+            # аварийный режим до миграции меты: показать список без обещанной
+            # фильтрации честнее, чем пустой раздел, но полагаться на него нельзя.
             logging.warning("ai-qa: очередь работает в режиме совместимости без evaluation meta")
             return _recent_calls_fallback(limit, allowed_direction_ids, department)
         logging.exception("ai-qa: очередь ревью недоступна")
@@ -349,8 +549,12 @@ def review_queue_list(limit: int = 30, offset: int = 0, allowed_direction_ids=No
                 pass
 
 
-def review_queue_count(allowed_direction_ids=None, subject_kind=None, department=None) -> int:
-    """Сколько всего субъектов в очереди ревью (не проверены человеком) — для пагинации."""
+def review_queue_count(allowed_direction_ids=None, subject_kind=None, department=None,
+                       filters=None) -> int:
+    """Сколько всего субъектов в очереди ревью (не проверены человеком) — для пагинации.
+
+    Фильтры обязаны совпадать со списком до последнего условия: разошедшийся
+    счётчик обещает «Показать ещё», после которого не приходит ни строки."""
     conn = None
     try:
         conn = config.connect_ro()
@@ -361,16 +565,25 @@ def review_queue_count(allowed_direction_ids=None, subject_kind=None, department
             cur.close(); conn.close()
             return 0
         kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+        filter_sql, filter_params = _list_filters_predicate(
+            cur, filters, allowed_direction_ids, department)
+        if filter_sql is None:
+            cur.close(); conn.close()
+            return 0
         cur.execute(
             """SELECT COUNT(*) FROM ai_review_cache rc""" + _SUBJECT_JOIN + """
                  LEFT JOIN ai_evaluation_meta m
                         ON m.subject_kind = rc.subject_kind AND m.call_id = rc.call_id
                            AND m.model = rc.model
                 WHERE rc.model = %s AND m.review_outcome IS NULL"""
-            + _SUBJECT_EXISTS + scope_sql + kind_sql,
-            (config.CLAUDE_MODEL, *scope_params, *kind_params))
+            + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql,
+            (config.CLAUDE_MODEL, *scope_params, *kind_params, *filter_params))
         n = cur.fetchone()[0]; cur.close(); conn.close()
-        return int(n or 0)
+        # Потолок тот же, что у списка: дальше _QUEUE_FETCH_CAP очередь физически
+        # не листается (сортировка по критичности делается в Python над этой
+        # выборкой). Пока счётчик считал без потолка, «Показать ещё (осталось
+        # 2 400)» вело в пустоту — кнопка нажималась и не приносила ни строки.
+        return min(int(n or 0), _QUEUE_FETCH_CAP)
     except Exception as exc:
         if runtime_store.is_schema_compat_error(exc):
             return 0
@@ -3256,7 +3469,55 @@ def refine_adjudication(body: dict) -> dict:
         excerpt=body.get("excerpt"))
 
 
-def random_call(allowed_direction_ids=None, department=None) -> dict:
+def _pick_filters_predicate(filters, *, operator_col, day_expr, direction_expr):
+    """(sql, params) для ПОДБОРА звонка/переписки с учётом отбора панели.
+
+    Отдельно от _list_filters_predicate: там один общий блок джойнов на все пять
+    видов субъекта, а здесь у каждого пула свои таблицы и свои имена колонок.
+    Общего кода между ними — одни только правила, и они продублированы бы всё
+    равно; зато так подбор нельзя случайно оставить без фильтра, забыв колонку.
+
+    Берём ровно те оси, которые СУЖАЮТ КРУГ РАЗГОВОРОВ: сотрудник, группа,
+    направление и период. Балл ИИ и «есть ли оценка человека» сюда не идут:
+    подбор ищет звонок, которого ИИ ещё не видел, — балла у него нет, а пул
+    выбирается по наличию человеческой оценки самой логикой подбора. Поиск по
+    имени тоже не идёт: сотрудника здесь выбирают селектором."""
+    filters = filters or {}
+    sql = ""
+    params: list = []
+    operator_id = filters.get('operator_id')
+    if operator_id is not None:
+        sql += f" AND {operator_col} = %s"
+        params.append(int(operator_id))
+    group_id = filters.get('group_id')
+    if group_id is not None:
+        membership = _MEMBERSHIP_OVERLAPS_MONTH_OF.format(day=day_expr)
+        if group_id == 'none':
+            sql += (" AND NOT EXISTS (SELECT 1 FROM group_operator_memberships gom"
+                    f" WHERE gom.operator_id = {operator_col} AND {membership})")
+        else:
+            sql += (" AND EXISTS (SELECT 1 FROM group_operator_memberships gom"
+                    f" WHERE gom.operator_id = {operator_col}"
+                    f" AND gom.group_id = %s AND {membership})")
+            params.append(int(group_id))
+    direction_id = filters.get('direction_id')
+    if direction_id is not None:
+        # Сравниваем с КАНОНИЧЕСКИМ id (direction_expr — уже
+        # COALESCE(d.canonical_id, d.id)): у направления бывают архивные версии
+        # шкалы, и сравнение с сырым direction_id теряло бы разговоры, которые
+        # оценивались по прежней редакции.
+        sql += f" AND {direction_expr} = %s"
+        params.append(int(direction_id))
+    if filters.get('date_from') is not None:
+        sql += f" AND {day_expr} >= %s"
+        params.append(filters['date_from'])
+    if filters.get('date_to') is not None:
+        sql += f" AND {day_expr} <= %s"
+        params.append(filters['date_to'])
+    return sql, tuple(params)
+
+
+def random_call(allowed_direction_ids=None, department=None, filters=None) -> dict:
     """Случайный звонок с записью — для оценки ИИ.
 
     Два пула, в этом порядке:
@@ -3302,12 +3563,20 @@ def random_call(allowed_direction_ids=None, department=None) -> dict:
                                             AND COALESCE(c.is_draft, FALSE) = FALSE)"""
         with_audio = " AND ic.audio_path IS NOT NULL AND ic.audio_path <> ''"
         without_audio = " AND (ic.audio_path IS NULL OR ic.audio_path = '')"
+        # Отбор панели сужает и подбор: кнопка «Оценить случайный звонок» при
+        # выбранном сотруднике обязана брать ЕГО звонок, иначе панель фильтров
+        # рядом с кнопкой выглядит как настройка, которую кнопка игнорирует.
+        imported_pick, imported_pick_params = _pick_filters_predicate(
+            filters, operator_col="ic.operator_id",
+            day_expr="(ic.datetime_raw AT TIME ZONE 'Asia/Almaty')::date",
+            direction_expr="COALESCE(d.canonical_id, d.id)")
+        imported = imported + imported_pick
         cur.execute(imported + with_audio + """ AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                                     WHERE rc.subject_kind = 'imported_call'
                                                       AND rc.call_id = ic.id
                                                       AND rc.model = %s)
                                    ORDER BY random() LIMIT 1""",
-                    (id_family, config.CLAUDE_MODEL))
+                    (id_family, *imported_pick_params, config.CLAUDE_MODEL))
         row = cur.fetchone()
         if row:
             return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
@@ -3323,6 +3592,10 @@ def random_call(allowed_direction_ids=None, department=None) -> dict:
                    WHERE c.direction_id = ANY(%s) AND c.audio_path IS NOT NULL
                      AND c.audio_path <> ''
                      AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
+        journal_pick, journal_pick_params = _pick_filters_predicate(
+            filters, operator_col="c.operator_id", day_expr="c.created_at::date",
+            direction_expr="COALESCE(d.canonical_id, d.id)")
+        base = base + journal_pick
         # Оценённый ИИ ищем по ОБОИМ видам субъекта: тот же физический звонок
         # мог быть оценён как imported_call (до появления оценки в журнале), и
         # без второго условия он вернулся бы вторым субъектом — две оценки одного
@@ -3335,10 +3608,12 @@ def random_call(allowed_direction_ids=None, department=None) -> dict:
                                                   AND rc2.call_id = c.imported_call_id
                                                   AND rc2.model = %s)
                                ORDER BY random() LIMIT 1""",
-                    (id_family, config.CLAUDE_MODEL, config.CLAUDE_MODEL))
+                    (id_family, *journal_pick_params,
+                     config.CLAUDE_MODEL, config.CLAUDE_MODEL))
         row = cur.fetchone()
         if not row:
-            cur.execute(base + " ORDER BY random() LIMIT 1", (id_family,))
+            cur.execute(base + " ORDER BY random() LIMIT 1",
+                        (id_family, *journal_pick_params))
             row = cur.fetchone()
         if row:
             return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
@@ -3348,16 +3623,22 @@ def random_call(allowed_direction_ids=None, department=None) -> dict:
         # Оба пула пусты — но у неоценённого пула ещё оставались строки БЕЗ
         # записи, и сказать про них честно полезнее, чем «звонков нет».
         cur.execute(imported + without_audio + " ORDER BY random() LIMIT 1",
-                    (id_family,))
+                    (id_family, *imported_pick_params))
         if cur.fetchone():
             raise ValueError("у подтянутых звонков ещё нет аудиозаписи — "
                              "она докачивается, попробуйте позже")
+        # С отбором «пусто» значит другое: звонки есть, но не под этот фильтр.
+        # Общий текст отправлял бы человека искать поломку вместо того, чтобы
+        # снять лишний фильтр.
+        if filters:
+            raise ValueError("под выбранные фильтры нет звонков, пригодных для оценки — "
+                             "снимите часть фильтров или расширьте период")
         raise ValueError("нет звонков с записью, пригодных для оценки")
     finally:
         cur.close(); conn.close()
 
 
-def random_chat_episode(allowed_direction_ids=None, department=None) -> dict:
+def random_chat_episode(allowed_direction_ids=None, department=None, filters=None) -> dict:
     """Случайная переписка, пригодная для оценки, из источника выбранного отдела.
 
     Источник у отдела ровно один (config.CHAT_SUBJECT_BY_DEPARTMENT): ОП —
@@ -3385,6 +3666,15 @@ def random_chat_episode(allowed_direction_ids=None, department=None) -> dict:
             if not family:
                 raise ValueError("чаты этого отдела вне ваших направлений")
         base, params = _CHAT_CANDIDATE_SQL[subject_kind](family)
+        # Подбор идёт по тому же отбору, что и список: сотрудник и направление у
+        # всех трёх источников берутся одинаково (общий JOIN users/directions),
+        # день — из карты, потому что у заявки Chat2Desk это дата, а у эпизодов
+        # момент завершения.
+        pick_sql, pick_params = _pick_filters_predicate(
+            filters, operator_col="u.id",
+            day_expr=_CHAT_CANDIDATE_DAY[subject_kind],
+            direction_expr="COALESCE(d.canonical_id, d.id)")
+        base, params = base + pick_sql, (*params, *pick_params)
         cur.execute(base + f""" AND NOT EXISTS (SELECT 1 FROM ai_review_cache rc
                                                  WHERE rc.subject_kind = '{subject_kind}'
                                                    AND rc.call_id = t.id AND rc.model = %s)
@@ -3397,6 +3687,9 @@ def random_chat_episode(allowed_direction_ids=None, department=None) -> dict:
     finally:
         cur.close(); conn.close()
     if not row:
+        if filters:
+            raise ValueError("под выбранные фильтры нет переписок, пригодных для оценки — "
+                             "снимите часть фильтров или расширьте период")
         raise ValueError("нет переписок, пригодных для оценки "
                          "(нужна работа одного оператора и достаточная длина)")
     return {"id": row[0], "direction": row[1], "operator": row[2] or "—",
@@ -3495,6 +3788,17 @@ _CHAT_CANDIDATE_SQL = {
     config.SUBJECT_WZ_EPISODE: _wz_candidates,
     config.SUBJECT_CA_EPISODE: _ca_candidates,
     config.SUBJECT_C2D_SNAPSHOT: _c2d_candidates,
+}
+
+# Дата переписки у каждого источника своя (у заявки Chat2Desk это день, у
+# эпизодов — момент завершения в UTC). Сотрудник и направление, наоборот, у всех
+# трёх берутся одинаково — `u`/`d` из общего JOIN, — поэтому в отдельной карте
+# только день. Каждый вид субъекта обязан быть здесь: забытый остался бы без
+# фильтра по периоду молча, показывая «не подошло» на пустом месте.
+_CHAT_CANDIDATE_DAY = {
+    config.SUBJECT_WZ_EPISODE: "(t.ended_at AT TIME ZONE 'Asia/Almaty')::date",
+    config.SUBJECT_CA_EPISODE: "(t.ended_at AT TIME ZONE 'Asia/Almaty')::date",
+    config.SUBJECT_C2D_SNAPSHOT: "t.day",
 }
 
 
@@ -3652,8 +3956,133 @@ def _c2d_eligibility_counts(cur, family) -> dict:
             "evaluated": int(row[4] or 0)}
 
 
-def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=None) -> int:
-    """Сколько всего звонков оценено ИИ (в рамках доступных направлений) — для пагинации."""
+def filter_options(allowed_direction_ids=None, department=None, subject_kind=None) -> dict:
+    """Что предложить в фильтрах раздела: направления, группы и сотрудники.
+
+    Один справочник на два места — панель фильтров и диалог «Из АТС», — и это
+    намеренно. Общие ручки портала (/api/groups, /api/admin/users) живут по
+    своим правам: часть зрителей раздела (наблюдатель «Маркетинга», whitelist по
+    id, СВ) до них не допущена вовсе, и панель фильтров у них была бы пустой при
+    полном списке оценок. Здесь тот же скоуп, что у самих списков, — направления
+    зрителя ∩ выбранный отдел, — поэтому предложить фильтр по чужому человеку
+    ручка физически не может.
+
+    Рядом с каждым сотрудником стоит число его оценок: выпадающий список из
+    полусотни фамилий без него — это список, в котором не видно, кого вообще
+    есть смысл выбирать. По той же причине уволенные показываются, только если
+    оценки у них остались: иначе фильтр по человеку молча давал бы пусто.
+
+    `can_pull` повторяет условия _ai_qa_department_operator_candidates: у
+    диалога подтяжки и у случайного перебора должен быть ОДИН круг людей, иначе
+    выбранный руками человек получал бы отказ там, где кнопка «наугад» работает.
+    """
+    conn = None
+    try:
+        conn = config.connect_ro()
+        cur = conn.cursor(); cur.execute("SET client_encoding TO 'UTF8'")
+        family = _scoped_qa_family(cur, allowed_direction_ids, department=department)
+        if not family:
+            cur.close(); conn.close()
+            return {"directions": [], "groups": [], "operators": []}
+
+        cur.execute(
+            """SELECT COALESCE(d.canonical_id, d.id), MIN(d.name)
+                 FROM directions d
+                WHERE d.id = ANY(%s)
+                GROUP BY COALESCE(d.canonical_id, d.id)
+                ORDER BY MIN(d.name)""", (family,))
+        directions = [{"id": int(r[0]), "name": r[1] or "—"} for r in cur.fetchall()]
+
+        cur.execute(
+            f"""SELECT u.id, u.name, COALESCE(d.canonical_id, d.id), d.name,
+                       g.id, g.name, COALESCE(u.status, ''), COALESCE(u.role, ''),
+                       (COALESCE(btrim(u.sip_number), '') <> ''),
+                       COALESCE(d.calculation_model_code, '')
+                  FROM users u
+                  JOIN directions d ON d.id = u.direction_id
+                  LEFT JOIN LATERAL (
+                      SELECT gr.id, gr.name
+                        FROM group_operator_memberships gom
+                        JOIN groups gr ON gr.id = gom.group_id
+                       WHERE gom.operator_id = u.id AND {_MEMBERSHIP_TODAY}
+                       ORDER BY gom.start_date DESC, gom.id DESC
+                       LIMIT 1
+                  ) g ON TRUE
+                 WHERE COALESCE(d.canonical_id, d.id) = ANY(%s)
+                 ORDER BY u.name""", (family,))
+        people = cur.fetchall()
+
+        # Сколько оценок у каждого — по той же последней оценке субъекта, что
+        # показывает список, и в том же скоупе. Вид субъекта берём из вкладки:
+        # на вкладке звонков число чатов рядом с фамилией только сбивало бы.
+        scope_sql, scope_params = _direction_predicate(
+            cur, allowed_direction_ids, department, _SUBJECT_DIRECTION)
+        counts: dict[int, int] = {}
+        if scope_sql is not None:
+            kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+            cur.execute(
+                f"""SELECT {_SUBJECT_OPERATOR_ID} AS op_id, COUNT(*)
+                      FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                                   rc.subject_kind, rc.call_id, rc.created_at, rc.payload
+                              FROM ai_review_cache rc
+                             ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
+                + _SUBJECT_JOIN + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql
+                + f" GROUP BY {_SUBJECT_OPERATOR_ID}",
+                (*scope_params, *kind_params))
+            counts = {int(r[0]): int(r[1]) for r in cur.fetchall() if r[0] is not None}
+        cur.close(); conn.close()
+
+        operators = []
+        for row in people:
+            user_id = int(row[0])
+            fired = row[6] in ('fired', 'dismissal')
+            evaluations = counts.get(user_id, 0)
+            if fired and not evaluations:
+                continue
+            operators.append({
+                "id": user_id, "name": row[1] or "—",
+                "direction_id": int(row[2]) if row[2] is not None else None,
+                "direction": row[3] or "—",
+                "group_id": int(row[4]) if row[4] is not None else None,
+                "group": row[5],
+                "evaluations": evaluations,
+                "fired": fired,
+                "has_sip": bool(row[8]),
+                "can_pull": (not fired and row[7] == 'operator'
+                             and row[6] in ('working', '') and row[9] != 'chat_manager'),
+            })
+
+        groups: dict[int, dict] = {}
+        for person in operators:
+            group_id = person["group_id"]
+            if group_id is None:
+                continue
+            entry = groups.setdefault(group_id, {"id": group_id, "name": person["group"] or "—",
+                                                 "operators": 0, "evaluations": 0})
+            entry["operators"] += 1
+            entry["evaluations"] += person["evaluations"]
+        return {"directions": directions,
+                "groups": sorted(groups.values(), key=lambda g: g["name"]),
+                "operators": operators}
+    except Exception:
+        logging.exception("ai-qa: справочник фильтров недоступен")
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=None,
+                      filters=None) -> int:
+    """Сколько всего звонков оценено ИИ (в рамках доступных направлений) — для пагинации.
+
+    Считает по ТОЙ ЖЕ последней оценке субъекта, что показывает список
+    (DISTINCT ON вместо простого DISTINCT). Пока здесь стоял DISTINCT по всем
+    строкам кэша, фильтр по баллу мог совпасть со СТАРОЙ оценкой звонка и
+    прибавить к счётчику строку, которой в списке нет."""
     conn = None
     try:
         conn = config.connect_ro()
@@ -3664,12 +4093,21 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=
             cur.close(); conn.close()
             return 0
         kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+        filter_sql, filter_params = _list_filters_predicate(
+            cur, filters, allowed_direction_ids, department)
+        if filter_sql is None:
+            cur.close(); conn.close()
+            return 0
         cur.execute(
             """SELECT COUNT(*) FROM (
-                   SELECT DISTINCT rc.subject_kind, rc.call_id
-                     FROM ai_review_cache rc""" + _SUBJECT_JOIN
-            + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + ") t",
-            (*scope_params, *kind_params))
+                   SELECT rc.subject_kind, rc.call_id
+                     FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
+                                  rc.subject_kind, rc.call_id, rc.created_at, rc.payload
+                             FROM ai_review_cache rc
+                            ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
+            + _SUBJECT_JOIN
+            + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + filter_sql + ") t",
+            (*scope_params, *kind_params, *filter_params))
         n = cur.fetchone()[0]; cur.close(); conn.close()
         return int(n or 0)
     except Exception:
@@ -3684,7 +4122,7 @@ def evaluations_count(allowed_direction_ids=None, subject_kind=None, department=
 
 
 def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
-                     subject_kind=None, department=None) -> list[dict]:
+                     subject_kind=None, department=None, filters=None) -> list[dict]:
     """Уже оценённые ИИ звонки (из кэша) — реальные данные, пусто пока ничего не оценено.
     Один звонок = одна строка (последняя оценка), иначе звонки, оценённые несколькими
     версиями модели, дублировались в списке. Сортировка — сначала новые; поддержана
@@ -3701,22 +4139,34 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
             cur.close(); conn.close()
             return []
         kind_sql, kind_params = _subject_kind_predicate(subject_kind)
+        filter_sql, filter_params = _list_filters_predicate(
+            cur, filters, allowed_direction_ids, department)
+        if filter_sql is None:
+            cur.close(); conn.close()
+            return []
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
                       TO_CHAR(rc.created_at,'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},
-                      rc.payload->>'ai_score' AS ai, rc.subject_kind
+                      rc.payload->>'ai_score' AS ai, rc.subject_kind,
+                      {_SUBJECT_DATETIME}
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                               rc.subject_kind, rc.call_id, rc.created_at, rc.payload
                          FROM ai_review_cache rc
                         ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
-            + _SUBJECT_JOIN + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql + """
+            + _SUBJECT_JOIN + " WHERE TRUE" + _SUBJECT_EXISTS + scope_sql + kind_sql
+            + filter_sql + """
                 ORDER BY rc.created_at DESC LIMIT %s OFFSET %s""",
-            (*scope_params, *kind_params, limit, offset))
+            (*scope_params, *kind_params, *filter_params, limit, offset))
         rows = cur.fetchall(); cur.close(); conn.close()
+        # `datetime` — момент ОЦЕНКИ, `subject_datetime` — когда состоялся сам
+        # разговор. Раньше в списке стояло только первое, и человек, отобравший
+        # период, видел рядом с фильтром «12.05» дату, которая к его выбору
+        # отношения не имеет: фильтр считает по дате разговора (_SUBJECT_DAY).
         return [{"id": r[0], "direction": r[1], "operator": r[2] or "—",
                  "datetime": r[3], "human": r[4],
                  "ai": round(float(r[5])) if r[5] is not None else None,
-                 "subject": r[6] or config.SUBJECT_CALL} for r in rows]
+                 "subject": r[6] or config.SUBJECT_CALL,
+                 "subject_datetime": r[7]} for r in rows]
     except Exception:
         logging.exception("ai-qa evaluations failed")
         raise

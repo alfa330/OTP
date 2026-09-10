@@ -69,6 +69,23 @@ def _function_source(path, function_name, class_name=None):
     )
 
 
+def _panel_parties_namespace():
+    """Окружение для _binotel_panel_call_end_parties, загруженной в изоляции.
+
+    У функции есть кэш на период: один её вызов — это логин в кабинет и два
+    CSV-экспорта, а зовут её на КАЖДОГО кандидата подтяжки «Из АТС». Кэш живёт
+    в модульных переменных, и без них функция в изоляции падает по NameError.
+    Свежий словарь на каждый тест — иначе они начали бы делить состояние."""
+    import threading
+    import time
+    return {
+        "logging": logging, "time": time,
+        "_BINOTEL_PANEL_PARTIES_CACHE": {},
+        "_BINOTEL_PANEL_PARTIES_LOCK": threading.Lock(),
+        "_BINOTEL_PANEL_PARTIES_TTL": 600,
+    }
+
+
 def _load_bot_function(function_name, globals_dict=None):
     node = copy.deepcopy(_function_node(BOT_PATH, function_name))
     node.decorator_list = []
@@ -556,7 +573,7 @@ class BinotelPanelEndPartySourceTests(unittest.TestCase):
         }
         with _stubbed_binotel_modules(lambda *a, **kw: raw):
             resolve = _load_bot_function(
-                "_binotel_panel_call_end_parties", {"logging": logging}
+                "_binotel_panel_call_end_parties", _panel_parties_namespace()
             )
             parties = resolve("2026-08-01", "2026-08-31")
 
@@ -569,7 +586,7 @@ class BinotelPanelEndPartySourceTests(unittest.TestCase):
 
         with _stubbed_binotel_modules(boom):
             resolve = _load_bot_function(
-                "_binotel_panel_call_end_parties", {"logging": logging}
+                "_binotel_panel_call_end_parties", _panel_parties_namespace()
             )
             self.assertEqual(resolve("2026-08-01", "2026-08-31"), {})
 

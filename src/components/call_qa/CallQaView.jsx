@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnSecondary, IosBadge, IosSegmented } from '../ui/ios';
 import { isDepartmentHead, normalizeRole } from '../../utils/roles';
-import { canPullCalls, SUBJECT_FAMILY_CALLS } from './subjects';
+import { canPullCalls, SUBJECT_FAMILY_CALLS, SUBJECT_FAMILY_CHATS } from './subjects';
 import CallReviewCard from './CallReviewCard';
 import QaDashboard from './QaDashboard';
 import EvaluationsList from './EvaluationsList';
@@ -15,6 +15,8 @@ import CriteriaClassification from './CriteriaClassification';
 import AdjudicationsRag from './AdjudicationsRag';
 import ChatQueue from './ChatQueue';
 import QueueList, { isChat } from './QueueList';
+import QaFilters from './QaFilters';
+import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './filters';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
  *
@@ -38,6 +40,11 @@ const TABS = [
     { key: 'criteria',  label: 'Критерии',       Icon: SlidersHorizontal },
     { key: 'rag',       label: 'База разборов',  Icon: Database },
 ];
+
+/* Где под панелью фильтров есть список, который она сужает. У обзора,
+ * классификации критериев и базы разборов своей выборки по сотрудникам нет —
+ * панель там была бы кнопкой, которая ни на что не влияет. */
+const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
 
 function Segmented({ tabs = TABS, tab, setTab }) {
     const refs = useRef([]);
@@ -122,6 +129,16 @@ export default function CallQaView(props) {
     const [queueMoreBusy, setQueueMoreBusy] = useState(false);
     const [departmentsReload, setDepartmentsReload] = useState(0);
 
+    /* Отбор живёт в контейнере, а не в каждом списке: панель стоит под
+     * вкладками и не должна прыгать по экрану, а переключение вкладки не должно
+     * сбрасывать то, что человек уже выставил. Фильтрует СЕРВЕР — клиентская
+     * фильтрация разошлась бы со счётчиком «Показано N из M». */
+    const [filters, setFilters] = useState(EMPTY_FILTERS);
+    const filtersActive = hasActiveFilters(filters);
+    /* Ключ-строка, а не сам объект: объект пересоздаётся на каждом рендере, и в
+     * зависимостях эффекта это бесконечный перезапрос. */
+    const filtersSignature = filtersKey(filters);
+
     const [selected, setSelected] = useState(null);
     const [callData, setCallData] = useState(null);
     const [callLoading, setCallLoading] = useState(false);
@@ -182,6 +199,10 @@ export default function CallQaView(props) {
         setSelected(null); setCallData(null); setCallErr(null); setCallLoading(false);
         setReviewInteraction({ dirty: false, busy: false });
         setQueue(null);
+        // Отбор принадлежит ОТДЕЛУ: сотрудники, группы и направления у отделов
+        // разные, и сохранённый выбор после переключения ссылался бы на чужого
+        // человека — список молча оказался бы пустым при живых оценках.
+        setFilters(EMPTY_FILTERS);
         setDepartment(nextCode);
     };
 
@@ -203,7 +224,8 @@ export default function CallQaView(props) {
         const requestId = queueRequest.current.id + 1;
         queueRequest.current = { id: requestId, controller };
         axios.get(`${apiBaseUrl}/api/ai-qa/review-queue`,
-            { params: { limit: QUEUE_PAGE, offset, ...(department ? { department } : {}) },
+            { params: { limit: QUEUE_PAGE, offset, ...(department ? { department } : {}),
+                        ...filtersToParams(filters) },
               headers: headers(), signal: controller.signal })
             .then((r) => {
                 if (requestId !== queueRequest.current.id) return;
@@ -228,6 +250,20 @@ export default function CallQaView(props) {
         if (tab === 'queue' && queue === null) loadQueue();
         // eslint-disable-next-line
     }, [tab, apiBaseUrl, department]);
+
+    /* Смена отбора — это НОВАЯ очередь, а не догрузка прежней. Очередь грузится
+     * один раз по условию `queue === null`, поэтому без явного сброса панель
+     * фильтров молча ничего бы не делала: запрос ушёл бы, а на экране остались
+     * бы старые строки. Первый прогон пропускаем — очередь уже грузит эффект
+     * выше, и второй запрос был бы гонкой двух ответов. */
+    const queueFiltersRef = useRef(filtersSignature);
+    useEffect(() => {
+        if (queueFiltersRef.current === filtersSignature) return;
+        queueFiltersRef.current = filtersSignature;
+        if (department === null || tab !== 'queue') { setQueue(null); return; }
+        loadQueue(0, false);
+        // eslint-disable-next-line
+    }, [filtersSignature, tab, department]);
 
     const openCall = (c, refresh = false) => {
         if (!selected && typeof document !== 'undefined') returnFocus.current = document.activeElement;
@@ -395,6 +431,24 @@ export default function CallQaView(props) {
             <>
             {!selected && <Segmented tabs={visibleTabs} tab={tab} setTab={changeTab} />}
 
+            {/* Панель — под вкладками и только там, где под ней список: у обзора,
+                классификации критериев и базы разборов своя выборка, и фильтр по
+                сотруднику к ним отношения не имеет. В очереди ревью каждая
+                карточка по определению не проверена человеком, поэтому балл и
+                «есть оценка человека» там не показываем — они дали бы пусто. */}
+            {!selected && FILTERABLE_TABS.includes(tab) && (
+                <QaFilters
+                    filters={filters}
+                    onChange={setFilters}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    department={department}
+                    subject={tab === 'chats' ? SUBJECT_FAMILY_CHATS : SUBJECT_FAMILY_CALLS}
+                    showScoreFilters={tab !== 'queue'}
+                    showReviewedFilter={tab !== 'queue'}
+                />
+            )}
+
             {selected ? (
                 <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
@@ -443,13 +497,28 @@ export default function CallQaView(props) {
                 queue === null ? <Spinner text="Загружаю очередь…" />
                     : queueErr ? <ErrorCard text="Не удалось загрузить очередь" onRetry={loadQueue} />
                     : queue.length === 0 ? (
+                        /* «Всё проверено» при активном отборе — неправда: очередь
+                           не пуста, пуст её срез. Сказать это прямо важнее, чем
+                           похвалить: иначе человек уходит, не сняв фильтр. */
                         <div className={`${iosCard} flex flex-col items-center gap-3 px-6 py-14 text-center`}>
-                            <CheckCircle2 size={26} className="text-emerald-500" />
+                            <CheckCircle2 size={26} className={filtersActive ? 'text-slate-300' : 'text-emerald-500'} />
                             <div>
-                                <p className="text-[14px] font-semibold text-slate-700">Всё проверено</p>
-                                <p className="mt-1 text-[12.5px] text-slate-500">В очереди сейчас нет новых карточек для ревью.</p>
+                                <p className="text-[14px] font-semibold text-slate-700">
+                                    {filtersActive ? 'Под фильтры ничего не подошло' : 'Всё проверено'}
+                                </p>
+                                <p className="mt-1 text-[12.5px] text-slate-500">
+                                    {filtersActive
+                                        ? 'Снимите часть фильтров или расширьте период — в очереди могут быть другие карточки.'
+                                        : 'В очереди сейчас нет новых карточек для ревью.'}
+                                </p>
                             </div>
-                            <button type="button" onClick={loadQueue} className={iosBtnSecondary}>Обновить очередь</button>
+                            {filtersActive ? (
+                                <button type="button" onClick={() => setFilters(EMPTY_FILTERS)} className={iosBtnSecondary}>
+                                    Сбросить фильтры
+                                </button>
+                            ) : (
+                                <button type="button" onClick={loadQueue} className={iosBtnSecondary}>Обновить очередь</button>
+                            )}
                         </div>
                     ) : (
                         <div className="space-y-2.5">
@@ -475,7 +544,8 @@ export default function CallQaView(props) {
                     )
             ) : tab === 'chats' ? (
                 <ChatQueue apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
-                           showToast={showToast} onOpen={openCall} department={department} />
+                           showToast={showToast} onOpen={openCall} department={department}
+                           filters={filters} onResetFilters={() => setFilters(EMPTY_FILTERS)} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              department={department} />
@@ -486,7 +556,9 @@ export default function CallQaView(props) {
                 <EvaluationsList apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                                  onOpen={openCall} showToast={showToast}
                                  subject={SUBJECT_FAMILY_CALLS}
-                                 department={department} canPull={canPullCalls(department)} />
+                                 department={department} canPull={canPullCalls(department)}
+                                 filters={filters}
+                                 onResetFilters={() => setFilters(EMPTY_FILTERS)} />
             ) : tab === 'criteria' ? (
                 <CriteriaClassification showToast={showToast} apiBaseUrl={apiBaseUrl}
                                         withAccessTokenHeader={withAccessTokenHeader} directions={props.directions}

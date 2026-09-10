@@ -3,6 +3,7 @@ import axios from 'axios';
 import { ChevronRight, Bot, User2, Shuffle, Loader2, ClipboardList, AlertCircle, RefreshCw, ChevronDown, PhoneIncoming } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { isChat, subjectTitle, SOURCE_LABEL, SUBJECT_IMPORTED_CALL } from './subjects';
+import { filtersToParams, filtersKey, hasActiveFilters, pullParamsFromFilters } from './filters';
 
 /* Список уже оценённых ИИ субъектов (реальные данные из кэша), новые сверху,
  * постраничная подгрузка «Показать ещё» — можно посмотреть все. Субъект задаёт
@@ -13,8 +14,12 @@ const PAGE = 50;
 
 export default function EvaluationsList(props) {
     const { apiBaseUrl, withAccessTokenHeader, onOpen, showToast, subject = 'call',
-            department, canPull = false } = props;
+            department, canPull = false, filters = null, onResetFilters } = props;
     const chats = isChat(subject);
+    const filtersActive = hasActiveFilters(filters);
+    /* Ключ-строка, а не объект фильтров: объект пересоздаётся на каждом рендере
+     * родителя, и в зависимостях эффекта это был бы бесконечный перезапрос. */
+    const filtersSignature = filtersKey(filters);
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [items, setItems] = useState(null);   // null = первичная загрузка
     const [total, setTotal] = useState(0);
@@ -40,7 +45,8 @@ export default function EvaluationsList(props) {
         if (append) setMoreBusy(true); else { setItems(null); setError(null); }
         if (!apiBaseUrl) { setItems([]); setError('Сервис оценок не настроен'); return; }
         axios.get(`${apiBaseUrl}/api/ai-qa/evaluations`,
-            { params: { limit: PAGE, offset, subject, ...(department ? { department } : {}) },
+            { params: { limit: PAGE, offset, subject, ...(department ? { department } : {}),
+                        ...filtersToParams(filters) },
               headers: headers(), signal: controller.signal })
             .then((r) => {
                 if (requestId !== loadRequest.current.id) return;
@@ -63,7 +69,7 @@ export default function EvaluationsList(props) {
             randomRequest.current.controller?.abort();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, subject, department]);
+    }, [apiBaseUrl, subject, department, filtersSignature]);
 
     const randomCall = () => {
         if (!apiBaseUrl) { showToast?.('Бэкенд недоступен', 'error'); return; }
@@ -72,8 +78,10 @@ export default function EvaluationsList(props) {
         const requestId = randomRequest.current.id + 1;
         randomRequest.current = { id: requestId, controller };
         setBusy(true);
+        // Подбор идёт по ТОМУ ЖЕ отбору, что и список: выбрав сотрудника и
+        // период, человек ждёт звонок именно оттуда, а не из всего отдела.
         axios.get(`${apiBaseUrl}/api/ai-qa/random-call`,
-            { params: { ...(department ? { department } : {}) },
+            { params: { ...(department ? { department } : {}), ...filtersToParams(filters) },
               headers: headers(), signal: controller.signal })
             .then((r) => {
                 if (requestId === randomRequest.current.id) onOpen?.(r.data.call);
@@ -104,14 +112,23 @@ export default function EvaluationsList(props) {
         const requestId = pullRequest.current.id + 1;
         pullRequest.current = { id: requestId, department };
         setPullBusy(true);
+        // Сотрудник и период берутся из отбора: без них подтяжка идёт «по всему
+        // отделу за неделю», и выставленный рядом фильтр не значил бы ничего.
+        // Направление и группа в АТС не уходят — они сужают ЛЮДЕЙ, а не звонки.
         axios.post(`${apiBaseUrl}/api/ai-qa/pull-call`,
-            { ...(department ? { department } : {}), count: 1 }, { headers: headers() })
+            { ...(department ? { department } : {}), count: 1, ...pullParamsFromFilters(filters) },
+            { headers: headers() })
             .then((r) => {
                 if (requestId !== pullRequest.current.id
                     || departmentRef.current !== pullRequest.current.department) return;
                 const call = (r.data?.calls || [])[0] || r.data?.call;
                 if (!call) { showToast?.('АТС не вернула подходящий звонок', 'error'); return; }
-                showToast?.('Звонок подтянут — оцениваю', 'success');
+                // Запись Binotel докачивается не мгновенно. Карточку открываем
+                // сразу — сервер добирает запись сам, — но говорим об ожидании,
+                // иначе долгая загрузка читается как зависание.
+                showToast?.(call.audio_pending
+                    ? 'Звонок подтянут — качаю запись и оцениваю'
+                    : 'Звонок подтянут — оцениваю', 'success');
                 onOpen?.({ id: call.id, subject: SUBJECT_IMPORTED_CALL,
                            operator: call.operator_name, datetime: call.datetime });
                 fetchPage(0, false);
@@ -171,16 +188,29 @@ export default function EvaluationsList(props) {
                     <button type="button" onClick={() => fetchPage(0, false)} className={iosBtnSecondary}><RefreshCw size={14} />Повторить</button>
                 </div>
             ) : items.length === 0 ? (
+                /* «Пока ничего не оценено» при активном отборе — неправда:
+                   оценки есть, просто не под этот срез. Человеку нужно снять
+                   фильтр, а не подбирать первый звонок заново. */
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <ClipboardList size={26} className="text-slate-300" />
                     <p className="text-[13px] text-slate-500">
-                        {chats ? 'Пока ни одна переписка не оценена ИИ.' : 'Пока ни один звонок не оценён ИИ.'}
+                        {filtersActive
+                            ? 'Под выбранные фильтры ничего не нашлось.'
+                            : (chats ? 'Пока ни одна переписка не оценена ИИ.'
+                                     : 'Пока ни один звонок не оценён ИИ.')}
                     </p>
                     <p className="text-[12px] text-slate-400">
-                        {chats
-                            ? 'Нажмите кнопку подбора выше, чтобы получить первую оценку.'
-                            : 'Нажмите «Оценить случайный звонок», чтобы протестировать оценку.'}
+                        {filtersActive
+                            ? 'Снимите часть фильтров или расширьте период.'
+                            : (chats
+                                ? 'Нажмите кнопку подбора выше, чтобы получить первую оценку.'
+                                : 'Нажмите «Оценить случайный звонок», чтобы протестировать оценку.')}
                     </p>
+                    {filtersActive && onResetFilters && (
+                        <button type="button" onClick={onResetFilters} className={iosBtnSecondary}>
+                            Сбросить фильтры
+                        </button>
+                    )}
                 </div>
             ) : (
                 <div className="space-y-2">
@@ -204,7 +234,15 @@ export default function EvaluationsList(props) {
                                         </IosBadge>
                                     )}
                                 </div>
-                                <p className="mt-0.5 text-[12px] text-slate-400">{m.operator} · {m.datetime}</p>
+                                {/* Две даты — разные: когда состоялся разговор и
+                                    когда его оценил ИИ. Фильтр по периоду считает
+                                    ПЕРВУЮ, и без неё в строке человек, отобравший
+                                    май, видел бы рядом сентябрьскую дату прогона. */}
+                                <p className="mt-0.5 text-[12px] text-slate-400">
+                                    {m.operator}
+                                    {m.subject_datetime ? ` · ${m.subject_datetime}` : ''}
+                                    <span className="text-slate-300"> · оценено {m.datetime}</span>
+                                </p>
                             </div>
                             <div className="flex items-center gap-3 sm:shrink-0">
                                 {m.ai != null && (
