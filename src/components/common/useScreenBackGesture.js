@@ -1,0 +1,23 @@
+import { useEffect, useRef } from 'react';
+import { pushBackEntry } from '../../utils/mobileBackStack';
+
+/* «Назад» закрывает открытый экран — только на телефоне.
+ *
+ * На компьютере окно закрывают крестиком и Escape, а «назад» там означает
+ * «предыдущая страница»: закрывать им модалку значило бы менять привычное
+ * поведение браузера ради экрана, который и так виден целиком.
+ *
+ * onClose держим в ref: он приходит из раздела заново на каждом его рендере, а
+ * список зависимостей эффекта — это список причин ПЕРЕЛОЖИТЬ запись в истории.
+ * Новая функция там снимала бы и клала запись на каждый чужой рендер, и жест
+ * «назад» уводил бы человека мимо экрана.
+ */
+export default function useScreenBackGesture(active, onClose) {
+    const closeRef = useRef(onClose);
+    closeRef.current = onClose;
+
+    useEffect(() => {
+        if (!active) return undefined;
+        return pushBackEntry(() => closeRef.current?.());
+    }, [active]);
+}

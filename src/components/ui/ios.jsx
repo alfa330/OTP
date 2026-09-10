@@ -1,6 +1,7 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 
 /* Сколько экран уезжает вправо при закрытии. Дублируется в mobile-shell.css
    (анимация otp-screen-out) — равенство сторожит тест: разойдясь, они дадут
@@ -390,6 +391,10 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
        На компьютере ничего не изменилось: там isNarrow всегда false, окно
        появляется и исчезает мгновенно, как раньше. */
     const isNarrow = useIsMobileShell();
+    /* Системное «назад» (свайп от края в iOS, кнопка в Android) закрывает
+       экран. Только на телефоне: на компьютере «назад» означает «предыдущая
+       страница», и закрывать им окно значило бы менять поведение браузера. */
+    useScreenBackGesture(isNarrow && open, onClose);
     /* Пока идёт анимация ухода, разметка обязана оставаться в дереве — иначе
        анимировать нечего. Держим её только на телефоне: на компьютере лишний
        кадр жизни закрытого окна ничем не оправдан. */
@@ -428,11 +433,15 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
                             onClick={onBack || onClose}
                             className={onBack || !isNarrow
                                 ? 'grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95'
-                                : 'otp-modal-back -ml-1 flex shrink-0 items-center gap-0.5 pr-1 text-[17px] text-blue-600 active:opacity-60'}
+                                : 'otp-modal-back grid h-9 w-9 shrink-0 place-items-center text-blue-600 active:opacity-60'}
                             aria-label="Назад"
                         >
-                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                            {!onBack && isNarrow && <span>Назад</span>}
+                            {/* Одна стрелка, без подписи (решение владельца
+                                10.09.2026): слово «Назад» рядом с шевроном — это
+                                вторая подпись к тому же действию, а место в шапке
+                                телефона дороже всего. Имя действия остаётся в
+                                aria-label, читалке оно по-прежнему слышно. */}
+                            <svg width="17" height="17" viewBox="0 0 16 16" fill="none"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"/></svg>
                         </button>
                     )}
                     <div className="min-w-0 flex-1">

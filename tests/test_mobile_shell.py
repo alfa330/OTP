@@ -583,7 +583,7 @@ class ScrollTitleTests(unittest.TestCase):
     показывается сверху»)."""
 
     TITLE = (ROOT / 'src' / 'components' / 'common' / 'MobileScrollTitle.jsx').read_text(encoding='utf-8')
-    TOPBAR = (ROOT / 'src' / 'components' / 'common' / 'MobileTopBar.jsx').read_text(encoding='utf-8')
+    TOPBAR = (ROOT / 'src' / 'components' / 'common' / 'MobilePageChrome.jsx').read_text(encoding='utf-8')
 
     def test_trigger_is_reachable_at_all(self):
         """Первая версия ждала, когда крупное имя уедет ПОД шапку, — и не
@@ -604,6 +604,9 @@ class ScrollTitleTests(unittest.TestCase):
         self.assertIn("window.addEventListener('scroll', sync, { passive: true });", self.TOPBAR)
         self.assertIn('if (next === scrolled) return;', self.TOPBAR)
         self.assertNotIn("addEventListener('scroll'", self.TITLE)
+        # Своё стекло у имени: полосы под ним больше нет, а читаться поверх
+        # содержимого раздела оно обязано.
+        self.assertIn('backdrop-filter: blur(', css_block(SHELL_CSS, '\n.mobile-scroll-title {', 900))
         self.assertNotIn('useState', self.TOPBAR)
         self.assertIn('body[data-mobile-scrolled] .mobile-scroll-title', SHELL_CSS)
 
@@ -631,52 +634,116 @@ class ScrollTitleTests(unittest.TestCase):
         self.assertIn('62px', block)
 
 
-class TopBarTests(unittest.TestCase):
-    """Верхняя полоса: матовое стекло вместо мёртвого поля под вырезом.
+class PageChromeTests(unittest.TestCase):
+    """Обвес страницы: цвет СИСТЕМНОЙ полосы состояния и признак «прокручено».
 
-    Владелец 10.09.2026: «сверху есть чёлка другого цвета, нужно чтобы он
-    подстраивался под страницу, то есть как ликвид гласс». Место под угловой
-    колокол оболочка отбивает верхним отступом у .main-content, и полоса
-    красилась ЕГО фоном — серым, а раздел под ней почти всегда своего цвета.
+    Владелец 10.09.2026: «убрать прозрачную полоску сверху, я имел в виду вот
+    есть же чёлка телефона, где отображается заряд и т.д., данную полоску
+    сделать адаптивной». То есть своей полосы поверх раздела быть не должно, а
+    подстраиваться обязана системная — та, до которой CSS не достаёт вовсе.
     """
 
-    TOPBAR = (ROOT / 'src' / 'components' / 'common' / 'MobileTopBar.jsx').read_text(encoding='utf-8')
+    CHROME = (ROOT / 'src' / 'components' / 'common' / 'MobilePageChrome.jsx').read_text(encoding='utf-8')
+
+    def test_no_bar_of_our_own_is_drawn(self):
+        """Компонент ничего не рисует: полосу поверх раздела убрали."""
+        self.assertIn('return null;', self.CHROME)
+        self.assertNotIn('createPortal', self.CHROME)
+        self.assertNotIn('mobile-top-bar', SHELL_CSS)
+        self.assertNotIn('MobileTopBar', APP)
+
+    def test_system_status_bar_follows_the_page(self):
+        """Цвет системной полосы берётся из meta[theme-color], и его надо
+        менять на каждую смену раздела — стилями туда не дотянуться."""
+        self.assertIn("document.querySelector('meta[name=\"theme-color\"]')", self.CHROME)
+        self.assertIn("meta?.setAttribute('content', color)", self.CHROME)
+        self.assertIn('<meta name="theme-color"', (ROOT / 'index.html').read_text(encoding='utf-8'))
 
     def test_page_colour_is_read_from_the_section_itself(self):
         """Списка «какой раздел какого цвета» быть не должно: у разделов
         разные классы (bg-white, bg-slate-50, градиент), и список разъедется
         с разметкой на первой же правке. Читаем вычисленный стиль."""
-        self.assertIn("document.querySelector('.main-content')?.firstElementChild", self.TOPBAR)
-        self.assertIn('getComputedStyle(root).backgroundColor', self.TOPBAR)
-        self.assertIn("body.style.setProperty('--mobile-page-bg', color)", self.TOPBAR)
+        self.assertIn("document.querySelector('.main-content')?.firstElementChild", self.CHROME)
+        self.assertIn('getComputedStyle(root).backgroundColor', self.CHROME)
+        self.assertIn("body.style.setProperty('--mobile-page-bg', color)", self.CHROME)
         self.assertIn('background: var(--mobile-page-bg, transparent);', SHELL_CSS)
 
     def test_transparent_section_keeps_the_old_colour(self):
-        """У раздела с прозрачным корнем шва и так не будет: под полосой и под
+        """У раздела с прозрачным корнем шва и так не будет: под вырезом и под
         ним один и тот же цвет. Красить полосу цветом карточки внутри раздела
         было бы хуже, чем не красить вовсе."""
-        self.assertIn('const isOpaque = (color) =>', self.TOPBAR)
-        self.assertIn("body.style.removeProperty('--mobile-page-bg')", self.TOPBAR)
+        self.assertIn('const isOpaque = (color) =>', self.CHROME)
+        self.assertIn("body.style.removeProperty('--mobile-page-bg')", self.CHROME)
 
-    def test_glass_turns_on_only_when_scrolled(self):
-        """Пока страница не тронута, за полосой ровный цвет страницы: мутить
-        там нечего, а полупрозрачная плёнка поверх ровного цвета дала бы ровно
-        тот оттеночный шов, от которого уходим."""
-        rest = css_block(SHELL_CSS, '.mobile-top-bar {', 900)
-        self.assertIn('background: transparent;', rest)
-        self.assertIn('backdrop-filter: none;', rest)
-        scrolled = css_block(SHELL_CSS, 'body[data-mobile-scrolled] .mobile-top-bar {', 400)
-        self.assertIn('backdrop-filter: blur(', scrolled)
-        self.assertIn('var(--mobile-page-bg', scrolled)
+    def test_scrolled_flag_is_one_passive_listener(self):
+        self.assertIn("window.addEventListener('scroll', sync, { passive: true });", self.CHROME)
+        self.assertIn('if (next === scrolled) return;', self.CHROME)
+        self.assertNotIn('useState', self.CHROME)
 
-    def test_bar_catches_no_taps(self):
-        """Под полосой содержимое раздела: невидимая полоса, перехватывающая
-        нажатия, была бы хуже её отсутствия."""
-        self.assertIn('pointer-events: none;', css_block(SHELL_CSS, '.mobile-top-bar {', 900))
+    def test_chrome_is_mobile_only(self):
+        self.assertIn('if (!active', self.CHROME)
+        self.assertIn('<MobilePageChrome active={isMobileShell}', APP)
 
-    def test_bar_is_mobile_only(self):
-        self.assertIn('if (!active', self.TOPBAR)
-        self.assertIn('<MobileTopBar active={isMobileShell}', APP)
+
+class BackGestureTests(unittest.TestCase):
+    """Системное «назад»: свайп от края в iOS и кнопка в Android.
+
+    Владелец 10.09.2026: «управление жестами не работает, на телефоне просто
+    делаю назад, а оно не идёт назад». Причина — портал одна страница: разделы
+    и окна живут состоянием, записей в истории не заводит ни одно из них (во
+    всём App.jsx был только replaceState), и жест уводил ИЗ приложения.
+    """
+
+    STACK = (ROOT / 'src' / 'utils' / 'mobileBackStack.js').read_text(encoding='utf-8')
+    HOOK = (ROOT / 'src' / 'components' / 'common' / 'useScreenBackGesture.js').read_text(encoding='utf-8')
+    IOS = (ROOT / 'src' / 'components' / 'ui' / 'ios.jsx').read_text(encoding='utf-8')
+
+    def test_one_stack_for_every_screen(self):
+        """Экраны вкладываются друг в друга, и «назад» обязано снимать ровно
+        верхний: слушатели, разложенные по компонентам, сработали бы все разом
+        и закрыли бы весь стопкой."""
+        self.assertIn("window.addEventListener('popstate', handlePop)", self.STACK)
+        self.assertIn('const stack = [];', self.STACK)
+        self.assertIn('const top = stack.pop();', self.STACK)
+
+    def test_own_entry_is_removed_on_a_normal_close(self):
+        """Иначе запись останется, и следующий жест уйдёт впустую: человек
+        свайпнет, а экран уже закрыт и ничего не произойдёт."""
+        self.assertIn('window.history.back();', self.STACK)
+        self.assertIn('pendingBacks += 1;', self.STACK)
+        self.assertIn('if (pendingBacks > 0) {', self.STACK)
+
+    def test_foreign_entries_are_left_alone(self):
+        """Пустой стек — запись не наша: это адрес, открытый до входа в
+        портал. Мешать браузеру нельзя."""
+        self.assertIn('if (top) top.close();', self.STACK)
+
+    def test_gesture_is_mobile_only(self):
+        """На компьютере «назад» означает «предыдущая страница»: закрывать им
+        окно значило бы менять поведение браузера."""
+        self.assertIn('if (!active) return undefined;', self.HOOK)
+        self.assertIn('useScreenBackGesture(isNarrow && open, onClose);', self.IOS)
+        self.assertIn('useScreenBackGesture(isNarrowModal && open, onClose);', APP)
+        sheet = (ROOT / 'src' / 'components' / 'common' / 'FullscreenSheet.jsx').read_text(encoding='utf-8')
+        self.assertIn('useScreenBackGesture(isNarrowShell && open, onClose);', sheet)
+
+    def test_sections_are_walked_back_too(self):
+        """Без записи на раздел жест с первого же экрана уводил бы из портала."""
+        self.assertIn('const backViewRef = useRef(view);', APP)
+        self.assertIn('const restoringViewRef = useRef(false);', APP)
+        self.assertIn('navigateToView(from);', APP)
+
+    def test_restore_does_not_push_again(self):
+        """Иначе на каждый жест ложилась бы новая запись, и «назад» перестало
+        бы уводить дальше первого шага."""
+        self.assertIn('if (restoringViewRef.current) {', APP)
+        self.assertIn('restoringViewRef.current = false;', APP)
+
+    def test_screen_keeps_no_stale_callback(self):
+        """onClose приходит заново на каждом рендере раздела: новая функция в
+        зависимостях снимала бы и клала запись на каждый чужой рендер."""
+        self.assertIn('const closeRef = useRef(onClose);', self.HOOK)
+        self.assertIn('}, [active]);', self.HOOK)
 
 
 class ModalScreenTests(unittest.TestCase):
@@ -732,6 +799,9 @@ class ModalScreenTests(unittest.TestCase):
         card = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-card {', 600)
         self.assertIn('min-height: 100%;', card)
         self.assertNotIn('height: 100% !important;', card)
+        # Смена логина и пароля свёрстана прямо в App: «модалка нам не нужна».
+        self.assertIn('otp-modal-card pointer-events-auto', APP)
+        self.assertIn('otp-modal-back order-first', APP)
         for name in ('AccountAvatarModal', 'UserEditModal', 'HistoryModal', 'DisputeModal'):
             source = (ROOT / 'src' / 'components' / 'modals' / f'{name}.jsx').read_text(encoding='utf-8')
             self.assertIn('otp-modal-root', source, name)
@@ -742,7 +812,10 @@ class ModalScreenTests(unittest.TestCase):
         мессенджере делают шевроном слева. Двух кнопок «закрыть» в одной шапке
         быть не должно."""
         self.assertIn('{(onBack || isNarrow) && (', self.IOS)
-        self.assertIn('{!onBack && isNarrow && <span>Назад</span>}', self.IOS)
+        # Подпись «Назад» рядом со стрелкой убрана 10.09.2026: это вторая
+        # подпись к тому же действию, а место в шапке телефона дороже всего.
+        self.assertNotIn('<span>Назад</span>', self.IOS)
+        self.assertIn('aria-label="Назад"', self.IOS)
         self.assertIn('{!isNarrow && (', self.IOS)
         self.assertIn('otp-modal-back', APP)
         self.assertIn('{!isNarrowShell && (', APP)

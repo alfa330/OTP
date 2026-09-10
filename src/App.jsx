@@ -55,7 +55,9 @@ import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
 import MobileBellSlot from './components/common/MobileBellSlot';
 import { holdPageScroll } from './utils/pageScrollLock';
-import MobileTopBar from './components/common/MobileTopBar';
+import MobilePageChrome from './components/common/MobilePageChrome';
+import useScreenBackGesture from './components/common/useScreenBackGesture';
+import { pushBackEntry } from './utils/mobileBackStack';
 import useIsMobileShell from './components/common/useIsMobileShell';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
@@ -14612,6 +14614,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             function SimpleModal({ open, onClose, children, panelClassName = '', fullScreenOnMobile = false }) {
             const [mounted, setMounted] = useState(open);
             const [show, setShow] = useState(false);
+            /* Системное «назад» закрывает экран — только на телефоне, см. IosModal. */
+            const isNarrowModal = useIsMobileShell();
+            useScreenBackGesture(isNarrowModal && open, onClose);
             useEffect(() => {
                 let t;
                 if (open) {
@@ -26196,11 +26201,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     setSwapCandidatesSearch('');
                                                                     swapExchangePromptHandledRef.current.clear();
                                                                 }}
-                                                                className="otp-modal-back -ml-1 flex shrink-0 items-center gap-0.5 pr-1 text-[17px] text-blue-600 active:opacity-60"
+                                                                className="otp-modal-back grid h-9 w-9 shrink-0 place-items-center text-blue-600 active:opacity-60"
                                                                 aria-label="Назад"
                                                             >
-                                                                <FaIcon className="fas fa-chevron-left text-[15px]"></FaIcon>
-                                                                <span>Назад</span>
+                                                                {/* Одна стрелка, без подписи — см. IosModal. */}
+                                                                <FaIcon className="fas fa-chevron-left text-[17px]"></FaIcon>
                                                             </button>
                                                         ) : (
                                                         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white shadow-sm ${isSwapExchangeMode ? 'bg-emerald-500' : 'bg-blue-600'}`}>
@@ -40120,6 +40125,51 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setView(nextView);
                 setMobileMenuOpen(false);
             }, []);
+
+            /* ЖЕСТ «НАЗАД» МЕЖДУ РАЗДЕЛАМИ — только на телефоне.
+             *
+             * Портал — одна страница: раздел живёт состоянием, а не адресом, и
+             * записей в истории не заводил вовсе. Поэтому свайп от края уводил
+             * не «на шаг назад», а ИЗ ПРИЛОЖЕНИЯ — владелец так и написал:
+             * «просто делаю назад, а оно не идёт назад». Кладём на каждый
+             * переход запись, которую жест снимет возвратом к прежнему разделу.
+             *
+             * Запись НЕ снимается уходом с раздела (у эффекта нет возврата):
+             * при переходе A → B → C записи о A и о B обе должны дожить до
+             * жеста, иначе «назад» из C увело бы сразу из портала.
+             *
+             * Флаг restoringView гасит отдачу: возврат сам меняет view, и без
+             * него на каждый жест ложилась бы новая запись — «назад» перестало
+             * бы уводить дальше первого шага. */
+            const backViewRef = useRef(view);
+            const restoringViewRef = useRef(false);
+            useEffect(() => {
+                const from = backViewRef.current;
+                backViewRef.current = view;
+                if (!isMobileShell || from === view) return;
+                if (restoringViewRef.current) {
+                    restoringViewRef.current = false;
+                    return;
+                }
+                pushBackEntry(() => {
+                    restoringViewRef.current = true;
+                    navigateToView(from);
+                });
+            }, [isMobileShell, view, navigateToView]);
+
+            /* Смена логина, пароля и фотографии — тоже экраны, и «назад» должно
+               закрывать их, а не уводить из портала. Хук здесь, а не внутри
+               окна: разметка этих трёх живёт прямо в разделе App. */
+            const closeAccountScreens = useCallback(() => {
+                setShowChangeLoginForm(false);
+                setShowChangePasswordForm(false);
+                setShowChangeAvatarForm(false);
+                setModalError("");
+            }, []);
+            useScreenBackGesture(
+                isMobileShell && (showChangeLoginForm || showChangePasswordForm || showChangeAvatarForm),
+                closeAccountScreens,
+            );
 
             useEffect(() => {
                 setPinnedTaskActionLoadingKey('');
@@ -55940,7 +55990,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <>
                             {/* Backdrop с blur */}
                             <div
-                            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
+                            /* otp-modal-dim — на телефоне окно превращается в экран, и затемнения
+                               у него нет вовсе: по этой метке его гасит mobile-shell.css. */
+                            className="otp-modal-dim fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity duration-300"
                             onClick={() => {
                                 setShowChangeLoginForm(false);
                                 setShowChangePasswordForm(false);
@@ -55951,7 +56003,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                             {/* Контейнер для модалей — ловит Escape */}
                             <div
-                            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+                            /* otp-modal-root — смена логина и пароля едет отдельным экраном,
+                               а не карточкой посреди раздела (решение владельца
+                               10.09.2026: «модалка нам не нужна»). */
+                            className="otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4"
                             tabIndex={-1}
                             onKeyDown={(e) => {
                                 if (e.key === "Escape") {
@@ -55967,7 +56022,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 role="dialog"
                                 aria-modal="true"
                                 aria-labelledby="change-login-title"
-                                className="pointer-events-auto w-full max-w-md bg-white/95 
+                                className="otp-modal-card pointer-events-auto w-full max-w-md bg-white/95 
                                             rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 
                                             animate-scale-in"
                                 onClick={(e) => e.stopPropagation()}
@@ -55977,14 +56032,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <h2 id="change-login-title" className="text-lg font-semibold">
                                         Смена логина
                                     </h2>
-                                    {/* Кнопка закрытия остаётся в заголовке — это заменяет кнопку "Отмена" */}
+                                    {/* Кнопка закрытия остаётся в заголовке — это заменяет кнопку "Отмена".
+                                        На телефоне окно едет отдельным экраном, и уход с него —
+                                        одна стрелка слева от заголовка, как в мессенджере; крестик
+                                        справа там был бы второй кнопкой «закрыть» в одной строке. */}
                                     <button
                                         type="button"
                                         onClick={() => { setShowChangeLoginForm(false); setModalError(""); }}
-                                        aria-label="Закрыть"
-                                        className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
+                                        aria-label={isMobileShell ? "Назад" : "Закрыть"}
+                                        className={isMobileShell
+                                            ? "otp-modal-back order-first grid h-9 w-9 shrink-0 place-items-center text-blue-600 active:opacity-60"
+                                            : "rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"}
                                     >
-                                        <FaIcon className="fas fa-times text-lg" />
+                                        <FaIcon className={isMobileShell ? "fas fa-chevron-left text-[17px]" : "fas fa-times text-lg"} />
                                     </button>
                                     </div>
 
@@ -56095,7 +56155,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     {/* Подсказка про закрытие модалки */}
-                                    <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>
+                                    {/* Про Esc — только на компьютере: на телефоне клавиши нет, а уход
+                                        с экрана делают стрелкой в шапке и жестом «назад». */}
+                                    {!isMobileShell && <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>}
                                     </form>
                                 </div>
                                 </div>
@@ -56107,7 +56169,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 role="dialog"
                                 aria-modal="true"
                                 aria-labelledby="change-password-title"
-                                className="pointer-events-auto w-full max-w-md bg-white/95 
+                                className="otp-modal-card pointer-events-auto w-full max-w-md bg-white/95 
                                             rounded-2xl shadow-2xl overflow-hidden transform transition-all duration-300 
                                             animate-scale-in"
                                 >
@@ -56116,13 +56178,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     <h2 id="change-password-title" className="text-lg font-semibold">
                                         Смена пароля
                                     </h2>
+                                    {/* На телефоне — одна стрелка слева, см. «Смену логина». */}
                                     <button
                                         type="button"
                                         onClick={() => { setShowChangePasswordForm(false); setModalError(""); }}
-                                        aria-label="Закрыть"
-                                        className="rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"
+                                        aria-label={isMobileShell ? "Назад" : "Закрыть"}
+                                        className={isMobileShell
+                                            ? "otp-modal-back order-first grid h-9 w-9 shrink-0 place-items-center text-blue-600 active:opacity-60"
+                                            : "rounded-md p-2 text-gray-600 hover:bg-gray-100 transition"}
                                     >
-                                        <FaIcon className="fas fa-times text-lg" />
+                                        <FaIcon className={isMobileShell ? "fas fa-chevron-left text-[17px]" : "fas fa-times text-lg"} />
                                     </button>
                                     </div>
 
@@ -56200,7 +56265,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </button>
                                     </div>
 
-                                    <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>
+                                    {/* Про Esc — только на компьютере: на телефоне клавиши нет, а уход
+                                        с экрана делают стрелкой в шапке и жестом «назад». */}
+                                    {!isMobileShell && <p className="mt-3 text-xs text-gray-400">Нажмите Esc или крестик вверху, чтобы закрыть.</p>}
                                     </form>
                                 </div>
                                 </div>
@@ -56455,11 +56522,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         живёт zoom, и position: fixed считался бы от него.
                         Рисуется только в мобильной оболочке: на компьютере
                         разделы открывает сайдбар, и вторая навигация там лишняя. */}
-                    {/* Верхняя полоса — матовое стекло вместо мёртвого поля под
-                        вырезом; она же задаёт .main-content цвет текущего раздела,
-                        чтобы сверху не шла чужеродная полоса поперёк экрана.
-                        Сиблинг main-content по той же причине, что бар и помощник. */}
-                    <MobileTopBar active={isMobileShell} view={view} />
+                    {/* Обвес страницы на телефоне: цвет системной полосы состояния
+                        (той самой, где заряд и время) и признак «прокручено» для
+                        имени в шапке «Профиля». Своей полосы поверх раздела не
+                        рисует — её владелец попросил убрать 10.09.2026. */}
+                    <MobilePageChrome active={isMobileShell} view={view} />
 
                     {isMobileShell && (
                         <MobileTabBar

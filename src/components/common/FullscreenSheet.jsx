@@ -1,5 +1,7 @@
 import React, { useEffect, useLayoutEffect } from 'react';
 import FaIcon from './FaIcon';
+import useIsMobileShell from './useIsMobileShell';
+import useScreenBackGesture from './useScreenBackGesture';
 
 /* Сколько окон сейчас стоит рядом с сайдбаром (offsetLeft). Считаем, а не держим
    флаг: закрытие одного окна не должно снимать класс, пока открыто другое. */
@@ -37,6 +39,10 @@ const FullscreenSheet = ({
   closeOnEscape = true,
   offsetLeft = null,
 }) => {
+  /* Системное «назад» закрывает окно — только на телефоне, см. IosModal. */
+  const isNarrowShell = useIsMobileShell();
+  useScreenBackGesture(isNarrowShell && open, onClose);
+
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (e) => {
