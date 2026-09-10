@@ -5,6 +5,7 @@ import { Bell, BookLock, Cake, CalendarClock, GraduationCap, Headset, Image, Cli
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';
+import { holdPageScroll } from '../../utils/pageScrollLock';
 import {
     buildDesktopNotice,
     desktopPermission as browserPermission,
@@ -138,6 +139,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             && typeof window.matchMedia === 'function'
             && window.matchMedia(MOBILE_SHELL_QUERY).matches,
     );
+    /* Под открытым листом уведомлений страница стоит намертво — как под листом
+       в мобильном приложении. Без замка палец, попавший мимо списка, увозил
+       раздел ПОД листом, и, закрыв его, человек оказывался в другом месте.
+       Замок со счётчиком: лист колокола открывается и поверх шторки разделов,
+       и снятый по одному закрытию он отпустил бы страницу под обоими. */
+    useEffect(() => holdPageScroll(isNarrow && (open || closing)), [isNarrow, open, closing]);
     /* Пришло новое: колокол звенит, из сайдбара выезжает карточка с ним.
        ringNonce перезапускает анимацию: одинаковый key React бы переиспользовал,
        и второе уведомление подряд прошло бы беззвучно. */

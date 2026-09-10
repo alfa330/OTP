@@ -389,8 +389,12 @@ class SectionLayoutTests(unittest.TestCase):
         content = css_block(SHELL_CSS, 'body.mobile-shell .main-content {\n    overflow: visible', 400)
         self.assertNotIn('overflow-x: hidden', content)
         self.assertNotIn('overflow-x: clip', content)
-        for line in SHELL_CSS.splitlines():
-            self.assertNotEqual(line.strip(), 'body.mobile-shell {')
+        # Голое правило body.mobile-shell завести можно (в нём живут жесты
+        # страницы), но обрезки в нём быть не должно: она и есть та самая
+        # вторая копия. Раньше запрет стоял на сам селектор — он оказался шире
+        # своей причины и не пускал touch-action.
+        if 'body.mobile-shell {' in SHELL_CSS:
+            self.assertNotIn('overflow', css_block(SHELL_CSS, 'body.mobile-shell {', 200))
 
     def test_screen_height_rule_ignores_breakpoint_prefixes(self):
         """Правило «высота в экран → авто» отбирает классы по НАЧАЛУ имени.
@@ -616,6 +620,57 @@ class ScrollTitleTests(unittest.TestCase):
         self.assertIn('const profileHeroRef = useRef(null);', APP)
         self.assertIn('watch={profileHeroRef}', APP)
         self.assertIn('<div ref={profileHeroRef} className="flex flex-col sm:flex-row items-center', APP)
+
+
+class GestureTests(unittest.TestCase):
+    """Жесты страницы: приближение выключено, прокрутка ведёт себя как в
+    мобильном приложении.
+
+    Обе поломки видны только с телефоном в руках. Наезд на поле при фокусе
+    уводит экран в масштаб, из которого он сам не возвращается: бар разделов
+    оказывается за краем, колокол повисает посреди содержимого. А фон,
+    проезжающий под открытым листом, человек замечает только после закрытия —
+    он оказывается в другом месте раздела и не понимает почему."""
+
+    INDEX = (ROOT / 'index.html').read_text(encoding='utf-8')
+    BELL = (ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx').read_text(encoding='utf-8')
+    LOCK = (ROOT / 'src' / 'utils' / 'pageScrollLock.js').read_text(encoding='utf-8')
+
+    def test_page_zoom_is_off(self):
+        """Решение владельца 10.09.2026: портал на телефоне работает как
+        приложение. maximum-scale снимает наезд iOS на поле при фокусе (в
+        портале десятки полей по 12–14px), touch-action — двойной тап."""
+        meta = re.search(r'<meta name="viewport" content="([^"]+)"', self.INDEX).group(1)
+        self.assertIn('maximum-scale=1', meta)
+        self.assertIn('user-scalable=no', meta)
+        # Безопасная зона остаётся: без неё содержимое залезет под чёлку.
+        self.assertIn('viewport-fit=cover', meta)
+        self.assertIn('touch-action: manipulation;', css_block(SHELL_CSS, 'body.mobile-shell {', 200))
+
+    def test_page_is_frozen_under_an_open_sheet(self):
+        """Шторка разделов и лист уведомлений — оба."""
+        self.assertIn('useEffect(() => holdPageScroll(isMobileShell && mobileMenuOpen), [isMobileShell, mobileMenuOpen]);', APP)
+        self.assertIn('useEffect(() => holdPageScroll(isNarrow && (open || closing)), [isNarrow, open, closing]);', self.BELL)
+
+    def test_lock_pins_the_body_and_counts_holders(self):
+        """overflow: hidden на <body> в Safari на iOS прокрутку не
+        останавливает вовсе — там прокручивается сам документ. И счётчик, а не
+        флаг: колокол открывается поверх шторки, и первый же закрывшийся снял
+        бы замок у обоих."""
+        self.assertIn("style.position = 'fixed';", self.LOCK)
+        self.assertIn('style.top = `${-savedScrollY}px`;', self.LOCK)
+        self.assertNotIn("overflow = 'hidden'", self.LOCK)
+        self.assertIn('depth += 1;', self.LOCK)
+        self.assertIn('if (depth > 1) return;', self.LOCK)
+        # Вернуть страницу на прежнее место обязательно: иначе закрытие листа
+        # выбрасывает человека в начало раздела.
+        self.assertIn('window.scrollTo(0, savedScrollY);', self.LOCK)
+
+    def test_scroll_does_not_leak_between_layers(self):
+        """Докрутив список листа или таблицу до края, палец не должен качнуть
+        то, что под ними, — и не должен выполнить жест «назад» браузера."""
+        self.assertIn('overscroll-behavior: contain;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar > div {', 900))
+        self.assertIn('overscroll-behavior-x: contain;', SHELL_CSS)
 
 
 class ViewSwitchTests(unittest.TestCase):

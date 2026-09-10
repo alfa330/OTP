@@ -69,21 +69,24 @@ const { pickMobileTabs, MOBILE_TAB_SECTIONS, MOBILE_TAB_LIMIT } = new Function(
 const ADMIN = {
     wiki: true, lms: true, groupLate: true, tasks: true, workSchedules: true, surveys: true,
     myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
+    qrAccess: true,
 };
 const LINE_OPERATOR = {
     wiki: true, lms: true, groupLate: false, tasks: false, workSchedules: true, surveys: true,
     myHours: true, myShifts: true, myShiftAuction: true, myEvaluations: true,
+    qrAccess: false,
 };
 /* Бэк-офис: отдел с картой разделов, и личных разделов линии в ней нет —
    часы этих людей ведут не по сменам. */
 const BACK_OFFICE = {
     wiki: true, lms: false, groupLate: false, tasks: true, workSchedules: false, surveys: true,
     myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
+    qrAccess: false,
 };
 
 const labels = (tabs) => tabs.map((tab) => tab.label);
 
-test('в баре ровно четыре раздела — пятое место занято аватаром', () => {
+test('в баре не больше четырёх разделов — пятое место занято аватаром', () => {
     assert.equal(MOBILE_TAB_LIMIT, 4);
     for (const access of [ADMIN, LINE_OPERATOR, BACK_OFFICE]) {
         assert.equal(pickMobileTabs(access).length, 4);
@@ -94,15 +97,18 @@ test('в баре ежедневные разделы этой роли, а не
     /* Служебные разделы (QR-доступ, «Сессии», «Рекрутинг») в бар не попадают,
        даже когда стоят в самом верху сайдбара: порядок меню переставляют, и
        бар, повторяющий верх списка, менялся бы у людей под руками. */
-    assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['Вики', 'Задачи', 'Курсы', 'Ивенты']);
+    assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['QR', 'Вики', 'Задачи', 'Курсы']);
     assert.deepEqual(labels(pickMobileTabs(BACK_OFFICE)), ['Вики', 'Задачи', 'Ивенты', 'Опросы']);
-    // У оператора линии «Задач» нет — их место занимает следующий доступный
-    // раздел, а не пустая кнопка.
+    // У кого личных разделов нет, место закрытого раздела занимает следующий
+    // доступный, а не пустая кнопка: у оператора линии нет «Задач».
     const noPersonal = { ...LINE_OPERATOR, myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false };
     assert.deepEqual(labels(pickMobileTabs(noPersonal)), ['Вики', 'Курсы', 'Ивенты', 'Графики']);
 
+    /* Служебные разделы в бар не попадают. «QR доступ» из этого списка выведен
+       намеренно: владелец 10.09.2026 поставил его первым у тех, кому он выдан,
+       — им пользуются каждый день, в отличие от «Сессий» и «Рекрутинга». */
     const views = MOBILE_TAB_SECTIONS.map((section) => section.view);
-    for (const service of ['qr_access', 'admin_sessions', 'recruiting', 'manage_users']) {
+    for (const service of ['admin_sessions', 'recruiting', 'manage_users']) {
         assert.ok(!views.includes(service), `служебный раздел ${service} попал в бар`);
     }
 });
@@ -113,16 +119,31 @@ test('закрытый раздел в бар не попадает', () => {
     assert.equal(noWiki.length, 4, 'место закрытого раздела должно занять следующий');
 });
 
+test('«QR доступ» стоит первым у тех, кому он выдан', () => {
+    /* Решение владельца 10.09.2026. Раздел есть у админов и глав отделов —
+       ровно у тех, у кого личных разделов нет вовсе, поэтому он открывает бар
+       и не мешает ежедневным добирать его до четырёх. */
+    assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['QR', 'Вики', 'Задачи', 'Курсы']);
+    assert.deepEqual(labels(pickMobileTabs({ ...ADMIN, qrAccess: false })), ['Вики', 'Задачи', 'Курсы', 'Ивенты']);
+    // Оператору QR не выдают — у него бар свой, из личных разделов.
+    assert.ok(!labels(pickMobileTabs(LINE_OPERATOR)).includes('QR'));
+});
+
 test('личные разделы человека занимают бар целиком', () => {
     /* Решение владельца 10.09.2026: у кого есть «Мои часы», «Мои смены»,
        «Аукцион смен» и «Мои оценки» — тот на телефоне ходит каждый день именно
        в них, а «Вики», «Курсы» и «Ивенты» достаёт из шторки под аватаром. */
     assert.deepEqual(labels(pickMobileTabs(LINE_OPERATOR)), ['Часы', 'Смены', 'Аукцион', 'Оценки']);
-    // Личных разделов может быть и меньше четырёх — остаток добирают ежедневные.
+    /* ОСВОБОДИВШЕЕСЯ МЕСТО НЕ ДОБИРАЕТСЯ ЧУЖИМ (уточнение владельца
+       10.09.2026): у кого нет «Аукциона смен», тот получает бар из трёх кнопок,
+       а профиль встаёт правее — к самому углу. Подставленные туда «Вики» и
+       «Курсы» выглядят как ошибка выдачи прав. */
+    const noAuction = { ...LINE_OPERATOR, myShiftAuction: false };
+    assert.deepEqual(labels(pickMobileTabs(noAuction)), ['Часы', 'Смены', 'Оценки']);
     const onlyHours = { ...LINE_OPERATOR, myShifts: false, myShiftAuction: false, myEvaluations: false };
-    assert.deepEqual(labels(pickMobileTabs(onlyHours)), ['Часы', 'Вики', 'Курсы', 'Ивенты']);
-    // У кого личных разделов нет, бар прежний — это админ и руководитель.
-    assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['Вики', 'Задачи', 'Курсы', 'Ивенты']);
+    assert.deepEqual(labels(pickMobileTabs(onlyHours)), ['Часы']);
+    // У кого личных разделов нет вовсе, бар по-прежнему собирается из ежедневных.
+    assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['QR', 'Вики', 'Задачи', 'Курсы']);
 });
 
 test('один раздел не даёт двух кнопок', () => {
@@ -130,12 +151,9 @@ test('один раздел не даёт двух кнопок', () => {
        остальным — подписи у пункта меню тоже разные. Флаги считаются по одному
        и тому же departmentAllowsView, поэтому у оператора верны оба, и без
        отсечения по view бар показал бы две кнопки в один и тот же раздел. */
-    const scarce = {
-        wiki: false, lms: false, groupLate: false, tasks: false, workSchedules: true, surveys: true,
-        myHours: false, myShifts: true, myShiftAuction: false, myEvaluations: false,
-    };
-    const tabs = pickMobileTabs(scarce);
-    assert.deepEqual(labels(tabs), ['Смены', 'Ивенты', 'Опросы']);
+    const tabs = pickMobileTabs(LINE_OPERATOR);
+    assert.equal(labels(tabs).filter((l) => l === 'Смены').length, 1);
+    assert.ok(!labels(tabs).includes('Графики'), 'второе объявление того же раздела попало в бар');
     const views = tabs.map((tab) => tab.view);
     assert.equal(new Set(views).size, views.length, 'в баре две кнопки в один раздел');
 });

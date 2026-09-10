@@ -2,7 +2,17 @@
 <html lang="ru" translate="no" class="notranslate">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!--
+      maximum-scale=1 + user-scalable=no — это НЕ про «запретить пользователю
+      увеличивать», а про то, что портал на телефоне работает как приложение,
+      а не как страница (решение владельца 10.09.2026). Без них iOS сам
+      наезжает на поле ввода при фокусе — в портале десятки полей с размером
+      12–14px, и каждый тап по фильтру уводил экран в масштаб 1.3, из которого
+      он уже не возвращается: бар разделов уезжает за край, колокол повисает
+      посреди экрана. Двойной тап по содержимому тоже больше не приближает —
+      за это отвечает touch-action: manipulation в mobile-shell.css.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <!--
       Защита от встроенного переводчика браузера. Он подменяет текстовые узлы
       обёртками <font>, после чего React пытается удалить узел, которого у

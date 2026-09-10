@@ -54,6 +54,7 @@ import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
 import MobileBellSlot from './components/common/MobileBellSlot';
+import { holdPageScroll } from './utils/pageScrollLock';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -461,16 +462,30 @@ const SidebarDeptScope = ({ section, activeCode, children }) => {
  * выдают, а «Графики работы» с «Аукционом смен» у них — не личные разделы,
  * а рабочие, и остаются там же, где стояли.
  *
+ * ПУСТОЕ МЕСТО ЛИЧНОГО РАЗДЕЛА НЕ ДОБИРАЕТСЯ ЧУЖИМ (уточнение владельца
+ * 10.09.2026). У кого нет «Аукциона смен», тот получает бар из трёх кнопок, а
+ * профиль встаёт правее — к самому углу; «Вики» и «Курсы» на освободившееся
+ * место НЕ подставляются. Бар личных разделов — это набор человека, а не
+ * четыре кнопки любой ценой: подставленный туда общий раздел выглядит как
+ * ошибка выдачи прав. У кого личных разделов нет вовсе (админ, глава отдела),
+ * бар по-прежнему собирается из ежедневных.
+ *
+ * «QR ДОСТУП» — ПЕРВЫМ У ТЕХ, У КОГО ОН ЕСТЬ (решение владельца 10.09.2026).
+ * Раздел выдан админам и главам отделов, то есть ровно тем, у кого личных
+ * разделов нет; поэтому он стоит в начале реестра и не мешает ежедневным
+ * добирать бар до четырёх.
+ *
  * ОДИН РАЗДЕЛ МОЖЕТ БЫТЬ ОБЪЯВЛЕН ДВАЖДЫ: work_schedules — это «Смены»
  * рядовому и «Графики» остальным, подпись у пункта меню тоже разная.
  * pickMobileTabs берёт ПЕРВОЕ подошедшее объявление, поэтому две кнопки в
  * один раздел в бар не попадают.
  */
 const MOBILE_TAB_SECTIONS = [
-    { view: 'hours', label: 'Часы', icon: 'fas fa-clock', allowed: (access) => access.myHours },
-    { view: 'work_schedules', label: 'Смены', icon: 'fas fa-calendar-alt', allowed: (access) => access.myShifts },
-    { view: 'shift_auction', label: 'Аукцион', icon: 'fas fa-gavel', allowed: (access) => access.myShiftAuction },
-    { view: 'evaluation', label: 'Оценки', icon: 'fas fa-chart-bar', allowed: (access) => access.myEvaluations },
+    { view: 'qr_access', label: 'QR', icon: 'fas fa-qrcode', allowed: (access) => access.qrAccess },
+    { view: 'hours', label: 'Часы', icon: 'fas fa-clock', personal: true, allowed: (access) => access.myHours },
+    { view: 'work_schedules', label: 'Смены', icon: 'fas fa-calendar-alt', personal: true, allowed: (access) => access.myShifts },
+    { view: 'shift_auction', label: 'Аукцион', icon: 'fas fa-gavel', personal: true, allowed: (access) => access.myShiftAuction },
+    { view: 'evaluation', label: 'Оценки', icon: 'fas fa-chart-bar', personal: true, allowed: (access) => access.myEvaluations },
     { view: 'wiki', label: 'Вики', icon: 'fas fa-book', allowed: (access) => access.wiki },
     { view: 'tasks', label: 'Задачи', icon: 'fas fa-tasks', allowed: (access) => access.tasks, badge: 'tasks' },
     { view: 'lms', label: 'Курсы', icon: 'fas fa-graduation-cap', allowed: (access) => access.lms },
@@ -486,19 +501,25 @@ const MOBILE_TAB_LIMIT = 4;
 
 const pickMobileTabs = (access, badges = {}) => {
     const taken = new Set();
-    const tabs = [];
+    const available = [];
     for (const section of MOBILE_TAB_SECTIONS) {
-        if (tabs.length >= MOBILE_TAB_LIMIT) break;
         if (taken.has(section.view) || !section.allowed(access)) continue;
         taken.add(section.view);
-        tabs.push({
-            view: section.view,
-            label: section.label,
-            icon: section.icon,
-            badge: section.badge ? Math.max(0, Number(badges[section.badge]) || 0) : 0,
-        });
+        available.push(section);
     }
-    return tabs;
+    /* Есть личные разделы — бар собирается ТОЛЬКО из них (плюс QR, если выдан).
+       Ежедневные на освободившееся место не подставляются: профиль просто
+       встаёт правее, к самому углу. */
+    const hasPersonal = available.some((section) => section.personal);
+    const chosen = hasPersonal
+        ? available.filter((section) => section.personal || section.view === 'qr_access')
+        : available;
+    return chosen.slice(0, MOBILE_TAB_LIMIT).map((section) => ({
+        view: section.view,
+        label: section.label,
+        icon: section.icon,
+        badge: section.badge ? Math.max(0, Number(badges[section.badge]) || 0) : 0,
+    }));
 };
 
 const DEFAULT_USERS_REPORT_OPTIONS = {
@@ -38074,6 +38095,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         && departmentAllowsView(user, 'shift_auction'),
                     myEvaluations: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
                         && departmentAllowsView(user, 'evaluation'),
+                    /* «QR доступ». Гейт повторяет два пункта сайдбара: у админа
+                       он безусловный, у главы отдела — по карте разделов. */
+                    qrAccess: isAdminLikeRole
+                        || (isDepartmentManager && !isAdminLikeRole && departmentAllowsView(user, 'qr_access')),
                     wiki: wikiSectionEnabled,
                     lms: canAccessLmsSection && departmentAllowsView(user, 'lms'),
                     groupLate: canAccessGroupLateBotSection,
@@ -38594,6 +38619,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                класс на <body>, по которому включается вся мобильная вёрстка;
                side — сторона бара, она же меняется при повороте экрана. */
             const { shell: isMobileShell, side: mobileTabSide } = useMobileShell();
+            /* Под открытой шторкой страница стоит намертво — как под листом в
+               мобильном приложении. Без замка палец, попавший мимо списка
+               разделов, увозил раздел ПОД шторкой, и, закрыв её, человек
+               оказывался в другом месте страницы. */
+            useEffect(() => holdPageScroll(isMobileShell && mobileMenuOpen), [isMobileShell, mobileMenuOpen]);
             /* Полосы, занятые навигацией телефона, — для плавающего помощника:
                шарик, севший на бар, отнимает вход в разделы. Мемоизация не ради
                скорости: объект уходит в ref помощника и в список зависимостей

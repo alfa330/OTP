@@ -38,6 +38,19 @@
     --sheet-radius: 16px;
 }
 
+/* ── Жесты страницы ────────────────────────────────────────────────────── */
+
+/* ДВОЙНОЙ ТАП БОЛЬШЕ НЕ ПРИБЛИЖАЕТ. Портал на телефоне работает как приложение,
+   а не как страница (решение владельца 10.09.2026): приближение здесь только
+   мешает — экран уезжает в масштаб, из которого он сам не возвращается, бар
+   разделов оказывается за краем, а колокол повисает посреди содержимого.
+   Наезд на поле при фокусе отключён вторым концом — maximum-scale в
+   index.html; здесь снят именно двойной тап. `manipulation` оставляет и
+   прокрутку, и щипок: запрещает ровно масштабирование двойным касанием. */
+body.mobile-shell {
+    touch-action: manipulation;
+}
+
 /* ── Бар ───────────────────────────────────────────────────────────────── */
 
 .mobile-tabbar {
@@ -303,6 +316,11 @@ body.mobile-shell .sidebar > div {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     min-height: 0;
+    /* Докрутив лист до конца, палец не должен продолжить прокручивать раздел
+       ПОД ним: страницу на это время держит замок (src/utils/pageScrollLock.js),
+       а сцепку прокруток снимает вот это. Два конца нужны оба — замок не даёт
+       уехать фону, contain не даёт листу «передать» ему движение. */
+    overscroll-behavior: contain;
 }
 
 body[data-tabbar-side="right"].mobile-shell .sidebar > div {
@@ -1447,6 +1465,21 @@ body.mobile-shell .main-content *:has(> table) {
     max-width: 100%;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+}
+
+/* Боковая прокрутка не «перетекает» дальше: доехав до края таблицы или полосы
+   вкладок, палец не должен ни качнуть страницу, ни выполнить жест «назад»
+   браузера. Одно правило на все три вида полос выше — их отбор уже расписан
+   там, повторять его смысла нет, а расходиться им нельзя. */
+body.mobile-shell .main-content .inline-flex[class*="rounded-"],
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-gray"],
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-slate"]:not([class*="flex-wrap"]),
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="overflow-hidden"]:not([class*="flex-wrap"]):has(> button + button),
+body.mobile-shell .main-content *:has(> .min-w-max),
+body.mobile-shell .main-content *:has(> [class*="min-w-["]),
+body.mobile-shell .main-content *:has(> table),
+body.mobile-shell .main-content [class*="overflow-x-auto"] {
+    overscroll-behavior-x: contain;
 }
 
 body.mobile-shell .main-content table {
