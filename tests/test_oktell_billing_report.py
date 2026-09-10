@@ -64,6 +64,7 @@ CONST_NAMES = (
     "OKTELL_BILLING_MAX_RANGE_DAYS",
     "_OKTELL_BILLING_PARK_LABELS",
     "_OKTELL_BILLING_LINE_LABELS",
+    "_OKTELL_BILLING_LINE_TAIL_MIN",
     "_OKTELL_BILLING_EXPORT_DUR_FMT",
     "_OKTELL_BILLING_EXPORT_PCT_FMT",
 )
@@ -422,19 +423,30 @@ class BuildReportTests(unittest.TestCase):
         # ничего не потеряли по дороге
         self.assertEqual(report["totals"]["arrived"], 153)
 
-    def test_unusable_line_value_does_not_become_a_fake_number(self):
-        """'7639iTaxi' раньше показывался как несуществующий номер «87639» вместо парка
-        «Такси 24» (задача #308). 10 цифр не набирается — значит линия не определена."""
+    def test_broken_line_value_is_restored_by_tail(self):
+        """'7639iTaxi' раньше показывался как несуществующий номер «87639» (задача #308).
+        Хвост '7639' подходит ровно одной известной линии — значит это Такси 24, и звонки
+        должны лечь в её строку, а не в «номер не определён»."""
         build = self.ns["_oktell_billing_build_report"]
         report = build([
             self._row("2026-06-01", "Taxi24", arrived=429, served=391, line_number="+77074777639"),
             self._row("2026-06-01", "Taxi24", arrived=19, served=18, line_number="7639iTaxi"),
         ], include_line=True)
         rows = {(r["park"], r["line"]): r["arrived"] for r in report["parks"]}
-        self.assertEqual(rows, {("Taxi24", "7074777639"): 429, ("Taxi24", ""): 19})
-        self.assertEqual(self.ns["_oktell_billing_line_digits"]("7639iTaxi"), "")
+        self.assertEqual(rows, {("Taxi24", "7074777639"): 448})
+        self.assertEqual(self.ns["_oktell_billing_line_digits"]("7639iTaxi"), "7074777639")
         # сумма по номерам сходится с итогом парка из отчёта Oktell
         self.assertEqual(report["totals"]["arrived"], 448)
+
+    def test_ambiguous_tail_stays_without_line(self):
+        """'2288' — хвост сразу двух линий (Бизнес Партнер и Бизнес Партнер Фин).
+        Выбирать одну наугад в биллинговом отчёте нельзя."""
+        build = self.ns["_oktell_billing_build_report"]
+        report = build([
+            self._row("2026-06-01", "Бизнес партнер", arrived=3, served=3, line_number="2288"),
+        ], include_line=True)
+        self.assertEqual([(r["park"], r["line"]) for r in report["parks"]],
+                         [("Бизнес партнер", "")])
 
     def test_line_key_normalisation(self):
         key = self.ns["_oktell_billing_line_key"]
@@ -444,9 +456,14 @@ class BuildReportTests(unittest.TestCase):
         self.assertEqual(key("7075050880"), "7075050880")
         self.assertEqual(key("+7 (707) 505-08-80"), "7075050880")
         self.assertEqual(key("Sp7771442288"), "7771442288")
-        # короче 10 цифр — номер не собирается, выдумывать его нельзя
-        self.assertEqual(key("7639iTaxi"), "")
+        # полный номер не собрался — восстанавливаем по хвосту, если он подходит ОДНОЙ линии
+        self.assertEqual(key("7639iTaxi"), "7074777639")
+        self.assertEqual(key("7639"), "7074777639")
+        # хвост сразу двух линий, внутренний номер, слишком короткий обрывок — линии нет
+        self.assertEqual(key("2288"), "")
+        self.assertEqual(key("4222"), "")
         self.assertEqual(key("6610"), "")
+        self.assertEqual(key("964"), "")
         self.assertEqual(key(""), "")
         self.assertEqual(key(None), "")
 

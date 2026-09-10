@@ -75,7 +75,13 @@ class BillingLineKeyTests(unittest.TestCase):
     def test_backend_requires_ten_digits(self):
         source = BOT_PATH.read_text(encoding="utf-8-sig")
         self.assertIn("def _oktell_billing_line_key(value):", source)
-        self.assertIn("return digits[-10:] if len(digits) >= 10 else ''", source)
+        self.assertIn("if len(digits) >= 10:\n        return digits[-10:]", source)
+        # обрывок доклеивается к линии только при однозначном совпадении по хвосту
+        self.assertIn(
+            "matches = [key for key in _OKTELL_BILLING_LINE_LABELS if key.endswith(digits)]",
+            source,
+        )
+        self.assertIn("if len(matches) == 1:", source)
         # группировка сводки и строка детализации берут тот же ключ, что и подпись
         self.assertIn(
             "key = (park, _oktell_billing_line_key(raw.get('line_number'))) if include_line",
