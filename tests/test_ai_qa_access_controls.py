@@ -67,7 +67,14 @@ class AiQaAccessControlTests(unittest.TestCase):
         cls.database_source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
 
     def test_frontend_allows_super_admin_and_moldir_user_id(self):
-        self.assertIn("const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);", self.app_source)
+        # Поимённый список, а не один литерал: людей в нём прибавляется по
+        # решению владельца, и тест не должен краснеть от каждого нового имени.
+        # Важно другое — что список ЕСТЬ и что «Чаты Верификаторов» смотрят в
+        # СВОЙ: общий список молча отдавал бы переписку ОП любому, кого
+        # добавили ради «ИИ-оценки».
+        self.assertIn("const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183", self.app_source)
+        self.assertIn("const VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = new Set([183]);", self.app_source)
+        self.assertIn("VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))", self.app_source)
         self.assertIn("normalizeRole(userLike?.role) === 'super_admin'", self.app_source)
         self.assertIn("AI_QA_EXTRA_ACCESS_USER_IDS.has(Number(userLike?.id))", self.app_source)
         self.assertIn("const canAccessAiQaSection = canAccessAiQaForUser(user);", self.app_source)
@@ -175,7 +182,8 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertIn("if (view === 'ai_qa' && canAccessAiQaSection) return;", self.app_source)
 
     def test_backend_allows_moldir_user_id(self):
-        self.assertIn("AI_QA_EXTRA_ACCESS_USER_IDS = {183}", self.api_source)
+        self.assertIn("AI_QA_EXTRA_ACCESS_USER_IDS = {183", self.api_source)
+        self.assertIn("VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = {183}", self.api_source)
         self.assertIn("int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS", self.api_source)
         self.assertIn("if _is_super_admin_role(role):", self.api_source)
 
@@ -331,6 +339,7 @@ class AiQaAccessControlTests(unittest.TestCase):
             "jsonify": lambda payload: payload,
             "logging": SimpleNamespace(exception=lambda *_a, **_kw: None),
             "AI_QA_EXTRA_ACCESS_USER_IDS": {183},
+            "VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS": {183},
             "AI_QA_OP_DEPARTMENT_ID": 367,
             "AI_QA_SUBJECT_DEPARTMENT_CODES": frozenset({"op", "szov", "tez"}),
             # «Чаты Верификаторов» — раздел ОТДЕЛА ПРОДАЖ: главы ОП и СЗоВ, но
@@ -368,7 +377,7 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertEqual(verdict(9), (None, ({"error": "forbidden"}, 403)),
                          "СВ СЗоВ в «Чаты Верификаторов» не допущен")
         self.assertEqual(verdict(6), (6, None), "СВ отдела продаж проходил и до правки")
-        self.assertEqual(verdict(183), (183, None), "whitelist ИИ-оценки")
+        self.assertEqual(verdict(183), (183, None), "поимённый список чатов")
 
         for user_id, who in ((3, "глава ТЭЗ с ролью admin"), (5, "оператор"),
                              (7, "тренер"), (8, "рядовой маркетолог"), (None, "без сессии")):

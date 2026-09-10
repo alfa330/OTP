@@ -2904,7 +2904,21 @@ AVATAR_SIGNED_URL_CACHE = {}
 AVATAR_SIGNED_URL_CACHE_LOCK = threading.Lock()
 FOUR_YOU_ADMIN_USER_ID = int(os.getenv('FOUR_YOU_ADMIN_USER_ID', '2'))
 FOUR_YOU_VIEWER_USER_ID = int(os.getenv('FOUR_YOU_VIEWER_USER_ID', '241') or 241)
-AI_QA_EXTRA_ACCESS_USER_IDS = {183}
+# Поимённый доступ к разделу «ИИ-оценка» — сверх ролей. Проверяется ПЕРВЫМ, до
+# роли и отдела, поэтому человек из списка проходит независимо от того, как
+# сложится остальная проверка.
+#   183 — Мулдир Юсупова (сейчас супер-админ, проходит и без списка).
+#   169 — Доспаева Жанна, админ СЗоВ: доступ выдан поимённо по решению владельца
+#         10.09.2026. По ролям она и так проходит как глобальный админ (админ,
+#         не возглавляющий отдел), но раздел ей нужен наверняка, а поимённая
+#         строка это и выражает — в отличие от роли, которую однажды поменяют.
+AI_QA_EXTRA_ACCESS_USER_IDS = {183, 169}
+# «Чаты Верификаторов» — СВОЙ список, а не тот же самый. Раздел показывает
+# переписку Wazzup ОТДЕЛА ПРОДАЖ, и пока список был общий, любой человек,
+# добавленный ради «ИИ-оценки», молча получал вместе с ней и чужую переписку.
+# Периметр здесь и так перечислен явно (см. docstring _verifier_chats_guard) —
+# теперь это верно и для поимённого доступа.
+VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = {183}
 FOUR_YOU_MAX_FILES_PER_UPLOAD = int(os.getenv('FOUR_YOU_MAX_FILES_PER_UPLOAD', '20'))
 FOUR_YOU_MAX_FILE_SIZE_BYTES = int(os.getenv('FOUR_YOU_MAX_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
 FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
@@ -5265,7 +5279,7 @@ def _verifier_chats_guard():
     requester_id = getattr(g, 'user_id', None)
     if requester_id is None:
         return None, (jsonify({"error": "forbidden"}), 403)
-    if int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
+    if int(requester_id) in VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS:
         return requester_id, None
     user = db.get_user(id=requester_id)
     role = _normalize_user_role(user[3]) if user else None

@@ -50,6 +50,9 @@ const NAMES = [
     'VERIFIER_CHATS_HEAD_DEPARTMENT_CODES',
     'AI_QA_HEAD_DEPARTMENT_CODES',
     'AI_QA_EXTRA_ACCESS_USER_IDS',
+    // Свой поимённый список у чатов: пока он был общий с «ИИ-оценкой»,
+    // добавленный туда человек молча получал и переписку отдела продаж.
+    'VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS',
     'normalizeDepartmentCode',
     'isOpSalesSupervisorForAiQa',
     'isAiQaSupervisor',
@@ -101,7 +104,12 @@ const PEOPLE = [
     ['СВ чужого отдела', { id: 8, role: 'sv', department_id: 900 }, false, false],
     ['тренер', { id: 9, role: 'trainer' }, false, false],
     ['оператор', { id: 10, role: 'operator' }, false, false],
-    ['оператор из whitelist ИИ-оценки', { id: 183, role: 'operator' }, true, true],
+    // 183 стоит в ОБОИХ поимённых списках — исторически, до их разделения.
+    ['оператор из обоих поимённых списков', { id: 183, role: 'operator' }, true, true],
+    // А вот поимённый доступ к «ИИ-оценке» переписку ОП НЕ открывает: ради
+    // этого списки и разведены. Роль взята заведомо бесправная, чтобы
+    // проверялся именно поимённый доступ, а не роль.
+    ['поимённый доступ только к ИИ-оценке', { id: 169, role: 'operator' }, false, true],
     ['бухгалтер', { id: 11, role: 'accounting_manager' }, false, false],
     // ЕДИНСТВЕННЫЙ, у кого разборы есть, а переписки нет: рядовой сотрудник
     // «Маркетинга». Разборы звонков ему выдал владелец (04.09.2026), чаты
