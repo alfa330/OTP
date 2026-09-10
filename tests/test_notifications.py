@@ -423,15 +423,21 @@ class MobilePresenceTest(unittest.TestCase):
     APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
     STYLES = (ROOT / 'src' / 'styles.css').read_text(encoding='utf-8')
     SHELL = (ROOT / 'src' / 'components' / 'common' / 'mobile-shell.css').read_text(encoding='utf-8')
+    SLOT = (ROOT / 'src' / 'components' / 'common' / 'MobileBellSlot.jsx').read_text(encoding='utf-8')
 
     def test_bell_moves_to_the_screen_corner_on_a_phone(self):
         self.assertIn('createPortal(', self.APP)
-        self.assertIn('<div className="mobile-bell-slot">{bell}</div>', self.APP)
+        # Слот в углу — компонент, а не голый div: колокол на телефоне
+        # ПЕРЕТАСКИВАЕТСЯ (он закрывал собой крестики окон раздела «Аукцион
+        # смен»). Класс на нём тот же — по нему написаны все стили угла.
+        self.assertIn('<MobileBellSlot userId={user?.id} side={mobileTabSide}>{bell}</MobileBellSlot>', self.APP)
+        self.assertIn('className="mobile-bell-slot"', self.SLOT)
         # На компьютере колокол остаётся в шапке сайдбара. Имя обёртки не
         # косметика: её положение (в рельсе под знаком, у развёрнутого — в
         # правом верхнем углу) задают стили по этому классу.
         self.assertIn('if (!isMobileShell) return <div className="sidebar-bell-slot">{bell}</div>;', self.APP)
-        # Угол — правый верхний, при любом повороте экрана.
+        # Угол — правый верхний, при любом повороте экрана; пока колокол не
+        # трогали, место ему задаёт CSS, а не посчитанные координаты.
         block = self.SHELL[self.SHELL.index('.mobile-bell-slot {'):]
         self.assertIn('position: fixed;', block[:200])
         self.assertIn('right: max(10px, env(safe-area-inset-right));', block[:300])
