@@ -377,10 +377,18 @@ test('колокол переезжает и меняет размер, а на 
     // Тот же размер, что у строки раздела: полоса 80 минус поля по 10.
     assert.equal(railLeft, 10, `колокол в рельсе на ${railLeft}px — не по краю карточек`);
     assert.equal(railW, 60, `колокол в рельсе шириной ${railW} — карточка раздела 60`);
-    const railRow = rules(styles).find((r) => r.selector === `${RAIL} .sidebar-top-row`);
-    assert.ok(railRow, 'нет высоты шапки в рельсе');
-    const rowH = Number(/height: (\d+)px/.exec(railRow.body)[1]);
-    assert.equal(rowH, railH, `шапка в рельсе ${rowH}px, а колокол ${railH}px — они обязаны совпадать`);
+    /* Высота шапки ОДНА на оба состояния: место под логотип держится всегда.
+       Иначе при наведении логотип раздвигал шапку и уводил весь список вниз. */
+    assert.ok(
+        !rules(styles).some((r) => r.selector === `${RAIL} .sidebar-top-row` && /height:/.test(r.body)),
+        'в рельсе у шапки снова своя высота — при наведении список поедет вниз',
+    );
+    const row = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-top-row');
+    const rowH = Number(/height: (\d+)px/.exec(row.body)[1]);
+    assert.equal(rowH, 54, `шапка ${rowH}px — под логотип нужно 54`);
+    assert.ok(rowH >= railH, `колокол (${railH}px) выше шапки (${rowH}px)`);
+    const railTop = Number(/top: (\d+)px/.exec(railSlot.body)[1]);
+    assert.equal(railTop * 2 + railH, rowH, `колокол в рельсе стоит не по центру шапки: ${railTop} + ${railH} + ${railTop} ≠ ${rowH}`);
 
     // Плитка значка: 18 px у развёрнутой панели, 26 в рельсе — как у разделов.
     const tile = rules(styles).find((r) => r.selector === 'body:not(.mobile-shell) .sidebar-bell-slot > div > button > svg:first-child');

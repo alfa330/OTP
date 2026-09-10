@@ -456,10 +456,14 @@
        минус 16, и без запаса они снова наложились бы. */
     body:not(.mobile-shell) .sidebar-top-row {
       position: relative;
+      /* 54 px — рост логотипа, и высота эта ОДНА на оба состояния. Раньше в
+         рельсе шапка была 42 (ровно под колокол), и при наведении логотип
+         раздвигал её на 12 px, уводя весь список вниз (замечание владельца
+         10.09.2026). Место под логотип держится всегда, поэтому ничего не
+         едет; в рельсе эти 12 px — просто воздух над селектором отдела. */
       height: 54px;
       padding: 0 10px;
       margin-bottom: 10px;
-      transition: height 0.3s ease;
     }
     /* Рельс: в шапке остаётся ОДИН колокол, ростом со строку раздела.
        Условие выписано целиком — `свёрнут И курсора нет И панель не открыта`, —
@@ -529,12 +533,10 @@
       transition: left 0.3s ease, opacity 0.2s ease, visibility 0s linear 0.2s;
     }
     /* Шапка в рельсе — ровно одна строка: 42 px, как карточка раздела. */
-    body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-top-row {
-      height: 42px;
-    }
     body:not(.mobile-shell) .sidebar.collapsed:not(:hover):not(:has(.sidebar-holds-open)) .sidebar-bell-slot {
       left: 10px;
-      top: 0;
+      /* По центру шапки: 6 = (54 − 42) / 2. */
+      top: 6px;
       width: 60px;
       height: 42px;
     }
