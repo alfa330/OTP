@@ -755,46 +755,77 @@ body[data-tabbar-side="right"] .mobile-bell-slot {
    пальцем. Матовое стекло, крупное скругление, ручка сверху, «Готово» справа —
    как в системных листах.
 
+   ЛИСТ ДОХОДИТ ДО НИЖНЕЙ ГРАНИ ЭКРАНА и накрывает бар разделов, а не висит
+   над ним карточкой с зазором. Висящая карточка читалась как всплывшее
+   сообщение, которое сейчас исчезнет: у неё были скруглены все четыре угла,
+   под ней светилась полоска полотна, а бар оставался ярким поверх затемнения.
+   Скругление сверху + опора на нижнюю грань — это ровно то, чем лист
+   отличается от карточки в любом телефоне.
+
    Позиционируется относительно ЭКРАНА, хотя лежит внутри углового слота: у
    слота нет transform, поэтому position: fixed внутри него считается от окна. */
 .mobile-bell-slot .notifications-dropdown {
     position: fixed;
     top: auto;
-    left: max(8px, env(safe-area-inset-left));
-    right: max(8px, env(safe-area-inset-right));
-    bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + 8px);
+    left: 0;
+    right: 0;
+    bottom: 0;
     width: auto !important;
     max-width: none;
     margin: 0;
-    max-height: min(72vh, 560px);
+    max-height: min(78vh, 620px);
     border: none;
-    border-radius: 22px;
+    border-radius: 22px 22px 0 0;
+    /* Отступ под домашнюю полосу — на самом листе, а не на его содержимом:
+       иначе полоса перечёркивала бы последнюю строку списка. */
+    padding-bottom: env(safe-area-inset-bottom);
     background: var(--sheet-glass);
     backdrop-filter: blur(30px) saturate(180%);
     -webkit-backdrop-filter: blur(30px) saturate(180%);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+    box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.22);
     animation: mtb-sheet-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) !important;
 }
 
+/* Телефон боком: бар стоит вертикальной полосой у края корпуса, и лист
+   отступает от него, а не подлезает под кнопки. Высота там мала, поэтому
+   лист занимает её почти целиком. */
 body[data-tabbar-side="right"] .mobile-bell-slot .notifications-dropdown {
-    right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 8px);
-    bottom: max(8px, env(safe-area-inset-bottom));
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
+    max-height: min(88vh, 620px);
 }
 
 body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown {
-    left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 8px);
-    bottom: max(8px, env(safe-area-inset-bottom));
+    left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+    max-height: min(88vh, 620px);
 }
 
 @keyframes mtb-sheet-in {
     from {
         opacity: 0;
-        transform: translateY(16px) scale(0.98);
+        transform: translateY(100%);
     }
     to {
         opacity: 1;
         transform: none;
     }
+}
+
+@keyframes mtb-sheet-out {
+    from {
+        opacity: 1;
+        transform: none;
+    }
+    to {
+        opacity: 0;
+        transform: translateY(100%);
+    }
+}
+
+/* Закрытие. Общий animate-dropdown-reverse — это сжатие по вертикали (scaleY),
+   от которого лист складывался бы гармошкой у нижней грани; уезжать он должен
+   туда же, откуда пришёл. */
+.mobile-bell-slot .notifications-dropdown.animate-dropdown-reverse {
+    animation: mtb-sheet-out 0.22s cubic-bezier(0.32, 0.72, 0, 1) both !important;
 }
 
 /* Ручка листа — та же подсказка «это можно закрыть», что и у шторки разделов. */
@@ -830,51 +861,79 @@ body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown {
 }
 
 /* Строки списка — как в системных уведомлениях: цветная плитка, заголовок,
-   пояснение под ним, время справа. */
-.mobile-bell-slot .notifications-scroll > button {
-    align-items: center;
+   пояснение под ним, время справа. Выравнивание по ВЕРХУ, а не по центру:
+   заголовок теперь занимает до двух строк, и центрированная плитка уезжала бы
+   к середине абзаца. */
+.mobile-bell-slot .notifications-item {
+    position: relative;
+    align-items: flex-start;
     gap: 12px;
     padding: 11px 14px;
     border-bottom: none;
     background: none;
 }
 
-.mobile-bell-slot .notifications-scroll > button + button {
-    box-shadow: inset 58px 0.5px 0 -57.5px var(--sheet-sep);
+/* Разделитель начинается от текста, а не от края листа — так отбиты строки в
+   любом системном списке. Отдельным слоем, а не рамкой: рамка добавила бы
+   строке высоту и сдвинула бы её содержимое на полпикселя. */
+.mobile-bell-slot .notifications-item + .notifications-item::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 60px;
+    right: 0;
+    height: 1px;
+    transform: scaleY(0.5);
+    transform-origin: top;
+    background: var(--sheet-sep);
 }
 
-.mobile-bell-slot .notifications-scroll > button > span:first-child {
+.mobile-bell-slot .notifications-item > span:first-child {
     width: 34px;
     height: 34px;
-    margin-top: 0;
+    margin-top: 1px;
     border-radius: 10px;
 }
 
-.mobile-bell-slot .notifications-scroll > button > span:first-child svg {
+.mobile-bell-slot .notifications-item > span:first-child svg {
     width: 17px;
     height: 17px;
 }
 
-.mobile-bell-slot .notifications-scroll > button .truncate:first-child,
-.mobile-bell-slot .notifications-scroll > button span[class*="text-[13.5px]"] {
+.mobile-bell-slot .notifications-item-title {
     font-size: 15px !important;
     color: var(--sheet-text) !important;
 }
 
-.mobile-bell-slot .notifications-scroll > button span[class*="text-[12px]"],
-.mobile-bell-slot .notifications-scroll > button span[class*="text-[11px]"] {
+.mobile-bell-slot .notifications-item-meta {
     font-size: 12.5px !important;
+}
+
+.mobile-bell-slot .notifications-item-when {
+    font-size: 12px !important;
+    padding-top: 2px;
 }
 
 /* Нажатие подсвечивает строку — на телефоне это единственный отклик, hover
    там не срабатывает вовсе. */
-.mobile-bell-slot .notifications-scroll > button:active {
+.mobile-bell-slot .notifications-item:active {
     background: var(--sheet-active) !important;
+}
+
+/* Строка «Отметить прочитанным» внизу листа — отдельная кнопка во всю ширину,
+   как «Очистить» в системном центре уведомлений. */
+.mobile-bell-slot .notifications-clear-all {
+    border-top: 1px solid var(--sheet-sep);
+    color: var(--sheet-accent);
+}
+
+.mobile-bell-slot .notifications-clear-all:active {
+    background: var(--sheet-active);
 }
 
 /* Переключатель уведомлений рабочего стола на телефоне не показываем: он про
    окно браузера на компьютере, а место в листе дорогое. */
-.mobile-bell-slot .notifications-dropdown > div:last-child:not(.notifications-scroll):not(.notifications-head) {
+.mobile-bell-slot .notifications-desktop-row {
     display: none;
 }
 
@@ -903,11 +962,17 @@ html[data-otp-theme="dark"] .mobile-bell-slot .notifications-head {
     border-bottom-color: var(--sheet-sep);
 }
 
-/* Подложка под листом. Гасит содержимое портала и ловит нажатие мимо. */
+/* Подложка под листом. Гасит содержимое портала и ловит нажатие мимо.
+
+   z-index 70 — вровень с баром разделов, а не под ним: подложка уходит
+   порталом в конец <body>, то есть при равном слое рисуется поверх. Бар тоже
+   гаснет, и в альбомной ориентации (где он стоит сбоку от листа, а не под ним)
+   больше не остаётся единственным ярким пятном на затемнённом экране. Сам
+   колокол (71) остаётся сверху — это переключатель, он и должен быть виден. */
 .notifications-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 69;
+    z-index: 70;
     background: rgba(0, 0, 0, 0.28);
     opacity: 0;
     transition: opacity 0.22s ease;
@@ -940,6 +1005,96 @@ body[data-tabbar-side="right"] .notifications-toast-floating {
 
 body[data-tabbar-side="left"] .notifications-toast-floating {
     left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 10px);
+}
+
+/* Подписи в карточке — обычным регистром. Разметка у неё общая с настольной
+   панелью, где раздел набран ЗАГЛАВНЫМИ вразрядку; рядом с листом, где то же
+   слово читается как «Ознакомление», две записи одного и того же выглядят
+   разнобоем. Правило мобильное, настольной панели не касается. */
+body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+/* ── Шапка, проявляющаяся при прокрутке ────────────────────────────────── */
+
+/* Полоса с портретом и именем поверх раздела: пока крупное имя видно, её нет,
+   а как только оно уходит вверх — проявляется матовым стеклом с волосяной
+   линией снизу. Ровно то же делают «Настройки» и Telegram.
+
+   z-index 68 — НИЖЕ колокола (71) и его листа: колокол висит в том же углу и
+   обязан оставаться нажимаемым. Место под него освобождает padding-right. */
+.mobile-scroll-title {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 68;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: calc(46px + max(10px, env(safe-area-inset-top)));
+    padding: max(10px, env(safe-area-inset-top)) 62px 0 16px;
+    background: var(--sheet-glass);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    box-shadow: 0 0.5px 0 var(--sheet-sep);
+    opacity: 0;
+    /* Не display: none — иначе не из чего анимировать проявление. Событий
+       шапка не ловит вовсе: под ней содержимое раздела, и невидимая полоса,
+       перехватывающая нажатия, была бы хуже её отсутствия. */
+    pointer-events: none;
+    transform: translateY(-6px);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.mobile-scroll-title.is-shown {
+    opacity: 1;
+    transform: none;
+}
+
+/* Бар сбоку (телефон боком) — шапка отступает от него, а не подлезает под
+   кнопки. Колокол в этом случае тоже отъезжает, поэтому правое поле меняется
+   вместе с ним. */
+body[data-tabbar-side="right"] .mobile-scroll-title {
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right));
+    padding-right: 62px;
+}
+
+body[data-tabbar-side="left"] .mobile-scroll-title {
+    left: calc(var(--mtb-thickness) + env(safe-area-inset-left));
+}
+
+.mobile-scroll-title__avatar {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    flex: 0 0 26px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--mtb-accent);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.mobile-scroll-title__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.mobile-scroll-title__text {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--sheet-text);
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* ── Место под бар и переход между разделами ───────────────────────────── */
@@ -1007,11 +1162,20 @@ body.mobile-shell .main-content {
     height: auto !important;
     max-height: none !important;
     min-height: 100dvh;
-    overflow-x: hidden;
     /* Длинные слова (адреса, идентификаторы, ФИО в одну строку) переносятся, а
        не растягивают блок за край экрана. */
     overflow-wrap: break-word;
 }
+
+/* Поперечной прокрутки у страницы нет и без правил этого файла: её обрезает
+   старый мобильный блок в src/styles.css — медиазапрос по 640 px, где у
+   body и html стоит overflow-x: clip. Второй такой страховки здесь быть не
+   должно: разъехавшись, две обрезки дают ровно ту путаницу, ради ухода от
+   которой условие «мы на телефоне» держат в одном месте.
+
+   Из блока выше по этой же причине убрана строка overflow-x: hidden — она не
+   работала вовсе, потому что рядом стоит overflow: visible !important, а
+   важное объявление бьёт обычное независимо от порядка. */
 
 /* Полосы прокрутки внутри разделов (таблицы, ленты вкладок) на телефоне не
    рисуем: их и так не тянут мышью, а видимая полоса съедает строку и выглядит
@@ -1043,6 +1207,31 @@ body.mobile-shell .main-content {
     padding-top: calc(46px + max(10px, env(safe-area-inset-top))) !important;
 }
 
+/* ── Модальные окна поверх оболочки ────────────────────────────────────── */
+
+/* Окно на телефоне — это отдельный экран, а не карточка посреди раздела:
+   оно обязано накрывать и бар разделов, и колокол. Настольные z-index'ы
+   (у SimpleModal — 50, у IosModal — 90) писались, когда ни бара (70), ни
+   углового колокола (71) не было вовсе, и на телефоне бар срезал подвал окна
+   с главной кнопкой, а колокол висел поверх шапки, ровно на крестике. */
+body.mobile-shell .otp-modal-root {
+    z-index: 120;
+}
+
+/* Колокол, пока окно открыто, не показываем совсем. Поднять его ещё выше
+   нельзя: он остался бы плавать поверх чужого экрана, а нажать на него,
+   не закрыв окно, всё равно некуда — лист уведомлений вышел бы из-под окна.
+   Метку ставят все три примитива окон: SimpleModal, IosModal, FullscreenSheet. */
+body.mobile-shell:has(.otp-modal-root) .mobile-bell-slot {
+    display: none;
+}
+
+/* Подвал окна прижат к нижней грани экрана, и на телефонах с домашней
+   полосой кнопка попадала бы прямо под неё. */
+body.mobile-shell .otp-modal-root .otp-modal-footer {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
 /* Ряды кнопок в шапках разделов. На компьютере они в одну строку, на телефоне
    уезжают за правый край — вместе с «Новой задачей» и «Обновить». */
 body.mobile-shell .main-content [class*="topbar"],
@@ -1068,8 +1257,23 @@ body.mobile-shell .main-content .flex.items-stretch:has(> .flex-1) {
 }
 
 /* Высота в экран у таких каркасов на телефоне превращается в две ленты
-   прокрутки — внешнюю и внутреннюю. Оставляем одну, страничную. */
-body.mobile-shell .main-content [class*="h-[calc"],
+   прокрутки — внешнюю и внутреннюю. Оставляем одну, страничную.
+
+   СЕЛЕКТОР ПРИБИТ К НАЧАЛУ КЛАССА, а не ищет подстроку где попало. Простое
+   [class*="h-[calc"] ловило и `sm:max-h-[calc(100vh-2rem)]` — ограничение,
+   которое НА ТЕЛЕФОНЕ НЕ ДЕЙСТВУЕТ ВОВСЕ (брейкпоинт sm начинается с 640px),
+   но строкой в атрибуте класса присутствует. Так модальному окну «Запроса на
+   замену» сносило height у внутреннего каркаса `flex h-full flex-col`: вместо
+   экрана он вырастал по содержимому, шапка и подвал переставали быть
+   липкими, и кнопка «Отправить» уезжала на 950-й пиксель — за нижний край.
+   Пробел перед именем класса (или начало атрибута) отсекает любые варианты
+   с префиксом брейкпоинта и оставляет ровно то, ради чего правило писалось. */
+body.mobile-shell .main-content [class^="h-[calc"],
+body.mobile-shell .main-content [class*=" h-[calc"],
+body.mobile-shell .main-content [class^="max-h-[calc"],
+body.mobile-shell .main-content [class*=" max-h-[calc"],
+body.mobile-shell .main-content [class^="min-h-[calc"],
+body.mobile-shell .main-content [class*=" min-h-[calc"],
 body.mobile-shell .main-content .h-screen:not(.main-content) {
     height: auto !important;
     max-height: none !important;
@@ -1116,9 +1320,23 @@ body.mobile-shell .main-content [role="listbox"] {
 
 /* Переключатели вкладок («Обзор · Бэклог · Доска», «Аналитика · Сотрудники»)
    рвать переносом нельзя — это одна полоса. Их прокручивают вбок, как в
-   мобильных приложениях, а полосу прокрутки прячем. */
+   мобильных приложениях, а полосу прокрутки прячем.
+
+   Три написания одного и того же приёма: подложка бывает bg-gray-100 и
+   bg-slate-100 (в «Курсах» — вторая, и полоса торчала за экран на 13 px), а
+   бывает белая полоса с обводкой и overflow-hidden ради скруглённых углов —
+   так свёрстаны вкладки «Мои смены», где «Смены коллег» переносились на
+   вторую строку и рвали высоту полосы. Последний случай отбираем по паре
+   кнопок ВНУТРИ: карточка с текстом под это описание не подходит.
+
+   ПОЛОСЫ, КОТОРЫМ ПЕРЕНОС ПРОПИСАН В РАЗМЕТКЕ (flex-wrap), не трогаем. Там
+   автор уже решил, что строка распадается на две, и таких в «Отметках» и
+   «Учете часов» по десятку кнопок: запрет переноса растянул бы их на 790 px,
+   то есть вдвое шире экрана, и половина ушла бы за край недосягаемой. */
 body.mobile-shell .main-content .inline-flex[class*="rounded-"],
-body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-gray"] {
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-gray"],
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-slate"]:not([class*="flex-wrap"]),
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="overflow-hidden"]:not([class*="flex-wrap"]):has(> button + button) {
     max-width: 100%;
     overflow-x: auto;
     scrollbar-width: none;
@@ -1127,6 +1345,25 @@ body.mobile-shell .main-content .flex[class*="rounded-"][class*="bg-gray"] {
 
 body.mobile-shell .main-content .inline-flex[class*="rounded-"]::-webkit-scrollbar {
     display: none;
+}
+
+/* Кнопки в такой полосе не должны сжиматься до нечитаемого: полоса на то и
+   прокручивается вбок, чтобы подписи оставались в одну строку. */
+body.mobile-shell .main-content .flex[class*="rounded-"][class*="overflow-hidden"]:not([class*="flex-wrap"]):has(> button + button) > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+/* Отрицательные боковые поля. В разметке они стоят у липких шапок списков
+   («Отделы», «Настройки SIP»): на компьютере -mx-1 растягивает шапку до самой
+   кромки карточки, поверх её внутреннего отступа. На телефоне карточка и так
+   во весь экран, отступа под ней нет, и шапка вылезала за правый край — её
+   рамку срезало. Префиксы брейкпоинтов (sm:-mx-1) правило не задевает: перед
+   именем класса там стоит «sm:», а не пробел. */
+body.mobile-shell .main-content [class^="-mx-"],
+body.mobile-shell .main-content [class*=" -mx-"] {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
 }
 
 /* Блоки с шириной, заданной в разметке (w-[210px] и подобные), не должны

@@ -336,9 +336,105 @@ class SectionLayoutTests(unittest.TestCase):
 
     def test_tab_strips_scroll_instead_of_wrapping(self):
         """Полосу вкладок («Обзор · Бэклог · Доска») переносом рвать нельзя."""
-        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .inline-flex[class*="rounded-"],', 400)
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .inline-flex[class*="rounded-"],', 900)
         self.assertIn('overflow-x: auto;', block)
         self.assertIn('flex-wrap: nowrap;', block)
+
+    def test_tab_strips_cover_every_way_they_are_written(self):
+        """Один и тот же приём в разделах написан по-разному, и правило,
+        знающее лишь про bg-gray, оставляло полосу «Курсов» (bg-slate-100) на
+        13 px шире экрана, а вкладки «Мои смены» (белая полоса с обводкой и
+        overflow-hidden) переносило на вторую строку."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .inline-flex[class*="rounded-"],', 900)
+        self.assertIn('.flex[class*="rounded-"][class*="bg-slate"]', block)
+        self.assertIn('.flex[class*="rounded-"][class*="overflow-hidden"]', block)
+
+    def test_tab_strips_leave_alone_rows_that_ask_for_wrapping(self):
+        """Полосам, у которых перенос прописан в разметке, запрещать его
+        нельзя: в «Отметках» и «Учете часов» такой ряд из десятка кнопок
+        растянулся бы на 790 px — вдвое шире экрана, и половина ушла бы за
+        край недосягаемой."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content .inline-flex[class*="rounded-"],', 900)
+        for selector in block.split('{')[0].split(','):
+            selector = selector.strip()
+            if 'bg-gray' in selector or not selector.startswith('body'):
+                continue
+            if '.flex[class*="rounded-"]' in selector:
+                self.assertIn(':not([class*="flex-wrap"])', selector)
+
+    def test_page_clips_sideways_without_becoming_a_scrollport(self):
+        """Поперечную прокрутку обрезает старый мобильный блок в styles.css, и
+        обрезать он обязан через clip, а не hidden.
+
+        hidden по одной оси заставляет вторую посчитаться как auto, то есть
+        делает страницу окном прокрутки, — и это ломало position: sticky во
+        ВСЕХ разделах на телефоне: липкая шапка списка («Отделы», «Настройки
+        SIP») начинала отсчитывать своё top: 0 от body, а тот ростом со всё
+        содержимое и потому не прокручивается. Измерено на стенде: при
+        прокрутке на 98 px шапка уезжала с 0 на −42 вместо того, чтобы
+        остаться наверху. С clip — остаётся."""
+        at = STYLES.index('@media (max-width: 640px) {')
+        block = STYLES[at:at + 1400]
+        self.assertIn('body, html {', block)
+        self.assertIn('overflow-x: clip !important;', block)
+        head = block[:block.index('body, html {') + block[block.index('body, html {'):].index('}')]
+        self.assertNotIn('overflow-x: hidden', head)
+
+    def test_shell_does_not_add_a_second_clip(self):
+        """Двух обрезок быть не должно: разъехавшись, они дают ту же путаницу,
+        ради ухода от которой условие «мы на телефоне» держат в одном месте.
+        И внутри .main-content обрезки нет — она сделала бы раздел собственным
+        окном прокрутки, то есть вернула бы то, от чего уходили страничной
+        прокруткой."""
+        content = css_block(SHELL_CSS, 'body.mobile-shell .main-content {\n    overflow: visible', 400)
+        self.assertNotIn('overflow-x: hidden', content)
+        self.assertNotIn('overflow-x: clip', content)
+        for line in SHELL_CSS.splitlines():
+            self.assertNotEqual(line.strip(), 'body.mobile-shell {')
+
+    def test_screen_height_rule_ignores_breakpoint_prefixes(self):
+        """Правило «высота в экран → авто» отбирает классы по НАЧАЛУ имени.
+        Поиск подстроки ловил и sm:max-h-[calc(...)] — ограничение, которое на
+        телефоне не действует вовсе (брейкпоинт sm начинается с 640 px), но в
+        атрибуте класса присутствует. Так модальному окну «Запроса на замену»
+        сносило height у каркаса flex h-full flex-col: шапка и подвал
+        переставали быть липкими, и кнопка «Отправить» уезжала за нижний край
+        экрана — с этой жалобы правка и началась."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content [class^="h-[calc"],', 600)
+        self.assertIn('[class*=" h-[calc"]', block)
+        self.assertIn('[class^="max-h-[calc"]', block)
+        self.assertNotIn('[class*="h-[calc"],', block.split('{')[0].replace('[class*=" h-[calc"],', ''))
+
+    def test_modal_covers_the_bar_and_hides_the_bell(self):
+        """Окно на телефоне — отдельный экран, а не карточка посреди раздела.
+        Настольные z-index'ы (SimpleModal 50, IosModal 90) писались, когда ни
+        бара (70), ни углового колокола (71) не было: бар срезал подвал окна с
+        главной кнопкой, а колокол висел поверх шапки, ровно на крестике."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root {', 120)
+        modal_z = int(re.search(r'z-index:\s*(\d+);', block).group(1))
+        slot_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-bell-slot {', 400)).group(1))
+        bar_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-tabbar {', 400)).group(1))
+        self.assertGreater(modal_z, slot_z)
+        self.assertGreater(modal_z, bar_z)
+        self.assertIn('body.mobile-shell:has(.otp-modal-root) .mobile-bell-slot', SHELL_CSS)
+        # Метку ставят все три примитива окон, иначе правило знает не про все.
+        for path in ('src/App.jsx', 'src/components/ui/ios.jsx', 'src/components/common/FullscreenSheet.jsx'):
+            self.assertIn('otp-modal-root', (ROOT / path).read_text(encoding='utf-8'), path)
+
+    def test_modal_footer_clears_the_home_bar(self):
+        """Подвал окна прижат к нижней грани экрана, и без отступа кнопка
+        попадала бы прямо под домашнюю полосу."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-footer {', 200)
+        self.assertIn('padding-bottom: max(0.75rem, env(safe-area-inset-bottom));', block)
+        self.assertIn('otp-modal-footer', APP)
+
+    def test_negative_side_margins_are_zeroed(self):
+        """Липкие шапки списков («Отделы», «Настройки SIP») вылезали на 4 px
+        за правый край: -mx-1 растягивает их до кромки карточки, а на телефоне
+        карточка и так во весь экран."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content [class^="-mx-"],', 250)
+        self.assertIn('margin-left: 0 !important;', block)
+        self.assertIn('margin-right: 0 !important;', block)
 
     def test_layer_is_locked_to_the_shell(self):
         """Ни одно правило слоя не должно действовать на компьютере."""
@@ -392,12 +488,48 @@ class NotificationsSheetTests(unittest.TestCase):
 
     def test_panel_is_a_bottom_sheet(self):
         """Вправо от колокола выпадать некуда, а до списка под самым верхом
-        экрана не дотянуться большим пальцем."""
-        block = css_block(SHELL_CSS, '.mobile-bell-slot .notifications-dropdown {', 900)
+        экрана не дотянуться большим пальцем.
+
+        ЛИСТ ОПИРАЕТСЯ НА НИЖНЮЮ ГРАНЬ ЭКРАНА и накрывает бар разделов
+        (решение владельца 10.09.2026: прежний вид он назвал плохим). До этого
+        лист висел карточкой над баром — со скруглением по всем четырём углам,
+        полоской полотна под ним и ярким баром поверх затемнения; читалось это
+        как всплывшее сообщение, которое сейчас исчезнет, а не как лист.
+        Скругление только сверху — то, чем лист отличается от карточки."""
+        block = css_block(SHELL_CSS, '.mobile-bell-slot .notifications-dropdown {', 1200)
         self.assertIn('position: fixed;', block)
         self.assertIn('top: auto;', block)
-        self.assertIn('bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + 8px);', block)
+        self.assertIn('bottom: 0;', block)
+        self.assertIn('border-radius: 22px 22px 0 0;', block)
+        self.assertIn('padding-bottom: env(safe-area-inset-bottom);', block)
         self.assertIn('backdrop-filter: blur(30px) saturate(180%);', block)
+
+    def test_sheet_leaves_the_same_way_it_arrived(self):
+        """Общий animate-dropdown-reverse — это сжатие по вертикали: лист
+        складывался бы гармошкой у нижней грани вместо того, чтобы уехать
+        вниз, откуда пришёл."""
+        self.assertIn('@keyframes mtb-sheet-out', SHELL_CSS)
+        block = css_block(SHELL_CSS, '.mobile-bell-slot .notifications-dropdown.animate-dropdown-reverse {', 300)
+        self.assertIn('mtb-sheet-out', block)
+
+    def test_mark_read_moves_out_of_the_head_on_a_phone(self):
+        """В шапке листа уже стоит «Готово», и вторая ссылка рядом с
+        заголовком не помещалась в строку: длинная подпись переносилась на
+        второй ряд и рвала высоту шапки. На телефоне она уходит вниз листа
+        отдельной строкой — как «Очистить» в системном центре уведомлений."""
+        self.assertIn('{!isNarrow && clearable.length > 0 && (', self.BELL)
+        self.assertIn('notifications-clear-all', self.BELL)
+        self.assertIn('.mobile-bell-slot .notifications-clear-all', SHELL_CSS)
+
+    def test_desktop_dropdown_keeps_its_own_row_markup(self):
+        """Правка мобильной оболочки не должна менять настольный вид —
+        прямое указание владельца 10.09.2026. Телефонная раскладка строки
+        (заголовок в две строки, подпись раздела обычным регистром) живёт под
+        isNarrow, а под ним прежняя настольная остаётся дословно."""
+        self.assertIn('{isNarrow ? (', self.BELL)
+        self.assertIn('notifications-item-title', self.BELL)
+        self.assertIn('uppercase tracking-wide text-slate-400', self.BELL)
+        self.assertIn('truncate text-[13.5px] font-medium text-slate-900', self.BELL)
 
     def test_sheet_moves_aside_from_a_side_bar(self):
         """Боком бар занимает край экрана — лист обязан отойти от него."""
@@ -427,6 +559,51 @@ class NotificationsSheetTests(unittest.TestCase):
         bar_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-tabbar {', 400)).group(1))
         self.assertLess(backdrop_z, slot_z, 'подложка накрыла бы сам колокол')
         self.assertLess(bar_z, slot_z, 'лист уехал бы под бар разделов')
+
+
+class ScrollTitleTests(unittest.TestCase):
+    """Шапка «Профиля», проявляющаяся при прокрутке (решение владельца
+    10.09.2026: «как у телеграмма — прокручиваешь вниз, и твоё имя
+    показывается сверху»)."""
+
+    TITLE = (ROOT / 'src' / 'components' / 'common' / 'MobileScrollTitle.jsx').read_text(encoding='utf-8')
+
+    def test_it_watches_instead_of_listening_to_scroll(self):
+        """onscroll на телефоне зовётся на каждый кадр движения пальца, и
+        setState в нём — это перерисовка раздела шестьдесят раз в секунду.
+        Наблюдатель будит нас ровно дважды: имя скрылось и вернулось."""
+        self.assertIn('new IntersectionObserver(', self.TITLE)
+        self.assertNotIn("addEventListener('scroll'", self.TITLE)
+
+    def test_bar_goes_through_a_portal(self):
+        """Внутри .main-content шапке мешают двое: свой overflow-x у раздела
+        (обрезал бы размытие по краям) и верхний отступ под колокол — полоса
+        встала бы на 56 px ниже, чем нужно."""
+        self.assertIn('createPortal(', self.TITLE)
+        self.assertIn('document.body,', self.TITLE)
+
+    def test_bar_is_mobile_only(self):
+        """На компьютере имя и так на виду, а раздел не прокручивается
+        страницей — наблюдать не за чем."""
+        self.assertIn('if (!active', self.TITLE)
+        self.assertIn('active={isMobileShell}', APP)
+
+    def test_bar_leaves_room_for_the_corner_bell(self):
+        """Колокол висит в том же углу: без запаса длинное имя заезжало бы
+        прямо под него, а сам колокол обязан оставаться нажимаемым."""
+        block = css_block(SHELL_CSS, '.mobile-scroll-title {', 900)
+        bar_z = int(re.search(r'z-index:\s*(\d+);', block).group(1))
+        slot_z = int(re.search(r'z-index:\s*(\d+);', css_block(SHELL_CSS, '.mobile-bell-slot {', 400)).group(1))
+        self.assertLess(bar_z, slot_z)
+        self.assertIn('pointer-events: none;', block)
+        self.assertIn('62px', block)
+
+    def test_profile_hero_is_the_watched_element(self):
+        """Наблюдать надо именно за крупным портретом с именем: шапка
+        появляется тогда, когда он уходит ПОД неё."""
+        self.assertIn('const profileHeroRef = useRef(null);', APP)
+        self.assertIn('watch={profileHeroRef}', APP)
+        self.assertIn('<div ref={profileHeroRef} className="flex flex-col sm:flex-row items-center', APP)
 
 
 class ViewSwitchTests(unittest.TestCase):

@@ -72,7 +72,10 @@ const FullscreenSheet = ({
 
   return (
     <div
-      className="fixed inset-0 flex bg-slate-100/95 backdrop-blur-sm"
+      /* otp-modal-root — метка «поверх всего окна» для мобильной оболочки:
+         пока окно открыто, угловой колокол прячется, иначе он висел бы поверх
+         шапки и накрывал крестик закрытия (см. mobile-shell.css). */
+      className="otp-modal-root fixed inset-0 flex bg-slate-100/95 backdrop-blur-sm"
       style={{
         zIndex: z,
         // Сдвиг вправо от сайдбара; анимация та же, что у отступа контента.

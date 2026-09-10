@@ -373,7 +373,10 @@ export const IosModal = ({ open, onClose, onBack = null, title, subtitle, childr
     if (!open) return null;
     return (
         <div
-            className="fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6"
+            /* otp-modal-root — метка для мобильной оболочки: по ней окно
+               поднимается над баром разделов и угловым колоколом, а колокол
+               на это время прячется (см. mobile-shell.css). */
+            className="otp-modal-root fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6"
             style={{ fontFamily: APPLE_FONT }}
             onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
         >

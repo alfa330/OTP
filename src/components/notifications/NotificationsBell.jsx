@@ -813,8 +813,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         writeDesktopPref(user?.id, next, window.localStorage);
     };
 
+    /* notifications-desktop-row — по классу строку прячет мобильная оболочка:
+       переключатель про окно браузера на компьютере, а место в листе дорогое.
+       Раньше её ловили как «последний div панели», но после появления строки
+       «Отметить прочитанным» внизу листа последним стал не он. */
     const desktopRow = desktopPerm === 'unsupported' ? null : (
-        <div className="shrink-0 border-t border-slate-100 px-4 py-2.5">
+        <div className="notifications-desktop-row shrink-0 border-t border-slate-100 px-4 py-2.5">
             {desktopPerm === 'granted' ? (
                 <div className="flex items-center justify-between gap-3">
                     <span className="text-[12.5px] text-slate-600">Показывать на рабочем столе</span>
@@ -861,7 +865,13 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             <div className="notifications-head flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
                 <div className="notifications-title text-[15px] font-semibold text-slate-900">Уведомления</div>
                 <div className="notifications-head-actions flex items-center gap-1">
-                    {clearable.length > 0 && (
+                    {/* «Отметить прочитанным» в шапке — только на компьютере. На
+                        телефоне в шапке уже стоит «Готово», и две ссылки рядом с
+                        заголовком не помещались в строку: длинная подпись
+                        переносилась на второй ряд и рвала высоту шапки. Там она
+                        уходит вниз листа отдельной строкой — как «Очистить» в
+                        системном центре уведомлений. */}
+                    {!isNarrow && clearable.length > 0 && (
                         <button
                             type="button"
                             onClick={markSeen}
@@ -916,27 +926,56 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                             key={`${item.source}:${item.id}`}
                             type="button"
                             onClick={() => pick(item)}
-                            className="flex w-full items-start gap-3 border-b border-slate-50 px-4 py-3 text-left transition last:border-b-0 hover:bg-slate-50"
+                            className="notifications-item flex w-full items-start gap-3 border-b border-slate-50 px-4 py-3 text-left transition last:border-b-0 hover:bg-slate-50"
                         >
                             <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl ${meta.tint || 'bg-slate-100 text-slate-500'}`}>
                                 <Icon size={15} />
                             </span>
-                            <span className="min-w-0 flex-1">
-                                <span className="flex items-baseline justify-between gap-2">
-                                    <span className="truncate text-[13.5px] font-medium text-slate-900">{item.title}</span>
-                                    <span className="shrink-0 text-[11px] text-slate-400">{fmtWhen(item.at)}</span>
-                                </span>
-                                <span className="mt-0.5 flex items-center gap-1.5">
-                                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                                        {meta.label || item.source}
+                            {/* Две раскладки строки, и вторая — ТОЛЬКО ДЛЯ ТЕЛЕФОНА.
+                                На компьютере панель осталась ровно такой, какой была:
+                                правка мобильной оболочки не должна менять настольный
+                                вид (прямое указание владельца 10.09.2026).
+
+                                Что не так с настольной раскладкой на телефоне:
+                                заголовок стоит в truncate и обрывается на середине
+                                слова («Регламент общения с водител…»), а подпись
+                                раздела идёт ЗАГЛАВНЫМИ вразрядку и на длинных
+                                («ЗАПРОСЫ ПО СМЕНАМ») переносится сама, отжимая
+                                подробность вправо рваной лесенкой. В листе шириной
+                                во весь экран это первое, что бросается в глаза. */}
+                            {isNarrow ? (
+                                <span className="min-w-0 flex-1">
+                                    <span className="flex items-start justify-between gap-2">
+                                        <span className="notifications-item-title min-w-0 flex-1 line-clamp-2 text-[13.5px] font-medium leading-snug text-slate-900">{item.title}</span>
+                                        <span className="notifications-item-when shrink-0 text-[11px] leading-snug text-slate-400">{fmtWhen(item.at)}</span>
                                     </span>
-                                    {item.body && (
-                                        <span className={`truncate text-[12px] ${item.tone === 'warning' ? 'font-medium text-amber-600' : 'text-slate-500'}`}>
-                                            · {item.body}
-                                        </span>
-                                    )}
+                                    <span className="notifications-item-meta mt-0.5 block line-clamp-2 text-[12px] leading-snug text-slate-500">
+                                        <span className="notifications-item-source text-slate-400">{meta.label || item.source}</span>
+                                        {item.body && (
+                                            <span className={item.tone === 'warning' ? 'font-medium text-amber-600' : undefined}>
+                                                {' · '}{item.body}
+                                            </span>
+                                        )}
+                                    </span>
                                 </span>
-                            </span>
+                            ) : (
+                                <span className="min-w-0 flex-1">
+                                    <span className="flex items-baseline justify-between gap-2">
+                                        <span className="truncate text-[13.5px] font-medium text-slate-900">{item.title}</span>
+                                        <span className="shrink-0 text-[11px] text-slate-400">{fmtWhen(item.at)}</span>
+                                    </span>
+                                    <span className="mt-0.5 flex items-center gap-1.5">
+                                        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                                            {meta.label || item.source}
+                                        </span>
+                                        {item.body && (
+                                            <span className={`truncate text-[12px] ${item.tone === 'warning' ? 'font-medium text-amber-600' : 'text-slate-500'}`}>
+                                                · {item.body}
+                                            </span>
+                                        )}
+                                    </span>
+                                </span>
+                            )}
                         </button>
                     );
                 })}
@@ -953,6 +992,19 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                     </div>
                 )}
             </div>
+
+            {/* Строка «Отметить прочитанным» на телефоне — внизу листа, во всю
+                ширину: так это делает системный центр уведомлений, и палец
+                достаёт её без перехвата, в отличие от ссылки в шапке. */}
+            {isNarrow && clearable.length > 0 && (
+                <button
+                    type="button"
+                    onClick={markSeen}
+                    className="notifications-clear-all shrink-0 border-t border-slate-100 px-4 py-3 text-center text-[15px] font-medium text-blue-600"
+                >
+                    Отметить прочитанным
+                </button>
+            )}
 
             {desktopRow}
         </div>

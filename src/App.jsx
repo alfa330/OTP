@@ -52,6 +52,7 @@ import IcoreMark from './components/common/IcoreMark';
 import InstallAppPrompt from './components/common/InstallAppPrompt';
 import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
+import MobileScrollTitle from './components/common/MobileScrollTitle';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -14587,9 +14588,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!mounted) return null;
 
+            /* otp-modal-root — метка «поверх всего окна» для мобильной оболочки:
+               по ней окно поднимается над баром разделов и угловым колоколом, а
+               сам колокол на это время прячется. Без метки колокол (z-index 71)
+               висел бы поверх шапки окна и накрывал крестик закрытия, а бар
+               разделов (70) срезал бы подвал с кнопкой действия. */
             const wrapperClass = fullScreenOnMobile
-                ? 'fixed inset-0 z-50 flex items-stretch sm:items-center sm:justify-center'
-                : 'fixed inset-0 z-50 flex items-center justify-center';
+                ? 'otp-modal-root fixed inset-0 z-50 flex items-stretch sm:items-center sm:justify-center'
+                : 'otp-modal-root fixed inset-0 z-50 flex items-center justify-center';
 
             const panelBaseClass = fullScreenOnMobile
                 ? `bg-white z-60 w-full h-full sm:h-auto rounded-none sm:rounded p-0 sm:max-h-[calc(100vh-2rem)] overflow-y-auto overflow-x-hidden shadow-lg transform transition-all duration-200 ${show ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-3 scale-95'}`
@@ -26739,7 +26745,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </div>
 
                                                     {/* ── Подвал ── */}
-                                                    <div className="flex items-center gap-2 border-t border-slate-200/70 bg-white/85 px-4 py-3 backdrop-blur-xl">
+                                                    {/* otp-modal-footer — метка для мобильной оболочки: на телефоне
+                                                        подвал стоит у нижней грани экрана, и без отступа под домашнюю
+                                                        полосу кнопка «Отправить» оказывалась бы прямо под ней. */}
+                                                    <div className="otp-modal-footer flex items-center gap-2 border-t border-slate-200/70 bg-white/85 px-4 py-3 backdrop-blur-xl">
                                                         <div className="hidden min-w-0 flex-1 truncate text-[12px] text-slate-500 sm:block">
                                                             {swapForm.targetOperatorId
                                                                 ? (isSwapExchangeMode
@@ -38593,6 +38602,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => ({ shell: isMobileShell, side: mobileTabSide }),
                 [isMobileShell, mobileTabSide],
             );
+            /* Крупный портрет с именем в «Профиле». По нему проявляющаяся
+               шапка понимает, что имя уехало вверх и его пора показать
+               строкой — см. MobileScrollTitle. */
+            const profileHeroRef = useRef(null);
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
             const sidebarResourceRef = useRef(null);
@@ -52535,8 +52548,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                       <ProfilePageSkeleton />
                                     ) : profileData ? (
                                       <div className="space-y-6">
+                                        {/* Проявляющаяся шапка с именем — как в Telegram: пока
+                                            крупный портрет виден, верх экрана пуст, а стоит ему
+                                            уехать вверх, имя появляется строкой в шапке. Только на
+                                            телефоне: на компьютере имя и так на виду, а раздел не
+                                            прокручивается страницей. */}
+                                        <MobileScrollTitle
+                                          active={isMobileShell}
+                                          watch={profileHeroRef}
+                                          title={profileData.name || ''}
+                                          avatarUrl={profileData.avatar_url}
+                                          initial={profileData.name}
+                                        />
                                         {/* Profile header - avatar and name */}
-                                        <div className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
+                                        <div ref={profileHeroRef} className="flex flex-col sm:flex-row items-center gap-4 pb-4 sm:pb-6 border-b border-gray-200">
                                           <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-3xl sm:text-4xl font-bold shadow-lg overflow-hidden">
                                             {profileData.avatar_url ? (
                                                 <AvatarImage
