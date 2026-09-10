@@ -829,7 +829,8 @@ body[data-tabbar-side="right"] .mobile-bell-slot {
     backdrop-filter: blur(30px) saturate(180%);
     -webkit-backdrop-filter: blur(30px) saturate(180%);
     box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.22);
-    animation: mtb-sheet-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) !important;
+    animation: mtb-sheet-in 0.32s cubic-bezier(0.32, 0.72, 0, 1) !important;
+    will-change: transform;
 }
 
 /* Телефон боком: бар стоит вертикальной полосой у края корпуса, и лист
@@ -871,7 +872,7 @@ body[data-tabbar-side="left"] .mobile-bell-slot .notifications-dropdown {
    от которого лист складывался бы гармошкой у нижней грани; уезжать он должен
    туда же, откуда пришёл. */
 .mobile-bell-slot .notifications-dropdown.animate-dropdown-reverse {
-    animation: mtb-sheet-out 0.22s cubic-bezier(0.32, 0.72, 0, 1) both !important;
+    animation: mtb-sheet-out 0.26s cubic-bezier(0.32, 0.72, 0, 1) both !important;
 }
 
 /* Ручка листа — та же подсказка «это можно закрыть», что и у шторки разделов. */
@@ -1111,7 +1112,7 @@ body.mobile-shell .notifications-toast-floating [class*="uppercase"] {
        нажатия, была бы хуже её отсутствия. */
     pointer-events: none;
     transform: translateY(-6px);
-    transition: opacity 0.22s ease, transform 0.22s ease;
+    transition: opacity 0.28s cubic-bezier(0.32, 0.72, 0, 1), transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 body[data-mobile-scrolled] .mobile-scroll-title {
@@ -1227,7 +1228,11 @@ body.mobile-shell .otp-modal-root {
     padding: 0 !important;
     align-items: stretch !important;
     justify-content: flex-start !important;
-    animation: otp-screen-in 0.32s cubic-bezier(0.32, 0.72, 0, 1) both;
+    animation: otp-screen-in 0.38s cubic-bezier(0.32, 0.72, 0, 1) both;
+    /* Экран едет целиком, и это единственное, что в кадре меняется. Подсказка
+       браузеру вынести его отдельным слоем снимает перерисовку всего раздела
+       под ним — на телефоне именно она и давала рывок в начале движения. */
+    will-change: transform;
 }
 
 /* Колокол, пока окно открыто, не показываем совсем. Поднять его ещё выше
@@ -1248,7 +1253,7 @@ body.mobile-shell .otp-modal-root .otp-modal-footer {
    IosModal, show у SimpleModal) — иначе анимировать было бы нечего.
    Длительность равна SCREEN_LEAVE_MS в src/components/ui/ios.jsx. */
 body.mobile-shell .otp-modal-root.is-leaving {
-    animation: otp-screen-out 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
+    animation: otp-screen-out 0.3s cubic-bezier(0.32, 0.72, 0, 1) both;
     pointer-events: none;
 }
 
@@ -1687,13 +1692,17 @@ body.mobile-shell .main-content iframe {
    привязать к CSS-состоянию, потому что «раздел только что сменился» —
    событие, а не состояние элемента. */
 body.mobile-shell .main-content.mobile-view-switch {
-    animation: mtb-view-in 0.26s cubic-bezier(0.32, 0.72, 0, 1);
+    animation: mtb-view-in 0.34s cubic-bezier(0.32, 0.72, 0, 1);
+    /* Раздел — самое большое поддерево на экране, и проявление меняет его
+       целиком. Без подсказки о слое браузер перерисовывает его покадрово, и
+       начало перехода заметно спотыкается. */
+    will-change: opacity, transform;
 }
 
 @keyframes mtb-view-in {
     from {
         opacity: 0;
-        transform: translateY(8px);
+        transform: translateY(10px);
     }
     to {
         opacity: 1;
@@ -1706,6 +1715,17 @@ body.mobile-shell .main-content.mobile-view-switch {
 @media (prefers-reduced-motion: reduce) {
     body.mobile-shell .main-content.mobile-view-switch {
         animation: none;
+    }
+    /* Экраны тоже: въезд справа — это движение, а не проявление. Окно должно
+       появляться сразу, иначе настройка не сделала ровно того, о чём просит. */
+    body.mobile-shell .otp-modal-root,
+    body.mobile-shell .otp-modal-root.is-leaving,
+    .mobile-bell-slot .notifications-dropdown,
+    .mobile-bell-slot .notifications-dropdown.animate-dropdown-reverse {
+        animation: none !important;
+    }
+    .mobile-scroll-title {
+        transition: opacity 0.01s;
     }
     body.mobile-shell .sidebar {
         transition: none;

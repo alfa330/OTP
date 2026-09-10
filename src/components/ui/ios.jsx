@@ -6,7 +6,7 @@ import useScreenBackGesture from '../common/useScreenBackGesture';
 /* Сколько экран уезжает вправо при закрытии. Дублируется в mobile-shell.css
    (анимация otp-screen-out) — равенство сторожит тест: разойдясь, они дадут
    либо обрубленную анимацию, либо застывший на кадр пустой экран. */
-const SCREEN_LEAVE_MS = 260;
+const SCREEN_LEAVE_MS = 300;
 
 /*
  * Общие iOS / macOS примитивы дизайн-системы.

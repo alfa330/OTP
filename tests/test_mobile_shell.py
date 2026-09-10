@@ -713,10 +713,31 @@ class BackGestureTests(unittest.TestCase):
         self.assertIn('pendingBacks += 1;', self.STACK)
         self.assertIn('if (pendingBacks > 0) {', self.STACK)
 
-    def test_foreign_entries_are_left_alone(self):
-        """Пустой стек — запись не наша: это адрес, открытый до входа в
-        портал. Мешать браузеру нельзя."""
-        self.assertIn('if (top) top.close();', self.STACK)
+    def test_back_never_leaves_the_document(self):
+        """ПУСТОЙ СТЕК — ЭТО ДНО, И УХОДИТЬ С НЕГО НЕКУДА.
+
+        Портал — одно приложение на одной странице, и «назад» ниже его корня
+        выводит из ДОКУМЕНТА: человек остаётся на белом экране. В браузере
+        оттуда есть выход адресной строкой, а в установленном портале нет ни
+        строки, ни кнопки «вперёд» — только закрыть приложение и открыть
+        заново. Владелец описал это как «при входе на разделы и назад сайт
+        просто зависает»; воспроизводилось с двух нажатий (вход в раздел,
+        «назад», «назад» → about:blank)."""
+        self.assertIn('const armRoot = () => {', self.STACK)
+        # На дне «назад» возвращает указатель на место, а не отпускает наружу.
+        at = self.STACK.index('const handlePop = () => {')
+        block = self.STACK[at:self.STACK.index('const listen = () => {')]
+        self.assertIn('armRoot();', block)
+        # Дно кладётся ДО первой своей записи, иначе первый же «назад» его снял бы.
+        listen = self.STACK[self.STACK.index('const listen = () => {'):]
+        self.assertIn('if (!rooted) armRoot();', listen)
+
+    def test_root_entry_is_pushed_not_replaced(self):
+        """replaceState затёр бы адрес, с которого человек в портал пришёл."""
+        at = self.STACK.index('const armRoot = () => {')
+        block = self.STACK[at:at + 400]
+        self.assertIn('window.history.pushState(', block)
+        self.assertNotIn('replaceState', block)
 
     def test_gesture_is_mobile_only(self):
         """На компьютере «назад» означает «предыдущая страница»: закрывать им
@@ -910,9 +931,12 @@ class ViewSwitchTests(unittest.TestCase):
         """Системная настройка «меньше движения» отменяет поездки, а не саму
         возможность попасть в раздел."""
         at = SHELL_CSS.index('@media (prefers-reduced-motion: reduce)')
-        block = SHELL_CSS[at:at + 500]
+        block = SHELL_CSS[at:at + 1200]
         self.assertIn('animation: none;', block)
         self.assertIn('transition: none;', block)
+        # Экраны тоже: въезд справа — это движение, а не проявление.
+        self.assertIn('body.mobile-shell .otp-modal-root,', block)
+        self.assertIn('animation: none !important;', block)
 
 
 if __name__ == '__main__':
