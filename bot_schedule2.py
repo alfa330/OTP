@@ -5868,9 +5868,19 @@ def api_ai_qa_pull_call():
             except (TypeError, ValueError):
                 return jsonify({"error": "operator_id должен быть числом"}), 400
         else:
+            # Отбор панели сужает круг людей: выбранные направление и группа
+            # обязаны действовать и здесь, иначе «Из АТС» при выбранной группе
+            # молча уходила за звонком случайного человека всего отдела.
+            from call_qa.api import normalise_list_filters
+            try:
+                pick = normalise_list_filters({key: body.get(key)
+                                               for key in ('direction_id', 'group_id')})
+            except ValueError as error:
+                return jsonify({"error": str(error)}), 400
             try:
                 candidates = _ai_qa_department_operator_candidates(
-                    requester_id, department, limit=AI_QA_PULL_CALL_MAX_OPERATORS)
+                    requester_id, department, limit=AI_QA_PULL_CALL_MAX_OPERATORS,
+                    filters=pick)
             except Exception:
                 # Сбой справочника — это НЕ «в отделе нет операторов»: с таким
                 # текстом дежурный пошёл бы искать проблему в кадрах.
@@ -5878,6 +5888,14 @@ def api_ai_qa_pull_call():
                 return jsonify({"error": "Справочник сотрудников недоступен, "
                                          "попробуйте ещё раз"}), 503
             if not candidates:
+                # С отбором «никого нет» значит другое: люди в отделе есть, но
+                # под выбранные направление/группу не подходят. Общий текст
+                # отправлял бы человека в кадры вместо того, чтобы снять фильтр.
+                if pick:
+                    return jsonify({"error": "Под выбранные фильтры нет действующих "
+                                             "операторов звонковых направлений — "
+                                             "снимите фильтр по группе или направлению",
+                                    "code": "no_candidates"}), 404
                 return jsonify({"error": "В отделе нет действующих операторов "
                                          "звонковых направлений"}), 404
 
@@ -6024,8 +6042,13 @@ def _ai_qa_pull_response_code(response):
         return ''
 
 
-def _ai_qa_department_operator_candidates(requester_id, department, limit=1):
+def _ai_qa_department_operator_candidates(requester_id, department, limit=1, filters=None):
     """Действующие операторы отдела в СЛУЧАЙНОМ порядке (в пределах скоупа).
+
+    `filters` — отбор панели раздела. Направление и группа сужают КРУГ ЛЮДЕЙ, и
+    в подтяжке это единственное, на что они влияют: в АТС уходит фамилия, а не
+    группа. Без этого выбранная в панели группа при нажатии «Из АТС» молча
+    игнорировалась, и портал шёл за звонком случайного человека из всего отдела.
 
     Нужен «случайному звонку отдела»: без оператора ни Oktell, ни Binotel список
     звонков не отдают — у обоих выборка идёт от конкретного сотрудника.
@@ -6065,6 +6088,26 @@ def _ai_qa_department_operator_candidates(requester_id, department, limit=1):
         # оценивается по шкале «ТП чат»), но её же операторы и звонят. Вычитание
         # по семье убрало бы из подтяжки 11 из 18 действующих операторов ТЭЗ.
         chat_sql = " AND COALESCE(d.calculation_model_code, '') <> 'chat_manager'"
+        # Отбор панели: направление и группа сужают КРУГ ЛЮДЕЙ. Группа берётся
+        # действующей на сегодня — подтяжка ищет звонки за последнюю неделю, и
+        # «кто в группе сейчас» здесь и есть верный вопрос (в СПИСКАХ мерка
+        # другая — членство по месяцу разговора, см. call_qa.api).
+        pick_sql = ""
+        filters = filters or {}
+        if filters.get('direction_id') is not None:
+            pick_sql += " AND COALESCE(d.canonical_id, d.id) = %s"
+            params.append(int(filters['direction_id']))
+        group_id = filters.get('group_id')
+        if group_id is not None:
+            membership = ("gom.operator_id = u.id AND gom.start_date <= CURRENT_DATE"
+                          " AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)")
+            if group_id == 'none':
+                pick_sql += (" AND NOT EXISTS (SELECT 1 FROM group_operator_memberships gom"
+                             f" WHERE {membership})")
+            else:
+                pick_sql += (" AND EXISTS (SELECT 1 FROM group_operator_memberships gom"
+                             f" WHERE {membership} AND gom.group_id = %s)")
+                params.append(int(group_id))
         params.append(max(1, int(limit or 1)))
         # Роль и статус — не формальность, а тот же круг людей, что у резолвера АТС.
         # role='operator': имя из Oktell матчится по lookup, построенному из
@@ -6083,7 +6126,7 @@ def _ai_qa_department_operator_candidates(requester_id, department, limit=1):
                  JOIN directions d ON d.id = u.direction_id
                 WHERE lower(COALESCE(dep.code, '')) = %s
                   AND COALESCE(u.status, '') NOT IN ('fired', 'dismissal')"""
-            + role_sql + scope_sql + chat_sql + """
+            + role_sql + scope_sql + chat_sql + pick_sql + """
                 ORDER BY random() LIMIT %s""", tuple(params))
         rows = cur.fetchall()
         cur.close()

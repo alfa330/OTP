@@ -117,6 +117,19 @@ test('чип снимает СВОЙ фильтр и не трогает сос�
     assert.equal(operatorChip.next.q, 'иванов');
 });
 
+test('чип не дублирует имя фильтра, когда значение с него и начинается', () => {
+    // В портале группы называются «Группа Тестбаевой», и выходило «Группа
+    // Группа Тестбаевой». Имя опускаем — значение говорит само за себя.
+    const [dup] = activeFilterChips({ ...EMPTY_FILTERS, group_id: 3 },
+        { groups: [{ id: 3, name: 'Группа Тестбаевой' }] });
+    assert.equal(dup.name, '');
+    assert.equal(dup.label, 'Группа Тестбаевой');
+    // А когда не дублирует — имя остаётся: без него «Ночная смена» не читается.
+    const [plain] = activeFilterChips({ ...EMPTY_FILTERS, group_id: 5 },
+        { groups: [{ id: 5, name: 'Ночная смена' }] });
+    assert.equal(plain.name, 'Группа');
+});
+
 test('чип «без группы» подписан словами', () => {
     const [chip] = activeFilterChips({ ...EMPTY_FILTERS, group_id: NO_GROUP }, {});
     assert.equal(chip.label, 'без группы');
@@ -129,14 +142,15 @@ test('чип периода читается и когда задана одна
     assert.equal(both.label, '01.05 — 31.05');
 });
 
-test('в АТС уходят только сотрудник и период', () => {
-    // Направление и группа сужают ЛЮДЕЙ, а не звонки; балл и наличие оценки
-    // человека к ещё не подтянутому звонку отношения не имеют вовсе.
+test('в АТС уходят сотрудник, период и то, что сужает круг людей', () => {
+    // Балл и наличие оценки человека к ещё НЕ подтянутому звонку отношения не
+    // имеют вовсе, а поиск по имени заменяет селектор сотрудника.
     const params = pullParamsFromFilters({
         ...EMPTY_FILTERS, operator_id: 42, date_from: '2026-05-01', date_to: '2026-05-07',
         direction_id: 7, group_id: 3, score_min: '10', reviewed: 'no', q: 'иванов',
     });
-    assert.deepEqual(params, { operator_id: 42, date_from: '2026-05-01', date_to: '2026-05-07' });
+    assert.deepEqual(params, { operator_id: 42, date_from: '2026-05-01', date_to: '2026-05-07',
+                               direction_id: 7, group_id: 3 });
 });
 
 test('список сотрудников сужается уже выбранными направлением и группой', () => {

@@ -248,7 +248,34 @@ _SUBJECT_HUMAN_SCORE = """COALESCE(c.score,
                   ORDER BY hc.created_at DESC LIMIT 1))"""
 
 
-_SUBJECT_DATETIME = ("COALESCE(TO_CHAR(c.created_at,'DD.MM HH24:MI'),"
+# ── Время на экране: всегда Алматы ────────────────────────────────────────────
+#
+# Сервер и база живут в UTC (тот же разбор, что у ночных падений CI), а смотрят
+# на раздел из Алматы — это UTC+5. Пока перевода не было, звонок, оценённый
+# восемь минут назад, показывался «пять часов назад»: ровно на разницу поясов.
+#
+# Переводов ДВА, и путать их нельзя:
+#   * timestamptz (ai_review_cache.created_at, episodes.ended_at,
+#     imported_calls.datetime_raw) — момент известен, нужен только показ:
+#     `AT TIME ZONE 'Asia/Almaty'`;
+#   * naive timestamp СТАРЫХ таблиц (calls.created_at с `DEFAULT
+#     CURRENT_TIMESTAMP`) — там лежит стенное время сервера, то есть UTC: его
+#     надо сперва объявить UTC и лишь потом перевести.
+# Новые таблицы проекта пишут наивное время уже по Алматы
+# (`DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')`, 161 место в
+# database.py) — их переводить НЕ нужно, иначе уедет на пять часов в другую
+# сторону. Отсюда и разнобой ниже: он не небрежность, а разные способы хранения.
+def _local(expr: str) -> str:
+    """timestamptz → местное время."""
+    return f"({expr} AT TIME ZONE 'Asia/Almaty')"
+
+
+def _local_from_utc(expr: str) -> str:
+    """naive timestamp, записанный сервером по UTC → местное время."""
+    return f"({expr} AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Almaty')"
+
+
+_SUBJECT_DATETIME = (f"COALESCE(TO_CHAR({_local_from_utc('c.created_at')},'DD.MM HH24:MI'),"
                      " TO_CHAR(e.ended_at AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),"
                      " TO_CHAR(ic.datetime_raw AT TIME ZONE 'Asia/Almaty','DD.MM HH24:MI'),"
                      " TO_CHAR(cs.day,'DD.MM'),"
@@ -284,12 +311,11 @@ def _subject_kind_predicate(subject_kind, column: str = "rc.subject_kind"):
 _SUBJECT_OPERATOR_ID = ("COALESCE(c.operator_id, e.operator_user_id, ic.operator_id,"
                         " cs.operator_id, ce.operator_user_id)")
 
-# День субъекта — РОВНО тот, что стоит в подписи строки (_SUBJECT_DATETIME).
-# Приведения разные не по небрежности: calls.created_at — naive timestamp и
-# показывается как есть, у остальных источников время в UTC и переводится в
-# Алматы. Считай фильтр время иначе, чем подпись, — человек выбирал бы «12 мая»
-# и не находил карточку, на которой написано «12.05».
-_SUBJECT_DAY = ("COALESCE(c.created_at::date,"
+# День субъекта — РОВНО тот, что стоит в подписи строки (_SUBJECT_DATETIME), и с
+# тем же переводом в Алматы. Считай фильтр время иначе, чем подпись, — человек
+# выбирал бы «12 мая» и не находил карточку, на которой написано «12.05».
+# Особенно у границы суток: по UTC разговор в 03:00 по Алматы — ещё вчерашний.
+_SUBJECT_DAY = (f"COALESCE({_local_from_utc('c.created_at')}::date,"
                 " (e.ended_at AT TIME ZONE 'Asia/Almaty')::date,"
                 " (ic.datetime_raw AT TIME ZONE 'Asia/Almaty')::date,"
                 " cs.day,"
@@ -609,7 +635,8 @@ def _recent_calls_fallback(limit: int, allowed_direction_ids=None, department=No
         cur.close(); conn.close()
         return []
     cur.execute(
-        """SELECT c.id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score
+        f"""SELECT c.id, d.name, u.name,
+                  TO_CHAR({_local_from_utc('c.created_at')},'DD.MM HH24:MI'), c.score
              FROM calls c
              LEFT JOIN directions d ON c.direction_id = d.id
              LEFT JOIN users u ON c.operator_id = u.id
@@ -3585,7 +3612,8 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                     "in_journal": False}
 
         # ── пул 2: звонок, оценённый человеком ────────────────────────────────
-        base = """SELECT c.id, d.name, u.name, TO_CHAR(c.created_at,'DD.MM HH24:MI'), c.score
+        base = f"""SELECT c.id, d.name, u.name,
+                    TO_CHAR({_local_from_utc('c.created_at')},'DD.MM HH24:MI'), c.score
                     FROM calls c
                     LEFT JOIN directions d ON c.direction_id = d.id
                     LEFT JOIN users u ON c.operator_id = u.id
@@ -3593,7 +3621,10 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                      AND c.audio_path <> ''
                      AND COALESCE(c.is_draft, FALSE) = FALSE AND c.score IS NOT NULL"""
         journal_pick, journal_pick_params = _pick_filters_predicate(
-            filters, operator_col="c.operator_id", day_expr="c.created_at::date",
+            filters, operator_col="c.operator_id",
+            # Тот же перевод, что в подписи и в фильтре списка: у calls время
+            # наивное и записано сервером по UTC (см. _local_from_utc).
+            day_expr=f"{_local_from_utc('c.created_at')}::date",
             direction_expr="COALESCE(d.canonical_id, d.id)")
         base = base + journal_pick
         # Оценённый ИИ ищем по ОБОИМ видам субъекта: тот же физический звонок
@@ -4146,7 +4177,7 @@ def evaluations_list(limit=100, offset=0, allowed_direction_ids=None,
             return []
         cur.execute(
             f"""SELECT rc.call_id, d.name, {_SUBJECT_OPERATOR},
-                      TO_CHAR(rc.created_at,'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},
+                      TO_CHAR({_local('rc.created_at')},'DD.MM HH24:MI'), {_SUBJECT_HUMAN_SCORE},
                       rc.payload->>'ai_score' AS ai, rc.subject_kind,
                       {_SUBJECT_DATETIME}
                  FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)

@@ -162,6 +162,34 @@ class QueueSqlTests(unittest.TestCase):
         self.assertIn("imported_call_id", self.api._SUBJECT_HUMAN_SCORE)
         self.assertIn("c2d_snapshot_id", self.api._SUBJECT_HUMAN_SCORE)
 
+    def test_every_moment_on_screen_is_converted_to_almaty(self):
+        """Сервер и база живут в UTC, смотрят из Алматы (UTC+5).
+
+        Пока перевода не было, звонок, оценённый восемь минут назад, показывался
+        «пять часов назад» — ровно на разницу поясов. Два вида перевода: у
+        timestamptz только показ, у наивного времени СТАРЫХ таблиц (calls) в
+        колонке лежит UTC, и его надо сперва объявить UTC."""
+        self.assertIn("c.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Almaty'",
+                      self.api._SUBJECT_DATETIME)
+        self.assertIn("c.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Almaty'",
+                      self.api._SUBJECT_DAY)
+        # Каждый источник времени переведён: сырых TO_CHAR по моменту не осталось.
+        for expression in (self.api._SUBJECT_DATETIME, self.api._SUBJECT_DAY):
+            with self.subTest(expression=expression[:30]):
+                self.assertNotIn("TO_CHAR(c.created_at", expression)
+                self.assertNotIn("COALESCE(c.created_at::date", expression)
+
+    def test_no_raw_timestamp_is_printed_anywhere_in_the_section(self):
+        """Любой момент, попадающий на экран, обязан быть переведён в Алматы.
+
+        Проверяем ИСХОДНИК, а не одно выражение: мест печати времени в модуле
+        пять (очередь, список оценок, режим совместимости, оба пула подбора), и
+        забытое отдаёт время на пять часов назад — молча и правдоподобно."""
+        source = (ROOT / "call_qa" / "api.py").read_text(encoding="utf-8-sig")
+        for raw in ("TO_CHAR(c.created_at,", "TO_CHAR(rc.created_at,"):
+            with self.subTest(raw=raw):
+                self.assertNotIn(raw, source)
+
 
 class SubjectFamilyTests(unittest.TestCase):
     """Вкладка спрашивает СЕМЕЙСТВО субъектов, а не одну таблицу.

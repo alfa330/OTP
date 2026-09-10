@@ -84,6 +84,14 @@ const shortDate = (iso) => {
     return parts.length === 3 ? `${parts[2]}.${parts[1]}` : iso;
 };
 
+/* Имя фильтра перед значением («Группа · Ночная смена») помогает читать чип, но
+ * только пока не дублирует само значение: у групп в портале названия вида
+ * «Группа Тестбаевой», и выходило «Группа Группа Тестбаевой». Если значение уже
+ * начинается с имени фильтра — имя опускаем. */
+const chipName = (name, label) => (
+    String(label).toLowerCase().startsWith(String(name).toLowerCase()) ? '' : name
+);
+
 /** Подписи отобранного — чипы под кнопкой. `clear` снимает ОДИН фильтр. */
 export const activeFilterChips = (filters, options = {}) => {
     const f = filters || EMPTY_FILTERS;
@@ -91,58 +99,66 @@ export const activeFilterChips = (filters, options = {}) => {
     const nameOf = (list, id) => (list.find((item) => String(item.id) === String(id)) || {}).name;
     const chips = [];
     const patch = (fields) => ({ ...f, ...fields });
+    const add = (key, name, label, next) => chips.push(
+        { key, name: chipName(name, label), label, next });
 
     if (isSet(f.date_from) || isSet(f.date_to)) {
         const label = isSet(f.date_from) && isSet(f.date_to)
             ? (f.date_from === f.date_to ? shortDate(f.date_from)
                 : `${shortDate(f.date_from)} — ${shortDate(f.date_to)}`)
             : (isSet(f.date_from) ? `с ${shortDate(f.date_from)}` : `по ${shortDate(f.date_to)}`);
-        chips.push({ key: 'period', name: 'Период', label, next: patch({ date_from: '', date_to: '' }) });
+        add('period', 'Период', label, patch({ date_from: '', date_to: '' }));
     }
     if (isSet(f.direction_id)) {
-        chips.push({ key: 'direction', name: 'Направление',
-                     label: nameOf(directions, f.direction_id) || `#${f.direction_id}`,
-                     next: patch({ direction_id: null }) });
+        add('direction', 'Направление',
+            nameOf(directions, f.direction_id) || `#${f.direction_id}`,
+            patch({ direction_id: null }));
     }
     if (isSet(f.group_id)) {
-        chips.push({ key: 'group', name: 'Группа',
-                     label: f.group_id === NO_GROUP
-                         ? 'без группы' : (nameOf(groups, f.group_id) || `#${f.group_id}`),
-                     next: patch({ group_id: null }) });
+        add('group', 'Группа',
+            f.group_id === NO_GROUP
+                ? 'без группы' : (nameOf(groups, f.group_id) || `#${f.group_id}`),
+            patch({ group_id: null }));
     }
     if (isSet(f.operator_id)) {
-        chips.push({ key: 'operator', name: 'Сотрудник',
-                     label: nameOf(operators, f.operator_id) || `#${f.operator_id}`,
-                     next: patch({ operator_id: null }) });
+        add('operator', 'Сотрудник',
+            nameOf(operators, f.operator_id) || `#${f.operator_id}`,
+            patch({ operator_id: null }));
     }
     if (isSet(f.reviewed)) {
-        chips.push({ key: 'reviewed', name: 'Оценка человека',
-                     label: f.reviewed === 'yes' ? 'есть' : 'нет',
-                     next: patch({ reviewed: '' }) });
+        add('reviewed', 'Оценка человека', f.reviewed === 'yes' ? 'есть' : 'нет',
+            patch({ reviewed: '' }));
     }
     if (isSet(f.score_min) || isSet(f.score_max)) {
         const label = isSet(f.score_min) && isSet(f.score_max)
             ? `${f.score_min}—${f.score_max}`
             : (isSet(f.score_min) ? `от ${f.score_min}` : `до ${f.score_max}`);
-        chips.push({ key: 'score', name: 'Балл ИИ', label,
-                     next: patch({ score_min: '', score_max: '' }) });
+        add('score', 'Балл ИИ', label, patch({ score_min: '', score_max: '' }));
     }
     if (isSet(f.q)) {
-        chips.push({ key: 'q', name: 'Поиск', label: f.q, next: patch({ q: '' }) });
+        add('q', 'Поиск', f.q, patch({ q: '' }));
     }
     return chips;
 };
 
-/* Что из отбора умеет принять подтяжка «Из АТС»: сотрудник и период. Направление
- * и группа сужают ЛЮДЕЙ, а не звонки, поэтому в АТС не уходят — их дело
- * подсказать, из кого выбирать. Балл и наличие оценки человека к ещё не
- * подтянутому звонку отношения не имеют вовсе. */
+/* Что из отбора принимает подтяжка «Из АТС».
+ *
+ * Сотрудник и период уходят в саму АТС — это её параметры выборки. Направление и
+ * группа в АТС не уходят (она про них не знает), но сужают КРУГ ЛЮДЕЙ, среди
+ * которых портал ищет, чей звонок подтянуть: без них выбранная в панели группа
+ * молча игнорировалась и портал шёл за звонком случайного человека всего отдела.
+ *
+ * Балл ИИ и наличие оценки человека не идут вовсе: у ещё не подтянутого звонка
+ * ни того, ни другого не существует. Поиск по имени — тоже: сотрудника здесь
+ * выбирают селектором. */
 export const pullParamsFromFilters = (filters) => {
     const f = filters || EMPTY_FILTERS;
     const params = {};
     if (isSet(f.operator_id)) params.operator_id = f.operator_id;
     if (isSet(f.date_from)) params.date_from = f.date_from;
     if (isSet(f.date_to)) params.date_to = f.date_to;
+    if (isSet(f.direction_id)) params.direction_id = f.direction_id;
+    if (isSet(f.group_id)) params.group_id = f.group_id;
     return params;
 };
 

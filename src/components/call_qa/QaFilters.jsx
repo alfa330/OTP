@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
-import { SlidersHorizontal, X, Search, Loader2 } from 'lucide-react';
-import { iosCard, iosGroupLabel, iosInput, IosSegmented } from '../ui/ios';
+import { SlidersHorizontal, X, Search } from 'lucide-react';
+import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker, { isoDate } from '../ui/DateRangePicker';
 import {
@@ -12,29 +12,29 @@ import {
 /* Панель фильтров раздела «ИИ-оценка»: период, направление, группа, сотрудник,
  * балл ИИ, наличие оценки человека и поиск.
  *
- * Одна панель на все списки раздела — она стоит в CallQaView под вкладками, а
- * не внутри списка: пока фильтры сидели бы в каждом списке отдельно, при
- * переключении вкладки отбор сбрасывался бы, а панель прыгала бы по экрану.
+ * Форма повторяет «Касания» (src/components/cdr/TouchesView.jsx:356) — это канон
+ * фильтров в проекте, и он же стоит в «Чатах Wazzup» и в базе разборов соседней
+ * вкладки:
+ *
+ *   1) ВИДИМАЯ ПОЛОСА — период и поиск. С них начинается работа с любым списком,
+ *      и прятать их за кнопкой значит требовать лишний клик на каждый заход.
+ *   2) КНОПКА «Фильтры · N» — за ней остальное, что нужно реже. Синяя, когда
+ *      что-то отобрано, серая — когда нет.
+ *   3) КАРТОЧКА-СЕТКА под полосой: подписи заглавными (iosGroupLabel) уместны
+ *      именно здесь — это второй уровень, где без подписи не догадаться, что
+ *      значит «Все группы».
+ *   4) ЧИПЫ отобранного — сразу под полосой, ДО панели: так они не прыгают вниз
+ *      при её раскрытии и видны, даже когда панель свёрнута (порядок «Посылок»,
+ *      ParcelsView.jsx:696).
+ *
+ * Первая версия была карточкой-анкетой на четыре колонки с заглавными подписями
+ * над КАЖДЫМ полем, включая период и поиск. Такой формы в проекте нет нигде: она
+ * читается как форма ввода данных, а не как отбор.
  *
  * Фильтрует СЕРВЕР (см. call_qa.api._list_filters_predicate). Клиентская
  * фильтрация разошлась бы со счётчиком «Показано N из M»: сервер считает total
  * по всей выборке, а не по загруженной странице.
- *
- * Вид собран из тех же примитивов, что «Посылки» и «Чаты»: свёрнутая строка с
- * чипами отобранного, раскрытая карточка iosCard с сеткой полей. Никаких новых
- * цветовых утилит — тёмная тема в проекте собирается генератором по уже
- * встречающимся классам (scripts/build_dark_theme.py), и свежая утилита осталась
- * бы светлой.
  */
-
-/* Вид чипа диапазона — один в один с ios-вариантом CustomSelect, иначе поле
- * периода выбивается по высоте из ряда селекторов. `[&>span]:flex-1` нужен,
- * потому что triggerClassName заменяет класс кнопки целиком. */
-const DATE_TRIGGER = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 '
-    + 'text-left text-[12.5px] font-medium text-slate-700 ring-1 ring-slate-200/70 '
-    + 'shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:bg-slate-50 '
-    + 'active:scale-[0.99] focus:outline-none focus:ring-2 focus:ring-blue-500/60 '
-    + '[&>span]:flex-1 [&>span]:text-left [&>span]:truncate';
 
 const shiftDays = (days) => {
     const value = new Date();
@@ -57,11 +57,6 @@ const REVIEWED_OPTIONS = [
     { value: 'yes', label: 'С оценкой' },
 ];
 
-const scoreField = 'w-full rounded-xl bg-white px-3 py-2 text-[12.5px] font-medium '
-    + 'text-slate-700 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)] '
-    + 'transition placeholder:font-normal placeholder:text-slate-400 focus:outline-none '
-    + 'focus:ring-2 focus:ring-blue-500/60 tabular-nums';
-
 export default function QaFilters(props) {
     const {
         filters, onChange, apiBaseUrl, withAccessTokenHeader, department, subject,
@@ -75,7 +70,6 @@ export default function QaFilters(props) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [open, setOpen] = useState(false);
     const [options, setOptions] = useState(null);   // null = ещё не загружены
-    const [optionsBusy, setOptionsBusy] = useState(false);
     /* Поля, которые НАБИРАЮТ, а не выбирают: поиск и границы балла. Запрос на
        каждое нажатие — это и лишняя нагрузка, и мигающий список: «90» уходило
        двумя запросами, а «100» ушло бы тремя, причём промежуточный «10» дал бы
@@ -102,7 +96,6 @@ export default function QaFilters(props) {
         const controller = new AbortController();
         const requestId = optionsRequest.current.id + 1;
         optionsRequest.current = { id: requestId, controller };
-        setOptionsBusy(true);
         axios.get(`${apiBaseUrl}/api/ai-qa/filter-options`, {
             params: { department, ...(subject ? { subject } : {}) },
             headers: headers(), signal: controller.signal,
@@ -119,9 +112,6 @@ export default function QaFilters(props) {
                 // баллом: они работают без него. Пустые селекторы честнее
                 // отказа во всей панели.
                 setOptions({ directions: [], groups: [], operators: [] });
-            })
-            .finally(() => {
-                if (requestId === optionsRequest.current.id) setOptionsBusy(false);
             });
         return () => controller.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -140,9 +130,9 @@ export default function QaFilters(props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [draftSignature]);
 
-    /* Внешний сброс («сбросить всё», крестик на чипе, смена отдела) обязан
-       очистить и черновик — иначе поле осталось бы заполненным и через 350 мс
-       вернуло бы только что снятый фильтр обратно. */
+    /* Внешний сброс («сбросить», крестик на чипе, смена отдела) обязан очистить
+       и черновик — иначе поле осталось бы заполненным и через 350 мс вернуло бы
+       только что снятый фильтр обратно. */
     const externalSignature = `${filters?.q || ''} ${filters?.score_min || ''} ${filters?.score_max || ''}`;
     useEffect(() => {
         setDraft((state) => {
@@ -191,185 +181,171 @@ export default function QaFilters(props) {
     ];
 
     return (
-        <div className="space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
+        <div>
+            {/* Полоса, с которой начинают: период и поиск. Остальное — за кнопкой. */}
+            <section className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
+                <IosDateRangePicker
+                    from={value.date_from || ''}
+                    to={value.date_to || ''}
+                    max={isoDate(new Date())}
+                    presets={DATE_PRESETS}
+                    onChange={({ from, to }) => set({ date_from: from || '', date_to: to || '' })}
+                />
+                <div className="relative sm:flex-1">
+                    <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                        type="search"
+                        className={`${iosInput} pl-9`}
+                        value={draft.q}
+                        onChange={(event) => setDraft((state) => ({ ...state, q: event.target.value }))}
+                        placeholder="Сотрудник или номер — хватит фамилии"
+                    />
+                </div>
                 <button
                     type="button"
                     onClick={() => setOpen((state) => !state)}
                     aria-expanded={open}
-                    className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-semibold transition active:scale-[0.98] ${
-                        open || activeCount
-                            ? 'bg-white text-slate-900 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200/80'}`}
+                    className={`${activeCount ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
                 >
-                    <SlidersHorizontal size={14} className="text-slate-400" />
-                    Фильтры
-                    {activeCount > 0 && (
-                        <span className="grid h-[18px] min-w-[18px] place-items-center rounded-full bg-blue-600 px-1 text-[11px] font-semibold tabular-nums text-white">
-                            {activeCount}
-                        </span>
-                    )}
+                    <SlidersHorizontal size={14} />
+                    Фильтры{activeCount ? ` · ${activeCount}` : ''}
                 </button>
-                {optionsBusy && options === null && (
-                    <span className="inline-flex items-center gap-1.5 text-[12px] text-slate-400">
-                        <Loader2 size={12} className="animate-spin" />справочник…
-                    </span>
-                )}
-            </div>
+            </section>
 
-            {/* Что отобрано — видно, не раскрывая панель: иначе снаружи торчит
-                только число, и человек не помнит, какие именно фильтры стоят. */}
+            {/* Чипы СРАЗУ под полосой, до панели: так они не прыгают вниз при её
+                раскрытии и видны, даже когда панель свёрнута — иначе снаружи
+                торчит только число, и человек не помнит, что именно отобрано. */}
             {chips.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                     {chips.map((chip) => (
                         <button
                             key={chip.key}
                             type="button"
                             onClick={() => onChange?.(chip.next)}
-                            title={`Убрать: ${chip.name} — ${chip.label}`}
-                            className="group inline-flex max-w-full items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:ring-slate-300 active:scale-[0.98]"
+                            title={`Убрать: ${chip.name || chip.label}`}
+                            className="inline-flex max-w-full items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:bg-slate-50"
                         >
-                            <span className="text-slate-400">{chip.name}</span>
+                            {/* Имени может не быть: у групп с названием «Группа
+                                Тестбаевой» оно дублировало бы значение (см.
+                                chipName в filters.js), и тогда чип — одно значение. */}
+                            {chip.name && <span className="text-slate-400">{chip.name}</span>}
                             <span className="truncate font-medium">{chip.label}</span>
-                            <X size={12} className="shrink-0 text-slate-400 group-hover:text-slate-600" />
+                            <X size={12} className="shrink-0 text-slate-400" />
                         </button>
                     ))}
                     <button
                         type="button"
                         onClick={() => onChange?.(EMPTY_FILTERS)}
-                        className="px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 transition hover:text-slate-700"
+                        className="px-1.5 text-[12.5px] font-medium text-slate-500 hover:text-slate-800"
                     >
-                        сбросить всё
+                        сбросить
                     </button>
                 </div>
             )}
-
+            {/* Три колонки, а не четыре: фильтров пять, и в ряду по четыре
+                «Балл ИИ» повисал один во втором ряду, а панель выглядела
+                оборванной. По три ряды складываются осмысленно — «кого смотрим»
+                и «какие оценки», — а на вкладке «Очередь ревью», где последних
+                двух нет, выходит ровно один полный ряд. */}
             {open && (
-                <div className={`${iosCard} p-3.5`}>
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                        <label className="block space-y-1.5">
-                            <span className={iosGroupLabel}>Период</span>
-                            <IosDateRangePicker
-                                from={value.date_from || ''}
-                                to={value.date_to || ''}
-                                max={isoDate(new Date())}
-                                presets={DATE_PRESETS}
-                                triggerClassName={DATE_TRIGGER}
-                                onChange={({ from, to }) => set({ date_from: from || '', date_to: to || '' })}
+                <section className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-3`}>
+                    <label className="block space-y-1.5">
+                        <span className={iosGroupLabel}>Направление</span>
+                        <CustomSelect
+                            value={value.direction_id}
+                            /* Сотрудник принадлежит направлению и группе: оставить
+                               его выбранным после смены верхнего уровня — значит
+                               показать пустой список при заполненной панели. */
+                            onChange={(next) => set({ direction_id: next || null, operator_id: null })}
+                            options={directionOptions}
+                            placeholder="Все направления"
+                            variant="ios"
+                            ariaLabel="Направление"
+                        />
+                    </label>
+                    <label className="block space-y-1.5">
+                        <span className={iosGroupLabel}>Группа</span>
+                        <CustomSelect
+                            value={value.group_id}
+                            onChange={(next) => set({ group_id: next || null, operator_id: null })}
+                            options={groupOptions}
+                            placeholder="Все группы"
+                            variant="ios"
+                            searchable
+                            ariaLabel="Группа"
+                        />
+                    </label>
+                    <label className="block space-y-1.5">
+                        <span className={iosGroupLabel}>Сотрудник</span>
+                        <CustomSelect
+                            value={value.operator_id}
+                            onChange={(next) => set({ operator_id: next || null })}
+                            options={operatorOptions}
+                            placeholder="Все сотрудники"
+                            variant="ios"
+                            searchable
+                            ariaLabel="Сотрудник"
+                        />
+                    </label>
+                    {showReviewedFilter && (
+                        /* НЕ <label>: IosSegmented — это tablist из кнопок, а
+                           <label> без htmlFor делает своим управляемым элементом
+                           первую кнопку внутри. Клик по подписи «Оценка человека»
+                           тогда молча выбирал «Все», то есть снимал фильтр.
+                           У соседей обёртка <label> уместна: там первый потомок —
+                           триггер CustomSelect, и клик по подписи просто
+                           раскрывает список. */
+                        <div className="block space-y-1.5">
+                            <span className={iosGroupLabel}>Оценка человека</span>
+                            <IosSegmented
+                                value={value.reviewed || ''}
+                                options={REVIEWED_OPTIONS}
+                                onChange={(next) => set({ reviewed: next })}
+                                stretch
+                                ariaLabel="Оценка человека"
                             />
-                        </label>
-                        <label className="block space-y-1.5">
-                            <span className={iosGroupLabel}>Направление</span>
-                            <CustomSelect
-                                value={value.direction_id}
-                                /* Сотрудник принадлежит направлению и группе:
-                                   оставить его выбранным после смены верхнего
-                                   уровня — значит показать пустой список при
-                                   заполненной панели. */
-                                onChange={(next) => set({ direction_id: next || null, operator_id: null })}
-                                options={directionOptions}
-                                placeholder="Все направления"
-                                variant="ios"
-                                ariaLabel="Направление"
-                            />
-                        </label>
-                        <label className="block space-y-1.5">
-                            <span className={iosGroupLabel}>Группа</span>
-                            <CustomSelect
-                                value={value.group_id}
-                                onChange={(next) => set({ group_id: next || null, operator_id: null })}
-                                options={groupOptions}
-                                placeholder="Все группы"
-                                variant="ios"
-                                searchable
-                                ariaLabel="Группа"
-                            />
-                        </label>
-                        <label className="block space-y-1.5">
-                            <span className={iosGroupLabel}>Сотрудник</span>
-                            <CustomSelect
-                                value={value.operator_id}
-                                onChange={(next) => set({ operator_id: next || null })}
-                                options={operatorOptions}
-                                placeholder="Все сотрудники"
-                                variant="ios"
-                                searchable
-                                ariaLabel="Сотрудник"
-                            />
-                        </label>
-
-                        {showReviewedFilter && (
-                            <label className="block space-y-1.5">
-                                <span className={iosGroupLabel}>Оценка человека</span>
-                                <IosSegmented
-                                    value={value.reviewed || ''}
-                                    options={REVIEWED_OPTIONS}
-                                    onChange={(next) => set({ reviewed: next })}
-                                    stretch
-                                    ariaLabel="Оценка человека"
-                                />
-                            </label>
-                        )}
-                        {showScoreFilters && (
-                            <label className="block space-y-1.5">
-                                <span className={iosGroupLabel}>Балл ИИ</span>
-                                <div className="flex items-center gap-2">
-                                    <input
-                                        /* text + inputMode, а не type="number": числовое поле
-                                           рисует стрелки-спиннеры (чужая деталь в ряду
-                                           iOS-полей) и меняет значение колесом мыши при
-                                           прокрутке страницы. Значение всё равно зажимает
-                                           clampScore, а телефон покажет цифровую клавиатуру. */
-                                        type="text" inputMode="numeric"
-                                        className={scoreField} placeholder="от"
-                                        aria-label="Балл ИИ от"
-                                        value={draft.score_min}
-                                        onChange={(event) => setDraft((state) => ({
-                                            ...state, score_min: clampScore(event.target.value) }))}
-                                    />
-                                    <span className="text-[12.5px] text-slate-400">—</span>
-                                    <input
-                                        /* text + inputMode, а не type="number": числовое поле
-                                           рисует стрелки-спиннеры (чужая деталь в ряду
-                                           iOS-полей) и меняет значение колесом мыши при
-                                           прокрутке страницы. Значение всё равно зажимает
-                                           clampScore, а телефон покажет цифровую клавиатуру. */
-                                        type="text" inputMode="numeric"
-                                        className={scoreField} placeholder="до"
-                                        aria-label="Балл ИИ до"
-                                        value={draft.score_max}
-                                        onChange={(event) => setDraft((state) => ({
-                                            ...state, score_max: clampScore(event.target.value) }))}
-                                    />
-                                </div>
-                            </label>
-                        )}
-                        <label className="block space-y-1.5 sm:col-span-2">
-                            <span className={iosGroupLabel}>Поиск</span>
-                            <div className="relative">
-                                <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        </div>
+                    )}
+                    {showScoreFilters && (
+                        <div className="block space-y-1.5">
+                            <span className={iosGroupLabel}>Балл ИИ</span>
+                            {/* ОДИН орган, а не два поля рядом: балл и считается
+                                одним фильтром, и снимается одним чипом («70—100»).
+                                Плитка в габаритах iosInput, поля внутри прозрачные,
+                                кольцо фокуса — на всей плитке (тот же приём, что у
+                                поиска вики и телефона в справочнике парков).
+                                Плейсхолдеры «0» и «100» — это действующие границы:
+                                пустой фильтр так и говорит, что берёт весь диапазон,
+                                а «от»/«до» были служебной подписью ни о чём. */}
+                            <div className="flex items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70">
+                                {/* text + inputMode, а не type="number": числовое
+                                    поле рисует стрелки-спиннеры (чужая деталь в ряду
+                                    iOS-полей) и меняет значение колесом мыши при
+                                    прокрутке страницы. Значение зажимает clampScore,
+                                    а телефон покажет цифровую клавиатуру. */}
                                 <input
-                                    type="text"
-                                    className={`${iosInput} pl-9 pr-8`}
-                                    placeholder="Имя сотрудника или номер"
-                                    value={draft.q}
-                                    onChange={(event) => setDraft((state) => ({ ...state, q: event.target.value }))}
+                                    type="text" inputMode="numeric" maxLength={3}
+                                    className="min-w-0 flex-1 border-0 bg-transparent p-0 text-center text-[14px] tabular-nums text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-0"
+                                    placeholder="0" aria-label="Балл ИИ от"
+                                    value={draft.score_min}
+                                    onChange={(event) => setDraft((state) => ({
+                                        ...state, score_min: clampScore(event.target.value) }))}
                                 />
-                                {draft.q && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setDraft((state) => ({ ...state, q: '' }))}
-                                        aria-label="Очистить поиск"
-                                        className="absolute right-2.5 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-                                    >
-                                        <X size={12} />
-                                    </button>
-                                )}
+                                <span className="shrink-0 text-[14px] text-slate-400">—</span>
+                                <input
+                                    type="text" inputMode="numeric" maxLength={3}
+                                    className="min-w-0 flex-1 border-0 bg-transparent p-0 text-center text-[14px] tabular-nums text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-0"
+                                    placeholder="100" aria-label="Балл ИИ до"
+                                    value={draft.score_max}
+                                    onChange={(event) => setDraft((state) => ({
+                                        ...state, score_max: clampScore(event.target.value) }))}
+                                />
                             </div>
-                        </label>
-                    </div>
-                </div>
+                        </div>
+                    )}
+                </section>
             )}
+
         </div>
     );
 }
