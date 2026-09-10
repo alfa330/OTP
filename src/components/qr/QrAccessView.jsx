@@ -37,6 +37,17 @@ import './qr-access.css';
    греет телефон на разборе кадров, реже — код «не ловится» на глаз. */
 const SCAN_INTERVAL_MS = 320;
 
+/* Сторона окна видоискателя. Считается от ШИРИНЫ кадра: кадр бывает и низким
+   (пока набирают код руками), и от высоты квадрат тогда не вписывался. По
+   ширине 62 % влезают в оба, а потолок в 240 px не даёт окну разрастись на
+   планшете. */
+const QR_FRAME_SIDE = 'min(62%, 240px)';
+
+/* То же для ужатого кадра (открыт ручной ввод): там высоты вдвое меньше, и
+   обычный квадрат подходил к верхней и нижней грани на 20 px — углы рамки
+   почти упирались в края. */
+const QR_FRAME_SIDE_COMPACT = 'min(52%, 190px)';
+
 /* Сколько держится экран «Доступ открыт» перед возвратом к сканеру. Хватает,
    чтобы прочитать имя, и не заставляет жать кнопку ради следующего человека. */
 const SUCCESS_HOLD_MS = 2400;
@@ -348,6 +359,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setManualValue('');
     }, [manualValue, catchCode]);
 
+    const frameSide = (isNarrow && manualOpen) ? QR_FRAME_SIDE_COMPACT : QR_FRAME_SIDE;
     const sheetOpen = Boolean(checking || candidate || failure || granted);
     const closeSheet = granting ? () => {} : resumeScanning;
 
@@ -397,21 +409,36 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                 />
 
                 {scanning && (
-                    <div className="pointer-events-none absolute inset-0 grid place-items-center">
-                        <div
-                            /* Размер считается от ВЫСОТЫ кадра, а не от ширины:
-                               кадр бывает и низким (пока набирают код руками), и
-                               квадрат в 240 px тогда вылезал за него, накрывая
-                               подпись. По высоте окно вписывается в любой. */
-                            className="qr-window relative rounded-[26px]"
-                            style={{ height: 'min(64%, 240px)', aspectRatio: '1 / 1', '--qr-sweep-distance': '100%' }}
-                        >
-                            <span className="absolute -left-px -top-px h-8 w-8 rounded-tl-[26px] border-l-[3px] border-t-[3px] border-white/90" />
-                            <span className="absolute -right-px -top-px h-8 w-8 rounded-tr-[26px] border-r-[3px] border-t-[3px] border-white/90" />
-                            <span className="absolute -bottom-px -left-px h-8 w-8 rounded-bl-[26px] border-b-[3px] border-l-[3px] border-white/90" />
-                            <span className="absolute -bottom-px -right-px h-8 w-8 rounded-br-[26px] border-b-[3px] border-r-[3px] border-white/90" />
-                            <span className="qr-sweep absolute inset-x-3 top-0 h-0.5 rounded-full bg-blue-400/90 shadow-[0_0_12px_rgba(96,165,250,0.9)]" />
-                        </div>
+                    <div
+                        /* КВАДРАТ СЧИТАЕТСЯ ОТ ШИРИНЫ И СТАВИТСЯ САМ, без сетки
+                           и без aspect-ratio.
+                           Прежний вариант (grid place-items-center + height в
+                           процентах + aspect-ratio) в Chrome вставал ровно по
+                           центру, а на живом iPhone уезжал к правому краю: от
+                           левой грани кадра оставалось ~150 pt, от правой — 5.
+                           Ни одного правила портала, которое бы его двигало,
+                           нет — значит виновата сама связка «высота в процентах
+                           → ширина из пропорции → место в дорожке сетки».
+                           Здесь её нет вовсе: сторона квадрата — одно значение
+                           (padding-bottom в процентах считается от ШИРИНЫ
+                           родителя, как и width, поэтому стороны равны), а
+                           положение задано left/top с переносом на полразмера.
+                           Промахнуться тут нечем. */
+                        className="qr-window pointer-events-none absolute rounded-[26px]"
+                        style={{
+                            width: frameSide,
+                            height: 0,
+                            paddingBottom: frameSide,
+                            left: '50%',
+                            top: '50%',
+                            transform: 'translate(-50%, -50%)',
+                        }}
+                    >
+                        <span className="absolute -left-px -top-px h-8 w-8 rounded-tl-[26px] border-l-[3px] border-t-[3px] border-white/90" />
+                        <span className="absolute -right-px -top-px h-8 w-8 rounded-tr-[26px] border-r-[3px] border-t-[3px] border-white/90" />
+                        <span className="absolute -bottom-px -left-px h-8 w-8 rounded-bl-[26px] border-b-[3px] border-l-[3px] border-white/90" />
+                        <span className="absolute -bottom-px -right-px h-8 w-8 rounded-br-[26px] border-b-[3px] border-r-[3px] border-white/90" />
+                        <span className="qr-sweep absolute inset-x-3 h-0.5 rounded-full bg-blue-400/90 shadow-[0_0_12px_rgba(96,165,250,0.9)]" />
                     </div>
                 )}
 

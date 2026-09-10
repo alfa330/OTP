@@ -300,6 +300,45 @@ class SectionMarkupTests(unittest.TestCase):
             self.assertIn(f'{prop}: var(--mtb-thickness', block,
                           f'бар у грани {side}: поле ставится не с той стороны')
 
+    def test_scan_frame_is_centred_without_engine_guesswork(self):
+        """Рамка сканирования ставится сама, без сетки и пропорции.
+
+        Первый вариант (grid place-items-center + height в процентах +
+        aspect-ratio) в Chrome вставал ровно по центру, а на живом iPhone
+        уезжал к правому краю кадра: слева оставалось ~150 pt, справа — 5
+        (владелец прислал снимок 10.09.2026). Правил портала, которые бы его
+        двигали, нет — расходится сама связка: высота в процентах от дорожки,
+        ширина из пропорции, место в дорожке сетки. Здесь ни одного из этих
+        звеньев не осталось, поэтому сторожим именно их отсутствие.
+        """
+        view = VIEW_PATH.read_text(encoding='utf-8-sig')
+        window = view.split('className="qr-window', 1)[1].split('>', 1)[0]
+
+        self.assertIn("left: '50%'", window)
+        self.assertIn("top: '50%'", window)
+        self.assertIn("translate(-50%, -50%)", window)
+        # Сторона — ОДНО значение на ширину и на нижнее поле: проценты у обоих
+        # считаются от ширины родителя, поэтому стороны равны без пропорции.
+        self.assertIn('width: frameSide', window)
+        self.assertIn('paddingBottom: frameSide', window)
+        self.assertNotIn('aspectRatio', window)
+        # Рамка лежит в кадре напрямую, без промежуточной сетки-центровщика
+        # (place-items-center у кружков с иконками к делу не относится).
+        self.assertIn('className="qr-window pointer-events-none absolute', view)
+        self.assertNotIn('grid place-items-center">\n', view.split('{scanning && (', 1)[1][:400])
+
+    def test_sweep_travels_the_whole_frame(self):
+        """Луч едет через top, а не через translateY.
+
+        Проценты в translateY считаются от СВОЕЙ высоты, а у луча она 2 px, —
+        он дёргался на месте вместо того, чтобы пробегать окно, и обе версии
+        сканера уехали в прод с неподвижным лучом.
+        """
+        css = CSS_PATH.read_text(encoding='utf-8-sig')
+        frames = css.split('@keyframes qr-sweep {', 1)[1].split('}', 1)[0]
+        self.assertIn('top:', frames)
+        self.assertNotIn('translateY', frames)
+
     def test_returning_does_not_switch_the_camera_on_by_itself(self):
         """Кто выключил камеру, тому её обратно не включают.
 
