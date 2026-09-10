@@ -87,6 +87,12 @@ class HeartbeatTest(unittest.TestCase):
         bridge = self._bridge(self.path)
         bridge.tick = lambda: (_ for _ in ()).throw(RuntimeError('станция молчит'))
         bridge.poll = lambda **kwargs: {}
+        # `agent_mod.time` — это сам модуль time из стандартной библиотеки, поэтому подмена
+        # здесь глобальная и переживает тест. Без возврата оригинала любой следующий
+        # `time.sleep` во всём прогоне бросал KeyboardInterrupt, и pytest обрывался на
+        # четверти набора с exit code 2 — красный CI выглядел как поломка чужой правки.
+        real_sleep = agent_mod.time.sleep
+        self.addCleanup(setattr, agent_mod.time, 'sleep', real_sleep)
         agent_mod.time.sleep = lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt)
         try:
             bridge.run()
@@ -94,6 +100,14 @@ class HeartbeatTest(unittest.TestCase):
             pass
         self.assertFalse(os.path.exists(self.path),
                          'пульс поставлен при неудачном проходе — сторож ослеп')
+
+    def test_sleep_is_restored_for_the_rest_of_the_run(self):
+        """Подмена time.sleep глобальная и живёт дольше теста, если её не вернуть.
+        Один невозвращённый sleep обрывает весь прогон pytest, а не только свой тест."""
+        import time as real_time
+
+        self.assertIs(agent_mod.time, real_time)
+        real_time.sleep(0)
 
 
 if __name__ == '__main__':
