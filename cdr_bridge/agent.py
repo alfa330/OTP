@@ -40,6 +40,7 @@ Render и до сети не дотягивается — значит, ходи
     CDR_STATION_URL       http://192.168.17.44:8000
     CDR_STATION_LOGIN     (необязательно)      если станция закроет чтение CDR
     CDR_STATION_PASSWORD  (необязательно)
+    CDR_HEARTBEAT_FILE    (необязательно)      куда писать отметку живости
 """
 
 import argparse
@@ -103,6 +104,8 @@ def load_config(argv_overrides=None):
         'station': value('CDR_STATION_URL', 'http://192.168.17.44:8000').rstrip('/'),
         'login': value('CDR_STATION_LOGIN'),
         'password': value('CDR_STATION_PASSWORD'),
+        # Пусто — пульс не пишется вовсе: при локальной отладке сторожа нет.
+        'heartbeat_file': value('CDR_HEARTBEAT_FILE'),
     }
     config.update({k: v for k, v in (argv_overrides or {}).items() if v})
     return config
@@ -238,6 +241,26 @@ class Bridge:
             self.do_day(job)
         return True
 
+    def beat(self):
+        """Отметка живости для сторожа снаружи (healthcheck контейнера, службы).
+
+        Ставится ТОЛЬКО после прохода, который целиком удался. Это принципиально:
+        «процесс запущен» — не признак здоровья. Мост, который прекрасно ходит к
+        порталу, но не может прочитать станцию, обязан считаться больным, иначе
+        плашка зелёная, а данных нет. Отсутствие работы здоровьем не считается:
+        пустой ответ портала — это тоже удачный проход.
+
+        Ошибка записи не должна ронять мост: пульс — диагностика, а не работа.
+        """
+        path = self.config.get('heartbeat_file')
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write('%d %s\n' % (int(time.time()), self.agent_id))
+        except OSError as exc:
+            log.warning('Пульс не записался в %s: %s', path, exc)
+
     def run(self):
         log.info('Мост «Касания» %s запущен. Портал: %s, станция: %s, id: %s',
                  VERSION, self.portal, self.config['station'], self.agent_id)
@@ -245,6 +268,7 @@ class Bridge:
         while True:
             try:
                 had_work = self.tick()
+                self.beat()
                 error_sleep = ERROR_SLEEP_SECONDS
                 # Была работа — сразу за следующей: очередь может быть длинной,
                 # и ждать минуту между сутками значило бы растянуть месяц на час.

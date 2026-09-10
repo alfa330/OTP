@@ -1,0 +1,25 @@
+# Зависимости моста, прибитые к версии и к содержимому файла.
+#
+# Зачем отдельный файл рядом с requirements.txt: в образе шлюза установка идёт с ключом
+# --require-hashes, то есть pip откажется ставить пакет, чей файл отличается от указанного
+# хотя бы одним байтом. Это единственное, что закрывает подмену в цепочке поставки —
+# без хешей `requests>=2.31.0` означает «что окажется на PyPI в день сборки».
+#
+# Колёса взяты под целевую платформу образа (CPython 3.12, manylinux x86_64). При сборке
+# на arm64 charset-normalizer не подойдёт — пересобрать список:
+#   pip download "requests>=2.32.0" -d whl --only-binary=:all: \
+#       --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --abi cp312
+#   pip hash whl/*.whl
+#
+# Обновлено 10.09.2026.
+
+requests==2.34.2 \
+    --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+charset-normalizer==3.5.1 \
+    --hash=sha256:b9af956078716df40d985fb0dfeb2c2120c5ca92ba4ff4b388acfd01cdc14d08
+idna==3.19 \
+    --hash=sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4
+urllib3==2.7.0 \
+    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
