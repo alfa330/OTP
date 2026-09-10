@@ -2,10 +2,12 @@
 //
 // Две вещи, которые ломаются молча и обе — на чужом устройстве:
 //
-//   * состав бара. Он показывает четыре ЕЖЕДНЕВНЫХ раздела, а набор разделов у
-//     каждой роли свой. Лишняя строка в реестре — и человек получает кнопку в
-//     раздел, куда его не пустят (ровно это было с «Задачами» у оператора
-//     линии, коммит 8adf8cac); пропущенная — и бар остаётся с двумя кнопками;
+//   * состав бара. Он показывает четыре раздела — сначала ЛИЧНЫЕ («Мои часы»,
+//     «Мои смены», «Аукцион смен», «Мои оценки»), затем ежедневные, — а набор
+//     разделов у каждой роли свой. Лишняя строка в реестре — и человек получает
+//     кнопку в раздел, куда его не пустят (ровно это было с «Задачами» у
+//     оператора линии, коммит 8adf8cac); пропущенная — и бар остаётся с двумя
+//     кнопками;
 //   * сторона бара при повороте. Бар прибит к нижней грани КОРПУСА и боком
 //     становится вертикальной полосой у края. Перепутанные 90 и 270 переносят
 //     его к противоположной грани — под ту руку, которой его там не ждут.
@@ -57,10 +59,27 @@ const { pickMobileTabs, MOBILE_TAB_SECTIONS, MOBILE_TAB_LIMIT } = new Function(
 )();
 
 /* Наборы доступов трёх типовых аудиторий. Значения ровно те, что считает App по
-   флагам роли, — здесь важен не способ их получить, а результат. */
-const ADMIN = { wiki: true, lms: true, groupLate: true, tasks: true, workSchedules: true, surveys: true };
-const LINE_OPERATOR = { wiki: true, lms: true, groupLate: false, tasks: false, workSchedules: true, surveys: true };
-const BACK_OFFICE = { wiki: true, lms: false, groupLate: false, tasks: true, workSchedules: false, surveys: true };
+   флагам роли, — здесь важен не способ их получить, а результат.
+
+   myHours / myShifts / myShiftAuction / myEvaluations — ЛИЧНЫЕ разделы рядового
+   сотрудника («Мои часы», «Мои смены», «Аукцион смен», «Мои оценки»). У админа
+   их нет вовсе: в его меню стоят «Учет часов» и «Графики работы» — это другие
+   разделы. У оператора линии есть все четыре: его отдел (СЗоВ) карты разделов
+   не ведёт, и departmentAllowsView пропускает любой ключ. */
+const ADMIN = {
+    wiki: true, lms: true, groupLate: true, tasks: true, workSchedules: true, surveys: true,
+    myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
+};
+const LINE_OPERATOR = {
+    wiki: true, lms: true, groupLate: false, tasks: false, workSchedules: true, surveys: true,
+    myHours: true, myShifts: true, myShiftAuction: true, myEvaluations: true,
+};
+/* Бэк-офис: отдел с картой разделов, и личных разделов линии в ней нет —
+   часы этих людей ведут не по сменам. */
+const BACK_OFFICE = {
+    wiki: true, lms: false, groupLate: false, tasks: true, workSchedules: false, surveys: true,
+    myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false,
+};
 
 const labels = (tabs) => tabs.map((tab) => tab.label);
 
@@ -76,10 +95,11 @@ test('в баре ежедневные разделы этой роли, а не
        даже когда стоят в самом верху сайдбара: порядок меню переставляют, и
        бар, повторяющий верх списка, менялся бы у людей под руками. */
     assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['Вики', 'Задачи', 'Курсы', 'Ивенты']);
+    assert.deepEqual(labels(pickMobileTabs(BACK_OFFICE)), ['Вики', 'Задачи', 'Ивенты', 'Опросы']);
     // У оператора линии «Задач» нет — их место занимает следующий доступный
     // раздел, а не пустая кнопка.
-    assert.deepEqual(labels(pickMobileTabs(LINE_OPERATOR)), ['Вики', 'Курсы', 'Ивенты', 'Графики']);
-    assert.deepEqual(labels(pickMobileTabs(BACK_OFFICE)), ['Вики', 'Задачи', 'Ивенты', 'Опросы']);
+    const noPersonal = { ...LINE_OPERATOR, myHours: false, myShifts: false, myShiftAuction: false, myEvaluations: false };
+    assert.deepEqual(labels(pickMobileTabs(noPersonal)), ['Вики', 'Курсы', 'Ивенты', 'Графики']);
 
     const views = MOBILE_TAB_SECTIONS.map((section) => section.view);
     for (const service of ['qr_access', 'admin_sessions', 'recruiting', 'manage_users']) {
@@ -91,6 +111,61 @@ test('закрытый раздел в бар не попадает', () => {
     const noWiki = pickMobileTabs({ ...ADMIN, wiki: false });
     assert.ok(!labels(noWiki).includes('Вики'), 'кнопка ведёт в раздел, куда не пустят');
     assert.equal(noWiki.length, 4, 'место закрытого раздела должно занять следующий');
+});
+
+test('личные разделы человека занимают бар целиком', () => {
+    /* Решение владельца 10.09.2026: у кого есть «Мои часы», «Мои смены»,
+       «Аукцион смен» и «Мои оценки» — тот на телефоне ходит каждый день именно
+       в них, а «Вики», «Курсы» и «Ивенты» достаёт из шторки под аватаром. */
+    assert.deepEqual(labels(pickMobileTabs(LINE_OPERATOR)), ['Часы', 'Смены', 'Аукцион', 'Оценки']);
+    // Личных разделов может быть и меньше четырёх — остаток добирают ежедневные.
+    const onlyHours = { ...LINE_OPERATOR, myShifts: false, myShiftAuction: false, myEvaluations: false };
+    assert.deepEqual(labels(pickMobileTabs(onlyHours)), ['Часы', 'Вики', 'Курсы', 'Ивенты']);
+    // У кого личных разделов нет, бар прежний — это админ и руководитель.
+    assert.deepEqual(labels(pickMobileTabs(ADMIN)), ['Вики', 'Задачи', 'Курсы', 'Ивенты']);
+});
+
+test('один раздел не даёт двух кнопок', () => {
+    /* work_schedules объявлен в реестре ДВАЖДЫ: «Смены» рядовому и «Графики»
+       остальным — подписи у пункта меню тоже разные. Флаги считаются по одному
+       и тому же departmentAllowsView, поэтому у оператора верны оба, и без
+       отсечения по view бар показал бы две кнопки в один и тот же раздел. */
+    const scarce = {
+        wiki: false, lms: false, groupLate: false, tasks: false, workSchedules: true, surveys: true,
+        myHours: false, myShifts: true, myShiftAuction: false, myEvaluations: false,
+    };
+    const tabs = pickMobileTabs(scarce);
+    assert.deepEqual(labels(tabs), ['Смены', 'Ивенты', 'Опросы']);
+    const views = tabs.map((tab) => tab.view);
+    assert.equal(new Set(views).size, views.length, 'в баре две кнопки в один раздел');
+});
+
+test('гейты личных разделов повторяют ветку рядового сотрудника', () => {
+    /* Гейт доступа и гейт видимости пункта — разные места, и расходятся они
+       молча (та же гоча, что с пунктом, объявленным в одной ветке сайдбара из
+       двух). «Мои часы» и «Мои оценки» стоят ТОЛЬКО в ветке рядового
+       сотрудника, поэтому бар обязан спрашивать ровно её условие: иначе кнопка
+       появится у СВ, у которого такого пункта в меню нет вовсе. */
+    const memoAt = appSource.indexOf('const mobileTabItems = useMemo(');
+    assert.ok(memoAt >= 0, 'набор кнопок бара не найден — проверь тест');
+    const memo = appSource.slice(memoAt, appSource.indexOf('], [', memoAt));
+    for (const [flag, viewKey] of [
+        ['myHours', 'hours'],
+        ['myShifts', 'work_schedules'],
+        ['myShiftAuction', 'shift_auction'],
+        ['myEvaluations', 'evaluation'],
+    ]) {
+        assert.match(
+            memo,
+            new RegExp(`${flag}: isRankAndFileRole\\(currentUserRole\\) && !isScopedDepartmentHead\\s+`
+                + `&& departmentAllowsView\\(user, '${viewKey}'\\)`),
+            `флаг ${flag} считается не так, как ветка рядового в сайдбаре`,
+        );
+        assert.ok(
+            appSource.includes(`handleSidebarViewNavigation(e, '${viewKey}')`),
+            `раздела ${viewKey} нет в сайдбаре — кнопка бара ведёт в никуда`,
+        );
+    }
 });
 
 test('у каждого кандидата есть раздел, подпись и значок', () => {

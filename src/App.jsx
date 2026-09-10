@@ -443,14 +443,32 @@ const SidebarDeptScope = ({ section, activeCode, children }) => {
  * другой <li> ломал бы навигацию молча. Здесь же условия видны глазами, и их
  * сверяет тест.
  *
- * ПОЧЕМУ КАНДИДАТОВ СЕМЬ, А МЕСТ ЧЕТЫРЕ. Набор разделов у ролей разный: у
+ * ПОЧЕМУ КАНДИДАТОВ БОЛЬШЕ, ЧЕМ МЕСТ. Набор разделов у ролей разный: у
  * оператора линии нет «Задач», у бэк-офиса — «Курсов» и «Графиков». Берутся
  * первые четыре ДОСТУПНЫХ, поэтому пустых кнопок в баре не бывает ни у кого.
  * Условия доступа ПОВТОРЯЮТ гейты соответствующих пунктов сайдбара дословно:
  * кнопка в раздел, куда человека не пустят, — это тот же дефект, что был у
  * «Задач» у оператора линии (коммит 8adf8cac).
+ *
+ * ЛИЧНЫЕ РАЗДЕЛЫ ИДУТ ПЕРВЫМИ (решение владельца 10.09.2026): у кого есть
+ * «Мои часы», «Мои смены», «Аукцион смен» и «Мои оценки» — тот открывает
+ * на телефоне именно их, а всё остальное достаёт из шторки. Гейты этих
+ * четырёх дословно повторяют ветку рядового сотрудника в сайдбаре
+ * (isRankAndFileRole && !isScopedDepartmentHead), поэтому у админа, СВ и
+ * главы отдела бар не меняется: «Мои часы» и «Мои оценки» им и в меню не
+ * выдают, а «Графики работы» с «Аукционом смен» у них — не личные разделы,
+ * а рабочие, и остаются там же, где стояли.
+ *
+ * ОДИН РАЗДЕЛ МОЖЕТ БЫТЬ ОБЪЯВЛЕН ДВАЖДЫ: work_schedules — это «Смены»
+ * рядовому и «Графики» остальным, подпись у пункта меню тоже разная.
+ * pickMobileTabs берёт ПЕРВОЕ подошедшее объявление, поэтому две кнопки в
+ * один раздел в бар не попадают.
  */
 const MOBILE_TAB_SECTIONS = [
+    { view: 'hours', label: 'Часы', icon: 'fas fa-clock', allowed: (access) => access.myHours },
+    { view: 'work_schedules', label: 'Смены', icon: 'fas fa-calendar-alt', allowed: (access) => access.myShifts },
+    { view: 'shift_auction', label: 'Аукцион', icon: 'fas fa-gavel', allowed: (access) => access.myShiftAuction },
+    { view: 'evaluation', label: 'Оценки', icon: 'fas fa-chart-bar', allowed: (access) => access.myEvaluations },
     { view: 'wiki', label: 'Вики', icon: 'fas fa-book', allowed: (access) => access.wiki },
     { view: 'tasks', label: 'Задачи', icon: 'fas fa-tasks', allowed: (access) => access.tasks, badge: 'tasks' },
     { view: 'lms', label: 'Курсы', icon: 'fas fa-graduation-cap', allowed: (access) => access.lms },
@@ -464,15 +482,22 @@ const MOBILE_TAB_SECTIONS = [
    и отнимать его у навигации нельзя: иначе часть меню становится недостижимой. */
 const MOBILE_TAB_LIMIT = 4;
 
-const pickMobileTabs = (access, badges = {}) => MOBILE_TAB_SECTIONS
-    .filter((section) => section.allowed(access))
-    .slice(0, MOBILE_TAB_LIMIT)
-    .map((section) => ({
-        view: section.view,
-        label: section.label,
-        icon: section.icon,
-        badge: section.badge ? Math.max(0, Number(badges[section.badge]) || 0) : 0,
-    }));
+const pickMobileTabs = (access, badges = {}) => {
+    const taken = new Set();
+    const tabs = [];
+    for (const section of MOBILE_TAB_SECTIONS) {
+        if (tabs.length >= MOBILE_TAB_LIMIT) break;
+        if (taken.has(section.view) || !section.allowed(access)) continue;
+        taken.add(section.view);
+        tabs.push({
+            view: section.view,
+            label: section.label,
+            icon: section.icon,
+            badge: section.badge ? Math.max(0, Number(badges[section.badge]) || 0) : 0,
+        });
+    }
+    return tabs;
+};
 
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
@@ -38021,12 +38046,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Бейдж «Задачи»: сколько задач ждут действия лично от пользователя.
             const [tasksActionRequiredCount, setTasksActionRequiredCount] = useState(0);
             const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
-            /* Четыре кнопки нижнего бара — ежедневные разделы этой роли; какие
-               именно и почему не «верх меню», см. MOBILE_TAB_SECTIONS.
-               Считается всегда, а не только на телефоне: набор нужен и первому
-               кадру после поворота, а стоит оно семи сравнений. */
+            /* Четыре кнопки нижнего бара — личные разделы человека, а следом
+               ежедневные разделы его роли; какие именно и почему не «верх
+               меню», см. MOBILE_TAB_SECTIONS. Считается всегда, а не только на
+               телефоне: набор нужен и первому кадру после поворота, а стоит
+               оно десятка сравнений. */
             const mobileTabItems = useMemo(() => pickMobileTabs(
                 {
+                    /* Личные разделы рядового сотрудника. Условие ровно то же,
+                       что открывает его ветку сайдбара, — иначе бар выдал бы
+                       «Мои часы» тому, у кого этого пункта в меню нет. */
+                    myHours: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                        && departmentAllowsView(user, 'hours'),
+                    myShifts: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                        && departmentAllowsView(user, 'work_schedules'),
+                    myShiftAuction: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                        && departmentAllowsView(user, 'shift_auction'),
+                    myEvaluations: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                        && departmentAllowsView(user, 'evaluation'),
                     wiki: wikiSectionEnabled,
                     lms: canAccessLmsSection && departmentAllowsView(user, 'lms'),
                     groupLate: canAccessGroupLateBotSection,
