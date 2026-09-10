@@ -33,8 +33,22 @@ jobs:
       - name: Системные библиотеки
         # weasyprint — обёртка над pango/cairo: колесо ставится, а импорт без этих
         # библиотек падает. Дешевле поставить их всегда, чем ловить красный прогон.
+        #
+        # 09.09.2026 три прогона подряд (34383347491, 34384115432, 34386054956) умерли
+        # именно здесь, не дойдя до тестов: в образе раннера прописан сторонний
+        # репозиторий Google Chrome, и apt-get update вернул по его индексу
+        # «Hash Sum mismatch» — Google переопубликовал Release в 17:16 UTC, а
+        # Packages.gz на зеркале остался старый. Наш код тут ни при чём, но
+        # apt-get update отдаёт код 100, и шаг валит всю задачу.
+        #
+        # Поэтому: репозиторий Chrome нам не нужен — убираем его перед обновлением,
+        # а сбой самого update больше не считаем фатальным. Индексы архива Ubuntu,
+        # откуда и ставятся pango с cairo, apt в этот момент уже забрал («old ones
+        # used instead»). Гейтом остаётся install: если библиотек правда нет,
+        # прогон покраснеет на нём, а не на чужом сломанном зеркале.
         run: |
-          sudo apt-get update -qq
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update -qq || sudo apt-get update -qq || true
           sudo apt-get install -y --no-install-recommends libpango-1.0-0 libpangoft2-1.0-0 libcairo2
 
       - name: Зависимости
