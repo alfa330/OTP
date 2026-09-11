@@ -829,15 +829,40 @@ class BackGestureTests(unittest.TestCase):
         11.09.2026 — «кнопка назад работает корректно, но свайп рукой снова
         выкидывает в другой раздел».
 
-        Две страховки: перед каждой сторожевой проверяем, стоим ли на своём дне,
-        и шаг, пришедший БЕЗ сторожевой, ничего не закрывает."""
+        Три страховки: перед каждой сторожевой проверяем, стоим ли на своём дне;
+        шаг, пришедший БЕЗ сторожевой, ничего не закрывает; и второй переход
+        одного и того же маха распознаётся по времени (см. соседний тест)."""
         self.assertIn('const standingOnFloor = () => {', self.STACK)
         self.assertIn("return window.history.state?.otpRoot === true;", self.STACK)
         sync = self.STACK[self.STACK.index('const sync ='):self.STACK.index('const scheduleSync')]
         self.assertIn('if (!standingOnFloor()) armRoot();', sync)
         pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
-        self.assertIn('if (!armed) {', pop)
+        self.assertIn('if (tail || !armed) {', pop)
         self.assertIn('armRoot();', pop)
+
+    def test_one_swipe_closes_exactly_one_screen(self):
+        """МАХ ПАЛЬЦЕМ — ЭТО ДВА ПЕРЕХОДА БРАУЗЕРА, А НЕ ДВА ЖЕСТА ЧЕЛОВЕКА.
+
+        Замер 11.09.2026 (профиль → экран «Сменить пароль» → мах): popstate
+        приходит ДВАЖДЫ с разрывом 8–10 мс. Первый снимает сторожевую и
+        закрывает экран, второй приходит уже ниже дна — и до этой правки
+        закрывал ЕЩЁ ОДИН экран, оставляя портал на загрузочной записи: адрес
+        терял ?view=, бар разделов исчезал. Владелец 11.09.2026: из профиля
+        заходишь в экран, свайп возвращает в профиль, а следующий свайп профиль
+        не закрывает.
+
+        ПОЧЕМУ ПО ВРЕМЕНИ, А НЕ ПО МЕТКЕ В history.state. Метку стирает чужой
+        replaceState — так делает роутер «Курсов», и признак «стоим на своей
+        записи» в этом разделе гаснет целиком: замерено — кнопка «назад»
+        переставала ходить по разделам вовсе. А разрыв во времени подделать
+        нечем: между двумя настоящими нажатиями всегда есть кадр."""
+        self.assertIn('const GESTURE_TAIL_MS = 80;', self.STACK)
+        pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
+        self.assertIn('const tail = now - lastPopAt < GESTURE_TAIL_MS;', pop)
+        self.assertIn('lastPopAt = now;', pop)
+        # Часы берём монотонные: системное время могут перевести, и отрицательный
+        # разрыв сделал бы хвостом каждый второй жест.
+        self.assertIn('performance.now()', pop)
 
     def test_marks_do_not_blur_into_each_other(self):
         """Состояние копируется с текущей записи, поэтому метки ставятся обе:
