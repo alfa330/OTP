@@ -729,7 +729,7 @@ class BackGestureTests(unittest.TestCase):
         """Иначе запись останется, и следующий жест уйдёт впустую: человек
         свайпнет, а экран уже закрыт и ничего не произойдёт."""
         self.assertIn('pendingSlots -= 1;', self.STACK)
-        self.assertIn('window.history.go(delta);', self.STACK)
+        self.assertIn('window.history.go(step);', self.STACK)
         # Свой же popstate пропускаем, иначе он закрыл бы и соседний экран.
         self.assertIn('pendingBacks += 1;', self.STACK)
         self.assertIn('if (pendingBacks > 0) {', self.STACK)
@@ -850,6 +850,23 @@ class BackGestureTests(unittest.TestCase):
         self.assertIn('useScreenBackGesture(isMobileShell && mobileMenuOpen, closeMobileMenu);', APP)
         bell = (ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx').read_text(encoding='utf-8')
         self.assertIn('useScreenBackGesture(isNarrow && open, close);', bell)
+
+    def test_never_rewinds_below_its_own_floor(self):
+        """ПОД ДНОМ ДОКУМЕНТ КОНЧАЕТСЯ. В установленном портале это пустой экран
+        с логотипом запуска, из которого выход только перезапуском приложения —
+        владелец 11.09.2026: «перекидывает в другой раздел и так зависает».
+
+        Наш учёт записей может разойтись с браузером (восстановление после
+        устаревшего бандла перезагружает страницу, вкладку могут обновить), и
+        лишний шаг перемотки унёс бы человека наружу. Поэтому мотаем ровно
+        столько, сколько положили сами."""
+        self.assertIn('let ownSlots = 0;', self.STACK)
+        self.assertIn('const step = Math.max(delta, -ownSlots);', self.STACK)
+        self.assertIn('if (step === 0) return;', self.STACK)
+        # Дно обнуляет счёт: своих записей над ним не осталось.
+        self.assertIn('ownSlots = 0;', self.STACK[self.STACK.index('const armRoot'):self.STACK.index('/* Свести итог')])
+        # Системное «назад» тратит нашу запись — иначе счёт поплыл бы вверх.
+        self.assertIn('if (ownSlots > 0) ownSlots -= 1;', self.STACK)
 
     def test_own_overlays_are_screens_too(self):
         """Окна, свёрстанные внутри разделов, жест не видел вовсе: «назад» над

@@ -48,6 +48,15 @@ let pendingBacks = 0;
    кадра. Сводится в микрозадаче — см. шапку. */
 let pendingSlots = 0;
 let flushScheduled = false;
+/* Сколько записей мы завели САМИ и ещё не израсходовали — потолок перемотки.
+   Ниже него лежит дно, а под дном документ кончается: в установленном портале
+   это пустой экран с логотипом, из которого выход только перезапуском
+   приложения (владелец 11.09.2026: «перекидывает в другой раздел и так
+   зависает»). Наш учёт может разойтись с браузером — восстановление после
+   устаревшего бандла, перезагрузка вкладки, чужой скрипт, — и тогда лишний
+   шаг назад унёс бы человека из приложения. Поэтому перематываем ровно
+   столько, сколько положили. */
+let ownSlots = 0;
 
 /* Своя запись-дно. Именно pushState, а не replaceState: заменять текущую
    запись нельзя — под нами может лежать адрес, с которого человек в портал
@@ -56,6 +65,8 @@ const armRoot = () => {
     if (typeof window === 'undefined' || typeof window.history?.pushState !== 'function') return;
     window.history.pushState({ ...(window.history.state || {}), otpRoot: true }, '');
     rooted = true;
+    /* Мы на дне: своих записей над ним не осталось. */
+    ownSlots = 0;
 };
 
 /* Свести итог кадра и привести историю в соответствие со стеком. */
@@ -68,14 +79,19 @@ const flush = () => {
             /* Прежнее состояние сохраняем: в нём лежит то, что положил роутер
                адреса (urlHygiene зовёт replaceState с window.history.state). */
             window.history.pushState({ ...(window.history.state || {}), otpBack: stack.length }, '');
+            ownSlots += 1;
         }
         return;
     }
     if (delta < 0) {
+        /* Глубже собственных записей не мотаем — см. ownSlots. */
+        const step = Math.max(delta, -ownSlots);
+        if (step === 0) return;
+        ownSlots += step;
         /* go(-n) — одна перемотка и ОДИН popstate на всю глубину, поэтому и в
            счётчик пропусков добавляется один. */
         pendingBacks += 1;
-        window.history.go(delta);
+        window.history.go(step);
     }
 };
 
@@ -93,6 +109,8 @@ const handlePop = () => {
         pendingBacks -= 1;
         return;
     }
+    /* Системное «назад» израсходовало одну нашу запись. */
+    if (ownSlots > 0) ownSlots -= 1;
     const top = stack.pop();
     if (top) {
         /* close вернул false — экран решил остаться (обязательная новость,
@@ -172,6 +190,7 @@ export const resetBackStack = () => {
     stack.length = 0;
     pendingBacks = 0;
     pendingSlots = 0;
+    ownSlots = 0;
     flushScheduled = false;
     rooted = false;
 };
