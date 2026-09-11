@@ -172,7 +172,8 @@ def _pull_amo(cursor, direction_code, day_from, day_to):
     Без справочника (403, отозвали права) всё продолжает работать: в отчёте
     останутся числовые id, и их свяжут на экране сопоставления.
     """
-    leads, stage_names, amo_users = sources.fetch_amo_sales_leads(day_from, day_to)
+    leads, stage_names, amo_users, loss_reasons = sources.fetch_amo_sales_leads(
+        day_from, day_to)
 
     if amo_users:
         people = queries.direction_people(cursor, direction_code)
@@ -191,7 +192,8 @@ def _pull_amo(cursor, direction_code, day_from, day_to):
                      'оставлены человеку', len(matched['ambiguous']))
 
     owner_map = queries.resolve_operator_map(cursor, SOURCE_AMO)
-    rows, seen = sources.amo_rows(leads, stage_names, direction_code, owner_map)
+    rows, seen = sources.amo_rows(leads, stage_names, direction_code, owner_map,
+                                  loss_reasons)
     return rows, seen, len(leads)
 
 

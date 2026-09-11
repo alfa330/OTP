@@ -226,7 +226,29 @@ def _amo_custom_field(lead, field_id):
     return ''
 
 
-def amo_rows(leads, stage_names, direction_code, responsible_to_user=None):
+def load_amo_loss_reasons(client):
+    """Справочник причин закрытия amoCRM: {id: название}.
+
+    Нужен как запасной путь. amoCRM не всегда раскрывает причину во вложении:
+    у части сделок `_embedded.loss_reason` приходит ПУСТЫМ СПИСКОМ, хотя
+    `loss_reason_id` заполнен (так ведут себя причины, удалённые из справочника).
+    Без справочника такие лиды теряли бы причину и падали в «увели» вместе с
+    по-настоящему беспричинными — то есть разбивка отказов была бы занижена, и
+    понять это по экрану было бы нельзя.
+    """
+    try:
+        data = client.get('/api/v4/leads/loss_reasons', {'limit': 250})
+    except Exception as exc:  # noqa: BLE001
+        log.warning('op_funnel: справочник причин amoCRM недоступен (%s)', exc)
+        return {}
+    return {
+        item.get('id'): item.get('name') or ''
+        for item in ((data or {}).get('_embedded') or {}).get('loss_reasons') or []
+    }
+
+
+def amo_rows(leads, stage_names, direction_code, responsible_to_user=None,
+             loss_reasons=None):
     """Сделки воронки «Отдел продаж» → строки таблицы.
 
     `stage_names` — справочник ЭТОЙ воронки, а не всех сразу. Разница не
@@ -252,6 +274,9 @@ def amo_rows(leads, stage_names, direction_code, responsible_to_user=None):
         loss_name = _text(loss.get('name')) if isinstance(loss, dict) else ''
         if not loss_name and isinstance(loss, list) and loss:
             loss_name = _text((loss[0] or {}).get('name'))
+        if not loss_name and lead.get('loss_reason_id'):
+            # Вложение пустое, а номер причины есть — берём имя из справочника.
+            loss_name = _text((loss_reasons or {}).get(lead.get('loss_reason_id')))
 
         outcome = metrics.classify_amo_lead(stage, loss_name or None, status_id)
         row = _base_row(direction_code, SOURCE_AMO, 0, lead.get('id'), work_day,
@@ -332,6 +357,7 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
     client = client or amo_leads.AmoClient()
     stage_names = load_amo_stage_names(client)
     users = load_amo_users(client)
+    loss_reasons = load_amo_loss_reasons(client)
 
     start = datetime.combine(day_from, datetime.min.time())
     end = datetime.combine(day_to, datetime.max.time())
@@ -363,7 +389,7 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
         url, params = next_url, None
     log.info('op_funnel: amoCRM отдал %d сделок воронки %s за %s—%s, пользователей %d',
              len(leads), AMO_SALES_PIPELINE_ID, day_from, day_to, len(users))
-    return leads, stage_names, users
+    return leads, stage_names, users, loss_reasons
 
 
 # ── «Верификатор» / Wazzup ───────────────────────────────────────────────────
