@@ -47811,7 +47811,48 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className={`fas fa-chevron-${isMobileShell ? 'down' : 'right'} ml-auto opacity-70 sidebar-text`}></FaIcon>
                                         </button>
 
-                                        {(showSidebarDeptFilter || isDeptFilterClosing) && (
+                                        {/* НА ТЕЛЕФОНЕ — ЛИСТ СНИЗУ, А НЕ ВЫПАДАЮЩАЯ ПАНЕЛЬ.
+                                            Панель выпадала прямо на список разделов: полупрозрачная
+                                            карточка поверх строк, сквозь которую просвечивают чужие
+                                            названия (видео владельца 11.09.2026). Выбор одного
+                                            значения телефон показывает листом снизу — тем же, каким
+                                            сделан выбор фотографии.
+
+                                            ПОРТАЛОМ В <body>, И ЭТО ОБЯЗАТЕЛЬНО: у шторки свой слой
+                                            (z-index 65), и нарисованный внутри неё лист выше бара
+                                            разделов (70) подняться не может — «Отмена» уезжала за
+                                            край экрана, а бар оставался ярким поверх затемнения
+                                            (замерено скриншотом). Значения отдела живут здесь, в
+                                            разметке шторки, поэтому переносим не разметку, а слой.
+
+                                            На компьютере панель выпадает вбок, как у «Аккаунта», и
+                                            остаётся ровно такой, какой была. */}
+                                        {isMobileShell && createPortal(
+                                            <MobileActionSheet
+                                                open={showSidebarDeptFilter}
+                                                onClose={() => stableSidebarHandleToggleDeptFilter(true)}
+                                                title="Показывать разделы отдела"
+                                                actions={[
+                                                    {
+                                                        key: '',
+                                                        label: 'Все отделы',
+                                                        selected: !activeDeptCode,
+                                                        onClick: () => stableSidebarSelectDept(''),
+                                                    },
+                                                    ...sidebarDeptOptions.map((dept) => {
+                                                        const code = String(dept.code).toLowerCase();
+                                                        return {
+                                                            key: code,
+                                                            label: dept.name || code,
+                                                            selected: activeDeptCode === code,
+                                                            onClick: () => stableSidebarSelectDept(code),
+                                                        };
+                                                    }),
+                                                ]}
+                                            />,
+                                            document.body,
+                                        )}
+                                        {!isMobileShell && (showSidebarDeptFilter || isDeptFilterClosing) && (
                                             <div
                                                 /* sidebar-holds-open: пока список открыт, свёрнутый
                                                    сайдбар не схлопывается. Панель прижата к строке

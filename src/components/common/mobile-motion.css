@@ -332,6 +332,68 @@ body.mobile-shell .animate-dropdown-reverse {
     to { opacity: 0; transform: scale(0.98) translateY(-4px); }
 }
 
+
+/* ── Лист снизу уходит ВНИЗ ───────────────────────────────────────────────
+ *
+ * Лист действий помечен `otp-modal-root` — по этой метке он встаёт над баром и
+ * получает проводы (src/utils/mobileScreenExit.js). Но уход у экранов общий —
+ * вправо, — а лист пришёл снизу: уезжая вбок, он объявлял себя экраном, которым
+ * не является. Туда же, откуда пришёл.
+ *
+ * И появление на общей кривой: у листа была своя, на 0.26 с. */
+body.mobile-shell .mobile-actions {
+    animation: mobile-actions-in var(--ios-sheet-in) var(--ios-move) both;
+}
+
+body.mobile-shell .mobile-actions.is-leaving {
+    animation: mobile-actions-out var(--ios-sheet-out) var(--ios-exit) both;
+}
+
+@keyframes mobile-actions-out {
+    from { transform: none; opacity: 1; }
+    to { transform: translateY(22%); opacity: 0; }
+}
+
+/* Затемнение под листом гаснет вместе с ним, а не остаётся плёнкой на кадр. */
+body.mobile-shell .mobile-actions.is-leaving .mobile-actions__dim {
+    opacity: 0;
+    transition: opacity var(--ios-sheet-out) var(--ios-exit);
+}
+
+/* ── Системные выпадающие списки ──────────────────────────────────────────
+ *
+ * `<select>` рисует сама система, и внутри карточек на скруглении 16 он
+ * читается деталью из другой программы — владелец называет второй визуальный
+ * язык на экране браком (эталон пикера — 24.08.2026). Сам список на телефоне
+ * системный и это правильно: iOS показывает своё колесо, лучше которого для
+ * одного значения ничего нет. Приводим в порядок ЗАКРЫТОЕ состояние: поле в
+ * стиле раздела и свой шеврон вместо двойной стрелки.
+ *
+ * Собственные пикеры портала (CustomSelect) правило не трогает — они и так в
+ * нужном языке. */
+body.mobile-shell .main-content select {
+    -webkit-appearance: none;
+    appearance: none;
+    min-height: 40px;
+    padding: 8px 34px 8px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--mobile-field-line, rgba(60, 60, 67, 0.16));
+    background-color: var(--mobile-field-bg, rgba(118, 118, 128, 0.08));
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1.5 1.75L6 6.25l4.5-4.5' stroke='%238a8a8e' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    font-size: 15px;
+    line-height: 20px;
+    color: var(--sheet-text, #000);
+    /* Наезд на поле при фокусе на iOS начинается с 16px и ниже — у нас 15px,
+       поэтому масштаб держит meta viewport в index.html (maximum-scale). */
+}
+
+body.mobile-shell .main-content select:focus {
+    outline: none;
+    border-color: var(--sheet-accent, #0a84ff);
+}
+
 /* ── Общие утилиты появления ──────────────────────────────────────────────
  *
  * `animate-scale-in`, `animate-fade-in`, `animate-card-open` — три утилиты из

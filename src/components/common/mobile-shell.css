@@ -2132,6 +2132,57 @@ body.mobile-shell .mobile-actions__cancel {
     cursor: pointer;
 }
 
+/* Подпись листа — как у системного листа действий: мелкая, серая, по центру,
+   с отбивкой снизу. Нужна там, где строки предлагают ВЫБОР, а не действие. */
+body.mobile-shell .mobile-actions__title {
+    padding: 14px 16px 10px;
+    border-bottom: 0.5px solid var(--sheet-sep);
+    color: var(--sheet-muted);
+    font-size: 13px;
+    line-height: 17px;
+    text-align: center;
+}
+
+/* СТРОКА ВЫБОРА, а не действия: текст по левому краю, галочка справа. Так
+   устроены списки выбора в телефоне — по одной колонке глаз находит выбранное,
+   не перечитывая весь список. Строки-действия остаются по центру. */
+body.mobile-shell .mobile-actions__row--pick {
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 16px;
+    font-size: 17px;
+    line-height: 22px;
+    color: var(--sheet-text);
+    text-align: left;
+}
+
+body.mobile-shell .mobile-actions__row--pick .mobile-actions__label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+body.mobile-shell .mobile-actions__row--pick.is-selected {
+    color: var(--sheet-accent);
+    font-weight: 600;
+}
+
+body.mobile-shell .mobile-actions__check {
+    flex: none;
+    color: var(--sheet-accent);
+}
+
+/* Список отделов бывает длинным — он прокручивается ВНУТРИ группы, а лист
+   остаётся на месте: уехавшая за край экрана «Отмена» — это лист, из которого
+   не выйти нажатием. */
+body.mobile-shell .mobile-actions__group {
+    max-height: min(60vh, 460px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
 body.mobile-shell .mobile-actions__row + .mobile-actions__row {
     border-top: 0.5px solid var(--sheet-sep);
 }

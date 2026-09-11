@@ -237,6 +237,35 @@ class PressTests(unittest.TestCase):
         self.assertIn(':not([class*="transition"])', MOTION_CSS)
 
 
+class SheetAndFieldTests(unittest.TestCase):
+    """Лист снизу и системные поля — в том же языке, что и всё остальное."""
+
+    def test_bottom_sheet_leaves_downwards(self):
+        """Лист помечен otp-modal-root — по этой метке он встаёт над баром и
+        получает проводы. Но уход у экранов общий, вправо, а лист пришёл
+        снизу: уезжая вбок, он объявлял себя экраном, которым не является."""
+        self.assertIn('body.mobile-shell .mobile-actions.is-leaving', MOTION_CSS)
+        self.assertIn('@keyframes mobile-actions-out', MOTION_CSS)
+        frames = MOTION_CSS[MOTION_CSS.index('@keyframes mobile-actions-out'):]
+        frames = frames[:frames.index('\n}')]
+        self.assertIn('translateY', frames)
+        self.assertNotIn('translateX', frames)
+
+    def test_system_select_looks_like_the_section(self):
+        """`<select>` рисует система, и внутри карточек на скруглении 16 он
+        читается деталью из другой программы — владелец считает второй
+        визуальный язык на экране браком (эталон пикера, 24.08.2026). Сам
+        список остаётся системным: колесо iOS для одного значения лучше
+        всего, — в порядок приводится закрытое состояние."""
+        self.assertIn('body.mobile-shell .main-content select {', MOTION_CSS)
+        block = MOTION_CSS[MOTION_CSS.index('body.mobile-shell .main-content select {'):]
+        block = block[:block.index('}')]
+        self.assertIn('appearance: none', block)
+        self.assertIn('border-radius: 12px', block)
+        # Свой шеврон вместо двойной системной стрелки.
+        self.assertIn('background-image: url("data:image/svg+xml', block)
+
+
 class ViewSwitchTests(unittest.TestCase):
     """Переключение раздела — растворение, а не появление из пустоты."""
 

@@ -271,6 +271,48 @@ class SheetAccountTests(unittest.TestCase):
         self.assertIn('onClick={darkThemeAllowed ? toggleDarkTheme : undefined}', block)
 
 
+class DeptPickerTests(unittest.TestCase):
+    """Выбор отдела в шторке: на телефоне — лист снизу, на компьютере — панель."""
+
+    SHEET = (ROOT / 'src' / 'components' / 'common' / 'MobileActionSheet.jsx').read_text(encoding='utf-8')
+
+    def test_phone_gets_a_sheet_instead_of_a_dropdown(self):
+        """Панель выпадала прямо на список разделов: полупрозрачная карточка
+        поверх строк, сквозь которую просвечивают чужие названия (видео
+        владельца 11.09.2026). Выбор одного значения телефон показывает листом
+        снизу — тем же, каким сделан выбор фотографии."""
+        self.assertIn('title="Показывать разделы отдела"', APP)
+        at = APP.index('title="Показывать разделы отдела"')
+        block = APP[at - 1800:at + 1200]
+        self.assertIn('{isMobileShell && createPortal(', block)
+        # Настольная панель осталась и заперта на «не телефон».
+        self.assertIn('{!isMobileShell && (showSidebarDeptFilter || isDeptFilterClosing) && (', APP)
+
+    def test_sheet_goes_through_a_portal(self):
+        """У шторки свой слой (z-index 65), и нарисованный внутри неё лист выше
+        бара разделов (70) подняться не может: «Отмена» уезжала за край экрана,
+        а бар оставался ярким поверх затемнения. Замерено скриншотом. Значения
+        отдела живут в разметке шторки, поэтому переносится не разметка, а
+        слой."""
+        at = APP.index('title="Показывать разделы отдела"')
+        self.assertIn('document.body,', APP[at:at + 2000])
+        self.assertIn('z-index: 10000', SHELL_CSS[SHELL_CSS.index('.mobile-actions {'):])
+
+    def test_sheet_shows_what_is_chosen(self):
+        """Список ВЫБОРА, а не команд: строка по левому краю, галочка справа,
+        подпись листа сверху. Без этого список отделов читается как набор
+        действий, и выбранное приходится искать чтением."""
+        self.assertIn('mobile-actions__row--pick', self.SHEET)
+        self.assertIn('mobile-actions__check', self.SHEET)
+        self.assertIn("role={action.selected === undefined ? undefined : 'menuitemradio'}", self.SHEET)
+        self.assertIn('.mobile-actions__title', SHELL_CSS)
+        # Длинный список прокручивается внутри группы: уехавшая за край «Отмена»
+        # — это лист, из которого не выйти нажатием.
+        groups = [b for b in SHELL_CSS.split('body.mobile-shell .mobile-actions__group {')[1:]]
+        self.assertTrue(any('max-height' in b.split('}')[0] for b in groups),
+                        'группа строк листа обязана прокручиваться внутри себя')
+
+
 class SheetLooksTests(unittest.TestCase):
     """Вид шторки — список настроек телефона, а не тёмный сайдбар.
 
@@ -757,7 +799,7 @@ class BackGestureTests(unittest.TestCase):
         нет, а лишние срезает следующий pushState — он отбрасывает всё, что было
         впереди. Замер 11.09.2026: восемь кругов «открыл профиль → мах» держат
         history.length на четырёх записях."""
-        self.assertIn('while (guards.length < stack.length) {', self.STACK)
+        self.assertIn('if (guards.length >= stack.length) return;', self.STACK)
         self.assertIn('const entry = { close, section: Boolean(options?.section) };', self.STACK)
         # Снятую жестом запись кладём заново, если внизу что-то осталось.
         pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
@@ -837,8 +879,14 @@ class BackGestureTests(unittest.TestCase):
 
         С записью на слой снимок берётся когда надо: открывая экран поверх
         профиля, мы уходим с записи профиля — её снимком и становится профиль."""
-        self.assertIn('while (guards.length < stack.length) {', self.STACK)
+        self.assertIn('if (guards.length >= stack.length) return;', self.STACK)
         self.assertIn('let guards = [];', self.STACK)
+        # ЗА РАЗ — ОДНА ЗАПИСЬ: положенные пачкой в одном кадре живут доли
+        # миллисекунды и не успевают быть снятыми, снимок у них ПУСТОЙ, и мах
+        # вытягивает на экран белое полотно (видео владельца IMG_4308: белый
+        # экран БЕЗ бара разделов, то есть не приложение, а снимок).
+        self.assertIn('if (guards.length < stack.length) scheduleSync(true);', self.STACK)
+        self.assertIn('window.requestAnimationFrame(() => window.requestAnimationFrame(sync));', self.STACK)
         # Своих шагов назад по-прежнему нет: лишние записи срезает следующий push.
         self.assertNotIn('window.history.back()', self.STACK)
         self.assertNotIn('history.go(', self.STACK)

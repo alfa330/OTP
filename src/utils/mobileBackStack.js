@@ -193,17 +193,31 @@ const sync = () => {
        (замерено), дно при этом проскакивается, и следующая запись легла бы уже
        на загрузочную запись документа — а с неё любой шаг уводит из портала. */
     if (!guards.length && !standingOnFloor()) armRoot();
-    while (guards.length < stack.length) {
-        seq += 1;
-        guards.push(seq);
-        /* Прежнее состояние сохраняем: в нём лежит то, что положил роутер
-           адреса (urlHygiene зовёт replaceState с window.history.state).
-           Адрес не меняем — запись служебная, человек её не видит. */
-        window.history.pushState(
-            { ...(window.history.state || {}), otpRoot: false, otpBack: true, otpSeq: seq },
-            '',
-        );
-    }
+    if (guards.length >= stack.length) return;
+
+    seq += 1;
+    guards.push(seq);
+    /* Прежнее состояние сохраняем: в нём лежит то, что положил роутер адреса
+       (urlHygiene зовёт replaceState с window.history.state). Адрес не меняем —
+       запись служебная, человек её не видит. */
+    window.history.pushState(
+        { ...(window.history.state || {}), otpRoot: false, otpBack: true, otpSeq: seq },
+        '',
+    );
+
+    /* ЗА РАЗ — ОДНА ЗАПИСЬ, ДАЖЕ ЕСЛИ СЛОЁВ ОТКРЫЛОСЬ НЕСКОЛЬКО.
+     *
+     * Снимок записи система делает в момент ухода с неё. Записи, положенные
+     * пачкой в одном кадре, живут доли миллисекунды и не успевают быть
+     * снятыми — снимок у них ПУСТОЙ, и мах пальцем вытягивает на экран белое
+     * полотно вместо страницы. Владелец прислал видео (IMG_4308): на кадрах
+     * свайпа белый экран без бара разделов, то есть это не приложение, а
+     * пустой снимок.
+     *
+     * Поэтому следующая запись — в следующем кадре, когда предыдущая уже
+     * нарисована и снята. Жест в эти миллисекунды не беззащитен: дно на месте,
+     * и шаг по нему ничего не закрывает. */
+    if (guards.length < stack.length) scheduleSync(true);
     /* Слоёв стало меньше, чем записей? Лишние ОСТАЮТСЯ ВИСЕТЬ. Снимать их своим
      * шагом назад нельзя: этот шаг складывается с ходом пальца в один переход
      * на две записи, и портал уходит ниже дна без всякого жеста (замер
@@ -215,9 +229,16 @@ const sync = () => {
      * «приложение ушло из портала». */
 };
 
-const scheduleSync = () => {
+const scheduleSync = (afterPaint = false) => {
     if (syncScheduled || !canTouchHistory()) return;
     syncScheduled = true;
+    if (afterPaint && typeof window.requestAnimationFrame === 'function') {
+        /* Два кадра, а не один: в первом браузер рисует то, что мы только что
+           положили, во втором запись уже снята системой и можно класть
+           следующую. */
+        window.requestAnimationFrame(() => window.requestAnimationFrame(sync));
+        return;
+    }
     /* Микрозадача, а не таймер: к её выполнению кадр уже собран, а нажать
        человек ещё не успел. Через Promise, а не queueMicrotask: вынутый из
        window, он в Chrome падает с «Illegal invocation». */
