@@ -356,6 +356,16 @@ class GroupSplitTests(unittest.TestCase):
         # Срез «до перехода» просим по последний день в прежней группе:
         # 4 сентября — первый линейный день, значит 3-е ещё чатовое.
         self.assertEqual(reg_contest.split_before_to("2026-09-04"), "2026-09-03")
+        self.assertEqual(reg_contest.split_before_to("2026-09-04", "2026-09-07"),
+                         "2026-09-03")
+
+    def test_before_snapshot_never_reaches_past_the_contest_window(self):
+        # Переход после последнего зачётного дня (Серикбаева Асел, 11.09):
+        # окно «до» прижимаем к концу конкурса. Иначе спросили бы у CRM
+        # регистрации 08–11.09, которых в зачёте нет, и срез «до» обогнал бы
+        # общий счёт — apply_group_splits начал бы писать «часть обнулена».
+        self.assertEqual(reg_contest.split_before_to("2026-09-12", "2026-09-07"),
+                         "2026-09-07")
 
     def test_counters_split_between_two_groups(self):
         result = self._split({"registrations": 18, "successful": 8})
@@ -452,17 +462,32 @@ class GroupSplitTests(unittest.TestCase):
         self.assertEqual([i["crm_operator_id"] for i in boards["line"]], ["7#line", "8"])
         self.assertEqual(boards["line"][0]["drivers"], 2)
 
-    def test_live_contest_split_is_inside_the_contest_window(self):
-        # Страж конфига: дата перехода вне окна конкурса означала бы, что одна
-        # из групп получает пустой срез, а вторая — весь счёт целиком.
+    def test_live_contest_splits_are_coherent(self):
+        # Страж конфига. Граница ПОЗЖЕ конца окна законна — так выглядит
+        # переход после последнего зачётного дня (весь счёт остаётся прежней
+        # группе). А вот граница в первый день конкурса означала бы, что
+        # прежняя группа не получает ничего: делить в этом случае нечего и
+        # строка splits лишняя.
         contest = reg_contest.CONTEST
+        registered_from = date.fromisoformat(contest["registered_from"])
+        registered_to = date.fromisoformat(contest["registered_to"])
+        seen = set()
         for split in contest.get("splits") or []:
             switch = date.fromisoformat(split["switch_date"])
-            self.assertGreater(switch, date.fromisoformat(contest["registered_from"]))
-            self.assertLessEqual(switch, date.fromisoformat(contest["registered_to"]))
+            self.assertGreater(switch, registered_from)
             self.assertIn(split["before_group"], reg_contest.GROUP_LABELS)
             self.assertIn(split["after_group"], reg_contest.GROUP_LABELS)
             self.assertNotEqual(split["before_group"], split["after_group"])
+            # Одному оператору — одна граница: вторая строка тихо перетёрла бы
+            # первую в by_id и делила бы счёт не по той дате.
+            self.assertNotIn(split["crm_operator_id"], seen)
+            seen.add(split["crm_operator_id"])
+            # Ключ части («146#chat») строится из id, поэтому разделитель
+            # внутри самого id разъехался бы с origins.
+            self.assertNotIn(reg_contest.SPLIT_KEY_SEP, split["crm_operator_id"])
+            before_to = reg_contest.split_before_to(split["switch_date"],
+                                                    contest["registered_to"])
+            self.assertLessEqual(date.fromisoformat(before_to), registered_to)
 
 
 class _FakeCursor:
@@ -601,6 +626,12 @@ class SyncSplitFlowTests(unittest.TestCase):
                     "before_group": "chat", "after_group": "line"}],
     }
 
+    # Переход уже после последнего зачётного дня: регистраций «после» в
+    # конкурсе быть не может, поэтому окно «до» совпадает с конкурсным.
+    CONTEST_AFTER_WINDOW = dict(CONTEST, splits=[
+        {"crm_operator_id": "7", "operator_name": "Перешедший Оператор",
+         "switch_date": "2026-09-12", "before_group": "chat", "after_group": "line"}])
+
     class _Client:
         def __init__(self):
             self.calls = []
@@ -630,7 +661,7 @@ class SyncSplitFlowTests(unittest.TestCase):
             return {"total": len(entries), "changes": 0, "decreases": 0,
                     "decrease_note": None}
 
-    def _sync(self):
+    def _sync(self, contest=None):
         import logging
         import time as time_module
 
@@ -641,7 +672,7 @@ class SyncSplitFlowTests(unittest.TestCase):
         namespace = {"reg_contest": reg_contest, "db": db, "logging": logging,
                      "time": time_module}
         exec(textwrap.dedent(ast.get_source_segment(source, node)), namespace)
-        with patch.object(reg_contest, "CONTEST", self.CONTEST), \
+        with patch.object(reg_contest, "CONTEST", contest or self.CONTEST), \
              patch.object(reg_contest, "get_config", lambda: {"url": "u", "token": "t"}), \
              patch.object(reg_contest.RegContestClient, "from_config",
                           classmethod(lambda cls, config=None: client)):
@@ -665,6 +696,21 @@ class SyncSplitFlowTests(unittest.TestCase):
         self.assertEqual((parts["7#line"]["contest_group"], parts["7#line"]["successful"]),
                          ("line", 2))
         self.assertEqual(db.upserted["split_origins"], {"7#chat": "7", "7#line": "7"})
+
+    def test_switch_after_the_window_asks_crm_once(self):
+        # Живой случай Серикбаевой Асел: направление сменили 11.09, когда
+        # регистрации уже не засчитываются. Окно «до» = окно конкурса, значит
+        # второй запрос вернул бы тот же самый срез — не ходим.
+        result, client, db = self._sync(self.CONTEST_AFTER_WINDOW)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(client.calls, [("2026-08-07", "2026-09-07", "2026-09-11")])
+        parts = {e["crm_operator_id"]: e for e in db.upserted["entries"]}
+        # Новая группа не получает ничего, поэтому строки «после» нет вовсе.
+        self.assertEqual(set(parts), {"7#chat"})
+        self.assertEqual((parts["7#chat"]["contest_group"],
+                          parts["7#chat"]["registrations"],
+                          parts["7#chat"]["successful"]), ("chat", 22, 10))
+        self.assertEqual(db.upserted["split_origins"], {"7#chat": "7"})
 
 
 if __name__ == "__main__":

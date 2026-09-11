@@ -13114,9 +13114,16 @@ def sync_reg_contest(triggered_by='scheduler'):
         splits = contest.get("splits") or []
         before_by_date = {}
         for switch_date in sorted({s["switch_date"] for s in splits}):
+            before_to = reg_contest.split_before_to(switch_date,
+                                                    contest["registered_to"])
+            if before_to == contest["registered_to"]:
+                # Переход случился после последнего зачётного дня: окно «до»
+                # совпало с конкурсным, и второй раз CRM спрашивать не о чем —
+                # это тот же самый срез.
+                before_by_date[switch_date] = reg_contest.counts_by_operator(crm_operators)
+                continue
             before_by_date[switch_date] = reg_contest.counts_by_operator(
-                client.fetch_operators(contest["registered_from"],
-                                       reg_contest.split_before_to(switch_date),
+                client.fetch_operators(contest["registered_from"], before_to,
                                        contest["trip_deadline"]))
         split_result = reg_contest.apply_group_splits(entries, before_by_date, splits)
         entries = split_result["entries"]
