@@ -2431,7 +2431,13 @@ const resolveAppPathname = (subPath = '') => {
         const basePath = String(appBaseUrl.pathname || '/').replace(/\/+$/, '');
         const normalizedSubPath = String(subPath || '').trim();
         if (!normalizedSubPath) {
-            return basePath || '/';
+            /* Корень портала — СО СЛЭШЕМ: «/OTP/», а не «/OTP». Так адрес
+               раздела совпадает с тем, по которому портал открывают, и Pages не
+               отвечает на него перенаправлением. Роутер теперь принимает оба
+               вида (см. routerBase в main.jsx), но писать лучше канонический:
+               именно «/OTP?view=…» когда-то и гасило приложение на первом же
+               шаге назад. */
+            return basePath ? `${basePath}/` : '/';
         }
         const suffix = normalizedSubPath.startsWith('/') ? normalizedSubPath : `/${normalizedSubPath}`;
         return `${basePath}${suffix}` || '/';
@@ -37935,8 +37941,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Main App
         const App = () => {
             const location = useLocation();
+            /* Адрес читаем ЖИВОЙ, а снимок роутера служит только поводом
+               перечитать его.
+             *
+             * Почему не снимок. Раздел портал пишет в адрес сам —
+             * `syncAppViewWithUrl` зовёт `history.replaceState` мимо роутера, —
+             * и снимок роутера отстаёт от адресной строки на всё время, пока
+             * человек ходит по разделам. Обычно это незаметно: пока роутеру
+             * никто не приносит `popstate`, он свой снимок и не пересчитывает.
+             *
+             * Заметно становится на жесте «назад» из «Курсов». Раздел живёт по
+             * адресу (/lms/...), и, входя в него, он ПЕРЕПИСЫВАЕТ запись под
+             * собой (`navigate(..., { replace: true })`) — адрес раздела, из
+             * которого человек пришёл, пропадает. Жест снимает сторожевую
+             * запись, `popstate` приносит роутеру тот самый /lms, и раздел,
+             * восстановленный жестом, тут же подменялся обратно «Курсами»:
+             * снаружи — «назад не работает вовсе». Живой адрес к этому моменту
+             * уже исправлен самим возвратом (см. close ниже), и спор исчезает.
+             */
             const requestedViewFromLocation = useMemo(
-                () => readAppViewFromUrl(location),
+                () => readAppViewFromUrl(),
                 [location.pathname, location.search]
             );
             const requestedTaskIdFromLocation = useMemo(
@@ -40184,6 +40208,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     /* Возврат в раздел, где мы уже стоим, React до рендера не
                        доводит: флаг подняли бы, а снять было бы некому. */
                     if (backViewRef.current !== from) restoringViewRef.current = true;
+                    /* Адрес правим ПРЯМО ЗДЕСЬ, в обработчике жеста, а не ждём
+                       эффекта: `popstate` принёс адрес записи, которую жест
+                       снял, и она может принадлежать разделу, ЖИВУЩЕМУ ПО
+                       АДРЕСУ («Курсы» переписывают запись под собой). Оставив
+                       её, мы бы вернули человека туда, откуда он уходит. */
+                    syncAppViewWithUrl(from);
                     navigateToView(from);
                 });
             }, [isMobileShell, view, navigateToView]);

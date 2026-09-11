@@ -1072,5 +1072,75 @@ class ViewSwitchTests(unittest.TestCase):
         self.assertIn('animation: none !important;', block)
 
 
+class RouterAddressTests(unittest.TestCase):
+    """Адрес раздела обязан лежать ВНУТРИ basename роутера.
+
+    Владелец 11.09.2026: «иногда после кнопки назад или свайпа, так же в
+    некоторых разделах ловит белый экран». Экран был именно белый — не окно
+    ошибки: React-дерево не падало, его просто не рисовали.
+
+    Механизм, замеренный в браузере на собранной версии с базой /OTP/ (на
+    стенде с базой «/» он не воспроизводится ВОВСЕ — там basename равен «/», и
+    роутер пропускает любой адрес):
+
+      1. адрес раздела портал пишет сам — `/OTP?view=…`, без слэша перед «?»
+         (resolveAppPathname);
+      2. react-router 6.30 сверяет `location.pathname` с basename в
+         `stripBasename`; «/OTP» с «/OTP/» не начинается, и `<Router>`
+         ВОЗВРАЩАЕТ NULL — вместе с ним исчезает всё приложение. Предупреждение
+         об этом в сборке для людей вырезано, поэтому в консоли пусто;
+      3. пока адрес меняет наш `history.replaceState`, роутер о подмене не
+         знает и держит прежнее место. Но первый же `popstate` — кнопка
+         «назад», свайп от края или наша же сторожевая запись — заставляет его
+         перечитать адрес, и портал гаснет до перезагрузки.
+
+    Замер: `#root` без единого потомка, `document.body.innerText` пуст, ни
+    одной ошибки в консоли; после правки в том же месте 381 знак текста.
+    """
+
+    MAIN = (ROOT / 'src' / 'main.jsx').read_text(encoding='utf-8')
+
+    def test_router_basename_has_no_trailing_slash(self):
+        """Basename без слэша принимает ОБА вида адреса: «/OTP» (следующего
+        знака нет) и «/OTP/lms/...» (следующий знак — слэш). Это не косметика:
+        записи вида «/OTP?view=…» уже лежат в историях у людей на телефонах, и
+        починка одного лишь адреса их не спасла бы."""
+        self.assertIn(
+            "const routerBase = (import.meta.env.BASE_URL || '/').replace(/\\/+$/, '') || '/';",
+            self.MAIN,
+        )
+        self.assertIn('<BrowserRouter basename={routerBase}>', self.MAIN)
+
+    def test_section_address_keeps_the_trailing_slash(self):
+        """А сам адрес пишем канонический — «/OTP/?view=…»: он совпадает с тем,
+        по которому портал открывают, и Pages не отвечает на него
+        перенаправлением."""
+        at = APP.index('const resolveAppPathname = ')
+        block = APP[at:at + 1200]
+        self.assertIn("return basePath ? `${basePath}/` : '/';", block)
+        self.assertNotIn("return basePath || '/';", block)
+
+    def test_url_view_is_read_from_the_live_address(self):
+        """Снимок роутера отстаёт от адресной строки на всё время, пока человек
+        ходит по разделам: раздел портал пишет своим replaceState, мимо роутера.
+        Поэтому раздел из адреса читаем ЖИВОЙ строкой, а снимок служит поводом
+        перечитать её."""
+        at = APP.index('const requestedViewFromLocation = useMemo(')
+        block = APP[at:at + 220]
+        self.assertIn('() => readAppViewFromUrl(),', block)
+        self.assertIn('[location.pathname, location.search]', block)
+
+    def test_back_fixes_the_address_before_the_router_reads_it(self):
+        """«Курсы» живут по адресу и, входя, ПЕРЕПИСЫВАЮТ запись под собой
+        (navigate с replace) — адрес раздела, откуда человек пришёл, пропадает.
+        Без правки адреса прямо в обработчике жеста возврат подменялся обратно
+        «Курсами»: снаружи — «назад не работает вовсе»."""
+        at = APP.index('pushBackEntry(() => {')
+        block = APP[at:at + 800]
+        self.assertIn('syncAppViewWithUrl(from);', block)
+        self.assertIn('navigateToView(from);', block)
+        self.assertLess(block.index('syncAppViewWithUrl(from);'), block.index('navigateToView(from);'))
+
+
 if __name__ == '__main__':
     unittest.main()
