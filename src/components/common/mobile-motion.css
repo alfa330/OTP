@@ -188,7 +188,15 @@ body.mobile-shell::before {
                 visibility 0s linear var(--ios-screen-out);
 }
 
-body.mobile-shell:has(.otp-modal-root:not(.is-leaving))::before {
+/* ЛИСТ ДЕЙСТВИЙ ИЗ ЭТОГО ПРАВИЛА ИСКЛЮЧЁН. У него ЕСТЬ СВОЁ затемнение
+   (.mobile-actions__dim), и вместе получалось два слоя серого поверх
+   светло-серой шторки профиля. Хуже того, эта заливка гаснет по
+   --ios-screen-out, то есть ещё 0.3 с висела серым над УЖЕ ПУСТЫМ профилем,
+   когда листа на экране давно нет. Владелец 11.09.2026: «выходит серое
+   затемнение, а затем уже выбор способа». Экраны (кадр фотографии, смена
+   логина и пароля) правилу подчиняются по-прежнему: у них своего затемнения
+   нет. */
+body.mobile-shell:has(.otp-modal-root:not(.is-leaving, .mobile-actions))::before {
     opacity: 1;
     visibility: visible;
     transition: opacity var(--ios-screen-in) var(--ios-move),

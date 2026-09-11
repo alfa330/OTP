@@ -1486,15 +1486,109 @@ class AccountScreenTests(unittest.TestCase):
         # файла вместо камеры.
         camera = APP[APP.index("key: 'camera'"):APP.index("key: 'pick'")]
         self.assertIn('accept="image/*"', camera)
-        self.assertIn("label: isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию',", APP)
+        self.assertIn("label: 'Удалить фотографию',", APP)
         self.assertIn('danger: true,', APP)
+        # Состояния «Удаляем…» у строки нет: лист закрывается тем же нажатием,
+        # и подпись, которую никто не увидит, — мёртвая ветка.
+        self.assertNotIn("isRemovingAvatar ? 'Удаляем…'", APP)
         # Удаление показывается только когда есть что удалять.
         self.assertIn("...(user?.avatar_url ? [{", APP)
         block = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions {', 700)
         self.assertIn('justify-content: flex-end !important;', block)
-        self.assertIn('animation: mobile-actions-in', block)
         # Выше всплывающих сообщений: иначе они закрывают собой выбор.
         self.assertIn('z-index: 10000;', block)
+
+    def test_sheet_does_not_ride_in_like_a_screen(self):
+        """ДЕФЕКТ, ПОЙМАННЫЙ 11.09.2026. Слой моторики даёт анимацию
+        otp-screen-in ВСЕМ окнам селектором `body.mobile-shell .otp-modal-root`
+        — вес тот же, что у `.mobile-actions`, а лежит он в сборке НИЖЕ, и при
+        равном весе выигрывал он. Лист действий въезжал СПРАВА, как раздел:
+        серая пелена шла шторой через весь экран (замер по кадрам: левый край
+        слоя 390 → 199 → 54 → 0 за 380 мс), и выбор приходил уже за ней.
+        Владелец: «выходит серое затемнение, а затем уже выбор способа».
+
+        Лечится ВЕСОМ: третий класс в селекторе, и порядок в сборке больше
+        ничего не решает. Затемнение после этого проявляется НА МЕСТЕ, а
+        карточки поднимаются снизу — и то и другое одним движением."""
+        kill = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root.mobile-actions,', 300)
+        self.assertIn('.mobile-actions.is-leaving', kill)
+        self.assertIn('animation: none;', kill)
+        dim = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions__dim {', 900)
+        self.assertIn('animation: mobile-actions-dim', dim)
+        # Пелена НЕ ездит: у неё только прозрачность.
+        self.assertIn('from { opacity: 0; }', css_block(SHELL_CSS, '@keyframes mobile-actions-dim {', 200))
+        rise = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions__sheet {', 400)
+        self.assertIn('animation: mobile-actions-rise', rise)
+        self.assertIn('translateY(calc(100% + 24px))', css_block(SHELL_CSS, '@keyframes mobile-actions-rise {', 400))
+        # Уход есть вовсе: разметка держится, пока лист уезжает.
+        sheet = (ROOT / 'src' / 'components' / 'common' / 'MobileActionSheet.jsx').read_text(encoding='utf-8')
+        self.assertIn('const LEAVE_MS = 240;', sheet)
+        self.assertIn("data-leaving={leaving ? '' : undefined}", sheet)
+        self.assertIn('if (!mounted) return null;', sheet)
+
+    def test_leaving_has_its_own_animation_names(self):
+        """ЛОВУШКА, ПОЙМАННАЯ ЗАМЕРОМ. Уход сначала был сделан теми же
+        анимациями с `reverse` и другой длительностью — и не проигрывался
+        вовсе: браузер НЕ начинает анимацию заново от смены длительности и
+        направления, он продолжает уже идущую, а она давно доиграна. Замер в
+        браузере: на 2-й миллисекунде лист уже стоял за нижним краем (y 860),
+        пелена была нулевой, и все 240 мс экран просто ждал снятия разметки.
+
+        С отдельными именами уход идёт как надо: y 600 → 776 → 841 → 859,
+        пелена 1.00 → 0.65 → 0.25 → 0.00, разметка снимается на 246-й мс."""
+        leave_dim = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions[data-leaving] .mobile-actions__dim {', 200)
+        self.assertIn('animation: mobile-actions-fade', leave_dim)
+        leave_sheet = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions[data-leaving] .mobile-actions__sheet {', 200)
+        self.assertIn('animation: mobile-actions-sink', leave_sheet)
+        # Именно РАЗНЫЕ имена, а не reverse у входных.
+        self.assertNotIn('reverse', leave_dim)
+        self.assertNotIn('reverse', leave_sheet)
+        self.assertIn('@keyframes mobile-actions-fade', SHELL_CSS)
+        self.assertIn('@keyframes mobile-actions-sink', SHELL_CSS)
+        # Пока лист уезжает, нажатия сквозь него не проходят в профиль.
+        self.assertIn('pointer-events: none;', css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions[data-leaving] {', 150))
+
+    def test_sheet_has_only_one_dimming(self):
+        """ВТОРАЯ ПОЛОВИНА ЖАЛОБЫ, НАЙДЕННАЯ РАЗБОРОМ. Слой моторики красит
+        `body::before` под ЛЮБОЕ окно (`:has(.otp-modal-root:not(.is-leaving))`)
+        — а у листа действий есть СВОЁ затемнение, и вместе получалось два слоя
+        серого поверх светло-серой шторки профиля. Хуже того, эта заливка гаснет
+        по --ios-screen-out: ещё 0.3 с она висела серым над УЖЕ ПУСТЫМ профилем,
+        когда листа на экране давно нет. Замер на стенде после правки:
+        body::before остаётся opacity 0 и visibility hidden всё время, пока лист
+        открыт.
+
+        Экраны (кадр фотографии, смена логина и пароля) правилу подчиняются
+        по-прежнему — у них своего затемнения нет."""
+        motion = (ROOT / 'src' / 'components' / 'common' / 'mobile-motion.css').read_text(encoding='utf-8')
+        self.assertIn(
+            'body.mobile-shell:has(.otp-modal-root:not(.is-leaving, .mobile-actions))::before',
+            motion,
+            'лист действий снова получает вторую заливку от слоя моторики',
+        )
+
+    def test_sheet_wears_the_same_glass_as_the_bell(self):
+        """Материал — не выдуманный: ровно тот, что у листа колокола
+        (.notifications-dropdown), чтобы лист выбора читался как родной, а не
+        как белая плашка, наклеенная поверх размытой страницы."""
+        glass = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions__group,', 500)
+        self.assertIn('background: var(--sheet-glass);', glass)
+        self.assertIn('backdrop-filter: blur(30px) saturate(180%);', glass)
+        # Строка своего фона не имеет — иначе плотная краска перекрыла бы стекло.
+        self.assertIn('background: transparent;', css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions__row {', 200))
+
+    def test_dim_is_blurred_page_not_grey_paint(self):
+        """«Серое затемнение» — вторая половина той же жалобы: плоская краска
+        поверх светло-серого списка профиля превращала экран в один кусок
+        серого. Теперь фон РАЗМЫТ и остаётся собой: видно портрет и цвета
+        значков, а краски — волос, только чтобы белые карточки не слились."""
+        dim = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions__dim {', 1100)
+        self.assertIn('backdrop-filter: blur(12px)', dim)
+        self.assertIn('-webkit-backdrop-filter: blur(12px)', dim)
+        self.assertIn('background: rgba(0, 0, 0, 0.14);', dim)
+        # Карточки приподняты тенью — на светлом размытом фоне без неё они
+        # лежат вровень со страницей.
+        self.assertIn('box-shadow: 0 8px 34px', css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions__group,', 400))
 
     def test_photo_screen_is_the_dark_frame(self):
         """Кадр как в образце: чёрное поле во весь экран, снимок под круглой

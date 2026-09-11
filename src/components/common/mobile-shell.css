@@ -2189,18 +2189,40 @@ body.mobile-shell .mobile-actions {
     justify-content: flex-end !important;
     align-items: stretch !important;
     padding: 0 8px max(8px, env(safe-area-inset-bottom)) !important;
-    animation: mobile-actions-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
-@keyframes mobile-actions-in {
-    from { transform: translateY(18%); opacity: 0; }
-    to { transform: none; opacity: 1; }
+/* ВЕС СЕЛЕКТОРА ЗДЕСЬ — НЕ УКРАШЕНИЕ. Слой моторики (mobile-motion.css) даёт
+   анимацию otp-screen-in ВСЕМ окнам, селектором body.mobile-shell
+   .otp-modal-root — вес тот же, что у .mobile-actions, но лежит он в сборке
+   НИЖЕ, и при равном весе выигрывал он. Лист въезжал СПРАВА, как раздел: серая
+   пелена шла шторой через весь экран, а выбор приходил уже за ней. Владелец
+   11.09.2026: «выходит серое затемнение, а затем уже выбор способа». Замер по
+   кадрам на стенде: левый край слоя 390 → 199 → 54 → 0 за 380 мс, и до самого
+   конца половина экрана — серая штора с жёстким краем. Третий класс поднимает
+   вес, и порядок в сборке больше ничего не решает. Тот же приём — у ухода. */
+body.mobile-shell .otp-modal-root.mobile-actions,
+body.mobile-shell .otp-modal-root.mobile-actions.is-leaving {
+    animation: none;
 }
 
+/* Затемнение ПРОЯВЛЯЕТСЯ на месте, карточки поднимаются снизу — и то и другое
+   одним движением, как в системном листе: фон и выбор приходят вместе, а не
+   друг за другом. */
 body.mobile-shell .mobile-actions__dim {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.28);
+    /* НЕ СЕРАЯ КРАСКА, А РАЗМЫТАЯ СТРАНИЦА. Плоское затемнение поверх
+       светло-серого списка профиля давало ровно то серое поле, на которое
+       пожаловался владелец: экран становился одним куском серого, и выбор
+       приходил уже на него. Теперь фон уходит из фокуса, но остаётся собой —
+       видно и портрет, и цвета значков. Краски здесь ВОЛОС (0.14): она нужна
+       только чтобы белые карточки не сливались со светлым списком.
+       Замеры на стенде: 20 px размытия превращают профиль в кашу и сами
+       карточки от этого сереют, 4 px не отрывают их от фона. */
+    background: rgba(0, 0, 0, 0.14);
+    backdrop-filter: blur(12px) saturate(130%);
+    -webkit-backdrop-filter: blur(12px) saturate(130%);
+    animation: mobile-actions-dim 0.3s ease both;
 }
 
 body.mobile-shell .mobile-actions__sheet {
@@ -2208,12 +2230,69 @@ body.mobile-shell .mobile-actions__sheet {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    animation: mobile-actions-rise 0.34s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+/* Уход — то же движение назад: лист уезжает вниз, затемнение тает. Без него
+   выбор пропадал мгновенно, будто экран моргнул.
+
+   ИМЕНА У УХОДА СВОИ, И ЭТО НЕ ПРИДИРКА К СТИЛЮ. Взять ту же анимацию с другой
+   длительностью и `reverse` нельзя: браузер НЕ начинает её заново — он
+   продолжает уже идущую, а она давно доиграна, и при развороте это мгновенный
+   прыжок в конечное положение. Замер в браузере: на 2-й миллисекунде лист уже
+   стоял за нижним краем (y 860), а прозрачность пелены была нулевой, и все
+   240 мс экран просто ждал, пока разметку снимут. Новое имя — новая анимация с
+   нуля. */
+body.mobile-shell .mobile-actions[data-leaving] {
+    pointer-events: none;
+}
+
+body.mobile-shell .mobile-actions[data-leaving] .mobile-actions__dim {
+    animation: mobile-actions-fade 0.22s ease both;
+}
+
+body.mobile-shell .mobile-actions[data-leaving] .mobile-actions__sheet {
+    animation: mobile-actions-sink 0.24s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes mobile-actions-dim {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes mobile-actions-rise {
+    /* Плюс отступ: карточки уходят ниже своего места ровно настолько, чтобы
+       из-под края экрана не выглядывал их скруглённый низ. */
+    from { transform: translateY(calc(100% + 24px)); }
+    to { transform: none; }
+}
+
+@keyframes mobile-actions-fade {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes mobile-actions-sink {
+    from { transform: none; }
+    to { transform: translateY(calc(100% + 24px)); }
+}
+
+/* МАТЕРИАЛ ТОТ ЖЕ, ЧТО У ЛИСТА КОЛОКОЛА (.notifications-dropdown выше):
+   полупрозрачное стекло на размытии и тень того же набора. Плотная белая
+   плашка поверх размытой страницы выглядит наклеенной, а стекло — лежащим на
+   ней. Тень нужна отдельно: на светлом фоне карточка без неё вровень со
+   страницей. */
+body.mobile-shell .mobile-actions__group,
+body.mobile-shell .mobile-actions__cancel {
+    background: var(--sheet-glass);
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+    box-shadow: 0 8px 34px rgba(0, 0, 0, 0.18);
 }
 
 body.mobile-shell .mobile-actions__group {
     border-radius: 14px;
     overflow: hidden;
-    background: var(--sheet-card);
 }
 
 body.mobile-shell .mobile-actions__row,
@@ -2224,12 +2303,17 @@ body.mobile-shell .mobile-actions__cancel {
     width: 100%;
     min-height: 57px;
     padding: 0 16px;
-    background: var(--sheet-card);
     color: var(--sheet-accent);
     font-size: 19px;
     line-height: 24px;
     text-align: center;
     cursor: pointer;
+}
+
+/* Строка своего фона не имеет: его держит стеклянная карточка под ней. Иначе
+   плотная краска строки перекрыла бы стекло, ради которого всё и затевалось. */
+body.mobile-shell .mobile-actions__row {
+    background: transparent;
 }
 
 body.mobile-shell .mobile-actions__row + .mobile-actions__row {

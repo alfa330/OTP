@@ -55670,9 +55670,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                        который ничего не делает, хуже отсутствующего. */
                                     ...(user?.avatar_url ? [{
                                         key: 'remove',
-                                        label: isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию',
+                                        /* Состояния «Удаляем…» у строки нет намеренно: лист
+                                           закрывается тем же нажатием, и подпись, которую
+                                           никто не увидит, — это мёртвая ветка. О том, чем
+                                           кончилось, говорит всплывающее сообщение. */
+                                        label: 'Удалить фотографию',
                                         danger: true,
-                                        disabled: isRemovingAvatar,
                                         onClick: () => {
                                             setPhotoActionsOpen(false);
                                             handleRemoveAccountAvatar();
