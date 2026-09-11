@@ -576,12 +576,8 @@ class TaskComposerTests(unittest.TestCase):
         схлопывалось вместе с набранным отчётом. Закрываем, только если и
         нажали, и отпустили ровно по подложке.
         """
-        start = self.src.index("const useOverlayDismiss = (onClose) => {")
-        block = self.src[start:self.src.index("/* ─── Main Component ─── */", start)]
-        self.assertIn("onPointerDown: (event) => {", block)
-        self.assertIn("down: event.target === event.currentTarget", block)
-        self.assertIn("pressRef.current.up = event.target === event.currentTarget;", block)
-        self.assertIn("if (down && up) onClose();", block)
+        # Сам приём живёт в общем хуке и закреплён в tests/test_modal_overlay_dismiss.py.
+        self.assertIn("import useOverlayDismiss from '../common/useOverlayDismiss';", self.src)
 
         # Ни одна подложка раздела не закрывается голым onClick: за каждой
         # из пяти — набранный человеком текст.

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import useOverlayDismiss from '../common/useOverlayDismiss';
 
 const MAX_DISPUTE_CHARS = 500;
 
@@ -42,9 +43,10 @@ const DisputeModal = ({
     return () => document.removeEventListener('keydown', onKey);
   }, [isLoading]);
 
-  const handleBackdropClick = (event) => {
-    if (event.target === event.currentTarget) handleClose();
-  };
+  /* Закрытие по подложке — через общий хук: голый onClick с проверкой
+     target === currentTarget гасил окно, когда выделение текста спора
+     отпускали за его краем, и набранное пропадало. */
+  const backdropDismiss = useOverlayDismiss(handleClose);
 
   const handleTextChange = (event) => {
     setDisputeText(event.target.value.slice(0, MAX_DISPUTE_CHARS));
@@ -56,7 +58,7 @@ const DisputeModal = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="dispute-modal-title"
-      onClick={handleBackdropClick}
+      {...backdropDismiss}
     >
       <div className="otp-modal-card workhours-modal bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
         <div className="flex-shrink-0 p-4 sm:p-6 pb-0 border-b border-gray-100">

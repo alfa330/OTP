@@ -58,6 +58,7 @@ import MobilePageChrome from './components/common/MobilePageChrome';
 import useScreenBackGesture from './components/common/useScreenBackGesture';
 import { pushBackEntry, clearBackStack } from './utils/mobileBackStack';
 import useIsMobileShell from './components/common/useIsMobileShell';
+import useOverlayDismiss from './components/common/useOverlayDismiss';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
@@ -42047,6 +42048,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const [isSending, setIsSending] = useState(false);
                 const [showModal, setShowModal] = useState(false);
                 const [showLegend, setShowLegend] = useState(false);
+                /* Окно дня закрываем только настоящим кликом по подложке. Голый
+                   onClick с проверкой target === currentTarget гасил его и тогда,
+                   когда выделение текста просто отпустили за краем окна, — вместе
+                   с набранным текстом запроса на правку часов. */
+                const dayModalDismiss = useOverlayDismiss(() => { setShowModal(false); setSelectedDay(null); });
                 const REQUEST_MESSAGE_MAX_LENGTH = 500;
                 const calculationModelCode = resolveWorkHoursMonthModelInfo(hoursData).modelCode;
 
@@ -42500,7 +42506,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             role="dialog"
                             aria-modal="true"
                             aria-labelledby="day-modal-title"
-                            onClick={(e) => { if (e.target === e.currentTarget) { setShowModal(false); setSelectedDay(null); } }}
+                            {...dayModalDismiss}
                         >
                             <div className="workhours-modal bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
                             {/* Заголовок - фиксированный */}

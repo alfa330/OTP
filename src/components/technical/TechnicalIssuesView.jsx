@@ -1,6 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import useOverlayDismiss from '../common/useOverlayDismiss';
 import ITTicketModal from './ITTicketModal';
 import {
     WORKPLACE_CABINETS,
@@ -835,6 +836,11 @@ const AddIssueModal = memo(function AddIssueModal({
         return () => document.removeEventListener('keydown', handler);
     }, [isOpen, onClose]);
 
+    /* Закрытие по подложке — общим хуком: голый onClick с проверкой
+       target === currentTarget гасил окно, когда выделение текста
+       отпускали за его краем, и заполненная форма пропадала. */
+    const backdropDismiss = useOverlayDismiss(onClose);
+
     if (!isOpen) return null;
 
     const toggleMassive = () => {
@@ -848,7 +854,7 @@ const AddIssueModal = memo(function AddIssueModal({
         <div
             className="fixed inset-0 z-50 flex items-center justify-center p-4"
             style={{ backgroundColor: 'rgba(15,23,42,0.55)', backdropFilter: 'blur(3px)' }}
-            onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+            {...backdropDismiss}
         >
             <div
                 className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl border border-blue-100 flex flex-col"
@@ -1114,6 +1120,9 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
     const [selectedWorkplace, setSelectedWorkplace] = useState(null);
     const [detailsWorkplace, setDetailsWorkplace] = useState(null);
     const [selectedCabinetId, setSelectedCabinetId] = useState(() => cabinets?.[0]?.id || null);
+    // Разбор РМ читают и выделяют мышью — по подложке закрываем только
+    // настоящим кликом по ней, а не отпусканием выделения за краем окна.
+    const detailsDismiss = useOverlayDismiss(() => setDetailsWorkplace(null));
 
     useEffect(() => {
         if (!cabinets || cabinets.length === 0) { setSelectedCabinetId(null); return; }
@@ -1350,9 +1359,7 @@ const WorkplaceAnalyticsPanel = memo(function WorkplaceAnalyticsPanel({
                 <div
                     className="fixed inset-0 z-[100] flex items-center justify-center p-3"
                     style={{ backgroundColor: 'rgba(15, 23, 42, 0.55)', backdropFilter: 'blur(3px)' }}
-                    onClick={(event) => {
-                        if (event.target === event.currentTarget) setDetailsWorkplace(null);
-                    }}
+                    {...detailsDismiss}
                 >
                     <div className="w-full max-w-2xl rounded-xl border border-rose-200 bg-white shadow-2xl">
                         <div className="flex items-center justify-between gap-2 border-b border-rose-100 px-4 py-3 bg-gradient-to-r from-rose-50 to-red-50">

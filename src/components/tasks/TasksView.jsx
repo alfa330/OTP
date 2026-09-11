@@ -26,6 +26,7 @@ import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/ro
 import { departmentAllowsView, departmentRestrictsViews } from '../../utils/departmentViews';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
+import useOverlayDismiss from '../common/useOverlayDismiss';
 import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
@@ -6753,31 +6754,6 @@ const SkeletonList = ({ count = 4 }) => (
     ))}
   </div>
 );
-
-/* ─── Закрытие окна по клику на подложку ───
-   Обычный onClick на подложке закрывал окно и тогда, когда по подложке не
-   кликали: выделяешь мышью текст в описании задачи, ведёшь курсор за край
-   окна и отпускаешь — браузер шлёт click общему предку нажатия и отпускания,
-   а общий предок здесь и есть подложка. Половина набранного текста пропадала
-   вместе с окном. Поэтому закрываем, только если и нажали, и отпустили ровно
-   по подложке. Тот же приём, что у IosModal (src/components/ui/ios.jsx), но
-   строже: там окно уходит уже по нажатию. */
-const useOverlayDismiss = (onClose) => {
-  const pressRef = useRef({ down: false, up: false });
-  return {
-    onPointerDown: (event) => {
-      pressRef.current = { down: event.target === event.currentTarget, up: false };
-    },
-    onPointerUp: (event) => {
-      pressRef.current.up = event.target === event.currentTarget;
-    },
-    onClick: () => {
-      const { down, up } = pressRef.current;
-      pressRef.current = { down: false, up: false };
-      if (down && up) onClose();
-    },
-  };
-};
 
 /* ─── Main Component ─── */
 const TasksView = ({
