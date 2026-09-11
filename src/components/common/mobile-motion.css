@@ -1,0 +1,392 @@
+/* Моторика мобильной оболочки: как на телефоне движется ВСЁ.
+ *
+ * Просьба владельца 11.09.2026: «переходы и все анимации проверь, сделай их
+ * плавными вместо таких резких, например при свайпе назад или при кнопке,
+ * сделай все в стиле ios/macos. Применить только к мобильной версии».
+ *
+ * ПОЧЕМУ ОТДЕЛЬНЫЙ ФАЙЛ, А НЕ СТРОКИ В mobile-shell.css. Моторика — это не
+ * ещё один раздел вёрстки, а сквозной набор из трёх десятков мест: кривая
+ * въезда экрана, длительность ухода листа, отклик кнопки на нажатие. Стоя
+ * порознь, они расползаются: сегодня 0.2 с ease у одного, завтра 0.34 с у
+ * соседнего — и оболочка начинает двигаться вразнобой, что глаз читает именно
+ * как «резко». Здесь всё это собрано в один набор токенов и один порядок
+ * правил, а mobile-shell.css остаётся про геометрию.
+ *
+ * Подключается СРАЗУ ПОСЛЕ mobile-shell.css (см. MobileTabBar.jsx): часть
+ * правил ниже перекрывает моторику оболочки при равном весе селектора, и
+ * порядок в бандле здесь — не случайность, а условие работы.
+ *
+ * ГРАНИЦА: всё заперто на `body.mobile-shell`. На компьютере не срабатывает ни
+ * одно правило этого файла — так же, как в самой оболочке.
+ */
+
+/* ── Токены: четыре кривые и шесть длительностей на всю оболочку ───────────
+ *
+ * Кривые сняты с системных переходов iOS/macOS и уже жили в оболочке порознь;
+ * здесь у них имена, и дальше по файлу везде стоят только имена.
+ *
+ *   --ios-move  — «поездка»: экран, лист, шторка. Резкий старт и длинный
+ *                 мягкий выбег — характерная моторика UIKit. Именно выбег
+ *                 отличает «приехало» от «подставили картинку».
+ *   --ios-soft  — «проявление»: подсветка, стекло, всё, что не едет.
+ *   --ios-exit  — уход: разгон к концу, потому что ждать закрытие незачем.
+ *   --ios-press — отпускание кнопки: мгновенный отклик вниз, мягкий возврат.
+ *
+ * Длительности тоже названы: экран въезжает дольше, чем уезжает (0.38 против
+ * 0.3 — так закрытие не заставляет ждать), а нажатие живёт двумя числами, и
+ * это главное в отклике кнопки — см. раздел «Нажатие» ниже.
+ */
+body.mobile-shell {
+    --ios-move: cubic-bezier(0.32, 0.72, 0, 1);
+    --ios-soft: cubic-bezier(0.16, 1, 0.3, 1);
+    --ios-exit: cubic-bezier(0.4, 0, 1, 1);
+    --ios-press: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+    --ios-screen-in: 0.38s;
+    --ios-screen-out: 0.3s;
+    --ios-sheet-in: 0.32s;
+    --ios-sheet-out: 0.26s;
+    --ios-view: 0.26s;
+    --ios-press-up: 0.32s;
+    --ios-press-down: 0.09s;
+}
+
+/* ── Нажатие ──────────────────────────────────────────────────────────────
+ *
+ * ЭТО ТО САМОЕ «РЕЗКО ПРИ КНОПКЕ». В разметке портала нажатие описано
+ * утилитами Tailwind (`active:scale-95` — 38 мест, `active:opacity-60`), и на
+ * элементе без класса `transition` они щёлкают мгновенно: кнопка прыгает в
+ * нажатое состояние и так же прыгает обратно. На телефоне это единственный
+ * ответ интерфейса на касание, и щелчок читается как сбой отрисовки.
+ *
+ * В iOS у нажатия ДВЕ разные длительности: вниз почти мгновенно (палец уже
+ * коснулся — отклик обязан быть там же), вверх — мягкий возврат за треть
+ * секунды. Одна длительность на оба конца даёт либо вязкое нажатие, либо
+ * резкий возврат; поэтому ниже две пары правил, и порядок между ними важен.
+ *
+ * ОБЛАСТЬ. Ровно то, что человек нажимает: содержимое раздела, экраны поверх
+ * него и строки шторки. Бар разделов и список уведомлений исключены — у них
+ * свой, продуманный отклик (пилюля под значком, заливка строки), и второй
+ * поверх него был бы шумом.
+ */
+body.mobile-shell .main-content :is(button, a[href], [role="button"], summary, label),
+body.mobile-shell .otp-modal-root :is(button, a[href], [role="button"], summary, label),
+body.mobile-shell .sidebar :is(button, a[href], [role="button"], summary, label) {
+    /* Серый прямоугольник, который браузер рисует поверх нажатой кнопки, —
+       примета страницы, а не приложения: он квадратный там, где кнопка
+       круглая, и появляется с задержкой. Свой отклик ниже. */
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Что именно плавно. Список свойств, а не `all`: `all` заставляет браузер в
+   каждом кадре переоценивать десяток свойств кнопки — на телефоне это заметно
+   именно на слабых аппаратах, ради которых всё и делается. Правило не трогает
+   элементы, у которых переход уже описан утилитой Tailwind (`transition`,
+   `transition-all`, `transition-colors`…): там список свойств выбран автором
+   места, и подменять его отсюда значило бы гасить чужие анимации. */
+body.mobile-shell .main-content :is(button, a[href], [role="button"], summary, label):not([class*="transition"]),
+body.mobile-shell .otp-modal-root :is(button, a[href], [role="button"], summary, label):not([class*="transition"]),
+body.mobile-shell .sidebar :is(button, a[href], [role="button"], summary, label):not([class*="transition"]) {
+    transition-property: opacity, transform, background-color, border-color, color, box-shadow, filter;
+}
+
+/* Сколько длится возврат. Тем, у кого утилита Tailwind уже стоит, меняем
+   только длительность и кривую — набор свойств остаётся авторским. Элементы с
+   явной утилитой `duration-*` не трогаем вовсе: там длительность выбрана
+   осознанно (полоса прогресса, задержанная подсказка). */
+body.mobile-shell .main-content :is(button, a[href], [role="button"], summary, label):not([class*="duration-"]),
+body.mobile-shell .otp-modal-root :is(button, a[href], [role="button"], summary, label):not([class*="duration-"]),
+body.mobile-shell .sidebar :is(button, a[href], [role="button"], summary, label):not([class*="duration-"]) {
+    transition-duration: var(--ios-press-up);
+    transition-timing-function: var(--ios-press);
+}
+
+/* И вниз — мгновенно. Правило стоит ПОСЛЕ предыдущего и равно ему по весу:
+   именно порядок делает нажатие быстрым, а отпускание мягким. */
+body.mobile-shell .main-content :is(button, a[href], [role="button"], summary, label):not([class*="duration-"]):active,
+body.mobile-shell .otp-modal-root :is(button, a[href], [role="button"], summary, label):not([class*="duration-"]):active,
+body.mobile-shell .sidebar :is(button, a[href], [role="button"], summary, label):not([class*="duration-"]):active {
+    transition-duration: var(--ios-press-down);
+}
+
+/* Сам отклик — приглушение, как у системных кнопок. Ставится там, где своего
+   отклика нет вовсе: без него снятый серый прямоугольник оставил бы нажатие
+   совсем без ответа. Исключены места, где отклик уже придуман: бар разделов,
+   список уведомлений и экраны учётной записи (там на нажатие меняется
+   заливка строки — решения владельца 10–11.09.2026).
+   Отключённые кнопки не отвечают: нажатие на них ничего не делает, и ответ
+   был бы обещанием, которого интерфейс не сдержит. */
+body.mobile-shell .main-content :is(button, a[href], [role="button"], summary, label):not(:disabled):not([aria-disabled="true"]):not([class*="mobile-account__"]):not([class*="mobile-crop__"]):active,
+body.mobile-shell .otp-modal-root :is(button, a[href], [role="button"], summary, label):not(:disabled):not([aria-disabled="true"]):not([class*="mobile-account__"]):not([class*="mobile-crop__"]):active,
+body.mobile-shell .sidebar :is(button, a[href], [role="button"], summary, label):not(:disabled):not([aria-disabled="true"]):not([class*="mobile-account__"]):not([class*="mobile-crop__"]):active {
+    opacity: 0.58;
+}
+
+/* Поля ввода и переключатели под это правило не попадают: у них отклик — сам
+   курсор и положение тумблера, а приглушённое поле читается как «недоступно». */
+
+/* Отклик бара разделов остаётся своим, но на той же кривой, что и всё
+   остальное: значок пружинит внутрь, пилюля проявляется. Раньше цвет ехал
+   0.2 с ease, а значок — 0.2 с по кривой поездки: два закона на одну кнопку. */
+body.mobile-shell .mtb-item {
+    transition: color var(--ios-press-up) var(--ios-press);
+}
+
+body.mobile-shell .mtb-item__icon {
+    transition: background-color var(--ios-press-up) var(--ios-press),
+                transform var(--ios-press-up) var(--ios-press);
+}
+
+body.mobile-shell .mtb-item:active .mtb-item__icon {
+    transition-duration: var(--ios-press-down);
+}
+
+/* ── Экран поверх раздела: глубина ────────────────────────────────────────
+ *
+ * Въезд справа у оболочки уже был, не было ГЛУБИНЫ. В iOS новый экран не
+ * просто закрывает предыдущий: он идёт над ним, и предыдущий на это время
+ * уходит в тень. Без этого движение читается как «поверх картинки протащили
+ * вторую» — ровно то, на что жалуются словом «резко». Особенно на закрытии:
+ * экран уезжает, а из-под него мгновенно, без перехода, проступает раздел.
+ *
+ * ПАРАЛЛАКС (уезжающий влево нижний экран) СДЕЛАТЬ НЕЛЬЗЯ, и это не лень.
+ * Окна портала свёрстаны внутри разделов (`position: fixed` внутри
+ * `.main-content`), а transform у предка превращает его в точку отсчёта для
+ * fixed-потомков. Сдвинув содержимое раздела, мы сдвинули бы вместе с ним сам
+ * экран, а на телефоне у `.main-content` ещё и высота страницы, а не окна, —
+ * экран растянулся бы на всю ленту и поехал бы вместе с прокруткой. Поэтому
+ * глубину даём двумя вещами, которые ничего не двигают: тенью у левой грани
+ * экрана и затемнением под ним.
+ */
+
+/* Тень идёт впереди экрана и падает на раздел. Она на КОРНЕ, а не на полотне:
+   полотну оболочка тень снимает намеренно (тень по краю во весь экран — это
+   примета окна), а корень прозрачен, и его box-shadow рисуется снаружи — то
+   есть ровно слева от приезжающего экрана. */
+body.mobile-shell .otp-modal-root {
+    box-shadow: -14px 0 34px rgba(15, 23, 42, 0.2);
+}
+
+/* Затемнение под экраном. Псевдоэлемент <body>, а не слой внутри окна: слой
+   внутри уехал бы ВМЕСТЕ с экраном и погасил бы не раздел, а сам экран.
+   z-index 119 — ровно под экраном (у него 120) и выше всего остального:
+   бар разделов, колокол и шторка на время экрана тоже уходят в тень.
+   Выключается на `is-leaving`, а не на исчезновении узла: экран уезжает
+   0.3 с, и раздел обязан светлеть ВМЕСТЕ с ним, а не после. */
+body.mobile-shell::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 119;
+    background: rgba(15, 23, 42, 0.22);
+    opacity: 0;
+    pointer-events: none;
+    /* Пока экранов нет, слоя нет и в отрисовке: невидимый слой во весь экран
+       браузер всё равно складывает в каждом кадре прокрутки. */
+    visibility: hidden;
+    transition: opacity var(--ios-screen-out) var(--ios-exit),
+                visibility 0s linear var(--ios-screen-out);
+}
+
+body.mobile-shell:has(.otp-modal-root:not(.is-leaving))::before {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity var(--ios-screen-in) var(--ios-move),
+                visibility 0s;
+}
+
+/* Въезд и уход — по именованным токенам. Значения те же, что были у оболочки;
+   здесь они перестают быть двумя случайными числами в разных концах файла.
+   Длительность ухода обязана совпадать с SCREEN_LEAVE_MS в
+   src/components/ui/ios.jsx и с SCREEN_EXIT_MS в mobileScreenExit.js — иначе
+   разметку снимут посреди движения. */
+body.mobile-shell .otp-modal-root {
+    animation: otp-screen-in var(--ios-screen-in) var(--ios-move) both;
+}
+
+body.mobile-shell .otp-modal-root.is-leaving {
+    animation: otp-screen-out var(--ios-screen-out) var(--ios-move) both;
+}
+
+/* Экран, который уезжает сам по себе (см. src/utils/mobileScreenExit.js):
+   разметку на время ухода держит не React, а оболочка, поэтому узел обязан
+   быть глухим ко всему — иначе нажатие уйдёт в то, чего уже нет. */
+body.mobile-shell .otp-modal-root.is-leaving {
+    pointer-events: none;
+}
+
+/* ВТОРОГО ДВИЖЕНИЯ В КАДРЕ НЕ БЫВАЕТ. Полотну оболочка уже сняла собственные
+   opacity/transform/transition, но не анимацию — и окна «Задач» приезжали
+   дважды: экран ехал справа, а полотно внутри него в те же 0.2 с росло с 0.95
+   (tvScaleIn в TasksView.jsx). Два закона на одно движение — это и есть
+   дёрганость, ровно как у карточки в .otp-modal-card, где animation сняли ещё
+   11.09.2026. Экран едет целиком, и этого достаточно. */
+body.mobile-shell .otp-modal-root .otp-modal-panel {
+    animation: none !important;
+}
+
+/* ── Переключение раздела ─────────────────────────────────────────────────
+ *
+ * Было: новый раздел проявлялся снизу вверх за 0.34 с. Два изъяна, оба
+ * читаются как резкость. Первый — старого раздела в этот момент уже нет,
+ * поэтому движение начинается с пустого экрана: не переход, а появление из
+ * ничего. Второй — сдвиг делает `.main-content` точкой отсчёта для fixed на
+ * всё время анимации, а высота у неё на телефоне страничная.
+ *
+ * Стало: растворение с 0.4, без поездки. Так переключают вкладки сами
+ * телефоны — панель вкладок в iOS не возит содержимое по экрану, — и глаз
+ * получает непрерывность вместо прыжка. Начало не с нуля: с нуля это опять
+ * «появилось из пустоты», а с 0.4 — «сменилось».
+ */
+body.mobile-shell .main-content.mobile-view-switch {
+    animation: ios-view-in var(--ios-view) var(--ios-soft) both;
+    /* Раздел — самое большое поддерево на экране; подсказка о слое снимает
+       покадровую перерисовку, с которой начало перехода спотыкалось. */
+    will-change: opacity;
+}
+
+@keyframes ios-view-in {
+    from { opacity: 0.4; }
+    to { opacity: 1; }
+}
+
+/* ── Листы, шторка, подложки ──────────────────────────────────────────────
+ *
+ * Здесь всё уже двигалось правильно, но каждое своим числом: шторка 0.2/0.22,
+ * лист уведомлений 0.32/0.26, подложки 0.22 и 0.28 ease. Разнобой не виден по
+ * отдельности и хорошо слышен вместе: подложка гаснет позже листа, и лист
+ * будто оставляет за собой след. Сводим к общим токенам.
+ */
+body.mobile-shell .sidebar {
+    transition: opacity var(--ios-sheet-out) var(--ios-exit),
+                transform var(--ios-sheet-out) var(--ios-exit),
+                visibility 0s linear var(--ios-sheet-out);
+}
+
+body.mobile-shell .sidebar.mobile-open {
+    transition: opacity var(--ios-sheet-in) var(--ios-move),
+                transform var(--ios-sheet-in) var(--ios-move),
+                visibility 0s;
+}
+
+/* Подложка шторки гаснет ровно столько же, сколько сама шторка. */
+body.mobile-shell .sidebar-overlay {
+    transition: opacity var(--ios-sheet-out) var(--ios-exit);
+}
+
+body.mobile-shell .sidebar-overlay.active {
+    transition: opacity var(--ios-sheet-in) var(--ios-move);
+}
+
+body.mobile-shell .notifications-backdrop {
+    transition: opacity var(--ios-sheet-out) var(--ios-exit);
+}
+
+body.mobile-shell .notifications-backdrop.is-open {
+    transition: opacity var(--ios-sheet-in) var(--ios-move);
+}
+
+body.mobile-shell .mobile-bell-slot .notifications-dropdown {
+    animation: mtb-sheet-in var(--ios-sheet-in) var(--ios-move) both !important;
+}
+
+body.mobile-shell .mobile-bell-slot .notifications-dropdown.animate-dropdown-reverse {
+    animation: mtb-sheet-out var(--ios-sheet-out) var(--ios-exit) both !important;
+}
+
+/* Имя в шапке при прокрутке — на той же мягкой кривой. */
+body.mobile-shell .mobile-scroll-title {
+    transition: opacity var(--ios-sheet-out) var(--ios-soft),
+                transform var(--ios-sheet-out) var(--ios-soft);
+}
+
+/* ── Выпадающие панели внутри разделов ────────────────────────────────────
+ *
+ * Общая утилита `animate-dropdown` — это сжатие по вертикали (scaleY 0→1):
+ * панель раскрывается гармошкой, а её содержимое в это время растянуто по
+ * высоте, то есть буквы едут. На компьютере, где панель мелкая и открывается
+ * под курсором, это незаметно; на телефоне панели во всю ширину экрана, и
+ * гармошка — самое резкое движение, которое в оболочке было.
+ *
+ * Здесь она заменена на системное раскрытие: проявление с приближением от
+ * верхней грани. Точка отсчёта сверху — панель выпадает вниз из своего пункта.
+ * Панелям, выпадающим вверх, это не мешает: движение короткое и без поездки.
+ */
+body.mobile-shell .animate-dropdown {
+    animation: ios-drop-in var(--ios-sheet-out) var(--ios-soft) both;
+    transform-origin: top center;
+}
+
+body.mobile-shell .animate-dropdown-reverse {
+    animation: ios-drop-out 0.18s var(--ios-exit) both;
+    transform-origin: top center;
+}
+
+@keyframes ios-drop-in {
+    from { opacity: 0; transform: scale(0.96) translateY(-6px); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes ios-drop-out {
+    from { opacity: 1; transform: none; }
+    to { opacity: 0; transform: scale(0.98) translateY(-4px); }
+}
+
+/* ── Общие утилиты появления ──────────────────────────────────────────────
+ *
+ * `animate-scale-in`, `animate-fade-in`, `animate-card-open` — три утилиты из
+ * tailwind.config.cjs, которыми в разделах проявляются карточки и панели. Сами
+ * движения оставлены как есть (их выбирал автор места), но кривая у них
+ * настольная — ease-out и material'овская 0.4/0/0.2/1. Рядом с системной
+ * моторикой оболочки они читаются как «чужой» рывок. Меняем ровно кривую и,
+ * где движение совсем короткое, длительность: разметка не трогается вовсе.
+ */
+body.mobile-shell .animate-scale-in,
+body.mobile-shell .animate-fade-in,
+body.mobile-shell .animate-card-open {
+    animation-timing-function: var(--ios-soft);
+}
+
+body.mobile-shell .animate-scale-in {
+    animation-duration: 0.24s;
+}
+
+/* Второй уровень ВНУТРИ экрана (подробность в окне) — та же мягкая кривая,
+   что у всего остального; сдвиг в 14px оставлен прежним. */
+body.mobile-shell .animate-push-in,
+body.mobile-shell .animate-pop-in {
+    animation-timing-function: var(--ios-soft);
+    animation-duration: var(--ios-sheet-out);
+}
+
+/* ── «Меньше движения» ────────────────────────────────────────────────────
+ *
+ * Системная настройка отменяет ПОЕЗДКИ, а не отклик: человек, который просил
+ * убрать движение, не просил лишить интерфейс ответа на нажатие. Поэтому
+ * приглушение кнопки остаётся, а въезды, уходы и раскрытия становятся
+ * мгновенными.
+ */
+@media (prefers-reduced-motion: reduce) {
+    body.mobile-shell .otp-modal-root,
+    body.mobile-shell .otp-modal-root.is-leaving,
+    body.mobile-shell .main-content.mobile-view-switch,
+    body.mobile-shell .animate-dropdown,
+    body.mobile-shell .animate-dropdown-reverse,
+    body.mobile-shell .mobile-bell-slot .notifications-dropdown,
+    body.mobile-shell .mobile-bell-slot .notifications-dropdown.animate-dropdown-reverse {
+        animation: none !important;
+    }
+
+    /* Затемнение под экраном — не движение, а свет, и оно остаётся; мгновенным
+       становится только его появление. */
+    body.mobile-shell::before,
+    body.mobile-shell:has(.otp-modal-root:not(.is-leaving))::before {
+        transition: none;
+    }
+
+    body.mobile-shell .sidebar,
+    body.mobile-shell .sidebar.mobile-open {
+        transition: opacity 0.01s linear, visibility 0s;
+        transform: none;
+    }
+}

@@ -6,7 +6,12 @@ import {
     readMobileShell,
     subscribeMobileShell,
 } from '../../utils/mobileShell';
+import { startMobileScreenExit } from '../../utils/mobileScreenExit';
 import './mobile-shell.css';
+/* Моторика — ПОСЛЕ вёрстки оболочки: часть её правил перекрывает длительности
+   и кривые из mobile-shell.css при равном весе селектора, и порядок в бандле
+   здесь условие работы, а не привычка. */
+import './mobile-motion.css';
 
 /* Нижний бар разделов — навигация портала на телефоне.
  *
@@ -57,6 +62,15 @@ export const useMobileShell = () => {
             delete body.dataset.tabbarSide;
         };
     }, [state.shell, state.side]);
+
+    /* Проводы экранов — здесь же, где живёт признак «мы на телефоне»: окна
+       портала уезжают вправо, а разметку на время ухода почти никто из них не
+       держит (см. src/utils/mobileScreenExit.js). На компьютере наблюдателя
+       нет вовсе — там окна не ездят. */
+    useEffect(() => {
+        if (!state.shell || typeof document === 'undefined') return undefined;
+        return startMobileScreenExit(document);
+    }, [state.shell]);
 
     return state;
 };
