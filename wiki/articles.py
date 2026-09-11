@@ -734,6 +734,33 @@ def get_file(cursor, file_id):
                      'original_name', 'content_type', 'uploaded_by'), row))
 
 
+def files_for_display(cursor, file_ids):
+    """Строки файлов пачкой — для подписи адресов картинок (wiki/file_urls.py).
+
+    Одним запросом, а не get_file в цикле: у статьи с галереей файлов десятки,
+    и каждый стоил бы отдельного обращения к базе, а соединение берётся из
+    общего пула портала (он же держит SSE аукциона).
+
+    article_id и uploaded_by в выборке НУЖНЫ: по ним вызывающий повторяет то же
+    правило доступа, по которому отвечает ручка /file/<id>. Без них подпись
+    выдавалась бы на всё, на что ссылается тело статьи, — включая картинку,
+    скопированную из статьи, которой читателю видеть не положено.
+    """
+    ids = [str(value) for value in (file_ids or []) if str(value or '').strip()]
+    if not ids:
+        return []
+    cursor.execute(
+        """
+        SELECT id, article_id, bucket, blob_path, content_type, uploaded_by
+          FROM wiki_files WHERE id = ANY(%s::uuid[])
+        """,
+        (ids,),
+    )
+    return [dict(zip(('id', 'article_id', 'bucket', 'blob_path',
+                      'content_type', 'uploaded_by'), row))
+            for row in cursor.fetchall()]
+
+
 def register_file(cursor, *, article_id, bucket, blob_path, original_name,
                   content_type, file_size, width, height, uploaded_by):
     cursor.execute(

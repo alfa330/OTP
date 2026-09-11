@@ -10,6 +10,7 @@ from flask import jsonify, redirect, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
+from . import file_urls as wiki_file_urls
 from . import guests as wiki_guests
 from . import migration as wiki_migration
 from . import parks as wiki_parks
@@ -410,6 +411,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
             cursor, article.get('content'), article['id'], visible)
         article['is_favorite'] = wiki_articles.is_favorite(
             cursor, ctx['user_id'], article['id'])
+        article['file_urls'] = _display_urls(cursor, ctx, article, visible)
         return jsonify(article)
 
     # ── Избранное ────────────────────────────────────────────────────────
@@ -423,6 +425,39 @@ def register(bp, wiki_route, db, log_ip, gcs):
         # Возвращаем состояние, а не голое «ok»: интерфейс рисует звезду по
         # ответу сервера, и договариваться о нём догадками не должен.
         return jsonify({"status": "ok", "is_favorite": favorite})
+
+    def _display_urls(cursor, ctx, article, visible):
+        """{id файла: подписанный адрес} для картинок ТЕЛА статьи.
+
+        Зачем это в ответе отдельным полем, а не подстановкой прямо в content:
+        то же тело уезжает в РЕДАКТОР, а он сохраняет то, что ему показали.
+        Подписанный адрес, попавший в базу, через три часа стал бы битой
+        картинкой навсегда, а файл с таким адресом перестал бы привязываться к
+        статье (wiki/edit.py: link_content_files ищет /api/wiki/file/<id>) — то
+        есть был бы виден одному загрузившему. Поэтому в теле остаётся
+        постоянный адрес, а подстановка живёт на витрине (WikiArticle.jsx).
+
+        ПРАВИЛО ДОСТУПА ЗДЕСЬ ТО ЖЕ, ЧТО У РУЧКИ /file/<id> НИЖЕ, и повторено
+        оно намеренно: тело статьи вправе ссылаться на файл, скопированный из
+        ЧУЖОЙ статьи — картинку вместе с разметкой переносят копированием, — и
+        подпись «на всё, что упомянуто в тексте» раздавала бы файлы из статей,
+        которых читателю не видно. Подписи не досталось — витрина покажет
+        прежний адрес ручки, то есть ровно то, что было до этой правки.
+        """
+        ids = wiki_file_urls.ids_in(article.get('content'))
+        if not ids:
+            return {}
+        allowed = []
+        for row in wiki_articles.files_for_display(cursor, ids):
+            owner_article = row.get('article_id')
+            if owner_article:
+                if owner_article in visible:
+                    allowed.append(row)
+            elif row.get('uploaded_by') == ctx['user_id']:
+                # Файл, ещё не привязанный к статье: так выглядит картинка,
+                # загруженная в редакторе до первого сохранения.
+                allowed.append(row)
+        return wiki_file_urls.sign_files(gcs, allowed)
 
     # ── Файлы ────────────────────────────────────────────────────────────
     @wiki_route('/file/<file_id>')

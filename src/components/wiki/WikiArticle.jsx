@@ -398,16 +398,22 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         return () => { cancelled = true; };
     }, [base, headers, slug, reloadKey]);
 
-    /* Адреса файлов раскрываем до абсолютных ПОСЛЕ санитайзера: фронт и API на
-       разных доменах, и относительный `/api/wiki/file/<id>` браузер искал бы на
-       домене страницы (см. fileUrls.js). Порядок важен — подстановка идёт по
-       уже очищенному HTML и мимо DOMPurify ничего не проносит. */
+    /* Адреса файлов раскрываем ПОСЛЕ санитайзера: фронт и API на разных
+       доменах, и относительный `/api/wiki/file/<id>` браузер искал бы на домене
+       страницы (см. fileUrls.js). Порядок важен — подстановка идёт по уже
+       очищенному HTML и мимо DOMPurify ничего не проносит.
+
+       file_urls — подписанные адреса тех же картинок, прямо из бакета. Без них
+       картинка запрашивается у ручки раздела, а её авторизует кука сессии,
+       которой на телефоне нет: там пропадало всё, что загружено в статью
+       файлом. Карта необязательна — не пришла, работает прежний путь. */
     const safeHtml = useMemo(
         () => (article?.content
             ? absolutizeFileUrls(
-                wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS)), base)
+                wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS)),
+                base, article.file_urls)
             : ''),
-        [article?.content, base],
+        [article?.content, article?.file_urls, base],
     );
 
     /* Статья защищена от копирования (тумблер в редакторе). Признак приходит с

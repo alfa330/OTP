@@ -13,6 +13,8 @@ import uuid
 from flask import jsonify, request
 
 from . import access as wiki_access
+from . import articles as wiki_articles
+from . import file_urls as wiki_file_urls
 from . import offices as wiki_offices
 from . import parks as wiki_parks
 from . import queries
@@ -236,6 +238,34 @@ def register(bp, wiki_route, db, log_ip, gcs):
         return jsonify({"error": "Справочник правит тот, у кого есть права сверх чтения",
                         "code": "WIKI_FORBIDDEN"}), 403
 
+    def _sign_images(cursor, rows, id_key, url_key):
+        """Меняет постоянный адрес картинки на подписанный — прямо в строках ответа.
+
+        Логотип парка (и баннер акции) рисует тег <img>, а он не отправляет
+        заголовков: на компьютере запрос выручала кука сессии, на телефоне её
+        нет — мобильному UA SameSite понижается до Lax, и кросс-сайтовый запрос
+        с Pages на Render эту куку не приложит (разбор и замеры — в шапке
+        wiki/file_urls.py). Логотипы пропадали у всех парков разом.
+
+        ГРАНИЦА ТА ЖЕ, ЧТО У СПРАВОЧНИКА: строки уже отобраны по space_id, а
+        сам space_id прошёл request_space. Это ровно то правило, по которому
+        ручку /file/<id> пускает logo_space_ids, — второй его расчёт здесь был
+        бы вторым источником истины.
+
+        Подписи не досталось — в строке остаётся прежний адрес ручки: на
+        компьютере он работал и работает.
+        """
+        ids = [row.get(id_key) for row in rows if row.get(id_key)]
+        if not ids:
+            return rows
+        urls = wiki_file_urls.sign_files(
+            gcs, wiki_articles.files_for_display(cursor, ids))
+        for row in rows:
+            signed = urls.get(str(row.get(id_key) or '').lower())
+            if signed:
+                row[url_key] = signed
+        return rows
+
     # ── Парки ────────────────────────────────────────────────────────────
     @wiki_route('/parks', methods=('GET', 'POST'))
     def wiki_parks_list(cursor, ctx):
@@ -258,6 +288,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 park['offices'] = by_park.get(park['id'], [])
                 # Номера без офиса — «онлайн»: парк принимает только по телефону.
                 park['phones'] = phones.get(park['id'], {}).get(None, [])
+            _sign_images(cursor, items, 'logo_file_id', 'logo_url')
             return jsonify({'items': items, 'can_manage': can_manage})
 
         if not _may_edit(ctx):
@@ -319,6 +350,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         park['phones'] = (wiki_offices.phones_by_park(cursor, [park['id']],
                                                       space_id=space_id)
                           .get(park['id'], {}).get(None, []))
+        _sign_images(cursor, [park], 'logo_file_id', 'logo_url')
         return jsonify(park)
 
     @wiki_route('/parks/<int:park_id>', methods=('PATCH', 'DELETE'))
@@ -448,7 +480,16 @@ def register(bp, wiki_route, db, log_ip, gcs):
                            ip_address=log_ip())
         # file_id отдаём отдельно от адреса: форма кладёт в парк именно его, а
         # url ей нужен только чтобы показать картинку до сохранения.
-        return jsonify({"file_id": file_id, "url": url}), 201
+        #
+        # Он подписанный, а не постоянный: показывает его тег <img>, а на
+        # телефоне ручка /file/<id> ему не ответит (шапка wiki/file_urls.py) —
+        # супервайзер выбрал бы файл и увидел пустой квадрат вместо логотипа.
+        # В парк при этом уезжает logo_file_id, а не адрес, поэтому подписи
+        # некуда «залипнуть»: следующий ответ справочника подпишет заново.
+        preview = wiki_file_urls.sign_files(
+            gcs, wiki_articles.files_for_display(cursor, [file_id]))
+        return jsonify({"file_id": file_id,
+                        "url": preview.get(str(file_id).lower()) or url}), 201
 
     # ── Акции ────────────────────────────────────────────────────────────
     @wiki_route('/promotions', methods=('GET', 'POST'))
@@ -460,8 +501,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
         if request.method == 'GET':
             can_manage = _may_edit(ctx)
             return jsonify({
-                'items': wiki_parks.list_promotions(cursor, include_archived=can_manage,
-                                                    space_id=space_id),
+                'items': _sign_images(
+                    cursor,
+                    wiki_parks.list_promotions(cursor, include_archived=can_manage,
+                                               space_id=space_id),
+                    'banner_file_id', 'banner_url'),
                 'can_manage': can_manage,
             })
 

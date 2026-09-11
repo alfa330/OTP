@@ -1,15 +1,14 @@
 """SQL правки статей: создание, обновление, версии, правила уровня статьи."""
 
-import re
-
 from . import links as wiki_links
+# Ссылки на файлы внутри тела статьи: /api/wiki/file/<uuid>. Регулярка одна на
+# весь раздел — ею же витрина подставляет подписанные адреса картинок
+# (wiki/file_urls.py). Два описания одного и того же разошлись бы молча: тогда
+# показанная картинка и привязанный к статье файл перестали бы быть одним
+# и тем же множеством.
+from .file_urls import FILE_REF as _FILE_REF
 from .sanitize import sanitize_html, to_plain_text
 from .search import refresh_aliases
-
-# Ссылки на файлы внутри тела статьи: /api/wiki/file/<uuid>
-_FILE_REF = re.compile(
-    r'/api/wiki/file/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
-    re.I)
 
 
 def link_content_files(cursor, article_id, content):

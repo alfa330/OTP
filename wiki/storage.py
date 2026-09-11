@@ -47,7 +47,16 @@ def store_file(cursor, gcs, *, data, filename, content_type, uploaded_by,
             filename = wiki_images.webp_name(filename)
 
     blob_path = wiki_importer.blob_path_for(filename, content_type)
-    gcs['client']().bucket(bucket).blob(blob_path).upload_from_string(
+    blob = gcs['client']().bucket(bucket).blob(blob_path)
+    # СРОК ГОДНОСТИ ДЛЯ БРАУЗЕРА. Без явного значения GCS отдаёт непубличный
+    # объект с max-age=0 (проверено запросом к боевому бакету), и картинки
+    # статьи перекачивались бы на каждое её открытие — а с 11.09.2026 витрина
+    # берёт их прямо из бакета по подписи (wiki/file_urls.py), то есть это
+    # мобильный трафик читателя. Час, как у фотографий новостей: подпись живёт
+    # три часа и внутри этого срока не меняется, так что кэшу есть на что
+    # опереться. `private` — кадр всё-таки не публичный.
+    blob.cache_control = 'private, max-age=3600'
+    blob.upload_from_string(
         data, content_type=content_type or 'application/octet-stream')
 
     file_id = wiki_articles.register_file(
