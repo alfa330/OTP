@@ -127,6 +127,9 @@ def _database_namespace(method_names):
         if isinstance(node, ast.FunctionDef) and node.name in (
             "normalize_sip_identifier", "build_sip_password", "parse_sip_flag",
             "normalize_sip_provider", "parse_sip_delay",
+            # Трёхпозиционный автоприём: «как у отдела» третьим состоянием.
+            "is_sip_inherit", "parse_sip_flag_tri", "parse_sip_delay_tri",
+            "resolve_sip_auto_answer", "resolve_sip_auto_answer_delay",
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
     for node in DATABASE_CLASS.body:
@@ -204,16 +207,21 @@ OPERATOR_STATE = {
     "department_autodial_server": "", "department_autodial_base_password": "",
     # Вход в FOP2 включён у всех, кому его отдельно не выключали.
     "fop2_enabled": True,
-    # Автопринятие звонка — наоборот: выключено у всех, кому его не включали.
-    # Асимметрия с соседним флагом намеренная и держит половину проверок ниже:
-    # строку в user_sip_settings у FOP2 оправдывает выключение, у автопринятия —
-    # включение.
-    "auto_answer": False,
-    "auto_answer_delay": 2,
+    # Автопринятие трёхпозиционное: None = «как у отдела». Асимметрия с соседним
+    # флагом намеренная и держит половину проверок ниже: строку в
+    # user_sip_settings у FOP2 оправдывает выключение, у автопринятия — САМ ФАКТ
+    # персонального значения, каким бы оно ни было.
+    "auto_answer": None,
+    "auto_answer_delay": None,
+    # Ярус отдела для того же автопринятия (None = отдел его не задавал).
+    "department_auto_answer": None,
+    "department_auto_answer_delay": None,
+    "department_binotel_cabinet_url": "",
     # Провайдер отдела: локальная АТС по умолчанию, Binotel — только у Тез КЦ.
     "department_provider": "asterisk",
     "sip_login": "",
     "binotel_cabinet_login": "", "binotel_employee_id": "", "binotel_cabinet_url": "",
+    "direction_id": None, "direction_name": "",
     "has_binotel_cabinet_password": False,
 }
 
@@ -459,25 +467,45 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         # Автопринятие и задержка встали сразу за флагом FOP2 (params[7]) и до
         # changed_by — так все прежние позиционные проверки остались валидными.
         self.assertIs(True, params[8])
-        self.assertEqual(2, params[9])
+        # Задержку не прислали — она остаётся унаследованной (NULL), а не
+        # материализуется числом: иначе оператор навсегда отвязался бы от
+        # общей задержки отдела, просто потому что ему включили автоприём.
+        self.assertIsNone(params[9])
 
     def test_only_the_auto_answer_change_is_not_treated_as_no_op(self):
         """PUT, где поменялось только автопринятие, обязан дойти до базы."""
         self._save({"auto_answer": True})
         self.assertNotEqual([], self.db.cursor.calls)
 
-    def test_turning_the_auto_answer_off_releases_the_row(self):
-        """Автопринятие выключили, других персональных настроек нет — строка не нужна."""
+    def test_turning_the_auto_answer_off_keeps_the_row(self):
+        """Личное «выключено» — это настройка, и она обязана пережить чистку.
+
+        С появлением общего автоприёма отдела выключенный флаг перестал быть
+        «состоянием по умолчанию»: у отдела может стоять «включено», и удаление
+        строки вернуло бы человеку ровно то, от чего его отключили. Требование
+        владельца прямое: своё у оператора сохраняется.
+        """
         self.current["auto_answer"] = True
         self._save({"auto_answer": False})
+        calls = self.db.cursor.calls
+        self.assertFalse(any("DELETE FROM user_sip_settings" in s for s, _ in calls))
+        _, params = next(
+            (s, p) for s, p in calls if "INSERT INTO user_sip_settings" in s
+        )
+        self.assertIs(False, params[8])
+
+    def test_returning_the_auto_answer_to_the_department_releases_the_row(self):
+        """А вот «как у отдела» персональных значений не оставляет — строка уходит."""
+        self.current["auto_answer"] = True
+        self._save({"auto_answer": "inherit", "auto_answer_delay": "inherit"})
         self.assertTrue(any("DELETE FROM user_sip_settings" in s for s in self._sql()))
 
     def test_a_personal_delay_keeps_the_row_even_with_the_flag_off(self):
         """Выключили автопринятие — персональная задержка не должна пропасть.
 
-        Строку держит отличие задержки от дефолта, а не сам флаг: иначе
-        временное выключение стирало бы настроенные секунды, и при повторном
-        включении оператор получал бы дефолтные два.
+        Строку держит сам факт персонального значения, а не его истинность:
+        иначе временное выключение стирало бы настроенные секунды, и при
+        повторном включении оператор получал бы задержку отдела.
         """
         self.current["auto_answer"] = True
         self.current["auto_answer_delay"] = 5
@@ -550,8 +578,41 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         # остаться последним (это же требует комментарий в самом SQL).
         self.assertTrue(columns[27].endswith("AS auto_answer"), columns[27])
         self.assertTrue(columns[28].endswith("AS auto_answer_delay"), columns[28])
+        # Ярус отдела и направление — следующая партия, и снова ПЕРЕД хвостом.
+        self.assertTrue(columns[29].endswith("AS department_auto_answer"), columns[29])
+        self.assertTrue(
+            columns[30].endswith("AS department_auto_answer_delay"), columns[30])
+        self.assertTrue(columns[32].endswith("AS direction_id"), columns[32])
+        self.assertTrue(columns[33].endswith("AS direction_name"), columns[33])
         self.assertTrue(
             columns[-1].endswith("AS has_binotel_cabinet_password"), columns[-1])
+
+    def test_the_auto_answer_columns_are_read_raw_and_not_collapsed(self):
+        """COALESCE(s.auto_answer, FALSE) схлопнул бы «как у отдела» с «выключено».
+
+        Третье состояние обязано доехать до Python: именно оно отличает
+        «человек выключил себе» от «человек ничего не настраивал».
+        """
+        sql = " ".join(self.ns["_SIP_OPERATOR_SELECT"].split())
+        self.assertIn("s.auto_answer AS auto_answer", sql)
+        self.assertIn("s.auto_answer_delay AS auto_answer_delay", sql)
+        self.assertNotIn("COALESCE(s.auto_answer, FALSE)", sql)
+        self.assertNotIn("COALESCE(s.auto_answer_delay", sql)
+
+    def test_the_direction_join_never_drops_anyone(self):
+        """Направление подтягиваем ТОЛЬКО левым join'ом.
+
+        В разделе живут и стажёры, а направления у них нет вовсе: INNER JOIN
+        вычеркнул бы их из списка вместе с их номерами — и выглядело бы это
+        как потерянные настройки, а не как отсутствующее направление.
+        """
+        sql = " ".join(self.ns["_SIP_OPERATOR_SELECT"].split())
+        self.assertIn("LEFT JOIN directions dir ON dir.id = u.direction_id", sql)
+        self.assertNotIn("JOIN directions dir ON dir.id = u.direction_id",
+                         sql.replace("LEFT JOIN directions", "X"))
+        # Источник — сам сотрудник, а не его группа: у группы направление бывает
+        # архивной версией того же самого, и фильтр по ней терял бы людей.
+        self.assertIn("u.direction_id AS direction_id", sql)
 
     def test_the_cabinet_password_never_leaves_the_database(self):
         """Панель получает только признак «пароль задан».
@@ -786,11 +847,12 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         #  fop2_enabled, sip_login, auto_answer, auto_answer_delay)
         # sip_login массовая правка не меняет, но обязана дотащить до апсерта —
         # иначе чистка пароля посчитает строку пустой и удалит учётку Binotel.
-        # Автопринятие и его задержка — по той же причине в конце строки.
+        # Автопринятие и его задержка — по той же причине в конце строки; None
+        # у обоих значит «как у отдела», а не «выключено».
         rows = [
-            (1, 'Иван', '', '', '2024', '', '', '1024', '', '', True, '', False, 2),        # автодозвон есть, персональных нет
-            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', '', '', True, '', False, 2),  # были персональные значения
-            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', '', '', True, '', False, 2),    # уже с нужным доменом — не трогаем
+            (1, 'Иван', '', '', '2024', '', '', '1024', '', '', True, '', None, None),        # автодозвон есть, персональных нет
+            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', '', '', True, '', None, None),  # были персональные значения
+            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', '', '', True, '', None, None),    # уже с нужным доменом — не трогаем
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -948,7 +1010,7 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def _only_fop2_off(self, sip_password='', sip_domain=''):
         """Подменяет выборку на одного Петра с выключенным FOP2."""
-        rows = [(2, 'Пётр', sip_password, sip_domain, '', '', '', '1088', '', '', False, '', False, 2)]
+        rows = [(2, 'Пётр', sip_password, sip_domain, '', '', '', '1088', '', '', False, '', None, None)]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
         self.db.get_sip_config = _no_common_tier
@@ -1117,11 +1179,25 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertIsInstance(values[0][9], int)
 
     def test_an_unchanged_auto_answer_writes_nothing(self):
-        """Автопринятия ни у кого нет — повторное «выключить» ничего не пишет."""
-        self._bulk({"auto_answer": False})
+        """Повторное «выключить» тем, у кого уже стоит своё «выключено», — no-op."""
+        self._with_auto_answer_on()
+        self.db.cursor._rows = [(2, 'Пётр', '', '', '', '', '', '1088', '', '',
+                                 True, '', False, None)]
+        self._bulk({"auto_answer": False}, ids=(2,))
         self.assertIsNone(self._batched("INSERT INTO user_sip_settings"))
         self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
         self.assertIsNone(self._batched("INSERT INTO sip_config_history"))
+
+    def test_switching_off_someone_who_inherits_is_a_real_change(self):
+        """А вот «выключить» наследующему — изменение, и оно обязано записаться.
+
+        До появления яруса отдела «нет строки» и значило «выключено», и такая
+        правка была пустышкой. Теперь у отдела может стоять «включено», и личное
+        «выключено» — единственный способ человека от него отцепить.
+        """
+        self._bulk({"auto_answer": False})
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual([False, False, False], [v[8] for v in values])
 
     def test_clearing_overrides_keeps_the_row_of_someone_with_auto_answer(self):
         """Чистка пароля не должна выключать автопринятие тем, кому его включили."""
@@ -1139,10 +1215,18 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         _, values, _ = self._batched("INSERT INTO user_sip_settings")
         self.assertEqual(5, values[0][9])
 
-    def test_turning_the_auto_answer_back_off_releases_the_row(self):
-        """Автопринятие было единственным персональным значением — строка не нужна."""
+    def test_turning_the_auto_answer_back_off_keeps_the_row(self):
+        """Личное «выключено» — тоже настройка: строку она держит, как и «включено»."""
         self._with_auto_answer_on()
         self._bulk({"auto_answer": False}, ids=(2,))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertIs(False, values[0][8])
+
+    def test_returning_the_auto_answer_to_the_department_releases_the_row(self):
+        """«Как у отдела» персональных значений не оставляет — строка уходит."""
+        self._with_auto_answer_on()
+        self._bulk({"auto_answer": "inherit", "auto_answer_delay": "inherit"}, ids=(2,))
         deletes = [c for c in self.db.cursor.calls if "DELETE FROM user_sip_settings" in c[0]]
         self.assertEqual(1, len(deletes))
         self.assertEqual(([2],), deletes[0][1])
@@ -1421,6 +1505,11 @@ class DepartmentSipConfigTests(unittest.TestCase):
             "provider": "asterisk",
             "configured": False, "updated_at": None, "updated_by_name": None,
             "operators_count": 7,
+            # Ярус отдела для автопринятия: None = отдел его не задавал. Это НЕ
+            # «выключено» — общий автоприём просто не используется.
+            "auto_answer": None, "auto_answer_delay": None,
+            "binotel_cabinet_url": "",
+            "own_auto_answer_count": 0,
         }
         self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
 
@@ -1429,17 +1518,26 @@ class DepartmentSipConfigTests(unittest.TestCase):
 
     def test_listing_marks_departments_without_their_own_settings(self):
         # Колонки: id, имя, код, сервер, база пароля, код автодозвона, его
-        # сервер и база, ПРОВАЙДЕР, configured, updated_at, автор, счётчик.
-        # provider встал перед configured — все флаги за ним сдвинулись.
+        # сервер и база, ПРОВАЙДЕР, configured, updated_at, автор, счётчик,
+        # автоприём отдела, его задержка, адрес кабинета, сколько человек с
+        # личной настройкой. provider встал перед configured — все флаги за ним
+        # сдвинулись; ярус автоприёма дописан в хвост.
         db = _StubDb(self.ns, _FakeCursor([
-            (12, 'СЗоВ', 'szov', '', '', '', '', '', 'asterisk', False, None, None, 7),
+            (12, 'СЗоВ', 'szov', '', '', '', '', '', 'asterisk', False, None, None, 7,
+             None, None, '', 0),
             (367, 'Отдел продаж', 'op', 'pbx.sales', 'sales', '*77', 'dialer.sales',
-             'Secret{номер}!', 'asterisk', True, None, 'Админ', 3),
-            (900, 'Тез КЦ', 'tez', '', '', '', '', '', 'binotel', True, None, 'Админ', 5),
+             'Secret{номер}!', 'asterisk', True, None, 'Админ', 3, None, None, '', 0),
+            (900, 'Тез КЦ', 'tez', '', '', '', '', '', 'binotel', True, None, 'Админ', 5,
+             True, 3, 'https://my.binotel.kz', 2),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual([False, True, True], [r["configured"] for r in rows])
         self.assertEqual([7, 3, 5], [r["operators_count"] for r in rows])
+        # Ярус автопринятия доезжает трёхпозиционным: None у тех, кто его не
+        # задавал, — схлопывать его с «выключено» нельзя.
+        self.assertEqual([None, None, True], [r["auto_answer"] for r in rows])
+        self.assertEqual([None, None, 3], [r["auto_answer_delay"] for r in rows])
+        self.assertEqual([0, 0, 2], [r["own_auto_answer_count"] for r in rows])
         # Провайдер доезжает до раздела: по нему он и делится на два.
         self.assertEqual(['asterisk', 'asterisk', 'binotel'], [r["provider"] for r in rows])
         sql, params = db.cursor.calls[0]
@@ -1830,7 +1928,7 @@ class BinotelAccountTests(unittest.TestCase):
         return self.ns["get_binotel_account"](db, 41), db.cursor.calls
 
     def test_password_and_status_link_are_built_for_the_phone(self):
-        account, calls = self._call([("op@tez.kz", "cab", "480431", "")])
+        account, calls = self._call([("op@tez.kz", "cab", "480431", "", "")])
         self.assertEqual("cab", account["cabinet_password"])
         self.assertEqual("https://my.binotel.kz", account["cabinet_url"])   # дефолт кабинета
         self.assertTrue(account["status_url"].endswith("/manage-users/480431"),
@@ -1838,7 +1936,7 @@ class BinotelAccountTests(unittest.TestCase):
         self.assertEqual((41,), calls[0][1])
 
     def test_an_explicit_cabinet_url_wins_over_the_default(self):
-        account, _ = self._call([("op@tez.kz", "cab", "480431", "https://my.binotel.ua/")])
+        account, _ = self._call([("op@tez.kz", "cab", "480431", "https://my.binotel.ua/", "")])
         self.assertEqual("https://my.binotel.ua/", account["cabinet_url"])
         # Хвост «/» из формы не должен превращаться в «//f/pbx».
         self.assertIn("https://my.binotel.ua/f/pbx", account["status_url"])
@@ -1846,7 +1944,7 @@ class BinotelAccountTests(unittest.TestCase):
     def test_the_link_works_before_the_employee_id_is_known(self):
         """employeeID узнаётся только из самого кабинета, а ссылка нужна раньше:
         «me» кабинет разбирает сам, поэтому руководитель не заперт."""
-        account, _ = self._call([("op@tez.kz", "cab", "", "")])
+        account, _ = self._call([("op@tez.kz", "cab", "", "", "")])
         self.assertTrue(account["status_url"].endswith("/manage-users/me"),
                         account["status_url"])
 
@@ -2226,7 +2324,10 @@ class SipSectionFrontendTests(unittest.TestCase):
         self.assertIn("flag: true", bulk_fields)
         # У флага своё «пусто»: пустая строка ушла бы на бэкенд как «включён».
         self.assertIn("value: f.flag ? false : ''", view)
-        self.assertIn("body[f.key] = f.flag ? Boolean(value) : value.trim();", view)
+        # INHERIT едет строкой: Boolean('inherit') дал бы «включить» и сделал
+        # бы ровно обратное «Как у отдела».
+        self.assertIn("? (value === INHERIT ? INHERIT : Boolean(value))", view)
+        self.assertIn(": value.trim();", view)
         # Три положения одним переключателем, а не тумблер «менять это поле»:
         # зелёный тумблер рядом с «Вход в FOP2» читался бы как сам вход, и
         # выбранное «Не входит» ниже противоречило бы ему.
@@ -2253,10 +2354,15 @@ class SipSectionFrontendTests(unittest.TestCase):
         self.assertIn("const autoAnswerSection = (", view)
         self.assertEqual(2, view.count("{autoAnswerSection}"))
         self.assertEqual(2, view.count("...autoAnswerPayload(),"))
-        # Дефолт — выключено, и «ключа нет» в ответе сервера читается так же:
-        # у fop2_enabled семантика обратная (!== false), скопировать её нельзя.
-        self.assertIn("auto_answer: false,", view)
-        self.assertIn("auto_answer: op?.auto_answer === true,", view)
+        # Дефолт — «как у отдела», и «ключа нет» в ответе сервера читается так
+        # же: у fop2_enabled семантика обратная (!== false), скопировать её
+        # нельзя, а ноль третьего состояния вернул бы затирание личных настроек.
+        self.assertIn("auto_answer: INHERIT,", view)
+        self.assertIn("auto_answer: modeFromValue(op?.auto_answer ?? null),", view)
+        # Третье положение — отдельным словом, потому что пустотой его не
+        # выразить: у флага '' уже значит «выключено».
+        self.assertIn("const INHERIT = 'inherit';", view)
+        self.assertIn("label: 'Как у отдела'", view)
         # Руководитель обязан понимать, что покупает: отклонить будет нельзя.
         self.assertIn("отклонить звонок не сможет", view)
 
@@ -2282,11 +2388,368 @@ class SipSectionFrontendTests(unittest.TestCase):
     def test_the_list_and_the_history_show_who_has_the_auto_answer(self):
         """Кто принимает звонки автоматически — видно из списка и из истории."""
         view = _read(VIEW_PATH)
-        self.assertIn("const autoAnswerOn = (op) => op?.auto_answer === true;", view)
-        self.assertIn("autoAnswerOn(op) && (", view)
+        # Эффективное значение — цепочка «персональное → отдела → выключено»,
+        # та же, что у resolve_sip_auto_answer на бэкенде.
+        self.assertIn("const autoAnswerOn = (op) => (op?.auto_answer != null", view)
+        self.assertIn("? op.auto_answer === true", view)
+        self.assertIn(": op?.department_auto_answer === true);", view)
+        # А метим в списке СВОЮ настройку: общая стоит у всего отдела, и значок
+        # на каждой строке был бы шумом.
+        self.assertIn("autoAnswerOwn(op) && (", view)
         # Снимок истории — это состояние, а не дифф: помечаем только включённое,
         # иначе строка «автопринятие выключено» появилась бы у каждой правки.
         self.assertIn("s.auto_answer === true", view)
+
+
+class AutoAnswerTierTests(unittest.TestCase):
+    """Общий автоприём отдела и персональное «как у отдела» (задача #309).
+
+    Ярус появился, потому что включать автопринятие каждому по одному в Тезе
+    было нечем: массовая правка для Binotel запрещена целиком. Условие владельца
+    жёсткое: у кого уже стоит своё — не трогать, общее действует только на тех,
+    у кого своего нет.
+    """
+
+    def setUp(self):
+        self.ns = _database_namespace(set())
+
+    def test_the_inherit_token_is_its_own_word(self):
+        """«Как у отдела» нельзя выразить ни пустотой, ни отсутствием ключа.
+
+        None в payload'е уже занят под «поле не прислали», а пустая строка у
+        флага значит «выключено» (SIP_FLAG_FALSE). Без отдельного слова снять
+        персональную настройку было бы нечем — она стала бы неснимаемой.
+        """
+        self.assertTrue(self.ns["is_sip_inherit"]("inherit"))
+        self.assertTrue(self.ns["is_sip_inherit"](" INHERIT "))
+        self.assertFalse(self.ns["is_sip_inherit"](""))
+        self.assertFalse(self.ns["is_sip_inherit"](None))
+        self.assertFalse(self.ns["is_sip_inherit"](False))
+
+    def test_the_three_state_flag_keeps_all_three_states_apart(self):
+        tri = self.ns["parse_sip_flag_tri"]
+        # Ключа нет — не меняем: возвращаем то, что было.
+        self.assertIs(True, tri(None, True))
+        self.assertIs(False, tri(None, False))
+        self.assertIsNone(tri(None, None))
+        # Токен — «наследовать», то есть NULL в базе.
+        self.assertIsNone(tri("inherit", True))
+        # Обычные значения разбираются как раньше.
+        self.assertIs(True, tri(True, None))
+        self.assertIs(False, tri(False, None))
+
+    def test_the_three_state_delay_keeps_an_empty_field_meaning_no_change(self):
+        """У числа пустота — по-прежнему «не заполнили», а не «наследовать».
+
+        Иначе сорванная валидация на фронте молча снимала бы настроенные
+        секунды: у parse_sip_delay это правило уже есть, и ломать его нельзя.
+        """
+        tri = self.ns["parse_sip_delay_tri"]
+        self.assertEqual(5, tri("", 5))
+        self.assertEqual(5, tri(None, 5))
+        self.assertIsNone(tri("inherit", 5))
+        self.assertEqual(3, tri("3", None))
+        # bool не число: auto_answer_delay: true не должно стать «1 секунда».
+        self.assertIsNone(tri(True, None))
+
+    def test_the_personal_value_always_wins_over_the_department_one(self):
+        """Ровно то, что просил владелец: своё у оператора общее не перебивает."""
+        resolve = self.ns["resolve_sip_auto_answer"]
+        # Личное «выключено» переживает общее «включено» — это и есть условие.
+        self.assertIs(False, resolve(False, True))
+        self.assertIs(True, resolve(True, False))
+        # Своего нет — берём отдела.
+        self.assertIs(True, resolve(None, True))
+        self.assertIs(False, resolve(None, False))
+        # Нет ни того, ни другого — выключено, как было до появления яруса.
+        self.assertIs(False, resolve(None, None))
+
+    def test_the_delay_is_inherited_independently_of_the_flag(self):
+        """Включили лично, а окно оставили общим — обычный случай, и он обязан работать."""
+        resolve = self.ns["resolve_sip_auto_answer_delay"]
+        self.assertEqual(7, resolve(7, 3))
+        self.assertEqual(3, resolve(None, 3))
+        self.assertEqual(0, resolve(0, 3))     # ноль — осмысленное «отвечать сразу»
+        self.assertEqual(self.ns["SIP_AUTO_ANSWER_DELAY_DEFAULT"], resolve(None, None))
+
+
+class AutoAnswerReachesThePhoneTests(unittest.TestCase):
+    """Ярус обязан доехать до самого телефона, а не только до панели."""
+
+    def setUp(self):
+        self.ns = _database_namespace({"get_user_sip_account"})
+
+    def _account(self, **over):
+        state = dict(OPERATOR_STATE)
+        state.update(over)
+        db = _StubDb(self.ns, _FakeCursor([]))
+        db.get_sip_operator = lambda uid: state
+        db.get_binotel_account = lambda uid: None
+        return self.ns["get_user_sip_account"](db, 41)
+
+    def test_the_department_setting_reaches_a_phone_without_personal_values(self):
+        account = self._account(department_auto_answer=True, department_auto_answer_delay=3)
+        self.assertIs(True, account["auto_answer"])
+        self.assertEqual(3, account["auto_answer_delay"])
+
+    def test_a_personal_switch_off_survives_the_department_switch_on(self):
+        account = self._account(
+            auto_answer=False, department_auto_answer=True, department_auto_answer_delay=3)
+        self.assertIs(False, account["auto_answer"])
+
+    def test_the_same_rule_applies_on_the_binotel_branch(self):
+        """У функции два независимых return'а — правило обязано быть одно.
+
+        Поле, посчитанное внутри ветки провайдера, стало бы двумя копиями:
+        на этом уже обжигались, когда автопринятие забыли в одной из них.
+        """
+        account = self._account(
+            department_provider='binotel', sip_login='sip-fixture-912',
+            sip_password='secret', sip_domain='sip52.binotel.com',
+            department_auto_answer=True, department_auto_answer_delay=3)
+        self.assertEqual('binotel', account["provider"])
+        self.assertIs(True, account["auto_answer"])
+        self.assertEqual(3, account["auto_answer_delay"])
+
+    def test_an_empty_personal_server_falls_back_to_the_department_one(self):
+        """Новому тезовцу sip52.binotel.com вбивать не нужно — он общий.
+
+        Это второй пункт задачи #309: при подключении сотрудника сервер и адрес
+        кабинета подставляются сами.
+        """
+        account = self._account(
+            department_provider='binotel', sip_login='sip-fixture-912',
+            sip_password='secret', sip_domain='',
+            department_sip_server='sip52.binotel.com')
+        self.assertEqual('sip52.binotel.com', account["main"]["server"])
+        self.assertEqual('sip52.binotel.com', account["main"]["domain"])
+
+    def test_without_any_server_at_all_there_is_still_no_registration(self):
+        """Ослабление не должно превратиться в молча неработающую регистрацию."""
+        account = self._account(
+            department_provider='binotel', sip_login='sip-fixture-912',
+            sip_password='secret', sip_domain='', department_sip_server='')
+        self.assertIsNone(account["main"])
+
+
+class DepartmentAutoAnswerStorageTests(unittest.TestCase):
+    """Хранение общего автоприёма в строке отдела."""
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "get_sip_department_configs", "update_sip_department_config", "_mask_sip_secret",
+        })
+        self.db = _StubDb(self.ns, _FakeCursor([]))
+        self.state = {
+            "department_id": 560, "department_name": "Тез КЦ", "department_code": "tez",
+            "sip_server": "sip52.binotel.com", "base_password": "", "autodial_code": "",
+            "autodial_server": "", "autodial_base_password": "", "provider": "binotel",
+            "configured": True, "updated_at": None, "updated_by_name": None,
+            "operators_count": 19, "auto_answer": None, "auto_answer_delay": None,
+            "binotel_cabinet_url": "", "own_auto_answer_count": 19,
+        }
+        self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
+
+    def _params(self):
+        return next(p for s, p in self.db.cursor.calls
+                    if "INSERT INTO sip_department_config" in s)
+
+    def test_the_tier_is_stored_with_the_department(self):
+        self.ns["update_sip_department_config"](
+            self.db, 560, {"auto_answer": True, "auto_answer_delay": "3"}, user_id=5)
+        params = self._params()
+        self.assertIn(True, params)
+        self.assertIn(3, params)
+
+    def test_the_tier_alone_is_enough_to_keep_the_row(self):
+        """Отдел, у которого настроен ТОЛЬКО автоприём, не должен потерять строку.
+
+        keep_row считался по текстовым полям, и у asterisk-отдела с одним лишь
+        общим автоприёмом строка ушла бы в DELETE при следующей же правке.
+        """
+        self.state.update({"provider": "asterisk", "sip_server": "", "configured": True})
+        self.ns["update_sip_department_config"](self.db, 560, {"auto_answer": False}, user_id=5)
+        sql = [s for s, _ in self.db.cursor.calls]
+        self.assertFalse(any("DELETE FROM sip_department_config" in s for s in sql))
+        self.assertTrue(any("INSERT INTO sip_department_config" in s for s in sql))
+
+    def test_returning_the_tier_to_unset_is_not_a_no_op(self):
+        """«Не задано» — это изменение, а не «ничего не прислали»."""
+        self.state.update({"auto_answer": True, "auto_answer_delay": 3})
+        self.ns["update_sip_department_config"](
+            self.db, 560, {"auto_answer": "inherit", "auto_answer_delay": "inherit"}, user_id=5)
+        self.assertTrue(any("INSERT INTO sip_department_config" in s
+                            for s, _ in self.db.cursor.calls))
+
+    def test_the_tier_and_the_cabinet_url_are_written_to_history(self):
+        """Общий автоприём задевает весь отдел разом — «кто включил» спросят первым."""
+        self.ns["update_sip_department_config"](
+            self.db, 560,
+            {"auto_answer": True, "auto_answer_delay": "3",
+             "binotel_cabinet_url": "https://my.binotel.kz"},
+            user_id=5)
+        _, params = next((s, p) for s, p in self.db.cursor.calls
+                         if "INSERT INTO sip_config_history" in s)
+        snapshot = json.loads(params[2])
+        self.assertIs(True, snapshot["auto_answer"])
+        self.assertEqual(3, snapshot["auto_answer_delay"])
+        self.assertEqual("https://my.binotel.kz", snapshot["binotel_cabinet_url"])
+
+    def test_the_listing_counts_who_has_a_personal_setting(self):
+        """Панель обязана показать, на кого общая настройка НЕ подействует.
+
+        Иначе «включил общий автоприём, а у половины отдела не сработало»
+        читается как поломка, хотя это ровно обещанное поведение.
+        """
+        db = _StubDb(self.ns, _FakeCursor([
+            (560, 'Тез КЦ', 'tez', 'sip52.binotel.com', '', '', '', '', 'binotel',
+             True, None, 'Админ', 19, True, 3, 'https://my.binotel.kz', 19),
+        ]))
+        rows = self.ns["get_sip_department_configs"](db)
+        self.assertEqual(19, rows[0]["own_auto_answer_count"])
+        sql, _ = db.cursor.calls[0]
+        self.assertIn("s.auto_answer IS NOT NULL OR s.auto_answer_delay IS NOT NULL", sql)
+
+
+class AutoAnswerMigrationTests(unittest.TestCase):
+    """Схема: снятие NOT NULL и разовая простановка значений по умолчанию."""
+
+    def test_the_personal_columns_become_nullable_without_a_default(self):
+        """Без NULL третье состояние хранить негде, а дефолт FALSE вернул бы
+        «выключено» строке, созданной без этих полей."""
+        for column in ("auto_answer", "auto_answer_delay"):
+            self.assertIn(
+                f"ALTER TABLE user_sip_settings ALTER COLUMN {column} DROP NOT NULL;",
+                DATABASE_SOURCE)
+            self.assertIn(
+                f"ALTER TABLE user_sip_settings ALTER COLUMN {column} DROP DEFAULT;",
+                DATABASE_SOURCE)
+
+    def test_the_department_tier_has_no_default_at_all(self):
+        """Отделы, которых настройка не касается (СЗоВ, фронт-офисы, отдел продаж),
+        обязаны остаться ровно с прежним поведением: NULL = ярус не используется."""
+        # Точка с запятой сразу за типом и есть доказательство: ни NOT NULL,
+        # ни DEFAULT у яруса отдела нет. У персональных колонок они были и
+        # снимаются отдельными ALTER'ами выше — там формулировка другая.
+        self.assertIn("ADD COLUMN IF NOT EXISTS auto_answer BOOLEAN;", DATABASE_SOURCE)
+        self.assertIn("ADD COLUMN IF NOT EXISTS auto_answer_delay SMALLINT;", DATABASE_SOURCE)
+
+    def test_the_defaults_are_seeded_once_and_not_on_every_start(self):
+        """Миграции гоняются при каждом запуске.
+
+        Без защиты администратор, снявший общий автоприём, получал бы его обратно
+        после ближайшего деплоя — молча. Признак «тут уже решали» берём из истории:
+        снимок с этими ключами пишется при каждом сохранении отдела.
+        """
+        seed = DATABASE_SOURCE.split("SET auto_answer = TRUE, auto_answer_delay = 3", 1)[1]
+        seed = seed.split('"""', 1)[0]
+        self.assertIn("c.provider = 'binotel'", seed)
+        self.assertIn("c.auto_answer IS NULL", seed)
+        self.assertIn("NOT EXISTS", seed)
+        self.assertIn("h.settings ? 'auto_answer'", seed)
+
+    def test_the_seed_never_touches_people(self):
+        """Простановка идёт ТОЛЬКО в строку отдела: у 19 тезовцев уже стоят свои
+        значения, и условие владельца — их не трогать."""
+        for statement in ("SET auto_answer = TRUE, auto_answer_delay = 3",
+                          "SET binotel_cabinet_url = %s"):
+            head = DATABASE_SOURCE.split(statement, 1)[0]
+            self.assertTrue(head.rstrip().endswith("UPDATE sip_department_config c"),
+                            head.rstrip()[-60:])
+
+
+class DirectionFilterFrontendTests(unittest.TestCase):
+    """Фильтр по направлениям: в Тезе отдел один, и делить список нечем."""
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+
+    def test_the_filter_is_built_from_the_rows_themselves(self):
+        """Опции собираем из выборки, а не из справочника направлений.
+
+        /api/admin/directions отдаёт админу направления ВСЕХ отделов, и в
+        фильтре раздела «Тез» появились бы СЗоВ и отдел продаж с нулём людей.
+        Сбор из строк заодно бесплатно уважает область видимости запросившего.
+        """
+        self.assertIn("const directionOptions = useMemo(", self.view)
+        self.assertIn("op.direction_id", self.view)
+        self.assertNotIn("/api/admin/directions", self.view)
+
+    def test_people_without_a_direction_get_their_own_bucket(self):
+        """У стажёра направления нет, и без корзины он пропадал бы при любом выборе."""
+        self.assertIn("const NO_DIRECTION = 'no-direction';", self.view)
+        self.assertIn("label: 'Без направления'", self.view)
+
+    def test_the_filter_is_keyed_by_id_and_labelled_by_name(self):
+        """Имена направлений не уникальны — ни между отделами, ни между версиями."""
+        self.assertIn("String(op.direction_id)", self.view)
+        self.assertIn("op.direction_name", self.view)
+
+    def test_switching_the_section_resets_the_direction(self):
+        """Направления у разделов разные: уехавший фильтр даёт пустой экран,
+        который читается как поломка загрузки, а не как выбранный фильтр."""
+        switch = self.view.split("const switchProvider = (next) => {", 1)[1].split("};", 1)[0]
+        self.assertIn("setDirectionFilter('')", switch)
+
+    def test_the_empty_state_knows_about_the_new_filter(self):
+        """«Ничего не найдено» против «Нет сотрудников» — разные сообщения."""
+        self.assertIn("search || departmentFilter || directionFilter || domainFilter", self.view)
+
+
+class BinotelCommonTabFrontendTests(unittest.TestCase):
+    """Вкладка «Общие» у Тез: общий сервер, адрес кабинета и общий автоприём."""
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+
+    def test_binotel_has_the_common_tab_now(self):
+        tabs = self.view.split("const TABS_BY_PROVIDER = {", 1)[1].split("};", 1)[0]
+        binotel = tabs.split("binotel: [", 1)[1]
+        self.assertIn("id: 'common'", binotel)
+
+    def test_the_common_tab_is_no_longer_gated_by_the_provider(self):
+        self.assertNotIn("tab === 'common' && !isBinotel", self.view)
+
+    def test_the_phone_installer_stays_out_of_the_tez_section(self):
+        """Манифест версии для Binotel не грузится — открытая вкладка показала бы
+        вечное «Дистрибутив ещё не опубликован», то есть ложь, а не ошибку."""
+        self.assertIn("canDownloadPhone && !isBinotel", self.view)
+
+    def test_the_department_card_offers_the_binotel_fields(self):
+        self.assertIn("SIP-сервер по умолчанию", self.view)
+        self.assertIn("Адрес кабинета по умолчанию", self.view)
+        self.assertIn("binotel_cabinet_url: deptForm.binotel_cabinet_url.trim()", self.view)
+
+    def test_the_reset_button_clears_the_new_fields_too(self):
+        """«Вернуть общие» перечисляет поля строкой: забытое поле не сбросится,
+        и отдел останется с половиной старых значений."""
+        reset = self.view.split("const body = reset", 1)[1].split(": {", 1)[0]
+        self.assertIn("binotel_cabinet_url: ''", reset)
+        self.assertIn("auto_answer: INHERIT", reset)
+        self.assertIn("auto_answer_delay: INHERIT", reset)
+
+    def test_saving_a_department_refreshes_the_effective_values_of_its_operators(self):
+        """Патч строк операторов уже подводил: превью врало до перезагрузки списка."""
+        self.assertIn("department_auto_answer: saved.auto_answer,", self.view)
+        self.assertIn("department_auto_answer_delay: saved.auto_answer_delay,", self.view)
+        self.assertIn("department_binotel_cabinet_url: saved.binotel_cabinet_url,", self.view)
+
+    def test_a_personal_delay_is_not_wiped_by_an_inherited_switch(self):
+        """Секунды наследуются ОТДЕЛЬНО от выключателя, и это законное состояние:
+        «включать решает отдел, а окно у этого человека своё».
+
+        Пока поле пряталось при унаследованном выключателе, обычное открытие
+        карточки и «Сохранить» стирало личные секунды молча — форма отправляла
+        то, чего на экране не было.
+        """
+        self.assertIn(
+            "const delayToPayload = (mode, raw) => (String(raw).trim() === ''", self.view)
+        self.assertIn("{autoAnswerEffectiveOn && (", self.view)
+
+    def test_the_panel_warns_that_personal_settings_are_not_overridden(self):
+        """Главное обещание раздела должно быть написано словами, а не подразумеваться."""
+        self.assertIn("own_auto_answer_count", self.view)
+        self.assertIn("общая её не перебивает", self.view)
 
 
 if __name__ == "__main__":

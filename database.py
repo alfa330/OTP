@@ -326,21 +326,85 @@ def parse_sip_delay(value, default=SIP_AUTO_ANSWER_DELAY_DEFAULT) -> int:
     Мусор тоже возвращает прежнее значение: сорванная валидация на фронте не
     повод молча выставить оператору ноль.
     """
+    # Разбор один на двоих с parse_sip_delay_tri — две копии клампа и проверки
+    # bool разъехались бы при первой же правке. Здесь только «сплющиваем»
+    # третье состояние: в двухпозиционном разборе «как у отдела» смысла не имеет.
+    parsed = parse_sip_delay_tri(value, default)
+    return int(default if parsed is None else parsed)
+
+
+# Третье состояние автопринятия — «как у отдела». Своим токеном, а не пустотой:
+# None в payload'е уже занят под «поле не прислали, не меняем», а пустая строка
+# у флага означает «выключено» (SIP_FLAG_FALSE). Без отдельного слова снять
+# персональную настройку было бы нечем — она стала бы неснимаемой.
+SIP_INHERIT_TOKEN = 'inherit'
+
+
+def is_sip_inherit(value) -> bool:
+    """Просят ли вернуть поле к настройке отдела."""
+    return isinstance(value, str) and value.strip().lower() == SIP_INHERIT_TOKEN
+
+
+def parse_sip_flag_tri(value, default=None):
+    """Трёхпозиционный флаг: True / False / None («как у отдела»).
+
+    None на входе — «поле не прислали», возвращаем прежнее значение; токен
+    SIP_INHERIT_TOKEN — «наследовать», то есть NULL в базе.
+    """
     if value is None:
-        return int(default)
-    # bool — это тоже int в Python (isinstance(True, int) истинно), поэтому без
-    # этой проверки auto_answer_delay: true молча стало бы «1 секунда».
+        return default
+    if is_sip_inherit(value):
+        return None
+    return parse_sip_flag(value, default if default is not None else False)
+
+
+def parse_sip_delay_tri(value, default=None):
+    """То же для задержки: число / None («как у отдела»).
+
+    Пустая строка здесь по-прежнему «оставить как было», а не «наследовать»:
+    поле в форме просто не заполнили, и молча снимать настройку из-за этого
+    нельзя. Разбор свой, а не через parse_sip_delay: тот на мусоре возвращает
+    ЧИСЛО по умолчанию, и унаследованное значение молча превратилось бы в
+    персональные две секунды — то есть человек отцепился бы от настройки
+    отдела из-за сорванной валидации на фронте.
+    """
+    if value is None:
+        return default
+    if is_sip_inherit(value):
+        return None
+    # bool — это тоже int в Python, поэтому проверка до попытки разбора:
+    # auto_answer_delay: true не должно стать «1 секунда».
     if isinstance(value, bool):
-        return int(default)
-    if isinstance(value, str):
-        value = value.strip()
-        if value == '':
-            return int(default)
+        return default
+    if isinstance(value, str) and value.strip() == '':
+        return default
     try:
         seconds = int(float(value))
     except (TypeError, ValueError):
-        return int(default)
+        return default
     return max(0, min(SIP_AUTO_ANSWER_DELAY_MAX, seconds))
+
+
+def resolve_sip_auto_answer(personal, department) -> bool:
+    """Эффективное автопринятие: персональное → отдела → выключено.
+
+    Ярус отдела появился позже персонального, поэтому порядок именно такой:
+    у кого стоит своё — тот общее не читает (решение владельца по задаче #309).
+    """
+    if personal is not None:
+        return bool(personal)
+    if department is not None:
+        return bool(department)
+    return False
+
+
+def resolve_sip_auto_answer_delay(personal, department) -> int:
+    """Эффективная задержка окна; наследуется отдельно от самого флага."""
+    if personal is not None:
+        return int(personal)
+    if department is not None:
+        return int(department)
+    return int(SIP_AUTO_ANSWER_DELAY_DEFAULT)
 
 
 def normalize_sip_identifier(value, field="SIP-номер"):
@@ -4990,6 +5054,70 @@ class Database:
                 ALTER TABLE user_sip_settings
                 ADD COLUMN IF NOT EXISTS auto_answer_delay SMALLINT NOT NULL DEFAULT 2;
             """)
+            # У автопринятия появился ярус отдела, и персональному значению стало
+            # нужно третье состояние — «как у отдела». Выразить его нечем, пока
+            # колонки NOT NULL: явное FALSE неотличимо от «не настраивали».
+            # Поэтому снимаем NOT NULL (NULL = наследовать) и убираем дефолты,
+            # чтобы строка, созданная без этих полей, наследовала, а не выключала.
+            # Существующие значения не трогаем: у кого стоит своё — то и остаётся
+            # своим (решение владельца: общее применяется только к новым).
+            cursor.execute("ALTER TABLE user_sip_settings ALTER COLUMN auto_answer DROP NOT NULL;")
+            cursor.execute("ALTER TABLE user_sip_settings ALTER COLUMN auto_answer DROP DEFAULT;")
+            cursor.execute("ALTER TABLE user_sip_settings ALTER COLUMN auto_answer_delay DROP NOT NULL;")
+            cursor.execute("ALTER TABLE user_sip_settings ALTER COLUMN auto_answer_delay DROP DEFAULT;")
+            # Ярус отдела для автопринятия: «общий автоприём» вкладки «Общие».
+            # Тоже nullable, и по той же причине — NULL значит «отдел не задавал»,
+            # и тогда действует выключенное состояние по умолчанию. Дефолта у
+            # колонок нет намеренно: отделы, которых настройка не касается,
+            # должны остаться ровно с тем поведением, что было до её появления.
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS auto_answer BOOLEAN;
+            """)
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS auto_answer_delay SMALLINT;
+            """)
+            # Общий адрес кабинета Binotel. У локальной АТС кабинета нет вовсе,
+            # поэтому поле живёт в той же строке отдела, но показывается только
+            # в разделе «Тез».
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS binotel_cabinet_url VARCHAR(255) NOT NULL DEFAULT '';
+            """)
+            # Значения по умолчанию для отделов на Binotel (задача #309): автоприём
+            # включён, окно 3 секунды, кабинет my.binotel.kz. Людей это не задевает:
+            # у кого есть своя строка, тот наследование не читает.
+            #
+            # Проставляем ОДИН РАЗ, а не при каждом старте. Миграции гоняются на
+            # каждом запуске, и условия «поле пустое» было бы мало: администратор,
+            # снявший общий автоприём, получил бы его обратно после ближайшего
+            # деплоя — молча и без объяснений. Признак «уже решали» берём из
+            # истории: update_sip_department_config пишет туда снимок с этими
+            # ключами при КАЖДОМ сохранении отдела, поэтому запись в истории и
+            # значит «человек тут уже высказался».
+            cursor.execute("""
+                UPDATE sip_department_config c
+                SET auto_answer = TRUE, auto_answer_delay = 3
+                WHERE c.provider = 'binotel'
+                  AND c.auto_answer IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sip_config_history h
+                      WHERE h.department_id = c.department_id
+                        AND h.settings ? 'auto_answer'
+                  );
+            """)
+            cursor.execute("""
+                UPDATE sip_department_config c
+                SET binotel_cabinet_url = %s
+                WHERE c.provider = 'binotel'
+                  AND c.binotel_cabinet_url = ''
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sip_config_history h
+                      WHERE h.department_id = c.department_id
+                        AND h.settings ? 'binotel_cabinet_url'
+                  );
+            """, (BINOTEL_CABINET_URL_DEFAULT,))
             # Учётка веб-кабинета my.binotel.kz. Отдельной таблицей, а не
             # колонками в user_sip_settings: та строка удаляется, когда у
             # сотрудника не осталось SIP-переопределений, и сброс SIP унёс бы
@@ -27477,8 +27605,9 @@ class Database:
     def get_sip_department_configs(self, department_ids=None) -> list:
         """Настройки SIP по отделам + сколько в отделе сотрудников с телефоном.
 
-        Отдел без своей строки наследует общие настройки — в ответе он приходит
-        с configured=False и пустыми полями, чтобы раздел показал «по умолчанию».
+        Отдел без своей строки наследовать больше нечего (общий ярус снят) — он
+        приходит с configured=False и пустыми полями, чтобы раздел показал
+        «телефония не настроена», а не подставил чужую АТС.
         """
         clauses = ["COALESCE(d.is_active, TRUE)"]
         params = []
@@ -27494,7 +27623,14 @@ class Database:
                        COALESCE(c.provider, 'asterisk') AS provider,
                        (c.department_id IS NOT NULL) AS configured,
                        c.updated_at, u.name,
-                       COALESCE(ops.cnt, 0)
+                       COALESCE(ops.cnt, 0),
+                       -- Ярус отдела для автопринятия: NULL = отдел его не
+                       -- задавал, и тогда действует выключенное состояние.
+                       -- COALESCE здесь нельзя: он схлопнул бы «не задано» с
+                       -- «выключено», а это разные вещи для карточки отдела.
+                       c.auto_answer, c.auto_answer_delay,
+                       COALESCE(c.binotel_cabinet_url, ''),
+                       COALESCE(own.cnt, 0)
                 FROM departments d
                 LEFT JOIN sip_department_config c ON c.department_id = d.id
                 LEFT JOIN users u ON u.id = c.updated_by
@@ -27505,9 +27641,22 @@ class Database:
                       AND o.role = ANY(%s)
                       AND LOWER(COALESCE(o.status, '')) <> ALL(%s)
                 ) ops ON TRUE
+                -- Сколько человек отдела автопринятие себе ЗАДАЛИ сами: на них
+                -- общая настройка не действует, и панель обязана это показать —
+                -- иначе «включил общий автоприём, а у половины не сработало».
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS cnt
+                    FROM users o
+                    JOIN user_sip_settings s ON s.user_id = o.id
+                    WHERE o.department_id = d.id
+                      AND o.role = ANY(%s)
+                      AND LOWER(COALESCE(o.status, '')) <> ALL(%s)
+                      AND (s.auto_answer IS NOT NULL OR s.auto_answer_delay IS NOT NULL)
+                ) own ON TRUE
                 WHERE {' AND '.join(clauses)}
                 ORDER BY d.name
-            """, tuple([list(self._SIP_OPERATOR_ROLES), list(self._SIP_INACTIVE_STATUSES)] + params))
+            """, tuple([list(self._SIP_OPERATOR_ROLES), list(self._SIP_INACTIVE_STATUSES),
+                        list(self._SIP_OPERATOR_ROLES), list(self._SIP_INACTIVE_STATUSES)] + params))
             rows = cur.fetchall()
         return [{
             "department_id": r[0],
@@ -27523,6 +27672,11 @@ class Database:
             "updated_at": r[10].isoformat() if r[10] else None,
             "updated_by_name": r[11],
             "operators_count": int(r[12] or 0),
+            # None — отдел автопринятие не настраивал (не то же самое, что «выключено»).
+            "auto_answer": None if r[13] is None else bool(r[13]),
+            "auto_answer_delay": None if r[14] is None else int(r[14]),
+            "binotel_cabinet_url": r[15] or "",
+            "own_auto_answer_count": int(r[16] or 0),
         } for r in rows]
 
     def update_sip_department_config(self, department_id: int, payload: dict, user_id=None) -> dict:
@@ -27552,7 +27706,14 @@ class Database:
         autodial_server = _field('autodial_server')
         autodial_base = _field('autodial_base_password')
         provider = normalize_sip_provider(payload.get('provider'), current['provider'])
-        filled = (sip_server, base_password, autodial_code, autodial_server, autodial_base)
+        cabinet_url = _field('binotel_cabinet_url')
+        # Автопринятие отдела трёхпозиционное, как и персональное: «не задано»
+        # (None) — это не «выключено», а «ярус не используется».
+        auto_answer = parse_sip_flag_tri(payload.get('auto_answer'), current['auto_answer'])
+        auto_answer_delay = parse_sip_delay_tri(
+            payload.get('auto_answer_delay'), current['auto_answer_delay'])
+        filled = (sip_server, base_password, autodial_code, autodial_server, autodial_base,
+                  cabinet_url, auto_answer is not None, auto_answer_delay is not None)
         # Binotel описывается одним признаком провайдера, поэтому его строка
         # «непустая» даже без единого заполненного поля.
         keep_row = any(filled) or provider != SIP_PROVIDER_DEFAULT
@@ -27563,6 +27724,9 @@ class Database:
             and autodial_server == current['autodial_server']
             and autodial_base == current['autodial_base_password']
             and provider == current['provider']
+            and cabinet_url == current['binotel_cabinet_url']
+            and auto_answer == current['auto_answer']
+            and auto_answer_delay == current['auto_answer_delay']
         )
         if unchanged and current['configured'] == keep_row:
             return current
@@ -27572,8 +27736,10 @@ class Database:
                 cur.execute("""
                     INSERT INTO sip_department_config (
                         department_id, sip_server, base_password, autodial_code, autodial_server,
-                        autodial_base_password, provider, updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                        autodial_base_password, provider, binotel_cabinet_url,
+                        auto_answer, auto_answer_delay, updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (department_id) DO UPDATE SET
                         sip_server = EXCLUDED.sip_server,
                         base_password = EXCLUDED.base_password,
@@ -27581,10 +27747,14 @@ class Database:
                         autodial_server = EXCLUDED.autodial_server,
                         autodial_base_password = EXCLUDED.autodial_base_password,
                         provider = EXCLUDED.provider,
+                        binotel_cabinet_url = EXCLUDED.binotel_cabinet_url,
+                        auto_answer = EXCLUDED.auto_answer,
+                        auto_answer_delay = EXCLUDED.auto_answer_delay,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, (department_id, sip_server, base_password, autodial_code, autodial_server,
-                      autodial_base, provider, user_id))
+                      autodial_base, provider, cabinet_url, auto_answer, auto_answer_delay,
+                      user_id))
             else:
                 cur.execute("DELETE FROM sip_department_config WHERE department_id = %s", (department_id,))
             cur.execute("""
@@ -27597,6 +27767,9 @@ class Database:
                 "autodial_code": autodial_code,
                 "autodial_server": autodial_server,
                 "autodial_base_password": self._mask_sip_secret(autodial_base),
+                "binotel_cabinet_url": cabinet_url,
+                "auto_answer": auto_answer,
+                "auto_answer_delay": auto_answer_delay,
             })))
         return next(
             row for row in self.get_sip_department_configs([department_id])
@@ -27644,8 +27817,21 @@ class Database:
             COALESCE(b.cabinet_url, '') AS binotel_cabinet_url,
             -- Автопринятие входящего: персональная настройка самого телефона,
             -- поэтому от провайдера отдела не зависит (нужна и Тезу, и таксопаркам).
-            COALESCE(s.auto_answer, FALSE) AS auto_answer,
-            COALESCE(s.auto_answer_delay, 2) AS auto_answer_delay,
+            -- Отдаём СЫРЫМ, без COALESCE: NULL здесь значит «как у отдела», и
+            -- схлопывать его с «выключено» нельзя — панель и телефон обязаны
+            -- различать личную настройку и унаследованную.
+            s.auto_answer AS auto_answer,
+            s.auto_answer_delay AS auto_answer_delay,
+            -- Ярус отдела для того же автопринятия (NULL = отдел не задавал).
+            dc.auto_answer AS department_auto_answer,
+            dc.auto_answer_delay AS department_auto_answer_delay,
+            COALESCE(dc.binotel_cabinet_url, '') AS department_binotel_cabinet_url,
+            -- Направление сотрудника: ось фильтра в разделе. Источник —
+            -- users.direction_id, а не группа: у группы направление бывает
+            -- архивной версией того же самого (canonical_id), и фильтр по ней
+            -- терял бы людей.
+            u.direction_id AS direction_id,
+            COALESCE(dir.name, '') AS direction_name,
             -- Пароль кабинета наружу не отдаём никогда — только признак «задан».
             -- Строго последней колонкой: _sip_operator_row читает row по индексам,
             -- вставка в середину сдвинула бы все поля после неё.
@@ -27655,6 +27841,9 @@ class Database:
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
         LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
         LEFT JOIN binotel_user_accounts b ON b.user_id = u.id
+        -- Только LEFT: у стажёра направления нет вовсе, и INNER выкинул бы его
+        -- из раздела вместе с его номером.
+        LEFT JOIN directions dir ON dir.id = u.direction_id
         LEFT JOIN users upd ON upd.id = s.updated_by
         LEFT JOIN LATERAL (
             SELECT g.name AS group_name
@@ -27701,12 +27890,20 @@ class Database:
             "binotel_cabinet_login": row[24] or "",
             "binotel_employee_id": row[25] or "",
             "binotel_cabinet_url": row[26] or "",
-            # Автопринятие: строки в user_sip_settings у большинства нет, COALESCE
-            # в SELECT уже отдал выключенное состояние и задержку по умолчанию.
-            "auto_answer": bool(row[27]),
-            "auto_answer_delay": int(row[28] if row[28] is not None
-                                     else SIP_AUTO_ANSWER_DELAY_DEFAULT),
-            "has_binotel_cabinet_password": bool(row[29]),
+            # Автопринятие: None = «как у отдела». Эффективное значение считают
+            # resolve_sip_auto_answer* — одним правилом на панель и на телефон,
+            # чтобы копии не разъехались.
+            "auto_answer": None if row[27] is None else bool(row[27]),
+            "auto_answer_delay": None if row[28] is None else int(row[28]),
+            "department_auto_answer": None if row[29] is None else bool(row[29]),
+            "department_auto_answer_delay": None if row[30] is None else int(row[30]),
+            "department_binotel_cabinet_url": row[31] or "",
+            # Направление: id для фильтра, имя для подписи. Имя не уникально
+            # (разные отделы, архивные версии), поэтому ключ — всегда id.
+            "direction_id": row[32],
+            "direction_name": row[33] or "",
+            # Сдвигается вместе с любой новой колонкой: это ПОСЛЕДНИЙ индекс.
+            "has_binotel_cabinet_password": bool(row[34]),
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -27891,10 +28088,13 @@ class Database:
         # Автопринятие разбираем ВНЕ ветки провайдера, в отличие от FOP2 ниже:
         # это поведение самого телефона (окно звонка и таймер ответа), АТС о нём
         # не знает — значит настройка одинаково нужна и таксопаркам, и Тезу.
-        auto_answer = _flag('auto_answer', current.get('auto_answer', False))
-        auto_answer_delay = parse_sip_delay(
-            payload.get('auto_answer_delay'),
-            current.get('auto_answer_delay', SIP_AUTO_ANSWER_DELAY_DEFAULT))
+        # Трёхпозиционно: None = «как у отдела». Через _flag/parse_sip_delay
+        # нельзя — у них нет состояния «наследовать», и снять персональную
+        # настройку было бы нечем (см. parse_sip_flag_tri).
+        auto_answer = parse_sip_flag_tri(
+            payload.get('auto_answer'), current.get('auto_answer'))
+        auto_answer_delay = parse_sip_delay_tri(
+            payload.get('auto_answer_delay'), current.get('auto_answer_delay'))
         if binotel:
             # Автодозвон — механика локальной АТС (второй номер, код, свой FOP2).
             # В Binotel его нет, и пустые поля тут не «наследование», а отсутствие.
@@ -27954,14 +28154,14 @@ class Database:
         # Выключенный FOP2 — тоже персональная настройка: без него строка с
         # одним лишь fop2_enabled=FALSE ушла бы в DELETE ниже, и флаг молча
         # вернулся бы к «включён» (COALESCE отдаёт TRUE при отсутствии строки).
-        # У автопринятия дефолт обратный, поэтому и условие обратное: строку
-        # держит сам включённый флаг, а задержку — только отличие от дефолта
-        # (иначе настроенная задержка исчезла бы вместе со строкой, стоило
-        # выключить автопринятие).
+        # У автопринятия теперь есть ярус отдела, поэтому строку держит сам ФАКТ
+        # персонального значения, а не его истинность: личное «выключено» при
+        # общем «включено» — это настройка, и терять её при чистке нельзя
+        # (прямое требование владельца: своё у оператора сохраняется).
         has_overrides = any((sip_password, sip_domain, sip_login, autodial_number,
                              autodial_password, autodial_domain, not fop2_enabled,
-                             auto_answer,
-                             auto_answer_delay != SIP_AUTO_ANSWER_DELAY_DEFAULT))
+                             auto_answer is not None,
+                             auto_answer_delay is not None))
 
         # Учётка кабинета: пустой пароль = «не менять» (так же ведёт себя сам
         # кабинет), поэтому «не передали» и «передали пусто» здесь одно и то же.
@@ -27994,9 +28194,10 @@ class Database:
             autodial_domain != current['autodial_domain'],
             # Без этой строки PUT с одним только флагом уходил бы в ранний return.
             fop2_enabled != bool(current.get('fop2_enabled', True)),
-            auto_answer != bool(current.get('auto_answer', False)),
-            auto_answer_delay != int(current.get('auto_answer_delay',
-                                                 SIP_AUTO_ANSWER_DELAY_DEFAULT)),
+            # Сравнение трёхпозиционное: None ≠ False, иначе возврат настройки
+            # к «как у отдела» уходил бы в ранний return и молча не сохранялся.
+            auto_answer != current.get('auto_answer'),
+            auto_answer_delay != current.get('auto_answer_delay'),
             cabinet_changed,
         ))
         if not changed:
@@ -28107,12 +28308,13 @@ class Database:
         # (см. parse_sip_flag), а «не передали» по-прежнему значит «не меняем».
         if payload.get('fop2_enabled') is not None:
             fields['fop2_enabled'] = parse_sip_flag(payload['fop2_enabled'])
-        # Автопринятие — так же мимо: флаг своим разбором, задержка своим
-        # (у числа '' значит «не заполнили», а не «ноль»).
+        # Автопринятие — так же мимо, но трёхпозиционно: кроме «включить» и
+        # «выключить» массово просят и «вернуть как у отдела» (SIP_INHERIT_TOKEN),
+        # иначе снять настройку с пачки было бы нечем.
         if payload.get('auto_answer') is not None:
-            fields['auto_answer'] = parse_sip_flag(payload['auto_answer'])
+            fields['auto_answer'] = parse_sip_flag_tri(payload['auto_answer'])
         if payload.get('auto_answer_delay') is not None:
-            fields['auto_answer_delay'] = parse_sip_delay(payload['auto_answer_delay'])
+            fields['auto_answer_delay'] = parse_sip_delay_tri(payload['auto_answer_delay'])
         if not fields:
             raise ValueError("Не выбрано ни одного поля для изменения")
 
@@ -28128,8 +28330,11 @@ class Database:
                        COALESCE(s.autodial_domain, ''), COALESCE(u.sip_number, ''),
                        COALESCE(dc.sip_server, ''), COALESCE(dc.autodial_server, ''),
                        COALESCE(s.fop2_enabled, TRUE), COALESCE(s.sip_login, ''),
-                       COALESCE(s.auto_answer, FALSE),
-                       COALESCE(s.auto_answer_delay, 2)
+                       -- Сырыми, без COALESCE: NULL = «как у отдела», и схлопнуть
+                       -- его с «выключено» значило бы стереть наследование у всей
+                       -- выбранной пачки при правке любого другого поля.
+                       s.auto_answer,
+                       s.auto_answer_delay
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
                 LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
@@ -28150,10 +28355,9 @@ class Database:
                     "sip_login": r[11],
                     # Автопринятие — по той же причине: без него массовая правка
                     # пароля сочла бы строку пустой и выключила бы настройку тем,
-                    # кому её включали.
-                    "auto_answer": bool(r[12]),
-                    "auto_answer_delay": int(r[13] if r[13] is not None
-                                             else SIP_AUTO_ANSWER_DELAY_DEFAULT),
+                    # кому её включали. None здесь — «как у отдела».
+                    "auto_answer": None if r[12] is None else bool(r[12]),
+                    "auto_answer_delay": None if r[13] is None else int(r[13]),
                 }
                 names[r[0]] = r[1] or ""
                 numbers[r[0]] = r[7]
@@ -28224,11 +28428,14 @@ class Database:
                 # Выключенный FOP2 — тоже повод хранить строку, поэтому считаем
                 # не any(after.values()): там лежит и fop2_enabled=True, который
                 # сам по себе строку не оправдывает (это состояние по умолчанию).
+                # Правило то же, что в save_user_sip_settings: строку держит сам
+                # факт персонального автопринятия, а не его истинность — личное
+                # «выключено» поверх общего «включено» обязано пережить чистку.
                 if any((after['sip_password'], after['sip_domain'], after['sip_login'],
                         after['autodial_number'], after['autodial_password'],
                         after['autodial_domain'], not after['fop2_enabled'],
-                        after['auto_answer'],
-                        after['auto_answer_delay'] != SIP_AUTO_ANSWER_DELAY_DEFAULT)):
+                        after['auto_answer'] is not None,
+                        after['auto_answer_delay'] is not None)):
                     upserts.append((
                         user_id, after['sip_password'], after['sip_domain'], after['sip_login'],
                         after['autodial_number'], after['autodial_password'],
@@ -28289,13 +28496,20 @@ class Database:
         переключает статус запросом."""
         with self._get_cursor() as cur:
             cur.execute("""
-                SELECT cabinet_login, cabinet_password, employee_id, cabinet_url
-                FROM binotel_user_accounts WHERE user_id = %s
+                SELECT b.cabinet_login, b.cabinet_password, b.employee_id, b.cabinet_url,
+                       COALESCE(dc.binotel_cabinet_url, '')
+                FROM binotel_user_accounts b
+                JOIN users u ON u.id = b.user_id
+                LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
+                WHERE b.user_id = %s
             """, (int(user_id),))
             row = cur.fetchone()
         if not row or not (row[0] or '').strip():
             return None
-        base_url = (row[3] or '').strip() or BINOTEL_CABINET_URL_DEFAULT
+        # Цепочка та же, что у домена: персональный адрес → общий адрес отдела →
+        # зашитый дефолт. Пустое поле в карточке значит «как у всех», а не «нет».
+        base_url = ((row[3] or '').strip() or (row[4] or '').strip()
+                    or BINOTEL_CABINET_URL_DEFAULT)
         employee_id = (row[2] or '').strip()
         return {
             "cabinet_url": base_url,
@@ -28310,17 +28524,28 @@ class Database:
     def get_user_sip_account(self, user_id: int) -> dict:
         """Готовые данные регистрации для iCORE Phone: основной аккаунт + автодозвон.
 
-        Значения берутся по цепочке «персональное → отдела»; общего яруса больше
-        нет. У Binotel наследовать нечего в принципе: сервер, логин и пароль
-        выданы каждому свои, а логин с номером не совпадает."""
+        Значения берутся по цепочке «персональное → отдела»; глобального яруса
+        больше нет. У Binotel персональны логин и пароль — их «на отдел» не
+        задать; сервер с задачи #309 наследуется, как и автопринятие."""
         row = self.get_sip_operator(int(user_id)) or {}
         provider = row.get("department_provider") or SIP_PROVIDER_DEFAULT
         sip_number = (row.get("sip_number") or "").strip()
+        # Автопринятие считаем ОДИН раз и выше развилки провайдера: ниже два
+        # независимых return'а, и правило, посчитанное внутри ветки, стало бы
+        # двумя копиями — на этом поле уже обжигались.
+        auto_answer = resolve_sip_auto_answer(
+            row.get("auto_answer"), row.get("department_auto_answer"))
+        auto_answer_delay = resolve_sip_auto_answer_delay(
+            row.get("auto_answer_delay"), row.get("department_auto_answer_delay"))
 
         if provider == 'binotel':
             login = (row.get("sip_login") or "").strip()
             password = row.get("sip_password") or ""
-            server = (row.get("sip_domain") or "").strip()
+            # Сервер у Binotel тоже наследуется: пустое поле сотрудника значит
+            # «общий сервер отдела» — иначе каждому новому пришлось бы вбивать
+            # sip52.binotel.com руками (задача #309).
+            server = ((row.get("sip_domain") or "").strip()
+                      or (row.get("department_sip_server") or "").strip())
             main = None
             if login and password and server:
                 main = {
@@ -28343,10 +28568,10 @@ class Database:
                 # FOP2 у Binotel не существует: телефон не должен и пытаться.
                 "fop2_enabled": False,
                 # Автопринятие, наоборот, живёт целиком в телефоне и провайдера
-                # не касается — отдаём его обеим ветками одинаково.
-                "auto_answer": bool(row.get("auto_answer", False)),
-                "auto_answer_delay": int(row.get("auto_answer_delay",
-                                                 SIP_AUTO_ANSWER_DELAY_DEFAULT)),
+                # не касается — отдаём его обеим ветками одинаково, посчитанным
+                # выше развилки (персональное → отдела → выключено).
+                "auto_answer": auto_answer,
+                "auto_answer_delay": auto_answer_delay,
                 "binotel": self.get_binotel_account(user_id),
             }
 
@@ -28385,10 +28610,10 @@ class Database:
             # логинится в свой FOP2 и этим флагом не управляется.
             "fop2_enabled": bool(row.get("fop2_enabled", True)),
             # Автопринятие входящего в самом телефоне — та же настройка, что и у
-            # Binotel выше: провайдер на неё не влияет.
-            "auto_answer": bool(row.get("auto_answer", False)),
-            "auto_answer_delay": int(row.get("auto_answer_delay",
-                                             SIP_AUTO_ANSWER_DELAY_DEFAULT)),
+            # Binotel выше: провайдер на неё не влияет, и значение здесь ровно то
+            # же, посчитанное один раз до развилки.
+            "auto_answer": auto_answer,
+            "auto_answer_delay": auto_answer_delay,
             "binotel": None,
         }
 
