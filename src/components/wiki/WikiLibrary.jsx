@@ -7,7 +7,7 @@ import WikiHome from './WikiHome';
 import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
 import WikiPark from './WikiPark';
-import { markedWord } from './WikiSearch';
+import { ArticleStamp, markedWord } from './WikiSearch';
 import WikiSearchFilters, { SearchFilterButton } from './WikiSearchFilters';
 import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
@@ -69,8 +69,13 @@ const Snippet = ({ html }) => {
     );
 };
 
-/* Карточка статьи в выдаче поиска: заголовок, подпись типа и отрывок с
-   найденным словом. */
+/* Карточка статьи в выдаче поиска: заголовок, подпись типа, актуальность с
+   датой добавления и отрывок с найденным словом.
+
+   Штамп актуальности тот же, что в выпадашке поиска (WikiSearch.ArticleStamp), и
+   это одно из двух мест, где он обязан стоять: витрина и выпадашка — две двери в
+   одну и ту же выдачу, и ответ на «черновик это или живая статья» не может
+   зависеть от того, в какую человек вошёл. */
 const ArticleCard = ({ article, onOpen }) => {
     const meta = typeBadge(article.article_type);
     return (
@@ -89,6 +94,7 @@ const ArticleCard = ({ article, onOpen }) => {
                             {article.title}
                         </span>
                         {meta && <IosBadge tone={meta.tone}>{meta.label}</IosBadge>}
+                        <ArticleStamp status={article.status} createdAt={article.created_at} />
                         {/* Создатель — рядом с типом, а не отдельной строкой:
                             выбрав фильтр по человеку, его же и хочется увидеть
                             в выдаче, иначе фильтр нечем проверить глазами. */}

@@ -13,9 +13,11 @@
 """
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from tests import prod_db
@@ -261,6 +263,10 @@ class SearchSqlTest(unittest.TestCase):
 WITH wiki_articles AS (
     SELECT id::int, slug::text, title::text, summary::text, status::text,
            views::int, NULL::timestamp AS updated_at,
+           -- Дата добавления — выражением по id, тем же приёмом, что тип и
+           -- автор ниже: она нужна одному тесту, а не всем строкам-заготовкам,
+           -- зато делает значение предсказуемым и разным у каждой статьи.
+           (DATE '2026-01-01' + id * INTERVAL '1 day')::timestamp AS created_at,
            content_plain::text, search_aliases::text,
            -- Тип статьи задаётся не в VALUES, а выражением по id: колонка
            -- нужна одному тесту из тридцати, и тащить её во все строки-
@@ -365,6 +371,19 @@ users AS (
     def test_finds_by_title(self):
         found = self.run_search(self.ARTICLES, 'аренда')
         self.assertEqual([a['id'] for a in found], [1])
+
+    def test_status_and_created_at_ride_along(self):
+        """Статус и дата добавления едут в каждой строке выдачи.
+
+        Ими строка поиска отвечает на вопрос «черновик это, архив или живая
+        статья и когда её завели» (задача #315). Проверяем здесь, а не во
+        фронте: поле легко потерять при правке SELECT'а — порядок колонок
+        жёстко связан с _KEYS, и молча съехал бы весь словарь строки.
+        """
+        found = self.run_search(self.ARTICLES, 'аренда')
+        self.assertEqual(found[0]['status'], 'published')
+        # 2026-01-01 + id дней: у статьи id=1 это второе января.
+        self.assertEqual(found[0]['created_at'], datetime(2026, 1, 2))
 
     def test_finds_by_body(self):
         found = self.run_search(self.ARTICLES, 'заказов')
@@ -795,3 +814,65 @@ class GluedNumeralTest(unittest.TestCase):
         """«бесік» — колыбель, а не «бес» + «ік»."""
         for word in ('бесік', 'бірлік', 'екеу'):
             self.assertEqual('', split_glued_numeral(word), word)
+
+
+class ResultStateSourceTest(unittest.TestCase):
+    """Актуальность статьи в выдаче — решение, которое видно только в исходнике.
+
+    Читаем .jsx текстом, по той же причине, что страж фильтров
+    (test_wiki_search_filters.SearchFiltersSourceTest): пропажа штампа ничего
+    не ломает — выдача просто снова перестаёт отличать черновик от живой
+    статьи, а заметить это можно лишь глазами на боевых данных.
+
+    Экранов поиска два — поле в шапке и витрина «Все статьи вики», — и они
+    ходят в /search независимо друг от друга. Поправь один, и на один и тот же
+    запрос две двери отвечали бы по-разному.
+    """
+
+    FRONT = ROOT / 'src' / 'components' / 'wiki'
+
+    @classmethod
+    def strip_comments(cls, text):
+        without_blocks = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+        return '\n'.join(line for line in without_blocks.splitlines()
+                          if not line.lstrip().startswith('//'))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.code = {
+            name: cls.strip_comments((cls.FRONT / name).read_text(encoding='utf-8'))
+            for name in ('WikiSearch.jsx', 'WikiLibrary.jsx')
+        }
+
+    def test_both_search_screens_stamp_the_article(self):
+        for name, code in self.code.items():
+            self.assertIn('<ArticleStamp', code,
+                          '%s не показывает актуальность статьи' % name)
+            self.assertIn('createdAt={', code,
+                          '%s не показывает дату добавления' % name)
+
+    def test_stamp_lives_in_one_place(self):
+        """Штамп объявлен один раз и переиспользуется, а не скопирован.
+
+        Подписи статусов в разделе уже сводили из трёх копий в одну
+        (articleTypes.STATUS_LABELS) — второй раз разводить их незачем.
+        """
+        self.assertIn('export const ArticleStamp', self.code['WikiSearch.jsx'])
+        self.assertIn("from './WikiSearch'", self.code['WikiLibrary.jsx'])
+        self.assertNotIn('const ArticleStamp', self.code['WikiLibrary.jsx'])
+
+    def test_status_labels_are_the_section_wide_ones(self):
+        """Подписи берутся из общего списка раздела, а не пишутся заново.
+
+        Иначе один и тот же статус назывался бы в поиске и в каталоге
+        по-разному, и это разошлось бы молча.
+        """
+        code = self.code['WikiSearch.jsx']
+        self.assertIn("STATUS_LABELS", code)
+        self.assertIn("STATUS_TONES", code)
+        self.assertIn("from './articleTypes'", code)
+
+    def test_search_returns_the_fields_the_stamp_needs(self):
+        """Сервер отдаёт ровно то, чем штамп рисуется."""
+        self.assertIn('status', wiki_search._KEYS)
+        self.assertIn('created_at', wiki_search._KEYS)

@@ -16,6 +16,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { matchBrand, matchCar } from './carMatch';
+import { STATUS_LABELS, STATUS_TONES } from './articleTypes';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import WikiSearchFilters, {
@@ -229,6 +230,63 @@ function CarWidget({ data, car, onOpenClassifier }) {
     );
 }
 
+/* Дата добавления статьи: «добавлена 11.09.26».
+ *
+ * Со словом, а не голым числом: рядом с ним в строке стоит статус, и дата без
+ * подписи читалась бы как «обновлена» — то есть отвечала бы на другой вопрос.
+ * Формат короткий (дд.мм.гг), потому что место в строке выдачи делится с
+ * названием статьи.
+ */
+export const addedOn = (iso) => {
+    if (!iso) return '';
+    const then = new Date(iso);
+    if (Number.isNaN(then.getTime())) return '';
+    return `добавлена ${then.toLocaleDateString('ru-RU',
+        { day: '2-digit', month: '2-digit', year: '2-digit' })}`;
+};
+
+/* Актуальность статьи прямо в строке выдачи: статус и дата добавления.
+ *
+ * Просьба заказчика (задача #315): «при поиске видеть статью и её актуальность
+ * — в архиве, черновик, актуальная статья, и сразу рядом дата добавления».
+ * Повод настоящий: на боевой базе 352 статьи, из них 242 черновика и 30 в
+ * архиве, а названия дублируются до четырёх раз («Тариф «Межгород»»). Строки
+ * выдачи у таких статей совпадают буквально, и выбрать из них было нечем.
+ *
+ * Бейдж стоит у КАЖДОЙ строки, включая опубликованную, — в отличие от подсказки
+ * у внутренних ссылок (WikiArticle.LINK_STATUS_NOTE), где помечены только
+ * черновик и архив. Там умолчание однозначно: непомеченная ссылка ведёт на
+ * живую статью. Здесь наоборот — опубликованных меньше четверти, и правило «нет
+ * бейджа значит опубликована» пришлось бы держать в голове ровно в том месте,
+ * где человек просил ответ глазами.
+ *
+ * Подписи и тона — общие для раздела (articleTypes.js): статус в каталоге, в
+ * шапке статьи и здесь обязан называться одинаково.
+ *
+ * Строкам секции «Совпадения в тексте» штамп не ставим: это фрагменты тех же
+ * статей, что уже перечислены выше со штампом, и второй раз он был бы шумом.
+ */
+export const ArticleStamp = ({ status, createdAt }) => {
+    const added = addedOn(createdAt);
+    if (!status && !added) return null;
+    /* Бейдж и дата — ОДИН неразрывный кусок, а не два соседа в переносимой
+       строке. Иначе на узком листе телефона бейдж оставался у названия, а дата
+       съезжала под него одна, и строка выдачи каждый раз рвалась в новом
+       месте. */
+    return (
+        <span className="inline-flex shrink-0 items-center gap-2">
+            {status && (
+                <IosBadge tone={STATUS_TONES[status] || 'slate'}>
+                    {STATUS_LABELS[status] || status}
+                </IosBadge>
+            )}
+            {added && (
+                <span className="text-[11px] tabular-nums text-slate-400">{added}</span>
+            )}
+        </span>
+    );
+};
+
 const SectionLabel = ({ icon: Icon, children }) => (
     <div className="mb-1.5 flex items-center gap-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
         <Icon size={11} /> {children}
@@ -372,8 +430,14 @@ export function ResultsPane({
                                                 index === selectedIndex ? 'text-indigo-500' : 'text-slate-300'
                                             }`} />
                                             <span className="min-w-0 flex-1">
-                                                <span className="block truncate text-[13.5px] font-medium text-slate-900">
-                                                    {item.title}
+                                                {/* Название и штамп — одной переносимой строкой: на
+                                                    узком листе телефона штамп уходит под название,
+                                                    а не обрезает его. */}
+                                                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                    <span className="min-w-0 max-w-full truncate text-[13.5px] font-medium text-slate-900">
+                                                        {item.title}
+                                                    </span>
+                                                    <ArticleStamp status={item.status} createdAt={item.created_at} />
                                                 </span>
                                                 {item.snippet ? (
                                                     <span

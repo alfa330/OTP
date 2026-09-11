@@ -121,7 +121,7 @@ WITH q AS (
 hit AS (
     SELECT DISTINCT ON (a.id)
            a.id, a.slug, a.title, a.summary, a.status, a.views, a.updated_at,
-           a.content_plain, q.tsq_mark,
+           a.created_at, a.content_plain, q.tsq_mark,
            {tier_expr}  AS tier,
            {score_expr} AS score,
            ts_rank_cd(a.search_vector, q.tsq) AS rank_fts,
@@ -143,7 +143,12 @@ top AS (
     SELECT * FROM hit ORDER BY tier ASC, score DESC, views DESC LIMIT %(limit)s
 )
 SELECT top.id, top.slug, top.title, top.summary, top.status, top.views,
-       top.updated_at, top.rank_fts, top.rank_trgm,
+       -- Дата добавления едет рядом со статусом и ради него же: строка выдачи
+       -- обязана отвечать «черновик это, архив или живая статья и когда её
+       -- завели», не открывая её. На боевой базе 352 статьи при 242 черновиках
+       -- и дублях названий до четырёх штук («Тариф «Межгород»») — без этих двух
+       -- полей одинаковые строки в выдаче неразличимы (задача #315).
+       top.updated_at, top.created_at, top.rank_fts, top.rank_trgm,
        {snippet_expr} AS snippet,
        -- Запасной отрывок для случая «статья по-казахски, запрос по-русски».
        -- Статья находится (векторы и tsvector свёрнуты), а ts_headline
@@ -292,8 +297,8 @@ _HEADLINE_JOIN = {
 }
 
 _KEYS = ('id', 'slug', 'title', 'summary', 'status', 'views', 'updated_at',
-         'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded', 'article_type',
-         'author_id', 'author_name')
+         'created_at', 'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded',
+         'article_type', 'author_id', 'author_name')
 
 # Буквы и цифры, из которых собирается префиксный tsquery. Всё прочее
 # (операторы tsquery, кавычки, дефисы) отбрасывается — слово из букв и цифр
