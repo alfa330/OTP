@@ -47811,48 +47811,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className={`fas fa-chevron-${isMobileShell ? 'down' : 'right'} ml-auto opacity-70 sidebar-text`}></FaIcon>
                                         </button>
 
-                                        {/* НА ТЕЛЕФОНЕ — ЛИСТ СНИЗУ, А НЕ ВЫПАДАЮЩАЯ ПАНЕЛЬ.
-                                            Панель выпадала прямо на список разделов: полупрозрачная
-                                            карточка поверх строк, сквозь которую просвечивают чужие
-                                            названия (видео владельца 11.09.2026). Выбор одного
-                                            значения телефон показывает листом снизу — тем же, каким
-                                            сделан выбор фотографии.
-
-                                            ПОРТАЛОМ В <body>, И ЭТО ОБЯЗАТЕЛЬНО: у шторки свой слой
-                                            (z-index 65), и нарисованный внутри неё лист выше бара
-                                            разделов (70) подняться не может — «Отмена» уезжала за
-                                            край экрана, а бар оставался ярким поверх затемнения
-                                            (замерено скриншотом). Значения отдела живут здесь, в
-                                            разметке шторки, поэтому переносим не разметку, а слой.
-
-                                            На компьютере панель выпадает вбок, как у «Аккаунта», и
-                                            остаётся ровно такой, какой была. */}
-                                        {isMobileShell && createPortal(
-                                            <MobileActionSheet
-                                                open={showSidebarDeptFilter}
-                                                onClose={() => stableSidebarHandleToggleDeptFilter(true)}
-                                                title="Показывать разделы отдела"
-                                                actions={[
-                                                    {
-                                                        key: '',
-                                                        label: 'Все отделы',
-                                                        selected: !activeDeptCode,
-                                                        onClick: () => stableSidebarSelectDept(''),
-                                                    },
-                                                    ...sidebarDeptOptions.map((dept) => {
-                                                        const code = String(dept.code).toLowerCase();
-                                                        return {
-                                                            key: code,
-                                                            label: dept.name || code,
-                                                            selected: activeDeptCode === code,
-                                                            onClick: () => stableSidebarSelectDept(code),
-                                                        };
-                                                    }),
-                                                ]}
-                                            />,
-                                            document.body,
-                                        )}
-                                        {!isMobileShell && (showSidebarDeptFilter || isDeptFilterClosing) && (
+                                        {(showSidebarDeptFilter || isDeptFilterClosing) && (
                                             <div
                                                 /* sidebar-holds-open: пока список открыт, свёрнутый
                                                    сайдбар не схлопывается. Панель прижата к строке
@@ -47873,6 +47832,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <button
                                                     onClick={() => stableSidebarSelectDept('')}
+                                                    /* data-selected — метка для оболочки: на телефоне
+                                                       по ней рисуется галочка выбранного пункта, как в
+                                                       списках выбора телефона. */
+                                                    data-selected={!activeDeptCode ? 'true' : undefined}
                                                     className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${!activeDeptCode ? 'bg-gray-100 font-medium' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-layer-group mr-2"></FaIcon> Все отделы
@@ -47884,6 +47847,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <div className="border-t border-gray-200" />
                                                             <button
                                                                 onClick={() => stableSidebarSelectDept(code)}
+                                                                data-selected={activeDeptCode === code ? 'true' : undefined}
                                                                 className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${activeDeptCode === code ? 'bg-gray-100 font-medium' : ''}`}
                                                             >
                                                                 <FaIcon className="fas fa-building mr-2"></FaIcon> {dept.name || code}

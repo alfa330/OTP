@@ -272,45 +272,50 @@ class SheetAccountTests(unittest.TestCase):
 
 
 class DeptPickerTests(unittest.TestCase):
-    """Выбор отдела в шторке: на телефоне — лист снизу, на компьютере — панель."""
+    """Выбор отдела в шторке: выпадашка, но в языке телефона."""
 
-    SHEET = (ROOT / 'src' / 'components' / 'common' / 'MobileActionSheet.jsx').read_text(encoding='utf-8')
+    def test_picker_stays_a_dropdown(self):
+        """Решение владельца 11.09.2026: список отделов остаётся ВЫПАДАШКОЙ —
+        лист снизу он назвал нелогичным. Разметка одна на оба вида, телефонным
+        её делают стили; отдельной мобильной ветки в JSX нет."""
+        at = APP.index('className="sidebar-dept-filter mb-2 relative"')
+        block = APP[at:at + 3000]
+        self.assertIn('{(showSidebarDeptFilter || isDeptFilterClosing) && (', block)
+        self.assertNotIn('MobileActionSheet', block)
 
-    def test_phone_gets_a_sheet_instead_of_a_dropdown(self):
-        """Панель выпадала прямо на список разделов: полупрозрачная карточка
-        поверх строк, сквозь которую просвечивают чужие названия (видео
-        владельца 11.09.2026). Выбор одного значения телефон показывает листом
-        снизу — тем же, каким сделан выбор фотографии."""
-        self.assertIn('title="Показывать разделы отдела"', APP)
-        at = APP.index('title="Показывать разделы отдела"')
-        block = APP[at - 1800:at + 1200]
-        self.assertIn('{isMobileShell && createPortal(', block)
-        # Настольная панель осталась и заперта на «не телефон».
-        self.assertIn('{!isMobileShell && (showSidebarDeptFilter || isDeptFilterClosing) && (', APP)
+    def test_dropdown_is_opaque_and_rounded(self):
+        """На видео 11.09.2026 панель просвечивала: сквозь полупрозрачную
+        карточку читались чужие названия разделов под ней. Всплывающее меню
+        телефона — глухое полотно, крупное скругление, мягкая тень и волосяная
+        обводка вместо рамки."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar-dept-filter > div:not(:first-child) {', 700)
+        self.assertIn('background: var(--sheet-card) !important', block)
+        self.assertIn('backdrop-filter: none !important', block)
+        self.assertIn('border-radius: 16px !important', block)
+        self.assertIn('border: none !important', block)
+        # Во всю ширину строки, а не 224 px из настольной разметки.
+        self.assertIn('width: auto !important', block)
+        self.assertIn('right: 0', block)
 
-    def test_sheet_goes_through_a_portal(self):
-        """У шторки свой слой (z-index 65), и нарисованный внутри неё лист выше
-        бара разделов (70) подняться не может: «Отмена» уезжала за край экрана,
-        а бар оставался ярким поверх затемнения. Замерено скриншотом. Значения
-        отдела живут в разметке шторки, поэтому переносится не разметка, а
-        слой."""
-        at = APP.index('title="Показывать разделы отдела"')
-        self.assertIn('document.body,', APP[at:at + 2000])
-        self.assertIn('z-index: 10000', SHELL_CSS[SHELL_CSS.index('.mobile-actions {'):])
+    def test_dropdown_shows_what_is_chosen(self):
+        """Выбранное в списке выбора находится взглядом, а не чтением: синий
+        текст и галочка справа. Серую заливку настольного вида снимаем."""
+        self.assertIn("data-selected={!activeDeptCode ? 'true' : undefined}", APP)
+        self.assertIn("data-selected={activeDeptCode === code ? 'true' : undefined}", APP)
+        self.assertIn('button[data-selected]::after', SHELL_CSS)
+        check = css_block(SHELL_CSS, 'button[data-selected]::after {', 400)
+        self.assertIn('var(--sheet-accent)', check)
 
-    def test_sheet_shows_what_is_chosen(self):
-        """Список ВЫБОРА, а не команд: строка по левому краю, галочка справа,
-        подпись листа сверху. Без этого список отделов читается как набор
-        действий, и выбранное приходится искать чтением."""
-        self.assertIn('mobile-actions__row--pick', self.SHEET)
-        self.assertIn('mobile-actions__check', self.SHEET)
-        self.assertIn("role={action.selected === undefined ? undefined : 'menuitemradio'}", self.SHEET)
-        self.assertIn('.mobile-actions__title', SHELL_CSS)
-        # Длинный список прокручивается внутри группы: уехавшая за край «Отмена»
-        # — это лист, из которого не выйти нажатием.
-        groups = [b for b in SHELL_CSS.split('body.mobile-shell .mobile-actions__group {')[1:]]
-        self.assertTrue(any('max-height' in b.split('}')[0] for b in groups),
-                        'группа строк листа обязана прокручиваться внутри себя')
+    def test_row_arrow_sits_at_the_right_edge(self):
+        """Уголок селектора носит тот же класс sidebar-text, что и подпись (на
+        компьютере он прячется вместе с ней при свёрнутом сайдбаре), а правило
+        шторки делает sidebar-text растяжкой — уголок вставал ПО СЕРЕДИНЕ
+        строки. Владелец 11.09.2026: «стрелка находится по середине, а не
+        справа». Замер после правки: 14 px от правого края строки."""
+        self.assertIn('body.mobile-shell .sidebar svg.sidebar-text {', SHELL_CSS)
+        block = css_block(SHELL_CSS, 'body.mobile-shell .sidebar svg.sidebar-text {', 200)
+        self.assertIn('flex: none', block)
+        self.assertIn('margin-left: auto', block)
 
 
 class SheetLooksTests(unittest.TestCase):

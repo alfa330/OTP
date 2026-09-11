@@ -424,6 +424,16 @@ body.mobile-shell .sidebar > div > div > button > svg:not(:first-child) {
     transform: none !important;
 }
 
+/* СТРЕЛКА СТРОКИ — НЕ ПОДПИСЬ. Уголок селектора отдела носит тот же класс
+   sidebar-text (на компьютере он прячется вместе с подписью, когда сайдбар
+   свёрнут), и правило ниже делало его растяжкой наравне с текстом: уголок
+   вставал по центру строки вместо правого края. Владелец 11.09.2026: «стрелка
+   находится по середине, а не справа». */
+body.mobile-shell .sidebar svg.sidebar-text {
+    flex: none;
+    margin-left: auto;
+}
+
 body.mobile-shell .sidebar .sidebar-text {
     flex: 1;
     display: flex;
@@ -451,6 +461,96 @@ body.mobile-shell .mobile-sheet-group :is(button, label):not(.mobile-sheet-row--
     border-bottom: 2px solid var(--sheet-chevron);
     border-radius: 1px;
     transform: rotate(-45deg);
+}
+
+/* ── Выпадашка выбора отдела ───────────────────────────────────────────────
+ *
+ * Решение владельца 11.09.2026: список отделов остаётся ВЫПАДАШКОЙ («это не
+ * логично» про лист снизу), но выглядеть обязан как всплывающее меню телефона,
+ * а не как полупрозрачная карточка поверх строк — на видео сквозь неё
+ * просвечивали чужие названия разделов.
+ *
+ * Что меняется: панель во всю ширину строки, глухое полотно вместо
+ * полупрозрачного, крупное скругление, мягкая тень и волосяная обводка, строки
+ * ростом с палец, разделители от текста, у выбранного — синяя галочка.
+ * Разметка та же, что на компьютере; настольный вид не трогаем. */
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) {
+    width: auto !important;
+    right: 0;
+    max-height: min(52vh, 420px) !important;
+    padding: 4px 0;
+    border: none !important;
+    border-radius: 16px !important;
+    background: var(--sheet-card) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow: 0 16px 44px rgba(15, 23, 42, 0.22), 0 0 0 0.5px var(--sheet-sep) !important;
+    overscroll-behavior: contain;
+}
+
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) > button,
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 8px 14px !important;
+    background: none !important;
+    color: var(--sheet-text) !important;
+    font-size: 16px !important;
+    font-weight: 400 !important;
+    line-height: 1.25;
+}
+
+/* Значок пункта — мелкий и серый: цветная плитка здесь была бы вторым уровнем
+   тех же плиток, что и в самом списке разделов под панелью. */
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) button > svg:first-child {
+    flex: 0 0 17px;
+    width: 17px !important;
+    height: 17px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background: none !important;
+    color: var(--sheet-muted) !important;
+}
+
+/* Разделитель — от текста, как в системных списках. Между «Все отделы» и
+   остальными его рисует сам разделитель разметки (border-t), поэтому он
+   снимается: две линии подряд читаются как сбой. */
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) > .border-t {
+    border: none !important;
+    height: 0.5px;
+    margin-left: 41px;
+    background: var(--sheet-sep);
+}
+
+/* Выбранный пункт: синий текст и галочка справа — так список выбора устроен в
+   телефоне, и выбранное находится взглядом, а не чтением. Серую заливку
+   разметки снимаем: она осталась от настольного вида. */
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) button[data-selected] {
+    color: var(--sheet-accent) !important;
+    font-weight: 500 !important;
+}
+
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) button[data-selected] > svg:first-child {
+    color: var(--sheet-accent) !important;
+}
+
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) button[data-selected]::after {
+    content: '';
+    flex: none;
+    width: 6px;
+    height: 11px;
+    margin-left: auto;
+    border-right: 2px solid var(--sheet-accent);
+    border-bottom: 2px solid var(--sheet-accent);
+    border-radius: 1px;
+    transform: rotate(45deg) translate(-1px, -1px);
+}
+
+body.mobile-shell .sidebar-dept-filter > div:not(:first-child) button:active {
+    background: var(--sheet-active) !important;
 }
 
 /* Разделитель между строками группы начинается после плитки значка — ровно
@@ -2130,57 +2230,6 @@ body.mobile-shell .mobile-actions__cancel {
     line-height: 24px;
     text-align: center;
     cursor: pointer;
-}
-
-/* Подпись листа — как у системного листа действий: мелкая, серая, по центру,
-   с отбивкой снизу. Нужна там, где строки предлагают ВЫБОР, а не действие. */
-body.mobile-shell .mobile-actions__title {
-    padding: 14px 16px 10px;
-    border-bottom: 0.5px solid var(--sheet-sep);
-    color: var(--sheet-muted);
-    font-size: 13px;
-    line-height: 17px;
-    text-align: center;
-}
-
-/* СТРОКА ВЫБОРА, а не действия: текст по левому краю, галочка справа. Так
-   устроены списки выбора в телефоне — по одной колонке глаз находит выбранное,
-   не перечитывая весь список. Строки-действия остаются по центру. */
-body.mobile-shell .mobile-actions__row--pick {
-    justify-content: space-between;
-    gap: 12px;
-    padding: 0 16px;
-    font-size: 17px;
-    line-height: 22px;
-    color: var(--sheet-text);
-    text-align: left;
-}
-
-body.mobile-shell .mobile-actions__row--pick .mobile-actions__label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-body.mobile-shell .mobile-actions__row--pick.is-selected {
-    color: var(--sheet-accent);
-    font-weight: 600;
-}
-
-body.mobile-shell .mobile-actions__check {
-    flex: none;
-    color: var(--sheet-accent);
-}
-
-/* Список отделов бывает длинным — он прокручивается ВНУТРИ группы, а лист
-   остаётся на месте: уехавшая за край экрана «Отмена» — это лист, из которого
-   не выйти нажатием. */
-body.mobile-shell .mobile-actions__group {
-    max-height: min(60vh, 460px);
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
 }
 
 body.mobile-shell .mobile-actions__row + .mobile-actions__row {
