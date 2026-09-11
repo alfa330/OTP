@@ -107,9 +107,16 @@ class MatchUserTests(unittest.TestCase):
 
     def test_служебная_учётка_не_связывается(self):
         # «ЯР», «Отток группа», «Администратор» — это не люди.
-        for name, email in (('ЯР', 'yandex_regisration@gmail.com'),
-                            ('Отток группа', 'igroupver@gmail.com'),
-                            ('Администратор', 'igroupcc@gmail.com'),
+        #
+        # Домен у служебных ящиков здесь синтетический (example.com). Репозиторий
+        # публичный, и страж tests/test_no_personal_data_in_repo.py роняет прогон
+        # на некорпоративной почте — настоящий адрес такого ящика ему неотличим от
+        # личной почты сотрудника. Проверке домен безразличен: email_words()
+        # отрезает всё после «@» и разбирает только локальную часть, а она
+        # оставлена как в справочнике — на ней и держится смысл теста.
+        for name, email in (('ЯР', 'yandex_regisration@example.com'),
+                            ('Отток группа', 'igroupver@example.com'),
+                            ('Администратор', 'igroupcc@example.com'),
                             ('Фокус группа', 'focus.pokus@yandex.kz')):
             got, how = self.link(6, name, email)
             self.assertIsNone(got, name)
@@ -141,7 +148,7 @@ class AutoLinkTests(unittest.TestCase):
     def test_раскладывает_на_три_корзины(self):
         users = [
             user(9357018, 'Nurmakhan 6323', 'sagidollayev_nurmakhan2_co@yandextaxi.kz'),
-            user(8403694, 'ЯР', 'yandex_regisration@gmail.com'),
+            user(8403694, 'ЯР', 'yandex_regisration@example.com'),
         ]
         result = match.auto_link(users, PEOPLE)
         self.assertEqual(list(result['links']), ['9357018'])
