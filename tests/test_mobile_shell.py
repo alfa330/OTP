@@ -725,35 +725,59 @@ class BackGestureTests(unittest.TestCase):
         self.assertIn('const stack = [];', self.STACK)
         self.assertIn('const top = stack.pop();', self.STACK)
 
-    def test_own_entry_is_removed_on_a_normal_close(self):
-        """Иначе запись останется, и следующий жест уйдёт впустую: человек
-        свайпнет, а экран уже закрыт и ничего не произойдёт."""
-        self.assertIn('pendingSlots -= 1;', self.STACK)
-        self.assertIn('window.history.go(step);', self.STACK)
-        # Свой же popstate пропускаем, иначе он закрыл бы и соседний экран.
-        self.assertIn('pendingBacks += 1;', self.STACK)
-        self.assertIn('if (pendingBacks > 0) {', self.STACK)
+    def test_history_keeps_one_entry_no_matter_how_deep(self):
+        """ЗАПИСЬ НА КАЖДЫЙ ЭКРАН ПЛОДИТЬ НЕЛЬЗЯ.
 
-    def test_one_frame_is_netted_out(self):
-        """ШАГОВ НАЗАД У БРАУЗЕРА РОВНО СТОЛЬКО, СКОЛЬКО У НАС ЭКРАНОВ.
+        Публикация на Pages подменяет файлы сборки разом, у открытого
+        приложения остаётся прежняя, и первый же ленивый кусок отвечает 404;
+        портал лечится перезагрузкой через location.replace(?v=…). После неё
+        записи, положенные ДО, принадлежат ПРЕЖНЕМУ документу, и шаг назад в них
+        — полная загрузка приложения: белый экран и чужой раздел. Владелец
+        11.09.2026: «перекидывает из профиля в какой-то другой раздел и ловлю
+        белый экран». Замерено меткой документа: на версии с записью-на-экран
+        первое же «назад» после такой перезагрузки грузило документ заново, с
+        одной сторожевой — нет.
 
-        Один кадр закрывает шторку разделов и открывает «Сменить логин»:
-        сначала все уборки (отмена), потом все подписки (новая запись). Но
-        back() в браузере отложен, а pushState мгновенен, и цель шага назад
-        считается по указателю на момент вызова — новая запись оказывалась выше
-        указателя, и на два экрана оставался один шаг. Дальше «назад» снимало
-        экран, а указатель уже стоял на дне, и следующее нажатие уходило через
-        раздел. Замерено в браузере: «назад» с экрана смены логина уводило в
-        раздел, с которого начался вход.
+        Поэтому глубина живёт в стеке, а браузеру достаётся одна запись."""
+        self.assertIn('let armed = false;', self.STACK)
+        self.assertIn('const want = stack.length > 0;', self.STACK)
+        self.assertIn('if (want === armed) return;', self.STACK)
+        # Ровно один шаг назад и только по своей записи — никаких go(-n).
+        self.assertIn('window.history.back();', self.STACK)
+        self.assertNotIn('history.go(', self.STACK)
+        # Снятую жестом сторожевую кладём заново, если внизу что-то осталось.
+        pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
+        self.assertIn('scheduleSync();', pop)
 
-        Поэтому обе половины кадра сводятся в одно число и применяются в
-        микрозадаче: закрыли и открыли поровну — история не трогается вовсе."""
-        self.assertIn('let pendingSlots = 0;', self.STACK)
-        self.assertIn('const delta = pendingSlots;', self.STACK)
-        self.assertIn('Promise.resolve().then(flush);', self.STACK)
-        # Запись кладётся только через сведённый итог, а не сразу на месте.
-        push = self.STACK[self.STACK.index('export const pushBackEntry'):]
-        self.assertNotIn('window.history.pushState', push[:push.index('export const clearBackStack')])
+    def test_frame_is_reconciled_once(self):
+        """Один кадр закрывает шторку разделов и открывает «Сменить логин»:
+        сначала ВСЕ уборки, потом ВСЕ подписки — порядок задаёт React. Правя
+        историю на месте, мы сняли бы сторожевую запись и положили заново, а
+        history.back() отложен, тогда как pushState мгновенен: шаг назад уводил
+        бы уже из-под новой записи. Поэтому сверка одна на кадр."""
+        self.assertIn('Promise.resolve().then(sync);', self.STACK)
+        self.assertIn('if (syncScheduled', self.STACK)
+
+    def test_floor_is_armed_before_the_first_screen(self):
+        """Иначе самый первый свайп уходит мимо нас — в то, что лежит в истории
+        ниже. После аварийной перезагрузки там записи прежнего документа."""
+        self.assertIn('export const armBackFloor = (urlProvider) => {', self.STACK)
+        self.assertIn('armBackFloor(() => buildAppViewUrl(backViewRef.current));', APP)
+        # Ниже дна лежит адрес ещё без ?view= (экран входа). Восстановив дно
+        # молча, мы оставили бы человека с адресом без раздела — и следующая
+        # перезагрузка, а её приносит каждая публикация, открыла бы ему раздел
+        # по умолчанию вместо того, где он стоит.
+        self.assertIn('url || window.location.href', self.STACK)
+
+    def test_screen_may_refuse_to_close(self):
+        """Обязательную новость не закрывает ни крестик, ни Esc — и «назад» не
+        должно. Но провалиться мимо неё жест тоже не вправе: под окном сменился
+        бы раздел. Поэтому close возвращает false, а экран кладётся обратно."""
+        self.assertIn('if (top.close() === false) stack.push(top);', self.STACK)
+        news = (ROOT / 'src' / 'components' / 'news' / 'NewsOfDayModal.jsx').read_text(encoding='utf-8')
+        self.assertIn('if (!current || current.is_mandatory) return false;', news)
+        events = (ROOT / 'src' / 'components' / 'events' / 'EventsView.jsx').read_text(encoding='utf-8')
+        self.assertIn('if (submitting) return false;', events)
 
     def test_back_never_leaves_the_document(self):
         """ПУСТОЙ СТЕК — ЭТО ДНО, И УХОДИТЬ С НЕГО НЕКУДА.
@@ -851,23 +875,6 @@ class BackGestureTests(unittest.TestCase):
         bell = (ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx').read_text(encoding='utf-8')
         self.assertIn('useScreenBackGesture(isNarrow && open, close);', bell)
 
-    def test_never_rewinds_below_its_own_floor(self):
-        """ПОД ДНОМ ДОКУМЕНТ КОНЧАЕТСЯ. В установленном портале это пустой экран
-        с логотипом запуска, из которого выход только перезапуском приложения —
-        владелец 11.09.2026: «перекидывает в другой раздел и так зависает».
-
-        Наш учёт записей может разойтись с браузером (восстановление после
-        устаревшего бандла перезагружает страницу, вкладку могут обновить), и
-        лишний шаг перемотки унёс бы человека наружу. Поэтому мотаем ровно
-        столько, сколько положили сами."""
-        self.assertIn('let ownSlots = 0;', self.STACK)
-        self.assertIn('const step = Math.max(delta, -ownSlots);', self.STACK)
-        self.assertIn('if (step === 0) return;', self.STACK)
-        # Дно обнуляет счёт: своих записей над ним не осталось.
-        self.assertIn('ownSlots = 0;', self.STACK[self.STACK.index('const armRoot'):self.STACK.index('/* Свести итог')])
-        # Системное «назад» тратит нашу запись — иначе счёт поплыл бы вверх.
-        self.assertIn('if (ownSlots > 0) ownSlots -= 1;', self.STACK)
-
     def test_own_overlays_are_screens_too(self):
         """Окна, свёрстанные внутри разделов, жест не видел вовсе: «назад» над
         ними снимало верхнюю чужую запись — переход между разделами, — и
@@ -885,18 +892,6 @@ class BackGestureTests(unittest.TestCase):
             source = (ROOT / 'src' / 'components' / path).read_text(encoding='utf-8')
             self.assertIn(call, source, f'{path}: окно не слышит «назад»')
             self.assertIn('useIsMobileShell', source, f'{path}: жест не заперт на телефон')
-
-    def test_screen_may_refuse_to_close(self):
-        """Обязательную новость не закрывает ни крестик, ни Esc — и «назад» не
-        должно. Но провалиться мимо неё жест тоже не вправе: под окном сменился
-        бы раздел, и человек, дочитав, оказался бы не там, где был. Поэтому
-        close возвращает false, а запись возвращается на место."""
-        self.assertIn('if (top.close() === false) {', self.STACK)
-        self.assertIn('stack.push(top);', self.STACK)
-        news = (ROOT / 'src' / 'components' / 'news' / 'NewsOfDayModal.jsx').read_text(encoding='utf-8')
-        self.assertIn('if (!current || current.is_mandatory) return false;', news)
-        events = (ROOT / 'src' / 'components' / 'events' / 'EventsView.jsx').read_text(encoding='utf-8')
-        self.assertIn('if (submitting) return false;', events)
 
     def test_screen_keeps_no_stale_callback(self):
         """onClose приходит заново на каждом рендере раздела: новая функция в

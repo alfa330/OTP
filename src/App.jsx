@@ -56,7 +56,7 @@ import MobileBellSlot from './components/common/MobileBellSlot';
 import { holdPageScroll } from './utils/pageScrollLock';
 import MobilePageChrome from './components/common/MobilePageChrome';
 import useScreenBackGesture from './components/common/useScreenBackGesture';
-import { pushBackEntry, clearBackStack } from './utils/mobileBackStack';
+import { pushBackEntry, clearBackStack, armBackFloor } from './utils/mobileBackStack';
 import useIsMobileShell from './components/common/useIsMobileShell';
 import useOverlayDismiss from './components/common/useOverlayDismiss';
 import sidebarLogo from './components/common/sidebar-logo.svg';
@@ -40141,6 +40141,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setView(nextView);
             }, []);
 
+            /* Дно истории ставим, как только оболочка стала телефонной, — до
+               первого перехода. Иначе самый первый свайп уходит мимо нас, в то,
+               что лежит в истории ниже; после аварийной перезагрузки там записи
+               прежнего документа, и шаг в них грузит приложение заново. */
+            useEffect(() => {
+                if (!isMobileShell) return;
+                /* Дну отдаём и адрес текущего раздела: восстанавливая его после
+                   жеста «ниже дна», мы возвращаем ?view= на место. */
+                armBackFloor(() => buildAppViewUrl(backViewRef.current));
+            }, [isMobileShell]);
+
             /* ЖЕСТ «НАЗАД» МЕЖДУ РАЗДЕЛАМИ — только на телефоне.
              *
              * Портал — одна страница: раздел живёт состоянием, а не адресом, и
@@ -46604,27 +46615,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
+            /* Рисуем код САМИ, у себя.
+             *
+             * Здесь стоял запрос картинки на api.qrserver.com, причём window.QRCode
+             * в портал никто не подключал — значит, уходил туда КАЖДЫЙ код. Это
+             * разом три беды: действующий код доступа уезжает постороннему
+             * сервису, без интернета (или когда сервис молчит) сотруднику нечего
+             * показать, и картинка приходила размером 280 px, из-за чего модули в
+             * ней были мельче некуда.
+             *
+             * Библиотека грузится по требованию: открывает это окно один человек
+             * из десяти, а в общий бандл она весит полсотни килобайт.
+             *
+             * margin: 2 — «тихая зона» вокруг кода. Стандарт просит четыре модуля,
+             * но код лежит на белой карточке, и двух своих хватает: сканеру нужен
+             * контраст по краю, а он есть. Уровень коррекции M — середина: L дал
+             * бы ту же версию QR (29×29) при нашей длине строки, но хуже держал бы
+             * блик от лампы на чужом экране.
+             */
             useEffect(() => {
                 if (!showSensitiveQrModal || !sensitiveQrUrl) {
                     setSensitiveQrImage('');
-                    return;
+                    return undefined;
                 }
+                let cancelled = false;
                 setSensitiveQrError('');
-                if (window.QRCode && window.QRCode.toDataURL) {
-                    window.QRCode.toDataURL(
-                        sensitiveQrUrl,
-                        { width: 280, margin: 1 },
-                        (err, url) => {
-                            if (err) {
-                                setSensitiveQrImage(`https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(sensitiveQrUrl)}`);
-                                return;
-                            }
-                            setSensitiveQrImage(url);
-                        }
-                    );
-                    return;
-                }
-                setSensitiveQrImage(`https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=${encodeURIComponent(sensitiveQrUrl)}`);
+                import('qrcode')
+                    .then((mod) => (mod.default || mod).toDataURL(sensitiveQrUrl, {
+                        errorCorrectionLevel: 'M',
+                        margin: 2,
+                        width: 1024,
+                    }))
+                    .then((url) => { if (!cancelled) setSensitiveQrImage(url); })
+                    .catch(() => {
+                        if (!cancelled) setSensitiveQrError('Не удалось нарисовать код — покажите резервный код строкой');
+                    });
+                return () => { cancelled = true; };
             }, [showSensitiveQrModal, sensitiveQrUrl]);
 
             useEffect(() => {
@@ -55809,11 +55835,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         {sensitiveQrError}
                                     </div>
                                 )}
+                                {/* Крупнее, чем было (w-64 = 256 px): расстояние, с
+                                    которого сканер берёт код, прямо пропорционально
+                                    его размеру на экране. Больше 320 px не делаем —
+                                    на телефоне в 390 px окно шире не станет. */}
                                 <div className="flex justify-center mb-4">
                                     {sensitiveQrImage ? (
-                                        <img src={sensitiveQrImage} alt="QR Access" className="w-64 h-64 border rounded-lg" />
+                                        <img
+                                            src={sensitiveQrImage}
+                                            alt="QR Access"
+                                            className="w-full max-w-[320px] aspect-square border rounded-lg bg-white"
+                                        />
                                     ) : (
-                                        <div className="w-64 h-64 border rounded-lg flex items-center justify-center text-sm text-gray-500">
+                                        <div className="w-full max-w-[320px] aspect-square border rounded-lg flex items-center justify-center text-sm text-gray-500">
                                             Генерация QR...
                                         </div>
                                     )}
