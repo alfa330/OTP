@@ -31508,6 +31508,45 @@ STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT = max(1, int(os.getenv('STATUS_IMPORT_I
 STATUS_IMPORT_LOCK = threading.Lock()
 CHAT_MANAGER_METRICS_IMPORT_LOCK = threading.Lock()
 
+# Часы отдела ТЭЗ: с этой даты они строятся по событиям телефона iCORE Phone
+# (POST /api/operator/status_event), а не по ночной выгрузке таймлайна Binotel.
+#
+# Держать оба источника одновременно нельзя, и дело не в задвоении:
+# save_operator_status_import работает как REPLACE по затронутым дням, поэтому
+# ночной синк не «сверял» бы данные, а молча затирал бы все события телефона за
+# этот день. Часы выглядели бы верными весь день и подменялись каждую ночь.
+#
+# Дата, а не булев флаг — ради двух вещей: дни ДО перехода по-прежнему можно
+# перезаливать выгрузкой (там она авторитетна, других данных за те дни нет), а
+# откат делается переносом даты в будущее через env, без выката кода.
+TEZ_PHONE_HOURS_SINCE_DEFAULT = '2026-09-11'
+
+
+def _tez_phone_hours_since():
+    """Дата перехода ТЭЗ на часы по событиям телефона; None — переход выключен."""
+    raw = (os.getenv('TEZ_PHONE_HOURS_SINCE', TEZ_PHONE_HOURS_SINCE_DEFAULT) or '').strip()
+    if not raw or raw.lower() in ('off', 'never', 'none'):
+        return None
+    try:
+        return datetime.strptime(raw[:10], '%Y-%m-%d').date()
+    except Exception:
+        # Опечатка в env не должна тихо вернуть выгрузке роль источника часов:
+        # разрушительная сторона здесь — импорт (replace по дню), поэтому при
+        # непонятном значении падаем в безопасную: импорт выключен всегда.
+        logging.warning(
+            "TEZ_PHONE_HOURS_SINCE=%r не разбирается как YYYY-MM-DD; "
+            "импорт статусов ТЭЗ из Binotel оставлен выключенным", raw
+        )
+        return dt_date.min
+
+
+def _tez_status_import_allowed(day):
+    """Можно ли писать часы ТЭЗ выгрузкой таймлайна Binotel за этот день."""
+    since = _tez_phone_hours_since()
+    if since is None:
+        return True
+    return day < since
+
 
 def _status_import_secure_filename_and_ext(raw_filename, fallback_filename='statuses.csv'):
     original_filename = str(raw_filename or '').strip()
@@ -46277,6 +46316,18 @@ def sync_work_schedules_statuses_binotel():
         if (d_to - d_from).days + 1 > 10:
             return jsonify({"error": "Период синхронизации Binotel не может быть больше 10 дней"}), 400
 
+        # За дни, которые уже считаются по событиям телефона, подтягивать выгрузку
+        # нельзя: импорт делает replace по дню и стёр бы события iCORE Phone целиком.
+        # Дни до перехода остаются доступны — там выгрузка единственный источник.
+        if not _tez_status_import_allowed(d_to):
+            since = _tez_phone_hours_since()
+            return jsonify({
+                "error": (
+                    f"С {since:%d.%m.%Y} часы ТЭЗ считаются по событиям телефона iCORE Phone. "
+                    f"Импорт выгрузки Binotel за эти дни затёр бы их: выберите период до {since:%d.%m.%Y}."
+                )
+            }), 400
+
         import tez_status_sync
         cfg = tez_status_sync.get_config()
         if not cfg.get('login') or not cfg.get('password'):
@@ -60047,16 +60098,28 @@ if __name__ == '__main__':
     async def tez_status_sync_job():
         # Ежедневная авто-выгрузка статусов операторов TEZ из Binotel → импорт в БД.
         # Блокирующий requests-вызов уводим в пул, чтобы не держать event loop.
-        try:
-            import tez_status_sync
-            loop = asyncio.get_event_loop()
-            summary = await loop.run_in_executor(
-                executor_pool,
-                lambda: tez_status_sync.run_sync(_tez_status_sync_importer, logger=logging.getLogger('tez_status_sync')),
+        #
+        # После перехода ТЭЗ на часы по событиям телефона импорт пропускается:
+        # синк тянет вчера-сегодня, то есть ровно те дни, которые уже закрыты
+        # событиями iCORE Phone, а пишет он через replace по дню — то есть стёр
+        # бы их. Остальная часть job'а (добор пула прослушки) нужна по-прежнему.
+        run_day = datetime.now(ZoneInfo('Asia/Almaty')).date()
+        if not _tez_status_import_allowed(run_day):
+            logging.info(
+                "tez_status_sync: импорт статусов пропущен — часы ТЭЗ с %s "
+                "строятся по событиям iCORE Phone", _tez_phone_hours_since()
             )
-            logging.info(f"tez_status_sync result: {summary}")
-        except Exception as e:
-            logging.exception(f"Error running tez_status_sync_job: {e}")
+        else:
+            try:
+                import tez_status_sync
+                loop = asyncio.get_event_loop()
+                summary = await loop.run_in_executor(
+                    executor_pool,
+                    lambda: tez_status_sync.run_sync(_tez_status_sync_importer, logger=logging.getLogger('tez_status_sync')),
+                )
+                logging.info(f"tez_status_sync result: {summary}")
+            except Exception as e:
+                logging.exception(f"Error running tez_status_sync_job: {e}")
         # Норма прослушки зависит от часов, поэтому пул ТЭЗ добираем ПОСЛЕ импорта
         # статусов — тем же порядком, что и у СЗоВ после синка Oktell.
         try:
