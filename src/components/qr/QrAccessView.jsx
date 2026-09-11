@@ -52,12 +52,87 @@ const QR_FRAME_SIDE_COMPACT = 'min(52%, 190px)';
    чтобы прочитать имя, и не заставляет жать кнопку ради следующего человека. */
 const SUCCESS_HOLD_MS = 2400;
 
+/* Сколько рамка держит пойманный код, прежде чем выедет карточка. Складывается
+   из перелёта (0.26 с, qr-access.css) и короткой паузы на «мигнул зелёным»:
+   без неё экран сменяется раньше, чем человек успевает увидеть, ЧТО поймалось,
+   и в очереди из десяти человек не поймёшь, на чей код сработало. */
+const LOCK_HOLD_MS = 380;
+
+/* Поле вокруг кода, когда рамка на него садится, и наименьшая её сторона: код
+   в дальнем углу кадра занимает десяток пикселей, и рамка по нему схлопнулась
+   бы в точку. */
+const LOCK_BOX_PAD = 1.3;
+const LOCK_MIN_SIDE = 64;
+
 const initialsOf = (name) => String(name || '')
     .trim()
     .split(/\s+/)
     .slice(0, 2)
     .map((part) => part.charAt(0).toUpperCase())
     .join('');
+
+const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+
+/* Прямоугольник кода в пикселях КАДРА, из чего бы его ни достали: у
+   BarcodeDetector это boundingBox, у jsQR — четыре угла. */
+const boxOfCorners = (points) => {
+    const list = (points || []).filter((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y));
+    if (list.length < 3) return null;
+    const xs = list.map((p) => p.x);
+    const ys = list.map((p) => p.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+};
+
+const boxOfDetected = (hit) => {
+    const rect = hit?.boundingBox;
+    if (rect?.width && rect?.height) return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+    return boxOfCorners(hit?.cornerPoints);
+};
+
+const boxOfJsQr = (code) => {
+    const spot = code?.location;
+    if (!spot) return null;
+    return boxOfCorners([spot.topLeftCorner, spot.topRightCorner,
+        spot.bottomRightCorner, spot.bottomLeftCorner]);
+};
+
+/* Куда рамке лететь, чтобы сесть на найденный код.
+ *
+ * Ответ — в тех же величинах, в которых рамка стоит по умолчанию: сдвиг от
+ * центра кадра и сторона в пикселях. Само МЕСТО рамки (left/top 50 % с
+ * переносом на полразмера) не трогается вовсе: связка процентов с пропорцией
+ * уже уводила её к правому краю на живом iPhone, и возвращать её сюда нельзя.
+ *
+ * Картинка показана через object-cover: она растянута по БОЛЬШЕМУ из двух
+ * отношений, а лишнее срезано поровну с двух сторон — отсюда и масштаб, и
+ * смещение. Стань кадр object-contain, формула будет другой.
+ */
+const lockOnBox = (box, video, host) => {
+    if (!box?.w || !box?.h || !video || !host) return null;
+    const frameW = video.videoWidth;
+    const frameH = video.videoHeight;
+    const hostW = host.clientWidth;
+    const hostH = host.clientHeight;
+    if (!frameW || !frameH || !hostW || !hostH) return null;
+
+    const scale = Math.max(hostW / frameW, hostH / frameH);
+    const cropX = (hostW - frameW * scale) / 2;
+    const cropY = (hostH - frameH * scale) / 2;
+
+    const side = clamp(
+        Math.max(box.w, box.h) * scale * LOCK_BOX_PAD,
+        LOCK_MIN_SIDE,
+        Math.min(hostW, hostH) * 0.9,
+    );
+    /* За кадр рамке нельзя: затемнение вокруг рисует её собственная тень, и
+       вылезший угол остаётся неприкрытым. */
+    const half = side / 2;
+    const codeX = clamp(cropX + (box.x + box.w / 2) * scale, half, hostW - half);
+    const codeY = clamp(cropY + (box.y + box.h / 2) * scale, half, hostH - half);
+    return { dx: codeX - hostW / 2, dy: codeY - hostH / 2, side };
+};
 
 /* Разрешение на камеру УЖЕ дано? Permissions API есть не везде (в Safari его
    для камеры нет), поэтому «не знаем» = «нет»: тогда на компьютере камера не
@@ -75,8 +150,14 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
     const isNarrow = useIsMobileShell();
 
     const videoRef = useRef(null);
+    /* Кадр целиком: от его размеров считается место кода на экране. */
+    const stageRef = useRef(null);
     const streamRef = useRef(null);
     const timerRef = useRef(null);
+    /* Отсчёт «рамка села — показываем карточку». Гасится вместе со сканером:
+       выключив камеру в эти доли секунды, человек передумал, и выехавшая следом
+       карточка чужого кода — ровно то, чего он не просил. */
+    const lockTimerRef = useRef(null);
     /* Кадр ещё разбирается. BarcodeDetector.detect асинхронный, и без этого
        флага следующий тик интервала входил бы в разбор поверх незакончившегося. */
     const frameBusyRef = useRef(false);
@@ -105,6 +186,9 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
     /* null — фонарика у камеры нет (так на всех iPhone), иначе включён/выключен. */
     const [torchOn, setTorchOn] = useState(null);
 
+    /* Рамка села на код: сдвиг от центра кадра и сторона. null — ещё ищет. */
+    const [lock, setLock] = useState(null);
+
     const [checking, setChecking] = useState(false);
     const [candidate, setCandidate] = useState(null);
     const [failure, setFailure] = useState('');
@@ -124,6 +208,10 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
             clearInterval(timerRef.current);
             timerRef.current = null;
         }
+        if (lockTimerRef.current) {
+            clearTimeout(lockTimerRef.current);
+            lockTimerRef.current = null;
+        }
         if (streamRef.current) {
             streamRef.current.getTracks().forEach((track) => track.stop());
             streamRef.current = null;
@@ -138,10 +226,8 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
        включённой под карточкой подтверждения незачем — она греет телефон и
        ловит следующий код в спину уже принятому решению. */
     const catchCode = useCallback(async (raw) => {
-        if (caughtRef.current) return;
         caughtRef.current = true;
         pendingTokenRef.current = String(raw || '');
-        try { navigator.vibrate?.(18); } catch (e) { /* вибрации может не быть */ }
         stopScanner();
         setFailure('');
         setCandidate(null);
@@ -162,6 +248,21 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
             if (mountedRef.current) setChecking(false);
         }
     }, [apiBaseUrl, authHeaders, stopScanner]);
+
+    /* Код ЗАМЕЧЕН. Сначала рамка бросается к нему и мигает — это и есть «нашёл»:
+       до сих пор она искала, теперь показывает, что именно поймала. Запрос
+       предпросмотра уходит следом, из catchCode. Сторож «ловим один раз» стоит
+       здесь: дальше каждый тик интервала находил бы ту же бумажку заново. */
+    const sightCode = useCallback((raw, box) => {
+        if (caughtRef.current) return;
+        caughtRef.current = true;
+        try { navigator.vibrate?.(18); } catch (e) { /* вибрации может не быть */ }
+        setLock(lockOnBox(box, videoRef.current, stageRef.current) || { dx: 0, dy: 0, side: 0 });
+        lockTimerRef.current = setTimeout(() => {
+            lockTimerRef.current = null;
+            catchCode(raw);
+        }, LOCK_HOLD_MS);
+    }, [catchCode]);
 
     const startScanner = useCallback(async () => {
         if (streamRef.current || startingRef.current) return;
@@ -186,6 +287,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
             await videoRef.current.play();
             caughtRef.current = false;
             cameraWantedRef.current = true;
+            setLock(null);
             setScanning(true);
 
             /* Фонарик есть у задней камеры Android; на iPhone возможности
@@ -219,8 +321,8 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                 try {
                     if (detector) {
                         const codes = await detector.detect(video);
-                        const value = codes?.[0]?.rawValue;
-                        if (value) catchCode(String(value));
+                        const hit = codes?.[0];
+                        if (hit?.rawValue) sightCode(String(hit.rawValue), boxOfDetected(hit));
                         return;
                     }
                     canvas.width = video.videoWidth;
@@ -228,7 +330,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
                     const code = jsQR(frame.data, frame.width, frame.height, { inversionAttempts: 'dontInvert' });
-                    if (code?.data) catchCode(String(code.data));
+                    if (code?.data) sightCode(String(code.data), boxOfJsQr(code));
                 } catch (e) {
                     /* Битый кадр — просто ждём следующий. */
                 } finally {
@@ -246,7 +348,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
             startingRef.current = false;
             if (mountedRef.current) setStarting(false);
         }
-    }, [stopScanner, catchCode]);
+    }, [stopScanner, sightCode]);
 
     const toggleTorch = useCallback(async () => {
         const track = streamRef.current?.getVideoTracks?.()[0];
@@ -273,6 +375,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setFailure('');
         setGranted(null);
         setChecking(false);
+        setLock(null);
         caughtRef.current = false;
         if (cameraWantedRef.current) startScanner();
     }, [startScanner]);
@@ -284,6 +387,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setFailure('');
         setGranted(null);
         setChecking(false);
+        setLock(null);
         caughtRef.current = false;
         startScanner();
     }, [startScanner]);
@@ -359,7 +463,17 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setManualValue('');
     }, [manualValue, catchCode]);
 
-    const frameSide = (isNarrow && manualOpen) ? QR_FRAME_SIDE_COMPACT : QR_FRAME_SIDE;
+    /* Рамка села на код — сторона считается от него; иначе прежняя, от ширины
+       кадра. Подставляем в те же width/paddingBottom, что и раньше: другого
+       способа задать квадрат здесь нет (см. комментарий у самой рамки). */
+    const locked = Boolean(lock);
+    const idleSide = (isNarrow && manualOpen) ? QR_FRAME_SIDE_COMPACT : QR_FRAME_SIDE;
+    const frameSide = (locked && lock.side) ? `${Math.round(lock.side)}px` : idleSide;
+    /* Перелёт — ДОБАВОЧНЫЙ сдвиг поверх переноса на полразмера, а не вместо
+       него: без translate(-50%, -50%) рамка встанет углом в середину кадра. */
+    const frameTransform = locked
+        ? `translate(-50%, -50%) translate(${Math.round(lock.dx)}px, ${Math.round(lock.dy)}px)`
+        : 'translate(-50%, -50%)';
     const sheetOpen = Boolean(checking || candidate || failure || granted);
     const closeSheet = granting ? () => {} : resumeScanning;
 
@@ -393,6 +507,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
 
             {/* Видоискатель */}
             <div
+                ref={stageRef}
                 className="relative overflow-hidden rounded-[28px] bg-slate-900 ring-1 ring-slate-900/10"
                 /* Пока набирают код руками, видоискатель уступает место: на
                    телефоне полноразмерный кадр уводил подвал формы под бар
@@ -423,28 +538,43 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                            (padding-bottom в процентах считается от ШИРИНЫ
                            родителя, как и width, поэтому стороны равны), а
                            положение задано left/top с переносом на полразмера.
-                           Промахнуться тут нечем. */
+                           Промахнуться тут нечем.
+
+                           ДВИЖЕНИЕ рамки — только через transform: пока код не
+                           найден, она подрагивает кадрами qr-hunt, а найдя —
+                           доезжает до него добавочным сдвигом. Размер при этом
+                           меняется width/paddingBottom, а не scale: затемнение
+                           вокруг рисует растянутая тень этой же рамки, и scale
+                           сжал бы вместе с рамкой её разгон — на мелком коде
+                           дальние углы кадра остались бы незатемнёнными. */
                         className="qr-window pointer-events-none absolute rounded-[26px]"
+                        data-qr-state={locked ? 'locked' : 'hunting'}
                         style={{
                             width: frameSide,
                             height: 0,
                             paddingBottom: frameSide,
                             left: '50%',
                             top: '50%',
-                            transform: 'translate(-50%, -50%)',
+                            transform: frameTransform,
                         }}
                     >
-                        <span className="absolute -left-px -top-px h-8 w-8 rounded-tl-[26px] border-l-[3px] border-t-[3px] border-white/90" />
-                        <span className="absolute -right-px -top-px h-8 w-8 rounded-tr-[26px] border-r-[3px] border-t-[3px] border-white/90" />
-                        <span className="absolute -bottom-px -left-px h-8 w-8 rounded-bl-[26px] border-b-[3px] border-l-[3px] border-white/90" />
-                        <span className="absolute -bottom-px -right-px h-8 w-8 rounded-br-[26px] border-b-[3px] border-r-[3px] border-white/90" />
-                        <span className="qr-sweep absolute inset-x-3 h-0.5 rounded-full bg-blue-400/90 shadow-[0_0_12px_rgba(96,165,250,0.9)]" />
+                        <span className="qr-corner absolute -left-px -top-px h-8 w-8 rounded-tl-[26px] border-l-[3px] border-t-[3px] border-white/90" />
+                        <span className="qr-corner absolute -right-px -top-px h-8 w-8 rounded-tr-[26px] border-r-[3px] border-t-[3px] border-white/90" />
+                        <span className="qr-corner absolute -bottom-px -left-px h-8 w-8 rounded-bl-[26px] border-b-[3px] border-l-[3px] border-white/90" />
+                        <span className="qr-corner absolute -bottom-px -right-px h-8 w-8 rounded-br-[26px] border-b-[3px] border-r-[3px] border-white/90" />
+                        {locked ? (
+                            <span className="qr-catch absolute -inset-1.5 rounded-[30px] border-2 border-emerald-300/80" />
+                        ) : (
+                            <span className="qr-sweep absolute inset-x-3 h-0.5 rounded-full bg-blue-400/90 shadow-[0_0_12px_rgba(96,165,250,0.9)]" />
+                        )}
                     </div>
                 )}
 
                 {scanning && !manualOpen && (
-                    <p className="pointer-events-none absolute inset-x-0 bottom-6 text-center text-[13px] font-medium text-white/80 drop-shadow">
-                        Наведите на QR-код сотрудника
+                    <p className={`pointer-events-none absolute inset-x-0 bottom-6 text-center text-[13px] font-medium drop-shadow ${
+                        locked ? 'text-emerald-300' : 'text-white/80'
+                    }`}>
+                        {locked ? 'Код найден' : 'Наведите на QR-код сотрудника'}
                     </p>
                 )}
 

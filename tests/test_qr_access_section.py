@@ -313,10 +313,15 @@ class SectionMarkupTests(unittest.TestCase):
         """
         view = VIEW_PATH.read_text(encoding='utf-8-sig')
         window = view.split('className="qr-window', 1)[1].split('>', 1)[0]
+        self.view_transform = lambda: view.split('const frameTransform', 1)[1].split(';', 1)[0]
 
         self.assertIn("left: '50%'", window)
         self.assertIn("top: '50%'", window)
-        self.assertIn("translate(-50%, -50%)", window)
+        # Перенос на полразмера с 11.09.2026 живёт в frameTransform: к нему
+        # ДОБАВЛЯЕТСЯ перелёт на найденный код. Что он там остался и что его не
+        # отменяют кадры анимации — сторожит ScanFrameHuntTests.
+        self.assertIn('transform: frameTransform', window)
+        self.assertIn("? `translate(-50%, -50%) translate(", self.view_transform())
         # Сторона — ОДНО значение на ширину и на нижнее поле: проценты у обоих
         # считаются от ширины родителя, поэтому стороны равны без пропорции.
         self.assertIn('width: frameSide', window)
@@ -365,6 +370,112 @@ class SectionMarkupTests(unittest.TestCase):
         module_tail = view.split('mountedRef.current = false;', 1)
         self.assertEqual(len(module_tail), 2, 'нет пометки размонтирования')
         self.assertIn('stopScanner();', module_tail[1].split('}, [stopScanner]);', 1)[0])
+
+
+class ScanFrameHuntTests(unittest.TestCase):
+    """Рамка ищет код сама и садится на него (постановка владельца 11.09.2026).
+
+    До этого рамка стояла посреди кадра неподвижно, а поймав код — просто
+    исчезала вместе с камерой: сменялся экран, и по нему нельзя было сказать,
+    ЧТО поймалось. Теперь она подрагивает, пока ищет, а найдя — перелетает на
+    место кода в кадре, зеленеет и держит его долю секунды.
+
+    Сторожатся три вещи, каждая из которых ломается молча — картинка остаётся
+    правдоподобной, а рамка показывает не туда.
+    """
+
+    def setUp(self):
+        self.view = VIEW_PATH.read_text(encoding='utf-8-sig')
+        self.css = CSS_PATH.read_text(encoding='utf-8-sig')
+
+    def _function(self, name, end='\n};\n'):
+        return self.view.split(f'const {name} = ', 1)[1].split(end, 1)[0]
+
+    def test_hunting_keeps_the_frame_centred(self):
+        """Каждый кадр анимации несёт перенос на полразмера.
+
+        Анимация в каскаде стоит ВЫШЕ inline-стиля, а место рамки задано именно
+        им (left/top 50 % + translate(-50%, -50%)). Кадр, написанный без
+        переноса, отменяет центровку на всё время анимации: рамка встаёт левым
+        верхним углом в середину кадра и дёргается уже оттуда. Никакой ошибки
+        при этом не видно — просто «сканер почему-то смещён».
+        """
+        frames = self.css.split('@keyframes qr-hunt {', 1)[1].split('\n}', 1)[0]
+        moves = [line for line in frames.splitlines() if 'transform:' in line]
+        self.assertGreaterEqual(len(moves), 4, 'рамка должна ходить, а не стоять')
+        for line in moves:
+            self.assertIn('translate(-50%, -50%)', line, f'кадр без центровки: {line.strip()}')
+
+        binding = self.css.split('.qr-window[data-qr-state="hunting"] {', 1)[1].split('}', 1)[0]
+        self.assertIn('animation: qr-hunt', binding)
+        self.assertIn("data-qr-state={locked ? 'locked' : 'hunting'}", self.view)
+
+    def test_landing_is_added_to_the_centring_and_not_instead_of_it(self):
+        """Перелёт — ДОБАВОЧНЫЙ сдвиг, а не замена переноса.
+
+        Размер рамке меняют width/padding-bottom, а не scale: затемнение вокруг
+        рисует растянутая тень самой рамки, и scale сжал бы вместе с ней разгон
+        тени — на мелком коде дальние углы кадра остались бы незатемнёнными.
+        """
+        transform = self.view.split('const frameTransform = locked', 1)[1].split(';', 1)[0]
+        self.assertIn('translate(-50%, -50%) translate(', transform)
+        self.assertNotIn('scale(', transform, 'размер рамки — не через scale')
+
+        side = self.view.split('const frameSide = ', 1)[1].split(';', 1)[0]
+        self.assertIn('lock.side', side)
+        self.assertIn('px', side)
+
+    def test_frame_lands_where_the_code_is(self):
+        """Пересчёт «код в кадре → место на экране» идёт по object-cover.
+
+        Картинка растянута по БОЛЬШЕМУ из двух отношений, лишнее срезано поровну
+        с двух сторон. Взяв меньшее (object-contain), рамка садится мимо кода
+        ровно на величину среза — на телефоне это половина ширины кадра, и
+        выглядит это как «сканер показывает не туда», а не как ошибка расчёта.
+        """
+        body = self._function('lockOnBox')
+        self.assertIn('const scale = Math.max(hostW / frameW, hostH / frameH);', body)
+        self.assertIn('object-cover', self.view, 'кадр перестал быть object-cover')
+        # Рамка не вылезает за кадр: затемнение рисует её же тень.
+        self.assertIn('clamp(cropX', body)
+        self.assertIn('clamp(cropY', body)
+
+        # jsQR отдаёт углы, BarcodeDetector — прямоугольник; читаем оба.
+        corners = self._function('boxOfJsQr')
+        for name in ('topLeftCorner', 'topRightCorner', 'bottomRightCorner', 'bottomLeftCorner'):
+            self.assertIn(name, corners)
+        self.assertIn('hit?.boundingBox', self._function('boxOfDetected'))
+
+    def test_the_code_is_caught_once_and_only_through_the_frame(self):
+        """Разбор кадра зовёт sightCode, а не catchCode напрямую.
+
+        Иначе карточка выезжает мгновенно, и посадка рамки не видна вовсе —
+        ровно то поведение, ради ухода от которого всё и сделано. Сторож
+        «ловим один раз» при этом обязан стоять В sightCode: без него каждый
+        следующий тик интервала находил бы ту же бумажку заново и слал бы ещё
+        один запрос предпросмотра.
+        """
+        start = self.view.split('const startScanner = useCallback', 1)[1]
+        start = start.split('const toggleTorch', 1)[0]
+        self.assertIn('sightCode(String(', start)
+        self.assertNotIn('catchCode(String(', start)
+
+        sight = self.view.split('const sightCode = useCallback', 1)[1].split('}, [catchCode]);', 1)[0]
+        self.assertIn('if (caughtRef.current) return;', sight)
+        self.assertIn('caughtRef.current = true;', sight)
+        self.assertIn('LOCK_HOLD_MS', sight)
+
+    def test_switching_the_camera_off_cancels_the_pending_card(self):
+        """Выключил камеру, пока рамка садилась, — карточка не выезжает.
+
+        Между «поймал» и вопросом «открыть доступ?» есть доли секунды. Не гаси
+        сканер этот отсчёт, нажатие «выключить камеру» кончалось бы выехавшей
+        поверх карточкой на чужой код — человек её не просил и уже не понимает,
+        откуда она.
+        """
+        stop = self.view.split('const stopScanner = useCallback', 1)[1].split('}, []);', 1)[0]
+        self.assertIn('clearTimeout(lockTimerRef.current)', stop)
+        self.assertIn('lockTimerRef.current = null;', stop)
 
 
 if __name__ == '__main__':

@@ -70,19 +70,72 @@ body[data-tabbar-side="right"] .qr-access-stage {
     animation: qr-sweep 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
-/* Пульс вокруг пойманного кода — короткое «поймал», как отклик на нажатие. */
+/* РАМКА ИЩЕТ. Пока код не пойман, окно коротко дёргается в стороны и слегка
+ * поджимается — как объектив, который наводится: рывок, замер, рывок. Стоять
+ * ей нельзя — неподвижная рамка над неподвижной картинкой читается как
+ * зависший экран, и человек начинает жать кнопки вместо того, чтобы поднести
+ * код ближе.
+ *
+ * ПЕРЕНОС НА ПОЛРАЗМЕРА ПОВТОРЁН В КАЖДОМ КАДРЕ, и это не описка. Анимация в
+ * каскаде стоит ВЫШЕ inline-стиля: кадр без translate(-50%, -50%) отменил бы
+ * центровку рамки целиком, и она встала бы левым верхним углом в середину
+ * кадра. Проценты во втором translate считаются от стороны самой рамки,
+ * поэтому рывки одинаковы и на телефоне, и на планшете.
+ */
+@keyframes qr-hunt {
+    0%, 4% { transform: translate(-50%, -50%) translate(0, 0) scale(1); }
+    10%, 26% { transform: translate(-50%, -50%) translate(-6%, -4%) scale(0.965); }
+    32%, 48% { transform: translate(-50%, -50%) translate(7%, -3%) scale(0.99); }
+    54%, 70% { transform: translate(-50%, -50%) translate(4%, 6%) scale(0.945); }
+    76%, 92% { transform: translate(-50%, -50%) translate(-5%, 3%) scale(0.98); }
+    100% { transform: translate(-50%, -50%) translate(0, 0) scale(1); }
+}
+
+.qr-window[data-qr-state="hunting"] {
+    animation: qr-hunt 5.2s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+/* КОД НАЙДЕН — рамка садится на него. Перелёт короткий: следом выезжает
+ * карточка подтверждения (LOCK_HOLD_MS в компоненте), и долгий полёт
+ * превратился бы в задержку ответа. Сторону рамке меняет компонент
+ * (width/padding-bottom в пикселях), здесь — только то, как она туда едет. */
+.qr-window[data-qr-state="locked"] {
+    animation: none;
+    transition: transform 0.26s cubic-bezier(0.22, 0.9, 0.3, 1),
+                width 0.26s cubic-bezier(0.22, 0.9, 0.3, 1),
+                padding-bottom 0.26s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+
+/* Углы зеленеют — «вот этот». Селектор тяжелее утилиты border-white/90
+ * намеренно: при равном весе выиграла бы она (утилиты в бандле ниже) —
+ * см. [[component-css-loses-to-tailwind]]. */
+.qr-window[data-qr-state="locked"] .qr-corner {
+    border-color: rgb(52, 211, 153);
+    transition: border-color 0.18s ease-out;
+}
+
+/* Всплеск вокруг пойманного кода — короткое «поймал», как отклик на нажатие.
+ * forwards обязателен: без него кольцо, досчитав до прозрачности, вернулось бы
+ * к непрозрачному и осталось висеть вторым контуром вокруг рамки. */
 @keyframes qr-catch {
     from { transform: scale(1); opacity: 0.9; }
     to { transform: scale(1.06); opacity: 0; }
 }
 
 .qr-catch {
-    animation: qr-catch 0.45s ease-out;
+    animation: qr-catch 0.45s ease-out forwards;
 }
 
 @media (prefers-reduced-motion: reduce) {
     .qr-sweep,
-    .qr-catch {
+    .qr-catch,
+    .qr-window[data-qr-state="hunting"] {
         animation: none;
+    }
+
+    /* Рамка всё равно встаёт на код — но без перелёта: он здесь и есть то
+       самое движение, от которого человек просил избавить. */
+    .qr-window[data-qr-state="locked"] {
+        transition: none;
     }
 }
