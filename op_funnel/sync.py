@@ -195,6 +195,49 @@ def _pull_amo(cursor, direction_code, day_from, day_to):
     return rows, seen, len(leads)
 
 
+def _autolink_owners(cursor, source, direction_code, seen, lead_rows):
+    """Связать встреченные имена с сотрудниками направления и проставить их лидам.
+
+    Зачем это здесь, а не «пусть человек сопоставит». СРМ отдаёт оператора ИМЕНЕМ,
+    и без связки все лиды падают в строку «не сопоставлен»: раздел после первой
+    выгрузки показывает 7748 лидов у несуществующего человека и ноль у всех
+    остальных. Открыв такой экран, супервайзер решит, что раздел сломан, — и
+    будет прав. Двадцать четыре ручных сопоставления на каждое направление до
+    первого полезного числа — это не «аккуратность», это неработающий раздел.
+
+    Связывается ТОЛЬКО однозначное, тем же кодом, что и amoCRM: имена сводятся к
+    огрублённой латинице (ж = zh и j, қ = k и q, й = y и i), и требуется
+    совпадение минимум двух слов. Замерено на живых данных 11.09.2026: из 24 имён
+    «Потока» связалось 20 при НУЛЕ неоднозначных, включая «Жұмаханбет Алдияр» →
+    «Жуманхабет Алдияр» и «Кузембаева Аяулым» → «Кузембекова Аяулым». Остальные
+    четыре («Жанат Абылайхан» против «Жанат Абылай») остались человеку — разница
+    в одно слово порогу не проходит, и это правильно.
+
+    Решение человека автоматика не переписывает: `fill_operator_map` бьёт только
+    по строкам, где сотрудник ещё не выбран.
+    """
+    people = queries.direction_people(cursor, direction_code)
+    if not people:
+        return 0
+    matched = operator_match.auto_link(
+        [{'id': key, 'name': name, 'email': ''} for key, name in seen.items()], people)
+    if matched['links']:
+        queries.fill_operator_map(
+            cursor, source,
+            {code: item['user_id'] for code, item in matched['links'].items()})
+    if matched['ambiguous']:
+        log.info('op_funnel: под %d имён %s подошло больше одного сотрудника — '
+                 'оставлены человеку', len(matched['ambiguous']), source)
+
+    # Лиды уже разобраны со старой картой — проставляем сотрудника заново, иначе
+    # связка подействовала бы только со следующей выгрузки.
+    owner_map = queries.resolve_operator_map(cursor, source)
+    for row in lead_rows or []:
+        if row.get('user_id') is None:
+            row['user_id'] = owner_map.get(row.get('owner_raw'))
+    return len(matched['links'])
+
+
 def _writable_days(cursor, direction_code, day_from, day_to, force):
     """Сутки, чьи лиды и причины можно переписать.
 
@@ -444,6 +487,7 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
 
             if seen:
                 queries.touch_operator_map(cursor, source, seen, direction_code)
+                _autolink_owners(cursor, source, direction_code, seen, lead_rows)
 
             if lead_rows:
                 # Пополнение справочника причин: новая причина обязана появиться
