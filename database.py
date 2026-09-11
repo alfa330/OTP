@@ -38271,15 +38271,26 @@ class Database:
                 'ignored': CHAT_MANAGER_NON_WORK_STATUS_KEYS | CHAT_MANAGER_LOGOUT_STATUS_KEYS | CHAT_MANAGER_ACTION_STATUS_KEYS,
             }
         if code in CALCULATION_MODEL_TEZ_CODES:
-            # Обе TEZ-модели (Линия/ТП и ОП) считают часы из посегментной выгрузки TEZ:
-            # active + work in crm = работа, break in work = перерыв, inactive = офлайн (игнор).
+            # Обе TEZ-модели (Линия/ТП и ОП) знают ДВА словаря статусов сразу, и это не
+            # перестраховка: 11.09.2026 отдел перешёл с ночной выгрузки кабинета Binotel на
+            # события телефона iCORE Phone (TEZ_PHONE_HOURS_SINCE в bot_schedule2).
+            #   * до перехода дни размечены словами кабинета: active + work in crm = работа,
+            #     break in work = перерыв, inactive = офлайн (игнор);
+            #   * после — словами телефона: готов / занят / перезвон = работа, перерыв = перерыв.
+            # Оставить только новый словарь значило бы обнулить всю историю отдела, оставить
+            # только старый — обнулить каждый день после перехода: незнакомый ключ не попадает
+            # ни в работу, ни в перерыв, и час просто исчезает из учёта. Поэтому объединение,
+            # а не ветка по дате: день сам приносит с собой тот словарь, которым размечен.
             return {
                 'code': code,
-                'work': TEZ_WORK_STATUS_KEYS,
-                'talk': set(),
-                'break': TEZ_BREAK_STATUS_KEYS,
+                'work': TEZ_WORK_STATUS_KEYS | SCHEDULE_AUTO_WORK_STATUS_KEYS,
+                # Разговор у кабинета не виден вовсе (в выгрузке такого состояния нет), а
+                # телефон его отмечает сам — поэтому с переходом у ТЭЗ появляется и talk_time,
+                # метрика для которого в моделях заведена давно и стояла пустой.
+                'talk': SCHEDULE_AUTO_TALK_STATUS_KEYS,
+                'break': TEZ_BREAK_STATUS_KEYS | SCHEDULE_AUTO_BREAK_STATUS_KEYS,
                 'training': {SCHEDULE_AUTO_TRAINING_STATUS_KEY, 'training', 'study'},
-                'late_start': TEZ_WORK_STATUS_KEYS,
+                'late_start': TEZ_WORK_STATUS_KEYS | SCHEDULE_AUTO_WORK_STATUS_KEYS,
                 'ignored': TEZ_IGNORED_STATUS_KEYS,
             }
         return {
@@ -58676,6 +58687,13 @@ class Database:
         Оператор без событий в ответ НЕ попадает: его статус неизвестен, и это
         не то же самое, что «не в сети» (телефон мог просто не обновиться).
         Отличить одно от другого обязан вызывающий — правило нуля табло.
+
+        Берём ТОЛЬКО события телефона (`client_event_id IS NOT NULL`). В той же
+        таблице живут сегменты ночной выгрузки кабинета Binotel, и они не статус
+        «сейчас», а история вчерашнего дня: 11.09.2026 на стене висело
+        «Inactive, 14:48» у троих — их последним событием был выход из кабинета,
+        записанный ночным импортом за 10.09. Живой статус приходит только через
+        POST /api/operator/status_event, и только он несёт client_event_id.
         """
         ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         if not ids:
@@ -58693,6 +58711,7 @@ class Database:
                 FROM operator_status_events e
                 WHERE e.operator_id = ANY(%s)
                   AND e.event_at >= %s
+                  AND e.client_event_id IS NOT NULL
                 ORDER BY e.operator_id, e.event_at DESC, e.id DESC
                 """,
                 (ids, floor_value)

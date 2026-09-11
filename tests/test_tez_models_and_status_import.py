@@ -1,6 +1,7 @@
 import ast
 import csv
 import re
+import typing
 import unittest
 from datetime import datetime, timedelta
 from io import StringIO
@@ -16,6 +17,39 @@ SALARY_FORMULA_PATH = ROOT / "src" / "utils" / "salaryFormula.js"
 
 def _read(path):
     return path.read_text(encoding="utf-8-sig")
+
+
+def _status_profile(model_code):
+    """Настоящий `Database._status_profile_for_calculation_model` без импорта database.py.
+
+    Импортировать модуль нельзя — на импорте он поднимает пул к боевой базе. Поэтому из
+    дерева берутся константы верхнего уровня (словари статусов), функция нормализации кода
+    модели и сам метод, и всё это исполняется в своём пространстве имён."""
+    tree = source_cache.parse(_read(DATABASE_PATH))
+    namespace = {'Optional': typing.Optional, 'List': typing.List, 'Any': typing.Any,
+                 'Dict': typing.Dict, 'Tuple': typing.Tuple}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and all(
+                isinstance(target, ast.Name) and target.id.isupper() for target in node.targets):
+            try:
+                module = ast.Module(body=[node], type_ignores=[])
+                exec(compile(ast.fix_missing_locations(module), str(DATABASE_PATH), 'exec'), namespace)
+            except Exception:
+                # Константы, собранные из недоступных здесь имён, профилю не нужны.
+                pass
+        elif isinstance(node, ast.FunctionDef) and node.name in (
+                'normalize_calculation_model_code', '_normalize_direction_name_key'):
+            module = ast.Module(body=[node], type_ignores=[])
+            exec(compile(ast.fix_missing_locations(module), str(DATABASE_PATH), 'exec'), namespace)
+
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Database')
+    wanted = {'_status_profile_for_calculation_model', '_normalize_calculation_model_code',
+              '_normalize_direction_key', '_is_chat_manager_direction'}
+    methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    stub = ast.ClassDef(name='_Profiles', bases=[], keywords=[], body=methods, decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[stub], type_ignores=[])),
+                 str(DATABASE_PATH), 'exec'), namespace)
+    return namespace['_Profiles']()._status_profile_for_calculation_model(model_code)
 
 
 def _tez_status_import_namespace():
@@ -165,9 +199,45 @@ class TezCalculationModelRegistryTests(unittest.TestCase):
         self.assertIn("TEZ_IGNORED_STATUS_KEYS = {'inactive'}", self.src)
         profile = self.src[self.src.index("if code in CALCULATION_MODEL_TEZ_CODES:"):]
         profile = profile[:profile.index("return {", profile.index("return {") + 1)]
-        self.assertIn("'work': TEZ_WORK_STATUS_KEYS", profile)
-        self.assertIn("'break': TEZ_BREAK_STATUS_KEYS", profile)
         self.assertIn("'ignored': TEZ_IGNORED_STATUS_KEYS", profile)
+
+    def test_tez_profile_knows_both_status_dictionaries(self):
+        """11.09.2026 отдел перешёл на события телефона: словарь кабинета остался нужен.
+
+        Оставь в профиле только один из двух — и половина истории отдела молча обнулится:
+        незнакомый ключ не попадает ни в работу, ни в перерыв, а часы считаются суммой
+        РАСПОЗНАННЫХ интервалов. Проверено на проде 11.09.2026: за 10.09 у отдела 64,9 ч,
+        за 11.09 — 1,0 ч при 15 нулевых строках из 16."""
+        profile = self.src[self.src.index("if code in CALCULATION_MODEL_TEZ_CODES:"):]
+        profile = profile[:profile.index("return {", profile.index("return {") + 1)]
+        self.assertIn("'work': TEZ_WORK_STATUS_KEYS | SCHEDULE_AUTO_WORK_STATUS_KEYS", profile)
+        self.assertIn("'break': TEZ_BREAK_STATUS_KEYS | SCHEDULE_AUTO_BREAK_STATUS_KEYS", profile)
+        # Опоздание ищется по первому рабочему статусу — тем же двойным словарём.
+        self.assertIn("'late_start': TEZ_WORK_STATUS_KEYS | SCHEDULE_AUTO_WORK_STATUS_KEYS", profile)
+        # Разговор кабинету неизвестен, а телефон его отмечает: talk перестал быть пустым.
+        self.assertIn("'talk': SCHEDULE_AUTO_TALK_STATUS_KEYS", profile)
+        self.assertNotIn("'talk': set()", profile)
+
+    def test_tez_profile_classifies_keys_of_both_sources(self):
+        """Настоящий профиль на настоящих ключах: и кабинетных, и телефонных."""
+        profile = _status_profile('tez_line')
+        for key in ('active', 'work in crm'):
+            self.assertIn(key, profile['work'], key)
+        for key in ('готов', 'занят', 'перезвон'):
+            self.assertIn(key, profile['work'], key)
+        self.assertIn('break in work', profile['break'])
+        self.assertIn('перерыв', profile['break'])
+        self.assertIn('занят', profile['talk'])
+        self.assertIn('тренинг', profile['training'])
+        self.assertIn('inactive', profile['ignored'])
+        # Модель ОП делит профиль с линией — у отдела один поток статусов на оба направления.
+        self.assertEqual(_status_profile('tez_op'), dict(profile, code='tez_op'))
+
+    def test_operator_model_is_left_alone(self):
+        """Правка про ТЭЗ не должна была задеть операторскую модель СЗоВ и ОП."""
+        profile = _status_profile('operator')
+        self.assertNotIn('active', profile['work'])
+        self.assertIn('готов', profile['work'])
 
 
 class TezMonthlyPlanBackendTests(unittest.TestCase):

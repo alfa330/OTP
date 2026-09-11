@@ -621,6 +621,7 @@ class _SnapshotHarness:
             # Поимённый список: каталог статусов телефона, счётчики человека, сборка строк.
             '_TEZ_WALLBOARD_STATUS_CATALOG',
             '_TEZ_WALLBOARD_STATUS_UNKNOWN',
+            '_TEZ_WALLBOARD_CABINET_STATUS_KEYS',
             '_tez_wallboard_status_entry',
             '_tez_wallboard_person_stats',
             '_tez_wallboard_roster',
@@ -957,6 +958,17 @@ class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
             label, tone, _ = ns['_tez_wallboard_status_entry'](spelling)
             self.assertEqual((tone, label), ('tech', 'Техническая пауза'), spelling)
 
+    def test_cabinet_vocabulary_never_becomes_a_live_status(self):
+        """Слово выгрузки кабинета — не состояние человека сейчас, а разметка прошлых суток.
+
+        11.09.2026 на стене висело «Inactive, 14:48» у троих: их последним событием был
+        выход из кабинета, записанный ночным импортом за 10.09. Про такого человека мы
+        знаем ровно одно — его телефон молчит."""
+        ns = self._namespace()
+        for key in ('inactive', 'active', 'work in crm', 'работа в CRM', 'break in work'):
+            self.assertEqual(ns['_tez_wallboard_status_entry'](key),
+                             ns['_TEZ_WALLBOARD_STATUS_UNKNOWN'], key)
+
     def test_unknown_status_key_is_shown_not_hidden(self):
         """Новый статус телефона приедет раньше табло: показываем как есть, а не «нет событий»."""
         ns = self._namespace()
@@ -1122,6 +1134,17 @@ class TezWallboardLiveStatusSourceTests(unittest.TestCase):
         self.assertNotIn('event_date', api.cursor.sql)
         self.assertEqual(api.cursor.params[1],
                          self.NOW - timedelta(hours=api.OPERATOR_LIVE_STATUS_LOOKBACK_HOURS))
+
+    def test_only_phone_events_count_as_a_live_status(self):
+        """В той же таблице лежит ночная выгрузка кабинета — она не статус «сейчас».
+
+        Событие телефона всегда несёт client_event_id (ICoreReporter шлёт GUID ради
+        идемпотентности ретраев), у строк импорта его нет. Без этого условия последним
+        событием человека оказывался вчерашний выход из кабинета, и на стене 11.09.2026
+        висело «Inactive, 14:48»."""
+        api = _RealLiveStatuses()
+        api([101], as_of=self.NOW)
+        self.assertIn('AND e.client_event_id IS NOT NULL', api.cursor.sql)
 
     def test_only_the_last_event_of_each_person_counts(self):
         """Статус — последнее событие, поэтому DISTINCT ON с сортировкой по времени вниз."""
