@@ -529,6 +529,15 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
             manual_rows = queries.read_manual_rows(cursor, direction_code, day_from, day_to)
             daily = _daily_rows(cursor, direction_code, day_from, day_to,
                                 lead_rows, chat_rows, manual_rows, ticket_rows)
+            # Снести строки, которых новый расчёт больше не даёт, — иначе строка
+            # «Не сопоставлен» остаётся висеть после того, как операторов
+            # связали, и удваивает итог суток.
+            writable_days = _writable_days(cursor, direction_code, day_from, day_to, force)
+            if writable_days:
+                queries.drop_orphan_daily(
+                    cursor, direction_code, writable_days,
+                    {(row['work_day'], row['user_id']) for row in daily})
+
             frozen = queries.freeze_daily(cursor, daily, force=force, run_id=run_id,
                                           today=date.today())
             summary['days_frozen'] = frozen['frozen']

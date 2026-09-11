@@ -128,6 +128,33 @@ class FreezeTests(unittest.TestCase):
         self.assertEqual(cursor.inserted_into('op_funnel_drift'), [])
 
 
+class OrphanDailyTests(unittest.TestCase):
+    """Строки, которых новый расчёт больше не даёт, обязаны исчезать."""
+
+    def test_РЕГРЕССИЯ_старая_строка_не_сопоставлен_удваивала_итог(self):
+        """Поймано на первом же прогоне на проде.
+
+        Пока операторы не были связаны, все 1008 лидов за сутки лежали в строке
+        «Не сопоставлен». После связывания они разошлись по людям, новый расчёт
+        такой строки уже не даёт — а `freeze_daily` обновляет только то, что ему
+        передали, и старая строка осталась. Итог суток стал 2016 вместо 1008.
+        """
+        cursor = FakeCursor()
+        keep = {(YESTERDAY, 7), (YESTERDAY, 9)}
+        queries.drop_orphan_daily(cursor, 'op_potok', [YESTERDAY], keep)
+        statements = [sql for sql, _ in cursor.statements]
+        self.assertTrue(any('DELETE FROM op_funnel_daily' in sql for sql in statements))
+        # Удаляем именно «всё, кроме пересчитанного», а не всё подряд.
+        self.assertTrue(any('NOT IN' in sql for sql in statements))
+
+    def test_без_суток_ничего_не_удаляется(self):
+        # Зафиксированные закрытые сутки в список переписываемых не попадают, и
+        # трогать их нельзя ни при каких обстоятельствах.
+        cursor = FakeCursor()
+        self.assertEqual(queries.drop_orphan_daily(cursor, 'op_potok', [], {(YESTERDAY, 7)}), 0)
+        self.assertEqual(cursor.statements, [])
+
+
 class NightlyWindowTests(unittest.TestCase):
 
     def test_РЕГРЕССИЯ_ночное_окно_не_берёт_сегодняшний_день(self):

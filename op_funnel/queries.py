@@ -687,6 +687,36 @@ def frozen_days(cursor, direction_code, day_from, day_to):
     return {_as_day(row['work_day']) for row in _rows(cursor)}
 
 
+def drop_orphan_daily(cursor, direction_code, days, keep):
+    """Снести суточные строки, которых новый расчёт больше не даёт.
+
+    Это не уборка ради чистоты, а исправление удвоения. Пример из первого
+    прогона на проде: пока операторы не были сопоставлены, все 1008 лидов за
+    03.09 лежали в строке «Не сопоставлен». После сопоставления они разошлись по
+    людям, новый расчёт строки «Не сопоставлен» за эти сутки уже НЕ ДАЁТ — и
+    старая осталась нетронутой, потому что `freeze_daily` обновляет только то,
+    что ему передали. Итог за сутки стал 2016 вместо 1008.
+
+    Тот же случай возникает, когда оператора перевели в другую группу или
+    исключили из направления: его вчерашняя строка осталась бы висеть вечно.
+
+    Трогаем только те сутки, которые и так вправе переписать (`days`), — на
+    зафиксированных закрытых сутках ничего не удаляем.
+    """
+    if not days:
+        return 0
+    cursor.execute(
+        """
+        DELETE FROM op_funnel_daily
+        WHERE direction_code = %s
+          AND work_day = ANY(%s)
+          AND (work_day, user_id) NOT IN %s
+        """,
+        (direction_code, list(days), tuple(keep) if keep else ((None, -1),)),
+    )
+    return cursor.rowcount or 0
+
+
 def read_daily(cursor, direction_code, day_from, day_to, user_ids=None):
     where = ["d.direction_code = %(direction)s", "d.work_day BETWEEN %(day_from)s AND %(day_to)s"]
     args = {'direction': direction_code, 'day_from': day_from, 'day_to': day_to}
