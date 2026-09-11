@@ -41255,6 +41255,31 @@ class Database:
             return 'action'
         return 'status'
 
+    def _clip_part_after_authoritative(self, part, authoritative_end):
+        """Обрезать кусок сегмента так, чтобы он не наезжал на авторитетный интервал.
+
+        Возвращает None, если от куска ничего не остаётся. Авторитетные интервалы
+        (готовые start/stop из выгрузки) остаются как есть, а пересобранное из
+        событий начинается после них — так сутки перехода на другой источник
+        собираются из двух половин, а не теряются целиком.
+        """
+        if authoritative_end is None:
+            # Границу определить не удалось — ведём себя как раньше и защищаем
+            # весь день: потерять кусок дня безопаснее, чем задвоить интервалы.
+            return None
+        start_at = part.get('start_at')
+        end_at = part.get('end_at')
+        if not isinstance(start_at, datetime) or not isinstance(end_at, datetime):
+            return None
+        if start_at >= authoritative_end:
+            return part
+        if end_at <= authoritative_end:
+            return None
+        clipped = dict(part)
+        clipped['start_at'] = authoritative_end
+        clipped['duration_sec'] = max(0, int((end_at - authoritative_end).total_seconds()))
+        return clipped
+
     def _split_status_segment_datetimes_by_day(self, start_at_value, end_at_value):
         if not isinstance(start_at_value, datetime) or not isinstance(end_at_value, datetime):
             return []
@@ -41381,7 +41406,7 @@ class Database:
         # поэтому переживает отдельные HTTP-запросы и рестарты приложения.
         cursor.execute(
             """
-            SELECT operator_id, status_date
+            SELECT operator_id, status_date, MAX(end_at) AS authoritative_end
             FROM operator_status_segments
             WHERE operator_id = ANY(%s)
               AND status_date >= %s
@@ -41391,11 +41416,20 @@ class Database:
             """,
             (op_ids, start_date_obj, end_date_obj),
         )
-        authoritative_days = {
-            (int(operator_id), status_date)
-            for operator_id, status_date in (cursor.fetchall() or [])
-            if status_date is not None
-        }
+        # Защита действует ПО ВРЕМЕНИ, а не на весь день. В сутки перехода отдела
+        # на другой источник (ТЭЗ: ночная выгрузка Binotel → события телефона
+        # iCORE Phone) день делится между двумя источниками: выгрузка закрывает
+        # ночь, дальше день закрывают события телефона. Блокировка целого дня
+        # оставляла такой день почти пустым — 453 события телефона не давали ни
+        # одного сегмента из-за 20 ночных строк выгрузки.
+        # Отсутствие ключа = авторитетных интервалов за день нет, пересборка
+        # свободна. Значение None = границу определить не удалось, тогда день
+        # защищаем целиком, как раньше.
+        authoritative_until = {}
+        for operator_id, status_date, authoritative_end in (cursor.fetchall() or []):
+            if status_date is None:
+                continue
+            authoritative_until[(int(operator_id), status_date)] = authoritative_end
 
         events_by_operator = {}
         for event_id, operator_id, event_at_value, status_key, state_note, event_kind in rows:
@@ -41436,8 +41470,13 @@ class Database:
                     status_date_obj = part.get('status_date')
                     if status_date_obj < start_date_obj or status_date_obj > end_date_obj:
                         continue
-                    if (int(op_id), status_date_obj) in authoritative_days:
-                        continue
+                    authoritative_key = (int(op_id), status_date_obj)
+                    if authoritative_key in authoritative_until:
+                        part = self._clip_part_after_authoritative(
+                            part, authoritative_until[authoritative_key]
+                        )
+                        if part is None:
+                            continue
                     segment_values.append((
                         int(op_id),
                         status_date_obj,
@@ -41460,8 +41499,13 @@ class Database:
                     status_date_obj = part.get('status_date')
                     if status_date_obj < start_date_obj or status_date_obj > end_date_obj:
                         continue
-                    if (int(op_id), status_date_obj) in authoritative_days:
-                        continue
+                    authoritative_key = (int(op_id), status_date_obj)
+                    if authoritative_key in authoritative_until:
+                        part = self._clip_part_after_authoritative(
+                            part, authoritative_until[authoritative_key]
+                        )
+                        if part is None:
+                            continue
                     segment_values.append((
                         int(op_id),
                         status_date_obj,

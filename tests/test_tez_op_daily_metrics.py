@@ -348,7 +348,14 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
                     and "is_authoritative" in normalized
                     and normalized.startswith("SELECT")
                 ):
-                    self.rows = [(7, start_day), (7, end_day)]
+                    # Третья колонка — MAX(end_at) авторитетных сегментов за день:
+                    # защита действует по времени, а не на весь день (см.
+                    # _clip_part_after_authoritative). На этот тест она не влияет:
+                    # сами события отфильтрованы SQL, кандидатов нет.
+                    self.rows = [
+                        (7, start_day, datetime.combine(start_day, dt_time(1, 0))),
+                        (7, end_day, datetime.combine(end_day, dt_time(1, 0))),
+                    ]
                 else:
                     self.rows = []
                     if normalized.startswith("DELETE FROM operator_status_segments"):
