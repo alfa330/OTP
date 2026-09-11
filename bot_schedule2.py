@@ -39426,17 +39426,26 @@ def _tez_wallboard_person_stats(employees, number):
     stats = record.get('stats') or {}
     served = int(stats.get('incoming_success') or 0)
     out_answered = int(stats.get('outgoing_success') or 0)
+    outgoing_total = int(stats.get('outgoing_amount') or 0)
     return {
         'served': served,
         'missed': int(stats.get('incoming_failed') or 0),
         # Усекаем, а не округляем — то же правило, что у общих плиток: кабинет показывает
         # 02:09 при 129,74 с, и округление разошлось бы с ним на каждой смене.
         'avg_talk_seconds': int(stats.get('incoming_billsec') // served) if served else None,
-        'outgoing_total': int(stats.get('outgoing_amount') or 0),
+        'outgoing_total': outgoing_total,
         'outgoing_success': out_answered,
         'outgoing_talk_seconds': int(stats.get('outgoing_billsec') or 0),
         'avg_outgoing_talk_seconds': (int(stats.get('outgoing_billsec') // out_answered)
                                       if out_answered else None),
+        # Дальше — то, чего на стене нет, но что нужно выгрузке за период: суммы, из которых
+        # средние пересчитываются по всему периоду (среднее средних по дням было бы неверным),
+        # и доля дозвона. Строке табло они не мешают — она их просто не читает.
+        'talk_seconds': int(stats.get('incoming_billsec') or 0),
+        'wait_seconds': int(stats.get('incoming_waitsec') or 0),
+        'avg_wait_seconds': int(stats.get('incoming_waitsec') // served) if served else None,
+        'outgoing_success_percent': (round(out_answered * 100.0 / outgoing_total, 1)
+                                     if outgoing_total else None),
     }
 
 
@@ -39661,6 +39670,131 @@ def api_tez_wallboard_tp_snapshot():
 def api_tez_wallboard_op_snapshot():
     """Табло Тез КЦ, направление «ОП»: люди отдела продаж и исходящие за день."""
     return _api_tez_wallboard_direction('op')
+
+
+# --- Табло Тез КЦ: выгрузка показателей за период ------------------------------------------------
+# Табло отвечает на вопрос «что сейчас», выгрузка — «как отработали». Период собирается по дню
+# на день: кабинет отдаёт аналитику сотрудников за конкретную дату (один запрос на сутки), а
+# вот страница очереди показывает ТОЛЬКО текущие сутки — поэтому за прошедшие дни в файле нет
+# ни SL, ни «потеряно» очереди, и это не упущение: подставить туда сегодняшние счётчики значило
+# бы соврать в отчёте. Всё, что в файле есть, посчитано по строкам самих операторов.
+#
+# Потолок 14 суток — постановка владельца. Он не про размер файла (14 дней × 20 человек — это
+# 280 строк), а про ожидание у кнопки: каждый день стоит отдельного похода в кабинет.
+TEZ_WALLBOARD_EXPORT_MAX_DAYS = _env_int('TEZ_WALLBOARD_EXPORT_MAX_DAYS', 14, minimum=1, maximum=92)
+
+
+def _tez_wallboard_export_range(date_from, date_to):
+    """Период выгрузки из параметров запроса. Ошибка периода — это 400, а не 500."""
+    def _parse(value, field):
+        text = str(value or '').strip()
+        if not text:
+            raise ValueError("Укажите период выгрузки")
+        try:
+            return datetime.strptime(text[:10], '%Y-%m-%d').date()
+        except Exception:
+            raise ValueError("%s должен быть датой в формате ГГГГ-ММ-ДД" % field)
+
+    start = _parse(date_from, "date_from")
+    end = _parse(date_to or date_from, "date_to")
+    if end < start:
+        start, end = end, start
+    today = tez_wallboard_source_today()
+    if start > today:
+        raise ValueError("Период начинается в будущем — кабинет за эти дни ничего не знает")
+    # Хвост в будущем просто обрезаем: человек выбрал «по воскресенье», а сегодня четверг —
+    # это не ошибка запроса, а обычный выбор недели вперёд.
+    if end > today:
+        end = today
+    length = (end - start).days + 1
+    if length > TEZ_WALLBOARD_EXPORT_MAX_DAYS:
+        raise ValueError("Максимум %s суток за раз — выберите период короче"
+                         % TEZ_WALLBOARD_EXPORT_MAX_DAYS)
+    return start, end
+
+
+def tez_wallboard_source_today():
+    """Сегодня глазами кабинета: сутки у Тез закрываются по Алматы."""
+    import tez_wallboard_source as tez_source
+    return tez_source.cabinet_today()
+
+
+def _tez_wallboard_export_collect(direction, date_from, date_to):
+    """Период по дню на день: состав направления на дату + его счётчики из кабинета."""
+    import tez_wallboard_source as tez_source
+
+    start, end = _tez_wallboard_export_range(date_from, date_to)
+    session = _tez_wallboard_session()
+    days = []
+    day = start
+    while day <= end:
+        # Состав берём НА ТУ ЖЕ ДАТУ, а не сегодняшний: за прошлый месяц человек мог быть в
+        # другой группе или ещё не работать, и сегодняшним составом отчёт приписал бы ему
+        # чужие звонки (или потерял его собственные).
+        people = _tez_wallboard_people(day)
+        rows, error = [], None
+        try:
+            employees = tez_source.fetch_day_employees(
+                session, day, timeout=TEZ_WALLBOARD_HTTP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            # Один упавший день не отменяет остальных: помечаем его в файле и идём дальше.
+            logging.warning("Выгрузка табло Тез: день %s не собрался: %s", day, exc)
+            employees, error = None, str(exc)[:200]
+        if employees is not None:
+            for person in (people.get(direction) or []):
+                rows.append({
+                    'operator_id': person.get('id'),
+                    'name': person.get('name') or '—',
+                    'stats': _tez_wallboard_person_stats(employees, person.get('sip_number')) or {},
+                })
+        days.append({'day': day.strftime('%Y-%m-%d'), 'people': rows, 'error': error})
+        day += timedelta(days=1)
+
+    return {
+        'direction': direction,
+        'direction_label': 'ОП' if direction == 'op' else 'ТП',
+        'date_from': start.strftime('%Y-%m-%d'),
+        'date_to': end.strftime('%Y-%m-%d'),
+        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'days': days,
+    }
+
+
+@app.route('/api/tez_wallboard/export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_tez_wallboard_export():
+    """Табло Тез КЦ: показатели направления за период файлом .xlsx."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _tez_wallboard_guard()
+    if err:
+        return err
+    import tez_wallboard_source as tez_source
+    if not tez_source.is_configured():
+        return jsonify({"error": "Интеграция с Binotel недоступна: BINOTEL_LOGIN/BINOTEL_PASSWORD не заданы"}), 503
+    direction = 'op' if str(request.args.get('direction') or '').strip().lower() == 'op' else 'tp'
+    try:
+        payload = _tez_wallboard_export_collect(direction,
+                                                request.args.get('date_from'),
+                                                request.args.get('date_to'))
+    except ValueError as exc:
+        # Ошибка периода — вина запроса: фронт покажет этот текст тостом как есть.
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logging.error("Табло Тез КЦ: выгрузка не собралась: %s", exc, exc_info=True)
+        return jsonify({"error": "Не удалось собрать выгрузку", "detail": str(exc)[:300]}), 503
+    try:
+        import tez_wallboard_export as tez_export
+        content = tez_export.build_workbook(payload)
+        file_name = tez_export.export_file_name(payload)
+    except Exception as exc:
+        logging.error("Табло Тез КЦ: файл выгрузки не собрался: %s", exc, exc_info=True)
+        return jsonify({"error": "Не удалось собрать файл", "detail": str(exc)[:300]}), 500
+    return send_file(
+        BytesIO(content),
+        as_attachment=True,
+        download_name=file_name,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 

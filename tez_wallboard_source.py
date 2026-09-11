@@ -810,6 +810,20 @@ def format_cabinet_date(day):
     return day.strftime("%d.%m.%Y")
 
 
+def fetch_day_employees(session, day, timeout=None):
+    """Дневные итоги по внутренним номерам за ОДИН день — один запрос, без «сейчас».
+
+    Отдельно от `fetch_snapshot`, потому что выгрузке за период не нужно ничего из
+    настоящего момента: ни страница очереди (она показывает только текущие сутки и за
+    прошедший день соврала бы сегодняшними счётчиками), ни активные звонки, ни
+    регистрация линий. Один день = один запрос — на этом и держится цена выгрузки.
+
+    Возвращает то же, что `parse_employees`: {'departments': ..., 'employees': ...},
+    то есть белый список полей, без SIP-учёток из сырого ответа кабинета."""
+    return parse_employees(session.get_text(
+        EMPLOYEES_PATH.format(day=format_cabinet_date(day)), timeout=timeout))
+
+
 def fetch_snapshot(session, day=None, *, with_endpoints=False,
                    endpoints_ttl_seconds=ENDPOINTS_TTL_SECONDS, queue_id=None,
                    timeout=None):

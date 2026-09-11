@@ -12,6 +12,7 @@ import {
     wallboardDirection,
     wallboardStaleNotice,
 } from './szovWallboardShared';
+import { TEZ_WALLBOARD_DIRECTIONS, tezWallboardDirection } from './tezWallboardShared';
 
 /*
  * Виджет «Табло СЗоВ» — то же табло отдельным окном поверх других окон (картинка в картинке)
@@ -31,6 +32,17 @@ import {
  */
 
 const PIP_WIDTH = 460;
+
+/*
+ * Окно одно на приложение, а табло у нас два — СЗоВ и Тез КЦ, — поэтому направление виджета
+ * ищется в обоих каталогах. Реестры описаны одинаково (подпись, источник, хук опроса, каталог
+ * показателей и набор по умолчанию), и виджету всё равно, чьё направление он показывает: он
+ * читает только эти поля. Отсюда и одно состояние на приложение — открытие виджета Тез
+ * закрывает виджет СЗоВ, потому что окно физически одно.
+ */
+const widgetDirection = (key) => (
+    TEZ_WALLBOARD_DIRECTIONS[key] ? tezWallboardDirection(key) : wallboardDirection(key)
+);
 
 const TILE_MIN_WIDTH = 132;
 const TILE_GAP = 10;
@@ -293,7 +305,7 @@ export default function SzovWallboardWidget({
      * уже открытый виджет, а открывает новый (в App.jsx компонент монтируется с key по
      * направлению). Иначе пришлось бы менять хук опроса на лету, чего React не допускает.
      */
-    const config = wallboardDirection(direction);
+    const config = widgetDirection(direction);
     const { snapshot, error, loading, refresh } = config.useSnapshot({ apiBaseUrl, withAccessTokenHeader });
 
     const [pipContainer, setPipContainer] = useState(null);

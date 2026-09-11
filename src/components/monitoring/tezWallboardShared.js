@@ -125,6 +125,19 @@ export const formatPair = (main, secondary) => ({
     secondary: isBlank(secondary) ? null : formatInt(secondary),
 });
 
+/*
+ * Выгрузка показателей за период. Адрес лежит здесь, рядом с путями фидов: раздел не должен
+ * знать адресов ручек по экранам — страж `test_each_endpoint_path_is_written_exactly_once`
+ * сторожит именно это правило.
+ *
+ * Потолок периода — тот же, что на сервере (TEZ_WALLBOARD_EXPORT_MAX_DAYS): просить больше
+ * бессмысленно, придёт 400. Проверяем и на фронте, чтобы «Подтвердить» гасло ДО запроса, а не
+ * после ожидания. Четырнадцать суток — решение владельца; цена периода в том, что каждый день
+ * стоит отдельного похода в кабинет Binotel.
+ */
+export const TEZ_WALLBOARD_EXPORT_PATH = '/api/tez_wallboard/export';
+export const TEZ_EXPORT_MAX_DAYS = 14;
+
 export const useTezTpWallboardSnapshot = createSnapshotFeed({
     path: '/api/tez_wallboard/tp_snapshot',
     pollIntervalMs: TEZ_POLL_INTERVAL_MS,

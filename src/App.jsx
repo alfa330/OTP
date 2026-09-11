@@ -49675,8 +49675,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
                                 <TezWallboardView
                                     user={user}
+                                    showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    widgetOpen={szovWallboardWidget}
+                                    onToggleWidget={setSzovWallboardWidget}
                                 />
                             </Suspense>
                         )}
@@ -55774,7 +55777,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                     </div>
 
-                    {canAccessSzovWallboardSection && szovWallboardWidget && (
+                    {/* Окно «поверх других» одно на приложение, а табло два: направления Тез
+                        начинаются с `tez_`, и права у них свои — виджет обязан спрашивать про
+                        доступ того раздела, чьё направление сейчас открыто, иначе табло Тез
+                        показывалось бы тому, кому закрыт сам раздел. */}
+                    {szovWallboardWidget && (String(szovWallboardWidget).startsWith('tez_')
+                        ? canAccessTezWallboardSection
+                        : canAccessSzovWallboardSection) && (
                         <SzovWallboardWidget
                             // key по направлению: у направлений разные источники, и смена
                             // направления должна пересоздать окно, а не менять хук опроса на лету.

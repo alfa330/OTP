@@ -410,7 +410,17 @@ def _patched_source(state):
             raise error
         return copy.deepcopy(state['raw'])
 
+    def fetch_day_employees(session, day, timeout=None):
+        """Дневная выдача для выгрузки за период: по дню на день, каждый со своим ответом."""
+        state.setdefault('days_asked', []).append(day)
+        error = state.get('day_error')
+        if error is not None:
+            raise error
+        per_day = state.get('day_employees') or {}
+        return copy.deepcopy(per_day.get(day, state['raw'].get('employees')))
+
     stub.fetch_snapshot = fetch_snapshot
+    stub.fetch_day_employees = fetch_day_employees
     stub.CabinetSession = _FakeCabinetSession
     stub.is_configured = lambda config=None: True
     previous = sys.modules.get('tez_wallboard_source')
@@ -583,6 +593,7 @@ class _SnapshotHarness:
             'logging': logging,
             'datetime': datetime,
             'dt_date': dt_date,
+            'timedelta': timedelta,
             're': re,
             # Константы модуля читаются через _env_int; в тесте берём значения по умолчанию.
             '_env_int': lambda name, default, minimum=None, maximum=None: default,
@@ -628,6 +639,11 @@ class _SnapshotHarness:
             '_tez_wallboard_fetch_snapshot',
             '_tez_wallboard_snapshot',
             '_tez_wallboard_direction_payload',
+            # Выгрузка за период: потолок, разбор периода и сборка по дню на день.
+            'TEZ_WALLBOARD_EXPORT_MAX_DAYS',
+            'tez_wallboard_source_today',
+            '_tez_wallboard_export_range',
+            '_tez_wallboard_export_collect',
             # Обвязка кэша общая на все табло: снимок в БД, устаревание, пауза после ошибки.
             '_wallboard_restore_cache',
             '_wallboard_persist_cache',
@@ -1059,9 +1075,13 @@ class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
         row = snapshot['tp']['roster'][0]
         self.assertEqual(set(row), {'operator_id', 'name', 'status_key', 'status_label',
                                     'status_seconds', 'stats'})
+        # Сверх показанных на стене строка несёт суммы и долю дозвона: из них выгрузка за
+        # период пересчитывает средние по всему периоду, а не складывает дневные средние.
         self.assertEqual(set(row['stats']), {'served', 'missed', 'avg_talk_seconds',
                                              'outgoing_total', 'outgoing_success',
-                                             'outgoing_talk_seconds', 'avg_outgoing_talk_seconds'})
+                                             'outgoing_talk_seconds', 'avg_outgoing_talk_seconds',
+                                             'talk_seconds', 'wait_seconds', 'avg_wait_seconds',
+                                             'outgoing_success_percent'})
 
     def test_roster_reaches_the_client(self):
         """Список должен доезжать до фронта: половина снимка без него бесполезна."""
@@ -1072,6 +1092,106 @@ class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
             op = ns['_tez_wallboard_direction_payload']('op')
         self.assertEqual(len(tp['roster']), 3)
         self.assertEqual(len(op['roster']), 3)
+
+
+# --- ВЫГРУЗКА ЗА ПЕРИОД ---------------------------------------------------------------------
+
+class TezWallboardExportTests(_SnapshotHarness, unittest.TestCase):
+    """Период выгрузки и сборка по дню на день.
+
+    Потолок в 14 суток — решение владельца, и он не про размер файла, а про ожидание у
+    кнопки: каждый день периода стоит отдельного похода в кабинет."""
+
+    TODAY = dt_date(2026, 9, 11)
+
+    def _ns(self, **kwargs):
+        ns = self._namespace(**kwargs)
+        # Сегодня фиксируем: иначе тест про «хвост в будущем» жил бы ровно один день.
+        ns['tez_wallboard_source_today'] = lambda: self.TODAY
+        return ns
+
+    def test_ceiling_is_fourteen_days(self):
+        ns = self._ns()
+        self.assertEqual(ns['TEZ_WALLBOARD_EXPORT_MAX_DAYS'], 14)
+        start, end = ns['_tez_wallboard_export_range']('2026-08-29', '2026-09-11')
+        self.assertEqual((start, end), (dt_date(2026, 8, 29), self.TODAY))
+        with self.assertRaises(ValueError) as caught:
+            ns['_tez_wallboard_export_range']('2026-08-28', '2026-09-11')
+        self.assertIn('14', str(caught.exception))
+
+    def test_future_tail_is_trimmed_not_refused(self):
+        """«По воскресенье» в четверг — обычный выбор недели, а не ошибка запроса."""
+        ns = self._ns()
+        start, end = ns['_tez_wallboard_export_range']('2026-09-09', '2026-09-20')
+        self.assertEqual((start, end), (dt_date(2026, 9, 9), self.TODAY))
+
+    def test_period_entirely_in_the_future_is_refused(self):
+        ns = self._ns()
+        with self.assertRaises(ValueError):
+            ns['_tez_wallboard_export_range']('2026-09-20', '2026-09-21')
+
+    def test_reversed_range_is_straightened(self):
+        ns = self._ns()
+        self.assertEqual(ns['_tez_wallboard_export_range']('2026-09-05', '2026-09-01'),
+                         (dt_date(2026, 9, 1), dt_date(2026, 9, 5)))
+
+    def test_bad_and_empty_dates_are_request_errors(self):
+        ns = self._ns()
+        for bad in ('', None, '05.09.2026', 'вчера'):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ns['_tez_wallboard_export_range'](bad, '2026-09-05')
+
+    def test_one_request_per_day_and_no_queue_page(self):
+        """День = один запрос дневной выдачи. Страница очереди не трогается вовсе: она
+        показывает только текущие сутки и за прошедший день соврала бы."""
+        ns = self._ns()
+        with _patched_source(ns['_state']):
+            payload = ns['_tez_wallboard_export_collect']('tp', '2026-09-09', '2026-09-11')
+        self.assertEqual(ns['_state']['days_asked'],
+                         [dt_date(2026, 9, 9), dt_date(2026, 9, 10), dt_date(2026, 9, 11)])
+        self.assertEqual(ns['_state']['calls'], 0)
+        self.assertEqual([day['day'] for day in payload['days']],
+                         ['2026-09-09', '2026-09-10', '2026-09-11'])
+        self.assertEqual(payload['direction_label'], 'ТП')
+
+    def test_rows_are_the_direction_roster_with_their_own_counters(self):
+        ns = self._ns()
+        with _patched_source(ns['_state']):
+            payload = ns['_tez_wallboard_export_collect']('op', '2026-09-11', '2026-09-11')
+        people = payload['days'][0]['people']
+        self.assertEqual(sorted(person['name'] for person in people),
+                         ['Айгуль Сат', 'Ерлан Бек', 'Салтанат Ли'])
+        seller = next(person for person in people if person['name'] == 'Салтанат Ли')
+        self.assertEqual(seller['stats']['outgoing_total'], 50)
+        self.assertEqual(seller['stats']['outgoing_success'], 20)
+        # Суммы для пересчёта средних по всему периоду тоже уезжают в выгрузку.
+        self.assertEqual(seller['stats']['outgoing_talk_seconds'], 1000)
+
+    def test_failed_day_does_not_cancel_the_others(self):
+        """Один упавший день помечается в файле, а не роняет всю выгрузку."""
+        ns = self._ns()
+        state = ns['_state']
+        state['day_error'] = RuntimeError('кабинет не ответил')
+        with _patched_source(state):
+            payload = ns['_tez_wallboard_export_collect']('tp', '2026-09-10', '2026-09-11')
+        self.assertEqual(len(payload['days']), 2)
+        self.assertTrue(all(day['error'] for day in payload['days']))
+        self.assertTrue(all(day['people'] == [] for day in payload['days']))
+
+    def test_roster_is_taken_for_the_day_not_for_today(self):
+        """Состав берётся НА ТУ ЖЕ ДАТУ: за прошлый месяц человек мог быть в другой группе."""
+        ns = self._ns()
+        asked = []
+        original = ns['_tez_wallboard_people']
+
+        def spy(day=None):
+            asked.append(day)
+            return original(day)
+
+        ns['_tez_wallboard_people'] = spy
+        with _patched_source(ns['_state']):
+            ns['_tez_wallboard_export_collect']('tp', '2026-09-09', '2026-09-10')
+        self.assertEqual(asked, [dt_date(2026, 9, 9), dt_date(2026, 9, 10)])
 
 
 # --- ИСТОЧНИК СТАТУСОВ: НАСТОЯЩИЙ МЕТОД БАЗЫ ------------------------------------------------
@@ -1569,6 +1689,54 @@ class TezWallboardWiringTests(unittest.TestCase):
         for key in ('sl_ratio', 'ar_ratio', 'avg_wait_seconds', 'queue'):
             self.assertNotIn(f'today.{key}', op_block, key)
         self.assertNotIn('metricKey="op_sl"', self.op)
+
+    def test_export_endpoint_is_registered_and_guarded(self):
+        self.assertIn("@app.route('/api/tez_wallboard/export', methods=['GET', 'OPTIONS'])", BOT_SOURCE)
+        handler = BOT_SOURCE[BOT_SOURCE.index("def api_tez_wallboard_export():"):]
+        handler = handler[:handler.index("@app.route", 10)] if "@app.route" in handler[10:] else handler[:4000]
+        self.assertIn("requester_id, err = _tez_wallboard_guard()", handler)
+        self.assertIn("if request.method == 'OPTIONS':", handler)
+        self.assertIn("return _build_cors_preflight_response()", handler)
+        # Ошибка периода — вина запроса, а не источника: 400 с человеческим текстом.
+        self.assertIn("return jsonify({\"error\": str(exc)}), 400", handler)
+
+    def test_export_ceiling_agrees_between_front_and_back(self):
+        """Потолок в двух местах: на фронте гасит кнопку, на сервере отвечает 400.
+
+        Разойдись они — пользователь жал бы «Подтвердить» и ждал ответа ради отказа."""
+        backend = re.search(r"TEZ_WALLBOARD_EXPORT_MAX_DAYS = _env_int\('TEZ_WALLBOARD_EXPORT_MAX_DAYS', (\d+)",
+                            BOT_SOURCE)
+        frontend = re.search(r"export const TEZ_EXPORT_MAX_DAYS = (\d+);", self.shared)
+        self.assertIsNotNone(backend)
+        self.assertIsNotNone(frontend)
+        self.assertEqual(backend.group(1), frontend.group(1))
+        self.assertEqual(frontend.group(1), '14')
+
+    def test_export_button_lives_in_the_header_with_a_picker(self):
+        """Период выбирается в самой кнопке — эталон тот же, что у выгрузки чатов СЗоВ."""
+        self.assertIn('<TezExportControls', self.view)
+        self.assertIn('IosDateRangeCalendar', self.view)
+        self.assertIn('Подтвердить', self.view)
+        # Пресеты не должны обещать период длиннее потолка.
+        self.assertIn("label: '14 дней'", self.view)
+        self.assertNotIn("label: '30 дней'", self.view)
+
+    def test_widget_button_is_wired_for_tez(self):
+        """Кнопка виджета есть у обоих направлений Тез и знает про неподдерживающий браузер."""
+        self.assertIn('<TezWidgetButton', self.view)
+        self.assertIn('canOpenWallboardWidget', self.view)
+        self.assertIn('fa-picture-in-picture', self.view)
+        self.assertIn('onToggleWidget={onToggleWidget}', self.view)
+
+    def test_widget_resolves_tez_directions(self):
+        """Окно «поверх других» одно на приложение, и направление ищется в ОБОИХ каталогах."""
+        widget = (MONITORING / "SzovWallboardWidget.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("from './tezWallboardShared'", widget)
+        self.assertIn('const config = widgetDirection(direction);', widget)
+        self.assertIn('TEZ_WALLBOARD_DIRECTIONS[key]', widget)
+        # Права виджета берутся у того раздела, чьё направление открыто.
+        self.assertIn("String(szovWallboardWidget).startsWith('tez_')", self.app)
+        self.assertIn('canAccessTezWallboardSection', self.app)
 
     def test_both_directions_show_the_named_list(self):
         """Список людей стоит на обоих табло и знает своё направление — колонки у них разные."""
