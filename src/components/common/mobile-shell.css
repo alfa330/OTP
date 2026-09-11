@@ -2154,43 +2154,48 @@ body.mobile-shell .mobile-actions__cancel {
     font-weight: 600;
 }
 
-/* ── Кадр фотографии: тёмный экран, как в образце ───────────────────────── */
+/* ── Кадр фотографии: снимок во всю страницу, круг — окно в нём ──────────── */
 
-/* Образец — экран смены фото в Telegram (видео владельца 11.09.2026): чёрное
-   поле во весь экран, снимок под круглой маской, внизу стрелка «назад» и синяя
-   галочка. Никаких списков и заголовков: в кадре нечего читать, им работают
-   пальцами. Полотно СВОЁ, тёмное при любой теме — светлый лист вокруг снимка
-   мешает оценить кадр. */
+/* Образец — экран смены фото в Telegram (видео владельца 11.09.2026) и
+   системный «Перемещайте и масштабируйте» в iOS: снимок лежит ВО ВСЮ СТРАНИЦУ,
+   круг — окно в нём, вокруг окна тот же снимок, только притушенный; внизу
+   стрелка «назад» и синяя галочка, наверху одна строка подсказки. Полотно СВОЁ,
+   тёмное при любой теме — светлый лист вокруг снимка мешает оценить кадр.
+
+   БЫЛО до 11.09.2026: снимок в квадратике 20-го радиуса посреди чёрного поля,
+   подпись и панель под ним. Кадра целиком видно не было, поэтому непонятно, что
+   останется за кругом, а экран читался как картинка на подложке. */
 body.mobile-shell .mobile-crop__card {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 14px;
+    position: relative;
     min-height: 100%;
-    padding: calc(12px + env(safe-area-inset-top)) 0 calc(14px + env(safe-area-inset-bottom)) !important;
+    overflow: hidden;
+    /* Отступов у полотна нет вовсе: снимок идёт от края до края, а воздух под
+       вырез и под нижнюю черту отмеряют подсказка и панель — они лежат ПОВЕРХ
+       снимка, и два правила на один отступ разъехались бы при первой правке. */
+    padding: 0 !important;
     background: #000000 !important;
 }
 
+/* Поле снимка — вся страница. Жест кадра НАШ: без этого палец вместо снимка
+   тянет страницу. Слушает всю площадь, а не круг: часть снимка лежит под
+   подсказкой и панелью, и нажатие там уходило в пустоту. */
 body.mobile-shell .mobile-crop__stage {
-    flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    min-height: 0;
-}
-
-body.mobile-shell .mobile-crop__area {
-    position: relative;
+    position: absolute;
+    inset: 0;
     overflow: hidden;
-    /* Скруглённая рамка, как в образце: прямой угол на чёрном поле выглядит
-       обрезком, а не кадром. */
-    border-radius: 20px;
-    background: #0b0b0b;
-    /* Жест кадра — наш: без этого палец вместо снимка тянет страницу. */
     touch-action: none;
     user-select: none;
+}
+
+/* Квадрат кадра — только система координат для снимка (по его стороне считают
+   положение и приближение), сам он ничего не рисует и НИЧЕГО НЕ ОБРЕЗАЕТ:
+   снимок обязан выходить за круг на всю страницу. Обрезает поле кадра. */
+body.mobile-shell .mobile-crop__area {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    overflow: visible;
 }
 
 /* Селектор с кадром, а не просто по снимку: общий слой оболочки ужимает
@@ -2204,89 +2209,116 @@ body.mobile-shell .mobile-crop__area .mobile-crop__photo {
     user-select: none;
 }
 
-/* Круглая маска: внутри круга снимок как есть, вокруг — затемнение. Тень
-   огромного радиуса обрезана рамкой кадра, поэтому лишнего на экран не
-   выплёскивается. */
+/* Круглая маска: внутри круга снимок как есть, вокруг — затемнение во всю
+   страницу. Тень огромного радиуса обрезана полем кадра, поэтому лишнего на
+   экран не выплёскивается. Обводка тонкая и полупрозрачная: в образце круг
+   намечен, а не обведён. */
 body.mobile-shell .mobile-crop__ring {
     position: absolute;
-    inset: 0;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
     border-radius: 50%;
-    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.62);
-    border: 1px solid rgba(255, 255, 255, 0.9);
+    /* Обрезает сетку по кругу; собственной тени элемента overflow не касается,
+       поэтому затемнение вокруг остаётся на месте. */
+    overflow: hidden;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.66);
+    border: 1px solid rgba(255, 255, 255, 0.82);
     pointer-events: none;
 }
 
+/* Сетка по третям — видна, ПОКА кадр ведут: в покое она расчерчивает лицо без
+   всякой нужды. Линии тайлами по 1/3: крайние приходятся на саму обводку и
+   обрезаются вместе с кругом. */
+body.mobile-shell .mobile-crop__guides {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    background-image:
+        linear-gradient(to right, rgba(255, 255, 255, 0.26) 0 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.26) 0 1px, transparent 1px);
+    background-size: 33.333% 100%, 100% 33.333%;
+    background-position: 33.333% 0, 0 33.333%;
+}
+
+body.mobile-shell .mobile-crop__guides[data-on] {
+    opacity: 1;
+}
+
 body.mobile-shell .mobile-crop__waiting {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 0;
+    transform: translate(-50%, -50%);
     color: rgba(255, 255, 255, 0.7);
     font-size: 15px;
 }
 
-/* Ползунок приближения на тёмном: тонкая полупрозрачная дорожка и белый
-   бегунок — светлая системная полоса на чёрном поле читается как чужая. */
-body.mobile-shell .mobile-crop__zoom {
-    width: min(280px, 72vw);
-    height: 28px;
-    background: transparent;
-    -webkit-appearance: none;
-    appearance: none;
+/* Подсказка — НАВЕРХУ и словами системного экрана iOS: внизу в образце только
+   кнопки, и строка текста между ними читалась как недостающая часть
+   управления. Под строкой мягкое затемнение: на светлом снимке белый текст
+   без него не читается. */
+body.mobile-shell .mobile-crop__hint {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    z-index: 2;
+    margin: 0;
+    padding: calc(16px + env(safe-area-inset-top)) 20px 20px;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+    color: rgba(255, 255, 255, 0.92);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    text-align: center;
+    text-shadow: 0 1px 12px rgba(0, 0, 0, 0.5);
+    /* Насквозь для пальца: подсказка лежит на снимке, и кадр под ней обязан
+       тянуться. */
+    pointer-events: none;
 }
 
-body.mobile-shell .mobile-crop__zoom::-webkit-slider-runnable-track {
-    height: 3px;
-    border-radius: 3px;
-    background: rgba(255, 255, 255, 0.28);
-}
-
-body.mobile-shell .mobile-crop__zoom::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 22px;
-    height: 22px;
-    margin-top: -9.5px;
-    border-radius: 50%;
-    background: #ffffff;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-}
-
-body.mobile-shell .mobile-crop__zoom::-moz-range-track {
-    height: 3px;
-    border-radius: 3px;
-    background: rgba(255, 255, 255, 0.28);
-}
-
-body.mobile-shell .mobile-crop__zoom::-moz-range-thumb {
-    width: 22px;
-    height: 22px;
-    border: none;
-    border-radius: 50%;
-    background: #ffffff;
-}
-
+/* Ошибка — таблеткой над панелью, а не строкой на снимке: красный текст прямо
+   по фотографии не прочитать. */
 body.mobile-shell .mobile-crop__error {
-    margin: 0 24px;
+    position: absolute;
+    left: 50%;
+    bottom: calc(104px + env(safe-area-inset-bottom));
+    z-index: 3;
+    max-width: calc(100% - 48px);
+    margin: 0;
+    padding: 9px 14px;
+    transform: translateX(-50%);
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.62);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     color: #ff453a;
     font-size: 13px;
     text-align: center;
 }
 
 body.mobile-shell .mobile-crop__bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 2;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    width: 100%;
-    padding: 0 18px;
+    padding: 20px 22px calc(20px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
 }
 
-/* Подсказка — НАД панелью и мелко: в образце внизу только кнопки, и строка
-   текста между ними читалась как недостающая часть управления. */
-body.mobile-shell .mobile-crop__tip {
-    margin: 0;
-    text-align: center;
-    font-size: 13px;
-    color: rgba(255, 255, 255, 0.45);
-}
-
+/* Кнопки — стеклянные кружки поверх снимка: плотная заливка на фотографии
+   читается как дырка в кадре. */
 body.mobile-shell .mobile-crop__round {
     display: grid;
     place-items: center;
@@ -2294,22 +2326,34 @@ body.mobile-shell .mobile-crop__round {
     height: 54px;
     flex: none;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.16);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
     color: #ffffff;
     font-size: 19px;
+    transition: transform 0.16s ease, opacity 0.16s ease;
 }
 
 body.mobile-shell .mobile-crop__round--go {
     background: #0a84ff;
+    box-shadow: 0 8px 22px rgba(10, 132, 255, 0.38);
 }
 
 body.mobile-shell .mobile-crop__round:active:not(:disabled) {
-    opacity: 0.7;
+    transform: scale(0.92);
+    opacity: 0.8;
 }
 
 body.mobile-shell .mobile-crop__round:disabled {
     opacity: 0.4;
 }
+
+/* Пока сохраняем — кадр не ведут: снимок уже ушёл на сервер, и сдвиг в этот
+   момент ничего не меняет, кроме ощущения, что экран сломался. */
+body.mobile-shell .mobile-crop__card[data-busy] .mobile-crop__stage {
+    pointer-events: none;
+}
+
 
 /* ── Имя в шапке профиля при прокрутке ──────────────────────────────────── */
 

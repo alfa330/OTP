@@ -228,14 +228,19 @@ class SheetAccountTests(unittest.TestCase):
         # До хвоста листа, а не окном на глаз: блок растёт вместе с пояснениями.
         block = APP[at:APP.index('mobile-sheet-account--tail')]
         # «Выйти» переехал в хвост листа — его проверяет test_exit_sits_at_the_very_bottom.
-        for label in ('Сменить логин', 'Сменить пароль', 'Сменить фотографию'):
+        for label in ('Сменить логин', 'Сменить пароль'):
             self.assertIn(f'<span>{label}</span>', block, f'действие «{label}» пропало из шапки')
         # Установка портала на телефон — там же, своим пунктом.
         self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
         # Смена фото — только тем, кому она разрешена; условие то же, что в меню.
-        # Строк две ветки: «Добавить» (фотографии нет) и «Сменить» (есть).
-        self.assertIn('{canChangeAccountAvatar && !user?.avatar_url && (', block)
-        self.assertIn('{canChangeAccountAvatar && user?.avatar_url && (', block)
+        # Строка ОДНА на оба состояния (правка 11.09.2026): подпись меняется, а
+        # открывает она один и тот же лист — и когда фотография есть, и когда её
+        # ещё нет. Две ветки разметки различались только словом в подписи.
+        self.assertIn('{canChangeAccountAvatar && (', block)
+        self.assertIn(
+            "<span>{user?.avatar_url ? 'Сменить фотографию' : 'Добавить фотографию'}</span>",
+            block,
+        )
 
     def test_actions_keep_the_sheet_open(self):
         """ПРАВИЛО ПЕРЕВЁРНУТО 11.09.2026. Раньше каждая строка закрывала
@@ -1313,8 +1318,9 @@ class AccountScreenTests(unittest.TestCase):
         block = APP[at:at + 6500]
         for flag in ('setShowChangeLoginForm(true);', 'setShowChangePasswordForm(true);'):
             self.assertIn(flag, block)
-        # Фотография открывается своим путём: галереей или листом действий.
-        self.assertIn('onChange={handlePickedAvatarFile}', block)
+        # Фотография открывается своим путём — листом действий (камера,
+        # галерея, удаление), и он тоже лежит поверх шторки.
+        self.assertIn('setPhotoActionsOpen(true);', block)
         self.assertIn('setPhotoActionsOpen(true);', block)
         self.assertIn('setShowChangeAvatarForm(true);', APP[APP.index('const handlePickedAvatarFile'):APP.index('const handlePickedAvatarFile') + 700])
         opens = block[:block.index('<InstallAppMenuItem')]
@@ -1395,24 +1401,19 @@ class AccountScreenTests(unittest.TestCase):
 
     def test_photo_lives_behind_one_row(self):
         """ПЕРЕДЕЛАНО 11.09.2026 по второму видео. Было две строки подряд —
-        «Сменить фотографию» и красная «Удалить фотографию»; владелец:
-        «удалить фото находится отдельно от смены фото профиля». В образце вход
-        ОДИН, а выбор снимка и удаление лежат в листе, который он открывает.
+        «Сменить фотографию» и красная «Удалить фотографию»; владелец: «удалить
+        фото находится отдельно от смены фото профиля». В образце вход ОДИН, а
+        способы взять снимок и удаление лежат в листе, который он открывает.
 
-        Пока фотографии нет, листу нечего показывать: строка открывает галерею
-        сама — label с настоящим input, потому что выбор файла браузер открывает
-        только по живому нажатию."""
-        at = APP.index('<label\n                                                    className="mobile-sheet-row mobile-sheet-row--pick"')
-        block = APP[at:at + 1800]
-        self.assertIn('{canChangeAccountAvatar && !user?.avatar_url && (', APP)
-        self.assertIn('<span>Добавить фотографию</span>', block)
-        self.assertIn('type="file"', block)
-        self.assertIn('onChange={handlePickedAvatarFile}', block)
-        # Значок берут по `> svg:first-child`: input обязан стоять последним.
-        self.assertLess(block.index('fa-camera'), block.index('type="file"'))
-        # Есть фотография — та же строка открывает лист действий.
-        self.assertIn('{canChangeAccountAvatar && user?.avatar_url && (', APP)
-        self.assertIn('setPhotoActionsOpen(true);', APP)
+        ДОРАБОТАНО в тот же день: лист открывается и когда фотографии ещё нет.
+        Раньше строка в этом случае открывала галерею сама (label с настоящим
+        input), и снять себя было нечем — а в образце камера первым пунктом."""
+        at = APP.index('{/* ОДИН ВХОД НА ВСЁ, ЧТО С ФОТОГРАФИЕЙ')
+        block = APP[at:at + 2200]
+        self.assertIn('{canChangeAccountAvatar && (', block)
+        self.assertIn('setPhotoActionsOpen(true);', block)
+        # Ни галереи, ни камеры прямо в строке: их открывают пункты листа.
+        self.assertNotIn('type="file"', block)
         self.assertNotIn('mobile-sheet-row--danger', APP)
 
     def test_action_sheet_holds_pick_and_delete(self):
@@ -1423,9 +1424,19 @@ class AccountScreenTests(unittest.TestCase):
         sheet = (ROOT / 'src' / 'components' / 'common' / 'MobileActionSheet.jsx').read_text(encoding='utf-8')
         self.assertIn('useScreenBackGesture(open, onClose);', sheet)
         self.assertIn('mobile-actions__cancel', sheet)
-        self.assertIn("key: 'pick'", APP)
+        # Камера первым пунктом, галерея вторым: снять себя на телефоне проще,
+        # чем искать готовый файл. Оба — label с настоящим input: и камеру, и
+        # галерею браузер открывает только по живому нажатию.
+        self.assertLess(APP.index("key: 'camera'"), APP.index("key: 'pick'"))
+        self.assertIn('capture="user"', APP)
+        # accept именно image/* : с перечислением типов iOS открывает выбор
+        # файла вместо камеры.
+        camera = APP[APP.index("key: 'camera'"):APP.index("key: 'pick'")]
+        self.assertIn('accept="image/*"', camera)
         self.assertIn("label: isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию',", APP)
         self.assertIn('danger: true,', APP)
+        # Удаление показывается только когда есть что удалять.
+        self.assertIn("...(user?.avatar_url ? [{", APP)
         block = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions {', 700)
         self.assertIn('justify-content: flex-end !important;', block)
         self.assertIn('animation: mobile-actions-in', block)
@@ -1439,11 +1450,47 @@ class AccountScreenTests(unittest.TestCase):
         self.assertIn('const handleCropConfirm = async () => {', self.AVATAR)
         self.assertIn('await onSave?.({', self.AVATAR)
         self.assertIn('mobile-crop__round--go', self.AVATAR)
-        card = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__card {', 500)
+        card = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__card {', 800)
         self.assertIn('background: #000000 !important;', card)
-        ring = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__ring {', 400)
+        ring = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__ring {', 700)
         self.assertIn('border-radius: 50%;', ring)
         self.assertIn('box-shadow: 0 0 0 9999px', ring)
+
+    def test_frame_fills_the_page_and_listens_everywhere(self):
+        """ПЕРЕДЕЛАНО 11.09.2026 («переделай смену фото профиля, как в
+        телеграме, аккуратно»). Было: снимок в квадратике посреди чёрного поля,
+        подпись и панель под ним — кадра целиком не видно, и экран читался как
+        картинка на подложке.
+
+        Стало как в образце: снимок во всю страницу, круг — окно в нём, вокруг
+        окна тот же снимок, только притушенный. Подсказка и панель лежат ПОВЕРХ
+        снимка, поэтому пальцы слушает вся страница: часть снимка уходит под
+        панель, и нажатие там раньше попадало в пустоту."""
+        stage = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__stage {', 400)
+        self.assertIn('position: absolute;', stage)
+        self.assertIn('inset: 0;', stage)
+        self.assertIn('touch-action: none;', stage)
+        # Квадрат кадра больше НЕ обрезает: снимок обязан выходить за круг.
+        area = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__area {', 400)
+        self.assertIn('overflow: visible;', area)
+        # Обработчики висят на поле кадра, а не на квадрате со снимком.
+        at = self.AVATAR.index('className="mobile-crop__stage"')
+        self.assertIn('onPointerDown={handleCropPointerDown}', self.AVATAR[at:at + 400])
+        # Подсказка — наверху и насквозь для пальца; внизу только кнопки.
+        hint = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__hint {', 800)
+        self.assertIn('top: 0;', hint)
+        self.assertIn('pointer-events: none;', hint)
+        self.assertIn("'Перемещайте и масштабируйте'", self.AVATAR)
+
+    def test_guides_show_up_only_while_the_frame_is_moved(self):
+        """Сетка по третям — как в образце: в покое она расчерчивает лицо без
+        всякой нужды, поэтому включается, ПОКА кадр ведут."""
+        self.assertIn('const [isCropMoving, setIsCropMoving] = useState(false);', self.AVATAR)
+        self.assertIn("data-on={isCropMoving ? '' : undefined}", self.AVATAR)
+        # Гаснет, когда с экрана ушёл ПОСЛЕДНИЙ палец, а не любой из двух:
+        # иначе щипок снимал бы сетку на середине движения.
+        self.assertIn('if (pointersRef.current.size === 0) setIsCropMoving(false);', self.AVATAR)
+        self.assertIn('[data-on] {', css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__guides {', 900))
 
     def test_pinch_zooms_the_frame(self):
         """Щипок двумя пальцами — первое, что делают со снимком на телефоне."""

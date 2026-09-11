@@ -433,7 +433,13 @@ const AccountAvatarModal = ({
             return undefined;
         }
         const measure = () => {
-            const side = Math.min(window.innerWidth, Math.max(200, window.innerHeight - 220));
+            /* Круг ВО ВСЮ ШИРИНУ экрана, только с волоском поля по краям: при
+               наименьшем приближении снимок ровно вписан в круг, и всё, что
+               отнято у круга, становится чёрной полосой по бокам снимка — с
+               ней экран снова читается как картинка на подложке. По высоте
+               вычитаем только полосу подсказки и панель: обе лежат ПОВЕРХ
+               снимка, и место под ними у кадра не отнимают. */
+            const side = Math.max(180, Math.min(window.innerWidth - 16, window.innerHeight - 208));
             setCropPreviewSize(Math.round(side));
         };
         measure();
@@ -478,9 +484,13 @@ const AccountAvatarModal = ({
        снимком, и без него кадр ощущается неживым. */
     const pinchRef = useRef(null);
     const pointersRef = useRef(new Map());
+    /* Сетка внутри круга показывается, ПОКА кадр ведут, — как в образце: в
+       покое она расчерчивает лицо без всякой нужды. */
+    const [isCropMoving, setIsCropMoving] = useState(false);
 
     const handleCropPointerDown = (event) => {
         pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        setIsCropMoving(true);
         if (pointersRef.current.size === 2) {
             const [a, b] = [...pointersRef.current.values()];
             pinchRef.current = {
@@ -514,6 +524,7 @@ const AccountAvatarModal = ({
     const handleCropPointerUp = (event) => {
         pointersRef.current.delete(event.pointerId);
         if (pointersRef.current.size < 2) pinchRef.current = null;
+        if (pointersRef.current.size === 0) setIsCropMoving(false);
         handleAvatarCropPointerUp(event);
     };
 
@@ -556,54 +567,81 @@ const AccountAvatarModal = ({
     if (!isOpen) return null;
 
     if (isMobileShell) {
-        /* Экран кадрирования — как в образце: тёмное поле во весь экран, снимок
-           под круглой маской, внизу стрелка «назад» и синяя галочка. Ни шапки,
-           ни списков: в кадре нечего читать, им работают пальцами. */
+        /* Экран кадрирования — как в образце: снимок лежит ВО ВСЮ СТРАНИЦУ, а
+           круг — это окно в нём; вокруг окна тот же снимок, только притушенный.
+           ПЕРЕДЕЛАНО 11.09.2026 (владелец: «переделай смену фото профиля, как в
+           телеграме, аккуратно»): было — квадратик со снимком посреди чёрного
+           поля, подпись под ним и панель ниже. Снимка целиком видно не было,
+           поэтому непонятно, что именно останется за кругом, а экран читался
+           как картинка на подложке, а не как кадр. Ни шапки, ни списков: в
+           кадре нечего читать, им работают пальцами. */
         const busy = isAvatarProcessing || isLoading;
+        const frameStyle = { width: `${cropPreviewSize}px`, height: `${cropPreviewSize}px` };
         return (
-            <div className="otp-modal-root mobile-crop fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Кадр фотографии">
-                <div className="otp-modal-card mobile-crop__card">
-                    <div className="mobile-crop__stage">
+            <div
+                className="otp-modal-root mobile-crop fixed inset-0 z-50"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Фотография профиля"
+            >
+                <div className="otp-modal-card mobile-crop__card" data-busy={busy ? '' : undefined}>
+                    {/* Пальцы слушает ВСЯ страница, а не круг: часть снимка
+                        лежит под подсказкой и панелью, и там, где в образце
+                        кадр спокойно тянется, у нас нажатие уходило в пустоту. */}
+                    <div
+                        className="mobile-crop__stage"
+                        onPointerDown={handleCropPointerDown}
+                        onPointerMove={handleCropPointerMove}
+                        onPointerUp={handleCropPointerUp}
+                        onPointerCancel={handleCropPointerUp}
+                        onWheel={handleAvatarCropWheel}
+                    >
                         {avatarCropState ? (
-                            <div
-                                className="mobile-crop__area"
-                                style={{ width: `${cropPreviewSize}px`, height: `${cropPreviewSize}px` }}
-                                onPointerDown={handleCropPointerDown}
-                                onPointerMove={handleCropPointerMove}
-                                onPointerUp={handleCropPointerUp}
-                                onPointerCancel={handleCropPointerUp}
-                                onWheel={handleAvatarCropWheel}
-                            >
-                                {avatarCropState.sourceUrl && avatarCropViewStyle && (
-                                    <img
-                                        src={avatarCropState.sourceUrl}
-                                        alt=""
-                                        className="mobile-crop__photo"
-                                        style={avatarCropViewStyle}
-                                        draggable={false}
+                            <>
+                                <div className="mobile-crop__area" style={frameStyle}>
+                                    {avatarCropState.sourceUrl && avatarCropViewStyle && (
+                                        <img
+                                            src={avatarCropState.sourceUrl}
+                                            alt=""
+                                            className="mobile-crop__photo"
+                                            style={avatarCropViewStyle}
+                                            draggable={false}
+                                        />
+                                    )}
+                                </div>
+                                {/* Круг — то, что останется от снимка; всё
+                                    вокруг гасим. Сетка внутри проявляется,
+                                    только пока палец ведёт кадр. */}
+                                <div className="mobile-crop__ring" style={frameStyle}>
+                                    <span
+                                        className="mobile-crop__guides"
+                                        data-on={isCropMoving ? '' : undefined}
+                                        aria-hidden="true"
                                     />
-                                )}
-                                {/* Круг — то, что останется от снимка; всё вокруг гасим. */}
-                                <div className="mobile-crop__ring" />
-                            </div>
+                                </div>
+                            </>
                         ) : (
-                            <div className="mobile-crop__waiting">
-                                {avatarError || 'Готовим снимок…'}
-                            </div>
+                            <p className="mobile-crop__waiting">
+                                <FaIcon className="fas fa-spinner fa-spin" aria-hidden="true" />
+                                <span>Готовим снимок…</span>
+                            </p>
                         )}
                     </div>
 
+                    {/* Подсказка — НАВЕРХУ и словами системного экрана iOS:
+                        внизу в образце только кнопки, и строка текста между
+                        ними читалась как недостающая часть управления. */}
+                    <p className="mobile-crop__hint">
+                        {busy ? 'Сохраняем…' : 'Перемещайте и масштабируйте'}
+                    </p>
+
                     {(avatarError || modalError) && (
-                        <p className="mobile-crop__error">{avatarError || modalError}</p>
+                        <p className="mobile-crop__error" role="alert">{avatarError || modalError}</p>
                     )}
 
                     {/* Ползунка приближения нет намеренно: в образце снимок
-                        приближают щипком, а полоса на чёрном поле читалась как
-                        недостающая часть управления. */}
-                    <p className="mobile-crop__tip">
-                        {busy ? 'Сохраняем…' : 'Двигайте снимок и приближайте щипком'}
-                    </p>
-
+                        приближают щипком, а полоса поверх снимка читалась бы
+                        как недостающая часть управления. */}
                     <div className="mobile-crop__bar">
                         <button
                             type="button"

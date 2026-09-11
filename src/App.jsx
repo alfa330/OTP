@@ -38311,12 +38311,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
             const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
             const [showChangeAvatarForm, setShowChangeAvatarForm] = useState(false);
-            /* Снимок, выбранный строкой профиля ДО открытия кадра: на телефоне
-               галерею открывает сама строка (см. mobile-sheet-row--pick). */
+            /* Снимок, выбранный ДО открытия кадра: на телефоне галерею и камеру
+               открывает сам пункт листа «что сделать с фотографией». */
             const [pickedAvatarFile, setPickedAvatarFile] = useState(null);
             const [isRemovingAvatar, setIsRemovingAvatar] = useState(false);
-            /* Лист «что сделать с фотографией»: выбрать новую или удалить. В
-               образце это один вход, а не две строки подряд. */
+            /* Лист «что сделать с фотографией»: снять, выбрать из галереи или
+               удалить. В образце это один вход, а не три строки подряд. */
             const [photoActionsOpen, setPhotoActionsOpen] = useState(false);
             const [newCredentials, setNewCredentials] = useState(null);
             const [loginData, setLoginData] = useState({
@@ -47742,45 +47742,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 «Удалить фотографию» лежат в одном листе, а не
                                                 двумя строками подряд).
 
-                                                Пока фотографии нет, лист не нужен: выбирать
-                                                не из чего, и строка открывает галерею сама —
-                                                label с настоящим input, потому что выбор
-                                                файла браузер открывает ТОЛЬКО по живому
-                                                нажатию, из кода — не откроет. */}
-                                            {canChangeAccountAvatar && !user?.avatar_url && (
-                                                <label
-                                                    className="mobile-sheet-row mobile-sheet-row--pick"
-                                                    /* Кусок с кадром подтягиваем, пока человек
-                                                       выбирает снимок в галерее: иначе после
-                                                       выбора экран секунду пустует — Suspense
-                                                       у этого окна без заглушки. */
-                                                    onClick={() => { import('./components/modals/AccountAvatarModal'); }}
-                                                >
-                                                    <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
-                                                    <span>Добавить фотографию</span>
-                                                    {/* input ПОСЛЕДНИМ: плитку значка стили
-                                                        берут по `> svg:first-child`, и поле
-                                                        выбора файла, стоя первым, оставляло
-                                                        строку без цветного квадрата. */}
-                                                    <input
-                                                        type="file"
-                                                        accept="image/png,image/jpeg,image/webp,image/gif"
-                                                        className="hidden"
-                                                        onChange={handlePickedAvatarFile}
-                                                    />
-                                                </label>
-                                            )}
-                                            {canChangeAccountAvatar && user?.avatar_url && (
+                                                ЛИСТ ОТКРЫВАЕТСЯ И КОГДА ФОТОГРАФИИ ЕЩЁ НЕТ
+                                                (правка 11.09.2026): в нём два способа её
+                                                взять — камера и галерея. Раньше в этом случае
+                                                строка открывала галерею сама, и снять себя
+                                                было нечем, хотя в образце камера первым же
+                                                пунктом. */}
+                                            {canChangeAccountAvatar && (
                                                 <button
                                                     type="button"
-                                                    className="mobile-sheet-row mobile-sheet-row--pick"
+                                                    className="mobile-sheet-row"
                                                     onClick={() => {
+                                                        /* Кусок с кадром подтягиваем, пока
+                                                           человек выбирает снимок: иначе
+                                                           после выбора экран секунду пустует —
+                                                           Suspense у этого окна без заглушки. */
                                                         import('./components/modals/AccountAvatarModal');
                                                         setPhotoActionsOpen(true);
                                                     }}
                                                 >
                                                     <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
-                                                    <span>Сменить фотографию</span>
+                                                    <span>{user?.avatar_url ? 'Сменить фотографию' : 'Добавить фотографию'}</span>
                                                 </button>
                                             )}
                                             {/* Пункт сам решает, показываться ли: на уже
@@ -55642,13 +55624,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 open={photoActionsOpen}
                                 onClose={() => setPhotoActionsOpen(false)}
                                 actions={[
+                                    /* Камера и галерея — двумя пунктами, как в образце:
+                                       снять себя на телефоне проще, чем искать готовый
+                                       файл. Оба пункта — label с настоящим input: и
+                                       камеру, и галерею браузер открывает ТОЛЬКО по
+                                       живому нажатию, из кода — не откроет. */
                                     {
-                                        key: 'pick',
-                                        /* Пункт — label с настоящим input: галерею
-                                           браузер открывает только по живому нажатию. */
+                                        key: 'camera',
                                         render: (
                                             <label className="mobile-actions__row">
-                                                Выбрать фото
+                                                Сделать снимок
+                                                {/* accept именно image/* : с перечислением
+                                                    типов iOS открывает выбор файла вместо
+                                                    камеры, и capture остаётся без дела. */}
+                                                <input
+                                                    type="file"
+                                                    accept="image/*"
+                                                    capture="user"
+                                                    className="hidden"
+                                                    onChange={handlePickedAvatarFile}
+                                                />
+                                            </label>
+                                        ),
+                                    },
+                                    {
+                                        key: 'pick',
+                                        render: (
+                                            <label className="mobile-actions__row">
+                                                Выбрать из галереи
                                                 <input
                                                     type="file"
                                                     accept="image/png,image/jpeg,image/webp,image/gif"
@@ -55658,7 +55661,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </label>
                                         ),
                                     },
-                                    {
+                                    /* Удаление — только когда есть что удалять: пункт,
+                                       который ничего не делает, хуже отсутствующего. */
+                                    ...(user?.avatar_url ? [{
                                         key: 'remove',
                                         label: isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию',
                                         danger: true,
@@ -55667,7 +55672,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             setPhotoActionsOpen(false);
                                             handleRemoveAccountAvatar();
                                         },
-                                    },
+                                    }] : []),
                                 ]}
                             />
                         )}
