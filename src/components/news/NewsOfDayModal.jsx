@@ -4,6 +4,8 @@ import { Bell, Check, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import NewsGallery from './NewsGallery';
 import { subscribeNewsPoke } from './newsShared';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import './news-modal.css';
 
 /* Окно «Новость дня».
@@ -175,6 +177,18 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [current, dismiss]);
+
+    /* «Назад» на телефоне работает как Escape: необязательную новость закрывает
+       (и это тоже отметка о прочтении), обязательную — нет. Но и провалиться
+       мимо окна жест не должен: под ним сменился бы раздел, и человек,
+       дочитав новость, оказался бы не там, где был. Возврат false оставляет
+       запись в истории на месте. */
+    const isMobileShell = useIsMobileShell();
+    useScreenBackGesture(isMobileShell && Boolean(current), () => {
+        if (!current || current.is_mandatory) return false;
+        dismiss();
+        return true;
+    });
 
     if (!current) return null;
 

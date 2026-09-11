@@ -103,7 +103,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         self.assertIn("handleSidebarViewNavigation(e, 'sv_list'", source)
         self.assertIn("handleSidebarViewNavigation(e, 'manage_users'", source)
         self.assertIn("handleSidebarViewNavigation(e, 'manage_trainers'", source)
-        self.assertIn("setView('manage_users')", source)
+        self.assertIn("redirectToView('manage_users')", source)
         self.assertNotIn("manageOperatorsRoleView", source)
         self.assertIn("const operatorUsers = useMemo(() => (", source)
         # Литеральный список заменён предикатом: к оператору и стажёру
@@ -146,7 +146,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         redirect_guards = source[redirect_start:redirect_end]
         self.assertIn("if (isPlainTrainer && !TRAINER_ALLOWED_VIEWS.includes(view))", redirect_guards)
         self.assertGreaterEqual(
-            redirect_guards.count("else if (isPlainTrainer) setView('surveys');"),
+            redirect_guards.count("else if (isPlainTrainer) redirectToView('surveys');"),
             4,
         )
         self.assertNotIn("user?.role === 'trainer'", redirect_guards)

@@ -2,6 +2,8 @@ import React, {
     useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
 import { createPortal } from 'react-dom';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import axios from 'axios';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
@@ -476,6 +478,10 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     // Десктоп — выпадашка под полем; телефон — полноэкранный лист.
     const [focused, setFocused] = useState(false);
     const [sheetOpen, setSheetOpen] = useState(false);
+    /* Лист фильтров — экран, и «назад» закрывает ЕГО. Без своей записи жест
+       снимал верхнюю чужую — запись перехода между разделами, — и человек с
+       открытым листом уезжал в соседний раздел. */
+    const isMobileShell = useIsMobileShell();
 
     const inputRef = useRef(null);
     const dropRef = useRef(null);
@@ -629,6 +635,8 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         setSheetOpen(false);
         inputRef.current?.blur();
     }, []);
+
+    useScreenBackGesture(isMobileShell && sheetOpen, close);
 
     /* Escape снимает по ОДНОМУ слою сверху вниз: сначала список создателей
        (CustomSelect гасит себя сам — его мы просто пропускаем вперёд), затем

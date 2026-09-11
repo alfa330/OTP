@@ -122,6 +122,25 @@ class TabBarTests(unittest.TestCase):
             self.assertIn(f'env(safe-area-inset-{inset})', block,
                           f'бар у грани {side} налезает на безопасную зону')
 
+    def test_toasts_do_not_sit_on_the_bar(self):
+        """ВСПЛЫВАЮЩЕЕ СООБЩЕНИЕ ГЛОТАЛО НАЖАТИЯ ПО ВКЛАДКАМ.
+
+        Контейнер прибит к нижнему правому углу и лежит выше всего на странице
+        (z-index 9999) — ровно там, где на телефоне стоит бар разделов. Пока
+        сообщение видно (пять секунд), нажатия по двум-трём вкладкам уходили в
+        никуда: человек жмёт «Задачи», а ничего не открывается. Поймано
+        замером: elementFromPoint в середине вкладки отдавал карточку
+        сообщения, а не кнопку."""
+        toasts = (ROOT / 'src' / 'components' / 'common' / 'ToastContainer.jsx').read_text(encoding='utf-8')
+        self.assertIn('className="otp-toasts fixed bottom-4 right-4', toasts)
+        self.assertIn('bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + 12px);',
+                      css_block(SHELL_CSS, 'body.mobile-shell .otp-toasts {'))
+        # Поворот: бар у боковой грани — отступ переезжает туда же.
+        self.assertIn('right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 12px);',
+                      css_block(SHELL_CSS, 'body[data-tabbar-side="right"].mobile-shell .otp-toasts {'))
+        self.assertIn('left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 12px);',
+                      css_block(SHELL_CSS, 'body[data-tabbar-side="left"].mobile-shell .otp-toasts {'))
+
     def test_content_gets_room_for_the_bar(self):
         """Без отступа последняя строка раздела прячется под кнопками."""
         self.assertIn('padding-bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));',
@@ -709,9 +728,32 @@ class BackGestureTests(unittest.TestCase):
     def test_own_entry_is_removed_on_a_normal_close(self):
         """Иначе запись останется, и следующий жест уйдёт впустую: человек
         свайпнет, а экран уже закрыт и ничего не произойдёт."""
-        self.assertIn('window.history.back();', self.STACK)
+        self.assertIn('pendingSlots -= 1;', self.STACK)
+        self.assertIn('window.history.go(delta);', self.STACK)
+        # Свой же popstate пропускаем, иначе он закрыл бы и соседний экран.
         self.assertIn('pendingBacks += 1;', self.STACK)
         self.assertIn('if (pendingBacks > 0) {', self.STACK)
+
+    def test_one_frame_is_netted_out(self):
+        """ШАГОВ НАЗАД У БРАУЗЕРА РОВНО СТОЛЬКО, СКОЛЬКО У НАС ЭКРАНОВ.
+
+        Один кадр закрывает шторку разделов и открывает «Сменить логин»:
+        сначала все уборки (отмена), потом все подписки (новая запись). Но
+        back() в браузере отложен, а pushState мгновенен, и цель шага назад
+        считается по указателю на момент вызова — новая запись оказывалась выше
+        указателя, и на два экрана оставался один шаг. Дальше «назад» снимало
+        экран, а указатель уже стоял на дне, и следующее нажатие уходило через
+        раздел. Замерено в браузере: «назад» с экрана смены логина уводило в
+        раздел, с которого начался вход.
+
+        Поэтому обе половины кадра сводятся в одно число и применяются в
+        микрозадаче: закрыли и открыли поровну — история не трогается вовсе."""
+        self.assertIn('let pendingSlots = 0;', self.STACK)
+        self.assertIn('const delta = pendingSlots;', self.STACK)
+        self.assertIn('Promise.resolve().then(flush);', self.STACK)
+        # Запись кладётся только через сведённый итог, а не сразу на месте.
+        push = self.STACK[self.STACK.index('export const pushBackEntry'):]
+        self.assertNotIn('window.history.pushState', push[:push.index('export const clearBackStack')])
 
     def test_back_never_leaves_the_document(self):
         """ПУСТОЙ СТЕК — ЭТО ДНО, И УХОДИТЬ С НЕГО НЕКУДА.
@@ -757,8 +799,87 @@ class BackGestureTests(unittest.TestCase):
     def test_restore_does_not_push_again(self):
         """Иначе на каждый жест ложилась бы новая запись, и «назад» перестало
         бы уводить дальше первого шага."""
-        self.assertIn('if (restoringViewRef.current) {', APP)
+        self.assertIn('const wasRestoring = restoringViewRef.current;', APP)
+        self.assertIn('if (wasRestoring || wasRedirect) return;', APP)
         self.assertIn('restoringViewRef.current = false;', APP)
+
+    def test_flags_are_cleared_on_every_run(self):
+        """Поднятый флаг, который некому опустить, съел бы запись у следующего
+        перехода — и «назад» шагнуло бы ЧЕРЕЗ раздел.
+
+        Так и выходило бы: возврат в раздел, где мы уже стоим, React до рендера
+        не доводит, эффект не срабатывает, и флаг доживал бы до настоящего
+        перехода."""
+        at = APP.index('const from = backViewRef.current;')
+        block = APP[at:at + 900]
+        # Снятие флагов идёт ДО любого раннего выхода из эффекта.
+        self.assertLess(block.index('redirectViewRef.current = false;'), block.index('if (!isMobileShell'))
+        self.assertIn('if (backViewRef.current !== from) restoringViewRef.current = true;', APP)
+        self.assertIn('if (!nextView || nextView === backViewRef.current) return;', APP)
+
+    def test_gate_redirects_leave_no_entry(self):
+        """ПЕРЕБРОС — НЕ ПЕРЕХОД. Раздел меняет гейт, а не человек: вход
+        открывает раздел по умолчанию роли, стражи уводят из закрытого раздела,
+        выход возвращает к началу. Владелец 11.09.2026: «перекидывает вообще в
+        другой раздел, а не оттуда, откуда ты начинал» — «назад» с первого же
+        раздела уходило в «Мои часы», где человек не был.
+
+        Замерено в браузере: после входа админа история была на запись длиннее,
+        чем разделов он открыл."""
+        self.assertIn('const redirectToView = useCallback((nextView) => {', APP)
+        for anchor, end in (
+            ('// Persist and restore view (after user is loaded', 'requestedViewFromLocation]);'),
+            ('// Do not touch view while authentication is still initializing', 'canAccessFourYouSection]);'),
+            ('// Гард видимости разделов по отделу (Этап 10)', 'wikiSectionEnabled, view]);'),
+        ):
+            at = APP.index(anchor)
+            block = APP[at:APP.index(end, at)]
+            self.assertNotIn('setView(', block, f'переброс кладёт запись: {anchor}')
+            self.assertIn('redirectToView(', block)
+
+    def test_logout_drops_the_entries_of_the_session(self):
+        """Иначе «назад» с экрана входа уводило бы в разделы ушедшего человека,
+        а следующего вошедшего первое же нажатие выбрасывало бы в чужой."""
+        self.assertIn('export const clearBackStack = ', self.STACK)
+        self.assertIn('clearBackStack();', APP)
+
+    def test_sheet_and_bell_are_screens_too(self):
+        """Без своей записи жест снимал верхнюю чужую — запись перехода между
+        разделами: человек открывал шторку, жал «назад» и оказывался в соседнем
+        разделе, а лист уведомлений при этом оставался открытым."""
+        self.assertIn('useScreenBackGesture(isMobileShell && mobileMenuOpen, closeMobileMenu);', APP)
+        bell = (ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx').read_text(encoding='utf-8')
+        self.assertIn('useScreenBackGesture(isNarrow && open, close);', bell)
+
+    def test_own_overlays_are_screens_too(self):
+        """Окна, свёрстанные внутри разделов, жест не видел вовсе: «назад» над
+        ними снимало верхнюю чужую запись — переход между разделами, — и
+        человек, закрыв окно, оказывался не там, откуда пришёл.
+
+        Здесь — те, что на телефоне открываются каждый день. Окна аукциона
+        смен намеренно не трогаем: они оставлены второй машине."""
+        cases = (
+            ('wiki/WikiSearch.jsx', 'useScreenBackGesture(isMobileShell && sheetOpen, close);'),
+            ('common/InstallGuideSheet.jsx', 'useScreenBackGesture(isMobileShell && open, onClose);'),
+            ('c2d_eval/MyLowRatings.jsx', 'useScreenBackGesture(isMobileShell && open, () => setOpen(false));'),
+            ('events/EventsView.jsx', 'useScreenBackGesture(isMobileShell, onClose);'),
+        )
+        for path, call in cases:
+            source = (ROOT / 'src' / 'components' / path).read_text(encoding='utf-8')
+            self.assertIn(call, source, f'{path}: окно не слышит «назад»')
+            self.assertIn('useIsMobileShell', source, f'{path}: жест не заперт на телефон')
+
+    def test_screen_may_refuse_to_close(self):
+        """Обязательную новость не закрывает ни крестик, ни Esc — и «назад» не
+        должно. Но провалиться мимо неё жест тоже не вправе: под окном сменился
+        бы раздел, и человек, дочитав, оказался бы не там, где был. Поэтому
+        close возвращает false, а запись возвращается на место."""
+        self.assertIn('if (top.close() === false) {', self.STACK)
+        self.assertIn('stack.push(top);', self.STACK)
+        news = (ROOT / 'src' / 'components' / 'news' / 'NewsOfDayModal.jsx').read_text(encoding='utf-8')
+        self.assertIn('if (!current || current.is_mandatory) return false;', news)
+        events = (ROOT / 'src' / 'components' / 'events' / 'EventsView.jsx').read_text(encoding='utf-8')
+        self.assertIn('if (submitting) return false;', events)
 
     def test_screen_keeps_no_stale_callback(self):
         """onClose приходит заново на каждом рендере раздела: новая функция в

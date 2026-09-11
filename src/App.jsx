@@ -56,7 +56,7 @@ import MobileBellSlot from './components/common/MobileBellSlot';
 import { holdPageScroll } from './utils/pageScrollLock';
 import MobilePageChrome from './components/common/MobilePageChrome';
 import useScreenBackGesture from './components/common/useScreenBackGesture';
-import { pushBackEntry } from './utils/mobileBackStack';
+import { pushBackEntry, clearBackStack } from './utils/mobileBackStack';
 import useIsMobileShell from './components/common/useIsMobileShell';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
@@ -40110,10 +40110,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.open(buildAppViewUrl(nextView), '_blank', 'noopener,noreferrer');
             }, []);
 
+            /* Какой раздел открыт сейчас — для тех, кто не может ждать рендера:
+               и переброс, и возврат по жесту решают ДО него, класть ли запись. */
+            const backViewRef = useRef(view);
+
             const navigateToView = useCallback((nextView) => {
                 if (!nextView) return;
                 setView(nextView);
                 setMobileMenuOpen(false);
+            }, []);
+
+            /* ПЕРЕБРОС — НЕ ПЕРЕХОД. Раздел меняет не человек, а гейт: вход
+               открывает раздел по умолчанию роли, стражи уводят из закрытого
+               раздела, выход возвращает к началу. Записи в истории такому
+               переходу не положено — иначе «назад» из первого же раздела уводит
+               туда, где человек НЕ БЫЛ. Ровно это владелец и увидел:
+               «перекидывает вообще в другой раздел, а не оттуда, откуда ты
+               начинал»: вход админа открывает «Супервайзеров», а «назад» с них
+               уходило в «Мои часы».
+
+               Просьбу открыть тот же раздел гасим здесь: setView тем же
+               значением React до рендера не доводит, эффект не сработает — и
+               поднятый флаг дожил бы до следующего, уже настоящего перехода и
+               съел бы его запись. */
+            const redirectViewRef = useRef(false);
+            const redirectToView = useCallback((nextView) => {
+                if (!nextView || nextView === backViewRef.current) return;
+                redirectViewRef.current = true;
+                setView(nextView);
             }, []);
 
             /* ЖЕСТ «НАЗАД» МЕЖДУ РАЗДЕЛАМИ — только на телефоне.
@@ -40131,18 +40155,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
              * Флаг restoringView гасит отдачу: возврат сам меняет view, и без
              * него на каждый жест ложилась бы новая запись — «назад» перестало
              * бы уводить дальше первого шага. */
-            const backViewRef = useRef(view);
             const restoringViewRef = useRef(false);
             useEffect(() => {
                 const from = backViewRef.current;
                 backViewRef.current = view;
+                /* Оба флага снимаем на КАЖДОМ прогоне, а не внутри своей ветки:
+                   поднятый флаг, который некому опустить, съел бы запись у
+                   следующего перехода, и «назад» шагнуло бы ЧЕРЕЗ раздел. */
+                const wasRestoring = restoringViewRef.current;
+                const wasRedirect = redirectViewRef.current;
+                restoringViewRef.current = false;
+                redirectViewRef.current = false;
                 if (!isMobileShell || from === view) return;
-                if (restoringViewRef.current) {
-                    restoringViewRef.current = false;
-                    return;
-                }
+                if (wasRestoring || wasRedirect) return;
                 pushBackEntry(() => {
-                    restoringViewRef.current = true;
+                    /* Возврат в раздел, где мы уже стоим, React до рендера не
+                       доводит: флаг подняли бы, а снять было бы некому. */
+                    if (backViewRef.current !== from) restoringViewRef.current = true;
                     navigateToView(from);
                 });
             }, [isMobileShell, view, navigateToView]);
@@ -40160,6 +40189,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 isMobileShell && (showChangeLoginForm || showChangePasswordForm || showChangeAvatarForm),
                 closeAccountScreens,
             );
+
+            /* Шторка разделов — экран поверх раздела, и «назад» обязано
+               закрывать её, а не уносить в соседний раздел: без своей записи
+               жест снимал верхнюю чужую — запись перехода, — и человек, открыв
+               шторку и передумав, оказывался там, откуда пришёл. */
+            const closeMobileMenu = useCallback(() => setMobileMenuOpen(false), []);
+            useScreenBackGesture(isMobileShell && mobileMenuOpen, closeMobileMenu);
 
             useEffect(() => {
                 setPinnedTaskActionLoadingKey('');
@@ -41422,10 +41458,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
                     if (requestedViewFromUrl && TRAINER_ALLOWED_VIEWS.includes(requestedViewFromUrl)) {
-                        setView(requestedViewFromUrl);
+                        redirectToView(requestedViewFromUrl);
                         return;
                     }
-                    setView('surveys');
+                    redirectToView('surveys');
                     return;
                 }
 
@@ -41449,14 +41485,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection);
                 if (canOpenRequestedView) {
-                    setView(requestedViewFromUrl);
+                    redirectToView(requestedViewFromUrl);
                     return;
                 }
 
-                if (isAdminLikeRole) setView('sv_list');
-                else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                else if (isSupervisorRole(user?.role)) setView('operators');
-                else setView('hours');
+                if (isAdminLikeRole) redirectToView('sv_list');
+                else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                else redirectToView('hours');
             }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, requestedViewFromLocation]);
 
             useEffect(() => {
@@ -41505,65 +41541,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
                 if (isPlainTrainer && !TRAINER_ALLOWED_VIEWS.includes(view)) {
-                    setView('surveys');
+                    redirectToView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (isPlainTrainer) setView('surveys');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
                 }
                 if ((view === 'resource_fte' || view === 'resource_fte_chat') && !canAccessResourceFteSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (isPlainTrainer) setView('surveys');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
                 }
                 if (view === 'ai_qa' && !canAccessAiQaSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (isPlainTrainer) setView('surveys');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
                 }
                 // Отдельной проверкой, а не вместе с 'ai_qa': у чатов свой,
                 // более широкий предикат, и общее условие выкидывало бы админа
                 // из раздела сразу после входа.
                 if (view === 'wazzup_chats' && !canAccessVerifierChatsSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (isPlainTrainer) setView('surveys');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
                 }
                 if (view === 'chatapp_chats' && !canAccessChatAppSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else redirectToView('hours');
                 }
                 if (view === 'group_late_bot' && !canAccessGroupLateBotSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else redirectToView('hours');
                 }
                 if (view === 'szov_wallboard' && !canAccessSzovWallboardSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else redirectToView('hours');
                 }
                 if (view === 'tez_wallboard' && !canAccessTezWallboardSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else redirectToView('hours');
                 }
                 if (view === 'four_you' && !canAccessFourYouSection) {
-                    if (isAdminLikeRole) setView('sv_list');
-                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
-                    else if (isSupervisorRole(user?.role)) setView('operators');
-                    else if (isPlainTrainer) setView('surveys');
-                    else setView('hours');
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
                 }
             }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessFourYouSection]);
 
@@ -45432,7 +45468,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setOperatorData(null);
                     setProfileData(null);
                     setHoursData(null);
-                    setView('hours');
+                    /* Выход — не переход между разделами: записи, накопленные за
+                       сессию, вместе с ней и заканчиваются. Иначе «назад» с
+                       экрана входа уводило бы в разделы ушедшего человека, а
+                       следующего вошедшего первое же нажатие выбрасывало бы в
+                       чужой раздел. */
+                    clearBackStack();
+                    redirectToView('hours');
                     setCallEvaluationContext(null);
                     setCallEvaluationFrameReady(false);
                     setLogin('');
@@ -46631,7 +46673,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user || !user.id) return;
                 if (view === 'monitoring_scale' && !isAdminLikeRole && !isDepartmentHeadUser) {
                     const fallback = firstAllowedView(user, []) || (isSupervisorRole(user?.role) ? 'operators' : 'hours');
-                    if (fallback && fallback !== view) setView(fallback);
+                    if (fallback && fallback !== view) redirectToView(fallback);
                     return;
                 }
                 if (!departmentRestrictsViews(user)) return;
@@ -46640,9 +46682,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     canUseAdminEmployeeAccounting &&
                     ['manage_operators', 'manage_users', 'sv_list', 'manage_trainers'].includes(view)
                 ) {
-                    if (view === 'manage_operators') setView('manage_users');
+                    if (view === 'manage_operators') redirectToView('manage_users');
                     // Упрощённый учёт (front_office): пунктов «Супервайзеры»/«Тренеры» нет.
-                    else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');
+                    else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) redirectToView('manage_users');
                     return;
                 }
                 if (view === 'ai_qa' && canAccessAiQaSection) return;
@@ -46690,7 +46732,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
-                if (fallback && fallback !== view) setView(fallback);
+                if (fallback && fallback !== view) redirectToView(fallback);
             }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников

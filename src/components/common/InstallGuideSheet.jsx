@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, Copy, EllipsisVertical, Plus, Share, SquarePlus, X } from 'lucide-react';
+import useIsMobileShell from './useIsMobileShell';
+import useScreenBackGesture from './useScreenBackGesture';
 import markUrl from './sidebar-logo-mark.svg';
 import qrUrl from './install-qr.svg';
 
@@ -350,6 +352,10 @@ const StepCard = ({ index, text, art }) => (
 );
 
 const InstallGuideSheet = ({ open, onClose, platform = 'ios', canPrompt = false, onInstall }) => {
+    /* Лист на телефоне — экран: «назад» закрывает его, а не уносит в соседний
+       раздел (без своей записи жест снимал верхнюю чужую). */
+    const isMobileShell = useIsMobileShell();
+    useScreenBackGesture(isMobileShell && open, onClose);
     /* Своя система открывается первой, но переключатель остаётся: инструкцию
        часто показывают коллеге с другим телефоном. */
     const [tab, setTab] = useState(platform === 'android' ? 'android' : 'ios');

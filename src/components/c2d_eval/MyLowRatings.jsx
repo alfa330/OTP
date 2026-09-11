@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import ChatThread from './ChatThread';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import { iosCard } from '../ui/ios';
 
 /* «Проверки низких оценок» в разделе «Мои оценки» чат-менеджера.
@@ -47,6 +49,11 @@ const formatDay = (value) => {
 export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId, month, granted }) {
     const [data, setData] = useState(null);
     const [open, setOpen] = useState(false);
+    /* Просмотр переписки занимает весь экран — значит, это экран, и «назад»
+       закрывает его. Без своей записи жест снимал запись перехода между
+       разделами, и человек уезжал в соседний раздел прямо из переписки. */
+    const isMobileShell = useIsMobileShell();
+    useScreenBackGesture(isMobileShell && open, () => setOpen(false));
     const [selectedId, setSelectedId] = useState('');
     const [chat, setChat] = useState({ id: '', snapshot: null, loading: false, error: '' });
     const [hideService, setHideService] = useState(false);

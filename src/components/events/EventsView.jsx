@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 
 /* ──────────────────────────────────────────────────────────────────────
  * Раздел «Ивенты»: общедоступная лента постов с фото/видео, лайками и
@@ -907,6 +909,11 @@ const EventDetailModal = ({
     event, apiRoot, authHeaders, currentUser, notify,
     onClose, onToggleLike, busyLike, onDelete, onCommentCountChange,
 }) => {
+    /* Окно живёт, пока его рисует раздел, и «назад» на телефоне закрывает
+       ЕГО. Без своей записи жест снимал запись перехода между разделами:
+       человек закрывал пост и оказывался не там, откуда пришёл. */
+    const isMobileShell = useIsMobileShell();
+    useScreenBackGesture(isMobileShell, onClose);
     const [comments, setComments] = useState([]);
     const [loadingComments, setLoadingComments] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
@@ -1261,6 +1268,16 @@ const EventComposerModal = ({ apiRoot, authHeaders, canTargetAll, departments = 
             document.body.style.overflow = prevOverflow;
         };
     }, [onClose, submitting]);
+
+    /* «Назад» закрывает композер на тех же условиях, что и Escape: пока идёт
+       отправка, окно не бросаем. Возврат false оставляет запись на месте —
+       жест не проваливается в смену раздела под окном. */
+    const isMobileShell = useIsMobileShell();
+    useScreenBackGesture(isMobileShell, () => {
+        if (submitting) return false;
+        onClose();
+        return true;
+    });
 
     // Чистим object-URL превью/постеров. Трекаем КАЖДЫЙ созданный URL в ref,
     // чтобы ничего не утекло, даже если композер закрыли во время захвата постера.

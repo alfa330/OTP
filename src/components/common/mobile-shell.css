@@ -1054,6 +1054,28 @@ body[data-tabbar-side="left"] .notifications-toast-floating {
     left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 10px);
 }
 
+/* ВСПЛЫВАЮЩИЕ СООБЩЕНИЯ — НАД БАРОМ, А НЕ ПОВЕРХ НЕГО.
+   Контейнер прибит к нижнему правому углу и лежит выше всего на странице
+   (z-index 9999). На телефоне ровно там стоит бар разделов, и сообщение
+   накрывало две-три вкладки: пять секунд нажатия по ним уходили в никуда —
+   человек жмёт «Задачи», а ничего не открывается. Поднимаем на толщину бара;
+   в альбомной ориентации бар у боковой грани, и отступ переезжает туда же. */
+body.mobile-shell .otp-toasts {
+    bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom) + 12px);
+    left: max(12px, env(safe-area-inset-left));
+    right: max(12px, env(safe-area-inset-right));
+}
+
+body[data-tabbar-side="right"].mobile-shell .otp-toasts {
+    bottom: max(12px, env(safe-area-inset-bottom));
+    right: calc(var(--mtb-thickness) + env(safe-area-inset-right) + 12px);
+}
+
+body[data-tabbar-side="left"].mobile-shell .otp-toasts {
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: calc(var(--mtb-thickness) + env(safe-area-inset-left) + 12px);
+}
+
 /* Подписи в карточке — обычным регистром. Разметка у неё общая с настольной
    панелью, где раздел набран ЗАГЛАВНЫМИ вразрядку; рядом с листом, где то же
    слово читается как «Ознакомление», две записи одного и того же выглядят

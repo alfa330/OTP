@@ -284,7 +284,7 @@ class BackOfficeHeadSidebarTests(unittest.TestCase):
         self.assertIn("{isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (", app)
         self.assertIn(
             "else if (departmentUsesSimpleEmployeeAccounting(user) && "
-            "['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');",
+            "['sv_list', 'manage_trainers'].includes(view)) redirectToView('manage_users');",
             app,
         )
 

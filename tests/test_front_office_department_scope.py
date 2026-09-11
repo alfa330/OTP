@@ -109,7 +109,7 @@ class FrontOfficeHeadSidebarTests(unittest.TestCase):
         self.assertIn("{isDepartmentHeadUser && departmentUsesSimpleEmployeeAccounting(user) && (", app)
         self.assertIn("{isDepartmentHeadUser && !departmentUsesSimpleEmployeeAccounting(user) && (", app)
         self.assertIn(
-            "else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) setView('manage_users');",
+            "else if (departmentUsesSimpleEmployeeAccounting(user) && ['sv_list', 'manage_trainers'].includes(view)) redirectToView('manage_users');",
             app,
         )
         # Подписи развилкой больше не выбираются: владелец 09.09.2026 назвал

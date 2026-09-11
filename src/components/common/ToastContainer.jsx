@@ -11,8 +11,11 @@ const ToastContainer = ({ toasts, removeToast, setToasts }) => {
         setTimeout(() => removeToast(id), 300); // Match animation duration
     };
 
+    /* otp-toasts — метка для оболочки телефона: там внизу экрана стоит бар
+       разделов, и сообщение, лежащее поверх него (z-index 9999), глотало
+       нажатия по вкладкам, пока не истечёт. Настольная раскладка прежняя. */
     return (
-        <div className="fixed bottom-4 right-4 space-y-3 z-[9999]" style={{ zIndex: 9999 }} aria-live="polite">
+        <div className="otp-toasts fixed bottom-4 right-4 space-y-3 z-[9999]" style={{ zIndex: 9999 }} aria-live="polite">
             {toasts.map(toast => (
                 <div
                     key={toast.id}

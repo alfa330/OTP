@@ -6,6 +6,7 @@ import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { MOBILE_SHELL_QUERY } from '../../utils/mobileShell.js';
 import { holdPageScroll } from '../../utils/pageScrollLock';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import {
     buildDesktopNotice,
     desktopPermission as browserPermission,
@@ -581,6 +582,13 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             setClosing(false);
         }, 200);
     }, []);
+
+    /* Лист уведомлений на телефоне — экран, и «назад» закрывает ЕГО. Без своей
+       записи жест снимал верхнюю чужую — запись перехода между разделами, — и
+       выходило худшее из двух: лист оставался открытым, а раздел под ним
+       менялся. Признак тот же MOBILE_SHELL_QUERY, что у оболочки: на
+       компьютере «назад» означает «предыдущая страница». */
+    useScreenBackGesture(isNarrow && open, close);
 
     useEffect(() => {
         if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
