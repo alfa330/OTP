@@ -1725,6 +1725,20 @@ styleTag.textContent = `
     display: flex; justify-content: flex-end; gap: 8px;
     background: var(--bg); flex-shrink: 0;
   }
+  /* Окна, в которые пишут задачу («Новая задача» и правка), на компьютере
+     шире и выше остальных: в общих 560 пикселях описание вставало узкой
+     колонкой высотой в четыре строки, и длинную задачу набирали вслепую.
+     Короткие окна (удаление, возврат, завершение) намеренно остаются прежними.
+     Правило под медиазапросом — на телефоне окно и так во весь экран,
+     и его размеры задаёт mobile-shell.css. */
+  @media (min-width: 900px) {
+    .tv-modal.tv-modal-composer { max-width: 720px; }
+    .tv-modal.tv-modal-composer .tv-composer-description { min-height: 150px; }
+  }
+  @media (min-width: 1500px) {
+    .tv-modal.tv-modal-composer { max-width: 820px; }
+    .tv-modal.tv-modal-composer .tv-composer-description { min-height: 200px; }
+  }
 
   /* ── Form ── */
   .tv-form-grid { display: flex; flex-direction: column; gap: 14px; }
@@ -6740,6 +6754,31 @@ const SkeletonList = ({ count = 4 }) => (
   </div>
 );
 
+/* ─── Закрытие окна по клику на подложку ───
+   Обычный onClick на подложке закрывал окно и тогда, когда по подложке не
+   кликали: выделяешь мышью текст в описании задачи, ведёшь курсор за край
+   окна и отпускаешь — браузер шлёт click общему предку нажатия и отпускания,
+   а общий предок здесь и есть подложка. Половина набранного текста пропадала
+   вместе с окном. Поэтому закрываем, только если и нажали, и отпустили ровно
+   по подложке. Тот же приём, что у IosModal (src/components/ui/ios.jsx), но
+   строже: там окно уходит уже по нажатию. */
+const useOverlayDismiss = (onClose) => {
+  const pressRef = useRef({ down: false, up: false });
+  return {
+    onPointerDown: (event) => {
+      pressRef.current = { down: event.target === event.currentTarget, up: false };
+    },
+    onPointerUp: (event) => {
+      pressRef.current.up = event.target === event.currentTarget;
+    },
+    onClick: () => {
+      const { down, up } = pressRef.current;
+      pressRef.current = { down: false, up: false };
+      if (down && up) onClose();
+    },
+  };
+};
+
 /* ─── Main Component ─── */
 const TasksView = ({
   user,
@@ -7866,6 +7905,15 @@ const TasksView = ({
   const deleteModalLoadingKey = `${deleteModal.taskId}:delete`;
   const statusModalLoadingKey = `${statusModal.taskId}:${statusModal.action}`;
 
+  // Подложки всех окон раздела: в каждом из них набирают текст, и в каждом
+  // выделение с выходом за край окна закрывало его вместе с набранным.
+  const closeCreate = useCallback(() => setCreateOpen(false), []);
+  const createOverlayProps = useOverlayDismiss(closeCreate);
+  const editOverlayProps = useOverlayDismiss(closeEditModal);
+  const deleteOverlayProps = useOverlayDismiss(closeDeleteModal);
+  const completeOverlayProps = useOverlayDismiss(closeCompleteModal);
+  const statusOverlayProps = useOverlayDismiss(closeStatusModal);
+
   /* ── Render helpers ── */
   const renderTaskList = (list, emptyTitle, emptySub, loading = isTasksLoading) => {
     if (loading) return <SkeletonList />;
@@ -8338,8 +8386,8 @@ const TasksView = ({
 
       {/* Create Modal */}
       {createOpen && (
-        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={() => setCreateOpen(false)}>
-          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" {...createOverlayProps}>
+          <div className="tv-modal tv-modal-composer otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">{form.isBacklog ? 'Новая задача в бэклог' : 'Новая задача'}</h3>
               <button className="tv-close-btn" onClick={() => setCreateOpen(false)}><CloseIcon /></button>
@@ -8373,8 +8421,8 @@ const TasksView = ({
 
       {/* Edit Modal */}
       {editModal.open && (
-        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeEditModal}>
-          <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" {...editOverlayProps}>
+          <div className="tv-modal tv-modal-composer otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Редактирование задачи</h3>
               <button className="tv-close-btn" onClick={closeEditModal}><CloseIcon /></button>
@@ -8417,7 +8465,7 @@ const TasksView = ({
 
       {/* Delete Confirm Modal */}
       {deleteModal.open && (
-        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeDeleteModal}>
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" {...deleteOverlayProps}>
           <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()} style={{ maxWidth: 500 }}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Подтверждение удаления</h3>
@@ -8474,7 +8522,7 @@ const TasksView = ({
 
       {/* Complete Modal */}
       {completeModal.open && (
-        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeCompleteModal}>
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" {...completeOverlayProps}>
           <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Завершение задачи</h3>
@@ -8551,7 +8599,7 @@ const TasksView = ({
 
       {/* Status Modal */}
       {statusModal.open && (
-        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" onClick={closeStatusModal}>
+        <div className="tv-modal-overlay otp-modal-root otp-modal-dim" {...statusOverlayProps}>
           <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">{statusModalTitle}</h3>

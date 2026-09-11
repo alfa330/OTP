@@ -568,6 +568,44 @@ class TaskComposerTests(unittest.TestCase):
         # Флаг бэклога уместен только при создании — правка его не отправляет.
         self.assertEqual(self.src.count("showBacklogToggle\n"), 1)
 
+    def test_overlay_does_not_close_on_text_selection_drag(self):
+        """
+        Выделение текста в окне с выходом мыши за его край не закрывает окно.
+        Раньше подложка висела на голом onClick: нажатие в поле и отпускание за
+        краем окна давали click общему предку — самой подложке, — и окно
+        схлопывалось вместе с набранным отчётом. Закрываем, только если и
+        нажали, и отпустили ровно по подложке.
+        """
+        start = self.src.index("const useOverlayDismiss = (onClose) => {")
+        block = self.src[start:self.src.index("/* ─── Main Component ─── */", start)]
+        self.assertIn("onPointerDown: (event) => {", block)
+        self.assertIn("down: event.target === event.currentTarget", block)
+        self.assertIn("pressRef.current.up = event.target === event.currentTarget;", block)
+        self.assertIn("if (down && up) onClose();", block)
+
+        # Ни одна подложка раздела не закрывается голым onClick: за каждой
+        # из пяти — набранный человеком текст.
+        overlay = 'className="tv-modal-overlay otp-modal-root otp-modal-dim"'
+        self.assertEqual(self.src.count(overlay), 5)
+        for props in (
+            "createOverlayProps", "editOverlayProps", "deleteOverlayProps",
+            "completeOverlayProps", "statusOverlayProps",
+        ):
+            self.assertIn(f"{props} = useOverlayDismiss(", self.src)
+            self.assertIn(f"{overlay} {{...{props}}}", self.src)
+
+    def test_composer_window_is_wider_on_desktop(self):
+        """
+        Окна, в которые пишут задачу, на компьютере шире общих 560 пикселей:
+        в узкой колонке описание вставало лесенкой в четыре строки. Короткие
+        окна (удаление, возврат, завершение) остаются прежними.
+        """
+        self.assertEqual(self.src.count('className="tv-modal tv-modal-composer otp-modal-panel"'), 2)
+        block = self.src[self.src.index("  @media (min-width: 900px) {\n    .tv-modal.tv-modal-composer"):]
+        wide = int(re.search(r"\.tv-modal\.tv-modal-composer \{ max-width: (\d+)px; \}", block).group(1))
+        base = int(re.search(r"\.tv-modal \{\n.*?max-width: (\d+)px;", self.src, re.S).group(1))
+        self.assertGreater(wide, base, "окно составителя должно быть шире общего")
+
     def test_files_chip_only_when_uploads_supported(self):
         start = self.src.index("const supportsFiles = typeof onFilesChange === 'function';")
         block = self.src[start:start + 320]
