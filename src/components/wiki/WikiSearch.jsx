@@ -236,13 +236,29 @@ function CarWidget({ data, car, onOpenClassifier }) {
  * подписи читалась бы как «обновлена» — то есть отвечала бы на другой вопрос.
  * Формат короткий (дд.мм.гг), потому что место в строке выдачи делится с
  * названием статьи.
+ *
+ * ЧИТАЕМ СТЕННЫЕ ЧАСЫ, А НЕ МОМЕНТ ВРЕМЕНИ. В базе wiki_articles.created_at
+ * лежит время Алматы без пояса (schema._NOW = CURRENT_TIMESTAMP AT TIME ZONE
+ * 'Asia/Almaty'), а jsonify подписывает любой datetime без пояса как GMT —
+ * проверено на боевом ответе: «Fri, 11 Sep 2026 17:57:10 GMT». Разбери такую
+ * строку как момент, и браузер в Алматы прибавит к ней пять часов: статья,
+ * заведённая в 19:54, значилась бы добавленной СЛЕДУЮЩИМ днём. Поэтому у
+ * строки с явным поясом берём UTC-составляющие — это и есть исходные часы, —
+ * а у строки без пояса местные, потому что её сам Date разбирает как местную.
  */
+const HAS_TIMEZONE = /(?:Z|GMT|UTC|[+-]\d{2}:?\d{2})\s*$/i;
+const pad2 = (value) => String(value).padStart(2, '0');
+
 export const addedOn = (iso) => {
-    if (!iso) return '';
-    const then = new Date(iso);
+    const raw = String(iso || '').trim();
+    if (!raw) return '';
+    const then = new Date(raw);
     if (Number.isNaN(then.getTime())) return '';
-    return `добавлена ${then.toLocaleDateString('ru-RU',
-        { day: '2-digit', month: '2-digit', year: '2-digit' })}`;
+    const zoned = HAS_TIMEZONE.test(raw);
+    const day = zoned ? then.getUTCDate() : then.getDate();
+    const month = (zoned ? then.getUTCMonth() : then.getMonth()) + 1;
+    const year = (zoned ? then.getUTCFullYear() : then.getFullYear()) % 100;
+    return `добавлена ${pad2(day)}.${pad2(month)}.${pad2(year)}`;
 };
 
 /* Актуальность статьи прямо в строке выдачи: статус и дата добавления.
