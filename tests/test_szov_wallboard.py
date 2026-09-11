@@ -1066,7 +1066,11 @@ class SzovWallboardWiringTests(unittest.TestCase):
                       self.app)
         # Состояние — направление открытого виджета, а не флаг: окно поверх других одно на документ.
         self.assertIn("const [szovWallboardWidget, setSzovWallboardWidget] = useState(null);", self.app)
-        self.assertIn("canAccessSzovWallboardSection && szovWallboardWidget && (", self.app)
+        # Окно поверх других одно на документ, а табло в продукте два — СЗоВ и Тез КЦ.
+        # Поэтому прав спрашивают у того раздела, чьё направление сейчас открыто: направления
+        # Тез начинаются с `tez_`. Гарантия прежняя — без доступа к разделу окно не рисуется.
+        self.assertIn("String(szovWallboardWidget).startsWith('tez_')", self.app)
+        self.assertIn(": canAccessSzovWallboardSection) && (", self.app)
         self.assertIn("onToggleWidget={setSzovWallboardWidget}", self.app)
         self.assertIn("direction={szovWallboardWidget}", self.app)
         # key по направлению: смена направления пересоздаёт окно, а не меняет хук опроса на лету

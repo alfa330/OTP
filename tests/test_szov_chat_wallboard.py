@@ -752,7 +752,10 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("<WidgetButton direction={direction}", self.view)
         widget = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardWidget.jsx").read_text(encoding="utf-8-sig")
         self.assertIn("direction = 'osnova'", widget)
-        self.assertIn("wallboardDirection(direction)", widget)
+        # Направление ищется в обоих каталогах — СЗоВ и Тез, — потому что окно одно на
+        # приложение; для ключей СЗоВ `widgetDirection` сводится к прежнему `wallboardDirection`.
+        self.assertIn("const config = widgetDirection(direction);", widget)
+        self.assertIn(": wallboardDirection(key)", widget)
         for key in ('chat_online', 'chat_busy', 'chat_training', 'chat_inner', 'chat_shift_list'):
             self.assertIn(f"key: '{key}'", self.shared, key)
 
