@@ -34,6 +34,9 @@
     --sheet-handle: rgba(60, 60, 67, 0.3);
     --sheet-chevron: rgba(60, 60, 67, 0.35);
     --sheet-glass: rgba(250, 250, 252, 0.92);
+    /* Стекло шапки — цвет САМОЙ страницы с прозрачностью: в образце сквозь него
+       видно уезжающие строки, а не белая плашка поверх серого листа. */
+    --sheet-bar: rgba(242, 242, 247, 0.72);
     --sheet-gutter: 14px;
     --sheet-radius: 16px;
 }
@@ -1793,10 +1796,11 @@ body.mobile-shell .mobile-account__head {
     align-items: center;
     gap: 4px;
     padding: calc(8px + env(safe-area-inset-top)) 10px 8px;
-    background: var(--sheet-glass);
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    border-bottom: 0.5px solid var(--sheet-sep);
+    /* То же стекло, что у полосы профиля: цвет страницы с прозрачностью, а не
+       белая плашка поверх серого листа. */
+    background: var(--sheet-bar);
+    backdrop-filter: saturate(180%) blur(22px);
+    -webkit-backdrop-filter: saturate(180%) blur(22px);
 }
 
 body.mobile-shell .mobile-account__back {
@@ -2070,6 +2074,86 @@ body.mobile-shell .mobile-account__zoom {
     background: transparent;
 }
 
+/* ── Лист действий (что сделать с фотографией) ──────────────────────────── */
+
+/* Образец — системный лист: крупные строки снизу экрана и отдельной карточкой
+   «Отмена». Общий слой окон прибивает .otp-modal-root к левому верхнему углу и
+   везёт его справа; листу нужно обратное — прижаться к низу и подняться. Отсюда
+   !important: перебиваем ровно те три объявления, и только для этого листа. */
+body.mobile-shell .mobile-actions {
+    /* Выше всплывающих сообщений (у них z-index 9999 и низ экрана): пока лист
+       открыт, сообщение не должно закрывать собой выбор. */
+    z-index: 10000;
+    display: flex !important;
+    flex-direction: column;
+    justify-content: flex-end !important;
+    align-items: stretch !important;
+    padding: 0 8px max(8px, env(safe-area-inset-bottom)) !important;
+    animation: mobile-actions-in 0.26s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes mobile-actions-in {
+    from { transform: translateY(18%); opacity: 0; }
+    to { transform: none; opacity: 1; }
+}
+
+body.mobile-shell .mobile-actions__dim {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.28);
+}
+
+body.mobile-shell .mobile-actions__sheet {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+body.mobile-shell .mobile-actions__group {
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--sheet-card);
+}
+
+body.mobile-shell .mobile-actions__row,
+body.mobile-shell .mobile-actions__cancel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 57px;
+    padding: 0 16px;
+    background: var(--sheet-card);
+    color: var(--sheet-accent);
+    font-size: 19px;
+    line-height: 24px;
+    text-align: center;
+    cursor: pointer;
+}
+
+body.mobile-shell .mobile-actions__row + .mobile-actions__row {
+    border-top: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .mobile-actions__row--danger {
+    color: #ff3b30;
+}
+
+body.mobile-shell .mobile-actions__row:active,
+body.mobile-shell .mobile-actions__cancel:active {
+    background: var(--sheet-active);
+}
+
+body.mobile-shell .mobile-actions__row:disabled {
+    opacity: 0.45;
+}
+
+body.mobile-shell .mobile-actions__cancel {
+    border-radius: 14px;
+    font-weight: 600;
+}
+
 /* ── Кадр фотографии: тёмный экран, как в образце ───────────────────────── */
 
 /* Образец — экран смены фото в Telegram (видео владельца 11.09.2026): чёрное
@@ -2100,6 +2184,9 @@ body.mobile-shell .mobile-crop__stage {
 body.mobile-shell .mobile-crop__area {
     position: relative;
     overflow: hidden;
+    /* Скруглённая рамка, как в образце: прямой угол на чёрном поле выглядит
+       обрезком, а не кадром. */
+    border-radius: 20px;
     background: #0b0b0b;
     /* Жест кадра — наш: без этого палец вместо снимка тянет страницу. */
     touch-action: none;
@@ -2191,11 +2278,13 @@ body.mobile-shell .mobile-crop__bar {
     padding: 0 18px;
 }
 
+/* Подсказка — НАД панелью и мелко: в образце внизу только кнопки, и строка
+   текста между ними читалась как недостающая часть управления. */
 body.mobile-shell .mobile-crop__tip {
-    flex: 1 1 auto;
+    margin: 0;
     text-align: center;
     font-size: 13px;
-    color: rgba(255, 255, 255, 0.55);
+    color: rgba(255, 255, 255, 0.45);
 }
 
 body.mobile-shell .mobile-crop__round {
@@ -2240,20 +2329,23 @@ body.mobile-shell .mobile-sheet-topbar {
     align-items: flex-end;
     justify-content: center;
     height: calc(44px + env(safe-area-inset-top));
+    /* Поля по бокам — ВНУТРЕННИЕ. Отрицательные внешние выносили полосу за края
+       листа, и лист начинал ездить вбок: владелец 11.09.2026 — «имеется боковой
+       скролл в профиле, он не нужен». */
     padding: 0 56px 8px;
-    margin: 0 calc(var(--sheet-gutter) * -1) 2px;
+    margin: 0 0 2px;
     /* Полоса не должна перехватывать нажатия по тому, что под ней. */
     pointer-events: none;
     background: transparent;
-    transition: background 0.22s ease, border-color 0.22s ease;
-    border-bottom: 0.5px solid transparent;
+    transition: background 0.22s ease;
 }
 
 body.mobile-shell .mobile-sheet-topbar[data-shown] {
-    background: var(--sheet-glass);
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    border-bottom-color: var(--sheet-sep);
+    /* Ни линии снизу, ни белой подложки: в образце полоса — это размытая
+       страница, и строки под ней видно насквозь. */
+    background: var(--sheet-bar);
+    backdrop-filter: saturate(180%) blur(22px);
+    -webkit-backdrop-filter: saturate(180%) blur(22px);
 }
 
 body.mobile-shell .mobile-sheet-topbar__name {
@@ -2301,6 +2393,7 @@ html[data-otp-theme="dark"] {
     --sheet-handle: rgba(235, 235, 245, 0.3);
     --sheet-chevron: rgba(235, 235, 245, 0.35);
     --sheet-glass: rgba(28, 28, 30, 0.94);
+    --sheet-bar: rgba(0, 0, 0, 0.7);
 }
 
 html[data-otp-theme="dark"] .mtb-item.is-active .mtb-item__icon {

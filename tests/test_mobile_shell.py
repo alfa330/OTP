@@ -233,7 +233,9 @@ class SheetAccountTests(unittest.TestCase):
         # Установка портала на телефон — там же, своим пунктом.
         self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
         # Смена фото — только тем, кому она разрешена; условие то же, что в меню.
-        self.assertIn('{canChangeAccountAvatar && (', block)
+        # Строк две ветки: «Добавить» (фотографии нет) и «Сменить» (есть).
+        self.assertIn('{canChangeAccountAvatar && !user?.avatar_url && (', block)
+        self.assertIn('{canChangeAccountAvatar && user?.avatar_url && (', block)
 
     def test_actions_keep_the_sheet_open(self):
         """ПРАВИЛО ПЕРЕВЁРНУТО 11.09.2026. Раньше каждая строка закрывала
@@ -752,8 +754,10 @@ class BackGestureTests(unittest.TestCase):
         self.assertIn('let armed = false;', self.STACK)
         self.assertIn('const want = stack.length > 0;', self.STACK)
         self.assertIn('if (want === armed) return;', self.STACK)
-        # Ровно один шаг назад и только по своей записи — никаких go(-n).
-        self.assertIn('window.history.back();', self.STACK)
+        # В историю САМИ НЕ ХОДИМ ВОВСЕ (правка 11.09.2026): наш собственный шаг
+        # назад складывался с жестом человека в один переход на две записи —
+        # см. test_stack_never_steps_back_on_its_own.
+        self.assertNotIn('window.history.back()', self.STACK)
         self.assertNotIn('history.go(', self.STACK)
         # Снятую жестом сторожевую кладём заново, если внизу что-то осталось.
         pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
@@ -841,6 +845,28 @@ class BackGestureTests(unittest.TestCase):
         а отличать их приходится."""
         self.assertIn('otpRoot: true, otpBack: false', self.STACK)
         self.assertIn('otpRoot: false, otpBack: true', self.STACK)
+
+    def test_stack_never_steps_back_on_its_own(self):
+        """Своих шагов назад у стека нет ни одного.
+
+        Раньше сверка снимала лишнюю сторожевую запись шагом назад. Этот шаг
+        складывался с жестом человека в ОДИН переход на две записи, а пришедший
+        popstate счётчик засчитывал как наш — шаг человека пропадал, и указатель
+        оставался на чужой записи. Замер 11.09.2026: «назад» на дне уводило в
+        раздел, открытый двумя шагами раньше. Цена: после закрытия последнего
+        экрана крестиком первый «назад» ничего не делает — но закрывать в этот
+        момент и правда нечего."""
+        self.assertNotIn('pendingBacks', self.STACK)
+
+    def test_stack_subscribes_before_the_router(self):
+        """Порядок слушателей popstate решает. Роутер заводит свой в
+        layout-эффекте; эффекты React выполняет снизу вверх, поэтому App —
+        ребёнок BrowserRouter — успевает подписаться первым ТОЛЬКО из
+        layout-эффекта. С обычным useEffect роутер читал адрес чужой записи
+        раньше, чем мы возвращали свой, и «назад» на дне меняло раздел."""
+        at = APP.index('armBackFloor(() => buildAppViewUrl(backViewRef.current));')
+        block = APP[at - 900:at]
+        self.assertIn('useLayoutEffect(() => {', block)
 
     def test_gesture_is_mobile_only(self):
         """На компьютере «назад» означает «предыдущая страница»: закрывать им
@@ -1198,8 +1224,12 @@ class AccountScreenTests(unittest.TestCase):
         уводил в раздел, который лежал под шторкой."""
         at = APP.index('<div className="mobile-sheet-group">')
         block = APP[at:at + 6500]
-        for flag in ('setShowChangeLoginForm(true);', 'setShowChangePasswordForm(true);', 'setShowChangeAvatarForm(true);'):
+        for flag in ('setShowChangeLoginForm(true);', 'setShowChangePasswordForm(true);'):
             self.assertIn(flag, block)
+        # Фотография открывается своим путём: галереей или листом действий.
+        self.assertIn('onChange={handlePickedAvatarFile}', block)
+        self.assertIn('setPhotoActionsOpen(true);', block)
+        self.assertIn('setShowChangeAvatarForm(true);', APP[APP.index('const handlePickedAvatarFile'):APP.index('const handlePickedAvatarFile') + 700])
         opens = block[:block.index('<InstallAppMenuItem')]
         self.assertNotIn('setMobileMenuOpen(false)', opens)
 
@@ -1276,19 +1306,44 @@ class AccountScreenTests(unittest.TestCase):
         self.assertIn('top: calc(-1 * (max(10px, env(safe-area-inset-top)) + 8px));', bar)
         self.assertIn('pointer-events: none;', bar)
 
-    def test_photo_row_opens_the_gallery_itself(self):
-        """В образце «Изменить фотографию» открывает выбор снимка СРАЗУ —
-        промежуточного экрана «загрузите фото» там нет. Поэтому строка профиля
-        это label с настоящим input: выбор файла браузер открывает только по
-        живому нажатию, из кода — не откроет."""
-        at = APP.index('<label className="mobile-sheet-row mobile-sheet-row--pick">')
-        block = APP[at:at + 2200]
-        self.assertIn('<label className="mobile-sheet-row mobile-sheet-row--pick">', block)
-        self.assertIn("type=\"file\"", block)
-        self.assertIn('setPickedAvatarFile(file);', block)
-        self.assertIn('initialFile={pickedAvatarFile}', APP)
+    def test_photo_lives_behind_one_row(self):
+        """ПЕРЕДЕЛАНО 11.09.2026 по второму видео. Было две строки подряд —
+        «Сменить фотографию» и красная «Удалить фотографию»; владелец:
+        «удалить фото находится отдельно от смены фото профиля». В образце вход
+        ОДИН, а выбор снимка и удаление лежат в листе, который он открывает.
+
+        Пока фотографии нет, листу нечего показывать: строка открывает галерею
+        сама — label с настоящим input, потому что выбор файла браузер открывает
+        только по живому нажатию."""
+        at = APP.index('<label\n                                                    className="mobile-sheet-row mobile-sheet-row--pick"')
+        block = APP[at:at + 1800]
+        self.assertIn('{canChangeAccountAvatar && !user?.avatar_url && (', APP)
+        self.assertIn('<span>Добавить фотографию</span>', block)
+        self.assertIn('type="file"', block)
+        self.assertIn('onChange={handlePickedAvatarFile}', block)
         # Значок берут по `> svg:first-child`: input обязан стоять последним.
         self.assertLess(block.index('fa-camera'), block.index('type="file"'))
+        # Есть фотография — та же строка открывает лист действий.
+        self.assertIn('{canChangeAccountAvatar && user?.avatar_url && (', APP)
+        self.assertIn('setPhotoActionsOpen(true);', APP)
+        self.assertNotIn('mobile-sheet-row--danger', APP)
+
+    def test_action_sheet_holds_pick_and_delete(self):
+        """Лист действий: выбор снимка и красное удаление вместе, отдельной
+        карточкой «Отмена» — как системный. Поднимается снизу, а не въезжает
+        справа: общий слой окон везёт экраны сбоку, и для двух строк выбора это
+        слишком большой ход."""
+        sheet = (ROOT / 'src' / 'components' / 'common' / 'MobileActionSheet.jsx').read_text(encoding='utf-8')
+        self.assertIn('useScreenBackGesture(open, onClose);', sheet)
+        self.assertIn('mobile-actions__cancel', sheet)
+        self.assertIn("key: 'pick'", APP)
+        self.assertIn("label: isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию',", APP)
+        self.assertIn('danger: true,', APP)
+        block = css_block(SHELL_CSS, 'body.mobile-shell .mobile-actions {', 700)
+        self.assertIn('justify-content: flex-end !important;', block)
+        self.assertIn('animation: mobile-actions-in', block)
+        # Выше всплывающих сообщений: иначе они закрывают собой выбор.
+        self.assertIn('z-index: 10000;', block)
 
     def test_photo_screen_is_the_dark_frame(self):
         """Кадр как в образце: чёрное поле во весь экран, снимок под круглой
@@ -1314,18 +1369,36 @@ class AccountScreenTests(unittest.TestCase):
         rule = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__area .mobile-crop__photo {', 300)
         self.assertIn('max-width: none;', rule)
 
-    def test_delete_row_is_red_and_only_with_a_photo(self):
-        """Красная строка появляется, только когда есть что удалять; ссылка на
-        обработчик СТАБИЛЬНАЯ, а свежие handleChangeAvatar и showToast берутся из
-        узла «последнее» — замыкание, снятое один раз, звало бы их версию с
-        первого рендера, с ещё пустым user (строка молча не срабатывала)."""
-        self.assertIn('{canChangeAccountAvatar && user?.avatar_url && (', APP)
-        self.assertIn('mobile-sheet-row--danger', APP)
+    def test_delete_goes_through_the_latest_handler(self):
+        """Ссылка на удаление СТАБИЛЬНАЯ, а свежие handleChangeAvatar и showToast
+        берутся из узла «последнее»: замыкание, снятое один раз, звало бы их
+        версию с первого рендера — с ещё пустым user. Ровно так строка и молчала
+        при первой попытке: нажатие доходило, а удаление не начиналось."""
         at = APP.index('const handleRemoveAccountAvatar = useCallback(')
         block = APP[at:at + 1200]
         self.assertIn('sidebarLatestRef.current.changeAvatar?.({ avatar_remove: true })', block)
         self.assertIn('}, []);', block)
         self.assertIn('changeAvatar: handleChangeAvatar,', APP)
+
+    def test_sheet_bar_is_page_coloured_glass(self):
+        """«Эта плашка белая выглядит убого» — владелец 11.09.2026. В образце
+        полоса это размытая СТРАНИЦА: сквозь неё видно уезжающие строки, и
+        линии снизу у неё нет. Белое стекло поверх серого листа читалось как
+        чужая плашка."""
+        self.assertIn('--sheet-bar: rgba(242, 242, 247, 0.72);', SHELL_CSS)
+        self.assertIn('--sheet-bar: rgba(0, 0, 0, 0.7);', SHELL_CSS)
+        shown = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar[data-shown] {', 400)
+        self.assertIn('background: var(--sheet-bar);', shown)
+        self.assertNotIn('border-bottom-color', shown)
+        self.assertIn('background: var(--sheet-bar);', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__head {', 700))
+
+    def test_sheet_bar_does_not_widen_the_list(self):
+        """«Имеется боковой скролл в профиле, он не нужен». Полоса выносилась за
+        края листа отрицательными полями, и лист начинал ездить вбок; замер:
+        scrollWidth 404 при ширине 390."""
+        bar = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar {', 900)
+        self.assertNotIn('calc(var(--sheet-gutter) * -1)', bar)
+        self.assertIn('margin: 0 0 2px;', bar)
 
     def test_account_layer_is_locked_to_the_shell(self):
         """Ни одно правило этих экранов не должно действовать на компьютере."""
@@ -1338,6 +1411,9 @@ class AccountScreenTests(unittest.TestCase):
             for part in selector.split(','):
                 part = part.strip()
                 if not part or part.startswith(('/*', '@')):
+                    continue
+                # Шаги анимации (from/to/50%) — не селекторы страницы.
+                if part in ('from', 'to') or part.rstrip('%').isdigit():
                     continue
                 self.assertTrue(part.startswith('body.mobile-shell'), f'правило «{part}» действует и на компьютере')
 

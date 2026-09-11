@@ -54,6 +54,7 @@ import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
 import MobileBellSlot from './components/common/MobileBellSlot';
 import MobileSheetTitle from './components/common/MobileSheetTitle';
+import MobileActionSheet from './components/common/MobileActionSheet';
 import {
     MobileAccountScreen,
     MobileAccountGroup,
@@ -38271,6 +38272,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                галерею открывает сама строка (см. mobile-sheet-row--pick). */
             const [pickedAvatarFile, setPickedAvatarFile] = useState(null);
             const [isRemovingAvatar, setIsRemovingAvatar] = useState(false);
+            /* Лист «что сделать с фотографией»: выбрать новую или удалить. В
+               образце это один вход, а не две строки подряд. */
+            const [photoActionsOpen, setPhotoActionsOpen] = useState(false);
             const [newCredentials, setNewCredentials] = useState(null);
             const [loginData, setLoginData] = useState({
                 new_login: '',
@@ -40181,7 +40185,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                первого перехода. Иначе самый первый свайп уходит мимо нас, в то,
                что лежит в истории ниже; после аварийной перезагрузки там записи
                прежнего документа, и шаг в них грузит приложение заново. */
-            useEffect(() => {
+            /* ИМЕННО layout-эффект, и это не вкусовщина. Слушателя popstate
+               роутер заводит в своём layout-эффекте, а эффекты React выполняет
+               СНИЗУ ВВЕРХ: App — ребёнок BrowserRouter, поэтому отсюда мы
+               успеваем подписаться ПЕРВЫМИ. Порядок решает: когда жест уводит
+               ниже дна, мы возвращаем адрес прямо в обработчике, и роутер
+               обязан прочитать уже исправленный. С обычным useEffect мы
+               подписывались после роутера, он успевал прочитать адрес чужой
+               записи, и «назад» на дне уводило в раздел, открытый двумя шагами
+               раньше (замер 11.09.2026: memo видел ?view=tasks вместо
+               ?view=sv_list). */
+            useLayoutEffect(() => {
                 if (!isMobileShell) return;
                 /* Дну отдаём и адрес текущего раздела: восстанавливая его после
                    жеста «ниже дна», мы возвращаем ?view= на место. */
@@ -47141,6 +47155,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                замыкание, снятое один раз, звало бы их версию с первого рендера —
                с ещё пустым `user`. Ровно так строка и молчала при первой попытке:
                нажатие доходило, а удаление не начиналось. */
+            /* Снимок выбран — ведём его в кадр. Один обработчик на оба входа:
+               строку «Добавить фотографию» и пункт листа «Выбрать фото». */
+            const handlePickedAvatarFile = useCallback((event) => {
+                const file = event.target.files?.[0] || null;
+                event.target.value = '';
+                if (!file) return;
+                setShowChangeLoginForm(false);
+                setShowChangePasswordForm(false);
+                setPhotoActionsOpen(false);
+                setPickedAvatarFile(file);
+                setShowChangeAvatarForm(true);
+            }, []);
+
             const removingAvatarRef = useRef(false);
             const handleRemoveAccountAvatar = useCallback(async () => {
                 /* Защёлка в ref, а не в состоянии: второе нажатие приходит
@@ -47656,13 +47683,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-lock" data-tint="gray"></FaIcon>
                                                 <span>Сменить пароль</span>
                                             </button>
-                                            {/* ГАЛЕРЕЮ ОТКРЫВАЕТ САМА СТРОКА (образец — видео
-                                                владельца 11.09.2026: «Изменить фотографию» →
-                                                выбор снимка → кадр). Поэтому здесь label с
-                                                настоящим input, а не кнопка: выбор файла
-                                                браузер открывает только по живому нажатию, и
-                                                промежуточный экран «загрузите фото» ушёл. */}
-                                            {canChangeAccountAvatar && (
+                                            {/* ОДИН ВХОД НА ВСЁ, ЧТО С ФОТОГРАФИЕЙ (образец —
+                                                видео владельца: выбор снимка и красное
+                                                «Удалить фотографию» лежат в одном листе, а не
+                                                двумя строками подряд).
+
+                                                Пока фотографии нет, лист не нужен: выбирать
+                                                не из чего, и строка открывает галерею сама —
+                                                label с настоящим input, потому что выбор
+                                                файла браузер открывает ТОЛЬКО по живому
+                                                нажатию, из кода — не откроет. */}
+                                            {canChangeAccountAvatar && !user?.avatar_url && (
                                                 <label
                                                     className="mobile-sheet-row mobile-sheet-row--pick"
                                                     /* Кусок с кадром подтягиваем, пока человек
@@ -47672,7 +47703,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     onClick={() => { import('./components/modals/AccountAvatarModal'); }}
                                                 >
                                                     <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
-                                                    <span>Сменить фотографию</span>
+                                                    <span>Добавить фотографию</span>
                                                     {/* input ПОСЛЕДНИМ: плитку значка стили
                                                         берут по `> svg:first-child`, и поле
                                                         выбора файла, стоя первым, оставляло
@@ -47681,29 +47712,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         type="file"
                                                         accept="image/png,image/jpeg,image/webp,image/gif"
                                                         className="hidden"
-                                                        onChange={(e) => {
-                                                            const file = e.target.files?.[0] || null;
-                                                            e.target.value = '';
-                                                            if (!file) return;
-                                                            setShowChangeLoginForm(false);
-                                                            setShowChangePasswordForm(false);
-                                                            setPickedAvatarFile(file);
-                                                            setShowChangeAvatarForm(true);
-                                                        }}
+                                                        onChange={handlePickedAvatarFile}
                                                     />
                                                 </label>
                                             )}
-                                            {/* Красная строка, как в образце: появляется только
-                                                когда фотография есть, что удалять. */}
                                             {canChangeAccountAvatar && user?.avatar_url && (
                                                 <button
                                                     type="button"
-                                                    className="mobile-sheet-row mobile-sheet-row--danger"
-                                                    onClick={handleRemoveAccountAvatar}
-                                                    disabled={isRemovingAvatar}
+                                                    className="mobile-sheet-row mobile-sheet-row--pick"
+                                                    onClick={() => {
+                                                        import('./components/modals/AccountAvatarModal');
+                                                        setPhotoActionsOpen(true);
+                                                    }}
                                                 >
-                                                    <FaIcon className="fas fa-trash-can" data-tint="red"></FaIcon>
-                                                    <span>{isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию'}</span>
+                                                    <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
+                                                    <span>Сменить фотографию</span>
                                                 </button>
                                             )}
                                             {/* Пункт сам решает, показываться ли: на уже
@@ -55524,6 +55547,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     }
                                     />
                             </Suspense>
+                        )}
+                        {isMobileShell && (
+                            <MobileActionSheet
+                                open={photoActionsOpen}
+                                onClose={() => setPhotoActionsOpen(false)}
+                                actions={[
+                                    {
+                                        key: 'pick',
+                                        /* Пункт — label с настоящим input: галерею
+                                           браузер открывает только по живому нажатию. */
+                                        render: (
+                                            <label className="mobile-actions__row">
+                                                Выбрать фото
+                                                <input
+                                                    type="file"
+                                                    accept="image/png,image/jpeg,image/webp,image/gif"
+                                                    className="hidden"
+                                                    onChange={handlePickedAvatarFile}
+                                                />
+                                            </label>
+                                        ),
+                                    },
+                                    {
+                                        key: 'remove',
+                                        label: isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию',
+                                        danger: true,
+                                        disabled: isRemovingAvatar,
+                                        onClick: () => {
+                                            setPhotoActionsOpen(false);
+                                            handleRemoveAccountAvatar();
+                                        },
+                                    },
+                                ]}
+                            />
                         )}
                         {showChangeAvatarForm && (
                             <Suspense fallback={null}>

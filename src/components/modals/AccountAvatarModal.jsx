@@ -593,22 +593,16 @@ const AccountAvatarModal = ({
                         )}
                     </div>
 
-                    {avatarCropState && (
-                        <input
-                            type="range"
-                            className="mobile-crop__zoom"
-                            min={AVATAR_MIN_ZOOM}
-                            max={avatarCropState.maxZoom}
-                            step="0.01"
-                            value={avatarCropState.zoom}
-                            onChange={handleAvatarCropZoomChange}
-                            aria-label="Приближение"
-                        />
-                    )}
-
                     {(avatarError || modalError) && (
                         <p className="mobile-crop__error">{avatarError || modalError}</p>
                     )}
+
+                    {/* Ползунка приближения нет намеренно: в образце снимок
+                        приближают щипком, а полоса на чёрном поле читалась как
+                        недостающая часть управления. */}
+                    <p className="mobile-crop__tip">
+                        {busy ? 'Сохраняем…' : 'Двигайте снимок и приближайте щипком'}
+                    </p>
 
                     <div className="mobile-crop__bar">
                         <button
@@ -620,9 +614,6 @@ const AccountAvatarModal = ({
                         >
                             <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
                         </button>
-                        <span className="mobile-crop__tip">
-                            {busy ? 'Сохраняем…' : 'Двигайте и приближайте снимок'}
-                        </span>
                         <button
                             type="button"
                             className="mobile-crop__round mobile-crop__round--go"
