@@ -478,6 +478,13 @@ olx_amo_pool = ThreadPoolExecutor(max_workers=9, thread_name_prefix='olx-amo')
 # держала бы четверть приложения, а спешить ей некуда: она идёт раз в сутки и
 # сравнивает отпечатки, а не строит отчёт к утру.
 yandex_pro_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='yandex-pro')
+# «Воронка ОП» держит своё ОДНО место. Ночная выгрузка — это сотни страниц по
+# 500 лидов подряд у двух ручек СРМ и полный обход воронки amoCRM: за месяц у
+# «Потока» набегает около ста тысяч строк. В общем пуле из четырёх мест такой
+# обход занимал бы четверть приложения, а торопиться ему некуда — отчёт нужен к
+# утру. Одно место, а не четыре, ещё и потому, что направления обязаны идти по
+# очереди: параллельный обход упёрся бы в лимиты одного и того же токена СРМ.
+op_funnel_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='op-funnel')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -40963,6 +40970,41 @@ async def olx_amo_retry_job():
                      summary.get('recovered'), summary.get('retried'))
 
 
+async def op_funnel_sync_job():
+    """Ночная выгрузка «Воронки ОП» — раз в сутки.
+
+    Перечитывает последние двое суток, а не одни: СРМ дописывает вчерашний день
+    утром, и односуточное окно теряло бы поздние правки. Зафиксированное раньше
+    не трогает — для этого есть кнопка «перечитать период» у руководителя.
+
+    Отказ одного направления не уносит остальные три: у каждого свой прогон в
+    журнале, и раздел честно покажет, какое именно не обновилось и почему.
+    """
+    try:
+        from op_funnel import sync as op_funnel_sync
+    except Exception:
+        logging.exception("Воронка ОП: модуль не импортировался, выгрузка пропущена")
+        return
+
+    try:
+        summaries = await asyncio.get_event_loop().run_in_executor(
+            op_funnel_pool, lambda: op_funnel_sync.sync_all(db))
+    except Exception as exc:
+        logging.error("Воронка ОП: ночная выгрузка не удалась: %s", exc, exc_info=True)
+        return
+
+    failed = [item for item in summaries if item.get('status') != 'ok']
+    logging.info(
+        "Воронка ОП: выгружено направлений %s из %s, лидов %s, суток зафиксировано %s",
+        len(summaries) - len(failed), len(summaries),
+        sum(int(item.get('leads_seen') or 0) for item in summaries),
+        sum(int(item.get('days_frozen') or 0) for item in summaries),
+    )
+    for item in failed:
+        logging.error("Воронка ОП: направление %s не обновилось — %s",
+                      item.get('direction_code'), item.get('error'))
+
+
 async def olx_amo_alerts_job():
     """Уведомления ответственным о простое, потере доступа и ошибках — раз в 5 минут.
 
@@ -58018,6 +58060,30 @@ except Exception:
     logging.exception("Раздел «Касания»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Воронка ОП»: ежедневная воронка обзвона по направлениям продаж ────
+# Задачи #301, #302, #303, #305 — четыре супервайзера вели одну и ту же
+# отчётность в Excel, каждый свою. Источники разные: «Поток» и «Яндекс
+# Регистрация» берутся партнёрскими ручками СРМ, «Основа» — из amoCRM,
+# «Верификатор» — из чатов Wazzup плюс ручная выгрузка тикетов.
+#
+# Суточный итог ФИКСИРУЕТСЯ и сам не меняется: СРМ переписывает прошлое
+# (замерено — за десять дней Дозвон по одним суткам вырос с 499 до 534), а
+# цифру, названную на планёрке, задним числом менять нельзя.
+try:
+    from op_funnel.routes import build_op_funnel_blueprint  # noqa: E402
+
+    app.register_blueprint(build_op_funnel_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+    ))
+    logging.info("Раздел «Воронка ОП»: Blueprint подключён на /api/op_funnel")
+except Exception:
+    logging.exception("Раздел «Воронка ОП»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Тренинги»: справочник корпоративных тем ──────────────────────────
 # Только НОВАЯ поверхность раздела. Сами записи о проведённых тренингах
 # остаются на плоских /api/trainings ниже: они вплетены в расчёт оплачиваемых
@@ -61229,6 +61295,26 @@ if __name__ == '__main__':
                 "нужны OLX_CLIENT_ID_N/OLX_CLIENT_SECRET_N и согласие владельцев кабинетов")
     except Exception:
         logging.exception("Лиды OLX: планировщик НЕ подключён")
+
+    # ── «Воронка ОП»: ночная выгрузка ────────────────────────────────────────
+    # 05:20, а не полночь: к этому часу СРМ уже закрыла вчерашние сутки, а до
+    # начала смены ещё три часа — супервайзер открывает раздел с готовыми
+    # цифрами, а не наблюдает, как они наливаются.
+    try:
+        scheduler.add_job(
+            op_funnel_sync_job,
+            CronTrigger(hour=5, minute=20, timezone=ZoneInfo('Asia/Almaty')),
+            id='op_funnel_sync',
+            # Час на опоздание: перезапуск приложения ночью не должен стоить
+            # разделу целых суток, а догонять больше часа смысла нет — дневная
+            # кнопка «Обновить» сделает то же самое.
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Воронка ОП: ночная выгрузка в 05:20 (последние двое суток)")
+    except Exception:
+        logging.exception("Воронка ОП: планировщик НЕ подключён")
 
     # Обзвон фронт-офиса: отчёт за прошедшие сутки утром (задача #159).
     # Данные тянем только если кто-то подписан — см. саму джобу.

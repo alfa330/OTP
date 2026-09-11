@@ -209,6 +209,7 @@ const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
 const OlxLeadsView = lazyWithRetry(() => import('./components/olx/OlxLeadsView'));
 const TouchesView = lazyWithRetry(() => import('./components/cdr/TouchesView'));
+const OpFunnelView = lazyWithRetry(() => import('./components/op_funnel/OpFunnelView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
 const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
@@ -346,6 +347,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   (OKTELL_GUARD_DEPARTMENT_CODE и соседние константы);
  *   chatapp_chats/tez_wallboard — 'tez' (CHATAPP_DEPARTMENT_CODE);
  *   touches — 'op' (TOUCHES_SECTION_DEPARTMENT_CODE);
+ *   op_funnel — 'op' (OP_FUNNEL_SECTION_DEPARTMENT_CODE);
  *   olx_leads — OLX_LEADS_HEAD_DEPARTMENT_CODES;
  *   wazzup_chats — VERIFIER_CHATS_HEAD_DEPARTMENT_CODES;
  *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
@@ -377,6 +379,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     driver_chats: ['szov'],
     olx_leads: ['op', 'marketing'],
     touches: ['op'],
+    op_funnel: ['op'],
     // Смены, часы, ресурсы
     work_schedules: ['szov', 'op', 'tez', 'front_office'],
     sv_hours: ['szov', 'op', 'tez'],
@@ -656,6 +659,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     driver_mailings: 'Driver mailings',
     olx_leads: 'OLX leads',
     touches: 'Sales touches',
+    op_funnel: 'Sales funnel',
     profile: 'Profile',
     qr_access: 'QR access',
     recruiting: 'Recruiting',
@@ -2336,6 +2340,43 @@ const canAccessTouchesSectionForUser = (userLike) => {
     if (isOpSalesSupervisorForAiQa(userLike)) return true;
     return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
         === TOUCHES_SECTION_DEPARTMENT_CODE;
+};
+
+/* «Воронка ОП» — ежедневная воронка обзвона по четырём направлениям отдела
+   продаж (задачи #301, #302, #303, #305). Аудитория та же, что у «Касаний»:
+   глобальные админы, глава отдела продаж и его супервайзеры.
+
+   Предикат СВОЙ, а не переиспользованный от «Касаний», по двум причинам. Первая:
+   разделы разные, и завтра одному из них могут открыть другую аудиторию — общий
+   предикат пришлось бы расщеплять задним числом, попутно меняя доступ там, где
+   не просили. Вторая: набор разделов, доступных человеку, сверяется тестами по
+   именам предикатов, и общий предикат на два раздела сделал бы эту сверку
+   бессмысленной.
+
+   Что видно внутри раздела, решает бэкенд: супервайзер получает только свои
+   направления (op_funnel/access.py::visible_directions), а нормы правит лишь
+   руководитель. Здесь — только «показывать ли пункт меню». */
+const OP_FUNNEL_SECTION_DEPARTMENT_CODE = 'op';
+
+const isOpFunnelSectionDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).includes(OP_FUNNEL_SECTION_DEPARTMENT_CODE)
+);
+
+const canAccessOpFunnelSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'trainer') return false;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: воронка продаж
+    // главам чужих отделов не нужна (глава ОП проходит проверкой ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isOpFunnelSectionDepartmentHead(userLike)) return true;
+    // СВ отдела продаж. Сверяем и код отдела, и id — как в «Касаниях»: у части
+    // профилей приходит только одно из двух полей.
+    if (!isSupervisorRole(role)) return false;
+    if (isOpSalesSupervisorForAiQa(userLike)) return true;
+    return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+        === OP_FUNNEL_SECTION_DEPARTMENT_CODE;
 };
 
 // Разделы «Обращения», «Вики» и «Посылки» оператор открывает только после того,
@@ -38065,6 +38106,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
             // «Касания»: глобальные админы, глава отдела продаж и СВ ОП.
             const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
+            // «Воронка ОП»: та же аудитория, что у «Касаний».
+            const canAccessOpFunnelSection = canAccessOpFunnelSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             const canAccessTezWallboardSection = canAccessTezWallboardForUser(user);
             // Виджет табло живёт здесь, а не в разделе: закрывается только своим крестиком.
@@ -41555,7 +41598,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     // уезжала в раздел по умолчанию.
                     (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
-                    (requestedViewFromUrl !== 'touches' || canAccessTouchesSection);
+                    (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
+                    (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection);
                 if (canOpenRequestedView) {
                     redirectToView(requestedViewFromUrl);
                     return;
@@ -46824,12 +46868,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Касания» — свой предикат, не allowlist отдела: раздел про
                 // отдел продаж, но открыт и админам, которые в ОП не состоят.
                 if (view === 'touches' && canAccessTouchesSection) return;
+                // «Воронка ОП» — по той же причине свой предикат: раздел про
+                // отдел продаж, но открыт и админам, которые в ОП не состоят. Без
+                // этой строки главу и СВ отдела продаж выбрасывало бы из раздела
+                // сразу: у ОП есть allowlist, и проверка ниже до op_funnel не
+                // дошла бы (та же ловушка, что описана у «Ограничителя Перезвона»).
+                if (view === 'op_funnel' && canAccessOpFunnelSection) return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -48702,6 +48752,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
                                         canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
                                         canAccessTouchesSection && deptAllowsInner('touches'),
+                                        canAccessOpFunnelSection && deptAllowsInner('op_funnel'),
                                         canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user),
                                         canAccessVerifierChatsSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user),
                                     )}
@@ -48842,6 +48893,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-phone-volume"></FaIcon>
                                                 <span className="sidebar-text">Касания</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Воронка ОП» — ежедневная воронка обзвона по
+                                        четырём направлениям отдела продаж (задачи
+                                        #301, #302, #303, #305: Основа, Поток, Яндекс
+                                        Регистрация, Верификатор). Пункт объявлен ОДИН
+                                        раз здесь, рядом с «Касаниями»: аудитория та же
+                                        и такая же разнородная, а по ролевым ветвям
+                                        пункт легко забыть в одной из них.
+                                        Какие направления человек увидит внутри, решает
+                                        бэкенд: СВ получает только свои. */}
+                                    {canAccessOpFunnelSection && (
+                                    <SidebarDeptScope section="op_funnel" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'op_funnel')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'op_funnel' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-filter"></FaIcon>
+                                                <span className="sidebar-text">Воронка ОП</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -49322,6 +49397,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessCrmSection,
                 canAccessParcelsSection,
                 canAccessTouchesSection,
+                canAccessOpFunnelSection,
                 canAccessDriverMailings,
                 bellReadSource,
                 selectedSvId,
@@ -49804,6 +49880,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "touches" && canAccessTouchesSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <TouchesView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "op_funnel" && canAccessOpFunnelSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка воронки…</div>}>
+                                <OpFunnelView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}

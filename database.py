@@ -6507,6 +6507,7 @@ class Database:
             self._init_trainer_schema_tx(cursor)
             self._init_cdr_schema_tx(cursor)
             self._init_olx_amo_schema_tx(cursor)
+            self._init_op_funnel_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -7571,6 +7572,34 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT cdr_schema")
+
+    def _init_op_funnel_schema_tx(self, cursor):
+        """Схема раздела «Воронка ОП» (таблицы op_funnel_*) и сид норм.
+
+        Под SAVEPOINT по той же причине, что и соседи: весь _init_db идёт одной
+        транзакцией, и упавший раздел не имеет права уронить старт приложения.
+        При отказе роуты отвечают понятным 503 (schema_is_ready), а не падают
+        пятисоткой из-под первого SELECT.
+
+        Сид норм (нормы дозвонов в час, планы на ставку, таргеты Верификаторов)
+        стоит здесь, а не миграцией отдельным скриптом: он идемпотентен
+        (ON CONFLICT DO NOTHING), а раздел без норм показывал бы пустой план и
+        выглядел бы сломанным на чистой базе.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT op_funnel_schema")
+        try:
+            from op_funnel.schema import init_op_funnel_schema
+            init_op_funnel_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT op_funnel_schema")
+            logging.exception(
+                "Схема раздела «Воронка ОП» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT op_funnel_schema")
 
     def _init_trainings_schema_tx(self, cursor):
         """Схема раздела «Тренинги»: справочник корпоративных тем (training_topics)
