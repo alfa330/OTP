@@ -192,6 +192,26 @@ def grant_status(row, now):
     return 'active'
 
 
+def grant_kind(row):
+    """Что именно выдано: 'article', 'space' или 'section'.
+
+    Одна функция на все выдачи раздела — список, баннер и /ping отвечают на этот
+    вопрос одинаково. Порядок ветвей не произволен: ограничение
+    wiki_guest_access_one_object держит ровно одну непустую колонку, но читать
+    его как «остальные пусты» в трёх местах по-разному — это ровно тот способ,
+    каким в этой вике уже расходились два вычислителя одного и того же.
+
+    Раздел — последним и без проверки: строка без всех трёх колонок ограничением
+    запрещена, а «Удалённый объект» в подписи объяснит остаток случаев честнее,
+    чем отдельный вид выдачи, которого не бывает.
+    """
+    if row.get('article_id'):
+        return 'article'
+    if row.get('space_id'):
+        return 'space'
+    return 'section'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Что человек вправе открыть гостю
 # ─────────────────────────────────────────────────────────────────────────────
@@ -355,25 +375,27 @@ def article_section_ids(cursor, article_id):
 # тест tests/test_wiki_guests.py — он сверяет тексты всех трёх.
 _MY_GRANTS_SQL = """
 WITH guest_seed AS (
-    SELECT g.id, g.section_id, g.article_id, g.include_subsections,
+    SELECT g.id, g.section_id, g.article_id, g.space_id, g.include_subsections,
            g.expires_at, g.reason, g.created_at
       FROM wiki_guest_access g
      WHERE g.user_id = %(user)s
        AND g.revoked_at IS NULL
        AND g.expires_at > """ + NOW_SQL + """
 )
-SELECT s.id, s.section_id, s.article_id, s.include_subsections,
+SELECT s.id, s.section_id, s.article_id, s.space_id, s.include_subsections,
        s.expires_at, s.reason, s.created_at,
-       sec.name AS section_name, a.title AS article_title, a.slug AS article_slug
+       sec.name AS section_name, a.title AS article_title, a.slug AS article_slug,
+       sp.name AS space_name
   FROM guest_seed s
   LEFT JOIN wiki_sections sec ON sec.id = s.section_id
   LEFT JOIN wiki_articles a   ON a.id   = s.article_id
+  LEFT JOIN wiki_spaces sp    ON sp.id  = s.space_id
  ORDER BY s.expires_at, s.id
 """
 
-_MY_GRANT_KEYS = ('id', 'section_id', 'article_id', 'include_subsections',
-                  'expires_at', 'reason', 'created_at',
-                  'section_name', 'article_title', 'article_slug')
+_MY_GRANT_KEYS = ('id', 'section_id', 'article_id', 'space_id',
+                  'include_subsections', 'expires_at', 'reason', 'created_at',
+                  'section_name', 'article_title', 'article_slug', 'space_name')
 
 
 def my_active_grants(cursor, user_id, now=None):
@@ -389,8 +411,9 @@ def my_active_grants(cursor, user_id, now=None):
     items = []
     for row in cursor.fetchall():
         item = dict(zip(_MY_GRANT_KEYS, row))
-        item['kind'] = 'article' if item['article_id'] else 'section'
-        item['title'] = item['article_title'] or item['section_name'] or 'Без названия'
+        item['kind'] = grant_kind(item)
+        item['title'] = (item['article_title'] or item['section_name']
+                         or item['space_name'] or 'Без названия')
         item['days_left'] = days_left(item['expires_at'], now)
         item['expires_at'] = item['expires_at'].isoformat() if item['expires_at'] else None
         item['created_at'] = item['created_at'].isoformat() if item['created_at'] else None
@@ -400,9 +423,10 @@ def my_active_grants(cursor, user_id, now=None):
 
 # Покрыта ли ЭТА статья гостевой выдачей — и до какого срока.
 #
-# Три способа покрытия, и все три обязаны сойтись в один ответ: выдача на саму
-# статью, выдача на её раздел и выдача на предка её раздела с раскрытием на
-# подразделы. Ответ — САМЫЙ ПОЗДНИЙ срок из покрывающих: доступ живёт, пока жива
+# Четыре способа покрытия, и все четыре обязаны сойтись в один ответ: выдача на
+# саму статью, выдача на её раздел, выдача на предка её раздела с раскрытием на
+# подразделы и выдача на всё пространство, в котором лежит её раздел.
+# Ответ — САМЫЙ ПОЗДНИЙ срок из покрывающих: доступ живёт, пока жива
 # хоть одна выдача, и показывать более раннюю дату значило бы обещать, что
 # доступ пропадёт, когда он не пропадёт.
 _ARTICLE_GRANT_SQL = """
@@ -435,6 +459,21 @@ covering AS (
     UNION ALL
     SELECT s.expires_at FROM guest_seed s
      WHERE s.id = ANY(%(sections)s)
+    -- ЧЕТВЁРТЫЙ способ покрытия: пространство выдали целиком (11.09.2026).
+    -- Забудь его здесь — и получился бы самый злой вид молчаливого отказа:
+    -- статья в витрине ЕСТЬ (её раздел приехал в периметр гостевой веткой
+    -- queries._GUEST_SECTIONS_CTE), а открыть её нельзя — guest_allows_read
+    -- приходит именно отсюда, и без него resolve_article_permissions вернёт
+    -- can_read=False на статье, которую человеку только что показали списком.
+    UNION ALL
+    SELECT g.expires_at
+      FROM wiki_guest_access g
+      JOIN wiki_sections s ON s.space_id = g.space_id
+     WHERE g.user_id = %(user)s
+       AND g.space_id IS NOT NULL
+       AND s.id = ANY(%(sections)s)
+       AND g.revoked_at IS NULL
+       AND g.expires_at > """ + NOW_SQL + """
 )
 SELECT max(expires_at) FROM covering
 """
@@ -468,12 +507,14 @@ SELECT g.id, g.user_id, u.name, u.role, d.name,
        g.section_id, sec.name, g.article_id, a.title, a.slug,
        g.include_subsections, g.reason, g.expires_at, g.created_at,
        g.revoked_at, g.granted_by, gb.name, g.revoked_by, rb.name,
-       COALESCE(sec.space_id, asec.space_id)
+       COALESCE(g.space_id, sec.space_id, asec.space_id),
+       g.space_id, sp.name, sp.icon
   FROM wiki_guest_access g
   JOIN users u              ON u.id = g.user_id
   LEFT JOIN departments d   ON d.id = u.department_id
   LEFT JOIN wiki_sections sec ON sec.id = g.section_id
   LEFT JOIN wiki_articles a ON a.id = g.article_id
+  LEFT JOIN wiki_spaces sp  ON sp.id = g.space_id
   LEFT JOIN users gb        ON gb.id = g.granted_by
   LEFT JOIN users rb        ON rb.id = g.revoked_by
   -- Пространство статьи — по любому её разделу: статья лежит в одном
@@ -492,12 +533,21 @@ SELECT g.id, g.user_id, u.name, u.role, d.name,
         OR EXISTS (SELECT 1 FROM wiki_article_sections xs
                     WHERE xs.article_id = g.article_id
                       AND xs.section_id = ANY(%(sections)s)))
+   -- Выдача ПРОСТРАНСТВА фильтр по пространству не проходит вовсе, и это не
+   -- недосмотр. Вкладка «Гостевой доступ» показывает выдачи того пространства,
+   -- в котором человек сейчас стоит, — но выдача чужого пространства делается
+   -- ИЗ своего, и отфильтруй мы её сюда, выдавший не увидел бы в списке того,
+   -- что только что выдал: строка ушла бы в ту вику, куда он и не собирался
+   -- заходить. Видят такие строки всё равно только двое — тот, кто выдал
+   -- (g.granted_by), и мастер-ключ (%(all)s): границы это не двигает.
    AND (%(space)s::int IS NULL
+        OR g.space_id IS NOT NULL
         OR COALESCE(sec.space_id, asec.space_id) = %(space)s::int)
    AND (%(query)s = ''
         OR u.name ILIKE %(like)s
         OR sec.name ILIKE %(like)s
-        OR a.title ILIKE %(like)s)
+        OR a.title ILIKE %(like)s
+        OR sp.name ILIKE %(like)s)
  ORDER BY (g.revoked_at IS NULL AND g.expires_at > """ + NOW_SQL + """) DESC,
           g.expires_at DESC, g.id DESC
  LIMIT %(limit)s OFFSET %(offset)s
@@ -507,7 +557,8 @@ _GRANT_KEYS = ('id', 'user_id', 'user_name', 'user_role', 'user_department',
                'section_id', 'section_name', 'article_id', 'article_title',
                'article_slug', 'include_subsections', 'reason', 'expires_at',
                'created_at', 'revoked_at', 'granted_by', 'granted_by_name',
-               'revoked_by', 'revoked_by_name', 'space_id')
+               'revoked_by', 'revoked_by_name', 'space_id',
+               'granted_space_id', 'space_name', 'space_icon')
 
 
 def list_grants(cursor, *, actor_id, section_ids, unbounded=False, space_id=None,
@@ -534,8 +585,14 @@ def list_grants(cursor, *, actor_id, section_ids, unbounded=False, space_id=None
         item = dict(zip(_GRANT_KEYS, row))
         item['status'] = grant_status(item, now)
         item['days_left'] = days_left(item['expires_at'], now)
-        item['kind'] = 'article' if item['article_id'] else 'section'
-        item['title'] = item['article_title'] or item['section_name'] or 'Удалённый объект'
+        # Вид считается по granted_space_id (колонка строки), а НЕ по space_id:
+        # второй — это «в каком пространстве лежит выданное», и у выдачи на
+        # раздел он тоже заполнен. Перепутай их — и каждая выдача раздела
+        # прочиталась бы как выдача всей вики.
+        item['kind'] = grant_kind({'article_id': item['article_id'],
+                                   'space_id': item['granted_space_id']})
+        item['title'] = (item['article_title'] or item['section_name']
+                         or item['space_name'] or 'Удалённый объект')
         for field in ('expires_at', 'created_at', 'revoked_at'):
             item[field] = item[field].isoformat() if item[field] else None
         items.append(item)
@@ -546,7 +603,7 @@ def get_grant(cursor, grant_id):
     """Одна выдача — для проверки прав перед отзывом и продлением."""
     cursor.execute(
         """
-        SELECT id, user_id, section_id, article_id, granted_by,
+        SELECT id, user_id, section_id, article_id, space_id, granted_by,
                expires_at, revoked_at, include_subsections, reason
           FROM wiki_guest_access WHERE id = %s
         """,
@@ -555,12 +612,16 @@ def get_grant(cursor, grant_id):
     row = cursor.fetchone()
     if not row:
         return None
-    return dict(zip(('id', 'user_id', 'section_id', 'article_id', 'granted_by',
-                     'expires_at', 'revoked_at', 'include_subsections', 'reason'), row))
+    grant = dict(zip(('id', 'user_id', 'section_id', 'article_id', 'space_id',
+                      'granted_by', 'expires_at', 'revoked_at',
+                      'include_subsections', 'reason'), row))
+    grant['kind'] = grant_kind(grant)
+    return grant
 
 
 def create_grant(cursor, *, user_id, section_id=None, article_id=None,
-                 granted_by, expires_at, reason=None, include_subsections=True):
+                 space_id=None, granted_by, expires_at, reason=None,
+                 include_subsections=True):
     """Завести выдачу. Повторная на тот же объект ПРОДЛЕВАЕТ прежнюю.
 
     Продлевает, а не плодит вторую строку: две действующие выдачи на один и тот
@@ -583,12 +644,14 @@ def create_grant(cursor, *, user_id, section_id=None, article_id=None,
          WHERE user_id = %(user)s
            AND section_id IS NOT DISTINCT FROM %(section)s
            AND article_id IS NOT DISTINCT FROM %(article)s
+           AND space_id IS NOT DISTINCT FROM %(space)s
            AND revoked_at IS NULL
            AND expires_at > """ + NOW_SQL + """
         RETURNING id
         """,
         {'user': user_id, 'section': section_id, 'article': article_id,
-         'expires': expires_at, 'reason': reason, 'deep': bool(include_subsections)},
+         'space': space_id, 'expires': expires_at, 'reason': reason,
+         'deep': bool(include_subsections)},
     )
     row = cursor.fetchone()
     if row:
@@ -597,15 +660,15 @@ def create_grant(cursor, *, user_id, section_id=None, article_id=None,
     cursor.execute(
         """
         INSERT INTO wiki_guest_access
-            (user_id, section_id, article_id, granted_by, reason,
+            (user_id, section_id, article_id, space_id, granted_by, reason,
              expires_at, include_subsections)
-        VALUES (%(user)s, %(section)s, %(article)s, %(by)s, %(reason)s,
+        VALUES (%(user)s, %(section)s, %(article)s, %(space)s, %(by)s, %(reason)s,
                 %(expires)s, %(deep)s)
         RETURNING id
         """,
         {'user': user_id, 'section': section_id, 'article': article_id,
-         'by': granted_by, 'reason': reason, 'expires': expires_at,
-         'deep': bool(include_subsections)},
+         'space': space_id, 'by': granted_by, 'reason': reason,
+         'expires': expires_at, 'deep': bool(include_subsections)},
     )
     return cursor.fetchone()[0], True
 

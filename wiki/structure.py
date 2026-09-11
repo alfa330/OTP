@@ -114,6 +114,21 @@ def set_space_departments(cursor, space_id, department_ids):
     )
 
 
+def space_is_active(cursor, space_id):
+    """Живо ли пространство. Архивное — то же самое, что несуществующее.
+
+    Нужен гостевой выдаче (routes_guests): архивное пространство выдалось бы без
+    единой ошибки, строка встала бы в список «действующей», а получатель не
+    увидел бы ничего — queries.spaces_for_user считает только активные, и
+    переключатель остался бы пустым. Молчаливый отказ с обеих сторон стола.
+    """
+    cursor.execute(
+        "SELECT TRUE FROM wiki_spaces WHERE id = %s AND status = 'active'",
+        (space_id,),
+    )
+    return bool(cursor.fetchone())
+
+
 def space_open_to(cursor, space_id, department_ids):
     """Открыто ли пространство хотя бы одному из перечисленных отделов.
 

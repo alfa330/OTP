@@ -14,6 +14,15 @@ access.GUEST_GRANT_CEILING (супервайзер и выше), а параме
 на КАЖДОЙ двери отдельно, включая продление и отзыв: право могло исчезнуть между
 выдачей и отзывом, и «раз выдал — значит вправе трогать» здесь неверно.
 
+ТРЕТИЙ ОБЪЕКТ — ПРОСТРАНСТВО ЦЕЛИКОМ (решение владельца 11.09.2026). Ветка
+отдела к нему неприменима по смыслу: пространство и есть граница между отделами,
+и «своей ветки» в чужом пространстве не бывает ни у кого. Поэтому у него своё,
+отдельное право — роль OTP super_admin (access.may_grant_guest_space), и оно НЕ
+лестница: администратор вики, которому весь остальной раздел выдаёт мастер-ключ,
+пространства не раздаёт. Владелец выбрал самый узкий ответ на прямой вопрос.
+Границы получателя это НЕ трогает: у супер-админа их и так нет, но обе проверки
+(чин и отдел) остаются на своих местах — они про человека, а не про объект.
+
 ПОЛУЧАТЕЛЬ. Свой подчинённый: и по чину (потолок должности), и по отделу.
 «Если СВ из СЗоВ, то он и видит операторов из СЗоВ» — решение владельца.
 
@@ -87,6 +96,16 @@ def register(bp, wiki_route, db, log_ip):
             own.add(ctx['department_id'])
         return sorted(own)
 
+    def _may_grant_space(ctx):
+        """Вправе ли человек открыть гостю ЦЕЛОЕ пространство. Только супер-админ.
+
+        Отдельно от _ceiling и _departments намеренно: те отвечают «кому по
+        чину» и «чьим людям», а это — «что вообще можно открыть». Свести их в
+        один признак значило бы, что следующее послабление потолка молча
+        раздаст пространства (см. access.may_grant_guest_space).
+        """
+        return wiki_access.may_grant_guest_space(ctx['otp_role'])
+
     def _shareable(cursor, ctx):
         """Разделы, которые человек вправе открыть гостю. None — любые."""
         return wiki_guests.shareable_section_ids(
@@ -136,6 +155,11 @@ def register(bp, wiki_route, db, log_ip):
             # Ради честного пустого экрана: «права нет вовсе» и «право есть, а
             # разделов в моей ветке нет» — разные беды с разными подсказками.
             "may_grant_by_role": ceiling is not None,
+            # Третий объект выдачи виден не всем. Считает сервер и отдаёт
+            # готовым — по той же причине, что и can_grant_guest в /ping: вторая
+            # формула во фронте однажды разойдётся с этой, и переключатель
+            # «Пространство» появится у того, кому сервер ответит 403.
+            "can_grant_space": _may_grant_space(ctx),
             "max_days": MAX_GUEST_DAYS,
             # Календарные рамки считает СЕРВЕР, и форма берёт их только отсюда.
             # У браузера западнее Алматы «сегодня» на сутки раньше нашего, и
@@ -176,10 +200,22 @@ def register(bp, wiki_route, db, log_ip):
         sections = [s for s in structure.list_sections(cursor)
                     if (shareable is None or s['id'] in shareable)
                     and (space_id is None or s['space_id'] == space_id)]
+        # Пространства — ВСЕ активные, а не только текущее: выдача пространства
+        # ради того и заведена, чтобы открыть человеку СОСЕДНЮЮ вику, и
+        # отфильтруй мы список по space_id, единственным выбором осталось бы то,
+        # в котором выдающий уже стоит. Пустой список у того, кто раздавать
+        # пространства не вправе: список объектов не должен рассказывать о
+        # существовании чужих вик тому, кому они не предназначены.
+        spaces = ([{'id': sp['id'], 'name': sp['name'], 'icon': sp['icon'],
+                    'description': sp['description'],
+                    'sections_count': sp['sections_count']}
+                   for sp in structure.list_spaces(cursor)]
+                  if _may_grant_space(ctx) else [])
         return jsonify({
             "sections": sections,
             "articles": wiki_guests.shareable_articles(
                 cursor, section_ids=shareable, space_id=space_id, query=query),
+            "spaces": spaces,
         })
 
     @wiki_route('/guests/people')
@@ -212,20 +248,36 @@ def register(bp, wiki_route, db, log_ip):
         if _ceiling(ctx) is None:
             return _forbidden(_NO_RIGHT)
         shareable = _shareable(cursor, ctx)
-        if shareable is not None and not shareable:
-            return _forbidden(_NOTHING_TO_SHARE, 'WIKI_GUEST_NOTHING_TO_SHARE')
-
+        # «Открывать нечего» — про ветку отдела, и к выдаче ПРОСТРАНСТВА это
+        # отношения не имеет: пространство раздают поверх веток. Проверка стоит
+        # ниже разбора объекта ровно поэтому.
         section_id = _int_or_none(data.get('section_id'))
         article_id = _int_or_none(data.get('article_id'))
-        if bool(section_id) == bool(article_id):
-            return jsonify({"error": "Выберите раздел ИЛИ статью"}), 400
+        space_id = _int_or_none(data.get('space_id'))
+        chosen = [value for value in (section_id, article_id, space_id) if value]
+        if len(chosen) != 1:
+            return jsonify({"error": "Выберите раздел, статью ИЛИ пространство"}), 400
+        if not space_id and shareable is not None and not shareable:
+            return _forbidden(_NOTHING_TO_SHARE, 'WIKI_GUEST_NOTHING_TO_SHARE')
 
         # ОБЪЕКТ. Статья проверяется по своим разделам: открыть её вправе тот,
         # кто вправе открыть хотя бы один раздел, в котором она лежит. Статья
         # без разделов не принадлежит никакой ветке — её раздаёт только тот, у
         # кого границы нет вовсе (та же логика, что и у границы пространства в
         # articles._VISIBLE_ARTICLES_SQL).
-        if section_id:
+        if space_id:
+            # Пространство границей отдела не проверяется — её здесь нет по
+            # смыслу (см. шапку модуля). Проверяется ПРАВО и то, что открывают
+            # живое пространство: архивное выдать можно было бы без единой
+            # ошибки, а увидел бы получатель пустой переключатель —
+            # spaces_for_user считает только активные.
+            if not _may_grant_space(ctx):
+                return _forbidden(
+                    'Пространство целиком выдаёт только супер-администратор',
+                    'WIKI_GUEST_SPACE_RIGHT')
+            if not structure.space_is_active(cursor, space_id):
+                return jsonify({"error": "Пространство не найдено или в архиве"}), 404
+        elif section_id:
             if structure.section_exists(cursor, section_id) is None:
                 return jsonify({"error": "Раздел не найден"}), 404
             if not _may_share_section(shareable, section_id):
@@ -278,20 +330,22 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": str(exc)}), 400
 
         reason = (data.get('reason') or '').strip()[:500] or None
-        # «Включая подразделы» — только у раздела: у статьи подразделов нет, и
-        # сохранённый TRUE на строке статьи однажды прочитали бы как признак.
+        # «Включая подразделы» — только у раздела: ни у статьи, ни у
+        # пространства подразделов нет, и сохранённый TRUE на такой строке
+        # однажды прочитали бы как признак. Пространство и так открывается
+        # целиком — раскрывать в нём нечего.
         deep = bool(data.get('include_subsections', True)) if section_id else False
 
         grant_id, created = wiki_guests.create_grant(
             cursor, user_id=target_id, section_id=section_id, article_id=article_id,
-            granted_by=ctx['user_id'], expires_at=expires_at, reason=reason,
-            include_subsections=deep)
+            space_id=space_id, granted_by=ctx['user_id'], expires_at=expires_at,
+            reason=reason, include_subsections=deep)
 
         queries.log_action(
             cursor, actor_id=ctx['user_id'],
             action='guest.grant' if created else 'guest.extend',
-            entity_type='section' if section_id else 'article',
-            entity_id=section_id or article_id,
+            entity_type=('space' if space_id else 'section' if section_id else 'article'),
+            entity_id=space_id or section_id or article_id,
             target_user_id=target_id,
             details={'grant_id': grant_id, 'expires_at': expires_at.isoformat(),
                      'include_subsections': deep, 'reason': reason,
@@ -320,6 +374,12 @@ def register(bp, wiki_route, db, log_ip):
         """
         if grant['granted_by'] == ctx['user_id']:
             return True
+        # Выдачу ПРОСТРАНСТВА мастер-ключ не открывает: продление — это выдача
+        # тем же нажатием, и разреши мы её всякому, у кого нет границы отдела,
+        # администратор вики раздавал бы пространства продлением того, чего сам
+        # выдать не вправе. Ветка стоит ВЫШЕ shareable is None ровно поэтому.
+        if grant['space_id']:
+            return _may_grant_space(ctx)
         shareable = _shareable(cursor, ctx)
         if shareable is None:
             return True
@@ -334,8 +394,21 @@ def register(bp, wiki_route, db, log_ip):
         if not grant:
             return jsonify({"error": "Выдача не найдена"}), 404
         if not _may_touch(cursor, ctx, grant):
+            # Причины две и объясняются они разным: чужая ветка отдела — одно,
+            # выдача целого пространства — другое, и «чужая ветка» на ней
+            # читалось бы как поломка (ветки у пространства нет вовсе).
+            if grant['space_id']:
+                return _forbidden(
+                    'Выдачу пространства трогает тот, кто её сделал, '
+                    'или супер-администратор', 'WIKI_GUEST_SPACE_RIGHT')
             return _forbidden('Эта выдача относится к чужой ветке отдела',
                               'WIKI_GUEST_SECTION_SCOPE')
+
+        # Тип объекта для журнала — один на обе двери ниже: отзыв и продление
+        # пишут его порознь, и разъехаться им негде только пока он считается
+        # один раз.
+        entity_type = grant['kind']
+        entity_id = grant['space_id'] or grant['section_id'] or grant['article_id']
 
         if request.method == 'DELETE':
             if not wiki_guests.revoke_grant(cursor, grant_id, ctx['user_id']):
@@ -344,8 +417,7 @@ def register(bp, wiki_route, db, log_ip):
                 return jsonify({"status": "already_revoked"})
             queries.log_action(
                 cursor, actor_id=ctx['user_id'], action='guest.revoke',
-                entity_type='section' if grant['section_id'] else 'article',
-                entity_id=grant['section_id'] or grant['article_id'],
+                entity_type=entity_type, entity_id=entity_id,
                 target_user_id=grant['user_id'],
                 details={'grant_id': grant_id}, ip_address=log_ip())
             return jsonify({"status": "revoked"})
@@ -367,8 +439,7 @@ def register(bp, wiki_route, db, log_ip):
         wiki_guests.extend_grant(cursor, grant_id, expires_at)
         queries.log_action(
             cursor, actor_id=ctx['user_id'], action='guest.extend',
-            entity_type='section' if grant['section_id'] else 'article',
-            entity_id=grant['section_id'] or grant['article_id'],
+            entity_type=entity_type, entity_id=entity_id,
             target_user_id=grant['user_id'],
             details={'grant_id': grant_id, 'expires_at': expires_at.isoformat()},
             ip_address=log_ip())

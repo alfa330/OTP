@@ -136,10 +136,18 @@ export const clampDate = (iso, min, max) => {
     return value;
 };
 
-/** Что именно выдано — одной строкой для списка и баннера. */
+/* Что именно выдано — одной строкой для списка и баннера.
+ *
+ * Пространство называем ПРОСТРАНСТВОМ и словом «целиком»: без него строка «Тез
+ * КЦ» в списке выдач неотличима от одноимённого раздела, а разница между
+ * «открыт раздел» и «открыта вся вика клиента» — это ровно то, ради чего на
+ * список и смотрят. У раздела ту же работу делает «и подразделы».
+ */
 export const targetLabel = (item) => {
     if (!item) return '';
-    const title = item.title || item.article_title || item.section_name || 'Без названия';
+    const title = item.title || item.article_title || item.section_name
+        || item.space_name || 'Без названия';
+    if (item.kind === 'space') return `Пространство «${title}» целиком`;
     if (item.kind === 'article') return title;
     return item.include_subsections ? `${title} и подразделы` : title;
 };

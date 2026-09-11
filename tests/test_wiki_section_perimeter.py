@@ -44,12 +44,16 @@ wiki_sections AS (
       FROM (VALUES {sections}) AS t(
         id, parent_section_id, status, visibility_scope, owner_user_id, space_id)
 ),
+-- Гостевая выдача. Колонок три вместо одной: с 11.09.2026 выдать можно РАЗДЕЛ,
+-- статью или ПРОСТРАНСТВО ЦЕЛИКОМ, и периметр разделов читает две из них —
+-- section_id и space_id. Пустое значение в обеих означает выдачу статьи, до
+-- разделов она не доходит.
 wiki_guest_access AS (
     SELECT section_id::int, user_id::int,
            revoked_at::timestamp, expires_at::timestamp,
-           include_subsections::boolean
+           include_subsections::boolean, space_id::int
       FROM (VALUES {guests}) AS t(section_id, user_id, revoked_at, expires_at,
-                                  include_subsections)
+                                  include_subsections, space_id)
 ),
 -- Кому видно ПРОСТРАНСТВО. Пустая заглушка = видно всем, прежнее поведение;
 -- граница проверяется только там, где её наполняют. Стоит она снаружи всех
@@ -71,7 +75,7 @@ wiki_section_public_departments AS (
 """
 
 _EMPTY_GUESTS = ("(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp, "
-                 "NULL::boolean)")
+                 "NULL::boolean, NULL::int)")
 
 # Дерево без единого правила: VALUES не бывает пустым, поэтому «правил нет»
 # выражается строкой из NULL — она не совпадёт ни с одним разделом.
@@ -314,7 +318,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         Щель узкая: только этому человеку, только выданный раздел, только пока
         выдача жива. Соседние ветки того же пространства проверяются ниже.
         """
-        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE)" % COMMON]
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE, NULL::int)" % COMMON]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests,
                             space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
@@ -327,7 +331,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         неважно, а разделы 1–6 того же пространства обязаны остаться закрытыми,
         хотя граница у них одна и та же.
         """
-        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE)" % COMMON]
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE, NULL::int)" % COMMON]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests,
                             space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
@@ -336,7 +340,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
     def test_revoked_guest_grant_does_not_cross_the_border(self):
         """Отозванная выдача границу не пробивает — щель закрывается вместе с ней."""
         guests = ["(%d, 10, CURRENT_TIMESTAMP::timestamp, "
-                  "'2099-01-01'::timestamp, FALSE)" % COMMON]
+                  "'2099-01-01'::timestamp, FALSE, NULL::int)" % COMMON]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests,
                             space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
@@ -350,7 +354,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         имеет в виду раздел со всем, что в нём лежит. До 25.08.2026 ветка была
         плоской, и гость видел один узел дерева без содержимого.
         """
-        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, TRUE)" % OPERATOR]
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, TRUE, NULL::int)" % OPERATOR]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests)
         self.assertIn(OPERATOR, got)
@@ -363,7 +367,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         Частный случай, ради которого галочка и оставлена в форме: открыть один
         раздел, не открывая всё, что под ним.
         """
-        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE)" % OPERATOR]
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE, NULL::int)" % OPERATOR]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests)
         self.assertIn(OPERATOR, got)
@@ -376,7 +380,7 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         Проверяем отдельно: рекурсия могла бы утащить подразделы за собой,
         отфильтруй мы срок ПОСЛЕ обхода, а не до него.
         """
-        guests = ["(%d, 10, NULL::timestamp, '2000-01-01'::timestamp, TRUE)" % OPERATOR]
+        guests = ["(%d, 10, NULL::timestamp, '2000-01-01'::timestamp, TRUE, NULL::int)" % OPERATOR]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests)
         self.assertNotIn(OPERATOR, got)
@@ -390,11 +394,94 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         Ветка BRANCH_OTP тут тоже открывается — она подраздел выданного; чужие
         ветки того же пространства проверены выше отдельным сценарием.
         """
-        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, TRUE)" % OPERATOR]
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, TRUE, NULL::int)" % OPERATOR]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests,
                             space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
         self.assertEqual({OPERATOR, BRANCH_OP, BRANCH_OTP}, got)
+
+    # ── Выдача ПРОСТРАНСТВА ЦЕЛИКОМ (владелец, 11.09.2026) ───────────────
+    #
+    # Третий объект гостевой выдачи. Проверяется здесь, на боевом тексте
+    # _AUTO_SECTIONS_SQL, а не текстовым стражем: вопрос «сколько разделов
+    # открылось» — это вопрос к самому запросу, и ответ на него меняется от
+    # одной забытой скобки в UNION.
+
+    def test_space_grant_opens_the_whole_space_across_the_border(self):
+        """Выдали пространство — открылись ВСЕ его разделы, мимо границы отдела.
+
+        Ради этого выдача и заведена: человеку из отдела, которому вика не
+        предназначена, открывают чужую вику целиком и на срок. Открылось бы
+        частично — механика оказалась бы имитацией: перечислять разделы
+        поштучно можно было и раньше, выдачей на раздел.
+        """
+        guests = ["(NULL::int, 10, NULL::timestamp, '2099-01-01'::timestamp, "
+                  "FALSE, %d)" % SPACE]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertEqual({DIRECTOR, HEAD, SUPERVISOR, OPERATOR,
+                          BRANCH_OP, BRANCH_OTP, COMMON}, got)
+
+    def test_space_grant_does_not_open_a_neighbouring_space(self):
+        """Открывается ровно ВЫДАННОЕ пространство, а не все чужие сразу.
+
+        Проверка узости: соседнее пространство закрыто тому же человеку тем же
+        способом, и перепутанное условие JOIN'а открыло бы оба разом — а
+        заметить это можно было бы только по чужой вике в переключателе.
+        """
+        tree = _TREE + ["(8, NULL, 'active', 'restricted', NULL, %d)" % OTHER_SPACE]
+        guests = ["(NULL::int, 10, NULL::timestamp, '2099-01-01'::timestamp, "
+                  "FALSE, %d)" % SPACE]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], tree=tree, guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP),
+                                               '(%d, %d)' % (OTHER_SPACE, DEPT_OP)])
+        self.assertIn(COMMON, got)
+        self.assertNotIn(8, got)
+
+    def test_space_grant_leaves_the_archive_closed(self):
+        """Архивный раздел выданного пространства гостю не открывается.
+
+        Пространство выдают, чтобы читать его вику, а архив из оборота убран.
+        Выданный поимённо раздел берётся как есть — это разные обещания, и
+        сходиться они не обязаны.
+        """
+        tree = [row.replace("'active'", "'archived'") if row.startswith('(7,') else row
+                for row in _TREE]
+        guests = ["(NULL::int, 10, NULL::timestamp, '2099-01-01'::timestamp, "
+                  "FALSE, %d)" % SPACE]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], tree=tree, guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertNotIn(COMMON, got)
+        self.assertIn(OPERATOR, got)
+
+    def test_revoked_and_expired_space_grants_open_nothing(self):
+        """Отозванная и истёкшая выдача пространства закрывается целиком.
+
+        Отдельно от выдачи раздела: условия живой выдачи вклеены в ветку заново,
+        и забытое отсечение здесь стоило бы не одного раздела, а всей чужой вики.
+        """
+        for label, row in (
+                ('отозвана', "(NULL::int, 10, CURRENT_TIMESTAMP::timestamp, "
+                             "'2099-01-01'::timestamp, FALSE, %d)" % SPACE),
+                ('истекла', "(NULL::int, 10, NULL::timestamp, "
+                            "'2000-01-01'::timestamp, FALSE, %d)" % SPACE)):
+            with self.subTest(grant=label):
+                got = self.sections(role='operator', department_id=DEPT_OTP,
+                                    user_id=10, rules=[], guests=[row],
+                                    space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+                self.assertEqual(set(), got)
+
+    def test_space_grant_belongs_to_the_named_person_only(self):
+        """Выдача именная: коллеге по отделу чужая вика не открывается."""
+        guests = ["(NULL::int, 11, NULL::timestamp, '2099-01-01'::timestamp, "
+                  "FALSE, %d)" % SPACE]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertEqual(set(), got)
 
     def test_other_space_border_does_not_touch_this_one(self):
         """Список, выставленный ЧУЖОМУ пространству, на наше не действует."""

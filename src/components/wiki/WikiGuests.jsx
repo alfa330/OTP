@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, CalendarClock, Clock, FileText, FolderTree, KeyRound, Loader2,
-    RotateCw, Search, ShieldOff, UserPlus, Users,
+    AlertCircle, Boxes, CalendarClock, Clock, FileText, FolderTree, KeyRound,
+    Loader2, RotateCw, Search, ShieldOff, UserPlus, Users,
 } from 'lucide-react';
 
 import {
@@ -14,6 +14,7 @@ import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
 import SectionTreeSelect from './SectionTreeSelect';
 import useStableCallback from './useStableCallback';
+import { spaceIcon } from './spaceIdentity';
 import {
     STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, fmtDeadline,
     plural, presetLabel, presetsWithin, targetLabel, urgency,
@@ -35,7 +36,9 @@ import {
  * ТРИ ГРАНИЦЫ ВЫДАЧИ СЧИТАЕТ СЕРВЕР, а не эта форма (wiki/guests.py):
  *   право   — должность: директор всем, руководитель супервайзерам и
  *             операторам, супервайзер операторам;
- *   объект  — раздел или статья из ветки своего отдела;
+ *   объект  — раздел или статья из ветки своего отдела; ПРОСТРАНСТВО ЦЕЛИКОМ —
+ *             только у супер-админа, и признак can_grant_space приезжает
+ *             готовым (решение владельца 11.09.2026);
  *   человек — СВОЙ подчинённый: и по чину, и по отделу.
  * Форма только показывает то, что сервер уже отфильтровал: списки «кому» и
  * «что» приезжают готовыми. Считать границы во второй раз здесь значило бы
@@ -165,8 +168,16 @@ const GrantRow = ({ item, onExtend, onRevoke, busy }) => {
     const active = item.status === 'active';
     return (
         <div className="flex flex-wrap items-start gap-3 px-4 py-3.5">
-            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
-                {item.kind === 'article' ? <FileText size={16} /> : <FolderTree size={16} />}
+            {/* Значок отвечает на вопрос «что открыто» раньше подписи. У
+                пространства он ещё и другого тона: выдача целой вики стоит
+                в списке рядом с выдачей одного раздела, и отличать их только
+                текстом — значит рассчитывать, что текст прочтут. */}
+            <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
+                item.kind === 'space' ? 'bg-indigo-50 text-indigo-600'
+                                      : 'bg-slate-100 text-slate-500'}`}>
+                {item.kind === 'space' ? <Boxes size={16} />
+                    : item.kind === 'article' ? <FileText size={16} />
+                    : <FolderTree size={16} />}
             </div>
 
             <div className="min-w-0 flex-1">
@@ -293,8 +304,9 @@ export default function WikiGuests({ base, headers, space = null, showToast = nu
                 <div className="min-w-0 flex-1">
                     <div className="text-[14px] font-semibold text-slate-900">Гостевой доступ</div>
                     <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                        Временный доступ к разделу или статье вашего отдела — своим
-                        подчинённым: на срок до
+                        Временный доступ к разделу или статье вашего отдела
+                        {meta?.can_grant_space ? ' — или к целому пространству' : ''} —
+                        своим подчинённым: на срок до
                         {' '}{meta?.max_days || 14} {plural(meta?.max_days || 14, 'дня', 'дней', 'дней')}
                         {' '}или до названного часа, хоть до 18:00 сегодня.
                     </p>
@@ -452,6 +464,7 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
     const [kind, setKind] = useState('section');
     const [sectionId, setSectionId] = useState(null);
     const [articleId, setArticleId] = useState('');
+    const [spaceId, setSpaceId] = useState('');
     const [deep, setDeep] = useState(true);
     const [days, setDays] = useState(7);
     const [until, setUntil] = useState('');
@@ -459,7 +472,12 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
     const [reason, setReason] = useState('');
     const [busy, setBusy] = useState(false);
 
-    const spaceId = space?.id || null;
+    /* Пространство, В КОТОРОМ человек сейчас стоит, — им сужаются разделы и
+       статьи формы. К выбору пространства как ОБЪЕКТА выдачи оно отношения не
+       имеет: там выбирают чужую вику, и подставлять в неё текущую было бы
+       ровно наоборот тому, зачем выдачу заводили. Два разных space_id в одной
+       форме — поэтому и имена разные. */
+    const activeSpaceId = space?.id || null;
 
     /* Оба справочника тянем при ОТКРЫТИИ формы, а не при монтировании экрана:
        список людей — это вся компания, и грузить его на каждый заход в раздел
@@ -471,13 +489,13 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
     }, [base, headers]);
 
     useEffect(() => {
-        axios.get(`${base}/guests/targets`, { headers, params: { space_id: spaceId } })
+        axios.get(`${base}/guests/targets`, { headers, params: { space_id: activeSpaceId } })
             .then((r) => { setTargets(r.data || null); setTargetsError(''); })
             .catch((e) => {
-                setTargets({ sections: [], articles: [] });
+                setTargets({ sections: [], articles: [], spaces: [] });
                 setTargetsError(errText(e, 'Не удалось загрузить разделы'));
             });
-    }, [base, headers, spaceId]);
+    }, [base, headers, activeSpaceId]);
 
     const peopleOptions = useMemo(() => people.map((person) => ({
         value: String(person.id),
@@ -490,7 +508,26 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
         label: article.title,
     })), [targets]);
 
-    const chosenTarget = kind === 'section' ? sectionId : articleId;
+    /* Пространства приезжают уже отфильтрованными по праву: тому, кто их
+       раздавать не вправе, сервер отдаёт пустой список (routes_guests). Поэтому
+       здесь только подпись — значок, название и сколько внутри разделов. Счёт
+       разделов не украшение: «Тез КЦ · 24 раздела» и есть ответ на вопрос
+       «сколько я сейчас открываю», который у пространства задают в первую
+       очередь. */
+    const spaceOptions = useMemo(() => (targets?.spaces || []).map((item) => ({
+        value: String(item.id),
+        label: [
+            spaceIcon(item),
+            item.name,
+            item.sections_count
+                ? `· ${item.sections_count} ${plural(item.sections_count,
+                    'раздел', 'раздела', 'разделов')}`
+                : '· пока пусто',
+        ].filter(Boolean).join(' '),
+    })), [targets]);
+
+    const chosenTarget = kind === 'section' ? sectionId
+        : kind === 'space' ? spaceId : articleId;
     const ready = !!userId && !!chosenTarget && (!!days || !!until);
 
     const submit = () => {
@@ -499,6 +536,7 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
             user_id: Number(userId),
             section_id: kind === 'section' ? sectionId : null,
             article_id: kind === 'article' ? Number(articleId) : null,
+            space_id: kind === 'space' ? Number(spaceId) : null,
             include_subsections: kind === 'section' ? deep : false,
             // Ровно одно поле ДНЯ: сервер отвергает оба сразу, и это правильно —
             // умолчание пришлось бы выбрать за человека. Час к дню не относится
@@ -566,13 +604,21 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
 
                 <div className="space-y-2">
                     <div className={iosGroupLabel}>Что открыть</div>
+                    {/* Третья кнопка появляется только у того, кто вправе
+                        раздавать пространства: право считает сервер и присылает
+                        готовым (can_grant_space). Показать её всем и отвечать
+                        403 на нажатие — это обещание, которого интерфейс не
+                        держит, а спрятать по собственной формуле значит завести
+                        второй источник истины об одном праве. */}
                     <IosSegmented
                         value={kind}
                         onChange={setKind}
-                        ariaLabel="Раздел или статья"
+                        ariaLabel="Раздел, статья или пространство"
                         options={[
                             { value: 'section', label: 'Раздел' },
                             { value: 'article', label: 'Статья' },
+                            ...(meta?.can_grant_space
+                                ? [{ value: 'space', label: 'Пространство' }] : []),
                         ]}
                     />
 
@@ -590,6 +636,19 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
                             spaces={space ? [space] : []}
                             value={sectionId}
                             onChange={setSectionId}
+                        />
+                    ) : kind === 'space' ? (
+                        <CustomSelect
+                            variant="ios"
+                            value={spaceId}
+                            onChange={setSpaceId}
+                            options={spaceOptions}
+                            searchable
+                            placeholder={spaceOptions.length ? 'Выберите пространство…'
+                                                             : 'Пространств для выдачи нет'}
+                            searchPlaceholder="Поиск по названию…"
+                            ariaLabel="Какое пространство открыть"
+                            disabled={!spaceOptions.length}
                         />
                     ) : (
                         <CustomSelect
@@ -609,6 +668,8 @@ const GrantModal = ({ base, headers, meta, space, onClose, onDone, toast }) => {
                     <p className="text-[11.5px] leading-relaxed text-slate-500">
                         {kind === 'section'
                             ? 'В списке только разделы вашей ветки отдела — те, что видны вам самим.'
+                            : kind === 'space'
+                            ? 'Сотрудник увидит всю вику этого пространства на срок выдачи — все разделы и опубликованные статьи, только на чтение. Справочники «Парки» и «Офисы», аналитика и журнал ему не откроются: он здесь в гостях.'
                             : 'Только опубликованные статьи. Черновик и статью в строгом режиме гостевой доступ не открывает — сотрудник их всё равно не увидит.'}
                     </p>
                 </div>

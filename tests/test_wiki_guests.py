@@ -37,6 +37,7 @@ from wiki.access import (
     ROLE_LEVELS,
     guest_grant_ceiling,
     may_grant_guest_in_department,
+    may_grant_guest_space,
     may_grant_guest_to,
     role_level_of,
 )
@@ -136,6 +137,78 @@ class GuestLadderTest(unittest.TestCase):
         self.assertEqual(guest_grant_ceiling('sv'), guest_grant_ceiling('supervisor'))
         self.assertTrue(may_grant_guest_to('supervisor', 'operator'))
         self.assertFalse(may_grant_guest_to('supervisor', 'trainer'))
+
+
+class GuestSpaceRightTest(unittest.TestCase):
+    """Третий объект выдачи — пространство целиком (владелец, 11.09.2026).
+
+    Право на него НЕ лестница и не мастер-ключ: владельцу был задан прямой
+    вопрос «кто получает это право», и выбран самый узкий из предложенных
+    ответов — роль OTP super_admin. Администратор вики, которому весь остальной
+    раздел выдаёт мастер-ключ, пространства не раздаёт.
+
+    Страж нужен именно потому, что соблазн «приравнять как везде» здесь
+    постоянный: рядом, в routes_structure._may_manage_space, роль вики как раз
+    приравнена — и это ДРУГОЕ решение про другое действие.
+    """
+
+    def test_only_super_admin_grants_a_space(self):
+        self.assertTrue(may_grant_guest_space('super_admin'))
+        for role in ('admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee'):
+            with self.subTest(role=role):
+                self.assertFalse(may_grant_guest_space(role))
+
+    def test_unknown_and_empty_roles_grant_nothing(self):
+        # Незнакомая должность не должна проходить «по умолчанию»: опечатка в
+        # поле role здесь означала бы выдачу чужой вики целиком.
+        for role in (None, '', 'директор', 'wiki_admin', 'манагер'):
+            with self.subTest(role=role):
+                self.assertFalse(may_grant_guest_space(role))
+
+    def test_space_right_is_not_the_ladder(self):
+        """Потолок должности и право на пространство — разные вопросы.
+
+        У руководителя потолок есть (он выдаёт супервайзерам и операторам), а
+        пространство он не раздаёт. Свяжи их — и следующее послабление потолка
+        молча раздало бы пространства.
+        """
+        self.assertIsNotNone(guest_grant_ceiling('admin'))
+        self.assertFalse(may_grant_guest_space('admin'))
+        # И наоборот: мастер-ключ роли вики поднимает потолок до максимума, но
+        # права на пространство не даёт — функция про него вовсе не спрашивает.
+        self.assertEqual(guest_grant_ceiling('trainer', is_wiki_admin=True),
+                         ROLE_LEVELS['super_admin'])
+        self.assertFalse(may_grant_guest_space('trainer'))
+
+
+class GuestKindTest(unittest.TestCase):
+    """Вид выдачи считается ОДНОЙ функцией на весь раздел.
+
+    Список, баннер и /ping отвечают на вопрос «что выдано» одинаково только
+    пока отвечает одна функция. Разложенный по трём местам тернарник — это ровно
+    тот способ, каким в этой вике уже расходились два вычислителя одного и того
+    же (см. шапку wiki/articles.py).
+    """
+
+    def test_three_kinds(self):
+        self.assertEqual(guests.grant_kind({'section_id': 7}), 'section')
+        self.assertEqual(guests.grant_kind({'article_id': 3}), 'article')
+        self.assertEqual(guests.grant_kind({'space_id': 2}), 'space')
+
+    def test_article_wins_over_space_and_section(self):
+        # Ограничение wiki_guest_access_one_object держит ровно одну непустую
+        # колонку, но порядок ветвей всё равно обязан быть определённым: строка
+        # из старой базы или из ручного INSERT не должна читаться по-разному в
+        # списке и в баннере.
+        self.assertEqual(
+            guests.grant_kind({'article_id': 3, 'space_id': 2, 'section_id': 7}),
+            'article')
+        self.assertEqual(guests.grant_kind({'space_id': 2, 'section_id': 7}), 'space')
+
+    def test_empty_row_is_a_section(self):
+        # Пустая строка ограничением запрещена; если она всё же встретилась,
+        # «Удалённый объект» в подписи честнее, чем вид выдачи, которого нет.
+        self.assertEqual(guests.grant_kind({}), 'section')
 
 
 class GuestDepartmentTest(unittest.TestCase):
@@ -381,6 +454,104 @@ class GuestSqlAgreementTest(unittest.TestCase):
         for sql in (queries._GUEST_SECTIONS_CTE, guests._ARTICLE_GRANT_SQL):
             with self.subTest(sql=_normalize(sql)[:60]):
                 self.assertIn('include_subsections', _normalize(sql))
+
+    def test_every_guest_branch_filters_revocation_and_expiry(self):
+        """Не «условие встречается», а «оно есть в КАЖДОЙ ветке».
+
+        Проверка выше (assertIn) проходит, даже если условие стоит в одной ветке
+        из двух: с 11.09.2026 у гостевой CTE их две — выдача раздела и выдача
+        пространства. Забудь отсечение во второй — и отозванная выдача целого
+        пространства продолжала бы открывать чужую вику, а в списке значилась бы
+        отозванной. Считаем обращения к таблице и сверяем с числом отсечений.
+        """
+        for sql in self.GUEST_SQL:
+            with self.subTest(sql=_normalize(sql)[:60]):
+                text = _normalize(sql)
+                reads = text.count('FROM wiki_guest_access')
+                self.assertGreater(reads, 0)
+                self.assertEqual(text.count('revoked_at IS NULL'), reads)
+                self.assertEqual(
+                    text.count(
+                        "expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"),
+                    reads)
+
+    def test_guest_perimeter_knows_the_space_grant(self):
+        """Выдача пространства втекает в тот же guest_seed, что и раздел.
+
+        Отдельным CTE она получила бы свою щель в границе пространства
+        (_SPACE_GATE_SQL смотрит ровно на guest_seed/guest_tree), своё отсечение
+        и своё попадание в оба режима периметра — то есть четыре места, где
+        забытая правка открывает гостю дерево без статей или наоборот.
+        """
+        cte = _normalize(queries._GUEST_SECTIONS_CTE)
+        self.assertIn('g.space_id IS NOT NULL', cte)
+        self.assertIn('JOIN wiki_sections s ON s.space_id = g.space_id', cte)
+        # Архив пространства гостю не открывается: он убран из оборота.
+        self.assertIn("s.status = 'active'", cte)
+        # Раскрывать в этой ветке нечего — она и так перечисляет все разделы.
+        self.assertIn('FALSE AS deep', cte)
+
+    def test_article_expiry_covers_the_space_grant(self):
+        """Статья, открытая выдачей ПРОСТРАНСТВА, обязана иметь срок.
+
+        Самый злой из молчаливых отказов раздела: статья в витрине есть (её
+        раздел приехал в периметр гостевой веткой), а открыть нельзя —
+        guest_allows_read приходит из этого запроса, и без ветки про
+        пространство resolve_article_permissions вернёт can_read=False на
+        статье, которую человеку только что показали списком.
+        """
+        text = _normalize(guests._ARTICLE_GRANT_SQL)
+        self.assertIn('g.space_id IS NOT NULL', text)
+        self.assertIn('JOIN wiki_sections s ON s.space_id = g.space_id', text)
+
+    def test_switcher_shows_the_granted_space(self):
+        """Пространство выдачи ищется тремя способами сразу.
+
+        Прямо названное (выдача пространства), пространство выданного раздела и
+        пространство разделов выданной статьи. Забудь первое — и человек с
+        выданной вики не нашёл бы её в переключателе: разделы посчитаны, а
+        прийти к ним некуда.
+        """
+        source = (Path(queries.__file__).read_text(encoding='utf-8')
+                  .split('def spaces_for_user(')[1].split('\ndef ')[0])
+        self.assertIn('COALESCE(g.space_id, gs.space_id, gass.space_id)',
+                      _normalize(source))
+
+    def test_create_grant_tells_three_objects_apart(self):
+        """Повторная выдача продлевает выдачу ТОГО ЖЕ объекта.
+
+        Условие поиска прежней строки обязано сравнивать все три колонки: без
+        space_id выдача пространства нашла бы выдачу раздела того же человека
+        (у неё section_id заполнен, а article_id пуст — и «пусто = пусто»
+        сошлось бы) и молча продлила бы не то.
+        """
+        text = (Path(guests.__file__).read_text(encoding='utf-8')
+                .split('def create_grant(')[1].split('\ndef ')[0])
+        update = re.search(r'UPDATE wiki_guest_access.*?RETURNING id', text, re.S)
+        self.assertIsNotNone(update)
+        for column in ('section_id', 'article_id', 'space_id'):
+            with self.subTest(column=column):
+                self.assertIn('%s IS NOT DISTINCT FROM' % column,
+                              _normalize(update.group(0)))
+        insert = re.search(r'INSERT INTO wiki_guest_access.*?RETURNING id', text, re.S)
+        self.assertIsNotNone(insert)
+        self.assertIn('space_id', _normalize(insert.group(0)))
+
+    def test_grant_list_tells_the_granted_space_from_the_host_space(self):
+        """Две разные колонки пространства в одном ответе — и их нельзя путать.
+
+        space_id — «где лежит выданное» (у выдачи раздела он тоже заполнен),
+        granted_space_id — «выдано само пространство». Считай вид выдачи по
+        первому — и каждая выдача раздела прочиталась бы как выдача всей вики.
+        """
+        self.assertIn('granted_space_id', guests._GRANT_KEYS)
+        self.assertIn('space_id', guests._GRANT_KEYS)
+        text = (Path(guests.__file__).read_text(encoding='utf-8')
+                .split('def list_grants(')[1].split('\ndef ')[0])
+        self.assertIn("item['granted_space_id']", text)
+        # Выдача пространства не проваливается сквозь фильтр по пространству:
+        # её делают ИЗ своей вики, и выдавший обязан увидеть её в списке.
+        self.assertIn('g.space_id IS NOT NULL', _normalize(guests._GRANT_LIST_SQL))
 
     def test_space_gate_lets_the_guest_through_by_name(self):
         """Исключение в границе пространства — только через гостевые CTE.

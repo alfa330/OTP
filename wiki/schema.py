@@ -484,17 +484,20 @@ _STATEMENTS = [
         user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         article_id    INTEGER REFERENCES wiki_articles(id) ON DELETE CASCADE,
         section_id    INTEGER REFERENCES wiki_sections(id) ON DELETE CASCADE,
+        space_id      INTEGER REFERENCES wiki_spaces(id) ON DELETE CASCADE,
         granted_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         reason        TEXT,
         expires_at    TIMESTAMP NOT NULL,
         revoked_at    TIMESTAMP,
         revoked_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
-        CHECK (
-            (article_id IS NOT NULL AND section_id IS NULL)
-            OR
-            (article_id IS NULL AND section_id IS NOT NULL)
-        )
+        -- Ровно ОДИН объект на строку, и ограничение названо поимённо: на
+        -- боевой базе таблица заведена ещё о двух колонках, и миграция ниже
+        -- обязана уметь снять прежнее безымянное ограничение. Безымянное
+        -- искалось бы по автоимени, а оно у постгреса детерминированное ровно
+        -- до второго ограничения на той же таблице.
+        CONSTRAINT wiki_guest_access_one_object
+            CHECK (num_nonnulls(article_id, section_id, space_id) = 1)
     );
     """,
     """
@@ -1769,7 +1772,8 @@ _ORG_STATEMENTS = [
 # периметр (queries._AUTO_SECTIONS_SQL), выданная статья — в витрину
 # (articles._VISIBLE_ARTICLES_SQL). Не было ВЫДАЮЩЕЙ стороны: ни двери, ни
 # права, ни срока в интерфейсе — доступ существовал только в схеме. Здесь
-# появляются две недостающие колонки.
+# появляются недостающие колонки: сначала include_subsections, потом space_id
+# (третий объект выдачи, 11.09.2026 — см. блок ниже).
 #
 # include_subsections — раскрывается ли выдача на подразделы. По умолчанию TRUE,
 # потому что человек, выдающий «Регламент СЗоВ», имеет в виду раздел со всем,
@@ -1801,6 +1805,57 @@ _GUEST_STATEMENTS = [
     "ON wiki_guest_access (article_id) WHERE article_id IS NOT NULL;",
     "CREATE INDEX IF NOT EXISTS idx_wiki_guest_granted_by "
     "ON wiki_guest_access (granted_by, created_at DESC);",
+
+    # ── ТРЕТИЙ ОБЪЕКТ ВЫДАЧИ: ПРОСТРАНСТВО ЦЕЛИКОМ (владелец, 11.09.2026) ──
+    #
+    # До сих пор чужое пространство открывалось человеку ровно одним способом —
+    # вписать его ОТДЕЛ в границу пространства в конструкторе. Это навсегда и
+    # сразу всем, а спрашивали про другое: показать коллеге вику соседнего
+    # клиента («по типу Тез») на время и поимённо. Раздел и статья на этот
+    # вопрос не отвечают: перечислять два десятка разделов поштучно — это не
+    # «доступ к пространству», а его имитация, и истекать они будут вразнобой.
+    #
+    # Колонка, а не отдельная таблица: у выдачи один и тот же срок, один и тот
+    # же отзыв, один и тот же журнал и один и тот же список. Вторая таблица
+    # означала бы второй resolve_expiry, второй revoke и вторую половину
+    # экрана — то есть второй источник истины о сроке.
+    "ALTER TABLE wiki_guest_access ADD COLUMN IF NOT EXISTS "
+    "space_id INTEGER REFERENCES wiki_spaces(id) ON DELETE CASCADE;",
+
+    # Ограничение «ровно один объект» на боевой базе заведено БЕЗЫМЯННЫМ и знает
+    # только про две колонки: с ним INSERT со space_id не пройдёт вовсе. Снимаем
+    # все проверочные ограничения таблицы, кроме нашего именованного, и ставим
+    # новое — так миграция идемпотентна и не зависит от того, как постгрес
+    # назвал прежнее (wiki_guest_access_check у одних баз, _check1 у других,
+    # если кто-то добавит второе).
+    """
+    DO $$
+    DECLARE constraint_name text;
+    BEGIN
+        FOR constraint_name IN
+            SELECT c.conname
+              FROM pg_constraint c
+              JOIN pg_class t ON t.oid = c.conrelid
+             WHERE t.relname = 'wiki_guest_access'
+               AND c.contype = 'c'
+               AND c.conname <> 'wiki_guest_access_one_object'
+        LOOP
+            EXECUTE format('ALTER TABLE wiki_guest_access DROP CONSTRAINT %I',
+                           constraint_name);
+        END LOOP;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'wiki_guest_access_one_object'
+                          AND conrelid = 'wiki_guest_access'::regclass) THEN
+            ALTER TABLE wiki_guest_access
+                ADD CONSTRAINT wiki_guest_access_one_object
+                CHECK (num_nonnulls(article_id, section_id, space_id) = 1);
+        END IF;
+    END $$;
+    """,
+
+    "CREATE INDEX IF NOT EXISTS idx_wiki_guest_space "
+    "ON wiki_guest_access (space_id) WHERE space_id IS NOT NULL;",
 ]
 
 
