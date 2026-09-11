@@ -2,13 +2,6 @@
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
-import {
-    MobileAccountScreen,
-    MobileAccountGroup,
-    MobileAccountRow,
-    MobileAccountError,
-    MobileAccountAction,
-} from '../common/MobileAccountScreen';
 
 const AVATAR_MAX_DIMENSION = 128;
 const AVATAR_TARGET_BYTES = 40 * 1024;
@@ -176,12 +169,20 @@ const AccountAvatarModal = ({
     onClose,
     onSave,
     userName,
-    avatarUrl
+    avatarUrl,
+    /* Файл, выбранный ДО открытия окна. На телефоне галерею открывает сама
+       строка профиля (иначе окно пришлось бы открыть, а потом просить выбрать
+       фото ещё раз — в видео-образце этого шага нет). */
+    initialFile = null
 }) => {
     /* Экран, а не окно: на телефоне у смены фотографии своя разметка — вид
        карточки контакта (решение владельца 11.09.2026). Настольное окно ниже
        оставлено прежним. */
     const isMobileShell = useIsMobileShell();
+    /* Сторона квадрата, в котором показывают снимок. На компьютере она всегда
+       была 256, и по ней же считается положение снимка внутри кадра; на телефоне
+       кадр занимает экран, поэтому число стало переменной. */
+    const [cropPreviewSize, setCropPreviewSize] = useState(AVATAR_CROP_PREVIEW_SIZE);
     const avatarInputRef = useRef(null);
     const avatarObjectUrlRef = useRef('');
     const avatarCropObjectUrlRef = useRef('');
@@ -244,9 +245,7 @@ const AccountAvatarModal = ({
         setAvatarPreviewUrl(objectUrl);
     };
 
-    const handleAvatarSelect = async (event) => {
-        const input = event.target;
-        const sourceFile = input?.files?.[0];
+    const startCropFromFile = async (sourceFile) => {
         if (!sourceFile) return;
 
         setModalError('');
@@ -277,9 +276,27 @@ const AccountAvatarModal = ({
             setAvatarError(error?.message || 'Не удалось обработать аватар');
         } finally {
             setIsAvatarProcessing(false);
-            if (input) input.value = '';
         }
     };
+
+    const handleAvatarSelect = async (event) => {
+        const input = event.target;
+        const sourceFile = input?.files?.[0];
+        if (!sourceFile) return;
+        await startCropFromFile(sourceFile);
+        if (input) input.value = '';
+    };
+
+    /* Файл, принесённый строкой профиля, ведём в кадр сразу — ОДИН РАЗ на файл:
+       без сторожевого ref повторный рендер (а их тут много: обработка, зум,
+       перетаскивание) заводил бы кадрирование заново поверх начатого. */
+    const startedFileRef = useRef(null);
+    useEffect(() => {
+        if (!isOpen || !initialFile) return;
+        if (startedFileRef.current === initialFile) return;
+        startedFileRef.current = initialFile;
+        startCropFromFile(initialFile);
+    }, [isOpen, initialFile]);
 
     const handleAvatarCropZoomChange = (event) => {
         const nextZoom = Number(event.target.value);
@@ -308,7 +325,7 @@ const AccountAvatarModal = ({
             drag.lastX = event.clientX;
             drag.lastY = event.clientY;
             const { minSide } = getAvatarCropMetrics(prev.sourceWidth, prev.sourceHeight, prev.zoom);
-            const displayScale = (AVATAR_CROP_PREVIEW_SIZE * prev.zoom) / minSide;
+            const displayScale = (cropPreviewSize * prev.zoom) / minSide;
             if (!Number.isFinite(displayScale) || displayScale <= 0) return prev;
             return normalizeAvatarCropState({
                 ...prev,
@@ -408,6 +425,26 @@ const AccountAvatarModal = ({
         }
     };
 
+    /* Кадр во весь экран: сторона — ширина экрана, но так, чтобы под ним
+       осталось место на нижнюю панель с кнопками. Пересчитываем на повороте. */
+    useEffect(() => {
+        if (!isMobileShell || !isOpen) {
+            setCropPreviewSize(AVATAR_CROP_PREVIEW_SIZE);
+            return undefined;
+        }
+        const measure = () => {
+            const side = Math.min(window.innerWidth, Math.max(200, window.innerHeight - 220));
+            setCropPreviewSize(Math.round(side));
+        };
+        measure();
+        window.addEventListener('resize', measure);
+        window.addEventListener('orientationchange', measure);
+        return () => {
+            window.removeEventListener('resize', measure);
+            window.removeEventListener('orientationchange', measure);
+        };
+    }, [isMobileShell, isOpen]);
+
     const avatarInitial = String(userName || 'U').charAt(0).toUpperCase();
     const avatarDisabled = isLoading || isAvatarProcessing || !!avatarCropState;
     const avatarCropViewStyle = useMemo(() => {
@@ -417,129 +454,187 @@ const AccountAvatarModal = ({
             avatarCropState.sourceHeight,
             avatarCropState.zoom
         );
-        const displayScale = (AVATAR_CROP_PREVIEW_SIZE * avatarCropState.zoom) / minSide;
+        const displayScale = (cropPreviewSize * avatarCropState.zoom) / minSide;
         const width = avatarCropState.sourceWidth * displayScale;
         const height = avatarCropState.sourceHeight * displayScale;
-        const left = (AVATAR_CROP_PREVIEW_SIZE / 2) - (avatarCropState.centerX * displayScale);
-        const top = (AVATAR_CROP_PREVIEW_SIZE / 2) - (avatarCropState.centerY * displayScale);
+        const left = (cropPreviewSize / 2) - (avatarCropState.centerX * displayScale);
+        const top = (cropPreviewSize / 2) - (avatarCropState.centerY * displayScale);
         return {
             width: `${width}px`,
             height: `${height}px`,
             left: `${left}px`,
             top: `${top}px`
         };
-    }, [avatarCropState]);
+    /* Сторона кадра входит в расчёт: на телефоне она меняется на повороте,
+       и без неё снимок остался бы посчитанным по прежнему размеру. */
+    }, [avatarCropState, cropPreviewSize]);
 
-    /* «Назад» на телефоне сперва отменяет кадрирование, а не закрывает экран
-       целиком: кадр — это отдельный экран поверх, и жест обязан снимать верхний.
-       Своя запись в стеке, как у всех экранов (см. utils/mobileBackStack.js). */
-    useScreenBackGesture(isMobileShell && isOpen && !!avatarCropState, handleAvatarCropCancel);
+    /* «Назад» на телефоне закрывает кадр — это единственный экран смены фото,
+       и жест обязан уводить с него в профиль, а не из портала. */
+    useScreenBackGesture(isMobileShell && isOpen, handleClose);
+
+    /* Щипок двумя пальцами — то же приближение, что ползунком. Считаем по
+       расстоянию между пальцами: на телефоне это первое, что пробуют сделать со
+       снимком, и без него кадр ощущается неживым. */
+    const pinchRef = useRef(null);
+    const pointersRef = useRef(new Map());
+
+    const handleCropPointerDown = (event) => {
+        pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (pointersRef.current.size === 2) {
+            const [a, b] = [...pointersRef.current.values()];
+            pinchRef.current = {
+                distance: Math.hypot(a.x - b.x, a.y - b.y),
+                zoom: avatarCropState?.zoom || AVATAR_MIN_ZOOM,
+            };
+            /* Пальцев два — тянуть снимок больше не тянем: иначе кадр поедет
+               вслед за серединой щипка. */
+            avatarCropDragRef.current = null;
+            return;
+        }
+        handleAvatarCropPointerDown(event);
+    };
+
+    const handleCropPointerMove = (event) => {
+        if (pointersRef.current.has(event.pointerId)) {
+            pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        }
+        const pinch = pinchRef.current;
+        if (pinch && pointersRef.current.size >= 2) {
+            const [a, b] = [...pointersRef.current.values()];
+            const distance = Math.hypot(a.x - b.x, a.y - b.y);
+            if (!pinch.distance) return;
+            const nextZoom = pinch.zoom * (distance / pinch.distance);
+            setAvatarCropState((prev) => normalizeAvatarCropState(prev ? { ...prev, zoom: nextZoom } : prev));
+            return;
+        }
+        handleAvatarCropPointerMove(event);
+    };
+
+    const handleCropPointerUp = (event) => {
+        pointersRef.current.delete(event.pointerId);
+        if (pointersRef.current.size < 2) pinchRef.current = null;
+        handleAvatarCropPointerUp(event);
+    };
+
+    /* Синяя галочка делает всё разом: обрезает, сжимает и сохраняет. В образце
+       (Telegram) подтверждение кадра И ЕСТЬ применение фотографии — второй
+       кнопки «Сохранить» там нет, и лишний шаг на телефоне только мешает. */
+    const handleCropConfirm = async () => {
+        if (!avatarCropState?.sourceFile || isAvatarProcessing || isLoading) return;
+        setModalError('');
+        setAvatarError('');
+        setIsAvatarProcessing(true);
+        let prepared = null;
+        try {
+            prepared = await compressAvatarImageFile(avatarCropState.sourceFile, avatarCropState);
+            if (prepared.size > AVATAR_MAX_BYTES) {
+                throw new Error('Фотография слишком большая даже после сжатия');
+            }
+        } catch (error) {
+            setAvatarError(error?.message || 'Не удалось обработать фотографию');
+            setIsAvatarProcessing(false);
+            return;
+        }
+        setIsAvatarProcessing(false);
+        setIsLoading(true);
+        try {
+            await onSave?.({
+                avatar_file: prepared,
+                avatar_original_file: avatarCropState.sourceFile,
+                avatar_remove: false,
+            });
+            closeAvatarCropEditor();
+            onClose?.();
+        } catch (error) {
+            setModalError(error?.response?.data?.error || error?.message || 'Не удалось сохранить фотографию');
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
     if (!isOpen) return null;
 
     if (isMobileShell) {
-        const sizeKb = avatarUploadFile ? Math.round(avatarUploadFile.size / 1024) : 0;
-        const hint = avatarUploadFile
-            ? `Новая фотография готова — ${sizeKb} КБ. Останется сохранить.`
-            : avatarRemoveRequested
-                ? 'Фотография будет удалена после сохранения.'
-                : 'Снимок обрежется в квадрат и уменьшится сам.';
+        /* Экран кадрирования — как в образце: тёмное поле во весь экран, снимок
+           под круглой маской, внизу стрелка «назад» и синяя галочка. Ни шапки,
+           ни списков: в кадре нечего читать, им работают пальцами. */
+        const busy = isAvatarProcessing || isLoading;
         return (
-            <>
-                <MobileAccountScreen title="Фотография" onBack={handleClose}>
-                    <div className="mobile-account__hero">
-                        <span className="mobile-account__hero-photo">
-                            {avatarPreviewUrl
-                                ? <img src={avatarPreviewUrl} alt="" />
-                                : avatarInitial}
-                        </span>
-                        <label className={`mobile-account__hero-pick${avatarDisabled ? ' is-disabled' : ''}`}>
-                            <input
-                                ref={avatarInputRef}
-                                type="file"
-                                accept="image/png,image/jpeg,image/webp,image/gif"
-                                className="hidden"
-                                onChange={handleAvatarSelect}
-                                disabled={avatarDisabled}
-                            />
-                            {isAvatarProcessing
-                                ? 'Обрабатываем…'
-                                : (avatarPreviewUrl ? 'Заменить фотографию' : 'Загрузить фотографию')}
-                        </label>
-                    </div>
-                    <p className="mobile-account__hint">{hint}</p>
-                    {(avatarPreviewUrl || avatarRemoveRequested) && !avatarRemoveRequested && (
-                        <MobileAccountGroup>
-                            <MobileAccountRow
-                                icon="fa-trash-can"
-                                label="Удалить фотографию"
-                                onClick={handleAvatarRemove}
-                                disabled={avatarDisabled}
-                                danger
-                            />
-                        </MobileAccountGroup>
-                    )}
-                    <MobileAccountError>{avatarError || modalError}</MobileAccountError>
-                    <MobileAccountAction
-                        type="button"
-                        label="Сохранить"
-                        loading={isLoading || isAvatarProcessing}
-                        disabled={!avatarUploadFile && !avatarRemoveRequested}
-                        onClick={handleSave}
-                    />
-                </MobileAccountScreen>
-
-                {avatarCropState && (
-                    <MobileAccountScreen title="Кадр" onBack={handleAvatarCropCancel}>
-                        <div className="mobile-account__crop">
+            <div className="otp-modal-root mobile-crop fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Кадр фотографии">
+                <div className="otp-modal-card mobile-crop__card">
+                    <div className="mobile-crop__stage">
+                        {avatarCropState ? (
                             <div
-                                className="mobile-account__crop-area"
-                                style={{ width: `${AVATAR_CROP_PREVIEW_SIZE}px`, height: `${AVATAR_CROP_PREVIEW_SIZE}px` }}
-                                onPointerDown={handleAvatarCropPointerDown}
-                                onPointerMove={handleAvatarCropPointerMove}
-                                onPointerUp={handleAvatarCropPointerUp}
-                                onPointerCancel={handleAvatarCropPointerUp}
+                                className="mobile-crop__area"
+                                style={{ width: `${cropPreviewSize}px`, height: `${cropPreviewSize}px` }}
+                                onPointerDown={handleCropPointerDown}
+                                onPointerMove={handleCropPointerMove}
+                                onPointerUp={handleCropPointerUp}
+                                onPointerCancel={handleCropPointerUp}
                                 onWheel={handleAvatarCropWheel}
                             >
-                                {avatarCropState?.sourceUrl && avatarCropViewStyle && (
+                                {avatarCropState.sourceUrl && avatarCropViewStyle && (
                                     <img
                                         src={avatarCropState.sourceUrl}
                                         alt=""
-                                        className="pointer-events-none absolute max-w-none select-none"
+                                        className="mobile-crop__photo"
                                         style={avatarCropViewStyle}
                                         draggable={false}
                                     />
                                 )}
-                                {/* Круг — это ровно то, что останется от снимка. */}
-                                <div className="mobile-account__crop-ring" />
+                                {/* Круг — то, что останется от снимка; всё вокруг гасим. */}
+                                <div className="mobile-crop__ring" />
                             </div>
-                        </div>
-                        <p className="mobile-account__hint">Двигайте фото пальцем, приближение — ползунком.</p>
-                        <MobileAccountGroup label="Приближение">
-                            <div className="mobile-account__row">
-                                <input
-                                    type="range"
-                                    min={AVATAR_MIN_ZOOM}
-                                    max={avatarCropState.maxZoom}
-                                    step="0.01"
-                                    value={avatarCropState.zoom}
-                                    onChange={handleAvatarCropZoomChange}
-                                    className="mobile-account__zoom"
-                                    aria-label="Приближение"
-                                />
+                        ) : (
+                            <div className="mobile-crop__waiting">
+                                {avatarError || 'Готовим снимок…'}
                             </div>
-                        </MobileAccountGroup>
-                        <MobileAccountError>{avatarError}</MobileAccountError>
-                        <MobileAccountAction
-                            type="button"
-                            label="Готово"
-                            loadingLabel="Обрабатываем…"
-                            loading={isAvatarProcessing}
-                            onClick={handleAvatarCropApply}
+                        )}
+                    </div>
+
+                    {avatarCropState && (
+                        <input
+                            type="range"
+                            className="mobile-crop__zoom"
+                            min={AVATAR_MIN_ZOOM}
+                            max={avatarCropState.maxZoom}
+                            step="0.01"
+                            value={avatarCropState.zoom}
+                            onChange={handleAvatarCropZoomChange}
+                            aria-label="Приближение"
                         />
-                    </MobileAccountScreen>
-                )}
-            </>
+                    )}
+
+                    {(avatarError || modalError) && (
+                        <p className="mobile-crop__error">{avatarError || modalError}</p>
+                    )}
+
+                    <div className="mobile-crop__bar">
+                        <button
+                            type="button"
+                            className="mobile-crop__round"
+                            onClick={handleClose}
+                            aria-label="Назад"
+                            disabled={isLoading}
+                        >
+                            <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
+                        </button>
+                        <span className="mobile-crop__tip">
+                            {busy ? 'Сохраняем…' : 'Двигайте и приближайте снимок'}
+                        </span>
+                        <button
+                            type="button"
+                            className="mobile-crop__round mobile-crop__round--go"
+                            onClick={handleCropConfirm}
+                            aria-label="Готово"
+                            disabled={!avatarCropState || busy}
+                        >
+                            <FaIcon className={busy ? 'fas fa-spinner fa-spin' : 'fas fa-check'} aria-hidden="true" />
+                        </button>
+                    </div>
+                </div>
+            </div>
         );
     }
 

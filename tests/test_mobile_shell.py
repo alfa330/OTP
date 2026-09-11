@@ -225,7 +225,8 @@ class SheetAccountTests(unittest.TestCase):
         раскраваться некуда: на телефоне за сменой пароля пришлось бы
         прокручивать меню до низа и открывать панель, которой не видно."""
         at = APP.index('<div className="mobile-sheet-account">')
-        block = APP[at:at + 7000]
+        # До хвоста листа, а не окном на глаз: блок растёт вместе с пояснениями.
+        block = APP[at:APP.index('mobile-sheet-account--tail')]
         # «Выйти» переехал в хвост листа — его проверяет test_exit_sits_at_the_very_bottom.
         for label in ('Сменить логин', 'Сменить пароль', 'Сменить фотографию'):
             self.assertIn(f'<span>{label}</span>', block, f'действие «{label}» пропало из шапки')
@@ -245,7 +246,7 @@ class SheetAccountTests(unittest.TestCase):
         Шторку по-прежнему закрывает один пункт — установка портала: там
         дальше идёт системное окно, и профиль под ним не нужен."""
         at = APP.index('<div className="mobile-sheet-group">')
-        block = APP[at:at + 4000]
+        block = APP[at:at + 6500]
         # Без точки с запятой: единственное упоминание живёт в стрелке пункта.
         self.assertEqual(block.count('setMobileMenuOpen(false)'), 1)
         self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
@@ -811,8 +812,35 @@ class BackGestureTests(unittest.TestCase):
         """replaceState затёр бы адрес, с которого человек в портал пришёл."""
         at = self.STACK.index('const armRoot = () => {')
         block = self.STACK[at:at + 400]
-        self.assertIn('window.history.pushState(', block)
+        self.assertIn('window.history.pushState(', self.STACK[self.STACK.index('const armRoot'):self.STACK.index('const sync')])
         self.assertNotIn('replaceState', block)
+
+    def test_floor_survives_a_two_step_swipe(self):
+        """КОРОТКИЙ МАХ ОТ КРАЯ ОТМАТЫВАЕТ ДВЕ ЗАПИСИ ОДНИМ ПЕРЕХОДОМ.
+
+        Замерено в браузере: два history.back() в одном такте дают ОДИН popstate,
+        а указатель уезжает на две записи — дно проскакивается. Дальше сторожевая
+        ложилась уже на загрузочную запись документа, и закрытие последнего
+        экрана (оно делает ещё шаг назад) уводило из портала совсем: владелец
+        11.09.2026 — «кнопка назад работает корректно, но свайп рукой снова
+        выкидывает в другой раздел».
+
+        Две страховки: перед каждой сторожевой проверяем, стоим ли на своём дне,
+        и шаг, пришедший БЕЗ сторожевой, ничего не закрывает."""
+        self.assertIn('const standingOnFloor = () => {', self.STACK)
+        self.assertIn("return window.history.state?.otpRoot === true;", self.STACK)
+        sync = self.STACK[self.STACK.index('const sync ='):self.STACK.index('const scheduleSync')]
+        self.assertIn('if (!standingOnFloor()) armRoot();', sync)
+        pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
+        self.assertIn('if (!armed) {', pop)
+        self.assertIn('armRoot();', pop)
+
+    def test_marks_do_not_blur_into_each_other(self):
+        """Состояние копируется с текущей записи, поэтому метки ставятся обе:
+        иначе сторожевая унаследовала бы otpRoot и стала бы неотличима от дна —
+        а отличать их приходится."""
+        self.assertIn('otpRoot: true, otpBack: false', self.STACK)
+        self.assertIn('otpRoot: false, otpBack: true', self.STACK)
 
     def test_gesture_is_mobile_only(self):
         """На компьютере «назад» означает «предыдущая страница»: закрывать им
@@ -1169,7 +1197,7 @@ class AccountScreenTests(unittest.TestCase):
         «назад» снимает верхний экран, возвращая в профиль. Закрывали — и жест
         уводил в раздел, который лежал под шторкой."""
         at = APP.index('<div className="mobile-sheet-group">')
-        block = APP[at:at + 4000]
+        block = APP[at:at + 6500]
         for flag in ('setShowChangeLoginForm(true);', 'setShowChangePasswordForm(true);', 'setShowChangeAvatarForm(true);'):
             self.assertIn(flag, block)
         opens = block[:block.index('<InstallAppMenuItem')]
@@ -1222,10 +1250,82 @@ class AccountScreenTests(unittest.TestCase):
         # 17 px — строка настроек и порог, ниже которого iOS наезжает на поле.
         self.assertIn('font-size: 17px;', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__input {', 500))
 
-    def test_crop_is_a_screen_with_its_own_back(self):
-        """Кадр — экран поверх экрана фотографии, и «назад» обязано снимать
-        верхний, а не закрывать оба."""
-        self.assertIn('useScreenBackGesture(isMobileShell && isOpen && !!avatarCropState, handleAvatarCropCancel);', self.AVATAR)
+    def test_crop_is_the_only_photo_screen(self):
+        """ПЕРЕДЕЛАНО 11.09.2026 по видео владельца. Было: экран «Фотография» с
+        кнопкой «Загрузить», под ним второй экран — кадр. Стало как в образце:
+        строка профиля открывает галерею сама, а единственный экран — кадр.
+        Поэтому «назад» здесь одно и уводит сразу в профиль."""
+        self.assertIn('useScreenBackGesture(isMobileShell && isOpen, handleClose);', self.AVATAR)
+        self.assertIn('if (isMobileShell) {', self.AVATAR)
+        self.assertIn('mobile-crop__area', self.AVATAR)
+
+    def test_name_stays_in_the_sheet_header_on_scroll(self):
+        """Образец — настройки Telegram (видео владельца 11.09.2026): прокрутив
+        список, человек теряет всякий признак того, чей это профиль. Полоса
+        ЛИПКАЯ и лежит в самом листе, а показывается, когда крупное имя ушло под
+        неё; наблюдатель за пересечением, а не обработчик прокрутки — он
+        срабатывает на событии, а не на каждом кадре движения пальца."""
+        title = (ROOT / 'src' / 'components' / 'common' / 'MobileSheetTitle.jsx').read_text(encoding='utf-8')
+        self.assertIn('new IntersectionObserver(', title)
+        self.assertIn(".mobile-sheet-hero__name", title)
+        self.assertIn('<MobileSheetTitle name={user?.name', APP)
+        self.assertIn('open={mobileMenuOpen} />', APP)
+        bar = css_block(SHELL_CSS, 'body.mobile-shell .mobile-sheet-topbar {', 1100)
+        self.assertIn('position: sticky;', bar)
+        # Прилипает к верхней грани листа, а не к его внутреннему отступу.
+        self.assertIn('top: calc(-1 * (max(10px, env(safe-area-inset-top)) + 8px));', bar)
+        self.assertIn('pointer-events: none;', bar)
+
+    def test_photo_row_opens_the_gallery_itself(self):
+        """В образце «Изменить фотографию» открывает выбор снимка СРАЗУ —
+        промежуточного экрана «загрузите фото» там нет. Поэтому строка профиля
+        это label с настоящим input: выбор файла браузер открывает только по
+        живому нажатию, из кода — не откроет."""
+        at = APP.index('<label className="mobile-sheet-row mobile-sheet-row--pick">')
+        block = APP[at:at + 2200]
+        self.assertIn('<label className="mobile-sheet-row mobile-sheet-row--pick">', block)
+        self.assertIn("type=\"file\"", block)
+        self.assertIn('setPickedAvatarFile(file);', block)
+        self.assertIn('initialFile={pickedAvatarFile}', APP)
+        # Значок берут по `> svg:first-child`: input обязан стоять последним.
+        self.assertLess(block.index('fa-camera'), block.index('type="file"'))
+
+    def test_photo_screen_is_the_dark_frame(self):
+        """Кадр как в образце: чёрное поле во весь экран, снимок под круглой
+        маской, внизу стрелка и синяя галочка. Галочка делает всё разом —
+        обрезает, сжимает и сохраняет: второй кнопки «Сохранить» в образце нет."""
+        self.assertIn('const handleCropConfirm = async () => {', self.AVATAR)
+        self.assertIn('await onSave?.({', self.AVATAR)
+        self.assertIn('mobile-crop__round--go', self.AVATAR)
+        card = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__card {', 500)
+        self.assertIn('background: #000000 !important;', card)
+        ring = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__ring {', 400)
+        self.assertIn('border-radius: 50%;', ring)
+        self.assertIn('box-shadow: 0 0 0 9999px', ring)
+
+    def test_pinch_zooms_the_frame(self):
+        """Щипок двумя пальцами — первое, что делают со снимком на телефоне."""
+        self.assertIn('const pinchRef = useRef(null);', self.AVATAR)
+        self.assertIn('Math.hypot(a.x - b.x, a.y - b.y)', self.AVATAR)
+
+    def test_frame_photo_may_be_wider_than_the_screen(self):
+        """Общий слой оболочки ужимает картинки разделов до ширины экрана, а
+        снимок в кадре обязан быть шире — иначе кадр показывает часть снимка."""
+        rule = css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__area .mobile-crop__photo {', 300)
+        self.assertIn('max-width: none;', rule)
+
+    def test_delete_row_is_red_and_only_with_a_photo(self):
+        """Красная строка появляется, только когда есть что удалять; ссылка на
+        обработчик СТАБИЛЬНАЯ, а свежие handleChangeAvatar и showToast берутся из
+        узла «последнее» — замыкание, снятое один раз, звало бы их версию с
+        первого рендера, с ещё пустым user (строка молча не срабатывала)."""
+        self.assertIn('{canChangeAccountAvatar && user?.avatar_url && (', APP)
+        self.assertIn('mobile-sheet-row--danger', APP)
+        at = APP.index('const handleRemoveAccountAvatar = useCallback(')
+        block = APP[at:at + 1200]
+        self.assertIn('sidebarLatestRef.current.changeAvatar?.({ avatar_remove: true })', block)
+        self.assertIn('}, []);', block)
+        self.assertIn('changeAvatar: handleChangeAvatar,', APP)
 
     def test_account_layer_is_locked_to_the_shell(self):
         """Ни одно правило этих экранов не должно действовать на компьютере."""

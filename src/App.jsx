@@ -53,6 +53,7 @@ import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
 import MobileBellSlot from './components/common/MobileBellSlot';
+import MobileSheetTitle from './components/common/MobileSheetTitle';
 import {
     MobileAccountScreen,
     MobileAccountGroup,
@@ -38266,6 +38267,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [showChangeLoginForm, setShowChangeLoginForm] = useState(false);
             const [showChangePasswordForm, setShowChangePasswordForm] = useState(false);
             const [showChangeAvatarForm, setShowChangeAvatarForm] = useState(false);
+            /* Снимок, выбранный строкой профиля ДО открытия кадра: на телефоне
+               галерею открывает сама строка (см. mobile-sheet-row--pick). */
+            const [pickedAvatarFile, setPickedAvatarFile] = useState(null);
+            const [isRemovingAvatar, setIsRemovingAvatar] = useState(false);
             const [newCredentials, setNewCredentials] = useState(null);
             const [loginData, setLoginData] = useState({
                 new_login: '',
@@ -47108,6 +47113,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 handleToggleDeptFilterDropdown,
                 handleSelectSidebarDept,
                 handleLogout,
+                changeAvatar: handleChangeAvatar,
                 openCallEvaluationSection,
                 fetchDirections,
                 showToast,
@@ -47126,6 +47132,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const stableSidebarOpenCallEvaluationSection = useCallback((opts) => sidebarLatestRef.current.openCallEvaluationSection(opts), []);
             const stableSidebarFetchDirections = useCallback(() => sidebarLatestRef.current.fetchDirections(), []);
             const stableSidebarShowToast = useCallback((...args) => sidebarLatestRef.current.showToast?.(...args), []);
+            /* Удаление фотографии — красной строкой в профиле, как в образце:
+               отдельного экрана на это заводить незачем, а подтверждать нечего —
+               фотографию всегда можно загрузить снова.
+
+               Ссылка СТАБИЛЬНАЯ, а свежие handleChangeAvatar и showToast берутся
+               из узла «последнее»: обе пересоздаются на каждом рендере, и
+               замыкание, снятое один раз, звало бы их версию с первого рендера —
+               с ещё пустым `user`. Ровно так строка и молчала при первой попытке:
+               нажатие доходило, а удаление не начиналось. */
+            const removingAvatarRef = useRef(false);
+            const handleRemoveAccountAvatar = useCallback(async () => {
+                /* Защёлка в ref, а не в состоянии: второе нажатие приходит
+                   раньше, чем React донесёт до строки новое значение. */
+                if (removingAvatarRef.current) return;
+                removingAvatarRef.current = true;
+                setIsRemovingAvatar(true);
+                try {
+                    await sidebarLatestRef.current.changeAvatar?.({ avatar_remove: true });
+                    sidebarLatestRef.current.showToast?.('Фотография удалена', 'success');
+                } catch (error) {
+                    sidebarLatestRef.current.showToast?.(
+                        error?.response?.data?.error || error?.message || 'Не удалось удалить фотографию',
+                        'error',
+                    );
+                } finally {
+                    removingAvatarRef.current = false;
+                    if (isMounted.current) setIsRemovingAvatar(false);
+                }
+            }, []);
 
             /* Колокол уведомлений. Обе функции обязаны быть стабильными: они
                уходят пропсами внутрь мемоизированного сайдбара, а внутри
@@ -47552,6 +47587,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     (см. .sidebar-footer-menu в mobile-shell.css): второе
                                     место жизни у одних и тех же действий — это два места,
                                     где их можно забыть обновить. */}
+                                {/* Липкая полоса с именем: пока крупное имя видно —
+                                    её нет, а как только оно уходит вверх, имя
+                                    проявляется в шапке листа. Стоит ОТДЕЛЬНО от
+                                    .mobile-sheet-account, прямым ребёнком
+                                    прокручиваемого блока: липкий элемент держится,
+                                    пока виден его родитель, и внутри шапки он уехал
+                                    бы вместе с ней. */}
+                                {isMobileShell && (
+                                    <MobileSheetTitle name={user?.name || 'Профиль'} open={mobileMenuOpen} />
+                                )}
                                 {isMobileShell && (
                                     <div className="mobile-sheet-account">
                                         {/* Шапка как в списке настроек телефона: крупный
@@ -47611,18 +47656,54 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-lock" data-tint="gray"></FaIcon>
                                                 <span>Сменить пароль</span>
                                             </button>
+                                            {/* ГАЛЕРЕЮ ОТКРЫВАЕТ САМА СТРОКА (образец — видео
+                                                владельца 11.09.2026: «Изменить фотографию» →
+                                                выбор снимка → кадр). Поэтому здесь label с
+                                                настоящим input, а не кнопка: выбор файла
+                                                браузер открывает только по живому нажатию, и
+                                                промежуточный экран «загрузите фото» ушёл. */}
                                             {canChangeAccountAvatar && (
-                                                <button
-                                                    type="button"
-                                                    className="mobile-sheet-row"
-                                                    onClick={() => {
-                                                        setShowChangeLoginForm(false);
-                                                        setShowChangePasswordForm(false);
-                                                        setShowChangeAvatarForm(true);
-                                                    }}
+                                                <label
+                                                    className="mobile-sheet-row mobile-sheet-row--pick"
+                                                    /* Кусок с кадром подтягиваем, пока человек
+                                                       выбирает снимок в галерее: иначе после
+                                                       выбора экран секунду пустует — Suspense
+                                                       у этого окна без заглушки. */
+                                                    onClick={() => { import('./components/modals/AccountAvatarModal'); }}
                                                 >
                                                     <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
                                                     <span>Сменить фотографию</span>
+                                                    {/* input ПОСЛЕДНИМ: плитку значка стили
+                                                        берут по `> svg:first-child`, и поле
+                                                        выбора файла, стоя первым, оставляло
+                                                        строку без цветного квадрата. */}
+                                                    <input
+                                                        type="file"
+                                                        accept="image/png,image/jpeg,image/webp,image/gif"
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            const file = e.target.files?.[0] || null;
+                                                            e.target.value = '';
+                                                            if (!file) return;
+                                                            setShowChangeLoginForm(false);
+                                                            setShowChangePasswordForm(false);
+                                                            setPickedAvatarFile(file);
+                                                            setShowChangeAvatarForm(true);
+                                                        }}
+                                                    />
+                                                </label>
+                                            )}
+                                            {/* Красная строка, как в образце: появляется только
+                                                когда фотография есть, что удалять. */}
+                                            {canChangeAccountAvatar && user?.avatar_url && (
+                                                <button
+                                                    type="button"
+                                                    className="mobile-sheet-row mobile-sheet-row--danger"
+                                                    onClick={handleRemoveAccountAvatar}
+                                                    disabled={isRemovingAvatar}
+                                                >
+                                                    <FaIcon className="fas fa-trash-can" data-tint="red"></FaIcon>
+                                                    <span>{isRemovingAvatar ? 'Удаляем…' : 'Удалить фотографию'}</span>
                                                 </button>
                                             )}
                                             {/* Пункт сам решает, показываться ли: на уже
@@ -49169,6 +49250,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 user,
                 mobileMenuOpen,
                 isMobileShell,
+                /* Строка «Удалить фотографию» живёт в этом дереве: без её
+                   обработчика и признака занятости меню осталось бы со старым
+                   замыканием и не показало бы «Удаляем…». */
+                handleRemoveAccountAvatar,
+                isRemovingAvatar,
                 sidebarCollapsed,
                 view,
                 currentUserRole,
@@ -55443,10 +55529,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <Suspense fallback={null}>
                                 <AccountAvatarModal
                                     isOpen={showChangeAvatarForm}
-                                    onClose={() => setShowChangeAvatarForm(false)}
+                                    onClose={() => { setShowChangeAvatarForm(false); setPickedAvatarFile(null); }}
                                     userName={user?.name || ''}
                                     avatarUrl={user?.avatar_url || ''}
                                     onSave={handleChangeAvatar}
+                                    initialFile={pickedAvatarFile}
                                 />
                             </Suspense>
                         )}

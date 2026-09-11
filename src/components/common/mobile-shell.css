@@ -352,7 +352,9 @@ body.mobile-shell .sidebar-menu-scroll > * {
 body.mobile-shell .sidebar-menu-scroll > li > button,
 body.mobile-shell .sidebar-menu-scroll > li > div > button,
 body.mobile-shell .sidebar > div > div > button,
-body.mobile-shell .mobile-sheet-group button {
+/* label — это строка «Сменить фотографию»: она открывает галерею настоящим
+   input'ом, а выглядеть обязана ровно как соседние кнопки. */
+body.mobile-shell .mobile-sheet-group :is(button, label) {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -377,7 +379,7 @@ body.mobile-shell .mobile-sheet-group button {
    оказывался на телефоне и на компьютере разного цвета. */
 body.mobile-shell .sidebar-menu-scroll button > svg:first-child,
 body.mobile-shell .sidebar > div > div > button > svg:first-child,
-body.mobile-shell .mobile-sheet-group button > svg:first-child {
+body.mobile-shell .mobile-sheet-group :is(button, label) > svg:first-child {
     /* !important здесь не украшение: размер значка приходит ИНЛАЙНОМ (FaIcon
        ставит width/height в 1em), а ширину в сайдбаре дополнительно держит
        flex-basis — без обоих перебиваний плитка остаётся 18-пиксельной. */
@@ -436,7 +438,7 @@ body.mobile-shell .sidebar .sidebar-text {
    :has() отсекает те строки, где стрелка уже своя. */
 body.mobile-shell .sidebar-menu-scroll > li > button::after,
 body.mobile-shell .sidebar-menu-scroll > li > div > button::after,
-body.mobile-shell .mobile-sheet-group button:not(.mobile-sheet-row--exit)::after {
+body.mobile-shell .mobile-sheet-group :is(button, label):not(.mobile-sheet-row--exit, .mobile-sheet-row--danger)::after {
     content: '';
     flex: none;
     width: 7px;
@@ -451,12 +453,12 @@ body.mobile-shell .mobile-sheet-group button:not(.mobile-sheet-row--exit)::after
 /* Разделитель между строками группы начинается после плитки значка — ровно
    так он выглядит в системных списках. */
 body.mobile-shell .sidebar-menu-scroll > li + li,
-body.mobile-shell .mobile-sheet-group button + button {
+body.mobile-shell .mobile-sheet-group :is(button, label) + :is(button, label) {
     position: relative;
 }
 
 body.mobile-shell .sidebar-menu-scroll > li + li::before,
-body.mobile-shell .mobile-sheet-group button + button::before {
+body.mobile-shell .mobile-sheet-group :is(button, label) + :is(button, label)::before {
     content: '';
     position: absolute;
     left: 55px;
@@ -2066,6 +2068,220 @@ body.mobile-shell .mobile-account__zoom {
     width: 100%;
     accent-color: var(--sheet-accent);
     background: transparent;
+}
+
+/* ── Кадр фотографии: тёмный экран, как в образце ───────────────────────── */
+
+/* Образец — экран смены фото в Telegram (видео владельца 11.09.2026): чёрное
+   поле во весь экран, снимок под круглой маской, внизу стрелка «назад» и синяя
+   галочка. Никаких списков и заголовков: в кадре нечего читать, им работают
+   пальцами. Полотно СВОЁ, тёмное при любой теме — светлый лист вокруг снимка
+   мешает оценить кадр. */
+body.mobile-shell .mobile-crop__card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    min-height: 100%;
+    padding: calc(12px + env(safe-area-inset-top)) 0 calc(14px + env(safe-area-inset-bottom)) !important;
+    background: #000000 !important;
+}
+
+body.mobile-shell .mobile-crop__stage {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 0;
+}
+
+body.mobile-shell .mobile-crop__area {
+    position: relative;
+    overflow: hidden;
+    background: #0b0b0b;
+    /* Жест кадра — наш: без этого палец вместо снимка тянет страницу. */
+    touch-action: none;
+    user-select: none;
+}
+
+/* Селектор с кадром, а не просто по снимку: общий слой оболочки ужимает
+   картинки разделов до ширины экрана (правило про .main-content img выше), и
+   снимок, который в кадре ОБЯЗАН быть шире окна, прижимался к его ширине —
+   кадр показывал часть снимка вместо целого. */
+body.mobile-shell .mobile-crop__area .mobile-crop__photo {
+    position: absolute;
+    max-width: none;
+    pointer-events: none;
+    user-select: none;
+}
+
+/* Круглая маска: внутри круга снимок как есть, вокруг — затемнение. Тень
+   огромного радиуса обрезана рамкой кадра, поэтому лишнего на экран не
+   выплёскивается. */
+body.mobile-shell .mobile-crop__ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.62);
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    pointer-events: none;
+}
+
+body.mobile-shell .mobile-crop__waiting {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 15px;
+}
+
+/* Ползунок приближения на тёмном: тонкая полупрозрачная дорожка и белый
+   бегунок — светлая системная полоса на чёрном поле читается как чужая. */
+body.mobile-shell .mobile-crop__zoom {
+    width: min(280px, 72vw);
+    height: 28px;
+    background: transparent;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+body.mobile-shell .mobile-crop__zoom::-webkit-slider-runnable-track {
+    height: 3px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.28);
+}
+
+body.mobile-shell .mobile-crop__zoom::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 22px;
+    height: 22px;
+    margin-top: -9.5px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+body.mobile-shell .mobile-crop__zoom::-moz-range-track {
+    height: 3px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.28);
+}
+
+body.mobile-shell .mobile-crop__zoom::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 50%;
+    background: #ffffff;
+}
+
+body.mobile-shell .mobile-crop__error {
+    margin: 0 24px;
+    color: #ff453a;
+    font-size: 13px;
+    text-align: center;
+}
+
+body.mobile-shell .mobile-crop__bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 0 18px;
+}
+
+body.mobile-shell .mobile-crop__tip {
+    flex: 1 1 auto;
+    text-align: center;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.55);
+}
+
+body.mobile-shell .mobile-crop__round {
+    display: grid;
+    place-items: center;
+    width: 54px;
+    height: 54px;
+    flex: none;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+    font-size: 19px;
+}
+
+body.mobile-shell .mobile-crop__round--go {
+    background: #0a84ff;
+}
+
+body.mobile-shell .mobile-crop__round:active:not(:disabled) {
+    opacity: 0.7;
+}
+
+body.mobile-shell .mobile-crop__round:disabled {
+    opacity: 0.4;
+}
+
+/* ── Имя в шапке профиля при прокрутке ──────────────────────────────────── */
+
+/* Образец тот же: пока крупное имя видно — шапки нет вовсе, а как только оно
+   уходит вверх, над списком проявляется стеклянная полоса с именем. Полоса
+   ЛИПКАЯ и лежит прямо в прокручиваемом листе, поэтому держится сама, без
+   единого обработчика прокрутки. */
+body.mobile-shell .mobile-sheet-topbar {
+    position: sticky;
+    /* Прилипает к САМОМУ верху листа, а не к его внутреннему отступу: у
+       прокручиваемого блока сверху есть поле под колокол, и с top: 0 над
+       стеклом оставалась бы полоска, сквозь которую видно уезжающие строки.
+       Отрицательный отступ ровно на эту величину и убирает её. */
+    top: calc(-1 * (max(10px, env(safe-area-inset-top)) + 8px));
+    z-index: 4;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    height: calc(44px + env(safe-area-inset-top));
+    padding: 0 56px 8px;
+    margin: 0 calc(var(--sheet-gutter) * -1) 2px;
+    /* Полоса не должна перехватывать нажатия по тому, что под ней. */
+    pointer-events: none;
+    background: transparent;
+    transition: background 0.22s ease, border-color 0.22s ease;
+    border-bottom: 0.5px solid transparent;
+}
+
+body.mobile-shell .mobile-sheet-topbar[data-shown] {
+    background: var(--sheet-glass);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom-color: var(--sheet-sep);
+}
+
+body.mobile-shell .mobile-sheet-topbar__name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--sheet-text);
+    opacity: 0;
+    transform: translateY(7px);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+body.mobile-shell .mobile-sheet-topbar[data-shown] .mobile-sheet-topbar__name {
+    opacity: 1;
+    transform: none;
+}
+
+/* Красная строка в профиле — «Удалить фотографию». */
+body.mobile-shell .mobile-sheet-group .mobile-sheet-row--danger span {
+    color: #ff3b30;
+}
+
+body.mobile-shell .mobile-sheet-group label.mobile-sheet-row {
+    cursor: pointer;
 }
 
 /* ── Тёмная тема ───────────────────────────────────────────────────────── */
