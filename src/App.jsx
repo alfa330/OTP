@@ -46602,7 +46602,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         throw new Error(data.error || 'Не удалось сформировать QR');
                     }
 
-                    setSensitiveQrUrl(data.qr_payload || `OTP-SENSITIVE:${data.token}`);
+                    /* Приставку к коду ставит сервер (SENSITIVE_QR_PREFIX). Своей
+                       копии здесь нет намеренно: разъехавшись, она дала бы код,
+                       который сканер не признаёт своим. Без qr_payload отдаём
+                       голый токен — его разбор понимает и без приставки. */
+                    setSensitiveQrUrl(data.qr_payload || data.token);
                     setSensitiveQrExpiresAt(data.token_expires_at || '');
 
                     clearSensitiveQrPolling();

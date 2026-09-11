@@ -118,7 +118,8 @@ class _Resolver:
             'parse_qs': __import__('urllib.parse', fromlist=['parse_qs']).parse_qs,
         }
         for name in ('ROLE_HIERARCHY', 'SENSITIVE_QR_TOKEN_MESSAGES',
-                     'SENSITIVE_QR_TOKEN_FALLBACK_MESSAGE'):
+                     'SENSITIVE_QR_TOKEN_FALLBACK_MESSAGE',
+                     'SENSITIVE_QR_PREFIX', 'SENSITIVE_QR_LEGACY_PREFIX'):
             node = next(n for n in module.body
                         if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == name)
             exec(ast.get_source_segment(source, node), namespace)
@@ -208,7 +209,7 @@ class SharedResolverGuardTests(unittest.TestCase):
     """У предпросмотра и подтверждения НЕТ своих копий проверок."""
 
     OWN_COPIES = ('_decode_sensitive_qr_token', '_sensitive_access_approval_error',
-                  'SENSITIVE_QR_GATED_ROLES', 'OTP-SENSITIVE')
+                  'SENSITIVE_QR_GATED_ROLES', 'SENSITIVE_QR_PREFIX')
 
     def _bodies(self):
         source, module = _bot_module()
@@ -332,17 +333,9 @@ class SectionMarkupTests(unittest.TestCase):
         self.assertIn('className="qr-window pointer-events-none absolute', view)
         self.assertNotIn('grid place-items-center">\n', view.split('{scanning && (', 1)[1][:400])
 
-    def test_sweep_travels_the_whole_frame(self):
-        """Луч едет через top, а не через translateY.
-
-        Проценты в translateY считаются от СВОЕЙ высоты, а у луча она 2 px, —
-        он дёргался на месте вместо того, чтобы пробегать окно, и обе версии
-        сканера уехали в прод с неподвижным лучом.
-        """
-        css = CSS_PATH.read_text(encoding='utf-8-sig')
-        frames = css.split('@keyframes qr-sweep {', 1)[1].split('}', 1)[0]
-        self.assertIn('top:', frames)
-        self.assertNotIn('translateY', frames)
+    # Страж бегущего луча («едет через top, а не translateY») убран вместе с
+    # самим лучом: владелец снял синюю полоску 11.09.2026. Ответ на вопрос «жива
+    # ли камера» перешёл к подрагиванию рамки — его сторожит ScanFrameHuntTests.
 
     def test_returning_does_not_switch_the_camera_on_by_itself(self):
         """Кто выключил камеру, тому её обратно не включают.
@@ -476,6 +469,187 @@ class ScanFrameHuntTests(unittest.TestCase):
         stop = self.view.split('const stopScanner = useCallback', 1)[1].split('}, []);', 1)[0]
         self.assertIn('clearTimeout(lockTimerRef.current)', stop)
         self.assertIn('lockTimerRef.current = null;', stop)
+
+
+class ShortQrCodeTests(unittest.TestCase):
+    """Код доступа короткий — и обязан таким остаться.
+
+    Постановка владельца 11.09.2026: «укороти код, чтобы сканировалось с
+    расстояния побольше». Длина строки в QR — не косметика: 235 знаков это QR
+    версии 11 (61×61 модулей), 57 знаков — версии 3 (29×29). На экране телефона
+    модуль во втором случае вдвое крупнее, и камера берёт код с двух метров
+    вместо двадцати сантиметров (замерено на стенде: 44 px в кадре против 100).
+
+    Ломается это молча: лишнее поле в теле кода, подпись целиком вместо
+    усечённой, строчные буквы в приставке — всё это оставляет рабочий QR,
+    который просто перестаёт читаться с расстояния. Поэтому здесь сторожится
+    сама ДЛИНА и алфавит.
+    """
+
+    #: Знаки, которые QR умеет паковать «буквенно-цифровым» режимом — 5.5 бита
+    #: вместо 8. Один знак вне набора переводит в побайтовый режим ВСЮ строку.
+    QR_ALNUM = set('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:')
+    #: Ёмкость QR версии 3 при уровне коррекции M. Следующая версия — это плюс
+    #: четыре модуля стороны, то есть минус расстояние.
+    QR_V3_M_CAPACITY = 61
+
+    NAMES = ('_base64url_encode', '_base64url_decode', '_sensitive_qr_signature',
+             '_build_sensitive_qr_token', '_decode_sensitive_qr_token',
+             '_decode_legacy_sensitive_qr_token', '_normalize_sensitive_qr_token')
+
+    def setUp(self):
+        import base64 as base64_module
+        import hashlib as hashlib_module
+        import hmac as hmac_module
+        import json as json_module
+        import uuid as uuid_module
+        from datetime import datetime, timedelta, timezone
+        from urllib.parse import urlparse, parse_qs
+
+        source, module = _bot_module()
+        self.ns = {
+            'base64': base64_module, 'hmac': hmac_module, 'hashlib': hashlib_module,
+            'json': json_module, 'uuid': uuid_module, 'datetime': datetime,
+            'timedelta': timedelta, 'timezone': timezone,
+            'urlparse': urlparse, 'parse_qs': parse_qs,
+            'SENSITIVE_QR_SECRET': 'secret-for-the-test',
+            'SENSITIVE_QR_TTL_SECONDS': 300,
+        }
+        for name in ('SENSITIVE_QR_PREFIX', 'SENSITIVE_QR_LEGACY_PREFIX',
+                     'SENSITIVE_QR_BODY_BYTES', 'SENSITIVE_QR_SIGNATURE_BYTES',
+                     'SENSITIVE_QR_TOKEN_MESSAGES'):
+            node = next(n for n in module.body
+                        if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == name)
+            exec(ast.get_source_segment(source, node), self.ns)
+        for name in self.NAMES:
+            node = next(n for n in module.body
+                        if isinstance(n, ast.FunctionDef) and n.name == name)
+            exec(textwrap.dedent(ast.get_source_segment(source, node)), self.ns)
+
+        self.sid = '6f1d8c0a-2b4e-49f8-93a1-7e5c2d8b4a61'
+        self.token, self.expires_at = self.ns['_build_sensitive_qr_token'](self.sid, 4127)
+        self.payload = self.ns['SENSITIVE_QR_PREFIX'] + self.token
+
+    def test_the_code_fits_the_smallest_practical_qr(self):
+        self.assertLessEqual(
+            len(self.payload), self.QR_V3_M_CAPACITY,
+            f'код на {len(self.payload)} знаков не влезает в QR версии 3 — '
+            'модули мельче, расстояние срабатывания меньше')
+        self.assertTrue(
+            set(self.payload) <= self.QR_ALNUM,
+            'в коде есть знак вне буквенно-цифрового режима QR: строчная буква '
+            'или дефис переводят в побайтовый режим ВСЮ строку')
+        # Длина постоянна: тело фиксированное, base32 не зависит от значений.
+        other, _ = self.ns['_build_sensitive_qr_token'](self.sid, 1)
+        self.assertEqual(len(other), len(self.token))
+
+    def test_the_code_reads_back_as_it_was_issued(self):
+        claims = self.ns['_decode_sensitive_qr_token'](self.token)
+        self.assertEqual(claims['session_id'], self.sid)
+        self.assertEqual(claims['user_id'], 4127)
+        self.assertLess(abs((claims['expires_at'] - self.expires_at).total_seconds()), 1)
+
+    def test_the_code_is_read_the_same_way_it_is_shown(self):
+        """С приставкой, ссылкой и строчными буквами — тот же ответ."""
+        normalize = self.ns['_normalize_sensitive_qr_token']
+        decode = self.ns['_decode_sensitive_qr_token']
+        for name, raw in (
+            ('со своей приставкой', self.payload),
+            ('голым токеном', self.token),
+            ('строчными буквами', self.token.lower()),
+            ('ссылкой с кодом', f'https://portal.example/qr?token={self.token}'),
+        ):
+            with self.subTest(name):
+                self.assertEqual(decode(normalize(raw))['session_id'], self.sid)
+
+    def test_a_touched_code_is_refused(self):
+        """Подпись усечена до 8 байт — проверяем, что она всё ещё подпись."""
+        decode = self.ns['_decode_sensitive_qr_token']
+        swapped = 'A' if self.token[10] != 'A' else 'B'
+        for name, broken in (
+            ('подменён знак', self.token[:10] + swapped + self.token[11:]),
+            ('обрезан', self.token[:-2]),
+            ('чужая строка', 'HELLOWORLD'),
+            ('пусто', ''),
+        ):
+            with self.subTest(name):
+                with self.assertRaises(ValueError):
+                    decode(broken)
+
+    def test_an_expired_code_is_refused(self):
+        self.ns['SENSITIVE_QR_TTL_SECONDS'] = -10
+        stale, _ = self.ns['_build_sensitive_qr_token'](self.sid, 4127)
+        with self.assertRaises(ValueError) as caught:
+            self.ns['_decode_sensitive_qr_token'](stale)
+        self.assertIn('expired', str(caught.exception))
+        # Человеку на экране показывают перевод ЭТОГО текста. Разъехавшись с
+        # ключом, он молча превращается в «Это не QR-код доступа портала», и
+        # супервайзер вместо «попросите обновить QR» видит «код не наш».
+        self.assertIn(str(caught.exception), self.ns['SENSITIVE_QR_TOKEN_MESSAGES'])
+
+    def test_codes_issued_before_the_change_still_open_the_door(self):
+        """Выкладка меняет процесс, а выданные коды живут ещё пять минут.
+
+        Ветку старого разбора можно убрать следующей выкладкой — но не этой:
+        иначе у всех, кто открыл окно с кодом за минуту до неё, подтверждение
+        кончится «Это не QR-код доступа портала».
+        """
+        import hashlib as hashlib_module
+        import hmac as hmac_module
+        import json as json_module
+        from datetime import datetime, timedelta, timezone
+
+        body = json_module.dumps({
+            'sid': self.sid, 'uid': 4127, 'nonce': 'a' * 32,
+            'exp': int((datetime.now(timezone.utc) + timedelta(seconds=300)).timestamp()),
+        }, separators=(',', ':'), sort_keys=True).encode('utf-8')
+        payload_b64 = self.ns['_base64url_encode'](body)
+        signature = hmac_module.new(self.ns['SENSITIVE_QR_SECRET'].encode('utf-8'),
+                                    payload_b64.encode('utf-8'), hashlib_module.sha256).hexdigest()
+        legacy = f'{self.ns["SENSITIVE_QR_LEGACY_PREFIX"]}{payload_b64}.{signature}'
+
+        claims = self.ns['_decode_sensitive_qr_token'](
+            self.ns['_normalize_sensitive_qr_token'](legacy))
+        self.assertEqual(claims['user_id'], 4127)
+        # И заодно: прежний код был вчетверо длиннее — ради этого всё и затеяно.
+        self.assertGreater(len(legacy), 4 * len(self.payload))
+
+
+class ScannerReachTests(unittest.TestCase):
+    """Сканер должен видеть код с расстояния, а не в упор.
+
+    Второе слагаемое той же постановки. Без требований к кадру браузер отдаёт
+    то, что считает нужным (у Chrome это 640×480), и код на чужом экране
+    занимает в кадре десятки пикселей: на стенде прежний код читался с 0,28 м,
+    нынешний в кадре 1920 — с 1,9 м. Требование разрешения выглядит «лишней
+    строчкой в настройках камеры» и снимается первым же упрощением.
+    """
+
+    def setUp(self):
+        self.view = VIEW_PATH.read_text(encoding='utf-8-sig')
+        self.app = APP_PATH.read_text(encoding='utf-8-sig')
+
+    def test_the_scanner_asks_for_a_big_frame(self):
+        block = self.view.split('const CAMERA_CONSTRAINTS = {', 1)[1].split('};', 1)[0]
+        self.assertIn("facingMode: { ideal: 'environment' }", block)
+        for side, least in (('width', 1280), ('height', 720)):
+            value = block.split(f'{side}: {{ ideal: ', 1)[1].split(' }', 1)[0]
+            self.assertGreaterEqual(int(value), least, f'{side} кадра просят мельче прежнего')
+        # Требования должны и доезжать до камеры.
+        self.assertIn('video: CAMERA_CONSTRAINTS', self.view)
+
+    def test_the_employee_code_is_drawn_by_the_portal_itself(self):
+        """Картинку кода рисуем у себя, а не заказываем на стороне.
+
+        Здесь стоял api.qrserver.com, и туда уходил ДЕЙСТВУЮЩИЙ код доступа —
+        вместе с тем, что без интернета сотруднику нечего показать. Библиотека
+        грузится по требованию: окно с кодом открывает меньшинство.
+        """
+        self.assertNotIn('qrserver.com/v1/create-qr-code', self.app,
+                         'код доступа снова уходит постороннему сервису')
+        self.assertIn("import('qrcode')", self.app)
+        self.assertIn("errorCorrectionLevel: 'M'", self.app)
+        self.assertIn('margin: 2', self.app)
 
 
 if __name__ == '__main__':

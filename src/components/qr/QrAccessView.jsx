@@ -33,9 +33,33 @@ import './qr-access.css';
  * нет вовсе (настольный браузер без веб-камеры) или в неё не дали доступ.
  */
 
-/* Как часто дёргаем кадр. 320 мс — компромисс из прежней реализации: чаще
-   греет телефон на разборе кадров, реже — код «не ловится» на глаз. */
+/* Как часто дёргаем кадр. Родной BarcodeDetector разбирает его за единицы
+   миллисекунд — там можно и чаще, код ловится заметно живее. jsQR (iPhone и
+   всё, где детектора нет) считает сам, кадр в 1080p стоит ему сотен
+   миллисекунд, и частить бессмысленно: следующий тик всё равно упрётся в
+   незаконченный разбор (frameBusyRef) и только нагреет телефон. */
 const SCAN_INTERVAL_MS = 320;
+const DETECTOR_INTERVAL_MS = 180;
+
+/* Какой кадр просим у камеры.
+ *
+ * ЭТО И ЕСТЬ «СКАН С РАССТОЯНИЯ» (постановка владельца 11.09.2026). Без
+ * ширины и высоты браузер отдаёт то, что считает нужным, — у Chrome это
+ * 640×480. Код на чужом экране занимает в таком кадре десятки пикселей, и
+ * разобрать его можно, только поднеся телефон почти вплотную. С 1920×1080
+ * пикселей на тот же код втрое больше по стороне, и расстояние срабатывания
+ * растёт во столько же. ideal, а не exact: камера, которая столько не умеет,
+ * должна отдать ближайшее, а не отказать вовсе.
+ *
+ * focusMode лежит в advanced не случайно: это «по возможности». Обычным полем
+ * его понимают не все, а в advanced незнакомое требование просто пропускают —
+ * там, где непрерывной фокусировки нет, камера всё равно включится. */
+const CAMERA_CONSTRAINTS = {
+    facingMode: { ideal: 'environment' },
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
+    advanced: [{ focusMode: 'continuous' }],
+};
 
 /* Сторона окна видоискателя. Считается от ШИРИНЫ кадра: кадр бывает и низким
    (пока набирают код руками), и от высоты квадрат тогда не вписывался. По
@@ -276,7 +300,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setStarting(true);
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: { ideal: 'environment' } },
+                video: CAMERA_CONSTRAINTS,
             });
             if (!mountedRef.current || !videoRef.current) {
                 stream.getTracks().forEach((track) => track.stop());
@@ -336,7 +360,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                 } finally {
                     frameBusyRef.current = false;
                 }
-            }, SCAN_INTERVAL_MS);
+            }, detector ? DETECTOR_INTERVAL_MS : SCAN_INTERVAL_MS);
         } catch (err) {
             cameraWantedRef.current = false;
             const denied = err?.name === 'NotAllowedError' || err?.name === 'SecurityError';
@@ -541,7 +565,9 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                            Промахнуться тут нечем.
 
                            ДВИЖЕНИЕ рамки — только через transform: пока код не
-                           найден, она подрагивает кадрами qr-hunt, а найдя —
+                           найден, она подрагивает кадрами qr-hunt (они же и
+                           говорят, что камера жива: бегущей полоски в окне
+                           больше нет — владелец убрал её 11.09.2026), а найдя —
                            доезжает до него добавочным сдвигом. Размер при этом
                            меняется width/paddingBottom, а не scale: затемнение
                            вокруг рисует растянутая тень этой же рамки, и scale
@@ -562,10 +588,8 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                         <span className="qr-corner absolute -right-px -top-px h-8 w-8 rounded-tr-[26px] border-r-[3px] border-t-[3px] border-white/90" />
                         <span className="qr-corner absolute -bottom-px -left-px h-8 w-8 rounded-bl-[26px] border-b-[3px] border-l-[3px] border-white/90" />
                         <span className="qr-corner absolute -bottom-px -right-px h-8 w-8 rounded-br-[26px] border-b-[3px] border-r-[3px] border-white/90" />
-                        {locked ? (
+                        {locked && (
                             <span className="qr-catch absolute -inset-1.5 rounded-[30px] border-2 border-emerald-300/80" />
-                        ) : (
-                            <span className="qr-sweep absolute inset-x-3 h-0.5 rounded-full bg-blue-400/90 shadow-[0_0_12px_rgba(96,165,250,0.9)]" />
                         )}
                     </div>
                 )}
@@ -656,7 +680,7 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
                             rows={3}
                             value={manualValue}
                             onChange={(e) => setManualValue(e.target.value)}
-                            placeholder="OTP-SENSITIVE:… или ссылка с кодом"
+                            placeholder="OTPQ:… или ссылка с кодом"
                             className={`${iosInput} resize-none font-mono`}
                         />
                         <div className="mt-3 flex flex-wrap gap-2">

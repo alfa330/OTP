@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import threading
 import asyncio
@@ -555,6 +555,30 @@ JWT_COOKIE_PARTITIONED = os.getenv('JWT_COOKIE_PARTITIONED', 'true').lower() == 
 JWT_TOKEN_PEPPER = os.getenv('JWT_TOKEN_PEPPER', JWT_SECRET)
 SENSITIVE_QR_SECRET = os.getenv('SENSITIVE_QR_SECRET', JWT_SECRET)
 SENSITIVE_QR_TTL_SECONDS = int(os.getenv('SENSITIVE_QR_TTL_SECONDS', '300'))
+# Из чего состоит код доступа, который сотрудник показывает с экрана.
+#
+# ПОЧЕМУ ОН ТАКОЙ КОРОТКИЙ (постановка владельца 11.09.2026: «укороти код,
+# чтобы сканировалось с расстояния побольше»). До этого в QR лежал подписанный
+# JSON в base64: приставка «OTP-SENSITIVE:» + 156 знаков тела + 64 знака
+# подписи = 235 символов вперемешку из букв обоих регистров. QR на такую строку
+# — это 57×57 модулей; на экране телефона в 6 см каждый модуль меньше миллиметра,
+# и камера различает его сантиметров с пятнадцати. Дальше сканер просто молчит,
+# и выглядит это как «сканер не работает».
+#
+# Здесь то же самое уложено в 32 байта: UUID сессии (16), id сотрудника (4),
+# время истечения (4) и усечённая подпись HMAC-SHA256 (8). Восьми байт подписи
+# хватает: код живёт пять минут, подобрать его можно только через нашу же
+# ручку, и 2^64 попыток в это окно не укладывается ничем.
+#
+# Кодируется в base32 (A–Z, 2–7), а НЕ в base64: у QR есть «буквенно-цифровой»
+# режим, где такой знак занимает 5.5 бита вместо 8, и вся строка с приставкой
+# укладывается в 57 знаков — QR версии 3, 29×29 модулей. Модуль вдвое крупнее,
+# на столько же дальше и берёт камера. Приставка тоже из этого алфавита:
+# строчная буква или дефис в ней сбили бы режим на побайтовый для ВСЕЙ строки.
+SENSITIVE_QR_PREFIX = 'OTPQ:'
+SENSITIVE_QR_LEGACY_PREFIX = 'OTP-SENSITIVE:'
+SENSITIVE_QR_BODY_BYTES = 24
+SENSITIVE_QR_SIGNATURE_BYTES = 8
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv('LOGIN_RATE_LIMIT_WINDOW_SECONDS', '900'))
 LOGIN_RATE_LIMIT_MAX_FAILURES_PER_IP = int(os.getenv('LOGIN_RATE_LIMIT_MAX_FAILURES_PER_IP', '20'))
 LOGIN_RATE_LIMIT_MAX_FAILURES_PER_LOGIN = int(os.getenv('LOGIN_RATE_LIMIT_MAX_FAILURES_PER_LOGIN', '8'))
@@ -1892,27 +1916,77 @@ def _is_valid_kz_phone(phone_number):
     return bool(KZ_PHONE_REGEX.match(value))
 
 
-def _build_sensitive_qr_token(session_id, user_id):
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SENSITIVE_QR_TTL_SECONDS)
-    payload = {
-        "sid": str(session_id),
-        "uid": int(user_id),
-        "exp": int(expires_at.timestamp()),
-        "nonce": uuid.uuid4().hex
-    }
-    payload_json = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
-    payload_b64 = _base64url_encode(payload_json)
-    signature = hmac.new(
+def _sensitive_qr_signature(body):
+    """Подпись тела кода, усечённая до SENSITIVE_QR_SIGNATURE_BYTES.
+
+    Усечение — ради длины строки в QR: каждый лишний байт подписи это ещё два
+    знака в коде, а на границе версии QR — ещё четыре модуля стороны.
+    """
+    return hmac.new(
         SENSITIVE_QR_SECRET.encode('utf-8'),
-        payload_b64.encode('utf-8'),
+        body,
         hashlib.sha256
-    ).hexdigest()
-    token = f"{payload_b64}.{signature}"
+    ).digest()[:SENSITIVE_QR_SIGNATURE_BYTES]
+
+
+def _build_sensitive_qr_token(session_id, user_id):
+    """Код доступа: 32 байта в base32 (см. SENSITIVE_QR_PREFIX).
+
+    Случайной соли здесь нет намеренно. В прежнем коде лежал nonce на 32 знака
+    — треть всей строки, — а защищал он от повторов ровно ничего: сервер
+    предъявленные коды не запоминает, и подставить снятый с чужого экрана код
+    можно было и с ним. От повтора бережёт короткий срок жизни и то, что
+    предъявить код может только подтверждающий со своими правами.
+    """
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SENSITIVE_QR_TTL_SECONDS)
+    body = (
+        uuid.UUID(str(session_id)).bytes
+        + int(user_id).to_bytes(4, 'big')
+        + int(expires_at.timestamp()).to_bytes(4, 'big')
+    )
+    token = base64.b32encode(body + _sensitive_qr_signature(body)).decode('ascii').rstrip('=')
     return token, expires_at
 
 
 def _decode_sensitive_qr_token(token):
-    if not token or '.' not in token:
+    token = (token or '').strip()
+    if not token:
+        raise ValueError("Invalid QR token format")
+    # Точка бывает только в кодах прежнего вида: base32 её не знает.
+    if '.' in token:
+        return _decode_legacy_sensitive_qr_token(token)
+
+    try:
+        raw = base64.b32decode(token + '=' * (-len(token) % 8), casefold=True)
+    except Exception as exc:
+        raise ValueError("Invalid QR token format") from exc
+
+    if len(raw) != SENSITIVE_QR_BODY_BYTES + SENSITIVE_QR_SIGNATURE_BYTES:
+        raise ValueError("Invalid QR token format")
+
+    body, signature = raw[:SENSITIVE_QR_BODY_BYTES], raw[SENSITIVE_QR_BODY_BYTES:]
+    if not hmac.compare_digest(signature, _sensitive_qr_signature(body)):
+        raise ValueError("Invalid QR token signature")
+
+    exp_ts = int.from_bytes(body[20:24], 'big')
+    if exp_ts <= int(datetime.now(timezone.utc).timestamp()):
+        raise ValueError("QR token expired")
+
+    return {
+        "session_id": str(uuid.UUID(bytes=body[:16])),
+        "user_id": int.from_bytes(body[16:20], 'big'),
+        "expires_at": datetime.fromtimestamp(exp_ts, timezone.utc)
+    }
+
+
+def _decode_legacy_sensitive_qr_token(token):
+    """Коды, выданные до перехода на короткий вид (11.09.2026).
+
+    Живут они пять минут, но выдать код может процесс, который в эти же пять
+    минут сменится при выкладке, — и тогда предъявят его уже новому. Ветку
+    можно убрать следующей же выкладкой после этой.
+    """
+    if '.' not in token:
         raise ValueError("Invalid QR token format")
 
     payload_b64, signature = token.rsplit('.', 1)
@@ -11824,7 +11898,7 @@ def request_sensitive_access_qr():
             return jsonify({"error": "Session not found or revoked"}), 401
 
         token, expires_at = _build_sensitive_qr_token(session_id=session_id, user_id=requester_id)
-        qr_payload = f"OTP-SENSITIVE:{token}"
+        qr_payload = f"{SENSITIVE_QR_PREFIX}{token}"
 
         return jsonify({
             "status": "success",
@@ -11920,16 +11994,21 @@ SENSITIVE_QR_TOKEN_FALLBACK_MESSAGE = "Это не QR-код доступа по
 def _normalize_sensitive_qr_token(raw_value):
     """Строка, снятая с камеры, → сам токен.
 
-    В коде нарисовано «OTP-SENSITIVE:<токен>», но в поле ручного ввода
-    приносят и ссылку с ?token=, и голый токен. Разбор ОДИН на предпросмотр и
-    на подтверждение: разъехавшись, они дали бы карточку одного человека и
-    открытый доступ у другого.
+    В коде нарисовано «OTPQ:<токен>», но в поле ручного ввода приносят и ссылку
+    с ?token=, и голый токен. Разбор ОДИН на предпросмотр и на подтверждение:
+    разъехавшись, они дали бы карточку одного человека и открытый доступ у
+    другого.
+
+    Прежняя приставка понимается наравне с нынешней: коды с ней живут пять
+    минут после выкладки, а в чьей-нибудь переписке строка лежит и дольше.
     """
     token = (raw_value or '').strip()
     if not token:
         return ''
-    if token.upper().startswith('OTP-SENSITIVE:'):
-        token = token.split(':', 1)[1].strip()
+    for prefix in (SENSITIVE_QR_PREFIX, SENSITIVE_QR_LEGACY_PREFIX):
+        if token.upper().startswith(prefix):
+            token = token[len(prefix):].strip()
+            break
     if 'token=' in token and ('http://' in token or 'https://' in token):
         try:
             parsed = urlparse(token)
@@ -39290,6 +39369,14 @@ _TEZ_WALLBOARD_STATUS_CATALOG = {
 # человека, и про готовность источника, поэтому у незнания свой разряд и своя подпись.
 _TEZ_WALLBOARD_STATUS_UNKNOWN = ('Нет событий', 'unknown', 90)
 
+# Словарь ночной выгрузки кабинета Binotel. Это НЕ статусы телефона, и живым статусом человека
+# они быть не могут: у выгрузки своя жизнь — она размечает прошедшие сутки целиком, включая
+# ночь. Второй рубеж к фильтру источника в get_operator_live_statuses: даже если такая строка
+# сюда доедет (историей, ручным импортом за прошлый день), человеку положено «Нет событий», а
+# не англоязычный «Inactive» с четырнадцатью часами в статусе — так это и выглядело 11.09.2026.
+_TEZ_WALLBOARD_CABINET_STATUS_KEYS = {'active', 'inactive', 'work in crm', 'работа в crm',
+                                      'break in work'}
+
 
 def _tez_wallboard_status_entry(status_key):
     """Подпись, ключ оформления и вес сортировки по ключу события телефона."""
@@ -39303,6 +39390,10 @@ def _tez_wallboard_status_entry(status_key):
     # разбирает учёт часов (_schedule_auto_is_tech_reason_status_key).
     if re.sub(r'[\s._-]+', '', key) in ('техпричина', 'techbreak', 'statustechbreak'):
         return _TEZ_WALLBOARD_STATUS_CATALOG['тех причина']
+    # Слово из выгрузки кабинета — это не состояние человека сейчас, а разметка прошедших
+    # суток. Про такого человека мы знаем ровно одно: его телефон молчит.
+    if key in _TEZ_WALLBOARD_CABINET_STATUS_KEYS:
+        return _TEZ_WALLBOARD_STATUS_UNKNOWN
     # Незнакомый ключ показываем как есть: у телефона статус может появиться раньше, чем у
     # табло, и «Нет событий» на работающем человеке было бы хуже непривычного слова.
     return (key[:1].upper() + key[1:], 'other', 80)
