@@ -735,7 +735,8 @@ class BackGestureTests(unittest.TestCase):
         и закрыли бы весь стопкой."""
         self.assertIn("window.addEventListener('popstate', handlePop)", self.STACK)
         self.assertIn('const stack = [];', self.STACK)
-        self.assertIn('const top = stack.pop();', self.STACK)
+        self.assertIn('const top = stack[stack.length - 1];', self.STACK)
+        self.assertIn('stack.pop();', self.STACK)
 
     def test_history_keeps_one_entry_no_matter_how_deep(self):
         """ЗАПИСЬ НА КАЖДЫЙ ЭКРАН ПЛОДИТЬ НЕЛЬЗЯ.
@@ -837,7 +838,7 @@ class BackGestureTests(unittest.TestCase):
         sync = self.STACK[self.STACK.index('const sync ='):self.STACK.index('const scheduleSync')]
         self.assertIn('if (!standingOnFloor()) armRoot();', sync)
         pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
-        self.assertIn('if (tail || !armed) {', pop)
+        self.assertIn('if (!landedOnFloor || !armed) {', pop)
         self.assertIn('armRoot();', pop)
 
     def test_pop_never_lets_a_foreign_address_through(self):
@@ -863,33 +864,84 @@ class BackGestureTests(unittest.TestCase):
         pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
         self.assertIn('restoreOwnUrl();', pop)
         # ПЕРВОЙ строкой обработчика: следующим адрес читает роутер.
-        self.assertLess(pop.index('restoreOwnUrl();'), pop.index('const tail'))
+        self.assertLess(pop.index('restoreOwnUrl();'), pop.index('let landedOnFloor'))
         # Состояние записи не трогаем — в нём счётчик роутера (idx).
         self.assertIn("window.history.replaceState(window.history.state, '', url);", self.STACK)
 
     def test_one_swipe_closes_exactly_one_screen(self):
         """МАХ ПАЛЬЦЕМ — ЭТО ДВА ПЕРЕХОДА БРАУЗЕРА, А НЕ ДВА ЖЕСТА ЧЕЛОВЕКА.
 
-        Замер 11.09.2026 (профиль → экран «Сменить пароль» → мах): popstate
-        приходит ДВАЖДЫ с разрывом 8–10 мс. Первый снимает сторожевую и
-        закрывает экран, второй приходит уже ниже дна — и до этой правки
-        закрывал ЕЩЁ ОДИН экран, оставляя портал на загрузочной записи: адрес
-        терял ?view=, бар разделов исчезал. Владелец 11.09.2026: из профиля
-        заходишь в экран, свайп возвращает в профиль, а следующий свайп профиль
-        не закрывает.
+        Первый снимает сторожевую и закрывает слой, второй приходит уже ниже
+        дна. Отличить его по флагу нельзя — флаг к тому времени снова поднят
+        сверкой.
 
-        ПОЧЕМУ ПО ВРЕМЕНИ, А НЕ ПО МЕТКЕ В history.state. Метку стирает чужой
-        replaceState — так делает роутер «Курсов», и признак «стоим на своей
-        записи» в этом разделе гаснет целиком: замерено — кнопка «назад»
-        переставала ходить по разделам вовсе. А разрыв во времени подделать
-        нечем: между двумя настоящими нажатиями всегда есть кадр."""
-        self.assertIn('const GESTURE_TAIL_MS = 80;', self.STACK)
+        ПО ВРЕМЕНИ МЕЖДУ ПЕРЕХОДАМИ — ТОЖЕ НЕЛЬЗЯ, и это проверено дорогой
+        ценой: разрыв меряется не между переходами, а между ВЫЗОВАМИ
+        обработчика, а обработчик бывает долгим — закрытие окна и отрисовка
+        раздела занимают больше сотни миллисекунд. Замер 11.09.2026: мах в
+        «Задачах» закрывал окно И уводил в стартовый раздел.
+
+        Поэтому у каждой своей записи есть НОМЕР, а номер дна живёт в
+        переменной модуля. Приземлились на дно — шаг ровно один. Приземлились
+        куда-то ещё (номера нет — запись не наша) — жест утащил глубже.
+
+        Номер читаем только у записи, на которую приземлились: она лежит НИЖЕ
+        нас, и чужой replaceState до неё не дотягивается. На этом сгорела
+        попытка судить по меткам otpRoot/otpBack у ТЕКУЩЕЙ записи: роутер
+        «Курсов» переписывает её состояние, метка гаснет, и жест в этом разделе
+        умирал целиком."""
+        self.assertIn('let floorSeq = null;', self.STACK)
+        self.assertIn('otpSeq: seq', self.STACK)
         pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
-        self.assertIn('const tail = now - lastPopAt < GESTURE_TAIL_MS;', pop)
-        self.assertIn('lastPopAt = now;', pop)
-        # Часы берём монотонные: системное время могут перевести, и отрицательный
-        # разрыв сделал бы хвостом каждый второй жест.
-        self.assertIn('performance.now()', pop)
+        self.assertIn('window.history.state?.otpSeq === floorSeq', pop)
+        # Ни времени, ни часов в решении быть не должно.
+        self.assertNotIn('performance.now()', pop)
+        self.assertNotIn('Date.now()', pop)
+
+    def test_window_never_swaps_the_section_under_itself(self):
+        """ПОД ОТКРЫТЫМ ОКНОМ РАЗДЕЛ НЕ МЕНЯЕТСЯ.
+
+        Окно обязано само проситься в стек (useScreenBackGesture), но забыть об
+        этом легко: на 11.09.2026 так было у ДЕВЯТИ окон, пять из них в
+        «Задачах». Жест перешагивал через окно и снимал запись перехода между
+        разделами: человек свайпал, чтобы закрыть окно, а получал чужой раздел,
+        и окно исчезало вместе с разделом, под которым было нарисовано. Замер:
+        «Задачи» → «Новая задача» → мах → оказались в стартовом разделе.
+
+        Страховка общая и на всё, что напишут дальше: пока на экране есть хоть
+        одно окно, шаг назад не трогает переходы между разделами."""
+        self.assertIn("const hasOpenScreen = () => {", self.STACK)
+        self.assertIn(".otp-modal-root:not(.is-leaving)", self.STACK)
+        pop = self.STACK[self.STACK.index('const handlePop'):self.STACK.index('const listen')]
+        self.assertIn('if (top?.section && hasOpenScreen()) {', pop)
+        # Метку ставит только переход между разделами.
+        self.assertIn('}, { section: true });', APP)
+        self.assertIn("section: Boolean(options?.section)", self.STACK)
+
+    def test_every_window_asks_the_gesture_to_close_it(self):
+        """КАЖДОЕ ОКНО ОБЯЗАНО ПРОСИТЬСЯ В СТЕК.
+
+        Метка otp-modal-root делает окно экраном (въезд, уход, место над баром),
+        но жест «назад» она не подключает — его подключает хук. Забытый хук не
+        виден никак: окно открывается, закрывается крестиком, и только на
+        телефоне свайп молча меняет раздел вместо закрытия."""
+        skip = {
+            # Разметка трёх экранов учётки живёт в разделе App, и запись за них
+            # кладёт он же — одним хуком на все три (closeAccountScreens).
+            'MobileAccountScreen.jsx',
+        }
+        forgotten = []
+        for path in sorted((ROOT / 'src').rglob('*.jsx')):
+            if path.name in skip:
+                continue
+            text = path.read_text(encoding='utf-8')
+            if 'otp-modal-root' not in text:
+                continue
+            if 'useScreenBackGesture' in text:
+                continue
+            forgotten.append(str(path.relative_to(ROOT)))
+        self.assertEqual(forgotten, [], f'окна без записи в стеке: {forgotten}')
+
 
     def test_marks_do_not_blur_into_each_other(self):
         """Состояние копируется с текущей записи, поэтому метки ставятся обе:

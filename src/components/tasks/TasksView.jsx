@@ -25,6 +25,8 @@ import {
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import { departmentAllowsView, departmentRestrictsViews } from '../../utils/departmentViews';
 import FaIcon from '../common/FaIcon';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import FullscreenSheet from '../common/FullscreenSheet';
 import useOverlayDismiss from '../common/useOverlayDismiss';
 import CustomSelect from '../ui/CustomSelect';
@@ -7889,6 +7891,17 @@ const TasksView = ({
   const deleteOverlayProps = useOverlayDismiss(closeDeleteModal);
   const completeOverlayProps = useOverlayDismiss(closeCompleteModal);
   const statusOverlayProps = useOverlayDismiss(closeStatusModal);
+
+  /* Системное «назад» закрывает окно — на телефоне это главный способ его
+  закрыть. Без записи в стеке жест перешагивает через окно и снимает переход
+  между разделами: человек свайпает, чтобы закрыть окно, а получает чужой
+  раздел (владелец 11.09.2026: «перекидывает в другой раздел»). */
+  const isMobileShell = useIsMobileShell();
+  useScreenBackGesture(isMobileShell && createOpen, closeCreate);
+  useScreenBackGesture(isMobileShell && editModal.open, closeEditModal);
+  useScreenBackGesture(isMobileShell && deleteModal.open, closeDeleteModal);
+  useScreenBackGesture(isMobileShell && completeModal.open, closeCompleteModal);
+  useScreenBackGesture(isMobileShell && statusModal.open, closeStatusModal);
 
   /* ── Render helpers ── */
   const renderTaskList = (list, emptyTitle, emptySub, loading = isTasksLoading) => {

@@ -1,5 +1,7 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
 import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
@@ -239,6 +241,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const [avatarError, setAvatarError] = useState("");
     const [isAvatarProcessing, setIsAvatarProcessing] = useState(false);
     const [avatarCropState, setAvatarCropState] = useState(null);
+
+    const isMobileShell = useIsMobileShell();
+    /* Системное «назад» закрывает окно — на телефоне это главный способ его
+       закрыть. Без записи в стеке жест перешагивает через окно и снимает
+       переход между разделами: человек свайпает, чтобы закрыть окно, а получает
+       чужой раздел (владелец 11.09.2026: «перекидывает в другой раздел»).
+       Кадр фотографии — экран ПОВЕРХ карточки, и «назад» снимает сперва его. */
+    useScreenBackGesture(isMobileShell && isOpen && !avatarCropState, onClose);
+    useScreenBackGesture(isMobileShell && Boolean(avatarCropState), () => setAvatarCropState(null));
     const toDateInputValue = (value) => {
         if (!value) return "";
         const str = String(value).trim();

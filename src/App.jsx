@@ -40241,7 +40241,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                        её, мы бы вернули человека туда, откуда он уходит. */
                     syncAppViewWithUrl(from);
                     navigateToView(from);
-                });
+                    /* `section: true` — метка для стека: такую запись нельзя
+                       снимать из-под открытого окна, иначе жест, которым
+                       закрывают окно, сменит раздел под ним (см. страховку в
+                       mobileBackStack.js). */
+                }, { section: true });
             }, [isMobileShell, view, navigateToView]);
 
             /* Смена логина, пароля и фотографии — тоже экраны, и «назад» должно

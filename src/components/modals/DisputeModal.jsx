@@ -1,5 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import useOverlayDismiss from '../common/useOverlayDismiss';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 
 const MAX_DISPUTE_CHARS = 500;
 
@@ -12,6 +14,7 @@ const DisputeModal = ({
   setShowDisputeModal,
 }) => {
   const textareaRef = useRef(null);
+  const isMobileShell = useIsMobileShell();
   const textValue = String(disputeText || '');
   const charCount = textValue.length;
   const canSubmit = !isLoading && textValue.trim().length > 0 && charCount <= MAX_DISPUTE_CHARS;
@@ -29,6 +32,12 @@ const DisputeModal = ({
     setShowDisputeModal(false);
     setDisputeText('');
   };
+
+  /* Системное «назад» закрывает окно — на телефоне это главный способ его
+  закрыть. Без записи в стеке жест перешагивает через окно и снимает переход
+  между разделами: человек свайпает, чтобы закрыть окно, а получает чужой
+  раздел (владелец 11.09.2026: «перекидывает в другой раздел»). */
+  useScreenBackGesture(isMobileShell, handleClose);
 
   useEffect(() => {
     const timer = setTimeout(() => textareaRef.current?.focus(), 80);

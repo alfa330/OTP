@@ -1,7 +1,16 @@
 ﻿import React, { useEffect, useMemo, useState } from 'react';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
 import FaIcon from '../common/FaIcon';
 
 const HistoryModal = ({ isOpen, onClose, history = [], subjectName = "" }) => {
+    const isMobileShell = useIsMobileShell();
+    /* Системное «назад» закрывает окно — на телефоне это главный способ его
+    закрыть. Без записи в стеке жест перешагивает через окно и снимает переход
+    между разделами: человек свайпает, чтобы закрыть окно, а получает чужой
+    раздел (владелец 11.09.2026: «перекидывает в другой раздел»). */
+    useScreenBackGesture(isMobileShell && isOpen, onClose);
+
 const [query, setQuery] = useState("");
 const searchRef = React.useRef(null);
 
