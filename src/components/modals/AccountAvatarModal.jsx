@@ -1,5 +1,14 @@
 ﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
+import useIsMobileShell from '../common/useIsMobileShell';
+import useScreenBackGesture from '../common/useScreenBackGesture';
+import {
+    MobileAccountScreen,
+    MobileAccountGroup,
+    MobileAccountRow,
+    MobileAccountError,
+    MobileAccountAction,
+} from '../common/MobileAccountScreen';
 
 const AVATAR_MAX_DIMENSION = 128;
 const AVATAR_TARGET_BYTES = 40 * 1024;
@@ -169,6 +178,10 @@ const AccountAvatarModal = ({
     userName,
     avatarUrl
 }) => {
+    /* Экран, а не окно: на телефоне у смены фотографии своя разметка — вид
+       карточки контакта (решение владельца 11.09.2026). Настольное окно ниже
+       оставлено прежним. */
+    const isMobileShell = useIsMobileShell();
     const avatarInputRef = useRef(null);
     const avatarObjectUrlRef = useRef('');
     const avatarCropObjectUrlRef = useRef('');
@@ -417,7 +430,118 @@ const AccountAvatarModal = ({
         };
     }, [avatarCropState]);
 
+    /* «Назад» на телефоне сперва отменяет кадрирование, а не закрывает экран
+       целиком: кадр — это отдельный экран поверх, и жест обязан снимать верхний.
+       Своя запись в стеке, как у всех экранов (см. utils/mobileBackStack.js). */
+    useScreenBackGesture(isMobileShell && isOpen && !!avatarCropState, handleAvatarCropCancel);
+
     if (!isOpen) return null;
+
+    if (isMobileShell) {
+        const sizeKb = avatarUploadFile ? Math.round(avatarUploadFile.size / 1024) : 0;
+        const hint = avatarUploadFile
+            ? `Новая фотография готова — ${sizeKb} КБ. Останется сохранить.`
+            : avatarRemoveRequested
+                ? 'Фотография будет удалена после сохранения.'
+                : 'Снимок обрежется в квадрат и уменьшится сам.';
+        return (
+            <>
+                <MobileAccountScreen title="Фотография" onBack={handleClose}>
+                    <div className="mobile-account__hero">
+                        <span className="mobile-account__hero-photo">
+                            {avatarPreviewUrl
+                                ? <img src={avatarPreviewUrl} alt="" />
+                                : avatarInitial}
+                        </span>
+                        <label className={`mobile-account__hero-pick${avatarDisabled ? ' is-disabled' : ''}`}>
+                            <input
+                                ref={avatarInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp,image/gif"
+                                className="hidden"
+                                onChange={handleAvatarSelect}
+                                disabled={avatarDisabled}
+                            />
+                            {isAvatarProcessing
+                                ? 'Обрабатываем…'
+                                : (avatarPreviewUrl ? 'Заменить фотографию' : 'Загрузить фотографию')}
+                        </label>
+                    </div>
+                    <p className="mobile-account__hint">{hint}</p>
+                    {(avatarPreviewUrl || avatarRemoveRequested) && !avatarRemoveRequested && (
+                        <MobileAccountGroup>
+                            <MobileAccountRow
+                                icon="fa-trash-can"
+                                label="Удалить фотографию"
+                                onClick={handleAvatarRemove}
+                                disabled={avatarDisabled}
+                                danger
+                            />
+                        </MobileAccountGroup>
+                    )}
+                    <MobileAccountError>{avatarError || modalError}</MobileAccountError>
+                    <MobileAccountAction
+                        type="button"
+                        label="Сохранить"
+                        loading={isLoading || isAvatarProcessing}
+                        disabled={!avatarUploadFile && !avatarRemoveRequested}
+                        onClick={handleSave}
+                    />
+                </MobileAccountScreen>
+
+                {avatarCropState && (
+                    <MobileAccountScreen title="Кадр" onBack={handleAvatarCropCancel}>
+                        <div className="mobile-account__crop">
+                            <div
+                                className="mobile-account__crop-area"
+                                style={{ width: `${AVATAR_CROP_PREVIEW_SIZE}px`, height: `${AVATAR_CROP_PREVIEW_SIZE}px` }}
+                                onPointerDown={handleAvatarCropPointerDown}
+                                onPointerMove={handleAvatarCropPointerMove}
+                                onPointerUp={handleAvatarCropPointerUp}
+                                onPointerCancel={handleAvatarCropPointerUp}
+                                onWheel={handleAvatarCropWheel}
+                            >
+                                {avatarCropState?.sourceUrl && avatarCropViewStyle && (
+                                    <img
+                                        src={avatarCropState.sourceUrl}
+                                        alt=""
+                                        className="pointer-events-none absolute max-w-none select-none"
+                                        style={avatarCropViewStyle}
+                                        draggable={false}
+                                    />
+                                )}
+                                {/* Круг — это ровно то, что останется от снимка. */}
+                                <div className="mobile-account__crop-ring" />
+                            </div>
+                        </div>
+                        <p className="mobile-account__hint">Двигайте фото пальцем, приближение — ползунком.</p>
+                        <MobileAccountGroup label="Приближение">
+                            <div className="mobile-account__row">
+                                <input
+                                    type="range"
+                                    min={AVATAR_MIN_ZOOM}
+                                    max={avatarCropState.maxZoom}
+                                    step="0.01"
+                                    value={avatarCropState.zoom}
+                                    onChange={handleAvatarCropZoomChange}
+                                    className="mobile-account__zoom"
+                                    aria-label="Приближение"
+                                />
+                            </div>
+                        </MobileAccountGroup>
+                        <MobileAccountError>{avatarError}</MobileAccountError>
+                        <MobileAccountAction
+                            type="button"
+                            label="Готово"
+                            loadingLabel="Обрабатываем…"
+                            loading={isAvatarProcessing}
+                            onClick={handleAvatarCropApply}
+                        />
+                    </MobileAccountScreen>
+                )}
+            </>
+        );
+    }
 
     return (
         <>

@@ -234,12 +234,21 @@ class SheetAccountTests(unittest.TestCase):
         # Смена фото — только тем, кому она разрешена; условие то же, что в меню.
         self.assertIn('{canChangeAccountAvatar && (', block)
 
-    def test_actions_close_the_sheet(self):
-        """Формы смены логина и пароля рисуются в разделе, ПОД шторкой: не
-        закрыв её, человек нажимает кнопку и не видит никакого ответа."""
+    def test_actions_keep_the_sheet_open(self):
+        """ПРАВИЛО ПЕРЕВЁРНУТО 11.09.2026. Раньше каждая строка закрывала
+        шторку: формы рисовались в разделе, под ней. Теперь у логина, пароля и
+        фотографии свои экраны, они выезжают ПОВЕРХ профиля, и шторка обязана
+        остаться открытой — иначе «назад» снимает не экран, а переход между
+        разделами. Владелец: «делаю назад, а он перекидывает меня в раздел учет
+        сотрудников, а нужно было снова в профиль».
+
+        Шторку по-прежнему закрывает один пункт — установка портала: там
+        дальше идёт системное окно, и профиль под ним не нужен."""
         at = APP.index('<div className="mobile-sheet-group">')
         block = APP[at:at + 4000]
-        self.assertEqual(block.count('setMobileMenuOpen(false);'), 3)
+        # Без точки с запятой: единственное упоминание живёт в стрелке пункта.
+        self.assertEqual(block.count('setMobileMenuOpen(false)'), 1)
+        self.assertIn('<InstallAppMenuItem onPicked={() => setMobileMenuOpen(false)} />', block)
 
     def test_footer_is_hidden_and_not_duplicated(self):
         """Два места жизни у одних и тех же действий — это два места, где их
@@ -1140,6 +1149,97 @@ class RouterAddressTests(unittest.TestCase):
         self.assertIn('syncAppViewWithUrl(from);', block)
         self.assertIn('navigateToView(from);', block)
         self.assertLess(block.index('syncAppViewWithUrl(from);'), block.index('navigateToView(from);'))
+
+
+class AccountScreenTests(unittest.TestCase):
+    """Свои экраны учётки на телефоне: логин, пароль, фотография.
+
+    Владелец 11.09.2026, две просьбы в одной: «захожу в профиль… далее в
+    сменить пароль, делаю назад, а он перекидывает меня в раздел учет
+    сотрудников, а нужно было снова в профиль» и «разделы сменить логин, пароль
+    и фото сделай под телефон максимально удобными, аккуратными, в стиле
+    ios/macos без каких либо дёрганий, применить только для мобильной версии».
+    """
+
+    SCREEN = (ROOT / 'src' / 'components' / 'common' / 'MobileAccountScreen.jsx').read_text(encoding='utf-8')
+    AVATAR = (ROOT / 'src' / 'components' / 'modals' / 'AccountAvatarModal.jsx').read_text(encoding='utf-8')
+
+    def test_profile_stays_open_under_the_screen(self):
+        """Строки профиля шторку НЕ ЗАКРЫВАЮТ: экран выезжает поверх неё, и
+        «назад» снимает верхний экран, возвращая в профиль. Закрывали — и жест
+        уводил в раздел, который лежал под шторкой."""
+        at = APP.index('<div className="mobile-sheet-group">')
+        block = APP[at:at + 4000]
+        for flag in ('setShowChangeLoginForm(true);', 'setShowChangePasswordForm(true);', 'setShowChangeAvatarForm(true);'):
+            self.assertIn(flag, block)
+        opens = block[:block.index('<InstallAppMenuItem')]
+        self.assertNotIn('setMobileMenuOpen(false)', opens)
+
+    def test_phone_markup_is_separate_from_the_desktop_one(self):
+        """«Применить только для мобильной версии» — дословное указание.
+        Настольное окно осталось прежним и теперь прямо заперто на !isMobileShell."""
+        self.assertIn('{isMobileShell && showChangeLoginForm && (', APP)
+        self.assertIn('{isMobileShell && showChangePasswordForm && (', APP)
+        self.assertIn('{!isMobileShell && (showChangeLoginForm || showChangePasswordForm) && (', APP)
+        # Экран фотографии — тем же приёмом, ранним возвратом внутри окна.
+        self.assertIn('const isMobileShell = useIsMobileShell();', self.AVATAR)
+        self.assertIn('if (isMobileShell) {', self.AVATAR)
+
+    def test_screen_moves_once(self):
+        """«Без каких либо дёрганий». Полотно окна везло себя само
+        (animate-scale-in, 0.2 с) ПОВЕРХ въезда экрана справа — два движения в
+        одном кадре."""
+        self.assertIn('animation: none !important;', css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-card {', 400))
+
+    def test_focus_waits_for_the_screen_to_arrive(self):
+        """Клавиатура, поднятая посреди въезда, дёргает экран на середине.
+        Курсор ставим, когда экран встал (0.38 с у otp-screen-in)."""
+        self.assertIn('const SCREEN_SETTLE_MS = 420;', self.SCREEN)
+        self.assertIn('setTimeout(() => ref.current?.focus(), SCREEN_SETTLE_MS)', self.SCREEN)
+        slide = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root {', 500)
+        self.assertIn('otp-screen-in 0.38s', slide)
+
+    def test_own_message_instead_of_the_browser_bubble(self):
+        """minLength не даёт форме отправиться и показывает пузырь браузера, а
+        наше сообщение в отведённой под него строке не доходит вовсе."""
+        start = APP.index('{isMobileShell && showChangeLoginForm && (')
+        end = APP.index('{!isMobileShell && (showChangeLoginForm || showChangePasswordForm) && (')
+        self.assertNotIn('minLength=', APP[start:end])
+        self.assertNotIn('minLength={minLength}', self.SCREEN)
+
+    def test_error_line_keeps_its_place(self):
+        """Появление ошибки не должно сдвигать кнопку ровно в момент нажатия."""
+        self.assertIn('min-height: 18px;', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__error {', 300))
+
+    def test_look_comes_from_the_settings_tokens(self):
+        """Вид — список настроек телефона, теми же токенами, что и шторка: у них
+        есть тёмная пара, и свой набор цветов разъехался бы с ней."""
+        group = css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__group {', 300)
+        self.assertIn('var(--sheet-card)', group)
+        self.assertIn('var(--sheet-radius)', group)
+        self.assertIn('var(--sheet-bg) !important', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__card {', 400))
+        self.assertIn('var(--sheet-accent)', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__action {', 400))
+        # 17 px — строка настроек и порог, ниже которого iOS наезжает на поле.
+        self.assertIn('font-size: 17px;', css_block(SHELL_CSS, 'body.mobile-shell .mobile-account__input {', 500))
+
+    def test_crop_is_a_screen_with_its_own_back(self):
+        """Кадр — экран поверх экрана фотографии, и «назад» обязано снимать
+        верхний, а не закрывать оба."""
+        self.assertIn('useScreenBackGesture(isMobileShell && isOpen && !!avatarCropState, handleAvatarCropCancel);', self.AVATAR)
+
+    def test_account_layer_is_locked_to_the_shell(self):
+        """Ни одно правило этих экранов не должно действовать на компьютере."""
+        start = SHELL_CSS.index('/* ── Экраны своей учётки')
+        end = SHELL_CSS.index('/* ── Тёмная тема')
+        for rule in SHELL_CSS[start:end].split('}'):
+            selector = rule.split('{')[0].strip()
+            if not selector or selector.startswith(('/*', '@', '*')):
+                continue
+            for part in selector.split(','):
+                part = part.strip()
+                if not part or part.startswith(('/*', '@')):
+                    continue
+                self.assertTrue(part.startswith('body.mobile-shell'), f'правило «{part}» действует и на компьютере')
 
 
 if __name__ == '__main__':

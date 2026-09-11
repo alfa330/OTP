@@ -1335,6 +1335,10 @@ body.mobile-shell .otp-modal-root .otp-modal-panel > form {
    прокрутить — а с min-height карточка растёт по содержимому, и прокручивает
    её сам экран. */
 body.mobile-shell .otp-modal-root .otp-modal-card {
+    /* Своя анимация появления (animate-scale-in, 0.2 с) шла ПОВЕРХ въезда
+       экрана справа: два движения в одном кадре и есть та дёрганость, на
+       которую жаловался владелец. Экран едет целиком — этого достаточно. */
+    animation: none !important;
     width: 100% !important;
     max-width: none !important;
     min-height: 100%;
@@ -1756,6 +1760,312 @@ body.mobile-shell .main-content.mobile-view-switch {
     .mtb-item:active .mtb-item__icon {
         transform: none;
     }
+}
+
+/* ── Экраны своей учётки: логин, пароль, фотография ─────────────────────── */
+
+/* Разметка у них СВОЯ, телефонная (src/components/common/MobileAccountScreen.jsx):
+   настольные окна остались слово в слово прежними. Образец — список настроек
+   телефона, тот же, по которому сделана шторка разделов: полотно --sheet-bg,
+   группы строк со скруглением, заголовок капителью, пояснение серым, действие
+   во всю ширину под группой. */
+
+body.mobile-shell .mobile-account__card {
+    display: flex;
+    flex-direction: column;
+    background: var(--sheet-bg) !important;
+    /* Вырез держит ШАПКА: она липкая, и отступ на полотне оторвал бы её от
+       верхней грани, оставив над стеклом полосу чужого цвета. */
+    padding-top: 0 !important;
+}
+
+/* Шапка: стекло, как у верха разделов портала. Липкая — с открытой клавиатурой
+   экран становится коротким, и уехавшая наверх стрелка «Назад» была бы
+   недосягаема. */
+body.mobile-shell .mobile-account__head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: 36px 1fr 36px;
+    align-items: center;
+    gap: 4px;
+    padding: calc(8px + env(safe-area-inset-top)) 10px 8px;
+    background: var(--sheet-glass);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .mobile-account__back {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    margin: 0;
+    color: var(--sheet-accent);
+    font-size: 19px;
+}
+
+body.mobile-shell .mobile-account__back:active {
+    opacity: 0.4;
+}
+
+body.mobile-shell .mobile-account__title {
+    margin: 0;
+    text-align: center;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--sheet-text);
+}
+
+body.mobile-shell .mobile-account__body {
+    flex: 1 1 auto;
+    width: 100%;
+    /* Телефон боком — это 844 px в ширину, и поля во всю строку там выглядят
+       растянутой лентой. На портрете ограничение не действует вовсе. */
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 18px 0 calc(24px + env(safe-area-inset-bottom));
+}
+
+body.mobile-shell .mobile-account__section {
+    margin: 0 0 22px;
+}
+
+/* Заголовок группы — капитель над ней, как «ОСНОВНЫЕ» в настройках. */
+body.mobile-shell .mobile-account__label {
+    margin: 0 0 7px;
+    padding: 0 calc(var(--sheet-gutter) + 6px);
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .mobile-account__group {
+    margin: 0 var(--sheet-gutter);
+    border-radius: var(--sheet-radius);
+    background: var(--sheet-card);
+    overflow: hidden;
+}
+
+/* Пояснение под группой — там, где его читают: после того, что оно поясняет. */
+body.mobile-shell .mobile-account__note {
+    margin: 7px 0 0;
+    padding: 0 calc(var(--sheet-gutter) + 6px);
+    font-size: 13px;
+    line-height: 17px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .mobile-account__row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 46px;
+    padding: 0 16px;
+    background: var(--sheet-card);
+    text-align: left;
+}
+
+/* Разделитель отступает от левого края до текста — примета списка настроек. */
+body.mobile-shell .mobile-account__row + .mobile-account__row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep);
+}
+
+body.mobile-shell .mobile-account__input {
+    flex: 1 1 auto;
+    min-width: 0;
+    /* 17 px — размер строки в настройках телефона, и он же порог, ниже которого
+       iOS наезжает на поле при фокусе. */
+    font-size: 17px;
+    line-height: 22px;
+    padding: 12px 0;
+    border: 0;
+    background: transparent;
+    color: var(--sheet-text);
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+body.mobile-shell .mobile-account__input::placeholder {
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .mobile-account__input:disabled {
+    opacity: 0.45;
+}
+
+body.mobile-shell .mobile-account__reveal {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    margin-right: -6px;
+    color: var(--sheet-muted);
+    font-size: 15px;
+}
+
+body.mobile-shell .mobile-account__reveal:active {
+    opacity: 0.4;
+}
+
+body.mobile-shell .mobile-account__row--tap {
+    font-size: 17px;
+    color: var(--sheet-accent);
+}
+
+body.mobile-shell .mobile-account__row--tap:active {
+    background: var(--sheet-active);
+}
+
+body.mobile-shell .mobile-account__row--danger {
+    color: #ff3b30;
+}
+
+body.mobile-shell .mobile-account__row--tap:disabled {
+    opacity: 0.4;
+}
+
+body.mobile-shell .mobile-account__row-icon {
+    width: 20px;
+    text-align: center;
+}
+
+/* Место под ошибку занято всегда: появись строка на пустом месте — кнопка
+   уехала бы вниз ровно в момент нажатия. */
+body.mobile-shell .mobile-account__error {
+    min-height: 18px;
+    margin: -12px 0 14px;
+    padding: 0 calc(var(--sheet-gutter) + 6px);
+    font-size: 13px;
+    line-height: 18px;
+    color: #ff3b30;
+    white-space: pre-line;
+}
+
+/* Главное действие — во всю ширину под группой: туда достаёт большой палец, и
+   туда НЕ достаёт клавиатура (прибитая к низу кнопка пряталась бы под ней). */
+body.mobile-shell .mobile-account__action {
+    display: block;
+    width: calc(100% - var(--sheet-gutter) * 2);
+    margin: 0 var(--sheet-gutter);
+    min-height: 50px;
+    border-radius: 14px;
+    background: var(--sheet-accent);
+    color: #ffffff;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+body.mobile-shell .mobile-account__action:active:not(:disabled) {
+    opacity: 0.72;
+}
+
+body.mobile-shell .mobile-account__action:disabled {
+    opacity: 0.45;
+}
+
+/* Портрет на экране смены фотографии — крупный, по центру, как в карточке
+   контакта; под ним одна синяя строка действия, а не ряд серых кнопок. */
+body.mobile-shell .mobile-account__hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 6px var(--sheet-gutter) 22px;
+}
+
+body.mobile-shell .mobile-account__hero-photo {
+    width: 116px;
+    height: 116px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    color: #ffffff;
+    display: grid;
+    place-items: center;
+    font-size: 42px;
+    font-weight: 600;
+}
+
+body.mobile-shell .mobile-account__hero-photo img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+body.mobile-shell .mobile-account__hero-pick {
+    font-size: 17px;
+    color: var(--sheet-accent);
+}
+
+body.mobile-shell .mobile-account__hero-pick:active {
+    opacity: 0.4;
+}
+
+body.mobile-shell .mobile-account__hint {
+    margin: -8px 0 22px;
+    padding: 0 calc(var(--sheet-gutter) + 6px);
+    font-size: 13px;
+    line-height: 17px;
+    text-align: center;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .mobile-account__hero-pick.is-disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+/* Кадрирование. Квадрат остаётся 256 px: по этому же числу считается положение
+   снимка внутри него (AVATAR_CROP_PREVIEW_SIZE в AccountAvatarModal.jsx), и
+   растянуть его «на всю ширину» без правки этой арифметики нельзя. */
+body.mobile-shell .mobile-account__crop {
+    display: flex;
+    justify-content: center;
+    padding: 0 var(--sheet-gutter) 18px;
+}
+
+body.mobile-shell .mobile-account__crop-area {
+    position: relative;
+    overflow: hidden;
+    border-radius: var(--sheet-radius);
+    background: var(--sheet-active);
+    touch-action: none;
+    user-select: none;
+    cursor: grab;
+}
+
+body.mobile-shell .mobile-account__crop-ring {
+    position: absolute;
+    inset: 9%;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    /* Затемнение вокруг круга обрезано рамкой квадрата (overflow: hidden):
+       сразу видно, что именно останется от снимка, а что уйдёт. */
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+}
+
+body.mobile-shell .mobile-account__zoom {
+    width: 100%;
+    accent-color: var(--sheet-accent);
+    background: transparent;
 }
 
 /* ── Тёмная тема ───────────────────────────────────────────────────────── */

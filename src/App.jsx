@@ -53,6 +53,13 @@ import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
 import MobileBellSlot from './components/common/MobileBellSlot';
+import {
+    MobileAccountScreen,
+    MobileAccountGroup,
+    MobileAccountField,
+    MobileAccountError,
+    MobileAccountAction,
+} from './components/common/MobileAccountScreen';
 import { holdPageScroll } from './utils/pageScrollLock';
 import MobilePageChrome from './components/common/MobilePageChrome';
 import useScreenBackGesture from './components/common/useScreenBackGesture';
@@ -47572,8 +47579,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                         {/* Действия над своей учёткой — отдельной группой
                                             строк, как «Мой профиль» и соседи в настройках.
-                                            Каждая закрывает шторку: формы смены логина и
-                                            пароля рисуются в разделе, под ней. */}
+                                            ШТОРКУ ОНИ НЕ ЗАКРЫВАЮТ (правка 11.09.2026):
+                                            экран смены выезжает ПОВЕРХ профиля, и «назад»
+                                            возвращает в профиль, а не под него. Раньше
+                                            шторка закрывалась, и жест уводил в раздел —
+                                            владелец: «делаю назад, а он перекидывает меня
+                                            в раздел учет сотрудников, а нужно было снова
+                                            в профиль». */}
                                         <div className="mobile-sheet-group">
                                             <button
                                                 type="button"
@@ -47582,7 +47594,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setShowChangeAvatarForm(false);
                                                     setShowChangePasswordForm(false);
                                                     setShowChangeLoginForm(true);
-                                                    setMobileMenuOpen(false);
                                                 }}
                                             >
                                                 <FaIcon className="fas fa-user-edit" data-tint="blue"></FaIcon>
@@ -47595,7 +47606,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setShowChangeAvatarForm(false);
                                                     setShowChangeLoginForm(false);
                                                     setShowChangePasswordForm(true);
-                                                    setMobileMenuOpen(false);
                                                 }}
                                             >
                                                 <FaIcon className="fas fa-lock" data-tint="gray"></FaIcon>
@@ -47609,7 +47619,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         setShowChangeLoginForm(false);
                                                         setShowChangePasswordForm(false);
                                                         setShowChangeAvatarForm(true);
-                                                        setMobileMenuOpen(false);
                                                     }}
                                                 >
                                                     <FaIcon className="fas fa-camera" data-tint="green"></FaIcon>
@@ -55516,7 +55525,103 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             </SimpleModal>
                         )}
-                        {(showChangeLoginForm || showChangePasswordForm) && (
+                        {/* НА ТЕЛЕФОНЕ У ЭТИХ ДВУХ ЭКРАНОВ СВОЯ РАЗМЕТКА —
+                            src/components/common/MobileAccountScreen.jsx, вид списка
+                            настроек телефона (решение владельца 11.09.2026: «сделай
+                            под телефон максимально удобными, аккуратными, в стиле
+                            ios/macos… применить только для мобильной версии»).
+                            Настольное окно ниже оставлено слово в слово прежним. */}
+                        {isMobileShell && showChangeLoginForm && (
+                            <MobileAccountScreen
+                                title="Логин"
+                                onBack={() => { setShowChangeLoginForm(false); setModalError(""); }}
+                            >
+                                <form
+                                    onSubmit={(e) => {
+                                        e.preventDefault();
+                                        const newLogin = (loginData.new_login || "").trim();
+                                        const confirm = (loginData.confirm_login || "").trim();
+                                        if (!newLogin) { setModalError("Логин не может быть пустым."); return; }
+                                        /* Четыре, а не три: ровно столько требует
+                                           handleChangeLogin, и на трёх знаках человек
+                                           получал бы отказ сервера по-английски. */
+                                        if (newLogin.length < 4) { setModalError("Логин должен быть не короче четырёх символов."); return; }
+                                        if (/\s/.test(newLogin)) { setModalError("Логин не должен содержать пробелов."); return; }
+                                        if (newLogin !== confirm) { setModalError("Логины не совпадают."); return; }
+                                        setModalError("");
+                                        handleChangeLogin();
+                                    }}
+                                >
+                                    {/* Подписи группы нет намеренно: её слово в слово
+                                        повторяют заголовок экрана и подсказка в поле. */}
+                                    <MobileAccountGroup note="Буквы, цифры и знаки без пробелов, не короче четырёх символов.">
+                                        <MobileAccountField
+                                            id="new-login"
+                                            placeholder="Новый логин"
+                                            value={loginData.new_login}
+                                            onChange={(e) => setLoginData({ ...loginData, new_login: e.target.value })}
+                                            disabled={isLoading}
+                                            autoComplete="username"
+                                            settleFocus
+                                        />
+                                        <MobileAccountField
+                                            id="confirm-login"
+                                            placeholder="Повторите логин"
+                                            value={loginData.confirm_login}
+                                            onChange={(e) => setLoginData({ ...loginData, confirm_login: e.target.value })}
+                                            disabled={isLoading}
+                                            autoComplete="username"
+                                        />
+                                    </MobileAccountGroup>
+                                    <MobileAccountError>{modalError}</MobileAccountError>
+                                    <MobileAccountAction label="Сохранить" loading={isLoading} />
+                                </form>
+                            </MobileAccountScreen>
+                        )}
+                        {isMobileShell && showChangePasswordForm && (
+                            <MobileAccountScreen
+                                title="Пароль"
+                                onBack={() => { setShowChangePasswordForm(false); setModalError(""); }}
+                            >
+                                <form
+                                    onSubmit={(e) => {
+                                        e.preventDefault();
+                                        const p1 = (passwordData.new_password || "").trim();
+                                        const p2 = (passwordData.confirm_password || "").trim();
+                                        if (!p1) { setModalError("Пароль не может быть пустым."); return; }
+                                        if (p1.length < 6) { setModalError("Пароль должен быть минимум 6 символов."); return; }
+                                        if (p1 !== p2) { setModalError("Пароли не совпадают."); return; }
+                                        setModalError("");
+                                        handleChangePassword();
+                                    }}
+                                >
+                                    <MobileAccountGroup note="Не короче шести символов. Глазок справа показывает набранное.">
+                                        <MobileAccountField
+                                            id="new-password"
+                                            type="password"
+                                            placeholder="Новый пароль"
+                                            value={passwordData.new_password}
+                                            onChange={(e) => setPasswordData({ ...passwordData, new_password: e.target.value })}
+                                            disabled={isLoading}
+                                            autoComplete="new-password"
+                                            settleFocus
+                                        />
+                                        <MobileAccountField
+                                            id="confirm-password"
+                                            type="password"
+                                            placeholder="Повторите пароль"
+                                            value={passwordData.confirm_password}
+                                            onChange={(e) => setPasswordData({ ...passwordData, confirm_password: e.target.value })}
+                                            disabled={isLoading}
+                                            autoComplete="new-password"
+                                        />
+                                    </MobileAccountGroup>
+                                    <MobileAccountError>{modalError}</MobileAccountError>
+                                    <MobileAccountAction label="Сохранить" loading={isLoading} />
+                                </form>
+                            </MobileAccountScreen>
+                        )}
+                        {!isMobileShell && (showChangeLoginForm || showChangePasswordForm) && (
                         <>
                             {/* Backdrop с blur */}
                             <div
