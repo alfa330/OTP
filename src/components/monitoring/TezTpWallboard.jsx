@@ -3,6 +3,7 @@ import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard } from '../ui/ios';
 import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
 import { readWallboardMetric } from './szovWallboardShared';
+import TezOperatorsTable from './TezOperatorsTable';
 import {
     TEZ_SL_THRESHOLD_SECONDS,
     TEZ_TP_METRIC_MAP,
@@ -116,56 +117,74 @@ export default function TezTpWallboardBody({ snapshot, scale = 1 }) {
     ].filter(([count]) => count > 0).map(([count, label]) => `${formatCount(count)} ${label}`);
 
     return (
-        // Две колонки: показатели слева, перерывы узкой колонкой справа во всю высоту.
-        // На узком экране колонка уезжает вниз.
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]" style={{ fontFamily: APPLE_FONT }}>
-            <div className="space-y-4">
-                <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
-                    <Grid>
-                        <MetricKeyTile metricKey="tp_queue" snapshot={snapshot} scale={scale} />
-                        <MetricKeyTile metricKey="tp_ar" snapshot={snapshot} scale={scale} />
-                        <MetricKeyTile metricKey="tp_online" snapshot={snapshot} scale={scale} />
-                        <MetricKeyTile metricKey="tp_break" snapshot={snapshot} scale={scale} />
-                    </Grid>
-                </Section>
+        /*
+         * Сверху — плитки и колонка перерывов, под ними во всю ширину список людей.
+         *
+         * Список вынесен ИЗ левой колонки намеренно: оставь его внутри, и колонка «На
+         * перерыве» растянется на высоту таблицы, оставив справа пустое поле в треть экрана.
+         * Теперь высоту сетки задают плитки, а таблице достаётся вся ширина стены.
+         */
+        <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
+            {/* Две колонки: показатели слева, перерывы узкой колонкой справа.
+                На узком экране колонка уезжает вниз. */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]">
+                <div className="space-y-4">
+                    <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
+                        <Grid>
+                            <MetricKeyTile metricKey="tp_queue" snapshot={snapshot} scale={scale} />
+                            <MetricKeyTile metricKey="tp_ar" snapshot={snapshot} scale={scale} />
+                            <MetricKeyTile metricKey="tp_online" snapshot={snapshot} scale={scale} />
+                            <MetricKeyTile metricKey="tp_break" snapshot={snapshot} scale={scale} />
+                        </Grid>
+                    </Section>
 
-                <Section
-                    icon="fa-chart-bar"
-                    title="Показатели за день"
-                    /* Подпись SL стоит здесь, а не в плитке: у кабинета Binotel уровень
-                       обслуживания считается ОТ ПРИНЯТЫХ, а у табло СЗоВ — от всех попавших
-                       в очередь. Одинаково подписанные плитки значили бы разное, и разницу
-                       надо назвать словами ровно один раз. */
-                    right={(
-                        <span className="hidden text-right text-[12.5px] leading-tight text-slate-400 sm:block">
-                            SL — доля принятых, отвеченных за {slSeconds} с
-                        </span>
-                    )}
-                >
-                    <Grid>
-                        <MetricStatTile metricKey="tp_served_pair" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="tp_lost" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="tp_sl" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="tp_avg_wait" snapshot={snapshot} scale={scale} />
-                    </Grid>
-                </Section>
+                    <Section
+                        icon="fa-chart-bar"
+                        title="Показатели за день"
+                        /* Подпись SL стоит здесь, а не в плитке: у кабинета Binotel уровень
+                           обслуживания считается ОТ ПРИНЯТЫХ, а у табло СЗоВ — от всех попавших
+                           в очередь. Одинаково подписанные плитки значили бы разное, и разницу
+                           надо назвать словами ровно один раз. */
+                        right={(
+                            <span className="hidden text-right text-[12.5px] leading-tight text-slate-400 sm:block">
+                                SL — доля принятых, отвеченных за {slSeconds} с
+                            </span>
+                        )}
+                    >
+                        <Grid>
+                            <MetricStatTile metricKey="tp_served_pair" snapshot={snapshot} scale={scale} />
+                            <MetricStatTile metricKey="tp_lost" snapshot={snapshot} scale={scale} />
+                            <MetricStatTile metricKey="tp_sl" snapshot={snapshot} scale={scale} />
+                            <MetricStatTile metricKey="tp_avg_wait" snapshot={snapshot} scale={scale} />
+                        </Grid>
+                    </Section>
 
-                <Section icon="fa-headset" title="Операторы">
-                    <Grid>
-                        <MetricStatTile metricKey="tp_free" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="tp_talking" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="tp_avg_talk" snapshot={snapshot} scale={scale} />
-                        <MetricStatTile metricKey="tp_outgoing_pair" snapshot={snapshot} scale={scale} />
-                    </Grid>
-                    {asideParts.length > 0 ? (
-                        <div className="mt-3 px-1 text-[14px] text-slate-400">
-                            Ещё {asideParts.join(' · ')}
-                        </div>
-                    ) : null}
-                </Section>
+                    <Section icon="fa-headset" title="Операторы">
+                        <Grid>
+                            <MetricStatTile metricKey="tp_free" snapshot={snapshot} scale={scale} />
+                            <MetricStatTile metricKey="tp_talking" snapshot={snapshot} scale={scale} />
+                            <MetricStatTile metricKey="tp_avg_talk" snapshot={snapshot} scale={scale} />
+                            <MetricStatTile metricKey="tp_outgoing_pair" snapshot={snapshot} scale={scale} />
+                        </Grid>
+                        {asideParts.length > 0 ? (
+                            <div className="mt-3 px-1 text-[14px] text-slate-400">
+                                Ещё {asideParts.join(' · ')}
+                            </div>
+                        ) : null}
+                    </Section>
+                </div>
+
+                {/* Колонка «На перерыве» и список операторов соседствуют намеренно, хотя
+                    ушедшие на перерыв есть и там и там: колонку считает кабинет Binotel, и
+                    она полна всегда, а статусы списка приходят от телефонов, а обновлён пока
+                    не весь флот. Когда события будет слать каждый телефон, колонка станет
+                    подмножеством списка — и тогда её место займёт освободившаяся ширина. */}
+                <TezStatusColumn now={now} scale={scale} />
             </div>
 
-            <TezStatusColumn now={now} scale={scale} />
+            {/* Поимённо — под всей сеткой: плитка отвечает «сколько», строка — «кто именно и
+                что у него за день», и семи колонкам нужна вся ширина стены. */}
+            <TezOperatorsTable rows={snapshot?.roster} direction="tp" scale={scale} />
         </div>
     );
 }

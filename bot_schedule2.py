@@ -39268,6 +39268,114 @@ def _tez_wallboard_name_list(people, rows):
     return out
 
 
+# Статусы в списке операторов — СЛОВАМИ САМОГО ТЕЛЕФОНА, а не отчётов по часам. Оператор
+# переключает пилюлю у себя в iCORE Phone и должен узнать своё состояние на экране в зале,
+# поэтому «Активный» и «Исход», а не «Готов» и «Перезвон» из SCHEDULE_STATUS_KEY_LABELS.
+#
+# Третье число — вес сортировки: список идёт сверху вниз от работы к её отсутствию
+# (разговор → активный → исход → учёба → пауза → перерыв → не в сети). Сортировка по смыслу,
+# а не по времени, выбрана намеренно: на стене строки не должны прыгать местами при каждом
+# обновлении — глаз ищет человека по позиции, а время внутри разряда уже вторично.
+_TEZ_WALLBOARD_STATUS_CATALOG = {
+    'занят': ('В разговоре', 'talking', 10),
+    'готов': ('Активный', 'free', 20),
+    'перезвон': ('Исход', 'outgoing', 30),
+    'тренинг': ('Тренинг', 'training', 40),
+    'тех причина': ('Техническая пауза', 'tech', 50),
+    'перерыв': ('Перерыв', 'break', 60),
+    'выключен': ('Не в сети', 'offline', 70),
+}
+# Событий нет вовсе — это НЕ «не в сети»: телефон мог просто не обновиться до версии, которая
+# шлёт статусы (флот обновляется сам, но не одномоментно). Ноль здесь соврал бы дважды: и про
+# человека, и про готовность источника, поэтому у незнания свой разряд и своя подпись.
+_TEZ_WALLBOARD_STATUS_UNKNOWN = ('Нет событий', 'unknown', 90)
+
+
+def _tez_wallboard_status_entry(status_key):
+    """Подпись, ключ оформления и вес сортировки по ключу события телефона."""
+    key = ' '.join(str(status_key or '').strip().lower().split())
+    if not key:
+        return _TEZ_WALLBOARD_STATUS_UNKNOWN
+    direct = _TEZ_WALLBOARD_STATUS_CATALOG.get(key)
+    if direct:
+        return direct
+    # «тех причина» приезжает и как `tech.break`, и как `тех_причина` — тот же разнобой, что
+    # разбирает учёт часов (_schedule_auto_is_tech_reason_status_key).
+    if re.sub(r'[\s._-]+', '', key) in ('техпричина', 'techbreak', 'statustechbreak'):
+        return _TEZ_WALLBOARD_STATUS_CATALOG['тех причина']
+    # Незнакомый ключ показываем как есть: у телефона статус может появиться раньше, чем у
+    # табло, и «Нет событий» на работающем человеке было бы хуже непривычного слова.
+    return (key[:1].upper() + key[1:], 'other', 80)
+
+
+def _tez_wallboard_person_stats(employees, number):
+    """Дневные счётчики одного внутреннего номера или None, если номера нет в ответе кабинета.
+
+    None, а не нули: не найденный в кабинете номер — это сорванная привязка человека к линии
+    (в отделе sip_number не уникален, а переименование направления обнуляет direction_id), и
+    прочерк в строке честнее, чем «сегодня не принял ни одного звонка»."""
+    people = (employees or {}).get('employees') if isinstance(employees, dict) else None
+    if people is None:
+        people = employees or {}
+    record = people.get(str(number or '')) if number else None
+    if not isinstance(record, dict):
+        return None
+    stats = record.get('stats') or {}
+    served = int(stats.get('incoming_success') or 0)
+    out_answered = int(stats.get('outgoing_success') or 0)
+    return {
+        'served': served,
+        'missed': int(stats.get('incoming_failed') or 0),
+        # Усекаем, а не округляем — то же правило, что у общих плиток: кабинет показывает
+        # 02:09 при 129,74 с, и округление разошлось бы с ним на каждой смене.
+        'avg_talk_seconds': int(stats.get('incoming_billsec') // served) if served else None,
+        'outgoing_total': int(stats.get('outgoing_amount') or 0),
+        'outgoing_success': out_answered,
+        'outgoing_talk_seconds': int(stats.get('outgoing_billsec') or 0),
+        'avg_outgoing_talk_seconds': (int(stats.get('outgoing_billsec') // out_answered)
+                                      if out_answered else None),
+    }
+
+
+def _tez_wallboard_roster(people, direction, employees, live_statuses):
+    """Строка на каждого человека направления: статус по телефону + его счётчики за день.
+
+    Статус берём из НАШИХ событий iCORE Phone (db.get_operator_live_statuses), а не из
+    presence Binotel, которым питаются плитки. Так решено осознанно: у кабинета градаций
+    всего четыре, «Тренинг» и «Техническая пауза» схлопнуты в «Перерыв», а отдел продаж
+    статусы там не переключает вовсе. Телефон же знает пять состояний и сам отмечает
+    разговор, поэтому список людей отвечает на вопрос «кто чем занят» точнее плиток.
+
+    Плата за это — два источника на одном экране: в редкую минуту счётчик плитки и число
+    одинаковых чипов в списке могут разойтись (телефон и кабинет узнают о начале разговора
+    не в одну секунду, а у необновившегося телефона статуса нет вовсе). Поэтому у секции
+    списка своя подпись с источником: расхождение названо словами, а не спрятано."""
+    statuses = live_statuses or {}
+    rows = []
+    for person in (people.get(direction) or []):
+        operator_id = person.get('id')
+        live = statuses.get(operator_id) or {}
+        label, tone_key, weight = _tez_wallboard_status_entry(live.get('status_key'))
+        rows.append({
+            'operator_id': operator_id,
+            'name': person.get('name') or '—',
+            'status_key': tone_key,
+            'status_label': label,
+            'status_seconds': live.get('seconds'),
+            'stats': _tez_wallboard_person_stats(employees, person.get('sip_number')),
+            '_weight': weight,
+        })
+    # Разряд, внутри разряда — дольше всех в статусе сверху, затем по имени: при равных
+    # значениях порядок обязан быть устойчивым, иначе строки меняются местами сами по себе.
+    rows.sort(key=lambda row: (row['_weight'],
+                               row['status_seconds'] is None,
+                               -(row['status_seconds'] or 0),
+                               row['name']))
+    for row in rows:
+        row.pop('_weight', None)
+    return rows
+
+
 def _tez_wallboard_fetch_snapshot():
     """Один обход кабинета Binotel на ОБА табло Тез КЦ."""
     import tez_wallboard_source as tez_source
@@ -39282,6 +39390,16 @@ def _tez_wallboard_fetch_snapshot():
     live_calls = raw.get('live_calls') or []
     now_ts = raw.get('binotel_now_ts')
     unmatched = []
+
+    # Статусы людей — из наших событий iCORE Phone. Отказ базы здесь гасить стену НЕ должен:
+    # плитки считаются из кабинета и без статусов остаются верными, поэтому список людей
+    # просто теряет разметку статуса, а не уносит с собой всё табло.
+    try:
+        live_statuses = db.get_operator_live_statuses(
+            [row['id'] for row in (people['tp'] + people['op'])])
+    except Exception:
+        logging.exception("Табло Тез КЦ: статусы iCORE Phone не прочитались")
+        live_statuses = {}
 
     snapshot = {
         'binotel_now': raw.get('binotel_now'),
@@ -39312,6 +39430,7 @@ def _tez_wallboard_fetch_snapshot():
                 recall_list=[],
             ),
             'today': tez_source.day_totals(raw.get('employees'), tp_numbers, queue=queue),
+            'roster': _tez_wallboard_roster(people, 'tp', raw.get('employees'), live_statuses),
         }
     else:
         snapshot['tp'] = None
@@ -39337,6 +39456,7 @@ def _tez_wallboard_fetch_snapshot():
         # Средняя длительность разговора у отдела продаж — по ИСХОДЯЩИМ: входящих у них нет
         # вовсе, и общая плитка показывала бы прочерк круглые сутки.
         'today': dict(op_today, avg_talk_seconds=op_today.get('avg_outgoing_talk_seconds')),
+        'roster': _tez_wallboard_roster(people, 'op', raw.get('employees'), live_statuses),
     }
 
     snapshot['diagnostics'] = dict(
@@ -39347,6 +39467,10 @@ def _tez_wallboard_fetch_snapshot():
             row['name'] for row in (people['tp'] + people['op']) if not row.get('sip_number')),
         endpoints_age_seconds=raw.get('endpoints_age_seconds'),
         free_unknown=bool(op_summary.get('free_unknown')),
+        # Сколько человек не прислали ни одного события телефона: пока флот обновляется, это
+        # ровно те, у кого статус на стене неизвестен, а часы в учёте не набираются.
+        operators_without_phone_events=len(
+            [row for row in (people['tp'] + people['op']) if row['id'] not in live_statuses]),
     )
     return snapshot
 
@@ -39387,6 +39511,8 @@ def _tez_wallboard_direction_payload(direction):
         'error': snapshot.get('error'),
         'now': half.get('now') or {},
         'today': half.get('today') or {},
+        # Список людей направления: у каждого свой статус и свои счётчики за день.
+        'roster': half.get('roster') or [],
         'diagnostics': snapshot.get('diagnostics') or {},
     }
     if direction == 'tp':

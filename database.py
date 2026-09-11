@@ -58654,6 +58654,65 @@ class Database:
                     updated_at = CURRENT_TIMESTAMP
             """, (user_id, date_key, json.dumps(greeting_data, ensure_ascii=False)))
 
+    # ── Живой статус оператора по событиям iCORE Phone ──────────────────────────
+    # Кто в каком статусе «прямо сейчас» — по НАШИМ событиям телефона
+    # (POST /api/operator/status_event), а не по presence телефонии. У Binotel
+    # градаций всего четыре, «Тренинг» и «Техническая пауза» схлопнуты в «Перерыв»,
+    # а отдел продаж статусы там вовсе не переключает (08.09.2026 все семеро
+    # висели inactive при полусотне звонков у одного номера). Телефон же статус
+    # проставляет всегда: каждый вход начинается с «Исхода».
+    OPERATOR_LIVE_STATUS_LOOKBACK_HOURS = 16
+
+    def get_operator_live_statuses(self, operator_ids, as_of=None, lookback_hours=None):
+        """{operator_id: {'status_key', 'event_at', 'seconds'}} — последнее событие каждого.
+
+        Окно по времени, а НЕ «события за сегодня», по двум причинам сразу:
+        ночная смена переходит через полночь (последнее событие человека в 03:00
+        лежит вчерашним числом и по дате потерялось бы), а событие трёхдневной
+        давности — это не «до сих пор активен», а телефон, который умер, не
+        прислав «выключен». Поэтому старше окна статус не показываем вовсе:
+        «Активный, 3 дня» на стене читается как работающий человек.
+
+        Оператор без событий в ответ НЕ попадает: его статус неизвестен, и это
+        не то же самое, что «не в сети» (телефон мог просто не обновиться).
+        Отличить одно от другого обязан вызывающий — правило нуля табло.
+        """
+        ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        if not ids:
+            return {}
+        now_value = as_of or datetime.now(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+        if isinstance(now_value, datetime) and now_value.tzinfo is not None:
+            now_value = now_value.astimezone(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+        hours = int(lookback_hours or self.OPERATOR_LIVE_STATUS_LOOKBACK_HOURS)
+        floor_value = now_value - timedelta(hours=max(1, hours))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT ON (e.operator_id)
+                       e.operator_id, e.status_key, e.event_at
+                FROM operator_status_events e
+                WHERE e.operator_id = ANY(%s)
+                  AND e.event_at >= %s
+                ORDER BY e.operator_id, e.event_at DESC, e.id DESC
+                """,
+                (ids, floor_value)
+            )
+            rows = cursor.fetchall()
+        out = {}
+        for operator_id, status_key, event_at in rows:
+            key = self._normalize_import_status_key(status_key)
+            if not key:
+                continue
+            seconds = None
+            if isinstance(event_at, datetime) and event_at <= now_value:
+                seconds = int((now_value - event_at).total_seconds())
+            out[int(operator_id)] = {
+                'status_key': key,
+                'event_at': event_at.isoformat() if isinstance(event_at, datetime) else None,
+                'seconds': seconds,
+            }
+        return out
+
 
 # Initialize database
 db = Database()

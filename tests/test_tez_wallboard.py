@@ -34,8 +34,9 @@ import threading
 import time
 import types
 import unittest
-from datetime import date as dt_date, datetime
+from datetime import date as dt_date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tests import source_cache
 
@@ -79,7 +80,8 @@ def _load_names(source, names, namespace, label="<tez-wallboard>"):
 def _load_db_method(name):
     """Метод Database без импорта модуля: `import database` поднимает пул к боевой базе."""
     tree = source_cache.parse(DB_SOURCE)
-    namespace = {'datetime': datetime, 'date': dt_date}
+    namespace = {'datetime': datetime, 'date': dt_date, 'timedelta': timedelta,
+                 'ZoneInfo': ZoneInfo}
     for node in tree.body:
         if isinstance(node, ast.Assign) and all(
                 isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
@@ -179,7 +181,8 @@ class _FakeDb:
     """Минимальный db: отделы, отдел пользователя, состав табло Тез, снимки табло по направлениям."""
 
     def __init__(self, departments=None, user_departments=None, operators_table=None,
-                 snapshots=None, snapshot_error=False):
+                 snapshots=None, snapshot_error=False, live_statuses=None,
+                 live_status_error=False):
         self.departments = departments if departments is not None else [
             {'id': 5, 'code': 'szov'}, {'id': 41, 'code': 'tez'}, {'id': 367, 'code': 'op'}]
         self.user_departments = user_departments or {}
@@ -191,6 +194,11 @@ class _FakeDb:
         self.snapshot_error = snapshot_error
         self.saved_snapshots = []
         self.snapshot_reads = []
+        # Статусы людей «сейчас» — события iCORE Phone из нашей же базы. Пустой словарь здесь
+        # означает «телефоны ещё ничего не прислали», а не «все не в сети».
+        self.live_statuses = dict(live_statuses or {})
+        self.live_status_error = live_status_error
+        self.live_status_requests = []
 
     def get_departments(self):
         return self.departments
@@ -200,6 +208,13 @@ class _FakeDb:
 
     def get_tez_wallboard_operators(self, department_id, on_date=None):
         return self._operators(department_id, on_date)
+
+    def get_operator_live_statuses(self, operator_ids, as_of=None, lookback_hours=None):
+        ids = sorted({int(value) for value in (operator_ids or [])})
+        self.live_status_requests.append(ids)
+        if self.live_status_error:
+            raise RuntimeError("БД недоступна")
+        return {op_id: dict(value) for op_id, value in self.live_statuses.items() if op_id in ids}
 
     def get_szov_wallboard_snapshot(self, direction='osnova'):
         self.snapshot_reads.append(direction)
@@ -603,6 +618,12 @@ class _SnapshotHarness:
             '_tez_wallboard_people',
             '_tez_wallboard_person',
             '_tez_wallboard_name_list',
+            # Поимённый список: каталог статусов телефона, счётчики человека, сборка строк.
+            '_TEZ_WALLBOARD_STATUS_CATALOG',
+            '_TEZ_WALLBOARD_STATUS_UNKNOWN',
+            '_tez_wallboard_status_entry',
+            '_tez_wallboard_person_stats',
+            '_tez_wallboard_roster',
             '_tez_wallboard_fetch_snapshot',
             '_tez_wallboard_snapshot',
             '_tez_wallboard_direction_payload',
@@ -873,6 +894,276 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         self.assertEqual(tp['sl_threshold_seconds'], ns['_state']['raw']['sl_threshold_seconds'])
 
 
+# --- ПОИМЁННЫЙ СПИСОК -----------------------------------------------------------------------
+
+class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
+    """Строка на человека: статус из событий телефона, счётчики звонков из кабинета.
+
+    Два источника в одной строке — не небрежность, а решение: у кабинета градаций статуса
+    всего четыре, тренинг и техпауза схлопнуты в перерыв, а отдел продаж их не переключает
+    вовсе. Тесты здесь стерегут именно стык: что статус приходит от телефона, что незнание
+    не выдаётся за состояние человека и что чужие счётчики не приписываются соседу.
+    """
+
+    def _snapshot(self, live_statuses=None, *, users=None, live_status_error=False, raw=None):
+        db = _FakeDb(operators_table=users if users is not None else USERS_TABLE,
+                     live_statuses=live_statuses, live_status_error=live_status_error)
+        ns = self._namespace(db=db, raw=raw)
+        with _patched_source(ns['_state']):
+            return ns['_tez_wallboard_fetch_snapshot'](), db
+
+    def test_roster_covers_the_whole_direction(self):
+        """В списке весь состав направления, а не только те, кого видно в кабинете."""
+        snapshot, _ = self._snapshot()
+        tp_names = [row['name'] for row in snapshot['tp']['roster']]
+        op_names = [row['name'] for row in snapshot['op']['roster']]
+        self.assertEqual(sorted(tp_names), ['Аскар Тлеу', 'Дана Ким', 'Нурлан Абай'])
+        self.assertEqual(sorted(op_names), ['Айгуль Сат', 'Ерлан Бек', 'Салтанат Ли'])
+        # Уволенный дубль с тем же номером 902 на стену не попадает и здесь.
+        self.assertNotIn('Яков Уволенный', tp_names + op_names)
+
+    def test_status_comes_from_the_phone_not_from_the_cabinet(self):
+        """Кабинет говорит «перерыв», телефон — «готов». На стене должен быть телефон.
+
+        Это и есть смысл всей затеи: у Дана Ким в фикстуре кабинета presence «Break in work»,
+        и если бы список читал кабинет, она висела бы на перерыве, отвечая на звонки."""
+        snapshot, _ = self._snapshot({102: {'status_key': 'готов', 'seconds': 300}})
+        row = next(item for item in snapshot['tp']['roster'] if item['operator_id'] == 102)
+        self.assertEqual((row['status_key'], row['status_label']), ('free', 'Активный'))
+        self.assertEqual(row['status_seconds'], 300)
+        # Плитки при этом по-прежнему считаются из кабинета — источники не перепутаны.
+        self.assertEqual(snapshot['tp']['now']['operators_on_break'], 1)
+
+    def test_every_phone_status_has_a_wall_label(self):
+        """Все пять статусов пилюли плюс разговор и выход — словами самого телефона."""
+        expected = {
+            'готов': ('free', 'Активный'),
+            'перезвон': ('outgoing', 'Исход'),
+            'тренинг': ('training', 'Тренинг'),
+            'перерыв': ('break', 'Перерыв'),
+            'тех причина': ('tech', 'Техническая пауза'),
+            'занят': ('talking', 'В разговоре'),
+            'выключен': ('offline', 'Не в сети'),
+        }
+        ns = self._namespace()
+        for status_key, (tone, label) in expected.items():
+            got_label, got_tone, _ = ns['_tez_wallboard_status_entry'](status_key)
+            self.assertEqual((got_tone, got_label), (tone, label), status_key)
+
+    def test_tech_pause_is_recognised_in_any_spelling(self):
+        """`тех причина`, `tech.break`, `тех_причина` — один и тот же статус телефона."""
+        ns = self._namespace()
+        for spelling in ('тех причина', 'Тех Причина', 'tech.break', 'tech_break', 'тех-причина'):
+            label, tone, _ = ns['_tez_wallboard_status_entry'](spelling)
+            self.assertEqual((tone, label), ('tech', 'Техническая пауза'), spelling)
+
+    def test_unknown_status_key_is_shown_not_hidden(self):
+        """Новый статус телефона приедет раньше табло: показываем как есть, а не «нет событий»."""
+        ns = self._namespace()
+        label, tone, weight = ns['_tez_wallboard_status_entry']('обед')
+        self.assertEqual((tone, label), ('other', 'Обед'))
+        self.assertLess(weight, ns['_TEZ_WALLBOARD_STATUS_UNKNOWN'][2])
+
+    def test_person_without_events_is_not_offline(self):
+        """Телефон молчит — это «нет событий», а не «человек вышел». Разница видна на стене."""
+        snapshot, _ = self._snapshot({101: {'status_key': 'занят', 'seconds': 60}})
+        silent = next(item for item in snapshot['tp']['roster'] if item['operator_id'] == 102)
+        self.assertEqual((silent['status_key'], silent['status_label']), ('unknown', 'Нет событий'))
+        self.assertIsNone(silent['status_seconds'])
+        # И это же число видно в диагностике: пока флот обновляется, оно и есть мера готовности.
+        self.assertEqual(snapshot['diagnostics']['operators_without_phone_events'], 5)
+
+    def test_counters_come_from_the_cabinet_row_of_that_person(self):
+        """Счётчики — из строки СВОЕГО номера: 901 принял 10, 902 — шесть, и не наоборот."""
+        snapshot, _ = self._snapshot()
+        by_id = {row['operator_id']: row for row in snapshot['tp']['roster']}
+        self.assertEqual(by_id[101]['stats']['served'], 10)
+        self.assertEqual(by_id[101]['stats']['missed'], 1)
+        # Среднее усекаем, как и в плитках: 1000 / 10 = 100
+        self.assertEqual(by_id[101]['stats']['avg_talk_seconds'], 100)
+        self.assertEqual(by_id[101]['stats']['outgoing_total'], 5)
+        self.assertEqual(by_id[101]['stats']['outgoing_success'], 3)
+        self.assertEqual(by_id[102]['stats']['served'], 6)
+
+    def test_op_row_carries_the_outgoing_numbers(self):
+        """У продавца дневная величина — исходящие: набрано, дозвонились и время разговора."""
+        snapshot, _ = self._snapshot()
+        by_id = {row['operator_id']: row for row in snapshot['op']['roster']}
+        self.assertEqual(by_id[201]['stats']['outgoing_total'], 50)
+        self.assertEqual(by_id[201]['stats']['outgoing_success'], 20)
+        self.assertEqual(by_id[201]['stats']['outgoing_talk_seconds'], 1000)
+        # 1000 / 20 = 50 — среднее по ИСХОДЯЩИМ, входящих у отдела продаж нет вовсе.
+        self.assertEqual(by_id[201]['stats']['avg_outgoing_talk_seconds'], 50)
+        self.assertIsNone(by_id[203]['stats']['avg_outgoing_talk_seconds'])
+
+    def test_person_unknown_to_the_cabinet_gets_dashes_not_zeros(self):
+        """Номера нет в ответе кабинета — это сорванная привязка, а не «не сделал ни звонка»."""
+        # Номер 907 в кабинете не заведён вовсе (905 там есть — это чужая линия с большими
+        # счётчиками, и её нельзя путать с отсутствующей).
+        users = USERS_TABLE + [
+            {'id': 104, 'name': 'Новый Без Линии', 'sip_number': '907',
+             'department_id': TEZ_DEPARTMENT_ID, 'group_model': 'tez_line',
+             'direction_name': 'ТП линия', 'role': 'operator', 'status': 'active'},
+        ]
+        snapshot, _ = self._snapshot(users=users)
+        row = next(item for item in snapshot['tp']['roster'] if item['operator_id'] == 104)
+        self.assertIsNone(row['stats'])
+
+    def test_rows_are_sorted_by_what_the_person_is_doing(self):
+        """Сверху вниз — от работы к её отсутствию; внутри разряда дольше всех выше."""
+        snapshot, _ = self._snapshot({
+            101: {'status_key': 'перерыв', 'seconds': 600},
+            102: {'status_key': 'занят', 'seconds': 30},
+            103: {'status_key': 'готов', 'seconds': 120},
+        })
+        order = [row['status_key'] for row in snapshot['tp']['roster']]
+        self.assertEqual(order, ['talking', 'free', 'break'])
+
+        same_status, _ = self._snapshot({
+            101: {'status_key': 'перерыв', 'seconds': 60},
+            102: {'status_key': 'перерыв', 'seconds': 900},
+            103: {'status_key': 'перерыв', 'seconds': 300},
+        })
+        seconds = [row['status_seconds'] for row in same_status['tp']['roster']]
+        self.assertEqual(seconds, [900, 300, 60])
+
+    def test_roster_is_asked_once_for_both_directions(self):
+        """Статусы читаются одним запросом на оба направления, а не по разу на каждое."""
+        _, db = self._snapshot()
+        self.assertEqual(len(db.live_status_requests), 1)
+        self.assertEqual(db.live_status_requests[0], [101, 102, 103, 201, 202, 203])
+
+    def test_status_source_failure_does_not_darken_the_wall(self):
+        """Упала база статусов — плитки из кабинета живы, а список теряет только разметку."""
+        snapshot, _ = self._snapshot(live_status_error=True)
+        self.assertIsNotNone(snapshot['tp'])
+        self.assertEqual(snapshot['tp']['now']['operators_total'], 3)
+        self.assertTrue(all(row['status_key'] == 'unknown' for row in snapshot['tp']['roster']))
+
+    def test_roster_row_copies_only_whitelisted_fields(self):
+        """В строку не должны просочиться ни внутренний номер, ни что-либо из ответа кабинета."""
+        snapshot, _ = self._snapshot({101: {'status_key': 'готов', 'seconds': 10,
+                                            'event_at': '2026-09-11T10:00:00'}})
+        row = snapshot['tp']['roster'][0]
+        self.assertEqual(set(row), {'operator_id', 'name', 'status_key', 'status_label',
+                                    'status_seconds', 'stats'})
+        self.assertEqual(set(row['stats']), {'served', 'missed', 'avg_talk_seconds',
+                                             'outgoing_total', 'outgoing_success',
+                                             'outgoing_talk_seconds', 'avg_outgoing_talk_seconds'})
+
+    def test_roster_reaches_the_client(self):
+        """Список должен доезжать до фронта: половина снимка без него бесполезна."""
+        ns = self._namespace(db=_FakeDb(operators_table=USERS_TABLE,
+                                        live_statuses={101: {'status_key': 'готов', 'seconds': 5}}))
+        with _patched_source(ns['_state']):
+            tp = ns['_tez_wallboard_direction_payload']('tp')
+            op = ns['_tez_wallboard_direction_payload']('op')
+        self.assertEqual(len(tp['roster']), 3)
+        self.assertEqual(len(op['roster']), 3)
+
+
+# --- ИСТОЧНИК СТАТУСОВ: НАСТОЯЩИЙ МЕТОД БАЗЫ ------------------------------------------------
+
+class _EventsCursor:
+    """Фальшивый курсор над operator_status_events: запоминает запрос, отдаёт заданные строки."""
+
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+        self.sql = None
+        self.params = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sql = re.sub(r'\s+', ' ', sql or '').strip()
+        self.params = list(params or [])
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class _RealLiveStatuses:
+    """Настоящий `Database.get_operator_live_statuses` поверх фальшивого курсора."""
+
+    OPERATOR_LIVE_STATUS_LOOKBACK_HOURS = _db_class_attr('OPERATOR_LIVE_STATUS_LOOKBACK_HOURS')
+    _method = staticmethod(_load_db_method('get_operator_live_statuses'))
+    # Без staticmethod: метод вызывается изнутри как `self._normalize_import_status_key(...)`,
+    # то есть `self` ему нужен — обычная функция в атрибуте класса им и становится.
+    _normalize_import_status_key = _load_db_method('_normalize_import_status_key')
+
+    def __init__(self, rows=None):
+        self.cursor = _EventsCursor(rows)
+
+    def _get_cursor(self):
+        return self.cursor
+
+    def __call__(self, operator_ids, as_of=None, lookback_hours=None):
+        return type(self)._method(self, operator_ids, as_of, lookback_hours)
+
+
+class TezWallboardLiveStatusSourceTests(unittest.TestCase):
+    """Откуда табло знает статус человека «сейчас»: последнее событие телефона в окне.
+
+    Окно здесь не украшение. Событие трёхдневной давности — это не «человек до сих пор
+    активен», а телефон, который умер, не прислав «выключен»; а по дате (`event_date`)
+    выбирать нельзя вовсе — у ночной смены последнее событие лежит вчерашним числом.
+    """
+
+    NOW = datetime(2026, 9, 11, 12, 0, 0)
+
+    def test_window_is_by_time_not_by_calendar_day(self):
+        api = _RealLiveStatuses()
+        api([101, 102], as_of=self.NOW)
+        self.assertIn('WHERE e.operator_id = ANY(%s) AND e.event_at >= %s', api.cursor.sql)
+        self.assertNotIn('event_date', api.cursor.sql)
+        self.assertEqual(api.cursor.params[1],
+                         self.NOW - timedelta(hours=api.OPERATOR_LIVE_STATUS_LOOKBACK_HOURS))
+
+    def test_only_the_last_event_of_each_person_counts(self):
+        """Статус — последнее событие, поэтому DISTINCT ON с сортировкой по времени вниз."""
+        api = _RealLiveStatuses()
+        api([101], as_of=self.NOW)
+        self.assertIn('SELECT DISTINCT ON (e.operator_id)', api.cursor.sql)
+        self.assertIn('ORDER BY e.operator_id, e.event_at DESC, e.id DESC', api.cursor.sql)
+
+    def test_time_in_status_is_counted_from_the_event(self):
+        api = _RealLiveStatuses([(101, 'готов', self.NOW - timedelta(minutes=7))])
+        result = api([101], as_of=self.NOW)
+        self.assertEqual(result[101]['status_key'], 'готов')
+        self.assertEqual(result[101]['seconds'], 420)
+
+    def test_event_from_the_future_does_not_become_negative_time(self):
+        """Часы оператора могут спешить: минус на стене читался бы как поломка табло."""
+        api = _RealLiveStatuses([(101, 'занят', self.NOW + timedelta(minutes=3))])
+        result = api([101], as_of=self.NOW)
+        self.assertEqual(result[101]['status_key'], 'занят')
+        self.assertIsNone(result[101]['seconds'])
+
+    def test_status_key_is_normalised(self):
+        api = _RealLiveStatuses([(101, '  ГОТОВ  ', self.NOW - timedelta(minutes=1))])
+        self.assertEqual(api([101], as_of=self.NOW)[101]['status_key'], 'готов')
+
+    def test_person_without_events_is_absent_from_the_answer(self):
+        """Отсутствие в ответе — это «не знаем», и отличать его от «вышел» обязан вызывающий."""
+        api = _RealLiveStatuses([(101, 'готов', self.NOW)])
+        self.assertEqual(set(api([101, 102], as_of=self.NOW)), {101})
+
+    def test_empty_request_does_not_touch_the_database(self):
+        api = _RealLiveStatuses()
+        self.assertEqual(api([]), {})
+        self.assertIsNone(api.cursor.sql)
+
+    def test_aware_time_is_brought_to_almaty_not_to_utc(self):
+        """Событие naive-локальное: приведи `as_of` к UTC — и «в статусе» уедет на часы."""
+        api = _RealLiveStatuses([(101, 'перерыв', datetime(2026, 9, 11, 11, 55))])
+        aware = datetime(2026, 9, 11, 12, 0, tzinfo=ZoneInfo('Asia/Almaty'))
+        self.assertEqual(api([101], as_of=aware)[101]['seconds'], 300)
+
+
 # --- КЭШ ------------------------------------------------------------------------------------
 
 class TezWallboardCacheTests(_SnapshotHarness, unittest.TestCase):
@@ -1126,6 +1417,7 @@ class TezWallboardWiringTests(unittest.TestCase):
         cls.view = (MONITORING / "TezWallboardView.jsx").read_text(encoding="utf-8-sig")
         cls.tp = (MONITORING / "TezTpWallboard.jsx").read_text(encoding="utf-8-sig")
         cls.op = (MONITORING / "TezOpWallboard.jsx").read_text(encoding="utf-8-sig")
+        cls.roster = (MONITORING / "TezOperatorsTable.jsx").read_text(encoding="utf-8-sig")
         cls.szov_shared = (MONITORING / "szovWallboardShared.js").read_text(encoding="utf-8-sig")
         cls.faicon = (ROOT / "src" / "components" / "common" / "FaIcon.jsx").read_text(encoding="utf-8-sig")
         cls.new_files = {
@@ -1133,6 +1425,7 @@ class TezWallboardWiringTests(unittest.TestCase):
             'TezWallboardView.jsx': cls.view,
             'TezTpWallboard.jsx': cls.tp,
             'TezOpWallboard.jsx': cls.op,
+            'TezOperatorsTable.jsx': cls.roster,
         }
 
     def test_backend_routes_are_registered_and_guarded(self):
@@ -1253,6 +1546,34 @@ class TezWallboardWiringTests(unittest.TestCase):
         for key in ('sl_ratio', 'ar_ratio', 'avg_wait_seconds', 'queue'):
             self.assertNotIn(f'today.{key}', op_block, key)
         self.assertNotIn('metricKey="op_sl"', self.op)
+
+    def test_both_directions_show_the_named_list(self):
+        """Список людей стоит на обоих табло и знает своё направление — колонки у них разные."""
+        self.assertIn('import TezOperatorsTable from \'./TezOperatorsTable\';', self.tp)
+        self.assertIn('import TezOperatorsTable from \'./TezOperatorsTable\';', self.op)
+        self.assertIn('<TezOperatorsTable rows={snapshot?.roster} direction="tp"', self.tp)
+        self.assertIn('<TezOperatorsTable rows={snapshot?.roster} direction="op"', self.op)
+
+    def test_every_status_the_backend_emits_has_a_chip(self):
+        """Ключ оформления без стиля — серый чип без смысла: каталоги обязаны совпадать.
+
+        Сервер выдаёт ключ разряда (`free`, `talking`, …), фронт по нему берёт цвет. Разойдись
+        они — на стене молча появится безымянный серый статус, и заметят это не сразу."""
+        catalog = BOT_SOURCE[BOT_SOURCE.index("_TEZ_WALLBOARD_STATUS_CATALOG = {"):
+                             BOT_SOURCE.index("_TEZ_WALLBOARD_STATUS_UNKNOWN = ")]
+        tones = set(re.findall(r"\('[^']+', '([a-z]+)', \d+\)", catalog))
+        self.assertTrue(tones)
+        # Плюс два разряда, которых в каталоге нет: незнание и незнакомый ключ.
+        for tone in sorted(tones | {'unknown', 'other'}):
+            self.assertIn(f"    {tone}: {{", self.shared, tone)
+
+    def test_op_named_list_has_no_incoming_columns(self):
+        """У отдела продаж входящих нет вовсе: «Принято» и «Пропущено» там были бы нулями."""
+        op_columns = self.roster[self.roster.index("    op: ["):self.roster.index("};")]
+        for forbidden in ('Принято', 'Пропущено'):
+            self.assertNotIn(forbidden, op_columns)
+        for expected in ('Набрано', 'Дозвонились'):
+            self.assertIn(expected, op_columns)
 
     def test_every_fa_token_of_the_new_files_is_mapped(self):
         """tests/test_faicon_mappings.py падает молча, если токен не замаплен — икона исчезает."""

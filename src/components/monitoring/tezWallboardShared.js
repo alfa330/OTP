@@ -77,6 +77,54 @@ export const tezBreakChip = (item) => {
     return { label: item.reason, className: style ? style.chip : 'bg-slate-100 text-slate-500' };
 };
 
+/*
+ * Статусы в списке операторов. Источник у них НЕ тот же, что у плиток: плитки считаются из
+ * кабинета Binotel, а строки людей — из событий iCORE Phone, которые телефон шлёт нам сам.
+ * У кабинета градаций всего четыре, «Тренинг» и «Техническая пауза» схлопнуты в «Перерыв», а
+ * отдел продаж статусы там не переключает вовсе — поэтому на вопрос «кто чем занят» отвечает
+ * телефон, а не кабинет.
+ *
+ * Подписи — словами самой пилюли телефона («Активный», «Исход»), чтобы оператор узнавал на
+ * стене своё состояние; они приходят в снимке, здесь — запасные для ключа без подписи.
+ *
+ * Цвета: зелёный/синий/янтарный — работа в трёх её видах, оранжевый — перерыв (та же
+ * оранжевая, что у перерывов на табло СЗоВ: один смысл на всех экранах горит одинаково),
+ * фиолетовый и фуксия — учёба и техпауза, серый — отсутствие. «Нет событий» отличается от
+ * «Не в сети» намеренно: первое — мы не знаем, второе — знаем, что человек вышел.
+ */
+export const TEZ_STATUS_STYLE = {
+    talking: { label: 'В разговоре', chip: 'bg-blue-100 text-blue-700' },
+    free: { label: 'Активный', chip: 'bg-green-100 text-green-700' },
+    outgoing: { label: 'Исход', chip: 'bg-amber-100 text-amber-700' },
+    training: { label: 'Тренинг', chip: 'bg-purple-100 text-purple-700' },
+    tech: { label: 'Техническая пауза', chip: 'bg-fuchsia-100 text-fuchsia-700' },
+    break: { label: 'Перерыв', chip: 'bg-orange-100 text-orange-700' },
+    offline: { label: 'Не в сети', chip: 'bg-slate-100 text-slate-500' },
+    unknown: { label: 'Нет событий', chip: 'bg-slate-50 text-slate-400 ring-1 ring-slate-200' },
+    other: { label: null, chip: 'bg-slate-100 text-slate-600' },
+};
+
+/** Чип статуса строки: подпись из снимка, оформление — по ключу. */
+export const tezStatusChip = (row) => {
+    const style = TEZ_STATUS_STYLE[row?.status_key] || TEZ_STATUS_STYLE.other;
+    return {
+        label: row?.status_label || style.label || '—',
+        className: style.chip,
+        // «Нет событий» — не состояние человека, а отсутствие данных о нём: такую строку
+        // приглушаем целиком, иначе она читается как полноценный статус.
+        muted: row?.status_key === 'unknown',
+    };
+};
+
+/*
+ * Пара «главное / приглушённое» в ячейке: набрано → дозвонились. Прочерк ставится по правилу
+ * нуля — счётчиков у человека нет вовсе, когда его номер не нашёлся в ответе кабинета.
+ */
+export const formatPair = (main, secondary) => ({
+    value: formatCount(main),
+    secondary: isBlank(secondary) ? null : formatInt(secondary),
+});
+
 export const useTezTpWallboardSnapshot = createSnapshotFeed({
     path: '/api/tez_wallboard/tp_snapshot',
     pollIntervalMs: TEZ_POLL_INTERVAL_MS,
