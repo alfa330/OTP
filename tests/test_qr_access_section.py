@@ -21,6 +21,7 @@
 """
 
 import ast
+import re
 import sys
 import textwrap
 import unittest
@@ -650,6 +651,125 @@ class ScannerReachTests(unittest.TestCase):
         self.assertIn("import('qrcode')", self.app)
         self.assertIn("errorCorrectionLevel: 'M'", self.app)
         self.assertIn('margin: 2', self.app)
+
+
+class MobileFitTests(unittest.TestCase):
+    """Раздел на телефоне встаёт РОВНО В ЭКРАН: прокручивать нечего.
+
+    Высота видоискателя была долей окна (62vh) и вместе с шапкой раздела,
+    кнопкой ручного ввода и полями оболочки — местом под вырез сверху и под бар
+    разделов снизу — перебирала экран. В браузере этого не видно вовсе
+    (безопасных зон там нет), а на живом iPhone 390×844 раздел получал ровно
+    13 px прокрутки: сканер виден целиком, тянуть нечего, а страница ездит.
+    Владелец прислал снимок 11.09.2026 и попросил убрать.
+
+    Сторожим не число, а СПОСОБ: высоту кадра оставляет flex, и ни одного
+    повторённого здесь размера оболочки быть не должно — разъехавшись с ней,
+    копия числа вернёт либо ту же прокрутку, либо срезанный низ.
+    """
+
+    def setUp(self):
+        self.view = VIEW_PATH.read_text(encoding='utf-8-sig')
+        self.css = CSS_PATH.read_text(encoding='utf-8-sig')
+
+    @staticmethod
+    def _without_comments(text):
+        """Без пояснений: в них прежние величины названы по имени.
+
+        Комментарии здесь рассказывают, ЧТО было и почему убрано («было
+        min(32vh, 280px)»), и страж, ищущий подстроку, спотыкался бы о рассказ
+        вместо кода.
+        """
+        return re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+
+    def _viewfinder_tag(self):
+        """Открывающий тег кадра — того, в котором лежит видео и рамка."""
+        tag = self.view.split('ref={stageRef}', 1)[1].split('\n            >', 1)[0]
+        return self._without_comments(tag)
+
+    def test_the_section_is_a_column_that_fills_the_screen(self):
+        """Оболочка растягивает раздел на экран, а раздел — столбец.
+
+        .main-content на телефоне уже ровно в экран (min-height: 100dvh) и уже
+        вычел поля под вырез и под бар. Столбцу остаётся забрать его высоту
+        целиком — тогда остаток достаётся кадру, и низ раздела никуда не
+        выходит.
+        """
+        stage_rule = self.css.split('body.mobile-shell .qr-access-stage {', 1)[1].split('}', 1)[0]
+        self.assertIn('flex-direction: column', stage_rule)
+        self.assertIn('flex: 1', stage_rule)
+        # Без этого столбец не станет ниже содержимого, и кадр вытолкнет низ
+        # раздела за экран — ровно та прокрутка, ради которой всё и сделано.
+        self.assertIn('min-height: 0', stage_rule)
+
+        main_rule = self.css.split('body.mobile-shell .main-content:has(> .qr-access-stage) {', 1)[1]
+        main_rule = main_rule.split('}', 1)[0]
+        self.assertIn('display: flex', main_rule)
+        self.assertIn('flex-direction: column', main_rule)
+
+        column = self.view.split('className={`mx-auto w-full max-w-2xl ${isNarrow ?', 1)[1].split('`}', 1)[0]
+        for token in ('flex', 'flex-col', 'flex-1', 'min-h-0'):
+            self.assertIn(token, column, f'колонка раздела не столбец во всю высоту: нет {token}')
+
+    def test_the_viewfinder_takes_what_is_left_and_not_a_share_of_the_window(self):
+        """Высота кадра — остаток экрана, а не доля окна.
+
+        Доля окна (vh) не знает ни про вырез, ни про бар разделов, ни про то,
+        что снизу выехала форма ручного ввода, — и промахивается мимо экрана
+        на десяток-другой пикселей в любую сторону.
+        """
+        tag = self._viewfinder_tag()
+        self.assertIn('flex-1', tag, 'кадр больше не забирает остаток высоты')
+        self.assertIn('min-h-[', tag, 'кадру нужен нижний предел: боком с открытой '
+                                      'формой ему досталось бы ноль')
+        self.assertNotIn('vh', tag, 'высота кадра снова доля окна')
+        # Настольная высота осталась числом: там раздел живёт в прокручиваемой
+        # области, и растягивать кадр на весь экран незачем.
+        self.assertIn("style={isNarrow ? undefined : { height: '380px' }}", self.view)
+
+    def test_the_shell_numbers_are_not_copied_into_the_section(self):
+        """Ни одного размера оболочки в файле раздела.
+
+        Место под вырез (46 px + безопасная зона) и под бар (--mtb-thickness)
+        уже вычтено полями .main-content. Любой calc(100dvh − «шапка на глаз»)
+        здесь — вторая копия этих чисел: первая же правка оболочки разведёт их,
+        и раздел молча получит прокрутку обратно.
+        """
+        rules = self._without_comments(self.css)
+        self.assertNotIn('100dvh', rules, 'высота экрана считается заново в разделе')
+        self.assertNotIn('100vh', rules, 'высота экрана считается заново в разделе')
+        self.assertNotIn('46px', rules, 'высота верхней полосы скопирована из оболочки')
+
+    def test_the_frame_cannot_outgrow_a_low_viewfinder(self):
+        """Сторона рамки считается от ОБЕИХ сторон кадра.
+
+        Кадр перестал быть заданной высоты, и боком он ниже, чем 62 % своей
+        ширины: рамка, посчитанная по одной ширине, упиралась бы углами в
+        верхнюю и нижнюю грань, а кадр обрезает содержимое — от рамки осталась
+        бы полоса без углов. Под подпись «Наведите на QR-код сотрудника» при
+        этом нужна полоса снизу, а рамка стоит по центру — значит столько же
+        и сверху.
+        """
+        side = self.view.split('const idleSide = hostBox', 1)[1].split(';', 1)[0]
+        self.assertIn('hostBox.w * QR_FRAME_SHARE', side)
+        self.assertIn('QR_FRAME_CAP', side)
+        self.assertIn('hostBox.h - QR_FRAME_HINT_ROOM', side)
+        self.assertIn('LOCK_MIN_SIDE', side, 'рамке нужен нижний предел')
+        self.assertIn('Math.min(', side)
+
+    def test_the_frame_learns_the_size_of_the_viewfinder(self):
+        """Кадр сменил размер — сторона рамки считается заново.
+
+        Поворот телефона, выехавшая форма ручного ввода и свернувшийся сайдбар
+        меняют кадр, не трогая ни одного состояния компонента: без наблюдателя
+        рамка осталась бы прежней стороны в кадре другого размера.
+        """
+        self.assertIn('new ResizeObserver(read)', self.view)
+        self.assertIn('observer.observe(host)', self.view)
+        self.assertIn('observer.disconnect()', self.view)
+        # Тот же размер — тот же объект: иначе сообщение наблюдателя крутило бы
+        # перерисовку вхолостую.
+        self.assertIn('prev.w === w && prev.h === h ? prev : { w, h }', self.view)
 
 
 if __name__ == '__main__':

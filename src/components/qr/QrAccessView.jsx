@@ -61,16 +61,23 @@ const CAMERA_CONSTRAINTS = {
     advanced: [{ focusMode: 'continuous' }],
 };
 
-/* Сторона окна видоискателя. Считается от ШИРИНЫ кадра: кадр бывает и низким
-   (пока набирают код руками), и от высоты квадрат тогда не вписывался. По
-   ширине 62 % влезают в оба, а потолок в 240 px не даёт окну разрастись на
-   планшете. */
-const QR_FRAME_SIDE = 'min(62%, 240px)';
+/* Сторона окна видоискателя: доля кадра и потолок в пикселях (потолок не даёт
+   окну разрастись на планшете).
 
-/* То же для ужатого кадра (открыт ручной ввод): там высоты вдвое меньше, и
-   обычный квадрат подходил к верхней и нижней грани на 20 px — углы рамки
-   почти упирались в края. */
-const QR_FRAME_SIDE_COMPACT = 'min(52%, 190px)';
+   ДОЛЯ СЧИТАЕТСЯ ОТ ОБЕИХ СТОРОН КАДРА, а не от одной ширины. На телефоне
+   высота кадра больше не задана числом — её оставляет от экрана flex
+   (qr-access.css), — и кадр бывает заметно ниже, чем 62 % своей ширины:
+   телефон боком, выехавшая снизу форма ручного ввода. Квадрат, посчитанный по
+   одной ширине, уходил бы в таком кадре углами за верхнюю и нижнюю грань, а
+   кадр обрезает содержимое — от рамки осталась бы полоса без углов. */
+const QR_FRAME_SHARE = 0.62;
+const QR_FRAME_CAP = 240;
+
+/* Сколько высоты кадра рамке НЕ отдаём. Под ней лежит подпись «Наведите на
+   QR-код сотрудника» (18 px текста в 24 px от нижней грани), и рамка стоит по
+   центру — значит столько же надо оставить сверху. Без этой полосы на низком
+   кадре подпись ложилась ровно на нижнюю грань рамки. */
+const QR_FRAME_HINT_ROOM = 92;
 
 /* Сколько держится экран «Доступ открыт» перед возвратом к сканеру. Хватает,
    чтобы прочитать имя, и не заставляет жать кнопку ради следующего человека. */
@@ -212,6 +219,11 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
 
     /* Рамка села на код: сдвиг от центра кадра и сторона. null — ещё ищет. */
     const [lock, setLock] = useState(null);
+
+    /* Стороны кадра в пикселях: от них считается сторона рамки. Высота кадра
+       на телефоне не задана числом (её оставляет flex), поэтому узнать её
+       можно только замером. null — ещё не мерили. */
+    const [hostBox, setHostBox] = useState(null);
 
     const [checking, setChecking] = useState(false);
     const [candidate, setCandidate] = useState(null);
@@ -478,6 +490,33 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         return () => clearTimeout(timer);
     }, [granted, resumeScanning]);
 
+    /* Кадр сменил размер — рамке считать сторону заново. Поворот телефона,
+       выехавшая форма ручного ввода, свернувшийся сайдбар меняют кадр, не
+       трогая ни одного состояния компонента: без наблюдателя рамка осталась бы
+       прежней стороны в кадре другого размера. */
+    useEffect(() => {
+        const host = stageRef.current;
+        if (!host) return undefined;
+        const read = () => {
+            const w = host.clientWidth;
+            const h = host.clientHeight;
+            /* Размер тот же — отдаём прежний объект: новый на каждое сообщение
+               наблюдателя (а шлёт он их и на свои же перерисовки) крутил бы
+               перерисовку вхолостую. */
+            setHostBox((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }));
+        };
+        read();
+        /* ResizeObserver есть везде, где открывают портал, кроме Safari старше
+           13.1 — там остаётся поворот экрана, то есть событие окна. */
+        if (typeof ResizeObserver !== 'function') {
+            window.addEventListener('resize', read);
+            return () => window.removeEventListener('resize', read);
+        }
+        const observer = new ResizeObserver(read);
+        observer.observe(host);
+        return () => observer.disconnect();
+    }, []);
+
     const submitManual = useCallback((event) => {
         event?.preventDefault?.();
         const value = manualValue.trim();
@@ -487,11 +526,24 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
         setManualValue('');
     }, [manualValue, catchCode]);
 
-    /* Рамка села на код — сторона считается от него; иначе прежняя, от ширины
-       кадра. Подставляем в те же width/paddingBottom, что и раньше: другого
-       способа задать квадрат здесь нет (см. комментарий у самой рамки). */
+    /* Рамка села на код — сторона считается от него; иначе от кадра: доля
+       ширины, потолок и высота за вычетом полосы под подпись — что меньше.
+       Нижний предел тот же, что и у пойманного кода: рамке в десяток пикселей
+       нечего показывать. Подставляем в те же
+       width/paddingBottom, что и раньше: другого способа задать квадрат здесь
+       нет (см. комментарий у самой рамки).
+
+       Кадр ещё не измерен — берём прежние проценты от ширины: они верны, а
+       первый замер приходит задолго до того, как включится камера и рамка
+       вообще появится на экране. */
     const locked = Boolean(lock);
-    const idleSide = (isNarrow && manualOpen) ? QR_FRAME_SIDE_COMPACT : QR_FRAME_SIDE;
+    const idleSide = hostBox
+        ? `${Math.round(Math.max(LOCK_MIN_SIDE, Math.min(
+            hostBox.w * QR_FRAME_SHARE,
+            QR_FRAME_CAP,
+            hostBox.h - QR_FRAME_HINT_ROOM,
+        )))}px`
+        : `min(${Math.round(QR_FRAME_SHARE * 100)}%, ${QR_FRAME_CAP}px)`;
     const frameSide = (locked && lock.side) ? `${Math.round(lock.side)}px` : idleSide;
     /* Перелёт — ДОБАВОЧНЫЙ сдвиг поверх переноса на полразмера, а не вместо
        него: без translate(-50%, -50%) рамка встанет углом в середину кадра. */
@@ -506,7 +558,10 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
            и бокового бара — вся вёрстка внутри (см. .qr-access-stage). */
         <div className="qr-access-stage">
         <div
-            className={`mx-auto w-full max-w-2xl ${isNarrow ? 'px-4 pb-4' : ''}`}
+            /* На телефоне колонка — столбец во всю высоту раздела: остаток
+               экрана достаётся видоискателю (см. ниже), и прокручивать
+               становится нечего. */
+            className={`mx-auto w-full max-w-2xl ${isNarrow ? 'flex min-h-0 flex-1 flex-col px-4 pb-4' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
         >
             <div className="mb-4 flex items-start gap-3">
@@ -532,12 +587,22 @@ const QrAccessView = ({ user, apiBaseUrl, withAccessTokenHeader, scopeHint = '' 
             {/* Видоискатель */}
             <div
                 ref={stageRef}
-                className="relative overflow-hidden rounded-[28px] bg-slate-900 ring-1 ring-slate-900/10"
-                /* Пока набирают код руками, видоискатель уступает место: на
-                   телефоне полноразмерный кадр уводил подвал формы под бар
-                   разделов, и «Проверить код» приходилось выискивать
-                   прокруткой — а нажатие по нему попадало в чужой пункт меню. */
-                style={{ height: isNarrow ? (manualOpen ? 'min(32vh, 280px)' : 'min(62vh, 560px)') : '380px' }}
+                /* ВЫСОТА КАДРА НА ТЕЛЕФОНЕ — ОСТАТОК ЭКРАНА, а не доля окна.
+                   Прежние 62vh вместе с шапкой, кнопкой ручного ввода и полями
+                   оболочки (место под вырез сверху, бар разделов снизу)
+                   перебирали экран на десяток-другой пикселей, и раздел получал
+                   прокрутку на ровном месте: тянуть его было некуда и незачем.
+                   Считать высоту здесь нечего — колонку растянула ровно на
+                   экран сама оболочка (qr-access.css), кадру остаётся забрать
+                   остаток.
+                   Заодно кадр сам уступает место форме ручного ввода: своей
+                   высоты на этот случай (было min(32vh, 280px)) больше не
+                   нужно. Нижний предел оставлен для низкого экрана с открытой
+                   формой — телефона боком, — иначе кадру досталось бы ноль. */
+                className={`relative overflow-hidden rounded-[28px] bg-slate-900 ring-1 ring-slate-900/10 ${
+                    isNarrow ? 'min-h-[140px] flex-1' : ''
+                }`}
+                style={isNarrow ? undefined : { height: '380px' }}
             >
                 <video
                     ref={videoRef}
