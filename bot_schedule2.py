@@ -39222,6 +39222,24 @@ TEZ_WALLBOARD_ENDPOINTS_TTL_SECONDS = _env_int('TEZ_WALLBOARD_ENDPOINTS_TTL_SECO
 TEZ_AR_TARGET_PERCENT = 5
 TEZ_AR_BAD_PERCENT = 7
 
+# Порог «потерянного» звонка: сброс за 21 секунду и раньше потерей НЕ считается и не
+# попадает ни в «Потеряно», ни во «Входящих», ни в AR (решение владельца 11.09.2026).
+# Число подобрано под SL очереди (20 с): потерян тот, кто прождал дольше нормы ответа и
+# не дождался. Почему это нельзя взять со страницы очереди и как считается — большой
+# комментарий у tez_wallboard_source.line_day_totals.
+TEZ_WALLBOARD_ABANDON_MIN_SECONDS = _env_int('TEZ_WALLBOARD_ABANDON_MIN_SECONDS', 21,
+                                             minimum=0, maximum=600)
+# Журнал звонков живёт СВОИМ сроком и качается ОТДЕЛЬНЫМ потоком, а не в шаге табло.
+# Причина в лимите Binotel API 4.0: 5 «нагружаемых» запросов в минуту, и на «too frequent»
+# клиент честно спит по подсказке сервера — до ~37 с с ретраями. Сделай это в шаге стены,
+# и весь зал вместе со всеми зрителями встал бы за одним замком.
+TEZ_WALLBOARD_JOURNAL_TTL_SECONDS = _env_int('TEZ_WALLBOARD_JOURNAL_TTL_SECONDS', 60,
+                                             minimum=20, maximum=600)
+# Дневные счётчики от минутной задержки не портятся, а вот от получасовой уже врут:
+# дальше этого возраста журнал считается пропавшим, и три плитки уходят в прочерк.
+TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS = _env_int('TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS', 600,
+                                                 minimum=60, maximum=3600)
+
 _TEZ_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
 _TEZ_WALLBOARD_DEPARTMENT_CACHE_TTL = 600
 # Свой словарь, а не общий с СЗоВ: _SZOV_WALLBOARD_DEPARTMENT_CACHE — один словарь на процесс, и
@@ -39230,6 +39248,10 @@ _tez_wallboard_cache = {'ts': 0.0, 'payload': None, 'failed_at': 0.0, 'error': N
                         'restored': False, 'persisted_at': 0.0}
 _tez_wallboard_lock = threading.Lock()
 _tez_wallboard_session_holder = {'session': None}
+# Журнал звонков за сегодня: свой кэш, свой поток, свой последний удачный ответ.
+_tez_wallboard_journal_cache = {'ts': 0.0, 'day': None, 'calls': None, 'error': None,
+                                'fetching': False}
+_tez_wallboard_journal_lock = threading.Lock()
 # Состав отдела меняется кадровыми решениями, а не поминутно: держим его отдельным коротким
 # кэшем, чтобы каждый опрос табло не ходил в базу за одним и тем же списком из двадцати строк.
 _TEZ_WALLBOARD_PEOPLE_CACHE = {'ts': 0.0, 'day': None, 'people': None}
@@ -39488,6 +39510,71 @@ def _tez_wallboard_roster(people, direction, employees, live_statuses):
     return rows
 
 
+def _tez_wallboard_journal_worker(day_key):
+    """Один поход в Binotel API за журналом дня. Крутится в СВОЁМ потоке."""
+    import tez_binotel_calls
+    import tez_wallboard_source as tez_source
+
+    calls, error = None, None
+    if not tez_binotel_calls.api_ready():
+        # Отдельная ветка ради внятного текста в диагностике: ключ API 4.0 — не тот же
+        # доступ, что логин кабинета, и «журнала нет» без причины искали бы долго.
+        with _tez_wallboard_journal_lock:
+            _tez_wallboard_journal_cache['fetching'] = False
+            _tez_wallboard_journal_cache['error'] = (
+                'Ключ Binotel API не задан: TEZ_BINOTEL_API_KEY/TEZ_BINOTEL_API_SECRET')
+        return
+    try:
+        calls = tez_binotel_calls.BinotelApiClient.from_config().list_calls_for_day(day_key)
+    except Exception as exc:
+        # Наружу текст ошибки уезжает в диагностику снимка, а requests пишет в него адрес
+        # API — чистим тем же правилом, что и ошибки кабинета.
+        error = tez_source._safe_reason(exc)[:200]
+        logging.warning("Табло Тез КЦ: журнал звонков за %s не прочитан: %s", day_key, error)
+    with _tez_wallboard_journal_lock:
+        _tez_wallboard_journal_cache['fetching'] = False
+        _tez_wallboard_journal_cache['error'] = error
+        if calls is not None:
+            _tez_wallboard_journal_cache.update(ts=time.time(), day=day_key, calls=calls)
+
+
+def _tez_wallboard_journal(day_key):
+    """Журнал звонков за сегодня: (список звонков | None, возраст в секундах, ошибка).
+
+    Возвращает то, что лежит в кэше, и при надобности заводит фоновое обновление. Шаг
+    табло этого потока НЕ ждёт: у API 4.0 лимит 5 запросов в минуту, и на «too frequent»
+    клиент честно спит по подсказке сервера — до ~37 секунд с ретраями. Дождись мы его в
+    общем замке снимка, и стена встала бы у всех зрителей разом.
+
+    Цена решения названа честно: первые секунды после старта процесса журнала ещё нет, и
+    три плитки ТП показывают прочерк. Это лучше, чем показать в них счётчик очереди —
+    у него другое определение (см. day_totals), и подмену никто бы не заметил.
+    """
+    now = time.time()
+    with _tez_wallboard_journal_lock:
+        fresh = (_tez_wallboard_journal_cache.get('day') == day_key
+                 and _tez_wallboard_journal_cache.get('calls') is not None)
+        age = (now - float(_tez_wallboard_journal_cache.get('ts') or 0.0)) if fresh else None
+        stale = (age is None) or (age > TEZ_WALLBOARD_JOURNAL_TTL_SECONDS)
+        if stale and not _tez_wallboard_journal_cache.get('fetching'):
+            _tez_wallboard_journal_cache['fetching'] = True
+            start = True
+        else:
+            start = False
+        calls = _tez_wallboard_journal_cache.get('calls') if fresh else None
+        error = _tez_wallboard_journal_cache.get('error')
+    if start:
+        # Свой поток, а не общий пул: пул исполнителя бота делится с опросом Telegram, и
+        # занимать в нём место ради минутного запроса нельзя (см. общий бюджет потоков).
+        threading.Thread(target=_tez_wallboard_journal_worker, args=(day_key,),
+                         name='tez-wallboard-journal', daemon=True).start()
+    # Слишком старый журнал — это не «данные за сегодня», а вчерашняя правда: день идёт,
+    # звонки приходят, а счётчики стоят. Лучше прочерк.
+    if calls is not None and age is not None and age > TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS:
+        calls = None
+    return calls, age, error
+
+
 def _tez_wallboard_fetch_snapshot():
     """Один обход кабинета Binotel на ОБА табло Тез КЦ."""
     import tez_wallboard_source as tez_source
@@ -39533,6 +39620,16 @@ def _tez_wallboard_fetch_snapshot():
             if _tez_wallboard_person(people, row.get('number'), row.get('name')) is None:
                 unmatched.append(row.get('name') or row.get('number'))
         summary = tez_source.summarize_queue_operators(queue)
+        # Приём и потери дня считаются по журналу звонков линии ТП, а не по счётчику
+        # очереди: счётчик не знает времени ожидания (а порог владельца — 21 секунда) и не
+        # видит звонков, пришедших оператору мимо очереди. Линию журнал не называет — её
+        # находим по своему же составу: линия ТП та, на которой эти номера приняли больше
+        # всего входящих.
+        journal_calls, journal_age, journal_error = _tez_wallboard_journal(raw.get('day'))
+        tp_line = tez_source.pick_line_number(journal_calls, tp_numbers)
+        line_totals = tez_source.line_day_totals(
+            journal_calls, tp_line, TEZ_WALLBOARD_ABANDON_MIN_SECONDS)
+        snapshot['abandon_min_seconds'] = TEZ_WALLBOARD_ABANDON_MIN_SECONDS
         snapshot['tp'] = {
             'now': dict(
                 summary,
@@ -39541,12 +39638,24 @@ def _tez_wallboard_fetch_snapshot():
                 break_list=_tez_wallboard_name_list(people, summary.get('break_list')),
                 recall_list=[],
             ),
-            'today': tez_source.day_totals(raw.get('employees'), tp_numbers, queue=queue),
+            'today': tez_source.day_totals(raw.get('employees'), tp_numbers, queue=queue,
+                                           line_totals=line_totals),
             'roster': _tez_wallboard_roster(people, 'tp', raw.get('employees'), live_statuses),
+        }
+        journal_diagnostics = {
+            'journal_age_seconds': None if journal_age is None else int(journal_age),
+            'journal_error': journal_error,
+            'tp_line_number': tp_line,
+            # Сколько звонков правило вычеркнуло из дня и где они обрывались: без этих двух
+            # чисел на вопрос «почему входящих меньше, чем в кабинете» ответить нечем, а
+            # переименованная вендором стадия видна тут раньше, чем перекос на стене.
+            'abandons_below_threshold': line_totals.get('dropped_short'),
+            'abandon_stages': line_totals.get('stages') or {},
         }
     else:
         snapshot['tp'] = None
         snapshot['tp_error'] = raw.get('queue_error') or 'Страница очереди Binotel недоступна'
+        journal_diagnostics = {}
 
     # --- ОП: очереди нет, ось собираем из статуса, звонков и регистрации телефона -----------
     op_numbers = [row['sip_number'] for row in people['op'] if row.get('sip_number')]
@@ -39573,6 +39682,7 @@ def _tez_wallboard_fetch_snapshot():
 
     snapshot['diagnostics'] = dict(
         raw.get('diagnostics') or {},
+        **journal_diagnostics,
         department_id=people.get('department_id'),
         unmatched_binotel_names=sorted({str(x) for x in unmatched if x}),
         operators_without_sip=sorted(
@@ -39633,6 +39743,9 @@ def _tez_wallboard_direction_payload(direction):
         payload['sl_threshold_seconds'] = snapshot.get('sl_threshold_seconds')
         payload['ar_target_percent'] = snapshot.get('ar_target_percent')
         payload['ar_bad_percent'] = snapshot.get('ar_bad_percent')
+        # Порог короткого сброса — на стену: подпись под плитками называет правило словами,
+        # иначе «Входящих» на табло и в кабинете расходятся без всякого объяснения.
+        payload['abandon_min_seconds'] = snapshot.get('abandon_min_seconds')
     return payload
 
 

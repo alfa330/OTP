@@ -381,6 +381,42 @@ def _raw_snapshot(*, queue=True, zero_day=False):
     }
 
 
+TP_LINE = '77003000770'
+OP_LINE = '77002990770'
+
+
+def _call(*, line=TP_LINE, number='901', answered=True, waitsec=0, call_type=0):
+    """Звонок в том виде, в каком его отдаёт tez_binotel_calls.BinotelApiClient."""
+    return {'general_call_id': str(id((line, number, waitsec, answered))),
+            'call_type': call_type, 'line_number': line, 'internal_number': number,
+            'disposition': 'ANSWER' if answered else 'CANCEL', 'waitsec': waitsec,
+            'billsec': 60 if answered else 0, 'employee_name': '', 'employee_email': ''}
+
+
+def _journal_calls(empty=False):
+    """Журнал дня: 12 принятых на линии ТП, четыре брошенных и чужая линия рядом.
+
+    Брошенные подобраны так, чтобы порог было видно: 30 и 45 секунд — потеря, 5 секунд в
+    очереди и секунда на приветствии — короткий сброс, которого на стене нет вовсе.
+    """
+    if empty:
+        return []
+    calls = []
+    for number, count in (('901', 6), ('902', 4), ('903', 2)):
+        calls.extend(_call(number=number) for _ in range(count))
+    calls.append(_call(number='Очередь', answered=False, waitsec=30))
+    calls.append(_call(number='Очередь', answered=False, waitsec=45))
+    calls.append(_call(number='Очередь', answered=False, waitsec=5))
+    calls.append(_call(number='Приветствие в рабочее время New', answered=False, waitsec=1))
+    # Линия отдела продаж: на ней приняли меньше, и в счёт ТП она попасть не должна.
+    calls.extend(_call(line=OP_LINE, number='950') for _ in range(5))
+    calls.append(_call(line=OP_LINE, number='Приветствие в рабочее время New',
+                       answered=False, waitsec=90))
+    # Исходящие журнал отдаёт вперемешку с входящими — в тройку дня они не идут.
+    calls.extend(_call(number='901', call_type=1) for _ in range(7))
+    return calls
+
+
 class _FakeCabinetSession:
     """Заглушка сессии кабинета: настоящая при создании читает учётку из окружения."""
 
@@ -581,15 +617,41 @@ class TezWallboardGuardTests(unittest.TestCase):
 
 # --- СНИМОК ---------------------------------------------------------------------------------
 
+_UNSET_JOURNAL = object()
+
+
+class _RecordedThread:
+    """Поток, который никуда не бежит: тест сам решает, когда выполнить его работу."""
+
+    def __init__(self, state, target=None, args=(), name=None, daemon=None):
+        self._state = state
+        self.target = target
+        self.args = args
+        self.name = name
+        self.daemon = daemon
+
+    def start(self):
+        self._state.setdefault('threads', []).append(self)
+
+    def run_now(self):
+        self.target(*self.args)
+
+
 class _SnapshotHarness:
     """Стенд снимка: настоящие функции табло, поддельные кабинет и БД."""
 
-    def _namespace(self, *, raw=None, db=None, error=None):
+    def _namespace(self, *, raw=None, db=None, error=None, journal=_UNSET_JOURNAL):
         state = {'calls': 0, 'kwargs': [], 'raw': raw if raw is not None else _raw_snapshot(),
-                 'error': error}
+                 'error': error, 'threads': []}
+        # Потоки в стенде НЕ настоящие: фоновое обновление журнала иначе полезло бы в живой
+        # Binotel прямо из теста. Замки остаются настоящими — их в модуле два.
+        fake_threading = types.SimpleNamespace(
+            Lock=threading.Lock,
+            Thread=lambda **kwargs: _RecordedThread(state, **kwargs),
+        )
         ns = {
             'time': time,
-            'threading': threading,
+            'threading': fake_threading,
             'logging': logging,
             'datetime': datetime,
             'dt_date': dt_date,
@@ -626,6 +688,14 @@ class _SnapshotHarness:
             'TezWallboardDirectionUnavailable',
             '_tez_wallboard_department_id',
             '_tez_wallboard_session',
+            # Журнал звонков линии: порог короткого сброса, свой кэш и фоновое обновление.
+            'TEZ_WALLBOARD_ABANDON_MIN_SECONDS',
+            'TEZ_WALLBOARD_JOURNAL_TTL_SECONDS',
+            'TEZ_WALLBOARD_JOURNAL_MAX_AGE_SECONDS',
+            '_tez_wallboard_journal_cache',
+            '_tez_wallboard_journal_lock',
+            '_tez_wallboard_journal_worker',
+            '_tez_wallboard_journal',
             '_tez_wallboard_people',
             '_tez_wallboard_person',
             '_tez_wallboard_name_list',
@@ -654,6 +724,12 @@ class _SnapshotHarness:
         ns['_tez_wallboard_cache'].update(ts=0.0, payload=None, failed_at=0.0, error=None,
                                           restored=False, persisted_at=0.0)
         ns['_tez_wallboard_session_holder']['session'] = None
+        # Журнал засеваем готовым и свежим: иначе _tez_wallboard_journal завёл бы фоновый
+        # поток и полез в настоящий Binotel. Свежесть отключает и поход, и ожидание.
+        calls = _journal_calls() if journal is _UNSET_JOURNAL else journal
+        ns['_tez_wallboard_journal_cache'].update(
+            ts=time.time(), day=(state['raw'] or {}).get('day'), calls=calls,
+            error=None, fetching=False)
         ns['_state'] = state
         return ns
 
@@ -730,9 +806,11 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         with _patched_source(ns['_state']):
             snapshot = ns['_tez_wallboard_fetch_snapshot']()
         tp_today, op_today = snapshot['tp']['today'], snapshot['op']['today']
-        # ТП: принятые/потерянные/SL приходят готовыми со страницы очереди
+        # ТП: приём и потери считает журнал линии, а не счётчик очереди (300/12 на странице).
+        # 12 принятых, потеряны двое из четырёх брошенных — те, кто ждал дольше порога.
         self.assertEqual((tp_today['served'], tp_today['lost'], tp_today['arrived']),
-                         (300, 12, 312))
+                         (12, 2, 14))
+        # SL остаётся кабинетным: это готовый процент вендора, свой пересчёт уже пробовали.
         self.assertEqual(tp_today['sl_ratio'], 0.93)
         # Среднее время разговора считаем сами и УСЕКАЕМ: 1700 / 20 = 85
         self.assertEqual(tp_today['avg_talk_seconds'], 85)
@@ -749,9 +827,58 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
             if isinstance(value, int):
                 self.assertLess(value, 9000, f"в сумму затесался чужой номер кабинета: {value}")
 
+    def test_missing_journal_shows_dashes_not_the_queue_counters(self):
+        """Журнал не доехал — три плитки в прочерк, а НЕ счётчик очереди.
+
+        Это главный инвариант всей затеи. У счётчика очереди другое определение: он не знает
+        порога и не видит звонков мимо очереди. Подставь его молча — и на стене висели бы
+        два разных показателя под одной подписью, чего никто бы не заметил."""
+        ns = self._namespace(journal=None)
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        tp_today = snapshot['tp']['today']
+        for key in ('served', 'lost', 'arrived', 'ar_ratio'):
+            self.assertIsNone(tp_today[key], f'{key} подменился счётчиком очереди')
+        # А то, что кабинет считает сам, на стене остаётся: гаснет тройка, а не табло.
+        self.assertEqual(tp_today['sl_ratio'], 0.93)
+        self.assertEqual(tp_today['outgoing_total'], 5)
+
+    def test_stale_journal_is_refreshed_outside_the_wall_step(self):
+        """Журнал качается своим потоком: шаг табло его не ждёт.
+
+        У API 4.0 лимит 5 запросов в минуту, и на «слишком часто» клиент честно спит по
+        подсказке сервера — до ~37 секунд. Дождись мы его под общим замком снимка, и стена
+        встала бы у всех зрителей разом."""
+        ns = self._namespace(journal=None)
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        # Снимок собрался, хотя журнала не было, а поход за ним только поставлен в очередь.
+        self.assertIsNotNone(snapshot['tp'])
+        started = ns['_state']['threads']
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0].name, 'tez-wallboard-journal')
+        self.assertTrue(started[0].daemon, 'фоновый поход обязан быть демоном')
+        # Пока поход не кончился, второй не заводится — иначе лимит Binotel выбрали бы за
+        # минуту тремя шагами табло.
+        with _patched_source(ns['_state']):
+            ns['_tez_wallboard_fetch_snapshot']()
+        self.assertEqual(len(ns['_state']['threads']), 1)
+
+    def test_threshold_work_is_visible_in_diagnostics(self):
+        """Сколько звонков вычеркнуло правило и где они обрывались — иначе на вопрос
+        «почему входящих меньше, чем в кабинете» отвечать нечем."""
+        ns = self._namespace()
+        with _patched_source(ns['_state']):
+            snapshot = ns['_tez_wallboard_fetch_snapshot']()
+        diagnostics = snapshot['diagnostics']
+        self.assertEqual(diagnostics['abandons_below_threshold'], 2)
+        self.assertEqual(diagnostics['tp_line_number'], TP_LINE)
+        self.assertEqual(diagnostics['abandon_stages']['Очередь'], {'long': 2, 'short': 1})
+
     def test_empty_day_yields_none_not_zero(self):
         """Правило нуля: посчитать не из чего — прочерк. Ноль на стене читается как «всё хорошо»."""
-        ns = self._namespace(raw=_raw_snapshot(zero_day=True))
+        # Пустой день пуст и в журнале: звонков не было ни на одной линии.
+        ns = self._namespace(raw=_raw_snapshot(zero_day=True), journal=[])
         with _patched_source(ns['_state']):
             snapshot = ns['_tez_wallboard_fetch_snapshot']()
         tp_today, op_today = snapshot['tp']['today'], snapshot['op']['today']
@@ -905,7 +1032,10 @@ class TezWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
         self.assertEqual(tp['sl_threshold_seconds'], 20)
         self.assertEqual(tp['ar_target_percent'], ns['TEZ_AR_TARGET_PERCENT'])
         self.assertEqual(tp['ar_bad_percent'], ns['TEZ_AR_BAD_PERCENT'])
-        for key in ('sl_threshold_seconds', 'ar_target_percent', 'ar_bad_percent'):
+        # Порог короткого сброса — тоже про очередь: у продаж входящих нет вовсе.
+        self.assertEqual(tp['abandon_min_seconds'], ns['TEZ_WALLBOARD_ABANDON_MIN_SECONDS'])
+        for key in ('sl_threshold_seconds', 'ar_target_percent', 'ar_bad_percent',
+                    'abandon_min_seconds'):
             self.assertNotIn(key, op)
         # Порог берём со страницы кабинета, а не из своей константы
         self.assertEqual(tp['sl_threshold_seconds'], ns['_state']['raw']['sl_threshold_seconds'])
@@ -1332,7 +1462,7 @@ class TezWallboardCacheTests(_SnapshotHarness, unittest.TestCase):
             ns['_tez_wallboard_cache']['ts'] = time.time() - 60
             stale = ns['_tez_wallboard_snapshot']()
         self.assertTrue(stale['stale'])
-        self.assertEqual(stale['tp']['today']['served'], 300)
+        self.assertEqual(stale['tp']['today']['served'], 12)
         self.assertIn('502', stale['error'])
         self.assertGreaterEqual(stale['age_seconds'], 60)
 
@@ -1399,7 +1529,7 @@ class TezWallboardCacheTests(_SnapshotHarness, unittest.TestCase):
         payload, captured_at, direction = db.saved_snapshots[0]
         self.assertEqual(direction, 'tez')
         self.assertNotEqual(direction, 'osnova')
-        self.assertEqual(payload['tp']['today']['served'], 300)
+        self.assertEqual(payload['tp']['today']['served'], 12)
         self.assertEqual(db.snapshot_reads, ['tez'])
 
     def test_persist_happens_once_per_interval(self):
@@ -1447,7 +1577,7 @@ class TezWallboardCacheTests(_SnapshotHarness, unittest.TestCase):
         with _patched_source(ns['_state']):
             snapshot = ns['_tez_wallboard_snapshot']()
         self.assertFalse(snapshot['stale'])
-        self.assertEqual(snapshot['tp']['today']['served'], 300)
+        self.assertEqual(snapshot['tp']['today']['served'], 12)
 
     def test_restore_reads_the_db_only_once_per_process(self):
         """Пустая строка снимка не должна превращаться в запрос к БД на каждый опрос."""
@@ -1570,6 +1700,25 @@ class TezWallboardWiringTests(unittest.TestCase):
             'TezOpWallboard.jsx': cls.op,
             'TezOperatorsTable.jsx': cls.roster,
         }
+
+    def test_abandon_threshold_matches_the_server(self):
+        """Запасное значение порога во фронте не должно разъехаться с сервером.
+
+        Настоящий порог приезжает в снимке, но подпись под плитками читает и локальную
+        константу — на старом кэше она осталась бы единственной. Разъедься эти два числа, и
+        стена объясняла бы правило не тем порогом, по которому считает сервер."""
+        found = re.search(r'TEZ_ABANDON_MIN_SECONDS\s*=\s*(\d+)', self.shared)
+        self.assertIsNotNone(found, 'TEZ_ABANDON_MIN_SECONDS пропал из tezWallboardShared.js')
+        server = re.search(r"TEZ_WALLBOARD_ABANDON_MIN_SECONDS = _env_int\([^,]+,\s*(\d+)",
+                           BOT_SOURCE)
+        self.assertIsNotNone(server, 'порог пропал из bot_schedule2.py')
+        self.assertEqual(int(found.group(1)), int(server.group(1)))
+
+    def test_wall_names_the_short_abandon_rule(self):
+        """Правило названо словами на самой стене: иначе «Входящих» у нас и в кабинете
+        расходятся без всякого объяснения, и это читается как брак табло."""
+        self.assertIn('потерей не считается', self.tp)
+        self.assertIn('abandon_min_seconds', self.tp)
 
     def test_backend_routes_are_registered_and_guarded(self):
         for direction in ('tp', 'op'):

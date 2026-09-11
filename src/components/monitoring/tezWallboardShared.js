@@ -52,6 +52,10 @@ export const arCeilingTone = (ratio) => {
  * Здесь — только запасное значение для подписи, пока снимка ещё нет.
  */
 export const TEZ_SL_THRESHOLD_SECONDS = 20;
+// Запасное значение порога короткого сброса: настоящее приходит в снимке
+// (`abandon_min_seconds`), правило целиком живёт на сервере. Здесь оно нужно только чтобы
+// подпись не осталась пустой, если снимок пришёл из старого кэша.
+export const TEZ_ABANDON_MIN_SECONDS = 21;
 
 /*
  * Ноль вместо «нет данных» — самая опасная ложь на стене: пустое ожидание читается как «всё
@@ -248,7 +252,7 @@ export const TEZ_TP_METRICS = [
         group: 'tp_today',
         kind: 'pair',
         label: 'Принято / входящих',
-        hint: 'Дошедших до очереди',
+        hint: 'Без коротких сбросов',
         read: (now, today) => ({
             value: formatCount(today.served),
             secondary: formatCount(today.arrived),
@@ -258,21 +262,21 @@ export const TEZ_TP_METRICS = [
         key: 'tp_served',
         group: 'tp_today',
         label: 'Принято',
-        hint: 'Отвеченных звонков',
+        hint: 'Отвеченных операторами ТП',
         read: (now, today) => ({ value: formatCount(today.served) }),
     },
     {
         key: 'tp_arrived',
         group: 'tp_today',
         label: 'Входящих',
-        hint: 'Дошедших до очереди',
+        hint: 'Без коротких сбросов',
         read: (now, today) => ({ value: formatCount(today.arrived) }),
     },
     {
         key: 'tp_lost',
         group: 'tp_today',
         label: 'Потеряно',
-        hint: 'Ушли, не дождавшись',
+        hint: 'Ждали и не дождались',
         // Красим, только когда есть что терять: красный ноль — тревога на пустом месте,
         // а нейтральное состояние цвета не заслуживает.
         read: (now, today) => ({

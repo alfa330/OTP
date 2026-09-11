@@ -288,9 +288,15 @@ class BinotelApiClient:
         if isinstance(emp, dict):
             emp_name = str(emp.get("name") or emp.get("fullName") or "").strip()
             emp_email = str(emp.get("email") or "").strip()
+        # Линия компании, НА которую позвонил клиент (`pbxNumberData.number`) — это не номер
+        # клиента, а наш собственный городской: по нему табло Тез отделяет поток ТП от ОП.
+        # Очередь в API не видна вовсе, и линия — единственный признак направления.
+        pbx = raw.get("pbxNumberData")
+        line_number = str((pbx or {}).get("number") or "").strip() if isinstance(pbx, dict) else ""
         return {
             "general_call_id": str(gid),
             "call_type": call_type,
+            "line_number": line_number,
             "billsec": billsec,
             "waitsec": waitsec,
             "start_time": start_time,

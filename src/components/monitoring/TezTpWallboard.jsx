@@ -6,6 +6,7 @@ import { readWallboardMetric } from './szovWallboardShared';
 import TezOperatorsTable from './TezOperatorsTable';
 import {
     TEZ_SL_THRESHOLD_SECONDS,
+    TEZ_ABANDON_MIN_SECONDS,
     TEZ_TP_METRIC_MAP,
     formatCount,
     formatSeconds,
@@ -109,6 +110,8 @@ export default function TezTpWallboardBody({ snapshot, scale = 1 }) {
     const now = snapshot?.now || {};
     // Порог берём из снимка: его пишет сам кабинет в подписи колонки, и меняют его там же.
     const slSeconds = Number(snapshot?.sl_threshold_seconds) || TEZ_SL_THRESHOLD_SECONDS;
+    // Порог короткого сброса тоже из снимка: правило живёт на сервере, а стена его называет.
+    const abandonSeconds = Number(snapshot?.abandon_min_seconds) || TEZ_ABANDON_MIN_SECONDS;
 
     // «Работа в CRM» и «не на линии» своей плитки не имеют — чтобы люди в этих статусах не
     // пропадали из виду, показываем их приглушённой строкой, и только когда они есть.
@@ -148,6 +151,8 @@ export default function TezTpWallboardBody({ snapshot, scale = 1 }) {
                         right={(
                             <span className="hidden text-right text-[12.5px] leading-tight text-slate-400 sm:block">
                                 SL — доля принятых, отвеченных за {slSeconds} с
+                                <br />
+                                Сброс до {abandonSeconds} с потерей не считается
                             </span>
                         )}
                     >

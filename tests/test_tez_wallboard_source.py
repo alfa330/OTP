@@ -759,6 +759,100 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual([], re.findall(r"\b7\d{10}\b", dumped))
 
 
+TP_LINE = "77003000770"
+OP_LINE = "77002990770"
+
+
+def _call(line=TP_LINE, number="901", answered=True, waitsec=0, call_type=0):
+    return {"call_type": call_type, "line_number": line, "internal_number": number,
+            "disposition": "ANSWER" if answered else "CANCEL", "waitsec": waitsec}
+
+
+class LineDayTotalsTests(unittest.TestCase):
+    """Тройка дня по журналу линии: порог короткого сброса и что он вычёркивает."""
+
+    def _totals(self, calls, threshold=21):
+        return source.line_day_totals(calls, TP_LINE, threshold)
+
+    def test_short_abandon_is_absent_everywhere(self):
+        """Решение владельца: сброс до порога не попадает НИ в потери, НИ во входящие.
+
+        Оставить его в знаменателе значило бы механически занижать AR — так в колл-центрах
+        и поступают с short abandon."""
+        totals = self._totals([
+            _call(), _call(), _call(),
+            _call(answered=False, waitsec=1),
+            _call(answered=False, waitsec=40),
+        ])
+        self.assertEqual((totals["served"], totals["lost"], totals["arrived"]), (3, 1, 4))
+        self.assertEqual(totals["dropped_short"], 1)
+        self.assertEqual(totals["ar_ratio"], 0.25)
+
+    def test_threshold_is_strict(self):
+        """«Свыше 21 секунды» — строго больше: ровно порог ещё не потеря."""
+        edge = self._totals([_call(), _call(answered=False, waitsec=21)])
+        self.assertEqual((edge["lost"], edge["dropped_short"]), (0, 1))
+        over = self._totals([_call(), _call(answered=False, waitsec=22)])
+        self.assertEqual((over["lost"], over["dropped_short"]), (1, 0))
+
+    def test_other_lines_and_outgoing_are_not_counted(self):
+        """Считаем только входящие своей линии: чужая линия и исходящие в день не идут."""
+        totals = self._totals([
+            _call(), _call(line=OP_LINE), _call(line=OP_LINE, answered=False, waitsec=99),
+            _call(call_type=1), _call(call_type=1, answered=False, waitsec=99),
+        ])
+        self.assertEqual((totals["served"], totals["lost"], totals["arrived"]), (1, 0, 1))
+
+    def test_stages_are_counted_for_diagnostics(self):
+        """Стадию обрыва Binotel пишет русским словом — считаем её, чтобы переименование
+        вендора было видно в диагностике раньше, чем перекос на стене."""
+        totals = self._totals([
+            _call(number="Очередь", answered=False, waitsec=77),
+            _call(number="Очередь", answered=False, waitsec=9),
+            _call(number="Приветствие в рабочее время New", answered=False, waitsec=1),
+        ])
+        self.assertEqual(totals["stages"]["Очередь"], {"long": 1, "short": 1})
+        self.assertEqual(totals["stages"]["Приветствие в рабочее время New"],
+                         {"long": 0, "short": 1})
+
+    def test_no_line_means_dashes_not_zeros(self):
+        """Линию не нашли — считать не из чего. Ноль на стене читается как «всё хорошо»."""
+        totals = source.line_day_totals([_call()], None, 21)
+        self.assertEqual([totals[key] for key in ("served", "lost", "arrived", "ar_ratio")],
+                         [None, None, None, None])
+
+    def test_quiet_day_is_zero_not_a_dash(self):
+        """А вот пустой день на найденной линии — честный ноль: звонков правда не было."""
+        totals = self._totals([])
+        self.assertEqual((totals["served"], totals["lost"], totals["arrived"]), (0, 0, 0))
+        # AR из нуля не считается: делить не на что.
+        self.assertIsNone(totals["ar_ratio"])
+
+
+class PickLineTests(unittest.TestCase):
+    """Линию направления ищем по своему же составу: в API очередь не видна вовсе."""
+
+    def test_line_with_most_answers_by_our_people_wins(self):
+        calls = [_call(number="901"), _call(number="902"),
+                 _call(line=OP_LINE, number="950")]
+        self.assertEqual(source.pick_line_number(calls, ["901", "902"]), TP_LINE)
+
+    def test_strangers_answers_do_not_pick_a_line(self):
+        """Чужие ответы линию не выбирают — иначе поток соседнего отдела уехал бы на стену ТП."""
+        calls = [_call(line=OP_LINE, number="950"), _call(line=OP_LINE, number="951")]
+        self.assertIsNone(source.pick_line_number(calls, ["901", "902"]))
+
+    def test_a_tie_is_a_dash_not_a_coin_flip(self):
+        """Две линии с одинаковым приёмом — признак перепутанного состава, а не выбор наугад."""
+        calls = [_call(number="901"), _call(line=OP_LINE, number="901")]
+        self.assertIsNone(source.pick_line_number(calls, ["901"]))
+
+    def test_unanswered_calls_do_not_pick_a_line(self):
+        """У брошенного звонка вместо номера стоит стадия обрыва — опираться на неё нельзя."""
+        calls = [_call(number="Очередь", answered=False, waitsec=99)]
+        self.assertIsNone(source.pick_line_number(calls, ["901"]))
+
+
 class ModuleBoundaryTests(unittest.TestCase):
     def test_module_does_not_depend_on_flask_or_database(self):
         # Ради этого модуль и вынесен в отдельный файл: database.py на импорте

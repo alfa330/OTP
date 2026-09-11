@@ -579,7 +579,7 @@ def parse_endpoints(html):
     return states
 
 
-def day_totals(employees, numbers, queue=None):
+def day_totals(employees, numbers, queue=None, line_totals=None):
     """Показатели за день по набору внутренних номеров — блок `today` табло.
 
     Если передана разобранная страница очереди, принятые/непринятые/SL/среднее
@@ -634,6 +634,21 @@ def day_totals(employees, numbers, queue=None):
         sl_ratio = None
         avg_wait = int(totals["incoming_waitsec"] // answered) if answered else None
 
+    # Приём и потери линии считает журнал звонков, а не страница очереди: она не видит ни
+    # звонков мимо очереди, ни времени ожидания брошенных (см. большой комментарий у
+    # line_day_totals). SL и среднее ожидание при этом остаются кабинетными — это готовые
+    # проценты вендора, и свой пересчёт SL по waitsec уже пробовали: он давал 100 % каждый
+    # день.
+    #
+    # Отката к счётчику очереди тут НЕТ намеренно. Журнал не доехал — «Принято»,
+    # «Потеряно» и «Входящих» уходят в прочерк, потому что у счётчика очереди другое
+    # определение: он не знает порога и не считает звонки мимо очереди. Подставить его
+    # молча значило бы показать на стене два разных показателя под одной подписью, и никто
+    # бы этого не заметил.
+    if line_totals is not None:
+        served = line_totals.get("served")
+        lost = line_totals.get("lost")
+
     arrived = None
     if served is not None and lost is not None:
         arrived = served + lost
@@ -657,6 +672,111 @@ def day_totals(employees, numbers, queue=None):
         # всех семи номеров incomingSuccess = 0), и «средняя длительность
         # разговора» из постановки для них может значить только исходящие.
         "avg_outgoing_talk_seconds": avg_out_talk,
+    }
+
+
+# --- журнал линии: «принято / потеряно / входящих» по звонкам ---------------
+#
+# Страница очереди отдаёт эти три числа готовыми, но видит только то, что дошло ДО
+# очереди и умерло В НЕЙ. Проверено на живом дне 11.09.2026: на линию ТП пришло 63
+# входящих, а очередь насчитала 54 (51 принято + 3 потеряно). Разницу видно только в
+# журнале звонков, и там же видно, ГДЕ звонок оборвался — Binotel пишет стадию в поле
+# внутреннего номера: «Приветствие в рабочее время New» (4 звонка, все по секунде),
+# «Очередь» (5 звонков: 9, 77, 80, 84 и 120 секунд), номер оператора при «занято».
+# Ещё два принятых пришли оператору напрямую, мимо очереди, — поэтому «Принято» на
+# стене было занижено на два против того, что операторы ТП реально приняли.
+#
+# Плюс у готового счётчика нет времени ожидания, а владелец попросил порог: сброс за
+# 21 секунду и раньше потерей не считается.
+#
+# Правила (решение владельца 11.09.2026):
+#   * берём ТОЛЬКО входящие (callType 0) на линии ТП;
+#   * принято — disposition ANSWER, сколько бы человек ни ждал;
+#   * потеряно — не ANSWER и ждал СТРОГО дольше порога;
+#   * вошло = принято + потеряно. Короткого сброса в нём нет ВОВСЕ: звонок, брошенный
+#     за секунду, считается так, будто его не было. Так делают в колл-центрах с short
+#     abandon — оставить его в знаменателе значило бы механически занижать AR.
+#
+# Порог применяем к времени ожидания, а не к названию стадии: «Очередь» и
+# «Приветствие…» — русские подписи вендора, их переименование не должно обнулить
+# метрику молча. Стадии всё же считаем — они уезжают в диагностику, и по ней видно,
+# если кабинет поменял разметку.
+
+ANSWERED_DISPOSITION = "ANSWER"
+
+
+def pick_line_number(calls, numbers):
+    """Линия направления = та, на которой ЕГО операторы приняли больше всего входящих.
+
+    Так линия находится сама и не требует ни хардкода, ни доли «больше половины»:
+    состав ТП мы и так знаем со страницы очереди, а у принятого звонка журнал пишет
+    внутренний номер ответившего. Ничья и пустой день → None, и тогда считать нечего.
+    """
+    wanted = {str(number) for number in (numbers or []) if str(number or "").strip()}
+    if not wanted:
+        return None
+    tally = {}
+    for call in calls or []:
+        if _to_int(call.get("call_type"), -1) != 0:
+            continue
+        if str(call.get("disposition") or "").upper() != ANSWERED_DISPOSITION:
+            continue
+        if str(call.get("internal_number") or "").strip() not in wanted:
+            continue
+        line = str(call.get("line_number") or "").strip()
+        if line:
+            tally[line] = tally.get(line, 0) + 1
+    if not tally:
+        return None
+    best = max(tally.values())
+    winners = sorted(line for line, count in tally.items() if count == best)
+    # Ровно один победитель: две линии с одинаковым приёмом — это не «выберем любую», а
+    # признак, что состав перепутан. Лучше прочерк, чем половина потока на стене.
+    return winners[0] if len(winners) == 1 else None
+
+
+def line_day_totals(calls, line_number, abandon_min_seconds):
+    """Входящие одной линии из журнала → те же поля дня, что даёт страница очереди.
+
+    Ничего, кроме чисел и стадий обрыва, наружу не отдаём: в журнале лежат телефоны
+    клиентов, и правило белого списка тут то же, что у парсеров кабинета.
+    """
+    line = str(line_number or "").strip()
+    threshold = max(0, _to_int(abandon_min_seconds, 0))
+    if not line:
+        return {"served": None, "lost": None, "arrived": None, "ar_ratio": None,
+                "dropped_short": None, "stages": {}}
+    served = 0
+    lost = 0
+    dropped_short = 0
+    stages = {}
+    for call in calls or []:
+        if _to_int(call.get("call_type"), -1) != 0:
+            continue
+        if str(call.get("line_number") or "").strip() != line:
+            continue
+        if str(call.get("disposition") or "").upper() == ANSWERED_DISPOSITION:
+            served += 1
+            continue
+        waited = _to_int(call.get("waitsec"), 0)
+        stage = str(call.get("internal_number") or "").strip() or "—"
+        bucket = stages.setdefault(stage, {"long": 0, "short": 0})
+        if waited > threshold:
+            lost += 1
+            bucket["long"] += 1
+        else:
+            dropped_short += 1
+            bucket["short"] += 1
+    arrived = served + lost
+    return {
+        "served": served,
+        "lost": lost,
+        "arrived": arrived,
+        "ar_ratio": round(lost / float(arrived), 4) if arrived else None,
+        # Сколько звонков правило вычеркнуло из дня целиком — на стене их нет, но без
+        # этого числа нельзя ответить на вопрос «почему входящих меньше, чем в кабинете».
+        "dropped_short": dropped_short,
+        "stages": stages,
     }
 
 
