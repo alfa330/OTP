@@ -719,6 +719,10 @@ class _SnapshotHarness:
             '_TEZ_WALLBOARD_CABINET_STATUS_KEYS',
             '_tez_wallboard_status_entry',
             '_tez_wallboard_person_stats',
+            # Сверка статуса телефона с регистрацией линии: запас на регистрацию и время выхода.
+            'TEZ_WALLBOARD_LINE_GRACE_SECONDS',
+            '_tez_wallboard_line_is_down',
+            '_tez_wallboard_line_offline_seconds',
             '_tez_wallboard_roster',
             '_tez_wallboard_fetch_snapshot',
             '_tez_wallboard_snapshot',
@@ -1236,6 +1240,94 @@ class TezWallboardRosterTests(_SnapshotHarness, unittest.TestCase):
             op = ns['_tez_wallboard_direction_payload']('op')
         self.assertEqual(len(tp['roster']), 3)
         self.assertEqual(len(op['roster']), 3)
+
+    # --- Телефон умер, не прислав «выключен»: сверка с регистрацией линии ---------------------
+
+    @staticmethod
+    def _roster_row(snapshot, direction, operator_id):
+        return next(item for item in snapshot[direction]['roster']
+                    if item['operator_id'] == operator_id)
+
+    def test_dead_phone_status_yields_to_an_offline_line(self):
+        """Телефон умер без «выключен» — на стене «Не в сети», а не его последний статус.
+
+        14.09.2026 у Мухана Ахана висело «Активный, 8:11», а его линия 909 в кабинете была
+        офлайн с конца смены. Событие телефона на восемь часов старше списка линий, и список
+        говорит прямо: телефон не на связи."""
+        raw = _raw_snapshot()
+        raw['endpoints']['901'] = False
+        snapshot, _ = self._snapshot({101: {'status_key': 'готов', 'seconds': 8 * 3600}}, raw=raw)
+        row = self._roster_row(snapshot, 'tp', 101)
+        self.assertEqual((row['status_key'], row['status_label']), ('offline', 'Не в сети'))
+        # Presence в кабинете «Active» — момента выхода кабинет не знает: прочерк, а не восемь
+        # часов от последнего «готов».
+        self.assertIsNone(row['status_seconds'])
+        self.assertEqual(snapshot['diagnostics']['operators_line_offline'], ['Аскар Тлеу'])
+
+    def test_offline_time_is_the_cabinet_logout(self):
+        """Выходя, телефон ставит в кабинете «Неактивен» — время смены presence и есть выход."""
+        raw = _raw_snapshot()
+        raw['endpoints']['901'] = False
+        cabinet_row = raw['employees']['employees']['901']
+        cabinet_row['presence_state'] = 'Inactive'
+        cabinet_row['presence_state_updated_at'] = BINOTEL_NOW_TS - 600
+        snapshot, _ = self._snapshot({101: {'status_key': 'готов', 'seconds': 900}}, raw=raw)
+        self.assertEqual(self._roster_row(snapshot, 'tp', 101)['status_seconds'], 600)
+
+        # «Неактивен» старше последнего события телефона — след давнего выхода, а не нынешнего
+        # молчания, и выдавать его время за нынешнее нельзя.
+        cabinet_row['presence_state_updated_at'] = BINOTEL_NOW_TS - 5000
+        snapshot, _ = self._snapshot({101: {'status_key': 'готов', 'seconds': 900}}, raw=raw)
+        row = self._roster_row(snapshot, 'tp', 101)
+        self.assertEqual((row['status_key'], row['status_seconds']), ('offline', None))
+
+    def test_fresh_phone_event_outweighs_a_line_list_taken_before_registration(self):
+        """Только что вошёл: статус уже пришёл, а список линий снят до регистрации телефона.
+
+        У списка свой TTL (до двух минут), и без запаса человек висел бы «не в сети» ровно
+        тогда, когда начал работать."""
+        raw = _raw_snapshot()
+        raw['endpoints']['901'] = False
+        raw['endpoints_age_seconds'] = 100
+        snapshot, _ = self._snapshot({101: {'status_key': 'перезвон', 'seconds': 130}}, raw=raw)
+        row = self._roster_row(snapshot, 'tp', 101)
+        self.assertEqual((row['status_key'], row['status_seconds']), ('outgoing', 130))
+        self.assertEqual(snapshot['diagnostics']['operators_line_offline'], [])
+
+    def test_unknown_line_state_keeps_the_phone_status(self):
+        """Номера нет в списке линий или самого списка нет — не знаем, статус телефона остаётся."""
+        # 902 в списке линий не значится вовсе.
+        snapshot, _ = self._snapshot({102: {'status_key': 'готов', 'seconds': 8 * 3600}})
+        self.assertEqual(self._roster_row(snapshot, 'tp', 102)['status_key'], 'free')
+
+        raw = _raw_snapshot()
+        raw['endpoints'], raw['endpoints_age_seconds'] = None, None
+        snapshot, _ = self._snapshot({101: {'status_key': 'готов', 'seconds': 8 * 3600}}, raw=raw)
+        self.assertEqual(self._roster_row(snapshot, 'tp', 101)['status_key'], 'free')
+
+    def test_line_rule_spares_no_events_and_covers_sales(self):
+        """«Нет событий» линия не трогает, а у отдела продаж правило то же, что у ТП."""
+        # В фикстуре линии 951 и 952 офлайн. Ерлан Бек давно сказал «готов» — «Не в сети»;
+        # у Айгуль Сат событий нет — остаётся «Нет событий»: это незнание, а не человек.
+        snapshot, _ = self._snapshot({202: {'status_key': 'готов', 'seconds': 3600}})
+        erlan = self._roster_row(snapshot, 'op', 202)
+        aigul = self._roster_row(snapshot, 'op', 203)
+        self.assertEqual((erlan['status_key'], erlan['status_label']), ('offline', 'Не в сети'))
+        self.assertEqual(aigul['status_key'], 'unknown')
+        self.assertEqual(snapshot['diagnostics']['operators_line_offline'], ['Ерлан Бек'])
+
+    def test_line_with_a_call_right_now_is_never_offline(self):
+        """Звонок по номеру идёт прямо сейчас — телефон на связи, что бы ни говорил список линий.
+
+        Список линий живёт своим TTL и мог быть снят до звонка, а страница кабинета не обязана
+        подписывать занятую линию словом «онлайн»: долгий разговор не должен превращаться на
+        стене в «не в сети»."""
+        raw = _raw_snapshot()
+        raw['endpoints']['950'] = False  # у 950 в фикстуре идёт исходящий звонок
+        snapshot, _ = self._snapshot({201: {'status_key': 'занят', 'seconds': 600}}, raw=raw)
+        row = self._roster_row(snapshot, 'op', 201)
+        self.assertEqual((row['status_key'], row['status_seconds']), ('talking', 600))
+        self.assertEqual(snapshot['diagnostics']['operators_line_offline'], [])
 
 
 # --- ВЫГРУЗКА ЗА ПЕРИОД ---------------------------------------------------------------------

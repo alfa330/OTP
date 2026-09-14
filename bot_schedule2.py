@@ -39370,6 +39370,10 @@ TEZ_WALLBOARD_PERSIST_INTERVAL_SECONDS = _env_int('TEZ_WALLBOARD_PERSIST_INTERVA
 # Список линий кабинет отдаёт ~3,5 с (он реально пингует каждую) — втрое дольше всей остальной
 # тройки, поэтому у него свой срок и в общий шаг опроса он не входит.
 TEZ_WALLBOARD_ENDPOINTS_TTL_SECONDS = _env_int('TEZ_WALLBOARD_ENDPOINTS_TTL_SECONDS', 120, minimum=30, maximum=900)
+# Запас на регистрацию телефона, прежде чем поверить списку линий, что линия офлайн. Телефон шлёт
+# статус раньше, чем Binotel подтверждает регистрацию, а список линий живёт своим TTL: без запаса
+# только что вошедший оператор до двух минут висел бы в списке людей «не в сети».
+TEZ_WALLBOARD_LINE_GRACE_SECONDS = _env_int('TEZ_WALLBOARD_LINE_GRACE_SECONDS', 60, minimum=0, maximum=900)
 
 # AR у Тез — ПОТОЛОК, а не коридор (решение владельца 08.09.2026): норма «не выше 5 %». У СЗоВ
 # это коридор 3-5 %, и там 1 % — тоже отклонение, потому что означает перезаложенных операторов.
@@ -39626,7 +39630,65 @@ def _tez_wallboard_person_stats(employees, number):
     }
 
 
-def _tez_wallboard_roster(people, direction, employees, live_statuses):
+def _tez_wallboard_line_is_down(tone_key, status_seconds, endpoints, endpoints_age_seconds, number,
+                                live_call_numbers=None):
+    """Молчит ли телефон человека — по регистрации его линии в Binotel.
+
+    Живой статус телефона — последнее событие за 16 часов, и телефон, умерший без «выключен»,
+    держит его на стене до конца окна: 14.09.2026 у Мухана Ахана висело «Активный, 8:11», а его
+    линия 909 в кабинете была офлайн с конца смены. «Выключен» терялся регулярно — с 11 по 14.09
+    в 5 выходах из 33: при выходе из аккаунта телефон стирал токен раньше, чем событие уезжало на
+    сервер, а выключение компьютера и сон его не слали вовсе. Регистрация линии отвечает на вопрос
+    «на связи ли телефон» прямо.
+
+    Четыре условия, без которых правило соврало бы:
+      * список линий есть и номер в нём ЯВНО офлайн. Нет списка или номера в нём — не знаем,
+        и статус телефона остаётся как есть;
+      * список снят позже события больше чем на TEZ_WALLBOARD_LINE_GRACE_SECONDS: телефон шлёт
+        статус раньше, чем Binotel подтверждает регистрацию, а у списка свой TTL;
+      * у строки есть живой статус. «Нет событий» — отдельный разряд про незнание, его линия не
+        трогает, а «Не в сети» и так не в сети;
+      * по номеру нет звонка прямо сейчас. Линия в разговоре на связи по определению, а список
+        линий мог быть снят до звонка — и страница кабинета не обязана подписывать занятую
+        линию именно «онлайн»."""
+    if tone_key in ('offline', 'unknown') or not number or not isinstance(endpoints, dict):
+        return False
+    if live_call_numbers and str(number) in live_call_numbers:
+        return False
+    if endpoints.get(str(number)) is not False:
+        return False
+    if status_seconds is None or endpoints_age_seconds is None:
+        return False
+    return status_seconds - endpoints_age_seconds > TEZ_WALLBOARD_LINE_GRACE_SECONDS
+
+
+def _tez_wallboard_line_offline_seconds(employees, number, status_seconds, now_ts):
+    """Сколько человек не в сети, если кабинет знает момент выхода; иначе None.
+
+    Выходя из аккаунта или закрываясь, телефон ставит в кабинете «Неактивен», и время смены
+    presence — ровно момент выхода. «Неактивен», поставленный раньше последнего события телефона,
+    — след давнего выхода, а не нынешнего молчания: тогда времени не знаем, и прочерк честнее
+    восьми часов от последнего «готов»."""
+    people = (employees or {}).get('employees') if isinstance(employees, dict) else None
+    if people is None:
+        people = employees or {}
+    record = people.get(str(number or '')) if number else None
+    if not isinstance(record, dict):
+        return None
+    if str(record.get('presence_state') or '').strip().lower() != 'inactive':
+        return None
+    since = record.get('presence_state_updated_at')
+    if not since or not now_ts:
+        return None
+    seconds = int(now_ts) - int(since)
+    if seconds < 0 or (status_seconds is not None and seconds > status_seconds):
+        return None
+    return seconds
+
+
+def _tez_wallboard_roster(people, direction, employees, live_statuses, endpoints=None,
+                          endpoints_age_seconds=None, now_ts=None, line_offline=None,
+                          live_call_numbers=None):
     """Строка на каждого человека направления: статус по телефону + его счётчики за день.
 
     Статус берём из НАШИХ событий iCORE Phone (db.get_operator_live_statuses), а не из
@@ -39638,20 +39700,32 @@ def _tez_wallboard_roster(people, direction, employees, live_statuses):
     Плата за это — два источника на одном экране: в редкую минуту счётчик плитки и число
     одинаковых чипов в списке могут разойтись (телефон и кабинет узнают о начале разговора
     не в одну секунду, а у необновившегося телефона статуса нет вовсе). Поэтому у секции
-    списка своя подпись с источником: расхождение названо словами, а не спрятано."""
+    списка своя подпись с источником: расхождение названо словами, а не спрятано.
+
+    Статус телефона сверяется с регистрацией его линии (_tez_wallboard_line_is_down): умерший
+    телефон иначе держал бы на стене последний статус до 16 часов. Имена таких строк
+    складываются в line_offline — для диагностики снимка."""
     statuses = live_statuses or {}
     rows = []
     for person in (people.get(direction) or []):
         operator_id = person.get('id')
         live = statuses.get(operator_id) or {}
         label, tone_key, weight = _tez_wallboard_status_entry(live.get('status_key'))
+        seconds = live.get('seconds')
+        number = person.get('sip_number')
+        if _tez_wallboard_line_is_down(tone_key, seconds, endpoints, endpoints_age_seconds, number,
+                                       live_call_numbers):
+            label, tone_key, weight = _TEZ_WALLBOARD_STATUS_CATALOG['выключен']
+            seconds = _tez_wallboard_line_offline_seconds(employees, number, seconds, now_ts)
+            if line_offline is not None:
+                line_offline.append(person.get('name') or '—')
         rows.append({
             'operator_id': operator_id,
             'name': person.get('name') or '—',
             'status_key': tone_key,
             'status_label': label,
-            'status_seconds': live.get('seconds'),
-            'stats': _tez_wallboard_person_stats(employees, person.get('sip_number')),
+            'status_seconds': seconds,
+            'stats': _tez_wallboard_person_stats(employees, number),
             '_weight': weight,
         })
     # Разряд, внутри разряда — дольше всех в статусе сверху, затем по имени: при равных
@@ -39754,6 +39828,16 @@ def _tez_wallboard_fetch_snapshot():
     except Exception:
         logging.exception("Табло Тез КЦ: статусы iCORE Phone не прочитались")
         live_statuses = {}
+    # Статус умершего телефона список людей не показывает: сверяет его с регистрацией линии
+    # (_tez_wallboard_line_is_down). Имена таких строк уходят в диагностику снимка.
+    line_offline = []
+    roster_lines = {
+        'endpoints': raw.get('endpoints'),
+        'endpoints_age_seconds': raw.get('endpoints_age_seconds'),
+        'now_ts': now_ts,
+        'line_offline': line_offline,
+        'live_call_numbers': {str(call.get('employee_number') or '') for call in live_calls},
+    }
 
     snapshot = {
         'binotel_now': raw.get('binotel_now'),
@@ -39795,7 +39879,8 @@ def _tez_wallboard_fetch_snapshot():
             ),
             'today': tez_source.day_totals(raw.get('employees'), tp_numbers, queue=queue,
                                            line_totals=line_totals),
-            'roster': _tez_wallboard_roster(people, 'tp', raw.get('employees'), live_statuses),
+            'roster': _tez_wallboard_roster(people, 'tp', raw.get('employees'), live_statuses,
+                                            **roster_lines),
         }
         journal_diagnostics = {
             'journal_age_seconds': None if journal_age is None else int(journal_age),
@@ -39832,7 +39917,8 @@ def _tez_wallboard_fetch_snapshot():
         # Средняя длительность разговора у отдела продаж — по ИСХОДЯЩИМ: входящих у них нет
         # вовсе, и общая плитка показывала бы прочерк круглые сутки.
         'today': dict(op_today, avg_talk_seconds=op_today.get('avg_outgoing_talk_seconds')),
-        'roster': _tez_wallboard_roster(people, 'op', raw.get('employees'), live_statuses),
+        'roster': _tez_wallboard_roster(people, 'op', raw.get('employees'), live_statuses,
+                                        **roster_lines),
     }
 
     snapshot['diagnostics'] = dict(
@@ -39848,6 +39934,9 @@ def _tez_wallboard_fetch_snapshot():
         # ровно те, у кого статус на стене неизвестен, а часы в учёте не набираются.
         operators_without_phone_events=len(
             [row for row in (people['tp'] + people['op']) if row['id'] not in live_statuses]),
+        # Чей статус телефона список не показал, потому что линия в Binotel офлайн: на вопрос
+        # «почему на стене „Не в сети“, а в телефоне „Активный“» отвечает этот список.
+        operators_line_offline=sorted(line_offline),
     )
     return snapshot
 
