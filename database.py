@@ -59451,6 +59451,14 @@ class Database:
         self.glb_forget_attendance_days(day_from=date_from)
         return rule_id
 
+    def glb_roster_synced_at(self, source):
+        """Когда состав источника в последний раз обновлялся. None — ни разу."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT MAX(synced_at) FROM glb_employees WHERE source = %s",
+                           (str(source or ''),))
+            row = cursor.fetchone()
+        return row[0] if row else None
+
     def glb_delete_plan_rule(self, rule_id):
         with self._get_cursor() as cursor:
             cursor.execute("DELETE FROM glb_plan_rules WHERE id = %s RETURNING date_from",

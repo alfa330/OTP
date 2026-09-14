@@ -8551,6 +8551,41 @@ def api_group_late_bot_attendance():
         return jsonify({"error": str(error)}), 500
 
 
+# Сколько живёт состав Clockster в кэше, прежде чем раздел подтянет его сам.
+# Ночная джоба обновляет его раз в сутки; этот порог — страховка на случай, когда
+# ночи ещё не было (первый деплой) или джоба её пропустила: иначе центрального
+# офиса не было бы в фильтрах и в выборе людей для отчёта до следующей ночи.
+GROUP_LATE_CLOCKSTER_ROSTER_MAX_AGE = timedelta(hours=26)
+_group_late_roster_refresh_lock = threading.Lock()
+
+
+def _group_late_refresh_clockster_roster_if_stale():
+    """Подтягивает состав Clockster, если его нет или он старше суток с запасом.
+
+    Замок не ждём: второй одновременный запрос просто отдаёт то, что уже есть, а
+    не идёт в Clockster повторно. Любая ошибка источника раздел не роняет —
+    справочник отдаётся без центрального офиса, как было до задачи #307."""
+    from group_late import clockster as _clockster
+    from group_late import config as _group_late_config
+    if not _group_late_config.is_clockster_configured():
+        return
+    if not _group_late_roster_refresh_lock.acquire(blocking=False):
+        return
+    try:
+        synced_at = db.glb_roster_synced_at('clockster')
+        if synced_at is not None:
+            now = datetime.now(synced_at.tzinfo) if synced_at.tzinfo else datetime.now()
+            if now - synced_at < GROUP_LATE_CLOCKSTER_ROSTER_MAX_AGE:
+                return
+        saved = db.glb_sync_employees(
+            _clockster.roster(_clockster.clockster_client.get_users()), source='clockster')
+        logging.info("Отметки: состав Clockster подтянут при открытии раздела — %s чел.", saved)
+    except Exception:
+        logging.exception("Отметки: состав Clockster при открытии раздела не обновлён")
+    finally:
+        _group_late_roster_refresh_lock.release()
+
+
 @app.route('/api/group_late_bot/directory', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_directory():
@@ -8566,6 +8601,7 @@ def api_group_late_bot_directory():
     _, scope, err = _group_late_bot_guard()
     if err:
         return err
+    _group_late_refresh_clockster_roster_if_stale()
     try:
         payload = db.glb_attendance_directory(department=scope)
         payload['status'] = 'success'

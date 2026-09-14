@@ -84,6 +84,19 @@ class ApiTests(unittest.TestCase):
     def test_nightly_job_is_registered(self):
         self.assertIn("id='group_late_nightly'", BOT)
 
+    def test_directory_does_not_wait_for_the_night(self):
+        """Первый деплой показал: до ночной джобы центрального офиса в справочнике
+        нет вовсе — ровно та жалоба, с которой пришла задача. Справочник обязан
+        подтянуть состав Clockster сам, если его нет или он устарел."""
+        route = BOT[BOT.index("def api_group_late_bot_directory"):]
+        route = route[:route.index("\n@app.route")]
+        self.assertIn("_group_late_refresh_clockster_roster_if_stale()", route)
+        helper = BOT[BOT.index("def _group_late_refresh_clockster_roster_if_stale"):]
+        helper = helper[:helper.index("\n@app.route")]
+        self.assertIn("acquire(blocking=False)", helper)
+        self.assertIn("source='clockster'", helper)
+        self.assertIn("GROUP_LATE_CLOCKSTER_ROSTER_MAX_AGE", helper)
+
 
 if __name__ == "__main__":
     unittest.main()
