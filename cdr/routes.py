@@ -11,12 +11,16 @@ crm/routes.py и parcels/routes.py).
 только два вида ручек:
 
     /api/cdr/*         разделу — читают нашу базу, наружу не ходят никогда
-    /api/cdr/agent/*   мосту — закрыты общим токеном CDR_AGENT_TOKEN
+    /api/cdr/agent/*   мосту — закрыты подписью Ed25519 (CDR_AGENT_KEYS) либо,
+                       пока ключей нет, общим токеном CDR_AGENT_TOKEN
 
 Ручки моста намеренно БЕЗ `require_api_key`: у моста нет ни cookie портала, ни
-JWT. Тот же приём, что у `/api/phone/publish` и `/api/oktell_guard/publish` —
-декоратор не вешается, а токен проверяется первой строкой тела через
-`hmac.compare_digest` (обычное `==` утекает токен по времени).
+JWT. Проверка идёт первой строкой тела. Основной путь — подпись каждого запроса
+закрытым ключом моста (`cdr/agent_auth.py`): портал держит только открытый ключ,
+и утечка настроек портала ничего не даёт. Общий токен остался запасным путём на
+время переезда: как только на портале задан хотя бы один ключ, токен не
+принимается вовсе — два способа входа одновременно это два способа ошибиться.
+Токен сверяется `hmac.compare_digest` (обычное `==` утекает его по времени).
 
 Как это выглядит для человека
 -----------------------------
@@ -45,10 +49,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, g, jsonify, request, send_file
 
-from . import (access, config, directory as directory_mod, queries, report, schema,
-               sync, touches as touches_mod)
+from . import (access, agent_auth, config, directory as directory_mod, queries, report,
+               schema, sync, touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -129,26 +133,54 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     # ── каркас роута моста ───────────────────────────────────────────────────
 
-    def agent_route(rule):
-        """Без require_api_key: у моста нет ни cookie портала, ни JWT.
+    def _authenticate_agent():
+        """Кто стучится: (идентификатор ключа | None, готовый отказ | None).
 
-        Токен сверяется compare_digest'ом — обычное сравнение строк утекает его
-        по времени. Не настроен на сервере (503) и неверен (401) — разные коды:
-        мост должен отличать «портал ещё не готов» от «ключ протух».
+        Заданы ключи — проверяется только подпись; заголовок с токеном при этом
+        игнорируется даже правильный. Ключей нет — старый путь с токеном.
+        Не настроено ничего (503) и не сошлось (401) — разные коды: мост должен
+        отличать «портал ещё не готов» от «ключ протух». Причина отказа уходит в
+        журнал, а не наружу: чужому незачем знать, на чём он споткнулся.
         """
+        raw_keys = config.agent_keys_raw()
+        if raw_keys:
+            try:
+                keys = agent_auth.parse_public_keys(raw_keys)
+            except ValueError as exc:
+                # Кривая настройка закрывает вход целиком, а не открывает его.
+                log.error('Касания: CDR_AGENT_KEYS задан с ошибкой: %s', exc)
+                return None, (jsonify({"error": "Мост не настроен на сервере: ключи "
+                                                "заданы с ошибкой"}), 503)
+            kid, reason = agent_auth.verify(
+                request.headers, request.method, request.path,
+                request.get_data(cache=True), keys)
+            if kid is None:
+                log.warning('Касания: мост не авторизован — %s', reason)
+                return None, (jsonify({"error": "Мост не авторизован"}), 401)
+            return kid, None
+        expected = config.agent_token()
+        if not expected:
+            return None, (jsonify({"error": "Мост не настроен на сервере: не заданы ни "
+                                            "CDR_AGENT_KEYS, ни CDR_AGENT_TOKEN"}), 503)
+        provided = (request.headers.get('X-Agent-Token') or '').strip()
+        if not provided or not _same_token(provided, expected):
+            return None, (jsonify({"error": "Мост не авторизован"}), 401)
+        return None, None
+
+    def agent_route(rule):
+        """Без require_api_key: у моста нет ни cookie портала, ни JWT — см.
+        _authenticate_agent. Идентификатор ключа кладётся в g, чтобы ручка
+        могла записать, кем именно подписан запрос."""
         def decorator(handler):
             @bp.route(rule, methods=['POST', 'OPTIONS'], endpoint='agent_' + handler.__name__)
             @wraps(handler)
             def wrapper(*args, **kwargs):
                 if request.method == 'OPTIONS':
                     return build_cors_preflight_response()
-                expected = config.agent_token()
-                if not expected:
-                    return jsonify({"error": "Мост не настроен на сервере: не задан "
-                                             "CDR_AGENT_TOKEN"}), 503
-                provided = (request.headers.get('X-Agent-Token') or '').strip()
-                if not provided or not _same_token(provided, expected):
-                    return jsonify({"error": "Мост не авторизован"}), 401
+                agent_key, refusal = _authenticate_agent()
+                if refusal is not None:
+                    return refusal
+                g.cdr_agent_key = agent_key
                 try:
                     payload = request.get_json(silent=True) or {}
                     return handler(payload, *args, **kwargs)
@@ -409,7 +441,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 hostname=str(payload.get('hostname') or '')[:120] or None,
                 version=str(payload.get('version') or '')[:40] or None,
                 station_url=str(payload.get('station_url') or '')[:200] or None,
-                error=payload.get('error') or None)
+                error=payload.get('error') or None,
+                agent_key=g.get('cdr_agent_key'))
             jobs = queries.claim_days(cursor, agent_id, AGENT_JOBS_PER_POLL)
             agents_at = queries.agent_state(cursor).get('agents_at')
             # Уборка кэша — на холостой заход моста: своего планировщика у

@@ -276,21 +276,24 @@ def replace_day_touches(cursor, day, touches):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def agent_seen(cursor, *, hostname=None, version=None, station_url=None,
-               error=None, days_sent=0, rows_read=0):
+               error=None, days_sent=0, rows_read=0, agent_key=None):
     """Отметка «мост на связи». Зовётся на каждом его запросе.
 
     Счётчики накопительные: по ним видно, работает мост или просто здоровается.
     Ошибка НЕ затирается пустой при следующем удачном заходе — рядом лежит её
     время, и «последняя ошибка вчера в 3 ночи» это другой разговор, чем
     «последняя ошибка минуту назад».
+
+    agent_key — идентификатор ключа подписи. По нему при ротации видно, что
+    мост уже говорит новым ключом и старый можно убирать.
     """
     cursor.execute("""
         INSERT INTO cdr_agent_state (id, last_seen_at, hostname, version,
                                      station_url, last_error, last_error_at,
-                                     days_sent, rows_read)
+                                     days_sent, rows_read, agent_key)
         VALUES (1, NOW(), %(host)s, %(version)s, %(station)s, %(error)s,
                 CASE WHEN %(error)s IS NULL THEN NULL ELSE NOW() END,
-                %(days)s, %(rows)s)
+                %(days)s, %(rows)s, %(key)s)
         ON CONFLICT (id) DO UPDATE SET
             last_seen_at  = NOW(),
             hostname      = COALESCE(EXCLUDED.hostname, cdr_agent_state.hostname),
@@ -300,16 +303,18 @@ def agent_seen(cursor, *, hostname=None, version=None, station_url=None,
             last_error_at = CASE WHEN %(error)s IS NULL
                                  THEN cdr_agent_state.last_error_at ELSE NOW() END,
             days_sent     = cdr_agent_state.days_sent + %(days)s,
-            rows_read     = cdr_agent_state.rows_read + %(rows)s
+            rows_read     = cdr_agent_state.rows_read + %(rows)s,
+            agent_key     = COALESCE(EXCLUDED.agent_key, cdr_agent_state.agent_key)
     """, {'host': hostname, 'version': version, 'station': station_url,
           'error': (str(error)[:500] if error else None),
-          'days': int(days_sent), 'rows': int(rows_read)})
+          'days': int(days_sent), 'rows': int(rows_read),
+          'key': (str(agent_key)[:32] if agent_key else None)})
 
 
 def agent_state(cursor):
     cursor.execute("""
         SELECT last_seen_at, hostname, version, station_url, last_error,
-               last_error_at, days_sent, rows_read, agents_at
+               last_error_at, days_sent, rows_read, agents_at, agent_key
           FROM cdr_agent_state WHERE id = 1
     """)
     row = cursor.fetchone()
@@ -323,6 +328,7 @@ def agent_state(cursor):
         'last_error_at': row[5].isoformat() if row[5] else None,
         'days_sent': row[6], 'rows_read': row[7],
         'agents_at': row[8].isoformat() if row[8] else None,
+        'agent_key': row[9],
     }
 
 

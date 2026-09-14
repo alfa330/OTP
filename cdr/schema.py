@@ -159,15 +159,26 @@ CREATE TABLE IF NOT EXISTS cdr_agent_state (
     agents_at      TIMESTAMPTZ,
     -- Когда последний раз подчищали кэш старше срока хранения. Без отметки
     -- уборка либо не запускалась бы вовсе, либо шла на каждый опрос моста.
-    cleaned_at     TIMESTAMPTZ
+    cleaned_at     TIMESTAMPTZ,
+    -- Идентификатор ключа, которым мост подписал последний запрос. Нужен при
+    -- ротации: старый ключ убирают с портала только когда здесь уже виден новый.
+    agent_key      TEXT
 );
 """
+
+# Таблица могла быть создана до появления колонки: CREATE TABLE IF NOT EXISTS
+# существующую не тронет, поэтому колонку добавляем отдельным идемпотентным шагом.
+CDR_SCHEMA_MIGRATIONS = (
+    "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS agent_key TEXT",
+)
 
 
 def init_cdr_schema(cursor):
     """Создаёт таблицы раздела. Курсор приходит снаружи: схема всех разделов
     разворачивается одной транзакцией."""
     cursor.execute(CDR_SCHEMA_SQL)
+    for statement in CDR_SCHEMA_MIGRATIONS:
+        cursor.execute(statement)
 
 
 def schema_is_ready(cursor):

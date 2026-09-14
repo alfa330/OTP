@@ -34,12 +34,38 @@ Render и до сети не дотягивается — значит, ходи
     python -m cdr_bridge.agent --once      один проход, для проверки
     python -m cdr_bridge.agent             рабочий цикл (служба)
 
+Как мост доказывает порталу, что он мост
+----------------------------------------
+Подписью Ed25519 на каждом запросе (`cdr_bridge/signing.py`, проверка —
+`cdr/agent_auth.py`). Закрытый ключ лежит только на шлюзе; портал знает
+открытый. Общий токен остался запасным путём на время переезда: если ключа
+нет, мост шлёт токен, как раньше.
+
+Чему мост НЕ верит
+------------------
+Порталу — не безусловно. Задание исполняется, только если оно похоже на сутки:
+окно не шире 25 часов и начинается в полночь названного дня. Взломанный портал
+не сможет через мост заставить станцию отдать год одним запросом. Переменным
+окружения вроде HTTPS_PROXY — тоже: наружу мост ходит только через прокси,
+названный явно, и проверяет сертификат портала по суженному набору корней,
+если он задан.
+
+Ключ подписи
+------------
+    python -m cdr_bridge.agent --keygen /etc/otp-gateway/agent.key
+        создаёт ключ файлом с правами 600 и печатает открытую часть с
+        идентификатором — их и вносят на портал в CDR_AGENT_KEYS.
+
 Настройки — переменные окружения (или .env.codex.local при локальной отладке):
     CDR_BRIDGE_PORTAL     https://…            адрес портала
-    CDR_AGENT_TOKEN       …                    общий токен, как на портале
+    CDR_AGENT_KEY_FILE    /etc/otp-gateway/agent.key   закрытый ключ подписи
+    CDR_AGENT_PRIVATE_KEY (вместо файла)       тот же ключ прямо в окружении
+    CDR_AGENT_TOKEN       (запасной путь)      общий токен, если ключа ещё нет
     CDR_STATION_URL       http://192.168.17.44:8000
     CDR_STATION_LOGIN     (необязательно)      если станция закроет чтение CDR
     CDR_STATION_PASSWORD  (необязательно)
+    CDR_PORTAL_PROXY      (необязательно)      единственный выход наружу
+    CDR_PORTAL_CA_BUNDLE  (необязательно)      файл с корнями, которым верим
     CDR_HEARTBEAT_FILE    (необязательно)      куда писать отметку живости
 """
 
@@ -51,15 +77,21 @@ import platform
 import socket
 import sys
 import time
+from datetime import datetime, timedelta
 
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr import touches as touches_mod  # noqa: E402
+from cdr_bridge import signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.0.0'
+VERSION = '1.1.0'
+
+# Сколько может длиться окно чтения, которое портал присылает мосту: сутки плюс
+# часовой хвост (cdr.sync.window_for). Всё, что шире, — не наше задание.
+MAX_JOB_WINDOW = timedelta(hours=25)
 
 log = logging.getLogger('cdr_bridge')
 
@@ -104,6 +136,17 @@ def load_config(argv_overrides=None):
         'station': value('CDR_STATION_URL', 'http://192.168.17.44:8000').rstrip('/'),
         'login': value('CDR_STATION_LOGIN'),
         'password': value('CDR_STATION_PASSWORD'),
+        # Ключ подписи: файл предпочтительнее переменной — окружение процесса
+        # видно в /proc и в docker inspect, файл с правами 600 — только владельцу.
+        'key_file': value('CDR_AGENT_KEY_FILE'),
+        'private_key': value('CDR_AGENT_PRIVATE_KEY'),
+        # Выход наружу — только через явно названный прокси. HTTPS_PROXY и
+        # подобные мост не читает вовсе (см. Bridge._build_session).
+        'proxy': value('CDR_PORTAL_PROXY'),
+        # Файл с корневыми сертификатами, которыми реально подписан портал, —
+        # вместо всего системного набора. Подменный сертификат от любого другого
+        # центра тогда не пройдёт.
+        'ca_bundle': value('CDR_PORTAL_CA_BUNDLE'),
         # Пусто — пульс не пишется вовсе: при локальной отладке сторожа нет.
         'heartbeat_file': value('CDR_HEARTBEAT_FILE'),
     }
@@ -111,26 +154,94 @@ def load_config(argv_overrides=None):
     return config
 
 
+def job_window(job):
+    """Проверка задания ДО похода на станцию. Возвращает (начало, конец).
+
+    Портал — доверенная сторона, но не безусловно: если его взломали, первое,
+    что сделают через мост, — заставят станцию отдать всё за год одним окном.
+    Она этого не переживёт: 25.08.2026 ей хватило трёх вызовов. Поэтому мост
+    исполняет только то, что похоже на сутки: окно не шире суток с часовым
+    хвостом, начало — полночь названного дня. Иначе ValueError, и на станцию
+    запрос не уходит.
+    """
+    try:
+        day = datetime.strptime(str(job.get('day') or ''), '%Y-%m-%d').date()
+        start = datetime.strptime(str(job.get('from_dt') or ''), '%Y-%m-%dT%H:%M:%S')
+        end = datetime.strptime(str(job.get('to_dt') or ''), '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        raise ValueError('задание не разбирается: day=%r from_dt=%r to_dt=%r'
+                         % (job.get('day'), job.get('from_dt'), job.get('to_dt')))
+    if start.date() != day or start.time() != datetime.min.time():
+        raise ValueError('окно начинается в %s, а не в полночь суток %s' % (start, day))
+    if not timedelta(0) < end - start <= MAX_JOB_WINDOW:
+        raise ValueError('окно %s — %s шире суток с хвостом' % (start, end))
+    return start, end
+
+
 class Bridge:
     def __init__(self, config, station=None, session=None):
         self.config = config
         self.portal = config['portal']
-        self.token = config['token']
-        self.session = session or requests.Session()
+        self.token = config.get('token') or ''
+        self.session = session or self._build_session(config)
+        self.signer = self._build_signer(config)
         self.station = station or Station(config['station'], config['login'],
                                           config['password'])
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
 
+    @staticmethod
+    def _build_session(config):
+        """Сессия к порталу.
+
+        trust_env=False намеренно: иначе однажды заведённая на машине переменная
+        HTTPS_PROXY молча перенаправила бы канал неизвестно куда. Прокси — только
+        тот, что назван в настройках, и только он. Набор доверенных корней тоже
+        можно сузить до тех, которыми подписан портал.
+        """
+        session = requests.Session()
+        session.trust_env = False
+        if config.get('proxy'):
+            session.proxies = {'http': config['proxy'], 'https': config['proxy']}
+        if config.get('ca_bundle'):
+            session.verify = config['ca_bundle']
+        return session
+
+    @staticmethod
+    def _build_signer(config):
+        """Ключ подписи из файла или из окружения; нет ни того ни другого — None,
+        и мост ходит по старому пути с токеном. ValueError — ключ не годится."""
+        text = ''
+        if config.get('key_file'):
+            text = signing.read_key_file(config['key_file'])
+        elif config.get('private_key'):
+            text = config['private_key']
+        if not text:
+            return None
+        return signing.Signer(signing.load_private_key(text))
+
+    @property
+    def auth_label(self):
+        return ('ключ %s' % self.signer.key_id) if self.signer else 'общий токен'
+
     # ── связь с порталом ─────────────────────────────────────────────────────
 
     def _post(self, path, payload):
-        response = self.session.post(
-            '%s/api/cdr/agent/%s' % (self.portal, path),
-            json=payload, timeout=PORTAL_TIMEOUT,
-            headers={'X-Agent-Token': self.token,
-                     'Content-Type': 'application/json'})
+        url_path = '/api/cdr/agent/%s' % path
+        # Тело сериализуем сами и отправляем байтами: подписывается хеш ровно
+        # тех байтов, что уйдут в сеть, а не то, что requests соберёт по-своему.
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        headers = {'Content-Type': 'application/json'}
+        if self.signer is not None:
+            headers.update(self.signer.headers('POST', url_path, body))
+        else:
+            headers['X-Agent-Token'] = self.token
+        response = self.session.post(self.portal + url_path, data=body,
+                                     timeout=PORTAL_TIMEOUT, headers=headers)
         if response.status_code == 401:
-            raise RuntimeError('Портал не принял токен: проверьте CDR_AGENT_TOKEN')
+            raise RuntimeError(
+                'Портал не принял подпись: ключ %s не внесён в CDR_AGENT_KEYS или '
+                'разошлись часы' % self.signer.key_id if self.signer else
+                'Портал не принял токен: проверьте CDR_AGENT_TOKEN')
         if response.status_code != 200:
             # Тело читаем текстом, а не json(): на 502/504 от прокси там HTML, и
             # разбор JSON бросил бы своё исключение поверх настоящей причины.
@@ -166,8 +277,16 @@ class Bridge:
         суток) — правило «сутки плюс час» живёт в одном месте, на портале, чтобы
         двум его копиям было негде разойтись.
         """
-        day = job['day']
+        day = str(job.get('day') or '?')
         started = time.time()
+        try:
+            job_window(job)
+        except ValueError as exc:
+            # На станцию не идём: такое задание — либо ошибка портала, либо
+            # чужая рука на нём. В обоих случаях исполнять нельзя.
+            log.error('Сутки %s: задание отвергнуто — %s', day, exc)
+            self._report_failure(day, 'мост отверг задание: %s' % exc)
+            return False
         rows = []
         try:
             for row in self.station.iter_cdr(job['from_dt'], job['to_dt']):
@@ -262,8 +381,9 @@ class Bridge:
             log.warning('Пульс не записался в %s: %s', path, exc)
 
     def run(self):
-        log.info('Мост «Касания» %s запущен. Портал: %s, станция: %s, id: %s',
-                 VERSION, self.portal, self.config['station'], self.agent_id)
+        log.info('Мост «Касания» %s запущен. Портал: %s (%s), станция: %s, id: %s',
+                 VERSION, self.portal, self.auth_label, self.config['station'],
+                 self.agent_id)
         error_sleep = ERROR_SLEEP_SECONDS
         while True:
             try:
@@ -287,6 +407,23 @@ class Bridge:
                 error_sleep = min(error_sleep * 2, ERROR_SLEEP_MAX)
 
 
+def keygen(target):
+    """Новый ключ подписи. Закрытая часть — в файл с правами 600 (или на экран,
+    если файла не просили), открытая с идентификатором — всегда на экран: их
+    вносят на портал в CDR_AGENT_KEYS."""
+    private_b64, public_b64, kid = signing.generate()
+    if target == '-':
+        print('Закрытый ключ (CDR_AGENT_PRIVATE_KEY, никому не показывать):')
+        print('    %s' % private_b64)
+    else:
+        signing.write_key_file(target, private_b64)
+        print('Закрытый ключ записан в %s (права 600)' % target)
+    print('Открытый ключ — добавить на портале в CDR_AGENT_KEYS через запятую:')
+    print('    %s' % public_b64)
+    print('Идентификатор ключа (так его покажет состояние моста на портале): %s' % kid)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Мост «Касания»: CDR → портал')
     parser.add_argument('--once', action='store_true',
@@ -295,6 +432,9 @@ def main(argv=None):
                         help='только проверить связь со станцией и порталом')
     parser.add_argument('--portal', help='адрес портала (перекрывает окружение)')
     parser.add_argument('--station', help='адрес станции (перекрывает окружение)')
+    parser.add_argument('--keygen', nargs='?', const='-', metavar='ФАЙЛ',
+                        help='создать ключ подписи (в файл с правами 600 или, без '
+                             'аргумента, на экран), напечатать открытую часть и выйти')
     parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args(argv)
 
@@ -303,17 +443,26 @@ def main(argv=None):
         format='%(asctime)s %(levelname)-7s %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S')
 
+    if args.keygen:
+        return keygen(args.keygen)
+
     config = load_config({'portal': args.portal, 'station': args.station})
-    missing = [name for name, key in (('CDR_BRIDGE_PORTAL', 'portal'),
-                                      ('CDR_AGENT_TOKEN', 'token')) if not config[key]]
-    if missing:
-        print('Не задано: %s' % ', '.join(missing))
+    if not config['portal']:
+        print('Не задано: CDR_BRIDGE_PORTAL')
+        return 2
+    if not (config['key_file'] or config['private_key'] or config['token']):
+        print('Не задан ни ключ подписи (CDR_AGENT_KEY_FILE), ни токен (CDR_AGENT_TOKEN)')
         return 2
 
-    bridge = Bridge(config)
+    try:
+        bridge = Bridge(config)
+    except ValueError as exc:
+        print('Ключ подписи не годится: %s' % exc)
+        return 2
 
     if args.check:
         ok = True
+        print('вход     %s' % bridge.auth_label)
         try:
             bridge.station.health()
             print('станция  %s — отвечает' % config['station'])
