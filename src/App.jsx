@@ -45557,14 +45557,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setShowLogoutConfirm(true);
             };
 
-            const confirmLogout = async () => {
+            /* Отзыв сессии на сервере — в фоне, экран его не ждёт.
+               Жалоба 14.09.2026: «при выходе из аккаунта экран просто зависает».
+               Окно подтверждения рисуется ВМЕСТО всего приложения, а сессию
+               гасили только после ответа /api/logout, у которого не было
+               таймаута. Пока сервер молчал — деплой, перезапуск, провал связи
+               на телефоне, — человек смотрел на застывшее окно с живой кнопкой,
+               и повторное нажатие ничего не меняло. Замер: ответ через 15 с —
+               15 с того же окна.
+
+               Заголовки снимаем СРАЗУ, до чистки токенов, и шлём через fetch, а
+               не axios: перехватчик axios выполняется асинхронно и перечитывает
+               токен из хранилища, где его к тому моменту уже нет, — сервер не
+               узнал бы, какую сессию закрыть, и она осталась бы живой.
+               keepalive доносит запрос, даже если вкладку сразу закроют.
+
+               Таймаута с обрывом здесь нет намеренно: экран запрос больше не
+               ждёт, а обрыв только отменил бы отзыв, который ещё мог дойти, —
+               и сессия на сервере осталась бы действующей. */
+            const revokeServerSessionInBackground = () => {
+                const headers = withAccessTokenHeader({ 'Content-Type': 'application/json' });
                 try {
-                    await axios.post(`${API_BASE_URL}/api/logout`, {}, { withCredentials: true });
+                    fetch(`${API_BASE_URL}/api/logout`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        keepalive: true,
+                        headers,
+                        body: '{}',
+                    }).catch((err) => console.error('Logout error:', err?.message || err));
                 } catch (err) {
-                    console.error('Logout error:', err);
-                } finally {
-                    clearAuthTokens();
+                    console.error('Logout error:', err?.message || err);
                 }
+            };
+
+            const confirmLogout = () => {
+                revokeServerSessionInBackground();
+                clearAuthTokens();
 
                 if (isMounted.current) {
                     clearSensitiveQrPolling();
