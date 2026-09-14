@@ -1,0 +1,659 @@
+/* ── Раздел «Сессии» на телефоне ─────────────────────────────────────────────
+
+   Настольный раздел — таблица на семь колонок с шапкой сортировки, три плитки
+   ролей и полоса вкладок тех же ролей рядом с ними, красная «Прервать все» в
+   каждой строке. На экране в 390 px общий слой оболочки превращал это в
+   таблицу, которая ездит вбок внутри страницы, плитки — в два ряда, а
+   «Прервать все», проявленная без наведения, стояла в каждой строке
+   одиннадцать раз подряд.
+
+   Здесь раздел приводится к виду списка в приложении: крупный заголовок,
+   поле поиска, переключатель ролей, строка — человек, по нажатию — его
+   карточка экраном. Массовое прерывание — режимом «Выбрать», как в «Фото» и
+   «Почте»: панель действий встаёт на место бара разделов.
+
+   Разметка списка своя (SessionsMobileView.jsx), и классы у неё свои — БЕЗ
+   утилит Tailwind. Общий слой разделов в mobile-shell.css отбирает элементы
+   по подстроке класса (`-actions`, `-tabs`, `topbar`, `.flex[class*="gap-"]`,
+   `grid-cols-3`, `h2`) и переносил бы ряды, срезал сетки и ужимал заголовок.
+   Поэтому ни одно имя здесь этих подстрок не содержит.
+
+   Карточка сотрудника (SessionUserModal.jsx) общая с компьютером; телефонные
+   куски в ней разведены useIsMobileShell, а крупнее кегль делает лестница
+   ниже по метке .ses-card.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_sessions_mobile.py). Цвета — токены --sheet-*:
+   тёмная тема подменяет их в mobile-shell.css. */
+
+body.mobile-shell .ses-m {
+    padding: 2px 16px 28px;
+    color: var(--sheet-text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+}
+
+/* ── Шапка: крупный заголовок, «Выбрать» и круглая «Обновить» ── */
+
+body.mobile-shell .ses-m-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 40px;
+}
+
+body.mobile-shell .ses-m-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .ses-m-link {
+    flex: none;
+    padding: 8px 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+    font-size: 17px;
+    line-height: 22px;
+}
+
+body.mobile-shell .ses-m-link:disabled {
+    opacity: 0.4;
+}
+
+body.mobile-shell .ses-m-round {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--sheet-card);
+    color: var(--sheet-accent);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+body.mobile-shell .ses-m-round svg {
+    width: 18px;
+    height: 18px;
+}
+
+body.mobile-shell .ses-m-round:disabled {
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-sub {
+    margin: 4px 0 14px;
+    font-size: 15px;
+    line-height: 20px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-sub > span {
+    white-space: nowrap;
+}
+
+/* ── Поиск: поле системного вида ── */
+
+body.mobile-shell .ses-m-search {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    padding: 0 6px 0 10px;
+    border-radius: 12px;
+    background: rgba(118, 118, 128, 0.12);
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-search > svg {
+    flex: none;
+    width: 17px;
+    height: 17px;
+}
+
+/* 17 px — кегль системного поля: мельче iOS наезжает на поле при фокусе. */
+body.mobile-shell .ses-m-search input,
+body.mobile-shell .ses-m-search input:focus {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    margin: 0 0 0 7px;
+    padding: 0;
+    border: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+    color: var(--sheet-text);
+    font-size: 17px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+body.mobile-shell .ses-m-search input::placeholder {
+    color: var(--sheet-muted);
+}
+
+/* Свой крестик у type="search" рисует браузер — рядом с нашим их было бы два. */
+body.mobile-shell .ses-m-search input::-webkit-search-cancel-button,
+body.mobile-shell .ses-m-search input::-webkit-search-decoration {
+    display: none;
+    -webkit-appearance: none;
+}
+
+body.mobile-shell .ses-m-search-clear {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-search-clear svg {
+    width: 17px;
+    height: 17px;
+}
+
+/* ── Роли: сегментный переключатель ── */
+
+body.mobile-shell .ses-m-seg {
+    display: flex;
+    margin-top: 12px;
+    padding: 2px;
+    border-radius: 9px;
+    background: rgba(118, 118, 128, 0.12);
+}
+
+body.mobile-shell .ses-m-seg-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 30px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--sheet-text);
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+body.mobile-shell .ses-m-seg-btn.is-on {
+    background: var(--sheet-card);
+    font-weight: 600;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04);
+}
+
+/* В тёмной теме выбранный сегмент у системы светлее подложки, а не темнее:
+   цвет карточки (#1c1c1e) на полупрозрачном сером просто пропадает. */
+html[data-otp-theme="dark"] body.mobile-shell .ses-m-seg-btn.is-on {
+    background: #636366;
+}
+
+/* ── Устройства: полоса меток вбок ── */
+
+/* Полоса доходит до краёв экрана: отрицательное поле ровно на отступ раздела,
+   иначе прокрученные метки обрезались бы в шестнадцати пикселях от края. */
+body.mobile-shell .ses-m-chips {
+    display: flex;
+    gap: 8px;
+    margin: 10px -16px 0;
+    padding: 0 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+}
+
+body.mobile-shell .ses-m-chip {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 16px;
+    background: var(--sheet-card);
+    color: var(--sheet-text);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+body.mobile-shell .ses-m-chip .ses-m-ico {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-chip-count {
+    color: var(--sheet-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .ses-m-chip.is-on {
+    background: var(--sheet-accent);
+    color: #fff;
+    box-shadow: none;
+}
+
+body.mobile-shell .ses-m-chip.is-on .ses-m-ico,
+body.mobile-shell .ses-m-chip.is-on .ses-m-chip-count {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+/* ── Группа: подпись со счётом и сортировка ── */
+
+body.mobile-shell .ses-m-group-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 22px 0 6px;
+    padding: 0 2px 0 16px;
+}
+
+body.mobile-shell .ses-m-group-title {
+    font-size: 13px;
+    line-height: 18px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+    font-size: 15px;
+    line-height: 20px;
+}
+
+body.mobile-shell .ses-m-sort svg {
+    width: 11px;
+    height: 11px;
+}
+
+/* ── Список людей ── */
+
+body.mobile-shell .ses-m-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--sheet-card);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+body.mobile-shell .ses-m-list[aria-busy="true"] {
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+}
+
+body.mobile-shell .ses-m-item {
+    position: relative;
+}
+
+/* Разделитель от текста, а не от края: так строки читаются одной группой. */
+body.mobile-shell .ses-m-item + .ses-m-item::before {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 70px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep);
+    pointer-events: none;
+}
+
+body.mobile-shell .ses-m.is-selecting .ses-m-item + .ses-m-item::before {
+    left: 106px;
+}
+
+body.mobile-shell .ses-m-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 66px;
+    padding: 10px 14px 10px 16px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+
+/* Строке списка отвечает заливка, как в системных списках. Общее приглушение
+   нажатия из mobile-motion.css (opacity 0.58) на строке во всю ширину гасило
+   бы и имя, и время — читалось бы как «строка недоступна». */
+body.mobile-shell .ses-m-row:active {
+    opacity: 1 !important;
+    background: var(--sheet-active);
+}
+
+body.mobile-shell .ses-m-check {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1.5px var(--sheet-chevron);
+    color: transparent;
+}
+
+body.mobile-shell .ses-m-check.is-on {
+    background: var(--sheet-accent);
+    box-shadow: none;
+    color: #fff;
+}
+
+body.mobile-shell .ses-m-check svg {
+    width: 14px;
+    height: 14px;
+}
+
+body.mobile-shell .ses-m-avatar {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: linear-gradient(180deg, #a8adb9, #868b97);
+    color: #fff;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+body.mobile-shell .ses-m-avatar-img {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    object-fit: cover;
+}
+
+body.mobile-shell .ses-m-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+body.mobile-shell .ses-m-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+body.mobile-shell .ses-m-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 21px;
+    letter-spacing: -0.01em;
+}
+
+body.mobile-shell .ses-m-time {
+    flex: none;
+    font-size: 14px;
+    color: var(--sheet-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .ses-m-meta,
+body.mobile-shell .ses-m-warn {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+body.mobile-shell .ses-m-meta {
+    font-size: 14px;
+    line-height: 19px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-warn {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 18px;
+}
+
+body.mobile-shell .ses-m-chevron {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin: 0 2px 0 2px;
+    border-right: 2px solid var(--sheet-chevron);
+    border-bottom: 2px solid var(--sheet-chevron);
+    transform: rotate(-45deg);
+}
+
+body.mobile-shell .ses-m-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 44px 24px;
+    text-align: center;
+    font-size: 15px;
+    line-height: 20px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-foot {
+    padding: 14px 0 2px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-sentinel {
+    height: 1px;
+}
+
+/* ── Режим «Выбрать»: панель действий на месте бара разделов ── */
+
+/* Как в «Фото»: пока выбирают, бар разделов уступает место панели. Две
+   стеклянные полосы друг над другом у нижнего края читались бы одной
+   сломанной, а переход в другой раздел посреди выбора всё равно ни к чему. */
+body.mobile-shell:has(.ses-m.is-selecting) .mobile-tabbar {
+    display: none;
+}
+
+body.mobile-shell .ses-m.is-selecting {
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
+}
+
+body.mobile-shell .ses-m-bulk {
+    position: fixed;
+    z-index: 70;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: calc(var(--mtb-thickness, 56px) + env(safe-area-inset-bottom));
+    padding: 0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(16px, env(safe-area-inset-left));
+    background: var(--sheet-bar);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 -0.5px 0 var(--sheet-sep);
+    animation: ses-m-bulk-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes ses-m-bulk-in {
+    from { transform: translateY(100%); }
+    to { transform: none; }
+}
+
+body.mobile-shell .ses-m-bulk .ses-m-link {
+    min-width: 0;
+    white-space: nowrap;
+}
+
+body.mobile-shell .ses-m-bulk .ses-m-link.is-danger {
+    color: #ff3b30;
+    font-weight: 600;
+}
+
+body.mobile-shell .ses-m-bulk .ses-m-link.is-danger:disabled {
+    color: var(--sheet-muted);
+    opacity: 1;
+}
+
+body.mobile-shell .ses-m-bulk-count {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;
+    font-size: 13px;
+    line-height: 17px;
+    color: var(--sheet-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .ses-m-bulk-count strong {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--sheet-text);
+}
+
+/* ── Листы действий: подтверждение и сортировка ── */
+
+body.mobile-shell .ses-m-sheet-note {
+    margin: 0;
+    padding: 14px 20px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-m-sheet-note + .mobile-actions__row {
+    border-top: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .mobile-actions__row.ses-m-sheet-choice {
+    position: relative;
+}
+
+body.mobile-shell .mobile-actions__row.ses-m-sheet-choice.is-current {
+    font-weight: 600;
+}
+
+body.mobile-shell .ses-m-sheet-check {
+    position: absolute;
+    top: 50%;
+    right: 18px;
+    width: 18px;
+    height: 18px;
+    margin-top: -9px;
+}
+
+/* ── Карточка сотрудника экраном ── */
+
+/* Лестница кегля по iOS: настольные 11–13 px на телефоне мелкие. Отбор по
+   ЦЕЛОЙ лексеме класса — sm:-варианты не ловятся. Вес (0,3,1) бьёт утилиту. */
+body.mobile-shell .ses-card [class~="text-[11px]"] { font-size: 13px; }
+body.mobile-shell .ses-card [class~="text-[12px]"] { font-size: 14px; }
+body.mobile-shell .ses-card [class~="text-[13px]"] { font-size: 15px; }
+
+/* Сроки сессии — строками «подпись — значение». Три колонки по трети экрана
+   переносили дату с временем на вторую строку. */
+body.mobile-shell .ses-card-dates {
+    border-top: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .ses-card-date {
+    position: relative;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    font-size: 15px;
+    line-height: 20px;
+}
+
+body.mobile-shell .ses-card-date + .ses-card-date::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 14px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep);
+}
+
+body.mobile-shell .ses-card-date > span:first-child {
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .ses-card-date > span:last-child {
+    color: var(--sheet-text);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+/* Действия над сессией — строками внизу карточки: сначала сведения, потом то,
+   что с ними делают. Мишень во всю ширину вместо пилюль по 28 px. */
+body.mobile-shell .ses-card-acts {
+    border-top: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .ses-card-act {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 46px;
+    padding: 0 14px;
+    border: 0;
+    background: transparent;
+    color: var(--sheet-accent);
+    font-size: 16px;
+    text-align: left;
+}
+
+body.mobile-shell .ses-card-act + .ses-card-act {
+    border-top: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .ses-card-act.is-danger {
+    color: #ff3b30;
+}
+
+body.mobile-shell .ses-card-act:disabled {
+    opacity: 0.4;
+}
+
+body.mobile-shell .ses-card-act:active {
+    opacity: 1 !important;
+    background: var(--sheet-active);
+}

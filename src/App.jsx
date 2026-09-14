@@ -184,6 +184,7 @@ const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModa
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
+const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -37248,6 +37249,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const [search, setSearch] = React.useState(view.query || '');
         const lastAppliedSearchRef = React.useRef(view.query || '');
         const loadMoreRef = React.useRef(null);
+        // На телефоне раздел рисует своя раскладка (SessionsMobileView) — список
+        // людей вместо таблицы. Состояние остаётся здесь и общее с компьютером.
+        const isMobileShell = useIsMobileShell();
 
         // ── Карточка сотрудника ──────────────────────────────────────────────────
         const [detailPerson, setDetailPerson] = React.useState(null);
@@ -37409,6 +37413,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         }, [onApplyAdminSessionsView, sortKey, sortDir]);
 
+        // Телефон выбирает порядок из листа целиком — ключ вместе с
+        // направлением, а не перещёлкивает направление, как заголовок колонки.
+        const applySort = React.useCallback((sort, dir) => {
+            setSelected(new Map());
+            onApplyAdminSessionsView({ sort, dir });
+        }, [onApplyAdminSessionsView]);
+
         // ── Прервать сессии у выбранных людей ─────────────────────────────────────
         const handleBulkRevoke = async () => {
             const ids = [...selected.keys()];
@@ -37552,26 +37563,79 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
             );
 
+        // Карточка сотрудника одна на обе раскладки: на телефоне IosModal сам
+        // становится экраном, въезжающим справа.
+        const detailScreen = (
+                <Suspense fallback={null}>
+                    <SessionUserModal
+                        open={Boolean(detailUserId)}
+                        onClose={closeDetail}
+                        person={detailPerson}
+                        detail={detail}
+                        isLoading={detailLoading}
+                        error={detailError}
+                        formatDate={formatDate}
+                        onRevokeSession={revokeSessionFromDetail}
+                        onRevokeAll={revokeAllFromDetail}
+                        revokingSessionId={revokingSessionId}
+                        onGrantAccess={grantAccessFromDetail}
+                        grantingSessionId={grantingSessionId}
+                    />
+                </Suspense>
+        );
+
+        if (isMobileShell) {
+            return (
+                <div>
+                    {detailScreen}
+                    <Suspense fallback={null}>
+                        <SessionsMobileView
+                            people={people}
+                            totalPeople={totalPeople}
+                            totalSessions={totalSessions}
+                            matchedPeople={matchedPeople}
+                            sensitivePeople={sensitivePeople}
+                            deviceCounts={deviceCounts}
+                            deviceOrder={SESSION_DEVICE_ORDER}
+                            deviceLabels={SESSION_DEVICE_LABELS}
+                            DeviceIcon={SessionDeviceIcon}
+                            Avatar={AvatarImage}
+                            search={search}
+                            onSearch={setSearch}
+                            roleFilter={roleFilter}
+                            onRole={setRole}
+                            deviceFilter={deviceFilter}
+                            onDevice={setDeviceFilter}
+                            sortKey={sortKey}
+                            sortDir={sortDir}
+                            onSort={applySort}
+                            hasFilters={hasFilters}
+                            onResetFilters={resetFilters}
+                            isLoading={isAdminSessionsLoading}
+                            isLoadingMore={isAdminSessionsLoadingMore}
+                            hasMore={hasMoreAdminSessions}
+                            onLoadMore={loadMoreAdminSessions}
+                            onRefresh={fetchAdminSessions}
+                            onOpen={openDetail}
+                            selected={selected}
+                            onToggle={toggleRow}
+                            onToggleAll={toggleAll}
+                            onClearSelection={clearSelection}
+                            allSelected={allVisChecked}
+                            selectedSessionsCount={selectedSessionsCount}
+                            bulkRevoking={bulkRevoking}
+                            onBulkRevoke={handleBulkRevoke}
+                        />
+                    </Suspense>
+                </div>
+            );
+        }
+
         // ── Render ────────────────────────────────────────────────────────────────
         return (
             <div className="space-y-4">
 
-            <Suspense fallback={null}>
-                <SessionUserModal
-                    open={Boolean(detailUserId)}
-                    onClose={closeDetail}
-                    person={detailPerson}
-                    detail={detail}
-                    isLoading={detailLoading}
-                    error={detailError}
-                    formatDate={formatDate}
-                    onRevokeSession={revokeSessionFromDetail}
-                    onRevokeAll={revokeAllFromDetail}
-                    revokingSessionId={revokingSessionId}
-                    onGrantAccess={grantAccessFromDetail}
-                    grantingSessionId={grantingSessionId}
-                />
-            </Suspense>
+            {detailScreen}
 
             {/* ── Confirmation modal ── */}
             {confirmOpen && (

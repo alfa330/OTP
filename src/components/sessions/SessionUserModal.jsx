@@ -1,6 +1,8 @@
 import React from 'react';
 import { IosModal, IosPager, iosCard } from '../ui/ios';
+import useIsMobileShell from '../common/useIsMobileShell';
 import { DEVICE_LABELS, parseUserAgent, roleLabel, sessionWord, sessionWordAcc } from './userAgent';
+import './sessions-mobile.css';
 
 /**
  * Карточка сотрудника: он сам и ВСЕ его живые сессии.
@@ -75,11 +77,48 @@ const SessionCard = ({
     onGrantAccess,
     isGranting,
     canGrantAccess,
-    disabled
+    disabled,
+    isNarrow = false
 }) => {
     const [uaOpen, setUaOpen] = React.useState(false);
     const device = React.useMemo(() => parseUserAgent(session.user_agent), [session.user_agent]);
     const accessOpen = Boolean(session.sensitive_data_unlocked);
+    const dates = [
+        ['Начата', session.created_at],
+        ['Активность', session.last_seen_at],
+        ['Истекает', session.expires_at]
+    ];
+
+    /* Кнопки одни и те же на обоих экранах, меняется только место. На
+       компьютере это пилюли в шапке карточки; на телефоне — строки во всю
+       ширину ВНИЗУ: сначала сведения о сессии, потом то, что с ней делают, и
+       мишень под палец вместо пилюли в 28 px. */
+    const actions = (
+        <div className={isNarrow ? 'ses-card-acts' : 'ml-auto flex shrink-0 items-center justify-end gap-1.5'}>
+            {/* Выдать доступ можно только там, где его ещё нет: когда он
+                открыт, об этом говорит янтарная полоса ниже, и второй
+                ответ на тот же вопрос — шум. Право приходит с сервера
+                одним флагом, потому что на клиенте его не посчитать. */}
+            {canGrantAccess && !accessOpen && (
+                <button
+                    type="button"
+                    onClick={() => onGrantAccess(session)}
+                    disabled={disabled || isGranting || isRevoking}
+                    className={isNarrow ? 'ses-card-act' : 'rounded-lg bg-blue-50 px-2.5 py-1.5 text-[12px] font-medium text-blue-600 ring-1 ring-blue-100 transition hover:bg-blue-600 hover:text-white active:scale-[0.98] disabled:opacity-40'}
+                >
+                    {isGranting ? 'Открываем…' : 'Открыть доступ'}
+                </button>
+            )}
+            <button
+                type="button"
+                onClick={() => onRevoke(session)}
+                disabled={disabled || isRevoking || isGranting}
+                className={isNarrow ? 'ses-card-act is-danger' : 'rounded-lg bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-600 ring-1 ring-red-100 transition hover:bg-red-600 hover:text-white active:scale-[0.98] disabled:opacity-40'}
+            >
+                {isRevoking ? 'Прерывание…' : 'Прервать'}
+            </button>
+        </div>
+    );
 
     return (
         <div className={`${iosCard} overflow-hidden`}>
@@ -108,44 +147,30 @@ const SessionCard = ({
                         {dash(session.ip_address)} · {session.session_id?.slice(0, 8)}…
                     </div>
                 </div>
-                <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
-                    {/* Выдать доступ можно только там, где его ещё нет: когда он
-                        открыт, об этом говорит янтарная полоса ниже, и второй
-                        ответ на тот же вопрос — шум. Право приходит с сервера
-                        одним флагом, потому что на клиенте его не посчитать. */}
-                    {canGrantAccess && !accessOpen && (
-                        <button
-                            type="button"
-                            onClick={() => onGrantAccess(session)}
-                            disabled={disabled || isGranting || isRevoking}
-                            className="rounded-lg bg-blue-50 px-2.5 py-1.5 text-[12px] font-medium text-blue-600 ring-1 ring-blue-100 transition hover:bg-blue-600 hover:text-white active:scale-[0.98] disabled:opacity-40"
-                        >
-                            {isGranting ? 'Открываем…' : 'Открыть доступ'}
-                        </button>
-                    )}
-                    <button
-                        type="button"
-                        onClick={() => onRevoke(session)}
-                        disabled={disabled || isRevoking || isGranting}
-                        className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-600 ring-1 ring-red-100 transition hover:bg-red-600 hover:text-white active:scale-[0.98] disabled:opacity-40"
-                    >
-                        {isRevoking ? 'Прерывание…' : 'Прервать'}
-                    </button>
-                </div>
+                {!isNarrow && actions}
             </div>
 
-            <div className="grid grid-cols-3 gap-px border-t border-slate-100 bg-slate-100 text-center">
-                {[
-                    ['Начата', session.created_at],
-                    ['Активность', session.last_seen_at],
-                    ['Истекает', session.expires_at]
-                ].map(([label, value]) => (
-                    <div key={label} className="bg-white px-2 py-2">
-                        <div className="text-[10px] uppercase tracking-wider text-slate-400">{label}</div>
-                        <div className="mt-0.5 text-[12px] tabular-nums text-slate-700">{formatDate(value)}</div>
-                    </div>
-                ))}
-            </div>
+            {/* Сроки на телефоне — строками «подпись — значение»: в трети экрана
+                дата с временем переносилась на вторую строку. */}
+            {isNarrow ? (
+                <div className="ses-card-dates">
+                    {dates.map(([label, value]) => (
+                        <div key={label} className="ses-card-date">
+                            <span>{label}</span>
+                            <span>{formatDate(value)}</span>
+                        </div>
+                    ))}
+                </div>
+            ) : (
+                <div className="grid grid-cols-3 gap-px border-t border-slate-100 bg-slate-100 text-center">
+                    {dates.map(([label, value]) => (
+                        <div key={label} className="bg-white px-2 py-2">
+                            <div className="text-[10px] uppercase tracking-wider text-slate-400">{label}</div>
+                            <div className="mt-0.5 text-[12px] tabular-nums text-slate-700">{formatDate(value)}</div>
+                        </div>
+                    ))}
+                </div>
+            )}
 
             {/* Закрытый доступ — норма, и полосы ему не рисуем: нейтральное
                 состояние не должно тянуть внимание. */}
@@ -179,6 +204,8 @@ const SessionCard = ({
                     )}
                 </div>
             )}
+
+            {isNarrow && actions}
         </div>
     );
 };
@@ -252,6 +279,8 @@ const SessionUserModal = ({
         }
     }, [busy, onRevokeAll, user, sessionsCount]);
 
+    const isNarrow = useIsMobileShell();
+
     return (
         <IosModal
             open={open}
@@ -262,27 +291,34 @@ const SessionUserModal = ({
                три колонки дат и строка с адресом и устройством. На max-w-2xl
                они жались и переносились на вторую строку. */
             maxWidth="max-w-4xl"
-            footer={
+            /* На телефоне «Закрыть» нет: экран уходит шевроном в шапке и жестом
+               «назад», и вторая кнопка ухода рядом с главной — шум. Прерывать
+               нечего — подвала нет вовсе, иначе внизу висела бы пустая полоса. */
+            footer={isNarrow && sessionsCount === 0 ? null : (
                 <>
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-medium text-slate-600 transition hover:bg-slate-50 active:scale-[0.98]"
-                    >
-                        Закрыть
-                    </button>
+                    {!isNarrow && (
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-medium text-slate-600 transition hover:bg-slate-50 active:scale-[0.98]"
+                        >
+                            Закрыть
+                        </button>
+                    )}
                     {sessionsCount > 0 && (
                         <button
                             type="button"
                             onClick={revokeAll}
                             disabled={busy}
-                            className="rounded-xl bg-red-600 px-4 py-2 text-[13px] font-medium text-white shadow-sm transition hover:bg-red-500 active:scale-[0.98] disabled:opacity-50"
+                            className={isNarrow
+                                ? 'w-full rounded-xl bg-red-600 px-4 py-3 text-[16px] font-semibold text-white active:scale-[0.99] disabled:opacity-50'
+                                : 'rounded-xl bg-red-600 px-4 py-2 text-[13px] font-medium text-white shadow-sm transition hover:bg-red-500 active:scale-[0.98] disabled:opacity-50'}
                         >
                             {busy ? 'Прерывание…' : `Прервать все ${sessionsCount} ${sessionWordAcc(sessionsCount)}`}
                         </button>
                     )}
                 </>
-            }
+            )}
         >
             {isLoading && !detail && (
                 <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-slate-400">
@@ -298,7 +334,7 @@ const SessionUserModal = ({
             )}
 
             {user && (
-                <div className="space-y-4">
+                <div className={`space-y-4${isNarrow ? ' ses-card' : ''}`}>
                     <Section title="Сотрудник">
                         <FactGrid>
                             <Row label="Логин" mono>{dash(user.user_login)}</Row>
@@ -416,6 +452,7 @@ const SessionUserModal = ({
                                         isGranting={grantingSessionId === session.session_id}
                                         canGrantAccess={canGrantAccess}
                                         disabled={busy}
+                                        isNarrow={isNarrow}
                                     />
                                 ))}
                             </div>

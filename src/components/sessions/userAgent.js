@@ -88,3 +88,26 @@ export const sessionWord = (n) => plural(n, 'сессия', 'сессии', 'с�
 export const sessionWordAcc = (n) => plural(n, 'сессию', 'сессии', 'сессий');
 export const personWord = (n) => plural(n, 'сотрудник', 'сотрудника', 'сотрудников');
 export const addressWord = (n) => plural(n, 'адрес', 'адреса', 'адресов');
+
+const MONTHS = ['янв.', 'февр.', 'мар.', 'апр.', 'мая', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
+
+const pad = (n) => String(n).padStart(2, '0');
+
+const sameDay = (a, b) => (
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+);
+
+/* «Когда был в сети» — как время в списке чатов: сегодня часы, вчера словом,
+   дальше дата. Дата из API — стенные часы Алматы без пояса, её Date разбирает
+   как местную; так же читает её formatDate в карточке, и время в строке с
+   карточкой совпадает. */
+export function lastSeenLabel(value, now = new Date()) {
+    if (!value) return '';
+    const at = new Date(value);
+    if (Number.isNaN(at.getTime())) return '';
+    if (sameDay(at, now)) return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    if (sameDay(at, yesterday)) return 'вчера';
+    if (at.getFullYear() === now.getFullYear()) return `${at.getDate()} ${MONTHS[at.getMonth()]}`;
+    return `${pad(at.getDate())}.${pad(at.getMonth() + 1)}.${String(at.getFullYear()).slice(2)}`;
+}
