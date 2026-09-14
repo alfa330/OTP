@@ -463,22 +463,34 @@ def generate_drafts(db, targets, *, instruction=None, actor_id=None,
         raise AdsError('Не выбрано ни одного объявления', code='empty')
 
     with db._get_cursor() as cursor:
-        brief = queries.get_active_brief(cursor)
         adverts = []
         for item in targets:
             advert = queries.get_advert(cursor, item['cabinet'], item['advert_id'])
             if advert:
                 adverts.append(advert)
+        # У каждого кабинета свой бриф (решение владельца 14.09.2026), поэтому
+        # бриф берётся по кабинету объявления, а не один на всю пачку.
+        briefs = queries.active_briefs_for(
+            cursor, [advert['cabinet_code'] for advert in adverts])
 
-    if not brief:
-        raise AdsError('Сначала заполните и включите бриф месяца — без него ИИ '
-                       'не из чего собирать текст', code='no_brief')
     if not adverts:
         raise AdsError('Выбранных объявлений нет в списке — обновите его',
                        code='not_found')
+    if not briefs:
+        raise AdsError('У кабинетов выбранных объявлений нет действующего брифа — '
+                       'задайте его во вкладке «Бриф месяца»', code='no_brief')
 
-    made, failed = [], []
+    made, failed, used = [], [], {}
     for advert in adverts:
+        brief = briefs.get(advert['cabinet_code'])
+        if not brief:
+            # Не роняем пачку из-за одного кабинета без брифа: остальные
+            # объявления ИИ напишет, а этим честно скажем, чего не хватило.
+            failed.append({'cabinet': advert['cabinet_code'],
+                           'advert_id': advert['advert_id'],
+                           'error': 'у кабинета нет действующего брифа'})
+            continue
+        used[brief['id']] = brief.get('title')
         try:
             result = ai.generate_for_advert(advert, brief=brief,
                                             instruction=instruction,
@@ -509,4 +521,5 @@ def generate_drafts(db, targets, *, instruction=None, actor_id=None,
                      'model': result.get('model'), 'problems': result.get('problems')})
 
     return {'made': made, 'failed': failed,
-            'brief': {'id': brief.get('id'), 'title': brief.get('title')}}
+            'briefs': [{'id': brief_id, 'title': title}
+                       for brief_id, title in used.items()]}

@@ -351,11 +351,46 @@ class SchemaTests(unittest.TestCase):
                        'actor_name', 'error_text'):
             self.assertIn(column, ddl)
 
-    def test_one_live_draft_and_one_active_brief(self):
+    def test_one_live_draft_per_advert(self):
         ddl = ' '.join(schema._STATEMENTS)
         self.assertIn("uniq_olx_ads_draft_live", ddl)
         self.assertIn("WHERE status = 'draft'", ddl)
-        self.assertIn('uniq_olx_ads_brief_active', ddl)
+
+    def test_one_active_brief_per_cabinet_is_held_by_the_database(self):
+        # Решение владельца 14.09.2026: разный бриф на разные кабинеты. Правило
+        # «у кабинета один действующий бриф» — уникальным индексом, не кодом.
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertIn('CREATE TABLE IF NOT EXISTS olx_ads_brief_cabinets', ddl)
+        self.assertIn('uniq_olx_ads_brief_cabinet_active', ddl)
+        self.assertIn('ON olx_ads_brief_cabinets (cabinet_code) WHERE is_active', ddl)
+
+    def test_old_global_active_brief_index_is_dropped_not_recreated(self):
+        # Старый индекс «один действующий бриф на всё» запрещал бы второй
+        # действующий бриф на другом кабинете.
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertNotIn('uniq_olx_ads_brief_active ', ddl)
+        migrations = ' '.join(schema._MIGRATIONS)
+        self.assertIn('DROP INDEX IF EXISTS uniq_olx_ads_brief_active', migrations)
+
+    def test_brief_enabled_before_cabinets_is_carried_to_all_cabinets(self):
+        from olx_amo import cabinets
+
+        backfill = [m for m in schema._MIGRATIONS if 'olx_ads_brief_cabinets' in m]
+        self.assertEqual(1, len(backfill))
+        self.assertIn('WHERE b.is_active', backfill[0])
+        self.assertIn('NOT EXISTS', backfill[0])
+        for cab in cabinets.CABINETS:
+            self.assertIn("'%s'" % cab.code, backfill[0])
+
+    def test_brief_migrations_run_before_the_new_cabinet_index(self):
+        cursor = _Cursor()
+        schema.init_olx_ads_schema(cursor)
+        joined = [s for s in cursor.statements]
+        drop = next(i for i, s in enumerate(joined) if 'DROP INDEX IF EXISTS uniq_olx_ads_brief_active' in s)
+        backfill = next(i for i, s in enumerate(joined) if 'INSERT INTO olx_ads_brief_cabinets' in s)
+        new_index = next(i for i, s in enumerate(joined) if 'uniq_olx_ads_brief_cabinet_active' in s)
+        self.assertLess(drop, new_index)
+        self.assertLess(backfill, new_index)
 
     def test_schema_is_wired_into_database_init(self):
         database = _read('database.py')
@@ -432,6 +467,157 @@ class JsonShapeTests(unittest.TestCase):
         self.assertNotIn('a.payload', ads_queries._LIST_SQL)
 
 
+class BriefPerCabinetGenerationTests(unittest.TestCase):
+    """ИИ берёт бриф КАБИНЕТА объявления; кабинет без брифа не роняет пачку.
+
+    Решение владельца 14.09.2026: разный бриф на разные кабинеты. База здесь
+    подменена на уровне функций queries — проверяется поведение сервиса, а не SQL.
+    """
+
+    def setUp(self):
+        from contextlib import contextmanager
+
+        self.adverts = {
+            ('tenge', '1'): {'cabinet_code': 'tenge', 'advert_id': '1',
+                             'category_id': 1812, 'city_name': 'Костанай'},
+            ('adal', '2'): {'cabinet_code': 'adal', 'advert_id': '2',
+                            'category_id': 1812, 'city_name': 'Алматы'},
+            ('jana', '3'): {'cabinet_code': 'jana', 'advert_id': '3',
+                            'category_id': 1812, 'city_name': 'Шымкент'},
+        }
+        self.briefs = {
+            'tenge': {'id': 7, 'title': 'Акция Тенге', 'offer': 'Комиссия 0 процентов'},
+            'adal': {'id': 5, 'title': 'Сентябрь', 'offer': 'Бонус пятнадцать тысяч'},
+        }
+        self.drafts = []
+
+        class _Db(object):
+            @contextmanager
+            def _get_cursor(inner):
+                yield object()
+
+        self.db = _Db()
+        self._saved = {name: getattr(service.queries, name)
+                       for name in ('get_advert', 'active_briefs_for', 'upsert_draft')}
+        service.queries.get_advert = (
+            lambda cursor, cab, adv: self.adverts.get((cab, str(adv))))
+        service.queries.active_briefs_for = (
+            lambda cursor, codes: {c: self.briefs[c] for c in codes if c in self.briefs})
+
+        def _upsert(cursor, cab, adv, title, description, **kwargs):
+            self.drafts.append({'cabinet': cab, 'advert_id': adv,
+                                'brief_id': kwargs.get('brief_id'),
+                                'description': description})
+            return len(self.drafts)
+
+        service.queries.upsert_draft = _upsert
+
+    def tearDown(self):
+        for name, fn in self._saved.items():
+            setattr(service.queries, name, fn)
+
+    @staticmethod
+    def _fake_ai(system, user, **kwargs):
+        # В описание кладём оффер, пришедший в промпт: по нему видно, из какого
+        # брифа писали текст.
+        offer = next((o for o in ('Комиссия 0 процентов', 'Бонус пятнадцать тысяч')
+                      if o in user), 'без брифа')
+        return {'text': 'ЗАГОЛОВОК: Работа в такси без ИП и отчётности\nОПИСАНИЕ:\n'
+                        '<p>%s. %s</p>' % (offer, _LONG_BODY), 'model': 'fake'}
+
+    def _targets(self, *keys):
+        return [{'cabinet': cab, 'advert_id': adv} for cab, adv in keys]
+
+    def test_each_advert_takes_the_brief_of_its_own_cabinet(self):
+        result = service.generate_drafts(
+            self.db, self._targets(('tenge', '1'), ('adal', '2')),
+            generate_fn=self._fake_ai)
+        self.assertEqual(2, len(result['made']))
+        by_cabinet = {d['cabinet']: d for d in self.drafts}
+        self.assertEqual(7, by_cabinet['tenge']['brief_id'])
+        self.assertIn('Комиссия 0 процентов', by_cabinet['tenge']['description'])
+        self.assertEqual(5, by_cabinet['adal']['brief_id'])
+        self.assertIn('Бонус пятнадцать тысяч', by_cabinet['adal']['description'])
+        self.assertEqual({5, 7}, {b['id'] for b in result['briefs']})
+
+    def test_cabinet_without_brief_is_skipped_not_fatal(self):
+        result = service.generate_drafts(
+            self.db, self._targets(('tenge', '1'), ('jana', '3')),
+            generate_fn=self._fake_ai)
+        self.assertEqual(['tenge'], [m['cabinet'] for m in result['made']])
+        self.assertEqual(1, len(result['failed']))
+        self.assertEqual('jana', result['failed'][0]['cabinet'])
+        self.assertIn('нет действующего брифа', result['failed'][0]['error'])
+
+    def test_no_brief_for_any_selected_cabinet_is_a_clear_refusal(self):
+        with self.assertRaises(service.AdsError) as ctx:
+            service.generate_drafts(self.db, self._targets(('jana', '3')),
+                                    generate_fn=self._fake_ai)
+        self.assertEqual('no_brief', ctx.exception.code)
+        self.assertEqual([], self.drafts)
+
+
+class BriefQueriesInvariantsTests(unittest.TestCase):
+    """Порядок операций, без которого уникальный индекс по кабинету отвергнет запись."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = _read('olx_ads', 'queries.py')
+
+    def _function(self, name):
+        return self.source.split('def %s(' % name, 1)[1].split('\ndef ', 1)[0]
+
+    def test_activation_claims_cabinets_before_lighting_its_own(self):
+        body = self._function('activate_brief')
+        self.assertLess(body.index('_claim_cabinets('),
+                        body.index('UPDATE olx_ads_brief_cabinets SET is_active = TRUE'))
+
+    def test_saving_cabinets_of_an_active_brief_claims_before_insert(self):
+        body = self._function('set_brief_cabinets')
+        self.assertLess(body.index('_claim_cabinets('),
+                        body.index('INSERT INTO olx_ads_brief_cabinets'))
+
+    def test_claim_removes_cabinet_from_the_old_brief_and_turns_off_empty_ones(self):
+        body = self._function('_claim_cabinets')
+        self.assertIn('DELETE FROM olx_ads_brief_cabinets', body)
+        self.assertIn('SET is_active = FALSE', body)
+        self.assertIn('NOT EXISTS', body)
+        # Выключенные брифы — заготовки, их выбор не трогаем.
+        self.assertIn('WHERE is_active AND brief_id <> %s', body)
+
+    def test_activation_without_cabinets_is_refused(self):
+        body = self._function('activate_brief')
+        self.assertIn('return None', body)
+
+
+class BriefRoutesTests(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.routes = _read('olx_ads', 'routes.py')
+
+    def test_deactivation_needs_the_content_right(self):
+        match = re.search(r"@section_route\(([^\n]*)\)\s*\n\s*def olx_ads_brief_deactivate\(",
+                          self.routes)
+        self.assertIsNotNone(match)
+        self.assertIn('content=True', match.group(1))
+
+    def test_brief_cannot_be_created_without_cabinets(self):
+        create = self.routes.split('def olx_ads_brief_create(', 1)[1].split('@section_route', 1)[0]
+        self.assertIn('_cabinet_codes(', create)
+        self.assertIn('Выберите хотя бы один кабинет', self.routes)
+        self.assertIn('Неизвестные кабинеты', self.routes)
+
+    def test_ping_tells_which_brief_each_cabinet_has(self):
+        self.assertIn("'briefs_by_cabinet'", self.routes)
+        self.assertNotIn("'active_brief'", self.routes)
+
+    def test_switching_cabinets_is_reported_back(self):
+        for handler in ('olx_ads_brief_create', 'olx_ads_brief_update', 'olx_ads_brief_activate'):
+            body = self.routes.split('def %s(' % handler, 1)[1].split('@section_route', 1)[0]
+            self.assertIn("'moved'", body, handler)
+
+
 class ClientTests(unittest.TestCase):
 
     def test_client_can_list_and_update_adverts(self):
@@ -468,6 +654,34 @@ class FrontendWiringTests(unittest.TestCase):
     def test_view_hides_publish_without_the_right(self):
         self.assertIn('caps.can_apply &&', self.view)
         self.assertIn('caps.can_write_content &&', self.view)
+
+
+class BriefFrontendTests(unittest.TestCase):
+    """Экран брифов по кабинетам: читает карту, выбирает кабинеты, умеет выключать."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.view = _read('src', 'components', 'olx', 'OlxAdsView.jsx')
+
+    def test_view_reads_the_brief_of_each_cabinet(self):
+        self.assertIn('briefs_by_cabinet', self.view)
+        self.assertNotIn('active_brief', self.view)
+
+    def test_brief_form_picks_cabinets_and_sends_them(self):
+        self.assertIn('data-cabinet=', self.view)
+        self.assertIn('data-cabinet-all', self.view)
+        self.assertIn('cabinets:', self.view)
+
+    def test_brief_can_be_turned_off(self):
+        self.assertIn('/deactivate', self.view)
+
+    def test_cabinet_switch_is_announced(self):
+        # Смена брифа у чужого кабинета не должна пройти молча.
+        self.assertIn('data?.moved', self.view)
+        self.assertIn('data-brief-conflict', self.view)
+
+    def test_generation_warns_about_cabinets_without_brief(self):
+        self.assertIn('data-no-brief-note', self.view)
 
 
 if __name__ == '__main__':

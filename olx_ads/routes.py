@@ -13,10 +13,15 @@ Blueprint собирается фабрикой и получает зависи
     GET  /api/olx_ads/adverts/<кабинет>/<id>      — карточка объявления с историей
     POST /api/olx_ads/check                      — проверить текст правилами OLX, ничего не отправляя
 
-    GET  /api/olx_ads/briefs                     — брифы месяца
-    POST /api/olx_ads/briefs                     — завести бриф
-    PATCH /api/olx_ads/briefs/<id>               — поправить бриф
-    POST /api/olx_ads/briefs/<id>/activate       — сделать действующим
+    GET  /api/olx_ads/briefs                     — брифы месяца с их кабинетами
+    POST /api/olx_ads/briefs                     — завести бриф (кабинеты обязательны)
+    PATCH /api/olx_ads/briefs/<id>               — поправить бриф и его кабинеты
+    POST /api/olx_ads/briefs/<id>/activate       — включить для его кабинетов
+    POST /api/olx_ads/briefs/<id>/deactivate     — выключить
+
+У кабинета одновременно действует не больше одного брифа; кабинет забирает бриф,
+включённый последним. Ручки, которые могут перевести кабинет с чужого брифа,
+возвращают `moved` — экран говорит об этом человеку словами.
 
     POST /api/olx_ads/generate                   — ИИ сочиняет черновики для выбранных
     GET  /api/olx_ads/drafts                     — живые черновики
@@ -167,14 +172,16 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
         with db._get_cursor() as cursor:
             ready = schema.schema_is_ready(cursor)
             facets = queries.advert_facets(cursor) if ready else {}
-            brief = queries.get_active_brief(cursor) if ready else None
+            # Карта «кабинет → действующий бриф»: у каждого кабинета может быть
+            # свой бриф, и экрану надо знать, какой ИИ возьмёт у объявления.
+            briefs_map = queries.briefs_by_cabinet(cursor) if ready else {}
         synced_at = facets.get('synced_at') if facets else None
         return jsonify({
             'ok': True,
             'schema_ready': ready,
             'capabilities': access.capabilities(ctx),
             'facets': facets,
-            'active_brief': brief,
+            'briefs_by_cabinet': briefs_map,
             'snapshot_stale': service.snapshot_is_stale(synced_at),
             'limits': {
                 'title_min': validate.TITLE_MIN, 'title_max': validate.TITLE_MAX,
@@ -273,36 +280,82 @@ def build_olx_ads_blueprint(*, db, require_api_key, build_cors_preflight_respons
         with db._get_cursor() as cursor:
             return jsonify({'items': queries.list_briefs(cursor)})
 
+    def _cabinet_codes(raw):
+        """Кабинеты брифа из тела запроса: только известные справочнику, без дублей.
+
+        Возвращает (коды, проблема). Бриф без кабинетов не имеет смысла — ИИ не
+        узнает, к каким объявлениям его применять, — поэтому пустой выбор это
+        отказ со словами, а не молчаливое сохранение.
+        """
+        if not isinstance(raw, (list, tuple)):
+            return None, 'Кабинеты брифа передаются списком'
+        known = {cab.code for cab in olx_cabinets.CABINETS}
+        codes = sorted({str(code).strip() for code in raw if str(code).strip()})
+        unknown = [code for code in codes if code not in known]
+        if unknown:
+            return None, 'Неизвестные кабинеты: %s' % (', '.join(unknown),)
+        if not codes:
+            return None, 'Выберите хотя бы один кабинет, для которого этот бриф'
+        return codes, None
+
     @section_route('/briefs', methods=('POST',), content=True)
     def olx_ads_brief_create(ctx):
         payload = _body()
         title = (payload.get('title') or '').strip()
         if not title:
             return jsonify({'error': 'У брифа должно быть название — например, «Сентябрь»'}), 400
+        codes, problem = _cabinet_codes(payload.get('cabinets', []))
+        if problem:
+            return jsonify({'error': problem}), 400
+        moved = []
         with db._get_cursor() as cursor:
             brief_id = queries.create_brief(cursor, payload, ctx.get('user_id'),
                                             ctx.get('name'))
+            queries.set_brief_cabinets(cursor, brief_id, codes)
             if payload.get('activate'):
-                queries.activate_brief(cursor, brief_id)
+                moved = queries.activate_brief(cursor, brief_id) or []
             brief = queries.get_brief(cursor, brief_id)
-        return jsonify({'brief': brief}), 201
+        # `moved` — какие кабинеты перешли с других брифов: экран говорит это
+        # человеку словами, иначе смена брифа у чужого кабинета прошла бы молча.
+        return jsonify({'brief': brief, 'moved': moved}), 201
 
     @section_route('/briefs/<int:brief_id>', methods=('PATCH',), content=True)
     def olx_ads_brief_update(ctx, brief_id):
         payload = _body()
+        if 'title' in payload and not (payload.get('title') or '').strip():
+            return jsonify({'error': 'У брифа должно быть название'}), 400
+        codes = None
+        if 'cabinets' in payload:
+            codes, problem = _cabinet_codes(payload.get('cabinets'))
+            if problem:
+                return jsonify({'error': problem}), 400
         with db._get_cursor() as cursor:
             if not queries.get_brief(cursor, brief_id):
                 return jsonify({'error': 'Бриф не найден'}), 404
             queries.update_brief(cursor, brief_id, payload)
+            moved = (queries.set_brief_cabinets(cursor, brief_id, codes)
+                     if codes is not None else [])
             brief = queries.get_brief(cursor, brief_id)
-        return jsonify({'brief': brief})
+        return jsonify({'brief': brief, 'moved': moved})
 
     @section_route('/briefs/<int:brief_id>/activate', methods=('POST',), content=True)
     def olx_ads_brief_activate(ctx, brief_id):
         with db._get_cursor() as cursor:
             if not queries.get_brief(cursor, brief_id):
                 return jsonify({'error': 'Бриф не найден'}), 404
-            queries.activate_brief(cursor, brief_id)
+            moved = queries.activate_brief(cursor, brief_id)
+            if moved is None:
+                return jsonify({'error': 'Сначала выберите кабинеты, для которых этот бриф'}), 400
+            brief = queries.get_brief(cursor, brief_id)
+        return jsonify({'brief': brief, 'moved': moved})
+
+    @section_route('/briefs/<int:brief_id>/deactivate', methods=('POST',), content=True)
+    def olx_ads_brief_deactivate(ctx, brief_id):
+        """Выключить бриф. Его кабинеты остаются без брифа, пока не включат другой."""
+        with db._get_cursor() as cursor:
+            if not queries.get_brief(cursor, brief_id):
+                return jsonify({'error': 'Бриф не найден'}), 404
+            queries.deactivate_brief(cursor, brief_id)
             brief = queries.get_brief(cursor, brief_id)
         return jsonify({'brief': brief})
 

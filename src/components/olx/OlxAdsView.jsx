@@ -188,7 +188,9 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const caps = ping?.capabilities || {};
     const facets = ping?.facets || {};
-    const activeBrief = ping?.active_brief || null;
+    /* У каждого кабинета может быть свой бриф: карта «кабинет → действующий
+       бриф». Кабинета без брифа в ней просто нет. */
+    const briefsByCabinet = ping?.briefs_by_cabinet || {};
     const limits = { ...LIMITS, ...(ping?.limits || {}) };
     const activeTotal = (facets.cabinets || []).reduce((sum, c) => sum + (Number(c.active) || 0), 0);
 
@@ -225,7 +227,7 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     caps={caps}
                     facets={facets}
                     cabinets={ping?.cabinets || []}
-                    activeBrief={activeBrief}
+                    briefsByCabinet={briefsByCabinet}
                     limits={limits}
                     version={listVersion}
                     onChanged={refreshAll}
@@ -239,6 +241,8 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     headers={headers}
                     toast={toast}
                     caps={caps}
+                    cabinets={ping?.cabinets || []}
+                    briefsByCabinet={briefsByCabinet}
                     onChanged={loadPing}
                 />
             )}
@@ -259,7 +263,7 @@ const OlxAdsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 /* ── Список объявлений ──────────────────────────────────────────────────── */
 
 const AdvertsPanel = ({
-    apiBaseUrl, headers, toast, caps, facets, cabinets, activeBrief, limits,
+    apiBaseUrl, headers, toast, caps, facets, cabinets, briefsByCabinet, limits,
     version, onChanged, onOpenBrief, syncing,
 }) => {
     const [items, setItems] = useState([]);
@@ -383,6 +387,9 @@ const AdvertsPanel = ({
 
     const selectedList = useMemo(() => Array.from(selected.values()), [selected]);
     const selectedWithDraft = selectedList.filter((item) => item.draft_id);
+    /* Бриф у каждого кабинета свой: отмеченные объявления кабинетов без брифа
+       ИИ пропустит, и человек должен знать это ДО нажатия, а не после. */
+    const selectedWithoutBrief = selectedList.filter((item) => !briefsByCabinet[item.cabinet_code]);
     const targets = (list) => list.map((item) => ({
         cabinet: item.cabinet_code, advert_id: item.advert_id,
     }));
@@ -409,8 +416,11 @@ const AdvertsPanel = ({
     }, [items]);
 
     const generate = () => {
-        if (!activeBrief) {
-            toast('Сначала заполните бриф месяца — ИИ не из чего собирать текст', 'warning');
+        /* Бриф у каждого кабинета свой. Если ни у одного кабинета выбранных
+           объявлений брифа нет — ИИ не из чего писать, ведём к брифам. Если нет
+           только у части — сервер пропустит их и скажет об этом сам. */
+        if (!selectedList.some((item) => briefsByCabinet[item.cabinet_code])) {
+            toast('У кабинетов выбранных объявлений нет брифа — задайте его во вкладке «Бриф месяца»', 'warning');
             onOpenBrief();
             return;
         }
@@ -494,7 +504,7 @@ const AdvertsPanel = ({
 
     return (
         <div className="space-y-3">
-            {!activeBrief && caps.can_write_content && (
+            {Object.keys(briefsByCabinet).length === 0 && caps.can_write_content && (
                 <button
                     type="button"
                     onClick={onOpenBrief}
@@ -574,6 +584,13 @@ const AdvertsPanel = ({
                             </button>
                         )}
                     </div>
+                    {selectedWithoutBrief.length > 0 && caps.can_write_content && (
+                        <p data-no-brief-note className="px-1 text-[12.5px] text-amber-700">
+                            {selectedWithoutBrief.length === 1
+                                ? 'У одного из выбранных объявлений нет брифа для его кабинета — ИИ его пропустит'
+                                : `У ${selectedWithoutBrief.length} из выбранных объявлений нет брифа для их кабинетов — ИИ их пропустит`}
+                        </p>
+                    )}
                     {showInstruction && (
                         <textarea
                             className={`${iosInput} min-h-[72px]`}
@@ -642,7 +659,7 @@ const AdvertsPanel = ({
                     toast={toast}
                     caps={caps}
                     limits={limits}
-                    activeBrief={activeBrief}
+                    brief={briefsByCabinet[editing.cabinet_code] || null}
                     target={editing}
                     cabinetTitle={cabinetTitle[editing.cabinet_code] || editing.cabinet_code}
                     onClose={() => setEditing(null)}
@@ -745,7 +762,7 @@ const Counter = ({ value, min, max }) => {
 };
 
 const AdvertEditor = ({
-    apiBaseUrl, headers, toast, caps, limits, activeBrief, target, cabinetTitle,
+    apiBaseUrl, headers, toast, caps, limits, brief: activeBrief, target, cabinetTitle,
     onClose, onChanged,
 }) => {
     const [card, setCard] = useState(null);
@@ -812,7 +829,7 @@ const AdvertEditor = ({
 
     const rewrite = () => {
         if (!activeBrief) {
-            toast('Сначала заполните бриф месяца', 'warning');
+            toast('У кабинета этого объявления нет брифа — задайте его во вкладке «Бриф месяца»', 'warning');
             return;
         }
         setBusy('ai');
@@ -1018,7 +1035,7 @@ const AdvertEditor = ({
                                     />
                                     <div className="flex items-center justify-between gap-2">
                                         <span className="text-[12px] text-slate-400">
-                                            {activeBrief ? `По брифу «${activeBrief.title}»` : 'Бриф месяца не заполнен'}
+                                            {activeBrief ? `По брифу «${activeBrief.title}»` : 'У этого кабинета нет брифа'}
                                         </span>
                                         <button
                                             type="button"
@@ -1076,9 +1093,58 @@ const BRIEF_FIELDS = [
     { key: 'extra', label: 'Что ещё сказать', hint: 'Требования, выплаты, график — всё, что ИИ должен знать' },
 ];
 
-const emptyBrief = () => ({ title: '', offer: '', bonus: '', promo: '', raffle: '', commission: '', income: '', extra: '' });
+const BRIEF_TEXT_KEYS = ['title', ...BRIEF_FIELDS.map((field) => field.key)];
 
-const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
+const emptyBrief = () => ({
+    ...Object.fromEntries(BRIEF_TEXT_KEYS.map((key) => [key, ''])),
+    cabinets: [],
+});
+
+const briefToForm = (brief) => ({
+    ...Object.fromEntries(BRIEF_TEXT_KEYS.map((key) => [key, brief[key] || ''])),
+    cabinets: [...(brief.cabinets || [])],
+});
+
+/* «Все кабинеты», «tenge_olx, jana_olx» или «8 кабинетов» — коротко, для списка. */
+const cabinetsSummary = (codes, cabinets) => {
+    const list = codes || [];
+    if (!list.length) return 'кабинеты не выбраны';
+    if (cabinets.length && list.length === cabinets.length) return 'все кабинеты';
+    if (list.length <= 2) {
+        const titleOf = Object.fromEntries(cabinets.map((cab) => [cab.code, cab.title || cab.code]));
+        return list.map((code) => titleOf[code] || code).join(', ');
+    }
+    return `${list.length} ${plural(list.length, 'кабинет', 'кабинета', 'кабинетов')}`;
+};
+
+/* «tenge_olx перешёл с брифа «Сентябрь»» — смена брифа у кабинета не должна
+   пройти молча: человек включал один бриф, а поменялся и другой. */
+const movedMessage = (moved, cabinets) => {
+    if (!moved || !moved.length) return '';
+    const titleOf = Object.fromEntries(cabinets.map((cab) => [cab.code, cab.title || cab.code]));
+    const groups = {};
+    moved.forEach((item) => {
+        const key = item.from_title || '—';
+        groups[key] = groups[key] || [];
+        groups[key].push(titleOf[item.cabinet] || item.cabinet);
+    });
+    return Object.entries(groups)
+        .map(([from, list]) => `${list.join(', ')} ${list.length === 1 ? 'перешёл' : 'перешли'} с брифа «${from}»`)
+        .join('; ');
+};
+
+/*
+ * Бриф месяца — вводные для ИИ, у КАЖДОГО кабинета свой.
+ *
+ * Решение владельца 14.09.2026: «разный бриф на разные кабинеты», с мультивыбором
+ * кабинетов при написании. Правило, которое держит сервер: у кабинета один
+ * действующий бриф, и кабинет забирает бриф, включённый последним. Экран
+ * предупреждает об этом ДО сохранения, а после — говорит, что куда перешло.
+ *
+ * Слева — сам бриф с выбором кабинетов; справа — карта «где какой бриф
+ * действует»: ради неё раздел брифов и открывают, когда брифов несколько.
+ */
+const BriefPanel = ({ apiBaseUrl, headers, toast, caps, cabinets, briefsByCabinet, onChanged }) => {
     const [briefs, setBriefs] = useState(null);
     const [form, setForm] = useState(emptyBrief());
     const [editingId, setEditingId] = useState(null);
@@ -1091,47 +1157,107 @@ const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
                 setBriefs(items);
                 return items;
             })
-            .catch(() => setBriefs([]))
+            .catch(() => {
+                setBriefs([]);
+                return [];
+            })
     ), [apiBaseUrl, headers]);
 
-    /* Открываем сразу действующий бриф: чаще всего его и правят. */
-    useEffect(() => {
-        load().then((items) => {
-            const active = (items || []).find((b) => b.is_active);
-            if (active) {
-                setEditingId(active.id);
-                setForm({ ...emptyBrief(), ...Object.fromEntries(Object.keys(emptyBrief()).map((k) => [k, active[k] || ''])) });
-            }
-        });
-    }, [load]);
-
-    const pick = (brief) => {
+    const pick = useCallback((brief) => {
         if (!brief) {
             setEditingId(null);
             setForm(emptyBrief());
             return;
         }
         setEditingId(brief.id);
-        setForm({ ...emptyBrief(), ...Object.fromEntries(Object.keys(emptyBrief()).map((k) => [k, brief[k] || ''])) });
-    };
+        setForm(briefToForm(brief));
+    }, []);
+
+    /* Открываем сразу действующий бриф: чаще всего его и правят. */
+    useEffect(() => {
+        load().then((items) => {
+            const active = (items || []).find((brief) => brief.is_active);
+            if (active) pick(active);
+        });
+    }, [load, pick]);
+
+    /* Где какой бриф действует. Считаем из списка брифов этой вкладки — он
+       перечитывается сразу после сохранения, — а до его загрузки берём карту
+       из /ping, чтобы справа не мигала пустота. */
+    const coverage = useMemo(() => {
+        if (!briefs) return briefsByCabinet || {};
+        const map = {};
+        briefs.filter((brief) => brief.is_active).forEach((brief) => {
+            (brief.cabinets || []).forEach((code) => { map[code] = { id: brief.id, title: brief.title }; });
+        });
+        return map;
+    }, [briefs, briefsByCabinet]);
+
+    const current = (briefs || []).find((brief) => brief.id === editingId) || null;
+    const readOnly = !caps.can_write_content;
+    const allCodes = cabinets.map((cab) => cab.code);
+    const selected = new Set(form.cabinets);
+    const allSelected = allCodes.length > 0 && allCodes.every((code) => selected.has(code));
+    const titleOf = Object.fromEntries(cabinets.map((cab) => [cab.code, cab.title || cab.code]));
+
+    const toggleCabinet = (code) => setForm((prev) => {
+        const next = new Set(prev.cabinets);
+        if (next.has(code)) next.delete(code); else next.add(code);
+        return { ...prev, cabinets: allCodes.filter((item) => next.has(item)) };
+    });
+    const toggleAll = () => setForm((prev) => ({ ...prev, cabinets: allSelected ? [] : [...allCodes] }));
+
+    /* Кабинеты выбора, которые сейчас на ДРУГОМ действующем брифе. */
+    const conflicts = form.cabinets
+        .map((code) => ({ code, owner: coverage[code] }))
+        .filter((item) => item.owner && item.owner.id !== editingId);
+    const conflictText = (() => {
+        if (!conflicts.length) return '';
+        const groups = {};
+        conflicts.forEach((item) => {
+            groups[item.owner.title] = groups[item.owner.title] || [];
+            groups[item.owner.title].push(titleOf[item.code] || item.code);
+        });
+        const when = current?.is_active ? 'при сохранении' : 'после включения';
+        return Object.entries(groups).map(([from, list]) => (
+            `${list.join(', ')} сейчас на брифе «${from}» — ${when} ${list.length === 1 ? 'перейдёт' : 'перейдут'} сюда`
+        )).join('; ');
+    })();
 
     const save = (activate) => {
         if (!form.title.trim()) {
             toast('Назовите бриф — например, «Сентябрь 2026»', 'warning');
             return;
         }
+        if (!form.cabinets.length) {
+            toast('Выберите хотя бы один кабинет, для которого этот бриф', 'warning');
+            return;
+        }
         setSaving(true);
+        const payload = { ...form, title: form.title.trim() };
         const request = editingId
-            ? axios.patch(`${apiBaseUrl}/api/olx_ads/briefs/${editingId}`, form, { headers: headers() })
-                .then((response) => (activate
-                    ? axios.post(`${apiBaseUrl}/api/olx_ads/briefs/${editingId}/activate`, {}, { headers: headers() })
-                    : response))
-            : axios.post(`${apiBaseUrl}/api/olx_ads/briefs`, { ...form, activate }, { headers: headers() });
+            ? axios.patch(`${apiBaseUrl}/api/olx_ads/briefs/${editingId}`, payload, { headers: headers() })
+                .then((response) => {
+                    if (!activate || response.data?.brief?.is_active) return response;
+                    return axios.post(`${apiBaseUrl}/api/olx_ads/briefs/${editingId}/activate`, {}, { headers: headers() })
+                        .then((activated) => ({
+                            data: {
+                                ...activated.data,
+                                moved: [...(response.data?.moved || []), ...(activated.data?.moved || [])],
+                            },
+                        }));
+                })
+            : axios.post(`${apiBaseUrl}/api/olx_ads/briefs`, { ...payload, activate }, { headers: headers() });
         request
             .then((response) => {
                 const brief = response.data?.brief;
-                if (brief?.id) setEditingId(brief.id);
-                toast(activate ? 'Бриф сохранён и включён' : 'Бриф сохранён', 'success');
+                if (brief?.id) {
+                    setEditingId(brief.id);
+                    setForm(briefToForm(brief));
+                }
+                const moved = movedMessage(response.data?.moved, cabinets);
+                const head = brief?.is_active ? 'Бриф сохранён и действует' : 'Бриф сохранён';
+                toast([head, moved].filter(Boolean).join('. '), 'success');
                 load();
                 onChanged();
             })
@@ -1139,11 +1265,23 @@ const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
             .finally(() => setSaving(false));
     };
 
-    const current = (briefs || []).find((b) => b.id === editingId);
-    const readOnly = !caps.can_write_content;
+    const deactivate = () => {
+        if (!editingId) return;
+        setSaving(true);
+        axios.post(`${apiBaseUrl}/api/olx_ads/briefs/${editingId}/deactivate`, {}, { headers: headers() })
+            .then((response) => {
+                const brief = response.data?.brief;
+                if (brief) setForm(briefToForm(brief));
+                toast('Бриф выключен — у его кабинетов нет брифа, пока не включите другой', 'success');
+                load();
+                onChanged();
+            })
+            .catch((error) => toast(error.response?.data?.error || 'Не удалось выключить бриф', 'error'))
+            .finally(() => setSaving(false));
+    };
 
     return (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px]">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_300px]">
             <div className={`${iosCard} space-y-4 p-4 sm:p-5`}>
                 <div>
                     <h2 className="text-[16px] font-semibold text-slate-900">
@@ -1151,7 +1289,7 @@ const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
                         {current?.is_active && <IosBadge tone="blue" className="ml-2 align-middle">Действует</IosBadge>}
                     </h2>
                     <p className="mt-0.5 text-[12.5px] text-slate-500">
-                        ИИ возьмёт отсюда только факты. Чего здесь нет — того не будет в объявлениях.
+                        ИИ возьмёт отсюда только факты — и только для объявлений выбранных кабинетов.
                     </p>
                 </div>
 
@@ -1165,6 +1303,47 @@ const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
                         onChange={(e) => setForm({ ...form, title: e.target.value })}
                         disabled={readOnly}
                     />
+                </div>
+
+                <div className="space-y-2">
+                    <div className="flex items-center justify-between px-1">
+                        <span className={iosGroupLabel}>Для каких кабинетов</span>
+                        {!readOnly && cabinets.length > 0 && (
+                            <button
+                                type="button"
+                                data-cabinet-all
+                                onClick={toggleAll}
+                                className="text-[12.5px] font-medium text-blue-600 hover:underline"
+                            >
+                                {allSelected ? 'Снять все' : 'Все'}
+                            </button>
+                        )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        {cabinets.map((cab) => {
+                            const on = selected.has(cab.code);
+                            return (
+                                <button
+                                    key={cab.code}
+                                    type="button"
+                                    data-cabinet={cab.code}
+                                    aria-pressed={on}
+                                    disabled={readOnly}
+                                    onClick={() => toggleCabinet(cab.code)}
+                                    className={`rounded-full px-3 py-1.5 text-[13px] font-medium ring-1 transition active:scale-[0.98] disabled:cursor-default ${
+                                        on ? 'bg-blue-600 text-white ring-blue-600' : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50'
+                                    }`}
+                                >
+                                    {cab.title || cab.code}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    {conflictText && (
+                        <p data-brief-conflict className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] leading-snug text-amber-800">
+                            {conflictText}
+                        </p>
+                    )}
                 </div>
 
                 {BRIEF_FIELDS.map((field) => (
@@ -1182,7 +1361,12 @@ const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
                 ))}
 
                 {!readOnly && (
-                    <div className="flex flex-wrap justify-end gap-2 pt-1">
+                    <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                        {current?.is_active && (
+                            <button type="button" className={iosBtnGhost} onClick={deactivate} disabled={saving}>
+                                Выключить
+                            </button>
+                        )}
                         <button type="button" className={iosBtnSecondary} onClick={() => save(false)} disabled={saving}>
                             Сохранить
                         </button>
@@ -1196,36 +1380,67 @@ const BriefPanel = ({ apiBaseUrl, headers, toast, caps, onChanged }) => {
                 )}
             </div>
 
-            <aside className="space-y-2">
-                <div className="flex items-center justify-between px-1">
-                    <span className={iosGroupLabel}>Все брифы</span>
-                    {!readOnly && (
-                        <button type="button" className="text-[12.5px] font-medium text-blue-600 hover:underline" onClick={() => pick(null)}>
-                            Новый
-                        </button>
-                    )}
+            <aside className="space-y-4">
+                <div className="space-y-2">
+                    <span className={`${iosGroupLabel} block`}>Где какой бриф</span>
+                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                        {cabinets.map((cab) => {
+                            const owner = coverage[cab.code];
+                            const ownerBrief = owner ? (briefs || []).find((brief) => brief.id === owner.id) : null;
+                            return (
+                                <div key={cab.code} data-coverage={cab.code}>
+                                    <button
+                                        type="button"
+                                        disabled={!ownerBrief}
+                                        onClick={() => ownerBrief && pick(ownerBrief)}
+                                        className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition ${
+                                            ownerBrief ? 'hover:bg-slate-50' : 'cursor-default'
+                                        } ${owner && owner.id === editingId ? 'bg-blue-50/60' : ''}`}
+                                    >
+                                        <span className="truncate text-[13px] text-slate-700">{cab.title || cab.code}</span>
+                                        <span className={`truncate text-right text-[12px] ${owner ? 'text-slate-500' : 'text-slate-400'}`}>
+                                            {owner ? owner.title : 'нет брифа'}
+                                        </span>
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
                 </div>
-                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                    {briefs === null && (
-                        <div className="flex justify-center py-6 text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /></div>
-                    )}
-                    {briefs && briefs.length === 0 && (
-                        <div className="px-3 py-6 text-center text-[12.5px] text-slate-500">Брифов пока нет</div>
-                    )}
-                    {(briefs || []).map((brief) => (
-                        <button
-                            key={brief.id}
-                            type="button"
-                            onClick={() => pick(brief)}
-                            className={`block w-full px-3 py-2.5 text-left transition ${brief.id === editingId ? 'bg-blue-50/60' : 'hover:bg-slate-50'}`}
-                        >
-                            <div className="flex items-center justify-between gap-2">
-                                <span className="truncate text-[13.5px] font-medium text-slate-800">{brief.title}</span>
-                                {brief.is_active && <IosBadge tone="blue">Действует</IosBadge>}
-                            </div>
-                            <div className="text-[11.5px] text-slate-400 tabular-nums">{fmtDateTime(brief.updated_at)}</div>
-                        </button>
-                    ))}
+
+                <div className="space-y-2">
+                    <div className="flex items-center justify-between px-1">
+                        <span className={iosGroupLabel}>Все брифы</span>
+                        {!readOnly && (
+                            <button type="button" className="text-[12.5px] font-medium text-blue-600 hover:underline" onClick={() => pick(null)}>
+                                Новый
+                            </button>
+                        )}
+                    </div>
+                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                        {briefs === null && (
+                            <div className="flex justify-center py-6 text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /></div>
+                        )}
+                        {briefs && briefs.length === 0 && (
+                            <div className="px-3 py-6 text-center text-[12.5px] text-slate-500">Брифов пока нет</div>
+                        )}
+                        {(briefs || []).map((brief) => (
+                            <button
+                                key={brief.id}
+                                type="button"
+                                onClick={() => pick(brief)}
+                                className={`block w-full px-3 py-2.5 text-left transition ${brief.id === editingId ? 'bg-blue-50/60' : 'hover:bg-slate-50'}`}
+                            >
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="truncate text-[13.5px] font-medium text-slate-800">{brief.title}</span>
+                                    {brief.is_active && <IosBadge tone="blue">Действует</IosBadge>}
+                                </div>
+                                <div className="text-[11.5px] text-slate-400 tabular-nums">
+                                    {cabinetsSummary(brief.cabinets, cabinets)} · {fmtDateTime(brief.updated_at)}
+                                </div>
+                            </button>
+                        ))}
+                    </div>
                 </div>
             </aside>
         </div>

@@ -401,20 +401,63 @@ _BRIEF_FIELDS = ('title', 'offer', 'bonus', 'promo', 'raffle', 'commission',
                  'income', 'extra')
 
 
+# Кабинеты брифа приклеиваются к нему здесь, одним запросом: экран брифов
+# показывает у каждого брифа, для кого он написан, и N+1 запросов на список не
+# нужен.
+_BRIEF_SELECT = """
+    SELECT b.*,
+           COALESCE(ARRAY(SELECT c.cabinet_code
+                            FROM olx_ads_brief_cabinets c
+                           WHERE c.brief_id = b.id
+                           ORDER BY c.cabinet_code), '{}') AS cabinets
+      FROM olx_ads_briefs b
+"""
+
+
 def list_briefs(cursor, limit=50):
-    cursor.execute("SELECT * FROM olx_ads_briefs ORDER BY is_active DESC, "
-                   " updated_at DESC LIMIT %s", (int(limit),))
+    cursor.execute(_BRIEF_SELECT + " ORDER BY b.is_active DESC, b.updated_at DESC LIMIT %s",
+                   (int(limit),))
     return _all(cursor)
 
 
 def get_brief(cursor, brief_id):
-    cursor.execute("SELECT * FROM olx_ads_briefs WHERE id = %s", (int(brief_id),))
+    cursor.execute(_BRIEF_SELECT + " WHERE b.id = %s", (int(brief_id),))
     return _one(cursor)
 
 
-def get_active_brief(cursor):
-    cursor.execute("SELECT * FROM olx_ads_briefs WHERE is_active LIMIT 1")
-    return _one(cursor)
+def briefs_by_cabinet(cursor):
+    """Карта «кабинет → действующий бриф» (только id и название).
+
+    Нужна экрану: какой бриф возьмёт ИИ у объявления этого кабинета, и у каких
+    кабинетов брифа нет вовсе. Кабинета без брифа в карте просто нет.
+    """
+    cursor.execute(
+        """
+        SELECT c.cabinet_code, b.id, b.title
+          FROM olx_ads_brief_cabinets c
+          JOIN olx_ads_briefs b ON b.id = c.brief_id
+         WHERE c.is_active
+        """)
+    return {row['cabinet_code']: {'id': row['id'], 'title': row['title']}
+            for row in _all(cursor)}
+
+
+def active_briefs_for(cursor, cabinet_codes):
+    """Действующие брифы целиком для перечисленных кабинетов: {кабинет: бриф}.
+
+    Для генерации ИИ: у каждого объявления свой кабинет, а значит и свой бриф.
+    """
+    codes = sorted({str(code) for code in (cabinet_codes or []) if code})
+    if not codes:
+        return {}
+    cursor.execute(
+        """
+        SELECT c.cabinet_code AS covered_cabinet, b.*
+          FROM olx_ads_brief_cabinets c
+          JOIN olx_ads_briefs b ON b.id = c.brief_id
+         WHERE c.is_active AND c.cabinet_code = ANY(%s)
+        """, (codes,))
+    return {row['covered_cabinet']: row for row in _all(cursor)}
 
 
 def create_brief(cursor, values, actor_id=None, actor_name=None):
@@ -446,16 +489,118 @@ def update_brief(cursor, brief_id, values):
     return cursor.rowcount or 0
 
 
-def activate_brief(cursor, brief_id):
-    """Сделать бриф действующим. Снятие прежнего и включение нового — одна транзакция.
+def brief_cabinet_codes(cursor, brief_id):
+    cursor.execute(
+        "SELECT cabinet_code FROM olx_ads_brief_cabinets WHERE brief_id = %s "
+        " ORDER BY cabinet_code", (int(brief_id),))
+    return [row['cabinet_code'] for row in _all(cursor)]
 
-    Порядок обязателен: частичный уникальный индекс `uniq_olx_ads_brief_active`
-    не даст двум строкам стоять активными одновременно, поэтому сначала гасим
-    все, потом зажигаем одну.
+
+def _claim_cabinets(cursor, brief_id, codes):
+    """Забрать кабинеты у других ДЕЙСТВУЮЩИХ брифов. Возвращает, что откуда перешло.
+
+    Правило раздела: у кабинета один действующий бриф, и кабинет забирает тот,
+    который включили (или сохранили включённым) последним. У прежнего брифа
+    кабинет СНИМАЕТСЯ из списка, а не просто гасится: иначе в экране у брифа
+    стоял бы кабинет, на котором он не действует, — и «почему ИИ взял не этот
+    бриф» стало бы загадкой. Бриф, у которого не осталось ни одного кабинета,
+    выключается сам.
+
+    Выключенные брифы не трогаем: их список кабинетов — это заготовка, и пока
+    её не включили, она никому не мешает.
     """
-    cursor.execute("UPDATE olx_ads_briefs SET is_active = FALSE WHERE is_active")
+    codes = sorted({str(code) for code in (codes or []) if code})
+    if not codes:
+        return []
+    cursor.execute(
+        """
+        SELECT c.cabinet_code AS cabinet, b.id AS from_brief_id, b.title AS from_title
+          FROM olx_ads_brief_cabinets c
+          JOIN olx_ads_briefs b ON b.id = c.brief_id
+         WHERE c.is_active AND c.brief_id <> %s AND c.cabinet_code = ANY(%s)
+         ORDER BY c.cabinet_code
+        """, (int(brief_id), codes))
+    moved = _all(cursor)
+    if not moved:
+        return []
+    cursor.execute(
+        "DELETE FROM olx_ads_brief_cabinets "
+        " WHERE is_active AND brief_id <> %s AND cabinet_code = ANY(%s)",
+        (int(brief_id), codes))
+    cursor.execute(
+        """
+        UPDATE olx_ads_briefs b
+           SET is_active = FALSE, updated_at = {now}
+         WHERE b.is_active AND b.id <> %s
+           AND NOT EXISTS (SELECT 1 FROM olx_ads_brief_cabinets c WHERE c.brief_id = b.id)
+        """.format(now=_NOW), (int(brief_id),))
+    return moved
+
+
+def set_brief_cabinets(cursor, brief_id, cabinet_codes):
+    """Заменить список кабинетов брифа. Возвращает, какие кабинеты перешли от других.
+
+    Если бриф включён, новые кабинеты он забирает у других действующих брифов
+    сразу (см. `_claim_cabinets`); выключенный просто запоминает выбор.
+    """
+    codes = sorted({str(code) for code in (cabinet_codes or []) if code})
+    cursor.execute("SELECT is_active FROM olx_ads_briefs WHERE id = %s", (int(brief_id),))
+    active = bool(_scalar(cursor))
+
+    cursor.execute(
+        "DELETE FROM olx_ads_brief_cabinets "
+        " WHERE brief_id = %s AND NOT (cabinet_code = ANY(%s))",
+        (int(brief_id), codes))
+
+    # Сначала забрать у других, потом зажечь у себя: частичный уникальный индекс
+    # uniq_olx_ads_brief_cabinet_active не даст двум действующим строкам по
+    # одному кабинету существовать даже на миг.
+    moved = _claim_cabinets(cursor, brief_id, codes) if active else []
+    for code in codes:
+        cursor.execute(
+            """
+            INSERT INTO olx_ads_brief_cabinets (brief_id, cabinet_code, is_active)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (brief_id, cabinet_code) DO UPDATE SET is_active = EXCLUDED.is_active
+            """, (int(brief_id), code, active))
+    return moved
+
+
+def activate_brief(cursor, brief_id):
+    """Включить бриф для его кабинетов. Одна транзакция.
+
+    Возвращает список перешедших кабинетов, а None — если кабинетов у брифа нет:
+    включать бриф «ни для кого» бессмысленно, и вызывающий должен сказать это
+    человеку, а не молча зажечь флаг.
+
+    Порядок обязателен: сначала кабинеты забираются у других брифов, потом
+    зажигаются у этого — иначе уникальный индекс по действующему кабинету
+    отвергнет запись.
+    """
+    codes = brief_cabinet_codes(cursor, brief_id)
+    if not codes:
+        return None
+    moved = _claim_cabinets(cursor, brief_id, codes)
+    cursor.execute(
+        "UPDATE olx_ads_brief_cabinets SET is_active = TRUE WHERE brief_id = %s",
+        (int(brief_id),))
     cursor.execute(
         "UPDATE olx_ads_briefs SET is_active = TRUE, updated_at = {now} WHERE id = %s"
+        .format(now=_NOW), (int(brief_id),))
+    return moved
+
+
+def deactivate_brief(cursor, brief_id):
+    """Выключить бриф: его кабинеты остаются без брифа, пока не включат другой.
+
+    Сами кабинеты из списка брифа не удаляются — выключенный бриф можно включить
+    обратно тем же составом.
+    """
+    cursor.execute(
+        "UPDATE olx_ads_brief_cabinets SET is_active = FALSE WHERE brief_id = %s",
+        (int(brief_id),))
+    cursor.execute(
+        "UPDATE olx_ads_briefs SET is_active = FALSE, updated_at = {now} WHERE id = %s"
         .format(now=_NOW), (int(brief_id),))
     return cursor.rowcount or 0
 
