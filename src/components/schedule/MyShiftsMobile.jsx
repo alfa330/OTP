@@ -194,6 +194,81 @@ export const MyShiftsShiftRow = ({ dotClassName, time, hours, typeLabel, breaks 
   </div>
 );
 
+/*
+ * Таймлайн дня — та же лента 00–24, что на компьютере: смены цветными полосами,
+ * перерывы янтарём внутри них, тех. сбои и офлайн тонкими линиями у нижней
+ * грани, красная черта — «сейчас». Владелец попросил оставить его на телефоне
+ * (14.09.2026: «ты убрал таймлайн, он пусть остается»). Подсказок по наведению
+ * здесь нет — наведения на телефоне нет; кто на что нажал, видно по строкам под
+ * лентой. Полоса становится кнопкой только когда ей дан onClick (в запросе на
+ * замену тап выбирает смену целиком).
+ */
+export const MyShiftsTimeline = ({
+  parts = [],
+  overlays = [],
+  lines = [],
+  nowPercent = null,
+  emptyLabel = null,
+  emptyClassName = 'text-slate-400',
+  caption = null,
+  marks = [0, 6, 12, 18, 24],
+}) => (
+  <div>
+    <div className="relative mb-1 h-4">
+      {marks.map((hour) => (
+        <span
+          key={hour}
+          className="absolute top-0 text-[11px] leading-none tabular-nums text-slate-400"
+          style={{ left: `${(hour / 24) * 100}%`, transform: hour === 0 ? 'none' : hour === 24 ? 'translateX(-100%)' : 'translateX(-50%)' }}
+        >
+          {String(hour).padStart(2, '0')}
+        </span>
+      ))}
+    </div>
+    <div className="relative h-11 overflow-hidden rounded-xl bg-slate-100">
+      {marks.filter((hour) => hour > 0 && hour < 24).map((hour) => (
+        <div key={hour} className="absolute inset-y-0 w-px bg-slate-200" style={{ left: `${(hour / 24) * 100}%` }} />
+      ))}
+      {parts.map((part) => {
+        const style = { left: `${part.left}%`, width: `${part.width}%`, background: part.background };
+        const inner = (
+          <>
+            {(part.breaks || []).map((brk, index) => (
+              // Перерывы внутри полосы упорядочены и не переставляются — индекс честный ключ.
+              // eslint-disable-next-line react/no-array-index-key
+              <span key={index} className="absolute inset-y-0 bg-amber-300/95" style={{ left: `${brk.left}%`, width: `${brk.width}%` }} />
+            ))}
+            {part.label ? (
+              <span className="relative z-10 block truncate px-1 text-center text-[11px] font-semibold tabular-nums leading-9 text-white">{part.label}</span>
+            ) : null}
+          </>
+        );
+        const className = `absolute inset-y-1 overflow-hidden rounded-lg ${part.className || ''}`;
+        return part.onClick ? (
+          <button key={part.key} type="button" onClick={part.onClick} aria-label={part.ariaLabel} className={className} style={style}>{inner}</button>
+        ) : (
+          <div key={part.key} className={className} style={style}>{inner}</div>
+        );
+      })}
+      {overlays.map((item) => (
+        <div key={item.key} className={`pointer-events-none absolute inset-y-0 ${item.className}`} style={{ left: `${item.left}%`, width: `${item.width}%` }} />
+      ))}
+      {lines.map((item) => (
+        <div key={item.key} className={`pointer-events-none absolute z-20 h-1 rounded-full ${item.className}`} style={{ left: `${item.left}%`, width: `${item.width}%` }} />
+      ))}
+      {!parts.length && emptyLabel ? (
+        <div className={`absolute inset-0 z-10 flex items-center justify-center text-[13px] font-medium ${emptyClassName}`}>{emptyLabel}</div>
+      ) : null}
+      {nowPercent !== null && Number.isFinite(nowPercent) ? (
+        <div className="pointer-events-none absolute inset-y-0 z-30 w-[2px] -translate-x-1/2 bg-rose-500" style={{ left: `${nowPercent}%` }}>
+          <div className="absolute -left-[3px] top-0 h-2 w-2 rounded-full bg-rose-500" />
+        </div>
+      ) : null}
+    </div>
+    {caption ? <p className="mt-2 text-[12px] leading-snug text-slate-400">{caption}</p> : null}
+  </div>
+);
+
 /* Строка с плиткой-значком: «Выходной», «Смен нет», статус графика. */
 export const MyShiftsNoteRow = ({ tileClassName = 'bg-slate-300', iconClassName = 'fa-calendar-xmark', title, subtitle = null, note = null }) => (
   <div className="sa-m-row flex items-center gap-3 px-4 py-3">

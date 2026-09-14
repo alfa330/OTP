@@ -111,6 +111,15 @@ class PhoneBranchTests(unittest.TestCase):
         self.assertNotIn('handleAddSwapDraft', branch)
         self.assertIn('onClick={handleCreateSwapRequest}', branch)
 
+    def test_timeline_stays_on_the_phone(self):
+        """Владелец 14.09.2026: «ты убрал таймлайн, он пусть остается» — лента дня
+        в «Сменах» и «Ваша смена в этот день» в запросе рисуются и на телефоне."""
+        branch = block(APP, '                if (isNarrowShell) {\n                    const phoneToday', '                return (\n                    <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">')
+        self.assertGreaterEqual(branch.count('<MyShiftsTimeline'), 3)
+        self.assertIn('getShiftPartsForDate(myTimelineOperator, phoneDayDate)', branch)
+        self.assertIn("label=\"Ваша смена в этот день\"", branch)
+        self.assertIn('export const MyShiftsTimeline', PHONE)
+
     def test_front_office_keeps_colleagues_hidden_on_the_phone(self):
         branch = block(APP, '                if (isNarrowShell) {\n                    const phoneToday', '                return (\n                    <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">')
         self.assertIn("operatorColleagueShiftsHidden ? null : { value: 'swaps', label: 'Замены', count: swapPendingIncomingCount }", branch)

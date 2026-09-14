@@ -57,8 +57,8 @@ import MobileSheetTitle from './components/common/MobileSheetTitle';
 import MobileActionSheet from './components/common/MobileActionSheet';
 import {
     MyShiftsCandidateRow, MyShiftsCheckRow, MyShiftsColleagueRow, MyShiftsNoteRow, MyShiftsPlainRow,
-    MyShiftsRequestCard, MyShiftsShiftRow, MyShiftsStatusCard, MyShiftsWeekHeader,
-    PHONE_BUTTON, PHONE_ICONS, PHONE_TIME_INPUT, PhoneChips, PhoneDayStrip, PhoneField, PhoneGroup,
+    MyShiftsRequestCard, MyShiftsShiftRow, MyShiftsStatusCard, MyShiftsTimeline, MyShiftsWeekHeader,
+    PHONE_BUTTON, PHONE_ICONS, PHONE_TIME_INPUT, PhoneDayStrip, PhoneField, PhoneGroup,
     PhoneLinkRow, PhoneRow, useLastPresent
 } from './components/schedule/MyShiftsMobile';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
@@ -25638,6 +25638,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }).filter(Boolean);
                     const phoneTech = normalizePhoneTimeline(phoneDay?.technicalIssues);
                     const phoneOffline = normalizePhoneTimeline(phoneDay?.offlineActivities);
+                    /* Таймлайн выбранного дня — те же помощники, что у настольного дня
+                       (getShiftPartsForDate/getBreakPartsForPart), только для даты из
+                       полосы, а не из currentDate. */
+                    const phoneTimelineParts = (myTimelineOperator && phoneDay)
+                        ? getShiftPartsForDate(myTimelineOperator, phoneDayDate).map((part, idx) => {
+                            const srcSeg = myTimelineOperator?.shifts?.[part.sourceDate]?.[part.sourceIndex];
+                            return {
+                                key: `phone-part-${idx}`,
+                                left: computeLeftPercent(part.start),
+                                width: ((part.end - part.start) / minutesInDay) * 100,
+                                background: plannerShiftVisualMeta(srcSeg).barGradient,
+                                breaks: (getBreakPartsForPart(myTimelineOperator, part, phoneDayDate) || []).map(b => ({
+                                    left: ((b.start - part.start) / Math.max(1, part.end - part.start)) * 100,
+                                    width: ((b.end - b.start) / Math.max(1, part.end - part.start)) * 100
+                                }))
+                            };
+                        })
+                        : [];
+                    const phoneTimelineLines = [
+                        ...phoneTech.map(seg => ({ key: `tech-${seg.id}`, left: computeLeftPercent(seg.startMin), width: ((seg.endMin - seg.startMin) / minutesInDay) * 100, className: 'bottom-0.5 bg-violet-500' })),
+                        ...phoneOffline.map(seg => ({ key: `offline-${seg.id}`, left: computeLeftPercent(seg.startMin), width: ((seg.endMin - seg.startMin) / minutesInDay) * 100, className: 'bottom-2 bg-emerald-500' }))
+                    ];
+                    const phoneNowDate = new Date();
+                    const phoneNowPercent = phoneDayDate === phoneToday
+                        ? computeLeftPercent(phoneNowDate.getHours() * 60 + phoneNowDate.getMinutes())
+                        : null;
                     // Нули не пишем: «0 выходных» — шум, а без смен и выходных строки нет вовсе.
                     const phoneWeekSummary = [
                         myScheduleSummary.shiftsCount ? `${myScheduleSummary.shiftsCount} ${pluralRu(myScheduleSummary.shiftsCount, 'смена', 'смены', 'смен')} · ${formatHoursRu(myScheduleSummary.totalWorkMin)}` : '',
@@ -25693,6 +25719,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             >
                                 {myScheduleLoading && !phoneDay ? (
                                     <MyShiftsNoteRow tileClassName="bg-slate-300" iconClassName="fa-spinner fa-spin" title="Загружаю смены…" />
+                                ) : null}
+                                {phoneTimelineParts.length || phoneTimelineLines.length ? (
+                                    <div className="px-4 pb-3.5 pt-3">
+                                        <MyShiftsTimeline parts={phoneTimelineParts} lines={phoneTimelineLines} nowPercent={phoneNowPercent} />
+                                    </div>
                                 ) : null}
                                 {phoneDayStatus ? (
                                     <MyShiftsNoteRow
@@ -26045,13 +26076,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             : (swapForm.targetOperatorId
                                 ? 'Можно отправлять'
                                 : (isSwapExchangeMode ? 'Выберите коллегу для обмена' : 'Выберите коллегу для замены')));
-                    const phoneOwnShiftChips = swapDayTimeline.segments.filter(seg => seg.sourceStart && seg.sourceEnd).map(seg => ({
-                        id: seg.id,
-                        label: seg.fullLabel || seg.label,
-                        caption: `целиком · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`,
-                        active: swapForm.startTime === seg.sourceStart && swapForm.endTime === seg.sourceEnd,
-                        seg
+                    /* «Ваша смена в этот день» — та же лента, что на компьютере: тап по
+                       смене выбирает её целиком, выбранный интервал подсвечен. */
+                    const phoneSwapTimelineParts = (segments, tappable) => segments.map(seg => ({
+                        key: seg.id,
+                        left: (seg.start / 1440) * 100,
+                        width: ((seg.end - seg.start) / 1440) * 100,
+                        className: tappable ? 'bg-blue-500/90' : 'bg-indigo-500/90',
+                        label: `${seg.fullLabel || seg.label} · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`,
+                        ariaLabel: `Выбрать целиком: ${seg.fullLabel || seg.label}`,
+                        onClick: tappable && seg.sourceStart ? () => selectPhoneOwnShift(seg) : null
                     }));
+                    const phoneSwapOverlay = (interval, key) => (interval ? [{
+                        key,
+                        left: (interval.start / 1440) * 100,
+                        width: ((interval.end - interval.start) / 1440) * 100,
+                        className: swapCurrentIntervalTone.timelineClass
+                    }] : []);
                     const phoneCandidateTags = (item) => [
                         Number(item?.priorityScore || 0) > 0 ? { key: 'priority', label: 'Приоритет', className: 'bg-emerald-100 text-emerald-700' } : null,
                         item?.matchStartsAtRequestEnd ? { key: 'start', label: 'Стык: старт', className: 'bg-blue-100 text-blue-700' } : null,
@@ -26160,12 +26201,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         />
                                     </PhoneGroup>
-                                    {phoneOwnShiftChips.length ? (
-                                        <PhoneChips
-                                            ariaLabel="Ваши смены в этот день"
-                                            items={phoneOwnShiftChips}
-                                            onSelect={(item) => selectPhoneOwnShift(item.seg)}
-                                        />
+                                    {swapDayTimeline.date && swapDayTimeline.hasShifts ? (
+                                        <PhoneGroup
+                                            label="Ваша смена в этот день"
+                                            right={phoneCountBadge(`${formatDateRuDayMonth(swapDayTimeline.date)} · ${formatHoursRu(swapDayTimeline.totalMinutes)}`)}
+                                        >
+                                            <div className="px-4 pb-3.5 pt-3">
+                                                <MyShiftsTimeline
+                                                    parts={phoneSwapTimelineParts(swapDayTimeline.segments, true)}
+                                                    overlays={phoneSwapOverlay(swapDayTimeline.selectedInterval, 'selected')}
+                                                    caption={currentSwapFullShiftMatch ? null : 'Нажмите смену, чтобы выбрать её целиком'}
+                                                />
+                                                {swapDayTimeline.hasNextDayShifts ? (
+                                                    <div className="mt-3 border-t border-slate-100 pt-3">
+                                                        <div className="mb-1 flex items-center justify-between gap-2 text-[12px] text-slate-400">
+                                                            <span>Следующий день</span>
+                                                            <span className="tabular-nums">{formatDateRuDayMonth(swapDayTimeline.nextDayDate)} · {formatHoursRu(swapDayTimeline.nextDayTotalMinutes)}</span>
+                                                        </div>
+                                                        <MyShiftsTimeline
+                                                            parts={phoneSwapTimelineParts(swapDayTimeline.nextDaySegments, false)}
+                                                            overlays={phoneSwapOverlay(swapDayTimeline.selectedIntervalNextDay, 'selected-next')}
+                                                        />
+                                                    </div>
+                                                ) : null}
+                                            </div>
+                                        </PhoneGroup>
                                     ) : null}
                                     <PhoneGroup
                                         label="Тип запроса"
