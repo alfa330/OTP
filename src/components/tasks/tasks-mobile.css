@@ -1,0 +1,1059 @@
+/* ── Раздел «Задачи» на телефоне ─────────────────────────────────────────────
+
+   Настольный раздел — редакционная вёрстка: плитки, строки с рядом бейджей,
+   выезжающая справа карточка, окна поверх затемнения. На экране в 390 px это
+   давало (замер на стенде 14.09.2026, iPhone 390×844):
+   • до первой задачи ~1000 px: четыре кнопки шапки в две строки и пять плиток
+     статистики в три ряда;
+   • тему, обрезанную до «Обновить и…», — ширину съедали бейджи, скрепка и
+     шеврон, а фильтры переносились тремя строками;
+   • карточку задачи ПОД колоколом и поверх бара разделов, без жеста «назад»,
+     с подсказкой «Esc»;
+   • «Ждут вас» — выпадашку, уехавшую за левый край на 215 px;
+   • доску с полутора колонками, подсказкой «перетащите», которая пальцем не
+     работает, и целями нажатия по 20–26 px.
+
+   Здесь раздел приводится к виду приложения: крупный заголовок, сгруппированные
+   списки, карточка задачи — экран. Разметка общая с компьютером; где телефону
+   нужна другая, её разводит isMobileShell в TasksView.jsx и
+   TaskBoardWorkspace.jsx.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_tasks_mobile.py).
+
+   ВЕС. Стили раздела вставляются тегом <style> ПОЗЖЕ этого файла, а общий слой
+   разделов в mobile-shell.css переносит «ряды кнопок» правилами с !important и
+   весом до (0,6,1). Поэтому селекторы здесь начинаются с body.mobile-shell
+   .tv-root, а там, где спорим с общим слоем, — ещё и с .main-content и
+   !important.
+
+   ЦВЕТ — только переменными раздела (--surface, --ink, --border…): тёмный режим
+   подменяет их на .tv-root, а хексы из этого файла генератор тёмной темы не
+   разбирает (он читает только тег <style> в TasksView.jsx). */
+
+/* ── Основа ── */
+
+/* Шрифт системы, как во всём портале на телефоне. Редакционные Syne и DM Sans
+   на экране телефона выглядят чужим сайтом внутри приложения. Значки портала —
+   SVG (FaIcon рисует lucide), шрифтом их не задеть. */
+body.mobile-shell .tv-root,
+body.mobile-shell .tv-root * {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+}
+
+/* Одно полотно на все вкладки. На компьютере доска уходит на свой серый, но на
+   телефоне цвет раздела красит и полосу под вырезом (MobilePageChrome читает его
+   при входе в раздел), и смена вкладки оставила бы под вырезом чужой цвет. */
+body.mobile-shell .tv-root,
+body.mobile-shell .tv-root.is-board-mode {
+    min-height: 0;
+    padding: 4px 16px 28px;
+    background: var(--bg);
+}
+
+/* Раздел — во всю высоту экрана. Короткая вкладка (бэклог из трёх задач)
+   заканчивалась посреди экрана, и ниже шло полотно .main-content своего,
+   чуть другого цвета: поперёк экрана лежал шов. Высоту даёт flex, а не число:
+   .main-content на телефоне и так ровно в экран и уже вычел поля оболочки
+   (тот же приём, что у «QR доступа»). */
+body.mobile-shell .main-content:has(> .tv-root) {
+    display: flex;
+    flex-direction: column;
+}
+
+body.mobile-shell .main-content > .tv-root {
+    flex: 1 0 auto;
+}
+
+body.mobile-shell .tv-root .tv-section {
+    margin-bottom: 26px;
+}
+
+/* Лёгкий серый системных переключателей; прозрачный, поэтому одинаково ложится и
+   на светлое, и на тёмное полотно. */
+body.mobile-shell .tv-root .tv-workspace-tabs,
+body.mobile-shell .tv-root .tv-my-tabs,
+body.mobile-shell .main-content .tv-root .inline-flex.tb-scope-select {
+    background: rgba(118, 118, 128, 0.12);
+}
+
+/* ── Шапка: крупный заголовок, значки справа, отдел строкой ниже ── */
+
+body.mobile-shell .main-content .tv-root .tv-topbar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 12px !important;
+    margin-bottom: 14px;
+}
+
+body.mobile-shell .tv-root .tv-topbar-lead {
+    display: contents;
+}
+
+body.mobile-shell .tv-root .tv-topbar-title {
+    grid-column: 1;
+    grid-row: 1;
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .tv-root .tv-dept-select {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    min-width: 0;
+}
+
+body.mobile-shell .main-content .tv-root .tv-topbar-actions {
+    grid-column: 2;
+    grid-row: 1;
+    flex-wrap: nowrap !important;
+    gap: 10px;
+}
+
+body.mobile-shell .tv-root .tv-round-btn {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: var(--shadow-sm);
+    cursor: pointer;
+}
+
+body.mobile-shell .tv-root .tv-round-btn.is-active {
+    color: var(--amber);
+}
+
+body.mobile-shell .tv-root .tv-round-btn.is-primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    box-shadow: none;
+}
+
+body.mobile-shell .tv-root .tv-round-btn.is-primary svg {
+    width: 18px;
+    height: 18px;
+}
+
+body.mobile-shell .tv-root .tv-round-btn .tv-inbox-count {
+    position: absolute;
+    top: -4px;
+    right: -5px;
+    box-shadow: 0 0 0 2px var(--bg);
+}
+
+/* ── Вкладки раздела и «Принятые / Исходящие» — сегменты во всю ширину ── */
+
+body.mobile-shell .main-content .tv-root .tv-workspace-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: 100%;
+    margin-bottom: 18px;
+    padding: 2px;
+    border-radius: 9px;
+}
+
+body.mobile-shell .tv-root .tv-workspace-tab,
+body.mobile-shell .tv-root .tv-tab-btn {
+    justify-content: center;
+    min-width: 0;
+    min-height: 32px;
+    padding: 0 4px;
+    border-radius: 7px;
+    font-size: 13px;
+}
+
+body.mobile-shell .tv-root .tv-my-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+    margin-bottom: 12px;
+    padding: 2px;
+    border: 0;
+    border-radius: 9px;
+}
+
+/* ── Статистика — одна полоса вместо пяти плиток ── */
+
+/* Пять плиток в три ряда занимали полэкрана до первой задачи. Числа — справка,
+   а не содержание раздела: им хватает одной полосы с подписью под числом. */
+body.mobile-shell .tv-root .tv-stats-strip {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0;
+    margin-bottom: 22px;
+    border-radius: 12px;
+    background: var(--surface);
+    overflow: hidden;
+}
+
+body.mobile-shell .tv-root .tv-stat-card,
+body.mobile-shell .tv-root .tv-stat-card:hover {
+    flex-direction: column-reverse;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 3px;
+    padding: 10px 2px 9px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    transform: none;
+    text-align: center;
+}
+
+body.mobile-shell .tv-root .tv-stat-card + .tv-stat-card {
+    box-shadow: inset 1px 0 0 var(--border);
+}
+
+body.mobile-shell .tv-root .tv-stat-value {
+    font-size: 20px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .tv-root .tv-stat-label {
+    font-size: 10.5px;
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+/* ── Заголовки групп ── */
+
+body.mobile-shell .tv-root .tv-section-header {
+    margin-bottom: 8px;
+    padding: 0 4px;
+}
+
+body.mobile-shell .tv-root .tv-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+/* ── Сгруппированные списки ── */
+
+/* Люди и задачи — строки одной карточки с разделителями от текста, как в
+   списках телефона, а не стопка отдельных карточек с рамками. */
+body.mobile-shell .tv-root .tv-person-list {
+    gap: 0;
+    margin-bottom: 12px;
+    border-radius: 12px;
+    background: var(--surface);
+    overflow: hidden;
+}
+
+body.mobile-shell .tv-root .tv-person-row,
+body.mobile-shell .tv-root .tv-person-row:hover {
+    position: relative;
+    flex-wrap: nowrap;
+    padding: 11px 14px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    transform: none;
+}
+
+body.mobile-shell .tv-root .tv-person-row + .tv-person-row::before,
+body.mobile-shell .tv-root .tv-task-row.is-compact + .tv-task-row.is-compact::before,
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participant + .tv-participant::before,
+body.mobile-shell .tv-root .tv-drawer-screen .tv-info-item + .tv-info-item::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 14px;
+    height: 1px;
+    background: var(--border);
+    pointer-events: none;
+}
+
+body.mobile-shell .tv-root .tv-person-row + .tv-person-row::before {
+    left: 60px;
+}
+
+body.mobile-shell .tv-root .tv-person-tasks-header {
+    gap: 8px;
+    margin-bottom: 6px;
+    padding: 0 4px;
+}
+
+body.mobile-shell .tv-root .tv-person-tasks-back {
+    min-height: 36px;
+    font-size: 14px;
+}
+
+/* ── Поиск и фильтры ── */
+
+body.mobile-shell .main-content .tv-root .tv-toolbar {
+    display: block;
+    margin-bottom: 10px;
+}
+
+body.mobile-shell .tv-root .tv-search-wrap {
+    min-width: 0;
+    margin-bottom: 10px;
+}
+
+body.mobile-shell .tv-root .tv-search-input {
+    height: 38px;
+    padding-left: 34px;
+    border-radius: 10px;
+    font-size: 15px;
+}
+
+/* Одиннадцать фильтров переносились тремя строками над списком. На телефоне это
+   одна полоса, которую листают вбок, от края до края экрана. */
+body.mobile-shell .main-content .tv-root .tv-filter-chips {
+    flex-wrap: nowrap !important;
+    margin: 0 -16px;
+    padding: 0 16px 2px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+
+body.mobile-shell .tv-root .tv-chip {
+    flex: none;
+    min-height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* «Сбросить» — в начале полосы: в конце его пришлось бы искать, листая вбок. */
+body.mobile-shell .tv-root .tv-chip-reset {
+    order: -1;
+}
+
+body.mobile-shell .tv-root .tv-results-info {
+    margin-bottom: 4px;
+    padding: 0 4px;
+}
+
+/* ── Строки задач ── */
+
+body.mobile-shell .tv-root .tv-task-list {
+    gap: 0;
+}
+
+body.mobile-shell .tv-root .tv-task-date-separator {
+    margin: 14px 4px 6px;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+}
+
+body.mobile-shell .tv-root .tv-task-list > .tv-task-date-separator:first-child {
+    margin-top: 2px;
+}
+
+body.mobile-shell .tv-root .tv-task-date-separator::after {
+    content: none;
+}
+
+body.mobile-shell .tv-root .tv-task-row.is-compact,
+body.mobile-shell .tv-root .tv-task-row.is-compact:hover {
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px 10px 14px;
+    border: 0;
+    border-radius: 0;
+    background: var(--surface);
+    box-shadow: none;
+    transform: none;
+}
+
+body.mobile-shell .tv-root .tv-task-row.is-compact:active {
+    background: var(--surface-2);
+}
+
+/* Строки между разделителями дня — одна карточка: скругляются только её края. */
+body.mobile-shell .tv-root .tv-task-list > .tv-task-row.is-compact:first-child,
+body.mobile-shell .tv-root .tv-task-date-separator + .tv-task-row.is-compact {
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+}
+
+body.mobile-shell .tv-root .tv-task-list > .tv-task-row.is-compact:last-child,
+body.mobile-shell .tv-root .tv-task-row.is-compact:has(+ .tv-task-date-separator) {
+    border-bottom-left-radius: 12px;
+    border-bottom-right-radius: 12px;
+}
+
+body.mobile-shell .tv-root .tv-task-row.is-compact .tv-task-row-subject {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.3;
+}
+
+body.mobile-shell .tv-root .tv-task-row-facts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1px 6px;
+    font-size: 12.5px;
+    line-height: 1.35;
+    color: var(--ink-3);
+}
+
+body.mobile-shell .tv-root .tv-task-row-sep {
+    color: var(--border-strong);
+}
+
+body.mobile-shell .tv-root .tv-task-row-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--ink-2);
+}
+
+body.mobile-shell .tv-root .tv-task-row-status i {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+body.mobile-shell .tv-root .tv-task-row-priority.is-urgent {
+    color: var(--amber);
+    font-weight: 600;
+}
+
+body.mobile-shell .tv-root .tv-task-row-priority.is-critical,
+body.mobile-shell .tv-root .tv-task-row-facts .is-overdue {
+    color: var(--rose);
+    font-weight: 600;
+}
+
+body.mobile-shell .tv-root .tv-task-row.is-compact > svg {
+    flex: none;
+    color: var(--border-strong);
+}
+
+body.mobile-shell .tv-root .tv-pagination {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+}
+
+body.mobile-shell .tv-root .tv-pagination .tv-btn {
+    min-height: 38px;
+    padding: 0 14px;
+}
+
+body.mobile-shell .tv-root .tv-empty {
+    padding: 28px 20px;
+    border: 0;
+    border-radius: 12px;
+}
+
+/* ── «Ждут вас» — лист снизу ── */
+
+/* Выпадашка прибита к правому краю кнопки, а кнопка на телефоне стоит у левого
+   края экрана: список уезжал за левый край на 215 px. Лист снизу — там, куда
+   дотягивается палец, и шириной во весь экран. */
+body.mobile-shell .tv-root .tv-inbox-dim {
+    z-index: 80;
+    background: rgba(15, 23, 42, 0.18);
+    -webkit-backdrop-filter: blur(10px) saturate(130%);
+    backdrop-filter: blur(10px) saturate(130%);
+    animation: tvFadeIn 0.2s ease both;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 81;
+    display: flex;
+    flex-direction: column;
+    width: auto;
+    max-height: min(78dvh, 640px);
+    padding-bottom: env(safe-area-inset-bottom);
+    border: 0;
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -10px 40px rgba(15, 23, 42, 0.18);
+    animation: tvInboxRise 0.34s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes tvInboxRise {
+    from { transform: translateY(100%); }
+    to { transform: none; }
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    row-gap: 1px;
+    padding: 14px 16px 10px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-title {
+    font-size: 17px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-sub {
+    grid-column: 1;
+    grid-row: 2;
+    font-size: 13px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-done {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    min-height: 36px;
+    padding: 0 2px 0 12px;
+    border: 0;
+    background: none;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--blue);
+    cursor: pointer;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    padding: 4px 8px 8px;
+    overscroll-behavior: contain;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-item {
+    align-items: center;
+    min-height: 52px;
+    padding: 10px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-item .tv-inbox-dot {
+    margin-top: 0;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-item-subject {
+    font-size: 15px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-item-meta {
+    font-size: 13px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-foot {
+    justify-content: center;
+    padding: 4px 10px;
+}
+
+body.mobile-shell .tv-root .tv-inbox-pop.is-sheet .tv-inbox-mark-all {
+    min-height: 40px;
+    font-size: 15px;
+    color: var(--blue);
+}
+
+/* ── Карточка задачи — экран ── */
+
+/* Слой. Окно статуса колонки («Посмотреть ещё») на телефоне стоит слоем экранов,
+   120 (TaskBoardWorkspace.jsx, COLUMN_BROWSER_MOBILE_Z): на своих настольных 90
+   оно лежало под затемнением оболочки. Живёт оно порталом в <body>, то есть в
+   документе ПОЗЖЕ раздела, и при равном слое открытая из него задача ушла бы под
+   окно. Поэтому карточка — 125, а окна действий над задачей (правка, сдача,
+   возврат) — 130: они открываются поверх карточки. */
+body.mobile-shell .tv-root .otp-modal-root.tv-drawer-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 125;
+    display: flex;
+}
+
+body.mobile-shell .tv-root .otp-modal-root.tv-modal-overlay {
+    z-index: 130;
+}
+
+/* Полотно — обычный блок внутри экрана. Своё position: fixed и z-index 111 у него
+   от настольной панели; внутри экрана z-index делал бы полотно слоем выше листа
+   действий «⋯», который лежит в том же экране. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer {
+    position: relative;
+    top: auto;
+    right: auto;
+    bottom: auto;
+    z-index: auto;
+    background: var(--bg);
+    animation: none;
+}
+
+body.mobile-shell .tv-root .otp-modal-root.tv-drawer-screen .tv-drawer-header {
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: calc(4px + env(safe-area-inset-top)) 8px 4px;
+    border-bottom: 0;
+    background: var(--bg);
+}
+
+body.mobile-shell .tv-root .tv-screen-back,
+body.mobile-shell .tv-root .tv-screen-more {
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--blue);
+    cursor: pointer;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-body {
+    gap: 16px;
+    padding: 2px 16px 24px;
+}
+
+/* Блоки карточки не сжимаются. Тело — flex-колонка с прокруткой, а у flex-потомка
+   с overflow: hidden минимальная высота нулевая: когда содержимого больше экрана,
+   браузер ужимал участников и сведения до полоски в 33 px (участники при этом
+   переносились в ряд) вместо того, чтобы дать телу прокрутиться. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-body > * {
+    flex-shrink: 0;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-header-text {
+    padding: 0 2px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-title {
+    margin: 0 0 10px;
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.22;
+    letter-spacing: -0.01em;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-badge {
+    padding: 2px 8px;
+    font-size: 12px;
+}
+
+/* Блоки карточки разделены своими подложками — линии между ними лишние. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-divider {
+    display: none;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-block-label {
+    margin: 0 0 6px;
+    padding: 0 4px;
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+}
+
+/* Участники и сведения — строки списка: подпись слева, значение справа. */
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participants,
+body.mobile-shell .tv-root .tv-drawer-screen .tv-info-grid {
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 0;
+    border-radius: 12px;
+    background: var(--surface);
+    overflow: hidden;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participant {
+    position: relative;
+    flex: none;
+    gap: 12px;
+    padding: 10px 14px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participant + .tv-participant::before {
+    left: 60px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participant-avatar {
+    width: 34px;
+    height: 34px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participant-role {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-participant-name {
+    font-size: 15px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-info-item {
+    position: relative;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 11px 14px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-info-item label {
+    flex: none;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink-2);
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-info-item span {
+    min-width: 0;
+    font-size: 15px;
+    text-align: right;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-description {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--surface);
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--ink);
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-file-btn {
+    max-width: 100%;
+    min-height: 36px;
+    font-size: 13px;
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-body .tv-btn {
+    min-height: 38px;
+}
+
+/* Подвал — действия над задачей во всю ширину, под большой палец. */
+body.mobile-shell .tv-root .otp-modal-root.tv-drawer-screen .tv-drawer-footer {
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 10px 16px max(10px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+}
+
+body.mobile-shell .tv-root .tv-drawer-screen .tv-drawer-footer .tv-btn {
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 10px;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-align: center;
+    white-space: normal;
+}
+
+/* ── Окна задачи: новая, правка, удаление, сдача, возврат ── */
+
+body.mobile-shell .tv-root .otp-modal-root.tv-modal-overlay .tv-modal-header {
+    justify-content: flex-start;
+    gap: 4px;
+    padding: calc(4px + env(safe-area-inset-top)) 8px 4px;
+    background: var(--surface);
+}
+
+/* Шеврон стоит в разметке после заголовка (там же, где настольный крестик), а
+   место ему — у левого края. */
+body.mobile-shell .tv-root .tv-modal-header .tv-screen-back {
+    order: -1;
+}
+
+body.mobile-shell .tv-root .otp-modal-root.tv-modal-overlay .tv-modal-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-right: 40px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-modal-body {
+    padding: 16px;
+}
+
+/* «Отмена» в подвале — второй способ сделать то же, что шеврон в шапке. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-modal-cancel {
+    display: none;
+}
+
+body.mobile-shell .tv-root .otp-modal-root.tv-modal-overlay .tv-modal-footer {
+    padding: 10px 16px max(10px, env(safe-area-inset-bottom));
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-modal-footer .tv-btn {
+    flex: 1 1 auto;
+    justify-content: center;
+    min-height: 46px;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-title {
+    min-height: 40px;
+    font-size: 21px;
+    font-weight: 600;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-description {
+    min-height: 96px;
+    font-size: 15px;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-chip {
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 14px;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-self {
+    min-height: 36px;
+    font-size: 14px;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-segmented button,
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-presets button {
+    min-height: 32px;
+    font-size: 13px;
+}
+
+/* Подпись слева шириной 96 px и три сегмента справа в экран не помещаются —
+   подпись встаёт над полем. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 7px;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-composer-row-label {
+    flex: none;
+}
+
+body.mobile-shell .tv-root .tv-modal-overlay .tv-input,
+body.mobile-shell .tv-root .tv-modal-overlay .tv-textarea,
+body.mobile-shell .tv-root .tv-modal-overlay .tv-select {
+    min-height: 40px;
+    font-size: 15px;
+}
+
+/* ── Заметки ── */
+
+body.mobile-shell .tv-root .tv-notes-panel.is-wide .tv-notes-toolbar {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+}
+
+body.mobile-shell .tv-root .tv-notes-panel.is-wide .tv-notes-toolbar-actions {
+    width: auto;
+}
+
+body.mobile-shell .tv-root .tv-notes-panel.is-wide .tv-notes-toolbar-actions .tv-btn {
+    flex: none;
+    justify-content: center;
+    min-height: 36px;
+}
+
+body.mobile-shell .tv-root .tv-notes-editor-actions .tv-btn {
+    min-height: 42px;
+}
+
+/* ── Бэклог, доска, таймлайн ── */
+
+/* Шапка: доска и выгрузка строкой, порядок строкой ниже. Размер порции и
+   подсказка про перетаскивание на телефоне не нужны: первое — настройка
+   плотности настольного экрана, второе пальцем не работает. */
+body.mobile-shell .main-content .tv-root .tb-toolbar {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px !important;
+}
+
+body.mobile-shell .tv-root .tb-toolbar-main,
+body.mobile-shell .tv-root .tb-toolbar-side {
+    display: contents;
+}
+
+body.mobile-shell .tv-root .tb-scope-select {
+    grid-column: 1;
+    grid-row: 1;
+    width: 100%;
+    min-width: 0;
+}
+
+body.mobile-shell .tv-root .tb-export-btn {
+    grid-column: 2;
+    grid-row: 1;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 12px;
+}
+
+body.mobile-shell .tv-root .tb-export-btn svg {
+    width: 17px;
+    height: 17px;
+}
+
+body.mobile-shell .tv-root .tb-sort-select {
+    grid-column: 1 / -1;
+    grid-row: 2;
+}
+
+/* Оценку и срок на карточке правят за компьютером: значок в 24 px на каждой
+   карточке — шум, а те же поля есть в правке задачи. */
+body.mobile-shell .tv-root .tb-chunk-select,
+body.mobile-shell .tv-root .tb-drag-hint,
+body.mobile-shell .tv-root .tb-export-label,
+body.mobile-shell .tv-root .tb-plan-btn,
+body.mobile-shell .tv-root .tb-timeline-expand {
+    display: none !important;
+}
+
+/* «Мои · На мне · Все» для сотрудника — сегменты во всю ширину. */
+body.mobile-shell .main-content .tv-root .inline-flex.tb-scope-select {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+body.mobile-shell .tv-root .inline-flex.tb-scope-select > button,
+body.mobile-shell .tv-root .tb-range-switch > button {
+    min-height: 32px;
+}
+
+/* Тема в очереди — в две строки, как в списке задач: в одну от неё оставалось
+   «Идея: показывать в табло ср…». */
+body.mobile-shell .tv-root .tb-backlog-subject {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    font-size: 14.5px;
+    line-height: 1.3;
+}
+
+body.mobile-shell .tv-root .tb-promote-btn,
+body.mobile-shell .tv-root .tb-backlog-add {
+    min-height: 34px;
+}
+
+body.mobile-shell .tv-root .tb-promote-btn {
+    padding: 0 12px;
+    font-size: 13px;
+}
+
+/* Общий слой разделов ставит колонкой любой ряд «items-start + flex-1» (так
+   свёрстаны каркасы экранов) — и шапка карточки доски распадалась на точку
+   срочности, тему и значок, каждый своей строкой. */
+body.mobile-shell .main-content .tv-root .tb-card-head {
+    flex-direction: row !important;
+    align-items: flex-start !important;
+}
+
+/* Переключатель колонок — полоса вбок, от края до края экрана. */
+body.mobile-shell .tv-root .tb-column-switch {
+    display: flex;
+    gap: 6px;
+    margin: 0 -16px;
+    padding: 0 16px 2px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+
+body.mobile-shell .tv-root .tb-column-tab {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 0 13px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--ink-2);
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+body.mobile-shell .tv-root .tb-column-tab.is-active {
+    background: var(--accent);
+    color: var(--accent-fg);
+}
+
+body.mobile-shell .tv-root .tb-column-tab-count {
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.6;
+}
+
+/* Окно статуса: дни с карточками вбок по 268 px — на телефоне столбиком. Окно
+   живёт порталом в <body>, поэтому без .tv-root. */
+body.mobile-shell .tb-day-cards {
+    flex-direction: column;
+    overflow: visible;
+}
+
+body.mobile-shell .tb-day-card {
+    width: 100%;
+}
+
+/* Таймлайн: шкала в 170 px, оставшихся от колонки задач, давала налезающие
+   друг на друга даты. Шкала шире экрана и едет вбок, колонка задач липнет к
+   левому краю; внутреннюю прокрутку по высоте убираем — страница одна. */
+body.mobile-shell .main-content .tv-root .tb-timeline-card {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+}
+
+body.mobile-shell .tv-root .tb-timeline-inner {
+    min-width: 640px;
+}
+
+body.mobile-shell .tv-root .tb-timeline-name {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    width: 148px;
+    background: var(--surface);
+    box-shadow: 1px 0 0 var(--border);
+}
+
+body.mobile-shell .tv-root .tb-timeline-rows {
+    max-height: none;
+    overflow: visible;
+}

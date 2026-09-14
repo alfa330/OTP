@@ -1482,9 +1482,11 @@ class ColumnBrowserTests(unittest.TestCase):
 
     def test_days_go_down_and_cards_go_right(self):
         self.assertIn("groupTasksByDay(tasks)", self.block)
-        # Карточки дня — горизонтальная лента фиксированной ширины.
-        self.assertIn('className="-mx-1 flex gap-2.5 overflow-x-auto px-1 pb-2"', self.block)
-        self.assertIn('className="w-[268px] shrink-0"', self.block)
+        # Карточки дня — горизонтальная лента фиксированной ширины. Метки
+        # tb-day-cards/tb-day-card впереди — для телефона: там tasks-mobile.css
+        # ставит ленту столбиком во всю ширину.
+        self.assertIn('className="tb-day-cards -mx-1 flex gap-2.5 overflow-x-auto px-1 pb-2"', self.block)
+        self.assertIn('className="tb-day-card w-[268px] shrink-0"', self.block)
         # Карточка вне доски не перетаскивается.
         self.assertIn("const isDraggable = typeof onDragStart === 'function';", self.src)
         self.assertIn("draggable={isDraggable}", self.src)
@@ -1493,7 +1495,9 @@ class ColumnBrowserTests(unittest.TestCase):
         # Окно живёт ниже карточки задачи и её модалок: закрыл задачу — остался там,
         # где смотрел. Раньше окно закрывалось, и приходилось открывать его заново.
         self.assertIn("const COLUMN_BROWSER_Z = ", self.src)
-        self.assertIn("z={COLUMN_BROWSER_Z}", self.block)
+        # На телефоне окно — слоем экранов: на настольных 90 оно лежало под
+        # затемнением оболочки (см. tests/test_tasks_mobile.py).
+        self.assertIn("z={isMobileShell ? COLUMN_BROWSER_MOBILE_Z : COLUMN_BROWSER_Z}", self.block)
         self.assertIn("onOpen={onOpenTask}", self.block)
         self.assertNotIn("const openTask = useCallback", self.block)
         # Esc при открытой задаче закрывает задачу, а не оба слоя.

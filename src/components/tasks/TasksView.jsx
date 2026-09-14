@@ -9,10 +9,12 @@ import {
   ChevronDown,
   ChevronLeft as LucideChevronLeft,
   GripHorizontal,
+  Inbox,
   Link2,
   LoaderCircle,
   Maximize2,
   Minimize2,
+  MoreHorizontal,
   Palette,
   PanelRightOpen,
   PictureInPicture2,
@@ -28,9 +30,12 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import FullscreenSheet from '../common/FullscreenSheet';
+import MobileActionSheet from '../common/MobileActionSheet';
 import useOverlayDismiss from '../common/useOverlayDismiss';
 import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
+// Телефонный слой раздела: всё в нём заперто на body.mobile-shell.
+import './tasks-mobile.css';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
 import { planTaskFocus, shouldOpenFetchedTask } from './taskFocus';
 import {
@@ -2637,6 +2642,9 @@ styleTag.textContent = `
     .tv-person-row { flex-wrap: wrap; }
     .tv-person-stats { white-space: normal; gap: 8px; }
     .tv-participants { flex-direction: column; gap: 10px; }
+    /* В колонке flex-basis 180px становился ВЫСОТОЙ участника: между
+       исполнителем и постановщиком зияло по 180 px пустоты. */
+    .tv-participant { flex: none; }
     .tv-pin-widget {
       width: min(360px, calc(100vw - 16px));
     }
@@ -3516,6 +3524,27 @@ const BackIcon = () => (
     <path d="M10 12l-4-4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
   </svg>
 );
+/* Шеврон «Назад» в шапке экрана на телефоне — тот же, что у IosModal. */
+const ScreenBackChevron = () => (
+  <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/* Уход с окна. На компьютере — крестик в правом углу, на телефоне окно — это
+   экран, и уходят с него шевроном слева: крестик справа читается как
+   «отменить», а двух «закрыть» в одной шапке быть не должно (решение
+   владельца 10.09.2026, см. IosModal). */
+const ModalCloseButton = ({ isMobileShell, onClick, disabled = false }) => (isMobileShell ? (
+  <button type="button" className="otp-modal-back tv-screen-back" aria-label="Назад" onClick={onClick} disabled={disabled}>
+    <ScreenBackChevron />
+  </button>
+) : (
+  <button type="button" className="tv-close-btn" onClick={onClick} disabled={disabled}>
+    <CloseIcon />
+  </button>
+));
+
 const PlusIcon = () => (
   <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
     <path d="M8 2v12M2 8h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
@@ -4796,7 +4825,7 @@ const TASK_MESSAGE_SUBMIT_LABEL = {
   answer: 'Отправить ответ',
 };
 
-const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
+const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
   const pm = PRIORITY_META[task.priority] || PRIORITY_META.normal;
@@ -4808,6 +4837,46 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
     : (assigneePeople[0]?.name || '—');
   const priorityCls = task.priority === 'critical' ? 'is-critical' : task.priority === 'urgent' ? 'is-urgent' : '';
   const indicatorColor = task.priority === 'critical' ? 'var(--rose)' : task.priority === 'urgent' ? 'var(--amber)' : sm.dot;
+
+  /* Телефон: тема в две строки и одна строка сути под ней. Бейджи в ряд
+     съедали ширину, и от темы оставалось «Обновить и…». Цвет — только там, где
+     он что-то значит: точка статуса, срочность, просрочка, вопрос без ответа.
+     «Задача» — тип по умолчанию и не пишется; кто кому поручил, видно по лицам. */
+  if (compact) {
+    const facts = [
+      <span key="status" className="tv-task-row-status"><i style={{ background: sm.dot }} />{sm.label}</span>,
+    ];
+    if (task.priority === 'urgent' || task.priority === 'critical') {
+      facts.push(<span key="priority" className={`tv-task-row-priority is-${task.priority}`}>{pm.label}</span>);
+    }
+    if (task.tag && task.tag !== 'task') facts.push(<span key="tag">{tm.label}</span>);
+    if (task?.due_at) {
+      const overdue = isTaskOverdue(task);
+      facts.push(
+        <span key="due" className={overdue ? 'is-overdue' : ''}>
+          {overdue ? 'Просрочено' : 'До'} {fmtShortDateTime(task.due_at)}
+        </span>
+      );
+    }
+    if (task?.info_request) facts.push(<span key="info" className="tv-clar-waiting">Ждёт ответа</span>);
+    return (
+      <div className="tv-task-row is-compact" onClick={() => onClick(task)}>
+        <span className="tv-task-row-main">
+          <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
+          <span className="tv-task-row-facts">
+            {facts.map((fact, index) => (
+              <React.Fragment key={fact.key}>
+                {index > 0 && <span className="tv-task-row-sep" aria-hidden="true">·</span>}
+                {fact}
+              </React.Fragment>
+            ))}
+          </span>
+        </span>
+        <AssigneeStack people={assigneePeople} />
+        <ChevronRight />
+      </div>
+    );
+  }
   return (
     <div className={`tv-task-row ${priorityCls}`} onClick={() => onClick(task)}>
       <span className="tv-task-row-indicator" style={{ background: indicatorColor }} />
@@ -5221,7 +5290,7 @@ const TaskDrawer = React.memo(({
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
-  onSubmitTaskMessage, onWithdrawInfoRequest,
+  onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -5255,6 +5324,8 @@ const TaskDrawer = React.memo(({
   const canWriteReport  = typeof onSubmitReport === 'function' && (
     assigneeIdSet.has(currentUserId) || creatorId === currentUserId || isAdminLikeRole(currentUserRole)
   );
+  // Лист «⋯» с действиями над задачей — только на телефоне.
+  const [actionsOpen, setActionsOpen] = useState(false);
 
   // ESC key handler
   useEffect(() => {
@@ -5276,79 +5347,138 @@ const TaskDrawer = React.memo(({
     return 'neutral';
   }, [assigneeIdSet, creatorId]);
 
-  return (
-    <>
-      <div className="tv-overlay" onClick={onClose} />
-      <div className="tv-drawer">
-        <div className="tv-drawer-header">
-          <div className="tv-drawer-header-text">
-            <h2 className="tv-drawer-title">{task.subject || 'Без темы'}</h2>
-            <div className="tv-drawer-badges">
-              <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-              <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
-              {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
-              {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
-            </div>
-          </div>
-          <div className="tv-drawer-header-actions">
-            {typeof onCopyTaskLink === 'function' && (
-              <button
-                type="button"
-                className="tv-icon-btn"
-                title="Скопировать ссылку на задачу"
-                aria-label="Скопировать ссылку на задачу"
-                onClick={() => onCopyTaskLink(task)}
-              >
-                <Link2 size={15} strokeWidth={2} />
-              </button>
-            )}
-            {typeof onTogglePinTask === 'function' && (
-              <button
-                type="button"
-                className={`tv-icon-btn ${isPinned ? 'is-pinned' : ''}`}
-                title={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
-                aria-label={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
-                disabled={!!actionLoadingKey}
-                onClick={() => onTogglePinTask(task)}
-              >
-                {isPinned ? <PinOff size={15} strokeWidth={2} /> : <Pin size={15} strokeWidth={2} />}
-              </button>
-            )}
-            {editBtn && (
-              <button
-                type="button"
-                className="tv-icon-btn"
-                title={editBtn.label}
-                aria-label={editBtn.label}
-                disabled={!!actionLoadingKey}
-                onClick={() => onEditTask(task)}
-              >
-                {actionLoadingKey === `${task.id}:edit`
-                  ? <FaIcon className="fa-circle-notch fa-spin" />
-                  : <FaIcon className="fa-pen" />}
-              </button>
-            )}
-            {deleteBtn && (
-              <button
-                type="button"
-                className="tv-icon-btn tv-icon-btn-danger"
-                title={deleteBtn.label}
-                aria-label={deleteBtn.label}
-                disabled={!!actionLoadingKey}
-                onClick={() => onDeleteTask(task)}
-              >
-                {actionLoadingKey === `${task.id}:delete`
-                  ? <FaIcon className="fa-circle-notch fa-spin" />
-                  : <FaIcon className="fa-trash-alt" />}
-              </button>
-            )}
-            <button className="tv-close-btn" type="button" onClick={onClose} aria-label="Закрыть (Esc)">
-              <CloseIcon />
-            </button>
-          </div>
-        </div>
+  /* Тема и метки. На компьютере — в шапке рядом с действиями; на телефоне шапка
+     экрана — это «Назад» и «⋯», а тема открывает содержимое крупным заголовком. */
+  const titleBlock = (
+    <div className="tv-drawer-header-text">
+      <h2 className="tv-drawer-title">{task.subject || 'Без темы'}</h2>
+      <div className="tv-drawer-badges">
+        <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
+        <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+        {/* «Обычная» — срочность по умолчанию: на телефоне её не пишем, как и в строке списка. */}
+        {task?.priority && (!isMobileShell || task.priority !== 'normal') && (
+          <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>
+        )}
+        {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
+      </div>
+    </div>
+  );
+
+  /* Действия с задачей на телефоне — в листе «⋯», у каждого своё имя: четыре
+     значка без подписей в шапке шириной 390 px угадывались бы по картинке, а
+     удаление стояло бы вплотную к правке. Лист закрывается в том же кадре, в
+     котором открывается окно действия, — запись истории переходит к окну. */
+  const runSheetAction = (action) => () => {
+    setActionsOpen(false);
+    action();
+  };
+  const sheetActions = [
+    typeof onCopyTaskLink === 'function' && {
+      key: 'link', label: 'Скопировать ссылку', onClick: runSheetAction(() => onCopyTaskLink(task)),
+    },
+    /* Закрепить с телефона нельзя: закреплённая задача — настольное плавающее
+       окно, и на экране в 390 px оно встаёт карточкой на пол-экрана поверх бара
+       разделов. Открепить — можно: закрепление хранится на устройстве, и тем, кто
+       закрепил с телефона раньше, иначе от окна не избавиться. */
+    typeof onTogglePinTask === 'function' && isPinned && {
+      key: 'pin', label: 'Открепить задачу',
+      disabled: !!actionLoadingKey, onClick: runSheetAction(() => onTogglePinTask(task)),
+    },
+    editBtn && {
+      key: 'edit', label: editBtn.label, disabled: !!actionLoadingKey, onClick: runSheetAction(() => onEditTask(task)),
+    },
+    deleteBtn && {
+      key: 'delete', label: deleteBtn.label, danger: true,
+      disabled: !!actionLoadingKey, onClick: runSheetAction(() => onDeleteTask(task)),
+    },
+  ].filter(Boolean);
+
+  const header = isMobileShell ? (
+    <div className="tv-drawer-header otp-modal-head">
+      <button type="button" className="otp-modal-back tv-screen-back" aria-label="Назад" onClick={onClose}>
+        <ScreenBackChevron />
+      </button>
+      {sheetActions.length > 0 && (
+        <button
+          type="button"
+          className="tv-screen-more"
+          aria-label="Действия с задачей"
+          aria-haspopup="dialog"
+          onClick={() => setActionsOpen(true)}
+        >
+          <MoreHorizontal size={22} strokeWidth={2} />
+        </button>
+      )}
+    </div>
+  ) : (
+    <div className="tv-drawer-header">
+      {titleBlock}
+      <div className="tv-drawer-header-actions">
+        {typeof onCopyTaskLink === 'function' && (
+          <button
+            type="button"
+            className="tv-icon-btn"
+            title="Скопировать ссылку на задачу"
+            aria-label="Скопировать ссылку на задачу"
+            onClick={() => onCopyTaskLink(task)}
+          >
+            <Link2 size={15} strokeWidth={2} />
+          </button>
+        )}
+        {typeof onTogglePinTask === 'function' && (
+          <button
+            type="button"
+            className={`tv-icon-btn ${isPinned ? 'is-pinned' : ''}`}
+            title={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
+            aria-label={isPinned ? 'Открепить задачу' : 'Закрепить задачу'}
+            disabled={!!actionLoadingKey}
+            onClick={() => onTogglePinTask(task)}
+          >
+            {isPinned ? <PinOff size={15} strokeWidth={2} /> : <Pin size={15} strokeWidth={2} />}
+          </button>
+        )}
+        {editBtn && (
+          <button
+            type="button"
+            className="tv-icon-btn"
+            title={editBtn.label}
+            aria-label={editBtn.label}
+            disabled={!!actionLoadingKey}
+            onClick={() => onEditTask(task)}
+          >
+            {actionLoadingKey === `${task.id}:edit`
+              ? <FaIcon className="fa-circle-notch fa-spin" />
+              : <FaIcon className="fa-pen" />}
+          </button>
+        )}
+        {deleteBtn && (
+          <button
+            type="button"
+            className="tv-icon-btn tv-icon-btn-danger"
+            title={deleteBtn.label}
+            aria-label={deleteBtn.label}
+            disabled={!!actionLoadingKey}
+            onClick={() => onDeleteTask(task)}
+          >
+            {actionLoadingKey === `${task.id}:delete`
+              ? <FaIcon className="fa-circle-notch fa-spin" />
+              : <FaIcon className="fa-trash-alt" />}
+          </button>
+        )}
+        <button className="tv-close-btn" type="button" onClick={onClose} aria-label="Закрыть (Esc)">
+          <CloseIcon />
+        </button>
+      </div>
+    </div>
+  );
+
+  const drawerInner = (
+      <>
+        {header}
 
         <div className="tv-drawer-body">
+          {isMobileShell && titleBlock}
+
           {/* Participants */}
           <div className="tv-participants">
             {/* Исполнителей столько, сколько отметили. Никого не помечаем
@@ -5526,10 +5656,13 @@ const TaskDrawer = React.memo(({
         </div>
 
         {footerBtns.length > 0 && (
-          <div className="tv-drawer-footer">
-            <span style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--ink-3)' }}>
-              <span className="tv-kbd">Esc</span> закрыть
-            </span>
+          <div className="tv-drawer-footer otp-modal-footer">
+            {/* Подсказка про клавишу — только там, где клавиатура есть. */}
+            {!isMobileShell && (
+              <span style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--ink-3)' }}>
+                <span className="tv-kbd">Esc</span> закрыть
+              </span>
+            )}
             {footerBtns.map(btn => {
               const key     = `${task.id}:${btn.action}`;
               const loading = actionLoadingKey === key;
@@ -5551,6 +5684,28 @@ const TaskDrawer = React.memo(({
             })}
           </div>
         )}
+      </>
+  );
+
+  /* Телефон: карточка — экран с въездом справа и своей записью в истории (жест
+     «назад» закрывает её, а не раздел под ней). Выезжающая панель лежала ПОД
+     колоколом и поверх бара разделов, а свайп назад менял раздел под ней. */
+  if (isMobileShell) {
+    return (
+      <div className="tv-drawer-screen otp-modal-root" role="dialog" aria-modal="true" aria-label={task.subject || 'Задача'}>
+        <div className="tv-drawer otp-modal-panel">
+          {drawerInner}
+        </div>
+        <MobileActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} actions={sheetActions} />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="tv-overlay" onClick={onClose} />
+      <div className="tv-drawer">
+        {drawerInner}
       </div>
     </>
   );
@@ -6637,11 +6792,15 @@ const inboxCounterpartLabel = (need) => {
   return name ? `Поручил: ${name}` : '';
 };
 
-const TaskInbox = ({ needs, unseenCount, onOpen, onMarkAllSeen }) => {
+const TaskInbox = ({ needs, unseenCount, onOpen, onMarkAllSeen, compact = false }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const count = needs.length;
   const groups = useMemo(() => groupTaskActionNeeds(needs), [needs]);
+  const close = useCallback(() => setOpen(false), []);
+  /* На телефоне список — лист снизу, и системное «назад» закрывает его, а не
+     раздел под ним. */
+  useScreenBackGesture(compact && open, close);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -6666,7 +6825,8 @@ const TaskInbox = ({ needs, unseenCount, onOpen, onMarkAllSeen }) => {
     <span className="tv-inbox" ref={rootRef}>
       <button
         type="button"
-        className={`tv-btn tv-btn-ghost tv-inbox-btn ${unseenCount > 0 ? 'is-hot' : ''}`}
+        className={`${compact ? 'tv-round-btn' : 'tv-btn tv-btn-ghost'} tv-inbox-btn ${unseenCount > 0 ? 'is-hot' : ''}`}
+        aria-label={compact ? 'Ждут вас' : undefined}
         onClick={() => setOpen((prev) => !prev)}
         title={unseenCount > 0
           ? `Новых задач, ждущих вашего действия: ${unseenCount}`
@@ -6674,13 +6834,19 @@ const TaskInbox = ({ needs, unseenCount, onOpen, onMarkAllSeen }) => {
         aria-haspopup="true"
         aria-expanded={open ? 'true' : 'false'}
       >
-        <Bell size={13} strokeWidth={2} />
-        Ждут вас
+        {/* На телефоне — значок входящих: у портала уже есть свой колокол, и два
+            колокола на одном экране читались бы как одно и то же. */}
+        {compact ? <Inbox size={19} strokeWidth={1.9} /> : <><Bell size={13} strokeWidth={2} />Ждут вас</>}
         {unseenCount > 0 && <span className="tv-inbox-count">{unseenCount > 99 ? '99+' : unseenCount}</span>}
       </button>
 
+      {open && compact && (
+        /* fixed inset-0 — метка открытого окна для оболочки: пока лист на
+           экране, бар разделов и колокол уходят (см. mobile-shell.css). */
+        <div className="tv-inbox-dim fixed inset-0" onClick={close} aria-hidden="true" />
+      )}
       {open && (
-        <div className="tv-inbox-pop" role="dialog" aria-label="Задачи, которые ждут вас">
+        <div className={`tv-inbox-pop ${compact ? 'is-sheet' : ''}`} role="dialog" aria-label="Задачи, которые ждут вас">
           <div className="tv-inbox-head">
             <span className="tv-inbox-title">Ждут вашего действия</span>
             <span className="tv-inbox-sub">
@@ -6688,6 +6854,9 @@ const TaskInbox = ({ needs, unseenCount, onOpen, onMarkAllSeen }) => {
                 ? `${count} ${pluralRu(count, 'задача', 'задачи', 'задач')}${unseenCount > 0 ? ` · ${unseenCount} ${pluralRu(unseenCount, 'новая', 'новые', 'новых')}` : ''}`
                 : 'пусто'}
             </span>
+            {compact && (
+              <button type="button" className="tv-inbox-done" onClick={close}>Готово</button>
+            )}
           </div>
 
           {count === 0 ? (
@@ -6820,6 +6989,8 @@ const TasksView = ({
   const [deleteModal,       setDeleteModal]       = useState({ open: false, taskId: null, taskSubject: '' });
   const [editForm,          setEditForm]          = useState(() => buildEmptyTaskForm());
   const [drawerTask,        setDrawerTask]        = useState(null);
+  /* «Мы на телефоне»: от него зависят и адрес открытой задачи (эффект ниже), и окна. */
+  const isMobileShell = useIsMobileShell();
   const [completeModal,     setCompleteModal]     = useState({ open: false, taskId: null, taskSubject: '', estimateMinutes: null });
   const [statusModal,       setStatusModal]       = useState({ open: false, taskId: null, action: '', taskSubject: '' });
   const [completionSummary, setCompletionSummary] = useState('');
@@ -7048,8 +7219,14 @@ const TasksView = ({
         }
       }
     }
-    syncTaskDeepLink(drawerTask?.id || null);
-  }, [drawerTask?.id]);
+    /* Телефон: номер задачи в адрес НЕ пишем, только снимаем. replaceState ложится
+       на ту запись истории, что окажется ПОД экраном карточки (свою запись стек
+       жестов кладёт позже), и после пары жестов «назад» указатель опускался на
+       неё: раздел читал task_id как переход по ссылке и заново открывал уже
+       закрытую карточку. Адресной строки на телефоне не видно, а ссылку на
+       задачу собирает buildTaskDeepLink. */
+    syncTaskDeepLink(isMobileShell ? null : (drawerTask?.id || null));
+  }, [drawerTask?.id, isMobileShell]);
 
   const fetchPagedTasks = useCallback(async () => {
     const requestId = ++pagedRequestIdRef.current;
@@ -7896,12 +8073,14 @@ const TasksView = ({
   закрыть. Без записи в стеке жест перешагивает через окно и снимает переход
   между разделами: человек свайпает, чтобы закрыть окно, а получает чужой
   раздел (владелец 11.09.2026: «перекидывает в другой раздел»). */
-  const isMobileShell = useIsMobileShell();
   useScreenBackGesture(isMobileShell && createOpen, closeCreate);
   useScreenBackGesture(isMobileShell && editModal.open, closeEditModal);
   useScreenBackGesture(isMobileShell && deleteModal.open, closeDeleteModal);
   useScreenBackGesture(isMobileShell && completeModal.open, closeCompleteModal);
   useScreenBackGesture(isMobileShell && statusModal.open, closeStatusModal);
+  /* Карточка задачи на телефоне — тоже экран (см. TaskDrawer). */
+  const closeDrawer = useCallback(() => setDrawerTask(null), []);
+  useScreenBackGesture(isMobileShell && Boolean(drawerTask), closeDrawer);
 
   /* ── Render helpers ── */
   const renderTaskList = (list, emptyTitle, emptySub, loading = isTasksLoading) => {
@@ -7928,8 +8107,10 @@ const TasksView = ({
             <TaskRow
               key={row.key}
               task={row.task}
+              compact={isMobileShell}
               onClick={setDrawerTask}
-              onPin={(task) => {
+              /* На телефоне скрепки в строке нет: закрепляют из карточки задачи. */
+              onPin={isMobileShell ? undefined : (task) => {
                 if (Number(task?.id || 0) === Number(pinnedTaskId)) {
                   onUnpinTask?.();
                   return;
@@ -8062,22 +8243,50 @@ const TasksView = ({
             unseenCount={actionNeedsUnseen}
             onOpen={openActionNeed}
             onMarkAllSeen={markActionNeedsSeen}
+            compact={isMobileShell}
           />
-          <button
-            className={`tv-btn ${notesOpen ? 'tv-btn-amber' : 'tv-btn-ghost'}`}
-            type="button"
-            onClick={() => setNotesOpen((prev) => !prev)}
-          >
-            <StickyNote size={13} strokeWidth={2} />
-            Заметки
-          </button>
-          <button className="tv-btn tv-btn-ghost" onClick={refreshTasksData} disabled={isAnyTasksLoading}>
-            <RefreshCw size={13} strokeWidth={2} style={{ transition: 'transform .4s', transform: isAnyTasksLoading ? 'rotate(360deg)' : 'none' }} />
-            {isAnyTasksLoading ? 'Обновляю...' : 'Обновить'}
-          </button>
-          <button className="tv-btn tv-btn-primary" onClick={() => setCreateOpen(true)}>
-            <PlusIcon /> Новая задача
-          </button>
+          {isMobileShell ? (
+            /* Телефон: круглые значки рядом с крупным заголовком, как в шапке
+               приложения. «Обновить» здесь нет: раздел перечитывает задачи при
+               каждом входе в него, а четвёртая кнопка — это та самая вторая
+               строка кнопок над списком, от которой уходили. */
+            <>
+              <button
+                type="button"
+                className={`tv-round-btn ${notesOpen ? 'is-active' : ''}`}
+                aria-label="Заметки"
+                onClick={() => setNotesOpen((prev) => !prev)}
+              >
+                <StickyNote size={18} strokeWidth={1.9} />
+              </button>
+              <button
+                type="button"
+                className="tv-round-btn is-primary"
+                aria-label="Новая задача"
+                onClick={() => setCreateOpen(true)}
+              >
+                <PlusIcon />
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className={`tv-btn ${notesOpen ? 'tv-btn-amber' : 'tv-btn-ghost'}`}
+                type="button"
+                onClick={() => setNotesOpen((prev) => !prev)}
+              >
+                <StickyNote size={13} strokeWidth={2} />
+                Заметки
+              </button>
+              <button className="tv-btn tv-btn-ghost" onClick={refreshTasksData} disabled={isAnyTasksLoading}>
+                <RefreshCw size={13} strokeWidth={2} style={{ transition: 'transform .4s', transform: isAnyTasksLoading ? 'rotate(360deg)' : 'none' }} />
+                {isAnyTasksLoading ? 'Обновляю...' : 'Обновить'}
+              </button>
+              <button className="tv-btn tv-btn-primary" onClick={() => setCreateOpen(true)}>
+                <PlusIcon /> Новая задача
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -8230,7 +8439,7 @@ const TasksView = ({
               <input
                 ref={searchRef}
                 className="tv-search-input"
-                placeholder="Поиск по всем задачам (Ctrl+K)"
+                placeholder={isMobileShell ? 'Поиск по задачам' : 'Поиск по всем задачам (Ctrl+K)'}
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value);
@@ -8281,7 +8490,7 @@ const TasksView = ({
               {hasActiveFilters && (
                 <button
                   type="button"
-                  className="tv-chip"
+                  className="tv-chip tv-chip-reset"
                   style={{ color: 'var(--rose)', borderColor: '#fecdd3' }}
                   onClick={() => {
                     setSearchQuery('');
@@ -8342,7 +8551,8 @@ const TasksView = ({
       {drawerTask && (
         <TaskDrawer
           task={drawerTask}
-          onClose={() => setDrawerTask(null)}
+          onClose={closeDrawer}
+          isMobileShell={isMobileShell}
           actionLoadingKey={actionLoadingKey}
           getActionButtons={getActionButtons}
           openCompleteModal={openCompleteModal}
@@ -8379,7 +8589,7 @@ const TasksView = ({
           <div className="tv-modal tv-modal-composer otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">{form.isBacklog ? 'Новая задача в бэклог' : 'Новая задача'}</h3>
-              <button className="tv-close-btn" onClick={() => setCreateOpen(false)}><CloseIcon /></button>
+              <ModalCloseButton isMobileShell={isMobileShell} onClick={() => setCreateOpen(false)} />
             </div>
             <form onSubmit={handleCreate}>
               <div className="tv-modal-body">
@@ -8396,7 +8606,7 @@ const TasksView = ({
                 />
               </div>
               <div className="tv-modal-footer">
-                <button type="button" className="tv-btn tv-btn-ghost" disabled={isCreateLoading}
+                <button type="button" className="tv-btn tv-btn-ghost tv-modal-cancel" disabled={isCreateLoading}
                   onClick={() => setCreateOpen(false)}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-primary"
                   disabled={isCreateLoading || isRecipientsLoading}>
@@ -8414,7 +8624,7 @@ const TasksView = ({
           <div className="tv-modal tv-modal-composer otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Редактирование задачи</h3>
-              <button className="tv-close-btn" onClick={closeEditModal}><CloseIcon /></button>
+              <ModalCloseButton isMobileShell={isMobileShell} onClick={closeEditModal} />
             </div>
             <form onSubmit={submitEditTask}>
               <div className="tv-modal-body">
@@ -8433,7 +8643,7 @@ const TasksView = ({
               <div className="tv-modal-footer">
                 <button
                   type="button"
-                  className="tv-btn tv-btn-ghost"
+                  className="tv-btn tv-btn-ghost tv-modal-cancel"
                   disabled={!!actionLoadingKey}
                   onClick={closeEditModal}
                 >
@@ -8458,9 +8668,7 @@ const TasksView = ({
           <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()} style={{ maxWidth: 500 }}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Подтверждение удаления</h3>
-              <button className="tv-close-btn" type="button" onClick={closeDeleteModal} disabled={!!actionLoadingKey}>
-                <CloseIcon />
-              </button>
+              <ModalCloseButton isMobileShell={isMobileShell} onClick={closeDeleteModal} disabled={!!actionLoadingKey} />
             </div>
             <form onSubmit={submitDeleteTask}>
               <div className="tv-modal-body">
@@ -8494,7 +8702,7 @@ const TasksView = ({
               <div className="tv-modal-footer">
                 <button
                   type="button"
-                  className="tv-btn tv-btn-ghost"
+                  className="tv-btn tv-btn-ghost tv-modal-cancel"
                   disabled={!!actionLoadingKey}
                   onClick={closeDeleteModal}
                 >
@@ -8515,7 +8723,7 @@ const TasksView = ({
           <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">Завершение задачи</h3>
-              <button className="tv-close-btn" onClick={closeCompleteModal}><CloseIcon /></button>
+              <ModalCloseButton isMobileShell={isMobileShell} onClick={closeCompleteModal} />
             </div>
             <form onSubmit={submitComplete}>
               <div className="tv-modal-body">
@@ -8575,7 +8783,7 @@ const TasksView = ({
                 </div>
               </div>
               <div className="tv-modal-footer">
-                <button type="button" className="tv-btn tv-btn-ghost" disabled={!!actionLoadingKey}
+                <button type="button" className="tv-btn tv-btn-ghost tv-modal-cancel" disabled={!!actionLoadingKey}
                   onClick={closeCompleteModal}>Отмена</button>
                 <button type="submit" className="tv-btn tv-btn-indigo" disabled={!!actionLoadingKey}>
                   {actionLoadingKey === `${completeModal.taskId}:completed` ? 'Сохраняю...' : 'Отметить выполненной'}
@@ -8592,7 +8800,7 @@ const TasksView = ({
           <div className="tv-modal otp-modal-panel" onClick={e => e.stopPropagation()}>
             <div className="tv-modal-header otp-modal-head">
               <h3 className="tv-modal-title">{statusModalTitle}</h3>
-              <button className="tv-close-btn" onClick={closeStatusModal}><CloseIcon /></button>
+              <ModalCloseButton isMobileShell={isMobileShell} onClick={closeStatusModal} />
             </div>
             <form onSubmit={submitStatusModal}>
               <div className="tv-modal-body">
@@ -8631,7 +8839,7 @@ const TasksView = ({
                 </div>
               </div>
               <div className="tv-modal-footer">
-                <button type="button" className="tv-btn tv-btn-ghost" disabled={!!actionLoadingKey}
+                <button type="button" className="tv-btn tv-btn-ghost tv-modal-cancel" disabled={!!actionLoadingKey}
                   onClick={closeStatusModal}>Отмена</button>
                 <button type="submit" className={`tv-btn ${isReturnAction ? 'tv-btn-rose' : 'tv-btn-indigo'}`} disabled={!!actionLoadingKey}>
                   {actionLoadingKey === statusModalLoadingKey ? 'Сохраняю...' : statusModalSubmitLabel}

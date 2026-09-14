@@ -4,6 +4,7 @@ import { Download, Maximize2, Minimize2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
+import useIsMobileShell from '../common/useIsMobileShell';
 import { ACTION_NEED_META } from './taskActionNeeds';
 import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
 import { groupTasksByDay } from './boardGrouping';
@@ -743,7 +744,7 @@ const BacklogRow = ({
       <PriorityDot priority={task?.priority} />
 
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13.5px] font-medium text-slate-800">{task?.subject}</span>
+        <span className="tb-backlog-subject block truncate text-[13.5px] font-medium text-slate-800">{task?.subject}</span>
         <span className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-slate-400">
           <span className="truncate">{TAG_LABEL[task?.tag] || 'Задача'}</span>
           {taskAssignees(task).length > 0 && <span className="truncate">· {taskAssigneesLabel(task)}</span>}
@@ -771,14 +772,14 @@ const BacklogRow = ({
           type="button"
           title="Оценка и срок"
           onClick={(event) => { event.stopPropagation(); setPlanOpen((prev) => !prev); }}
-          className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 opacity-0 transition hover:bg-slate-200/70 hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"
+          className="tb-plan-btn grid h-7 w-7 place-items-center rounded-lg text-slate-400 opacity-0 transition hover:bg-slate-200/70 hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"
         >
           <ClockIcon />
         </button>
         <button
           type="button"
           onClick={(event) => { event.stopPropagation(); onPromote(task); }}
-          className="rounded-lg bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 transition hover:bg-slate-900 hover:text-white active:scale-[0.98]"
+          className="tb-promote-btn rounded-lg bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 transition hover:bg-slate-900 hover:text-white active:scale-[0.98]"
         >
           В работу
         </button>
@@ -861,7 +862,7 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
         <button
           type="button"
           onClick={onCreate}
-          className="rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]"
+          className="tb-backlog-add rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]"
         >
           + В бэклог
         </button>
@@ -900,7 +901,10 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
       )}
 
       <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-        Порядок сверху вниз — это приоритет. Перетащите карточку, чтобы изменить очередь.
+        Порядок сверху вниз — это приоритет.
+        {/* Перетаскивание здесь мышиное: пальцем карточку не утащить, и на
+            телефоне подсказка обещала бы то, чего нет. */}
+        <span className="tb-drag-hint"> Перетащите карточку, чтобы изменить очередь.</span>
       </p>
     </div>
   );
@@ -915,6 +919,11 @@ const COLUMN_BROWSER_PAGE = 40;
    раздела и гамбургера (60), но ниже карточки задачи и её модалок (110/111/120):
    открытая задача перекрывает окно, закрытая возвращает к нему. */
 const COLUMN_BROWSER_Z = 90;
+/* На телефоне под экранами лежит затемнение оболочки (z 119, mobile-motion.css),
+   и окно на 90 оказывалось ПОД ним — серым целиком. Там окно встаёт слоем
+   экранов (120), а карточка задачи, открытая поверх него, — выше
+   (tasks-mobile.css). */
+const COLUMN_BROWSER_MOBILE_Z = 120;
 const COLUMN_BROWSER_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';
 
 const ColumnBrowser = ({
@@ -926,6 +935,7 @@ const ColumnBrowser = ({
   actionNeedOf,
   canPlan,
   isTaskOpen = false,
+  isMobileShell = false,
   onApplyPlan,
   onOpenTask,
   onClose,
@@ -998,15 +1008,16 @@ const ColumnBrowser = ({
     <FullscreenSheet
       open
       wide
-      z={COLUMN_BROWSER_Z}
+      z={isMobileShell ? COLUMN_BROWSER_MOBILE_Z : COLUMN_BROWSER_Z}
       offsetLeft={COLUMN_BROWSER_OFFSET_LEFT}
       // Esc при открытой задаче закрывает задачу, а не оба слоя сразу.
       closeOnEscape={!isTaskOpen}
       icon="fa-layer-group"
       title={column.title}
+      // «Esc» на телефоне — подсказка про клавишу, которой нет.
       subtitle={total > 0
-        ? `${tasks.length} из ${total} ${pluralTasks(total)} · Esc чтобы выйти`
-        : 'Esc чтобы выйти'}
+        ? `${tasks.length} из ${total} ${pluralTasks(total)}${isMobileShell ? '' : ' · Esc чтобы выйти'}`
+        : (isMobileShell ? '' : 'Esc чтобы выйти')}
       onClose={onClose}
     >
       <div className="tb-scope space-y-5" style={{ fontFamily: APPLE_FONT }}>
@@ -1022,9 +1033,9 @@ const ColumnBrowser = ({
                 {day.tasks.length} {pluralTasks(day.tasks.length)}
               </span>
             </header>
-            <div className="-mx-1 flex gap-2.5 overflow-x-auto px-1 pb-2">
+            <div className="tb-day-cards -mx-1 flex gap-2.5 overflow-x-auto px-1 pb-2">
               {day.tasks.map((task) => (
-                <div key={task.id} className="w-[268px] shrink-0">
+                <div key={task.id} className="tb-day-card w-[268px] shrink-0">
                   <BoardCard
                     task={task}
                     canPlan={canPlan}
@@ -1041,9 +1052,9 @@ const ColumnBrowser = ({
         <div ref={sentinelRef} className="h-px" />
 
         {isLoading && (
-          <div className="flex gap-2.5">
+          <div className="tb-day-cards flex gap-2.5">
             {[0, 1, 2].map((index) => (
-              <div key={index} className="h-20 w-[268px] shrink-0 animate-pulse rounded-xl bg-slate-200/70" />
+              <div key={index} className="tb-day-card h-20 w-[268px] shrink-0 animate-pulse rounded-xl bg-slate-200/70" />
             ))}
           </div>
         )}
@@ -1106,7 +1117,7 @@ const BoardCard = ({
         isDragging ? 'opacity-40' : ''
       } ${isFocused ? 'tb-card-focus' : ''}`}
     >
-      <div className="flex items-start gap-1.5">
+      <div className="tb-card-head flex items-start gap-1.5">
         <span className="mt-[6px]"><PriorityDot priority={task?.priority} /></span>
         <p className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-slate-800 line-clamp-2">
           {task?.subject}
@@ -1116,7 +1127,7 @@ const BoardCard = ({
           type="button"
           title="Оценка и срок"
           onClick={(event) => { event.stopPropagation(); setPlanOpen((prev) => !prev); }}
-          className="-mr-1 -mt-1 grid h-6 w-6 shrink-0 place-items-center rounded-lg text-slate-300 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"
+          className="tb-plan-btn -mr-1 -mt-1 grid h-6 w-6 shrink-0 place-items-center rounded-lg text-slate-300 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"
         >
           <ClockIcon />
         </button>
@@ -1193,6 +1204,7 @@ const BoardView = ({
   onOpen,
   onApplyPlan,
   onDrop,
+  isMobileShell = false,
 }) => {
   const [dragged, setDragged] = useState(null);
   const [hoverColumn, setHoverColumn] = useState(null);
@@ -1222,109 +1234,169 @@ const BoardView = ({
   const inProgressCount = Number(columnMeta.progress?.total ?? (tasksByColumn.progress?.length || 0));
   const wipExceeded = Number(wipLimit) > 0 && inProgressCount > Number(wipLimit);
 
+  /* Телефон: одна колонка во всю ширину и переключатель над ней. Пять колонок
+     по 268 px на экране в 390 px — это полторы видимых колонки и лента вбок, в
+     которой не видно, что лежит в соседних. Перетаскивать пальцем между
+     колонками нельзя вовсе (drag and drop браузера — мышиный), поэтому статус
+     на телефоне меняют в карточке задачи. Пока колонку не выбрали, показываем
+     первую непустую из рабочих. */
+  const [mobileColumnId, setMobileColumnId] = useState(null);
+  const defaultMobileColumnId = useMemo(() => {
+    const busy = BOARD_COLUMNS.find((column) => column.id !== 'backlog'
+      && Number(columnMeta[column.id]?.total || (tasksByColumn[column.id] || []).length) > 0);
+    return busy?.id || 'todo';
+  }, [columnMeta, tasksByColumn]);
+  const activeMobileColumnId = mobileColumnId || defaultMobileColumnId;
+
+  // Переход из уведомления: карточка могла лежать в другой колонке — открываем её.
+  useEffect(() => {
+    if (!isMobileShell || !focusTaskId) return;
+    const holder = BOARD_COLUMNS.find((column) => (tasksByColumn[column.id] || [])
+      .some((entry) => entry.task.id === focusTaskId));
+    if (holder) setMobileColumnId(holder.id);
+  }, [isMobileShell, focusTaskId, tasksByColumn]);
+
+  const renderColumn = (column, single = false) => {
+    const items = tasksByColumn[column.id] || [];
+    const meta = columnMeta[column.id] || { total: items.length, hidden: 0, loading: false };
+    const isAllowed = !allowedColumns || allowedColumns.has(column.id);
+    const isHover = hoverColumn === column.id && isAllowed;
+    const isProgress = column.id === 'progress';
+
+    return (
+      <section
+        key={column.id}
+        onDragOver={(event) => {
+          if (!dragged) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = isAllowed ? 'move' : 'none';
+          setHoverColumn(column.id);
+        }}
+        onDragLeave={() => setHoverColumn((prev) => (prev === column.id ? null : prev))}
+        onDrop={(event) => {
+          event.preventDefault();
+          const payload = dragged;
+          handleDragEnd();
+          if (payload) onDrop(payload.task, column.id);
+        }}
+        /* Одна колонка на телефоне — без серой подложки: рамка вокруг единственной
+           колонки во всю ширину экрана ничего не отделяет. */
+        className={single
+          ? 'flex w-full flex-col'
+          : `flex w-[268px] shrink-0 flex-col rounded-2xl p-2 transition-colors ${
+            isHover ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'bg-slate-100/70'
+          } ${dragged && !isAllowed ? 'opacity-50' : ''}`}
+      >
+        {/* Имя и счёт колонки на телефоне уже стоят в переключателе над ней,
+            а лимит WIP кнопками в 20 px пальцем не настроить. */}
+        {!single && (
+          <header className="flex items-center justify-between gap-2 px-1.5 pb-2 pt-1">
+            <span className="flex items-baseline gap-1.5">
+              <span className="text-[12.5px] font-semibold text-slate-700">{column.title}</span>
+              <span
+                className={`text-[11.5px] tabular-nums ${wipExceeded && isProgress ? 'font-semibold text-amber-600' : 'text-slate-400'}`}
+                title={meta.hidden > 0 ? `Показано ${items.length} из ${meta.total}` : undefined}
+              >
+                {meta.total || items.length}
+                {isProgress && Number(wipLimit) > 0 && `/${wipLimit}`}
+              </span>
+            </span>
+            {isProgress && (
+              <span className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  title="Уменьшить лимит WIP"
+                  onClick={() => onWipLimitChange(Math.max(0, Number(wipLimit || 0) - 1))}
+                  className="grid h-5 w-5 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                >
+                  −
+                </button>
+                <button
+                  type="button"
+                  title="Увеличить лимит WIP"
+                  onClick={() => onWipLimitChange(Number(wipLimit || 0) + 1)}
+                  className="grid h-5 w-5 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                >
+                  +
+                </button>
+              </span>
+            )}
+          </header>
+        )}
+
+        {wipExceeded && isProgress && (
+          <p className="mb-1.5 px-1.5 text-[11px] leading-snug text-amber-600">
+            Превышен лимит одновременной работы — закройте начатое, прежде чем брать новое.
+          </p>
+        )}
+
+        <div className="flex min-h-[72px] flex-col gap-1.5">
+          {items.length === 0 ? (
+            <p className="px-1.5 py-3 text-[11.5px] text-slate-400">{column.caption}</p>
+          ) : (
+            items.map((entry) => (
+              <BoardCard
+                key={entry.task.id}
+                task={entry.task}
+                canPlan={canPlan}
+                focusPersonId={focusPersonId}
+                isFocused={focusTaskId === entry.task.id}
+                actionNeedOf={actionNeedOf}
+                isDragging={dragged?.task?.id === entry.task.id}
+                onOpen={onOpen}
+                onApplyPlan={onApplyPlan}
+                onDragStart={(event, task) => handleDragStart(event, task, entry.resolve)}
+                onDragEnd={handleDragEnd}
+              />
+            ))
+          )}
+
+          {meta.hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => onBrowseColumn?.(column)}
+              className="mt-0.5 rounded-lg border border-dashed border-slate-300 px-2 py-2 text-[11.5px] font-medium text-slate-500 transition hover:border-slate-400 hover:bg-white hover:text-slate-700"
+            >
+              Посмотреть ещё · не показано {meta.hidden}
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  };
+
+  if (isMobileShell) {
+    const activeColumn = BOARD_COLUMNS.find((column) => column.id === activeMobileColumnId) || BOARD_COLUMNS[0];
+    return (
+      <div className="space-y-2.5">
+        <div className="tb-column-switch" role="tablist" aria-label="Колонки доски">
+          {BOARD_COLUMNS.map((column) => {
+            const active = column.id === activeColumn.id;
+            const count = Number(columnMeta[column.id]?.total || (tasksByColumn[column.id] || []).length);
+            return (
+              <button
+                key={column.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setMobileColumnId(column.id)}
+                className={`tb-column-tab ${active ? 'is-active' : ''}`}
+              >
+                {column.title}
+                {count > 0 && <span className="tb-column-tab-count">{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+        {renderColumn(activeColumn, true)}
+      </div>
+    );
+  }
+
   return (
     <div className="-mx-1 overflow-x-auto px-1 pb-1">
       <div className="flex min-w-max gap-2.5">
-        {BOARD_COLUMNS.map((column) => {
-          const items = tasksByColumn[column.id] || [];
-          const meta = columnMeta[column.id] || { total: items.length, hidden: 0, loading: false };
-          const isAllowed = !allowedColumns || allowedColumns.has(column.id);
-          const isHover = hoverColumn === column.id && isAllowed;
-          const isProgress = column.id === 'progress';
-
-          return (
-            <section
-              key={column.id}
-              onDragOver={(event) => {
-                if (!dragged) return;
-                event.preventDefault();
-                event.dataTransfer.dropEffect = isAllowed ? 'move' : 'none';
-                setHoverColumn(column.id);
-              }}
-              onDragLeave={() => setHoverColumn((prev) => (prev === column.id ? null : prev))}
-              onDrop={(event) => {
-                event.preventDefault();
-                const payload = dragged;
-                handleDragEnd();
-                if (payload) onDrop(payload.task, column.id);
-              }}
-              className={`flex w-[268px] shrink-0 flex-col rounded-2xl p-2 transition-colors ${
-                isHover ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'bg-slate-100/70'
-              } ${dragged && !isAllowed ? 'opacity-50' : ''}`}
-            >
-              <header className="flex items-center justify-between gap-2 px-1.5 pb-2 pt-1">
-                <span className="flex items-baseline gap-1.5">
-                  <span className="text-[12.5px] font-semibold text-slate-700">{column.title}</span>
-                  <span
-                    className={`text-[11.5px] tabular-nums ${wipExceeded && isProgress ? 'font-semibold text-amber-600' : 'text-slate-400'}`}
-                    title={meta.hidden > 0 ? `Показано ${items.length} из ${meta.total}` : undefined}
-                  >
-                    {meta.total || items.length}
-                    {isProgress && Number(wipLimit) > 0 && `/${wipLimit}`}
-                  </span>
-                </span>
-                {isProgress && (
-                  <span className="flex items-center gap-0.5">
-                    <button
-                      type="button"
-                      title="Уменьшить лимит WIP"
-                      onClick={() => onWipLimitChange(Math.max(0, Number(wipLimit || 0) - 1))}
-                      className="grid h-5 w-5 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-                    >
-                      −
-                    </button>
-                    <button
-                      type="button"
-                      title="Увеличить лимит WIP"
-                      onClick={() => onWipLimitChange(Number(wipLimit || 0) + 1)}
-                      className="grid h-5 w-5 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
-                    >
-                      +
-                    </button>
-                  </span>
-                )}
-              </header>
-
-              {wipExceeded && isProgress && (
-                <p className="mb-1.5 px-1.5 text-[11px] leading-snug text-amber-600">
-                  Превышен лимит одновременной работы — закройте начатое, прежде чем брать новое.
-                </p>
-              )}
-
-              <div className="flex min-h-[72px] flex-col gap-1.5">
-                {items.length === 0 ? (
-                  <p className="px-1.5 py-3 text-[11.5px] text-slate-400">{column.caption}</p>
-                ) : (
-                  items.map((entry) => (
-                    <BoardCard
-                      key={entry.task.id}
-                      task={entry.task}
-                      canPlan={canPlan}
-                      focusPersonId={focusPersonId}
-                      isFocused={focusTaskId === entry.task.id}
-                      actionNeedOf={actionNeedOf}
-                      isDragging={dragged?.task?.id === entry.task.id}
-                      onOpen={onOpen}
-                      onApplyPlan={onApplyPlan}
-                      onDragStart={(event, task) => handleDragStart(event, task, entry.resolve)}
-                      onDragEnd={handleDragEnd}
-                    />
-                  ))
-                )}
-
-                {meta.hidden > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => onBrowseColumn?.(column)}
-                    className="mt-0.5 rounded-lg border border-dashed border-slate-300 px-2 py-2 text-[11.5px] font-medium text-slate-500 transition hover:border-slate-400 hover:bg-white hover:text-slate-700"
-                  >
-                    Посмотреть ещё · не показано {meta.hidden}
-                  </button>
-                )}
-              </div>
-            </section>
-          );
-        })}
+        {BOARD_COLUMNS.map((column) => renderColumn(column))}
       </div>
     </div>
   );
@@ -1484,6 +1556,7 @@ const TimelineView = ({ tasks, onOpen }) => {
         </div>
         <div className="flex items-center gap-2">
           <SegmentedControl
+            className="tb-range-switch"
             value={range}
             onChange={setRange}
             options={TIMELINE_RANGES.map(({ value, label }) => ({ value, label }))}
@@ -1492,7 +1565,7 @@ const TimelineView = ({ tasks, onOpen }) => {
             type="button"
             onClick={() => setExpanded((prev) => !prev)}
             title={expanded ? 'Свернуть' : 'Развернуть на весь экран'}
-            className="grid h-[32px] w-[32px] place-items-center rounded-[10px] bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+            className="tb-timeline-expand grid h-[32px] w-[32px] place-items-center rounded-[10px] bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
           >
             {expanded
               ? <Minimize2 size={14} strokeWidth={2} />
@@ -1507,9 +1580,12 @@ const TimelineView = ({ tasks, onOpen }) => {
           hint="Таймлайн показывает задачи, у которых есть плановый срок или зафиксировано начало работ."
         />
       ) : (
-        <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
+        <div className="tb-timeline-card overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
+          {/* Обёртка нужна телефону: шкала там шире экрана и едет вбок вместе с
+              шапкой, а колонка задач остаётся на месте. На компьютере — просто блок. */}
+          <div className="tb-timeline-inner">
           <div className="flex border-b border-slate-100 bg-slate-50/60">
-            <div className="w-[190px] shrink-0 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 sm:w-[240px]">
+            <div className="tb-timeline-name w-[190px] shrink-0 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 sm:w-[240px]">
               Задача
             </div>
             <div className="relative flex-1">
@@ -1525,7 +1601,7 @@ const TimelineView = ({ tasks, onOpen }) => {
             </div>
           </div>
 
-          <div className={`overflow-y-auto ${expanded ? 'max-h-[calc(100vh-280px)]' : 'max-h-[520px]'}`}>
+          <div className={`tb-timeline-rows overflow-y-auto ${expanded ? 'max-h-[calc(100vh-280px)]' : 'max-h-[520px]'}`}>
             {rows.map(({ task, span }) => {
               const planned = barGeometry(span.plannedStart, span.plannedEnd);
               const actual = barGeometry(span.actualStart, span.actualFinish);
@@ -1540,7 +1616,7 @@ const TimelineView = ({ tasks, onOpen }) => {
                   onClick={() => onOpen(task)}
                   className="flex cursor-pointer border-t border-slate-100 transition first:border-t-0 hover:bg-slate-50/70"
                 >
-                  <div className="flex w-[190px] shrink-0 items-center gap-2 px-3 py-2 sm:w-[240px]">
+                  <div className="tb-timeline-name flex w-[190px] shrink-0 items-center gap-2 px-3 py-2 sm:w-[240px]">
                     <PriorityDot priority={task?.priority} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12.5px] font-medium text-slate-800">{task.subject}</span>
@@ -1593,6 +1669,7 @@ const TimelineView = ({ tasks, onOpen }) => {
                 </div>
               );
             })}
+          </div>
           </div>
         </div>
       )}
@@ -1660,6 +1737,7 @@ const TaskBoardWorkspace = ({
   notify,
 }) => {
   const [scope, setScope] = useState('my');
+  const isMobileShell = useIsMobileShell();
   const [boardSort, setBoardSort] = useState('freshness');
   const [isExporting, setIsExporting] = useState(false);
   const [overrides, setOverrides] = useState({});
@@ -2073,11 +2151,11 @@ const TaskBoardWorkspace = ({
 
   return (
     <div className="tb-scope space-y-3" style={{ fontFamily: APPLE_FONT }}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-1 flex-wrap items-center gap-2">
+      <div className="tb-toolbar flex flex-wrap items-center justify-between gap-2">
+        <div className="tb-toolbar-main flex flex-1 flex-wrap items-center gap-2">
           {isAdmin ? (
             <CustomSelect
-              className="w-full sm:w-[240px]"
+              className="tb-scope-select w-full sm:w-[240px]"
               variant="ios"
               ariaLabel="Выбор доски сотрудника"
               value={scope}
@@ -2087,11 +2165,11 @@ const TaskBoardWorkspace = ({
               searchPlaceholder="Найти сотрудника…"
             />
           ) : (
-            <SegmentedControl value={scope} options={scopeOptions} onChange={changeScope} />
+            <SegmentedControl className="tb-scope-select" value={scope} options={scopeOptions} onChange={changeScope} />
           )}
           {mode === 'board' && (
             <CustomSelect
-              className="w-full sm:w-[170px]"
+              className="tb-sort-select w-full sm:w-[170px]"
               variant="ios"
               ariaLabel="Сортировка карточек"
               value={boardSort}
@@ -2100,7 +2178,7 @@ const TaskBoardWorkspace = ({
             />
           )}
           <CustomSelect
-            className="w-[110px]"
+            className="tb-chunk-select w-[110px]"
             variant="ios"
             ariaLabel={isBoardMode ? 'Карточек в колонке' : 'Карточек на странице'}
             value={chunkSize}
@@ -2108,9 +2186,9 @@ const TaskBoardWorkspace = ({
             onChange={changeChunkSize}
           />
         </div>
-        <div className="flex items-center gap-3">
+        <div className="tb-toolbar-side flex items-center gap-3">
           {mode === 'board' && (
-            <span className="text-[11.5px] text-slate-400">
+            <span className="tb-drag-hint text-[11.5px] text-slate-400">
               Перетащите карточку между колонками, чтобы сменить статус
             </span>
           )}
@@ -2120,10 +2198,11 @@ const TaskBoardWorkspace = ({
               onClick={handleExport}
               disabled={isExporting}
               title="Excel: лист на каждую колонку доски"
-              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
+              aria-label="Выгрузка в Excel"
+              className="tb-export-btn flex shrink-0 items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
             >
               <Download size={13} strokeWidth={2} />
-              {isExporting ? 'Готовлю…' : 'Выгрузка'}
+              <span className="tb-export-label">{isExporting ? 'Готовлю…' : 'Выгрузка'}</span>
             </button>
           )}
         </div>
@@ -2156,6 +2235,7 @@ const TaskBoardWorkspace = ({
           onBrowseColumn={setBrowsedColumn}
           wipLimit={wipLimit}
           onWipLimitChange={handleWipLimitChange}
+          isMobileShell={isMobileShell}
           onOpen={onOpenTask}
           onApplyPlan={handleApplyPlan}
           onDrop={handleDrop}
@@ -2176,6 +2256,7 @@ const TaskBoardWorkspace = ({
           actionNeedOf={actionNeedOf}
           canPlan={canPlan}
           isTaskOpen={isTaskOpen}
+          isMobileShell={isMobileShell}
           onApplyPlan={handleApplyPlan}
           onOpenTask={onOpenTask}
           onClose={() => setBrowsedColumn(null)}

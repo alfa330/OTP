@@ -81,7 +81,9 @@ const FullscreenSheet = ({
       /* otp-modal-root — метка «поверх всего окна» для мобильной оболочки:
          пока окно открыто, угловой колокол прячется, иначе он висел бы поверх
          шапки и накрывал крестик закрытия (см. mobile-shell.css). */
-      className="otp-modal-root fixed inset-0 flex bg-slate-100/95 backdrop-blur-sm"
+      /* На телефоне полотно непрозрачное: окно там — экран во весь экран, и сквозь
+         95 % подложки проступал раздел под ним («Задачи» за «Заметками»). */
+      className={`otp-modal-root fixed inset-0 flex ${isNarrowShell ? 'bg-slate-100' : 'bg-slate-100/95 backdrop-blur-sm'}`}
       style={{
         zIndex: z,
         // Сдвиг вправо от сайдбара; анимация та же, что у отступа контента.
@@ -91,28 +93,55 @@ const FullscreenSheet = ({
       <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
         {/* otp-modal-head — метка для мобильной оболочки: там окно едет
              экраном во весь экран, и шапке нужен отступ под вырез. */}
-        <div className="otp-modal-head flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
-              <FaIcon className={`fas ${icon}`} aria-hidden="true" />
-            </span>
-            <div className="min-w-0">
-              <h3 className="truncate text-base font-semibold text-slate-900">{title}</h3>
-              {subtitle ? <p className="truncate text-xs leading-5 text-slate-500">{subtitle}</p> : null}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {actions}
+        {isNarrowShell ? (
+          /* Телефон: шапка экрана, как у IosModal, — шеврон «Назад» слева,
+             заголовок, свои действия справа. Плитка значка и крестик справа на
+             390 px не помещались в строку, и крестик падал второй строкой под
+             заголовок. Запрет переноса — инлайном: общий слой разделов
+             (mobile-shell.css) переносит ряды с gap-* правилом весом (0,6,1),
+             и классом его не перебить. */
+          <div
+            className="otp-modal-head flex items-center gap-1 border-b border-slate-200 bg-white/90 px-2 py-2 backdrop-blur"
+            style={{ flexWrap: 'nowrap' }}
+          >
             <button
               type="button"
               onClick={onClose}
-              aria-label="Закрыть"
-              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+              aria-label="Назад"
+              className="otp-modal-back grid h-9 w-9 shrink-0 place-items-center text-blue-600 active:opacity-60"
             >
-              <FaIcon className="fas fa-xmark" aria-hidden="true" />
+              <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
             </button>
+            <div className="min-w-0 flex-1">
+              <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
+              {subtitle ? <p className="truncate text-[12px] text-slate-500">{subtitle}</p> : null}
+            </div>
+            {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
           </div>
-        </div>
+        ) : (
+          <div className="otp-modal-head flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                <FaIcon className={`fas ${icon}`} aria-hidden="true" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="truncate text-base font-semibold text-slate-900">{title}</h3>
+                {subtitle ? <p className="truncate text-xs leading-5 text-slate-500">{subtitle}</p> : null}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {actions}
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Закрыть"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+              >
+                <FaIcon className="fas fa-xmark" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
           <div className={`mx-auto w-full ${wide ? '' : 'max-w-5xl'}`}>{children}</div>
         </div>
