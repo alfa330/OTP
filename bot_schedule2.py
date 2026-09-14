@@ -8525,6 +8525,17 @@ def api_group_late_bot_attendance():
             wanted = {e.strip() for e in employees}
             rows = [r for r in rows if r['employee_id'] in wanted]
 
+        # Счётчики по статусам — для полосы «Все · Опоздали · Не отметились…» над
+        # списком. Считаются ДО фильтра по статусу и до страниц: иначе, выбрав
+        # «Опоздали», человек видел бы у остальных статусов нули и не понимал бы,
+        # сколько всего людей за период.
+        status_counts = {}
+        for row in rows:
+            status_counts[row['status']] = status_counts.get(row['status'], 0) + 1
+        statuses = {s.strip() for s in (request.args.get('status') or '').split(',') if s.strip()}
+        if statuses:
+            rows = [r for r in rows if r['status'] in statuses]
+
         total = len(rows)
         try:
             limit = max(1, min(int(request.args.get('limit', 200)), 1000))
@@ -8541,6 +8552,7 @@ def api_group_late_bot_attendance():
             'department_scope': scope,
             'clockster_error': payload.get('clockster_error'),
             'pending_days': payload.get('pending_days') or [],
+            'status_counts': status_counts,
             'built_days': payload.get('built_days', 0),
             'cached_days': payload.get('cached_days', 0),
         }), 200

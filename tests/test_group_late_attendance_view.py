@@ -48,6 +48,57 @@ class MainScreenTests(unittest.TestCase):
         self.assertIn("attendancePending.length > 0", VIEW)
 
 
+class RedesignTests(unittest.TestCase):
+    """Вид раздела после переделки 14.09.2026 — то, что легко вернуть назад правкой."""
+
+    def test_status_strip_counts_come_from_the_server(self):
+        # Счётчики считаются ДО фильтра по статусу: выбрав «Опоздали», человек
+        # всё равно видит, сколько всего людей за период.
+        self.assertIn("setAttendanceCounts(r.data.status_counts || {})", VIEW)
+        self.assertIn("status: filters.status || undefined", VIEW)
+        route = BOT[BOT.index("def api_group_late_bot_attendance"):]
+        route = route[:route.index("\n@app.route")]
+        self.assertLess(route.index("status_counts[row['status']]"),
+                        route.index("if statuses:"))
+        self.assertIn("'status_counts': status_counts", route)
+
+    def test_rows_open_a_day_card_instead_of_a_wide_table(self):
+        self.assertIn("onClick={() => setAttendanceDetail(row)}", VIEW)
+        self.assertIn("renderAttendanceDetail(attendanceDetail)", VIEW)
+        block = VIEW[VIEW.index("const renderAttendance = () => {"):]
+        block = block[:block.index("const renderAttendanceDetail")]
+        self.assertNotIn("<table", block)
+        self.assertNotIn("overflow-x-auto", block)
+
+    def test_neutral_statuses_are_not_colored(self):
+        # «Вне графика» — больше половины строк дня; цветом его не выделяем.
+        self.assertIn("off_schedule: 'slate',", VIEW)
+        self.assertIn("ok: 'slate',", VIEW)
+
+    def test_bot_tabs_live_under_one_entry(self):
+        self.assertIn("const BOT_TAB_KEYS = ['overview', 'events', 'chats', 'departments', 'mutes'];", VIEW)
+        self.assertIn("{ key: 'bot', label: 'Уведомления', icon: Bell }", VIEW)
+        self.assertIn('ariaLabel="Уведомления бота"', VIEW)
+
+    def test_navigation_scrolls_instead_of_wrapping(self):
+        # Девять вкладок складывались на телефоне в три ряда.
+        self.assertNotIn('<div className="flex flex-wrap rounded-xl bg-slate-100 p-1">', VIEW)
+        self.assertIn('aria-label="Разделы"', VIEW)
+
+    def test_plan_modal_uses_project_pickers(self):
+        # Системные поля времени и числа рисует ОС — это второй визуальный язык.
+        self.assertNotIn('type="time"', VIEW)
+        self.assertNotIn('type="number"', VIEW)
+        self.assertIn("<IosTimePicker", VIEW)
+        self.assertIn("options={PLAN_BREAK_OPTIONS}", VIEW)
+        self.assertIn("options={PLAN_HOURS_OPTIONS}", VIEW)
+
+    def test_long_explanations_live_behind_hints(self):
+        self.assertIn('label="О разделе"', VIEW)
+        self.assertIn('label="О графиках"', VIEW)
+        self.assertIn('label="Об отчётах"', VIEW)
+
+
 class ReportPickerTests(unittest.TestCase):
     def test_people_come_from_both_sources(self):
         # Раньше список собирался из сводки нарушений Workpace — центрального

@@ -1,18 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bell, BellOff, Building2,
-    CalendarClock, CalendarRange, CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet,
+    Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Bell, BellOff, Building2,
+    CalendarClock, CalendarRange, CheckCircle2, ChevronDown, ChevronRight, Clock, Download, FileSpreadsheet,
     Loader2, Link2, LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send,
-    ShieldAlert, Timer, Trash2, Users, UserX, X, Zap,
+    ShieldAlert, Timer, Trash2, User, Users, UserX, X, Zap,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
-    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosPager, IosSegmented,
-    IosToggle,
+    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosMenu, IosModal, IosPager,
+    IosSegmented, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
+import IosTimePicker from '../ui/TimePicker';
 
 /* Раздел «Бот опозданий» — контроль отметок Workpace: наш бот следит за
  * нарушениями графика и шлёт их в рабочие чаты Telegram.
@@ -36,16 +37,36 @@ const eventMeta = (type) => EVENT_TYPES[type] || { label: type || '—', tone: '
 /* Статусы дня на вкладке «Отметки». Цветом отмечено только то, где он несёт смысл:
  * «вовремя» и «не отмечается» нейтральные — первое потому, что вопросов нет, второе
  * потому, что это про человека, который вообще не пользуется терминалом, а не про
- * нарушение. Подписи приходят с сервера, здесь только тон. */
+ * нарушение. «Вне графика» тоже нейтральный: на живых данных это больше половины
+ * строк дня, и синие плашки на каждой второй строке заслоняли настоящие проблемы.
+ * Подписи приходят с сервера, здесь только тон. */
 const ATTENDANCE_STATUS_TONES = {
     absent: 'red',
     late: 'red',
     early_out: 'amber',
     no_out: 'amber',
-    off_schedule: 'blue',
+    off_schedule: 'slate',
     no_terminal: 'slate',
     ok: 'slate',
 };
+
+/* Полоса над списком: сначала то, ради чего раздел открывают, потом нейтральное. */
+const ATTENDANCE_STATUS_CHIPS = [
+    { value: 'late', label: 'Опоздали' },
+    { value: 'absent', label: 'Не отметились' },
+    { value: 'early_out', label: 'Ранний уход' },
+    { value: 'no_out', label: 'Нет ухода' },
+    { value: 'ok', label: 'Вовремя' },
+    { value: 'off_schedule', label: 'Вне графика' },
+    { value: 'no_terminal', label: 'Не отмечаются' },
+];
+
+/* Точка цвета у чипа — только у проблемных статусов. */
+const STATUS_DOT = { red: 'bg-rose-500', amber: 'bg-amber-500' };
+
+/* Колонки списка отметок на компьютере — одна строка на шапку и на строки,
+ * иначе они разъедутся при первой же правке ширины. */
+const ATTENDANCE_GRID = 'grid-cols-[minmax(0,2.3fr)_minmax(0,1.1fr)_72px_72px_76px_minmax(0,1.5fr)_16px]';
 
 /* Оси сортировки из постановки: подразделение, локация, приход/уход. Остальные
  * добавлены потому, что таблицу читают ради них же.
@@ -90,6 +111,10 @@ const TABS = [
 
 const EVENTS_PAGE = 60;
 
+/* Вкладки Telegram-бота. В навигации они собраны под одну «Уведомления»: кадровику
+ * каждый день нужны отметки, графики и отчёты, а чаты и правила тишины — нет. */
+const BOT_TAB_KEYS = ['overview', 'events', 'chats', 'departments', 'mutes'];
+
 /* Сколько отметок показывать на странице. Просили выбор «50/100/т.д.» (ТЗ #307):
  * у кадровика на экране помещается порядок полусотни строк, а листать тысячу
  * одним куском — это не таблица, а лента. */
@@ -102,6 +127,13 @@ const WEEKDAYS = [
 ];
 
 const PLAN_SCOPE_LABELS = { department: 'Подразделение', employee: 'Сотрудник' };
+
+/* Поле времени в окне графика — во всю ширину колонки, как остальные поля окна. */
+const PLAN_TIME_INPUT = 'h-9 w-full rounded-xl border-0 bg-white px-6 text-center text-[13px] font-medium tabular-nums text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/70 placeholder-slate-400 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/60';
+
+const PLAN_BREAK_OPTIONS = [0, 15, 30, 45, 60, 90, 120].map((minutes) => ({
+    value: minutes, label: minutes ? `${minutes} мин` : 'Без перерыва',
+}));
 
 /* Пустое правило формы «добавить график». Отдельной константой, чтобы «Отмена» и
  * «Добавить ещё одно» открывали одинаковую форму, а не остатки предыдущей. */
@@ -125,6 +157,9 @@ const hoursLabel = (value) => {
     const minutes = Math.round((hours - whole) * 60);
     return `${whole}:${String(minutes).padStart(2, '0')}`;
 };
+/* Норма от получаса до двенадцати часов с шагом в полчаса. */
+const PLAN_HOURS_OPTIONS = Array.from({ length: 24 }, (_, index) => (index + 1) / 2)
+    .map((hours) => ({ value: hours, label: `${hoursLabel(hours)} ч` }));
 
 /* Колонки таблицы дисциплины. `numeric` — и выравнивание, и то, что по такой
  * колонке сортируем по убыванию с первого клика: интересны нарушители сверху.
@@ -187,6 +222,67 @@ const fmtSize = (bytes) => {
 };
 
 const fmtPeriod = (from, to) => (from === to ? fmtDay(from) : `${fmtDay(from)} — ${fmtDay(to)}`);
+
+/* «понедельник, 14 сентября» — заголовок дня в списке за период. */
+const fmtDayLong = (iso) => {
+    if (!iso) return '—';
+    const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+    const text = new Date(y, m - 1, d).toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+    return text.charAt(0).toUpperCase() + text.slice(1);
+};
+
+/* 17 → «17 мин», 125 → «2 ч 05 мин». */
+const fmtMinutes = (value) => {
+    const total = Math.max(0, Math.round(Number(value) || 0));
+    if (total < 60) return `${total} мин`;
+    return `${Math.floor(total / 60)} ч ${String(total % 60).padStart(2, '0')} мин`;
+};
+
+const initialsOf = (name) => String(name || '')
+    .trim().split(/\s+/).filter(Boolean).slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase()).join('') || '·';
+
+/* Кружок с инициалами — ориентир для глаза в длинном списке, как в «Контактах». */
+const Avatar = ({ name, size = 'md' }) => (
+    <span className={`grid shrink-0 place-items-center rounded-full bg-slate-100 font-semibold text-slate-500 ${
+        size === 'lg' ? 'h-12 w-12 text-[15px]' : 'h-8 w-8 text-[11px]'}`}>
+        {initialsOf(name)}
+    </span>
+);
+
+/* Статус дня одной плашкой: опоздание сразу с минутами — отдельная колонка
+ * «Опоздание» рядом со статусом «Опоздание» говорила одно и то же дважды. */
+const AttendanceStatusPill = ({ row }) => {
+    const tone = ATTENDANCE_STATUS_TONES[row.status] || 'slate';
+    const minutes = row.status === 'late' ? row.late_minutes
+        : row.status === 'early_out' ? row.early_out_minutes : 0;
+    return (
+        <IosBadge tone={tone} className="max-w-full whitespace-nowrap">
+            <span className="truncate">{row.status_label}{minutes > 0 ? ` · ${fmtMinutes(minutes)}` : ''}</span>
+        </IosBadge>
+    );
+};
+
+const TimeCell = ({ fact, plan }) => (
+    <div className="text-center tabular-nums">
+        <div className={`text-[13.5px] ${fact ? 'text-slate-900' : 'text-slate-300'}`}>{fmtTime(fact)}</div>
+        {plan && <div className="text-[11.5px] text-slate-400">{fmtTime(plan)}</div>}
+    </div>
+);
+
+/* Строка сгруппированного списка iOS: подпись слева, значение справа. */
+const DetailRow = ({ label, value, hint = null, tone = null }) => (
+    <div className="flex items-center justify-between gap-3 px-4 py-2.5">
+        <span className="text-[13.5px] text-slate-600">{label}</span>
+        <span className="min-w-0 text-right">
+            <span className={`block truncate text-[13.5px] font-medium tabular-nums ${
+                tone === 'red' ? 'text-rose-600' : tone === 'amber' ? 'text-amber-600' : 'text-slate-900'}`}>
+                {value}
+            </span>
+            {hint && <span className="block truncate text-[11.5px] text-slate-400">{hint}</span>}
+        </span>
+    </div>
+);
 
 // created_by приходит как 'web:12:Имя' либо 'telegram:<id>'
 const actorLabel = (raw) => {
@@ -268,19 +364,22 @@ const errText = (error, fallback) => error?.response?.data?.error || error?.mess
 const asArray = (value) => (Array.isArray(value) ? value : []);
 
 const SegButton = ({ active, onClick, icon: Icon, children }) => (
-    <button onClick={onClick}
-            className={`flex items-center gap-1.5 rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
+    <button type="button" role="tab" aria-selected={active} onClick={onClick}
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[9px] px-3.5 py-1.5 text-[12.5px] font-semibold transition-all ${
                 active ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                        : 'text-slate-500 hover:text-slate-700'}`}>
-        <Icon size={13} /> {children}
+        <Icon size={13} className="hidden sm:block" /> {children}
     </button>
 );
 
 /* Поле фильтра с подписью: подписи держат строку фильтров ровной, а без них
  * непонятно, что означает выбранное значение. */
-const FilterField = ({ label, children, className = '' }) => (
+const FilterField = ({ label, children, className = '', compact = false }) => (
     <label className={`flex flex-col gap-1 ${className}`}>
-        <span className="px-1 text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+        {/* compact — на телефоне без подписи: там поля и так говорят сами за себя
+            (дата, «Все подразделения», «Сначала свежие»), а четыре подписи
+            съедали пол-экрана до первой строки списка. */}
+        <span className={`px-1 text-[10.5px] font-semibold uppercase tracking-wider text-slate-400 ${compact ? 'hidden sm:block' : ''}`}>
             {label}
         </span>
         {children}
@@ -662,10 +761,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [attendanceNotice, setAttendanceNotice] = useState(null);
     const [attendanceFilters, setAttendanceFilters] = useState({
         from: isoDate(new Date()), to: isoDate(new Date()),
-        departments: [], q: '', kind: '', sort: 'recent',
+        departments: [], q: '', kind: '', sort: 'recent', status: '',
     });
     const [attendanceSearch, setAttendanceSearch] = useState('');
-    const [expandedMarks, setExpandedMarks] = useState(() => new Set());
+    const [attendanceCounts, setAttendanceCounts] = useState(null);
+    const [attendanceDetail, setAttendanceDetail] = useState(null);
     const [attendancePage, setAttendancePage] = useState(1);
     const [attendancePageSize, setAttendancePageSize] = useState(ATTENDANCE_PAGE_SIZES[0]);
     const [attendancePending, setAttendancePending] = useState([]);
@@ -710,6 +810,17 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const scoped = Boolean(departmentScope);
     const departmentNames = departments?.items || [];
+
+    const primaryTab = BOT_TAB_KEYS.includes(tab) ? 'bot' : tab;
+    const lastBotTab = useRef('overview');
+    if (BOT_TAB_KEYS.includes(tab)) lastBotTab.current = tab;
+    const PRIMARY_TABS = [
+        ...TABS.filter((item) => !BOT_TAB_KEYS.includes(item.key)),
+        { key: 'bot', label: 'Уведомления', icon: Bell },
+    ];
+    /* «Уведомления» возвращают туда, где человек был в прошлый раз: из «Чатов»
+       в отметки и обратно — без лишнего шага через «Обзор». */
+    const openPrimaryTab = (key) => setTab(key === 'bot' ? lastBotTab.current : key);
 
     /* Подразделения обоих источников. Группируем по системе: в списке рядом
        стоят «КЦ 3» из Workpace и «Центральный офис» из Clockster, и без подписи
@@ -905,6 +1016,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 department: (filters.departments || []).join(';') || undefined,
                 q: filters.q || undefined,
                 kind: filters.kind || undefined,
+                status: filters.status || undefined,
                 sort: filters.sort || undefined,
                 limit,
                 offset: Math.max(0, (page - 1) * limit),
@@ -915,6 +1027,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             setAttendance(r.data.rows || []);
             setAttendanceTotal(r.data.total || 0);
             setAttendancePending(asArray(r.data.pending_days));
+            setAttendanceCounts(r.data.status_counts || {});
             // Второй источник мог отвалиться — таблица при этом рабочая, но
             // неполная, и молчать об этом нельзя: пропал бы целый офис.
             if (r.data.clockster_error) {
@@ -1160,12 +1273,6 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         }, 'График удалён');
     };
 
-    const toggleMarks = (key) => setExpandedMarks((prev) => {
-        const next = new Set(prev);
-        if (next.has(key)) next.delete(key); else next.add(key);
-        return next;
-    });
-
     const applyEventFilters = (patch) => {
         const next = { ...eventFilters, ...patch };
         setEventFilters(next);
@@ -1401,275 +1508,384 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         );
     };
 
-    const renderAttendance = () => (
-        <div className="space-y-3">
-            <div className={`${iosCard} p-3`}>
-                <div className="flex flex-wrap items-end gap-2.5">
-                    <FilterField label="Период">
-                        <IosDateRangePicker from={attendanceFilters.from} to={attendanceFilters.to}
-                                            max={isoDate(new Date())}
-                                            onChange={({ from, to }) => applyAttendanceFilters({ from, to })} />
-                    </FilterField>
-                    <FilterField label="Отметка" className="w-[170px]">
-                        <CustomSelect
-                            variant="ios"
-                            value={attendanceFilters.kind}
-                            onChange={(kind) => applyAttendanceFilters({ kind })}
-                            options={[
-                                { value: '', label: 'Приход и уход' },
-                                { value: 'in', label: 'Только приход' },
-                                { value: 'out', label: 'Только уход' },
-                                { value: 'absent', label: 'Без отметки' },
-                            ]}
-                            ariaLabel="Отметка"
-                        />
-                    </FilterField>
-                    {!scoped && (
-                        <FilterField label="Подразделения" className="w-[230px]">
-                            <CustomSelect
-                                variant="ios"
-                                searchable
-                                multiple
-                                value={attendanceFilters.departments}
-                                onChange={(departments) => applyAttendanceFilters({ departments })}
-                                options={directoryDepartmentOptions}
-                                placeholder="Все подразделения"
-                                renderValue={(values) => (values.length === 1
-                                    ? values[0]
-                                    : `Выбрано: ${values.length}`)}
-                                searchPlaceholder="Поиск подразделения…"
-                                ariaLabel="Подразделения"
-                            />
-                        </FilterField>
-                    )}
-                    <FilterField label="Сортировка" className="w-[190px]">
-                        <CustomSelect
-                            variant="ios"
-                            value={attendanceFilters.sort}
-                            onChange={(sort) => applyAttendanceFilters({ sort })}
-                            options={ATTENDANCE_SORTS}
-                            ariaLabel="Сортировка"
-                        />
-                    </FilterField>
-                    <FilterField label="Поиск" className="flex-1 min-w-[200px]">
-                        <div className="relative">
-                            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                            <input
-                                className={`${iosInput} pl-9`}
-                                value={attendanceSearch}
-                                onChange={(e) => onAttendanceSearch(e.target.value)}
-                                placeholder="ФИО или должность"
-                            />
-                        </div>
-                    </FilterField>
-                    {/* Прошедшие дни читаются из кэша — «Обновить» перечитывает их
-                        из Workpace и Clockster заново. Нужна редко, поэтому кнопка
-                        тихая и без подписи. */}
-                    <button type="button" onClick={refreshAttendance} className={iosBtnGhost}
-                            disabled={attendance === null}
-                            title="Перечитать период из Workpace и Clockster">
-                        <RefreshCw className={`h-4 w-4 ${attendance === null ? 'animate-spin' : ''}`} />
-                    </button>
-                </div>
-            </div>
-
-            {attendancePending.length > 0 && (
-                <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-slate-600`}>
-                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />
-                    Ещё собираем {attendancePending.length}&nbsp;
-                    {pluralRu(attendancePending.length, 'день', 'дня', 'дней')} периода
-                    ({fmtDay(attendancePending[0])} — {fmtDay(attendancePending[attendancePending.length - 1])}).
-                    Нажмите «Обновить» через минуту — они появятся в таблице.
-                </div>
-            )}
-
-            {attendanceNotice && (
-                <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-amber-800`}>
-                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />
-                    {attendanceNotice}
-                </div>
-            )}
-            {attendanceError && (
-                <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-rose-700`}>
-                    <AlertCircle className="h-4 w-4 shrink-0" />
-                    {attendanceError}
-                </div>
-            )}
-
-            {attendance === null && (
-                <div className={`${iosCard} flex items-center justify-center gap-2 p-8 text-sm text-slate-500`}>
-                    <Loader2 className="h-4 w-4 animate-spin" /> Загружаем отметки…
-                </div>
-            )}
-
-            {attendance !== null && attendance.length === 0 && !attendanceError && (
-                <div className={`${iosCard} p-8 text-center text-sm text-slate-500`}>
-                    За выбранный период отметок нет
-                </div>
-            )}
-
-            {attendance !== null && attendance.length > 0 && (
-                <div className={`${iosCard} overflow-hidden`}>
-                    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-xs text-slate-500">
-                        <span className="tabular-nums">
-                            {fmtInt((attendancePage - 1) * attendancePageSize + 1)}–
-                            {fmtInt((attendancePage - 1) * attendancePageSize + attendance.length)} из {fmtInt(attendanceTotal)}
-                        </span>
-                        <div className="flex items-center gap-2">
-                            <span className="tabular-nums">
-                                {fmtPeriod(attendanceFilters.from, attendanceFilters.to)}
+    /* ─── «Отметки»: главная вкладка ──────────────────────────────────────────
+     *
+     * Вместо таблицы на девять колонок — список в стиле iOS: строка читается за
+     * один взгляд (кто, когда пришёл и ушёл, что с днём), подробности дня живут
+     * в карточке по нажатию. Широкая таблица на телефоне превращалась в
+     * горизонтальную прокрутку, а на компьютере опоздание, статус и система
+     * стояли в трёх разных колонках, хотя отвечают на один вопрос. */
+    const renderAttendanceStatusStrip = () => {
+        const counts = attendanceCounts || {};
+        const all = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+        const chips = [
+            { value: '', label: 'Все', count: all },
+            ...ATTENDANCE_STATUS_CHIPS
+                .map((chip) => ({ ...chip, count: Number(counts[chip.value] || 0) }))
+                // Пустые статусы не показываем: семь чипов с нулями — это шум,
+                // а не информация. Выбранный остаётся, даже если опустел.
+                .filter((chip) => chip.count > 0 || chip.value === attendanceFilters.status),
+        ];
+        return (
+            <div className="flex gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}
+                 role="tablist" aria-label="Статус дня">
+                {chips.map((chip) => {
+                    const active = (attendanceFilters.status || '') === chip.value;
+                    const dot = STATUS_DOT[ATTENDANCE_STATUS_TONES[chip.value]];
+                    return (
+                        <button key={chip.value || 'all'} type="button" role="tab" aria-selected={active}
+                                onClick={() => applyAttendanceFilters({ status: chip.value })}
+                                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium transition active:scale-[0.98] ${
+                                    active
+                                        ? 'bg-slate-900 text-white shadow-sm'
+                                        : 'bg-white text-slate-600 ring-1 ring-slate-200/80 hover:bg-slate-50'
+                                }`}>
+                            {dot && <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />}
+                            {chip.label}
+                            <span className={`tabular-nums ${active ? 'text-white/60' : 'text-slate-400'}`}>
+                                {fmtInt(chip.count)}
                             </span>
-                            {/* Размер страницы стоит рядом со счётчиком строк, а не в
-                                панели фильтров: он про эту таблицу, а не про выборку. */}
-                            <div className="w-[92px]">
-                                <CustomSelect
-                                    variant="ios"
-                                    value={attendancePageSize}
-                                    onChange={(size) => changeAttendancePageSize(Number(size))}
-                                    options={ATTENDANCE_PAGE_SIZES.map((size) => ({
-                                        value: size, label: `по ${size}`,
-                                    }))}
-                                    ariaLabel="Строк на странице"
-                                />
+                        </button>
+                    );
+                })}
+            </div>
+        );
+    };
+
+    const renderAttendanceRow = (row, index, showDate) => {
+        const meta = [row.position, row.department, row.system_label].filter(Boolean).join(' · ');
+        return (
+            <button key={`${row.date}:${row.employee_id}:${index}`} type="button"
+                    onClick={() => setAttendanceDetail(row)}
+                    className="group block w-full px-4 py-2.5 text-left transition hover:bg-slate-50/80 active:bg-slate-100">
+                {/* Телефон: имя и время прихода–ухода сверху, статус — строкой ниже.
+                    Рядом с именем плашка «Ранний уход · 25 мин» съедала само имя. */}
+                <div className="flex items-center gap-3 lg:hidden">
+                    <Avatar name={row.employee} />
+                    <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2">
+                            <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-slate-900">
+                                {row.employee || '—'}
+                            </span>
+                            <span className="shrink-0 text-[12.5px] tabular-nums text-slate-500">
+                                {row.fact_in && row.fact_out
+                                    ? `${fmtTime(row.fact_in)}–${fmtTime(row.fact_out)}`
+                                    : row.fact_in ? `с ${fmtTime(row.fact_in)}` : ''}
+                            </span>
+                        </div>
+                        <div className="mt-1 flex min-w-0 items-center gap-2">
+                            <AttendanceStatusPill row={row} />
+                            {row.work_seconds > 0 && (
+                                <span className="shrink-0 text-[12px] tabular-nums text-slate-400">
+                                    {fmtWorked(row.work_seconds)} в работе
+                                </span>
+                            )}
+                        </div>
+                        <div className="mt-0.5 truncate text-[12px] text-slate-400">
+                            {showDate ? `${fmtDay(row.date)} · ` : ''}{meta || '—'}
+                        </div>
+                    </div>
+                    <ChevronRight size={15} className="shrink-0 text-slate-300" />
+                </div>
+
+                {/* Компьютер: те же сведения колонками, без горизонтальной прокрутки. */}
+                <div className={`hidden items-center gap-4 lg:grid ${ATTENDANCE_GRID}`}>
+                    <div className="flex min-w-0 items-center gap-3">
+                        <Avatar name={row.employee} />
+                        <div className="min-w-0">
+                            <div className="truncate text-[13.5px] font-medium text-slate-900">{row.employee || '—'}</div>
+                            <div className="truncate text-[12px] text-slate-500">
+                                {showDate ? `${fmtDay(row.date)} · ` : ''}{meta || 'должность не указана'}
                             </div>
                         </div>
                     </div>
-                    <div className="overflow-x-auto">
-                        <table className="w-full min-w-[1040px] text-sm">
-                            <thead>
-                                <tr className="border-y border-slate-200/70 bg-slate-50/70 text-xs text-slate-500">
-                                    <th className="px-4 py-2 text-left font-medium">Сотрудник</th>
-                                    <th className="px-3 py-2 text-left font-medium">Подразделение</th>
-                                    <th className="px-3 py-2 text-left font-medium">График</th>
-                                    <th className="px-3 py-2 text-left font-medium">Система</th>
-                                    <th className="px-3 py-2 text-center font-medium">Приход</th>
-                                    <th className="px-3 py-2 text-center font-medium">Уход</th>
-                                    <th className="px-3 py-2 text-right font-medium">Опоздание</th>
-                                    <th className="px-3 py-2 text-right font-medium">В работе</th>
-                                    <th className="px-3 py-2 text-left font-medium">Статус</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {attendance.map((row, index) => {
-                                    const key = `${row.date}:${row.employee_id}:${index}`;
-                                    const open = expandedMarks.has(key);
-                                    const tone = ATTENDANCE_STATUS_TONES[row.status] || 'slate';
-                                    return (
-                                        <React.Fragment key={key}>
-                                            <tr className="border-b border-slate-100 last:border-0 align-top">
-                                                <td className="px-4 py-2.5">
-                                                    <div className="font-medium text-slate-900">{row.employee || '—'}</div>
-                                                    <div className="text-xs text-slate-500">
-                                                        {row.position || 'должность не указана'}
-                                                        {attendanceFilters.from !== attendanceFilters.to && ` · ${row.date}`}
-                                                    </div>
-                                                </td>
-                                                <td className="px-3 py-2.5 text-slate-700">
-                                                    <div>{row.department || '—'}</div>
-                                                    {row.location && (
-                                                        <div className="flex items-center gap-1 text-xs text-slate-500">
-                                                            <MapPin className="h-3 w-3" />{row.location}
-                                                        </div>
-                                                    )}
-                                                </td>
-                                                <td className="px-3 py-2.5 text-slate-700">
-                                                    <div>{row.schedule || '—'}</div>
-                                                    {/* Откуда план, кадровик обязан видеть: с ручным
-                                                        графиком опоздание считается от него, а не от
-                                                        смены в Workpace или Clockster. */}
-                                                    {row.plan_source === 'rule' && (
-                                                        <div className="text-xs text-slate-400">наш график</div>
-                                                    )}
-                                                </td>
-                                                <td className="px-3 py-2.5 text-slate-600">{row.system_label}</td>
-                                                <td className="px-3 py-2.5 text-center tabular-nums">
-                                                    <div className="text-slate-900">{fmtTime(row.fact_in)}</div>
-                                                    <div className="text-xs text-slate-400">{fmtTime(row.plan_in)}</div>
-                                                </td>
-                                                <td className="px-3 py-2.5 text-center tabular-nums">
-                                                    <div className="text-slate-900">{fmtTime(row.fact_out)}</div>
-                                                    <div className="text-xs text-slate-400">{fmtTime(row.plan_out)}</div>
-                                                </td>
-                                                {/* Ноль не красим и не печатаем: цвет только там, где он
-                                                    что-то значит, иначе таблица рябит. */}
-                                                <td className={`px-3 py-2.5 text-right tabular-nums ${row.late_minutes > 0 ? 'font-medium text-rose-600' : 'text-slate-400'}`}>
-                                                    {row.late_minutes > 0 ? `${fmtInt(row.late_minutes)} м` : '—'}
-                                                </td>
-                                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">
-                                                    <div>{fmtWorked(row.work_seconds)}</div>
-                                                    {row.plan_mode === 'hours' && row.hours_norm > 0 && (
-                                                        <div className="text-xs text-slate-400">
-                                                            из {hoursLabel(row.hours_norm)}
-                                                        </div>
-                                                    )}
-                                                </td>
-                                                <td className="px-3 py-2.5">
-                                                    <div className="flex items-center gap-2">
-                                                        <IosBadge tone={tone}>{row.status_label}</IosBadge>
-                                                        {asArray(row.marks).length > 0 && (
-                                                            <button type="button" onClick={() => toggleMarks(key)}
-                                                                    className={iosBtnGhost}
-                                                                    title="Все отметки за день">
-                                                                <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                            {open && (
-                                                <tr className="border-b border-slate-100 bg-slate-50/60">
-                                                    <td colSpan={9} className="px-4 py-2.5">
-                                                        <div className="flex flex-wrap items-center gap-1.5">
-                                                            {asArray(row.marks).map((mark, i) => (
-                                                                <span key={i}
-                                                                      className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-xs text-slate-600 ring-1 ring-slate-200/70">
-                                                                    {mark.kind === 'in'
-                                                                        ? <ArrowDown className="h-3 w-3 text-emerald-600" />
-                                                                        : <ArrowUp className="h-3 w-3 text-slate-400" />}
-                                                                    <span className="tabular-nums">{fmtTime(mark.at)}</span>
-                                                                    {mark.suspicious && (
-                                                                        <ShieldAlert className="h-3 w-3 text-amber-500" title="Терминал не подтвердил отметку" />
-                                                                    )}
-                                                                </span>
-                                                            ))}
-                                                            {/* Сколько человек был на месте на самом деле:
-                                                                сумма отрезков «вход → выход». Показываем
-                                                                только когда это НЕ то же, что в колонке
-                                                                «В работе», — иначе одно число дважды. */}
-                                                            {row.present_seconds > 0
-                                                                && row.present_seconds !== row.work_seconds && (
-                                                                <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-xs text-slate-500 ring-1 ring-slate-200/70">
-                                                                    <Timer className="h-3 w-3 text-slate-400" />
-                                                                    на месте {fmtWorked(row.present_seconds)}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </React.Fragment>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
+                    <div className="min-w-0">
+                        <div className="truncate text-[13px] text-slate-700">{row.schedule || '—'}</div>
+                        {/* Откуда план, кадровик обязан видеть: с ручным графиком
+                            опоздание считается от него, а не от смены в системе. */}
+                        {row.plan_source === 'rule' && (
+                            <div className="text-[11.5px] text-slate-400">наш график</div>
+                        )}
                     </div>
-                    {attendanceTotal > attendancePageSize && (
-                        <div className="border-t border-slate-100 px-3 py-2">
-                            <IosPager
-                                page={attendancePage}
-                                pageCount={Math.ceil(attendanceTotal / attendancePageSize)}
-                                total={attendanceTotal}
-                                from={(attendancePage - 1) * attendancePageSize + 1}
-                                to={(attendancePage - 1) * attendancePageSize + attendance.length}
-                                onPage={goAttendancePage}
-                                unit="отметки"
-                            />
+                    <TimeCell fact={row.fact_in} plan={row.plan_in} />
+                    <TimeCell fact={row.fact_out} plan={row.plan_out} />
+                    <div className="text-right tabular-nums">
+                        <div className="text-[13.5px] text-slate-800">{fmtWorked(row.work_seconds)}</div>
+                        {row.plan_mode === 'hours' && row.hours_norm > 0 && (
+                            <div className="text-[11.5px] text-slate-400">из {hoursLabel(row.hours_norm)}</div>
+                        )}
+                    </div>
+                    <div className="min-w-0"><AttendanceStatusPill row={row} /></div>
+                    <ChevronRight size={15} className="text-slate-300 transition group-hover:text-slate-400" />
+                </div>
+            </button>
+        );
+    };
+
+    const renderAttendance = () => {
+        const rows = asArray(attendance);
+        const multiDay = attendanceFilters.from !== attendanceFilters.to;
+        // По дням группируем только при сортировке «сначала свежие»: там дни идут
+        // подряд. При сортировке по ФИО один день разорвался бы на куски, поэтому
+        // дата тогда стоит в самой строке.
+        const grouped = multiDay && attendanceFilters.sort === 'recent';
+        const groups = [];
+        if (grouped) {
+            for (const [index, row] of rows.entries()) {
+                const last = groups[groups.length - 1];
+                if (last && last.date === row.date) last.items.push([row, index]);
+                else groups.push({ date: row.date, items: [[row, index]] });
+            }
+        }
+        const firstShown = (attendancePage - 1) * attendancePageSize + 1;
+        const lastShown = (attendancePage - 1) * attendancePageSize + rows.length;
+
+        return (
+            <div className="space-y-3">
+                <div className={`${iosCard} p-3`}>
+                    {/* Порядок в разметке — телефонный: период с «Обновить», поиск,
+                        подразделения с сортировкой. На компьютере ряд собирается
+                        привычно слева направо через order. */}
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 sm:flex sm:flex-wrap sm:gap-2.5">
+                        <FilterField compact label="Период" className="min-w-0 sm:order-1">
+                            <IosDateRangePicker from={attendanceFilters.from} to={attendanceFilters.to}
+                                                max={isoDate(new Date())}
+                                                onChange={({ from, to }) => applyAttendanceFilters({ from, to })} />
+                        </FilterField>
+                        {/* Прошедшие дни читаются из кэша — «Обновить» перечитывает
+                            их из Воркпейса и Клокстера. Нужна редко, поэтому тихая. */}
+                        <button type="button" onClick={refreshAttendance}
+                                className="grid h-[38px] w-[38px] shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-slate-200 active:scale-95 disabled:opacity-50 sm:order-4 sm:h-[42px] sm:w-[42px]"
+                                disabled={attendance === null}
+                                aria-label="Перечитать период из систем"
+                                title="Перечитать период из Воркпейса и Клокстера">
+                            <RefreshCw className={`h-4 w-4 ${attendance === null ? 'animate-spin' : ''}`} />
+                        </button>
+                        <FilterField compact label="Поиск" className="col-span-2 min-w-0 sm:order-3 sm:min-w-[200px] sm:flex-1">
+                            <div className="relative">
+                                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                                <input
+                                    className={`${iosInput} pl-9`}
+                                    value={attendanceSearch}
+                                    onChange={(e) => onAttendanceSearch(e.target.value)}
+                                    placeholder="ФИО или должность"
+                                />
+                            </div>
+                        </FilterField>
+                        <div className="col-span-2 grid grid-cols-2 gap-2 sm:order-2 sm:flex sm:gap-2.5">
+                            {!scoped && (
+                                <FilterField compact label="Подразделения" className="min-w-0 sm:w-[220px]">
+                                    <CustomSelect
+                                        variant="ios"
+                                        searchable
+                                        multiple
+                                        value={attendanceFilters.departments}
+                                        onChange={(departments) => applyAttendanceFilters({ departments })}
+                                        options={directoryDepartmentOptions}
+                                        placeholder="Все подразделения"
+                                        renderValue={(values) => (values.length === 1
+                                            ? values[0]
+                                            : `Выбрано: ${values.length}`)}
+                                        searchPlaceholder="Поиск подразделения…"
+                                        ariaLabel="Подразделения"
+                                    />
+                                </FilterField>
+                            )}
+                            <FilterField compact label="Сортировка" className={`min-w-0 sm:w-[190px] ${scoped ? 'col-span-2' : ''}`}>
+                                <CustomSelect
+                                    variant="ios"
+                                    value={attendanceFilters.sort}
+                                    onChange={(sort) => applyAttendanceFilters({ sort })}
+                                    options={ATTENDANCE_SORTS}
+                                    ariaLabel="Сортировка"
+                                />
+                            </FilterField>
+                        </div>
+                    </div>
+                </div>
+
+                {attendanceCounts !== null && renderAttendanceStatusStrip()}
+
+                {attendancePending.length > 0 && (
+                    <div className={`${iosCard} flex items-center gap-2.5 px-4 py-3 text-[12.5px] text-slate-600`}>
+                        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />
+                        <span>
+                            Ещё собираем {attendancePending.length}&nbsp;
+                            {pluralRu(attendancePending.length, 'день', 'дня', 'дней')}
+                            {' '}({fmtDay(attendancePending[0])} — {fmtDay(attendancePending[attendancePending.length - 1])}).
+                            Нажмите «Обновить» через минуту.
+                        </span>
+                    </div>
+                )}
+                {attendanceNotice && (
+                    <div className={`${iosCard} flex items-center gap-2.5 px-4 py-3 text-[12.5px] text-amber-800`}>
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" />
+                        {attendanceNotice}
+                    </div>
+                )}
+
+                <div className={`${iosCard} overflow-hidden`}>
+                    <div className={`hidden gap-4 border-b border-slate-100 px-4 py-2 text-[11.5px] font-medium text-slate-400 lg:grid ${ATTENDANCE_GRID}`}>
+                        <span className="pl-11">Сотрудник</span>
+                        <span>График</span>
+                        <span className="text-center">Приход</span>
+                        <span className="text-center">Уход</span>
+                        <span className="text-right">В работе</span>
+                        <span>Статус</span>
+                        <span />
+                    </div>
+
+                    {attendanceError ? <ErrorBlock>{attendanceError}</ErrorBlock>
+                        : attendance === null ? (
+                            <div className="flex items-center justify-center gap-2 p-10 text-[13px] text-slate-500">
+                                <Loader2 className="h-4 w-4 animate-spin" /> Загружаем отметки…
+                            </div>
+                        ) : rows.length === 0 ? (
+                            <EmptyBlock icon={Clock}>
+                                {attendanceFilters.status || attendanceFilters.q || attendanceFilters.departments.length
+                                    ? 'Под выбранные условия никто не подходит'
+                                    : 'За выбранный период отметок нет'}
+                            </EmptyBlock>
+                        ) : grouped ? (
+                            groups.map((group) => (
+                                <div key={group.date}>
+                                    <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-1.5 text-[12px] font-semibold text-slate-500">
+                                        {fmtDayLong(group.date)}
+                                    </div>
+                                    <div className="divide-y divide-slate-100">
+                                        {group.items.map(([row, index]) => renderAttendanceRow(row, index, false))}
+                                    </div>
+                                </div>
+                            ))
+                        ) : (
+                            <div className="divide-y divide-slate-100">
+                                {rows.map((row, index) => renderAttendanceRow(row, index, multiDay))}
+                            </div>
+                        )}
+
+                    {attendance !== null && rows.length > 0 && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-4 py-2.5">
+                            <div className="flex items-center gap-2 text-[12px] text-slate-500">
+                                {/* Размер страницы — у счётчика строк: он про эту таблицу, а не про выборку. */}
+                                <div className="w-[96px]">
+                                    <CustomSelect
+                                        variant="ios"
+                                        value={attendancePageSize}
+                                        onChange={(size) => changeAttendancePageSize(Number(size))}
+                                        options={ATTENDANCE_PAGE_SIZES.map((size) => ({
+                                            value: size, label: `по ${size}`,
+                                        }))}
+                                        ariaLabel="Строк на странице"
+                                    />
+                                </div>
+                                {attendanceTotal <= attendancePageSize && (
+                                    <span className="tabular-nums">
+                                        {fmtInt(attendanceTotal)} {pluralRu(attendanceTotal, 'строка', 'строки', 'строк')}
+                                    </span>
+                                )}
+                            </div>
+                            {attendanceTotal > attendancePageSize && (
+                                <div className="min-w-0 flex-1">
+                                    <IosPager
+                                        page={attendancePage}
+                                        pageCount={Math.ceil(attendanceTotal / attendancePageSize)}
+                                        total={attendanceTotal}
+                                        from={firstShown}
+                                        to={lastShown}
+                                        onPage={goAttendancePage}
+                                        unit="отметки"
+                                    />
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
-            )}
-        </div>
-    );
+            </div>
+        );
+    };
+
+    /* Карточка дня сотрудника: всё, что раньше пряталось за шевроном строки и
+       по колонкам таблицы, — одним экраном, как карточка контакта в iOS. */
+    const renderAttendanceDetail = (row) => {
+        const marks = asArray(row.marks);
+        const hours = row.plan_mode === 'hours';
+        return (
+            <div className="space-y-4">
+                <div className="flex items-center gap-3 px-1">
+                    <Avatar name={row.employee} size="lg" />
+                    <div className="min-w-0 flex-1">
+                        <div className="truncate text-[16px] font-semibold text-slate-900">{row.employee || '—'}</div>
+                        <div className="truncate text-[12.5px] text-slate-500">
+                            {[row.position, row.department].filter(Boolean).join(' · ') || 'должность не указана'}
+                        </div>
+                        <div className="mt-1.5 flex"><AttendanceStatusPill row={row} /></div>
+                    </div>
+                </div>
+
+                <div>
+                    <div className={`${iosGroupLabel} mb-1.5`}>День</div>
+                    <div className="divide-y divide-slate-100 rounded-2xl bg-white ring-1 ring-slate-200/70">
+                        <DetailRow label="График"
+                                   value={row.schedule || '—'}
+                                   hint={row.plan_source === 'rule' ? 'наш график' : null} />
+                        <DetailRow label="Приход" value={fmtTime(row.fact_in)}
+                                   hint={row.plan_in ? `план ${fmtTime(row.plan_in)}` : null} />
+                        <DetailRow label="Уход" value={fmtTime(row.fact_out)}
+                                   hint={row.plan_out ? `план ${fmtTime(row.plan_out)}` : null} />
+                        {row.late_minutes > 0 && (
+                            <DetailRow label="Опоздание" value={fmtMinutes(row.late_minutes)} tone="red" />
+                        )}
+                        {row.early_out_minutes > 0 && (
+                            <DetailRow label="Ранний уход" value={fmtMinutes(row.early_out_minutes)} tone="amber" />
+                        )}
+                        <DetailRow label="В работе" value={fmtWorked(row.work_seconds)}
+                                   hint={hours
+                                       ? (row.hours_norm ? `по всем отметкам · норма ${hoursLabel(row.hours_norm)}` : 'по всем отметкам')
+                                       : (row.lunch_seconds > 0 ? `без обеда ${Math.round(row.lunch_seconds / 60)} мин` : null)} />
+                        {!hours && row.present_seconds > 0 && row.present_seconds !== row.work_seconds && (
+                            <DetailRow label="На месте" value={fmtWorked(row.present_seconds)}
+                                       hint="сумма отрезков «вход → выход»" />
+                        )}
+                        <DetailRow label="Система" value={row.system_label || '—'}
+                                   hint={row.location || null} />
+                    </div>
+                </div>
+
+                <div>
+                    <div className={`${iosGroupLabel} mb-1.5`}>
+                        Отметки{marks.length ? ` · ${marks.length}` : ''}
+                    </div>
+                    {marks.length === 0 ? (
+                        <div className="rounded-2xl bg-white px-4 py-3.5 text-[13px] text-slate-500 ring-1 ring-slate-200/70">
+                            За день отметок нет
+                        </div>
+                    ) : (
+                        <div className="divide-y divide-slate-100 rounded-2xl bg-white ring-1 ring-slate-200/70">
+                            {marks.map((mark, index) => (
+                                <div key={index} className="flex items-center gap-3 px-4 py-2.5">
+                                    <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full ${
+                                        mark.kind === 'in' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'}`}>
+                                        {mark.kind === 'in' ? <ArrowDown size={13} /> : <ArrowUp size={13} />}
+                                    </span>
+                                    <div className="min-w-0 flex-1">
+                                        <div className="text-[13.5px] text-slate-900">{mark.kind === 'in' ? 'Вход' : 'Выход'}</div>
+                                        {(mark.location || mark.suspicious) && (
+                                            <div className={`truncate text-[12px] ${mark.suspicious ? 'text-amber-600' : 'text-slate-400'}`}>
+                                                {mark.suspicious ? 'терминал не подтвердил отметку' : mark.location}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <span className="shrink-0 text-[14px] font-medium tabular-nums text-slate-900">
+                                        {fmtTime(mark.at)}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
 
     /* ─── «Графики»: свой план смен поверх Workpace и Clockster ──────────────
      *
@@ -1677,94 +1893,120 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
      * источники, а не спорит с ними. Он появляется только в те дни, где смены
      * нет ни в Workpace, ни в Clockster, — ради этого правила и заведены (план
      * на выходной). Иначе одно правило на отдел перебило бы настоящий сменный
-     * график колл-центра и сделало бы опоздавшим весь отдел разом. */
-    const renderPlanRules = () => (
-        <div className="space-y-3">
-            <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
-                <div className="max-w-2xl">
-                    <div className="text-[14px] font-semibold text-slate-900">График смен вручную</div>
-                    <div className="mt-1 text-[12.5px] leading-relaxed text-slate-500">
-                        План на подразделение целиком или на отдельного человека — в том числе
-                        на выходные, которых нет ни в Воркпейсе, ни в Клокстере. Ставится только
-                        в дни без смены: настоящий график систем он не перебивает.
-                        Режим «по часам» — для тех, кто отрабатывает часы, а не смену: у них
-                        не считается опоздание, а время берётся по всем отметкам дня.
+     * график колл-центра и сделало бы опоздавшим весь отдел разом.
+     *
+     * Список — группами «Подразделения» и «Сотрудники», действия над строкой — за
+     * «тремя точками»: две голые кнопки в каждой строке читались как украшение. */
+    const planRuleSummary = (rule) => {
+        const parts = [];
+        if (rule.mode === 'hours') {
+            parts.push(`По часам · норма ${hoursLabel(rule.hours_norm)}`);
+        } else {
+            parts.push(`${rule.time_start}–${rule.time_end}`);
+            if (rule.break_minutes) parts.push(`перерыв ${rule.break_minutes} мин`);
+        }
+        parts.push(weekdaysLabel(rule.weekdays));
+        if (rule.date_from || rule.date_to) {
+            parts.push(`${rule.date_from ? fmtDay(rule.date_from) : '…'} — ${rule.date_to ? fmtDay(rule.date_to) : '…'}`);
+        }
+        return parts.join(' · ');
+    };
+
+    const editPlanRule = (rule) => setPlanRuleModal({
+        ...EMPTY_PLAN_RULE, ...rule,
+        date_from: rule.date_from || '',
+        date_to: rule.date_to || '',
+    });
+
+    const PLAN_RULE_SECTIONS = [
+        { scope: 'department', title: 'Подразделения', icon: Building2 },
+        { scope: 'employee', title: 'Сотрудники', icon: User },
+    ];
+
+    const renderPlanRules = () => {
+        const list = asArray(planRules);
+        return (
+            <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                    <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                            <span className="text-[15px] font-semibold text-slate-900">Графики смен</span>
+                            <IosHint
+                                label="О графиках"
+                                text="План на подразделение целиком или на отдельного сотрудника — в том числе на выходные, которых нет ни в Воркпейсе, ни в Клокстере. Настоящий график систем он не перебивает. Режим «по часам» — для тех, кто отрабатывает часы, а не смену: опоздание у них не считается, а время берётся по всем отметкам дня."
+                            />
+                        </div>
+                        <div className="text-[12.5px] text-slate-500">
+                            Ставятся только в дни, где у Воркпейса и Клокстера смены нет
+                        </div>
                     </div>
+                    <button type="button" className={iosBtnPrimary}
+                            onClick={() => setPlanRuleModal({ ...EMPTY_PLAN_RULE })}>
+                        <Plus size={14} /> Добавить график
+                    </button>
                 </div>
-                <button type="button" className={iosBtnPrimary}
-                        onClick={() => setPlanRuleModal({ ...EMPTY_PLAN_RULE })}>
-                    <Plus className="h-4 w-4" /> Добавить график
-                </button>
-            </div>
 
-            {planRulesError && <ErrorBlock>{planRulesError}</ErrorBlock>}
-            {planRules === null && <LoadingBlock />}
+                {planRulesError && <div className={iosCard}><ErrorBlock>{planRulesError}</ErrorBlock></div>}
+                {planRules === null && <div className={iosCard}><LoadingBlock /></div>}
+                {planRules !== null && list.length === 0 && !planRulesError && (
+                    <div className={iosCard}>
+                        <EmptyBlock icon={CalendarRange}>
+                            Графиков пока нет — план берётся только из Воркпейса и Клокстера
+                        </EmptyBlock>
+                    </div>
+                )}
 
-            {planRules !== null && planRules.length === 0 && !planRulesError && (
-                <EmptyBlock icon={CalendarRange}>
-                    Графиков пока нет — план берётся только из Воркпейса и Клокстера
-                </EmptyBlock>
-            )}
-
-            {asArray(planRules).length > 0 && (
-                <div className={`${iosCard} divide-y divide-slate-100`}>
-                    {planRules.map((rule) => (
-                        <div key={rule.id} className="flex flex-wrap items-start gap-3 p-4">
-                            <div className="min-w-[220px] flex-1">
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <IosBadge tone={rule.scope === 'employee' ? 'blue' : 'slate'}>
-                                        {PLAN_SCOPE_LABELS[rule.scope] || rule.scope}
-                                    </IosBadge>
-                                    <span className="text-[13.5px] font-medium text-slate-900">
-                                        {rule.target_label || rule.target}
-                                    </span>
-                                    {!rule.enabled && <IosBadge tone="amber">выключен</IosBadge>}
-                                </div>
-                                {rule.note && (
-                                    <div className="mt-1 text-[12px] text-slate-500">{rule.note}</div>
-                                )}
-                            </div>
-                            <div className="min-w-[200px] flex-1 text-[12.5px] text-slate-600">
-                                <div className="font-medium text-slate-800">
-                                    {rule.mode === 'hours'
-                                        ? `По часам · норма ${hoursLabel(rule.hours_norm)}`
-                                        : `${rule.time_start}–${rule.time_end}`}
-                                </div>
-                                <div className="mt-0.5 text-slate-500">
-                                    {weekdaysLabel(rule.weekdays)}
-                                    {rule.mode !== 'hours' && rule.break_minutes ? ` · перерыв ${rule.break_minutes} мин` : ''}
-                                </div>
-                                {(rule.date_from || rule.date_to) && (
-                                    <div className="mt-0.5 text-slate-500">
-                                        {rule.date_from ? fmtDay(rule.date_from) : '…'} — {rule.date_to ? fmtDay(rule.date_to) : '…'}
+                {PLAN_RULE_SECTIONS.map((section) => {
+                    const items = list.filter((rule) => rule.scope === section.scope);
+                    if (!items.length) return null;
+                    const SectionIcon = section.icon;
+                    return (
+                        <div key={section.scope}>
+                            <div className={`${iosGroupLabel} mb-1.5`}>{section.title} · {items.length}</div>
+                            <div className={`${iosCard} divide-y divide-slate-100`}>
+                                {items.map((rule) => (
+                                    <div key={rule.id} className="flex items-center gap-3 px-4 py-3">
+                                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+                                            <SectionIcon size={17} />
+                                        </span>
+                                        <button type="button" className="min-w-0 flex-1 text-left"
+                                                onClick={() => editPlanRule(rule)}>
+                                            <div className="flex items-center gap-2">
+                                                <span className="truncate text-[13.5px] font-medium text-slate-900">
+                                                    {rule.target_label || rule.target}
+                                                </span>
+                                                {!rule.enabled && <IosBadge tone="amber">выключен</IosBadge>}
+                                            </div>
+                                            <div className="truncate text-[12.5px] text-slate-600">{planRuleSummary(rule)}</div>
+                                            {(rule.note || rule.author_name) && (
+                                                <div className="truncate text-[11.5px] text-slate-400">
+                                                    {[rule.note, rule.author_name].filter(Boolean).join(' · ')}
+                                                </div>
+                                            )}
+                                        </button>
+                                        <IosMenu
+                                            label="Действия с графиком"
+                                            disabled={busy === `plan-rule-del:${rule.id}`}
+                                            items={[
+                                                { key: 'edit', label: 'Изменить', icon: CalendarClock,
+                                                  onSelect: () => editPlanRule(rule) },
+                                                { key: 'delete', label: 'Удалить', icon: Trash2, danger: true,
+                                                  onSelect: () => {
+                                                      if (window.confirm(`Удалить график «${rule.target_label || rule.target}»?`)) {
+                                                          deletePlanRule(rule);
+                                                      }
+                                                  } },
+                                            ]}
+                                        />
                                     </div>
-                                )}
-                            </div>
-                            <div className="flex items-center gap-1">
-                                <span className="mr-1 text-[11.5px] text-slate-400">
-                                    {rule.author_name || '—'}
-                                </span>
-                                <button type="button" className={iosBtnGhost}
-                                        onClick={() => setPlanRuleModal({
-                                            ...EMPTY_PLAN_RULE, ...rule,
-                                            date_from: rule.date_from || '',
-                                            date_to: rule.date_to || '',
-                                        })}>
-                                    Изменить
-                                </button>
-                                <button type="button" className={iosBtnGhost}
-                                        disabled={busy === `plan-rule-del:${rule.id}`}
-                                        onClick={() => deletePlanRule(rule)}
-                                        title="Удалить график">
-                                    <Trash2 className="h-4 w-4 text-rose-500" />
-                                </button>
+                                ))}
                             </div>
                         </div>
-                    ))}
-                </div>
-            )}
-        </div>
-    );
+                    );
+                })}
+            </div>
+        );
+    };
 
     const renderEvents = () => (
         <div className="space-y-3">
@@ -2077,18 +2319,23 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const renderReports = () => (
         <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="text-[12.5px] text-slate-500">
-                    Все отчёты, которые формировал бот, — и по команде <code className="rounded bg-slate-100 px-1">/report</code> в чате, и с сайта
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                <div className="flex items-center gap-2">
+                    <span className="text-[15px] font-semibold text-slate-900">Выгрузки в Excel</span>
+                    <IosHint
+                        label="Об отчётах"
+                        text="Здесь все отчёты: и заказанные на сайте, и по команде /report в чате. Файл хранится вместе с карточкой — скачать его можно без переписки в Telegram. Отчёт за период собирается по каждому дню диапазона, поэтому большой период считается несколько минут."
+                    />
                 </div>
                 <div className="flex items-center gap-2">
-                    <button onClick={loadReports} className={iosBtnGhost}>
-                        <RefreshCw size={13} /> Обновить
+                    <button onClick={loadReports} className={iosBtnGhost}
+                            aria-label="Обновить список" title="Обновить список">
+                        <RefreshCw size={14} />
                     </button>
                     <button onClick={() => setReportModal({
                         from: isoDate(new Date()), to: isoDate(new Date()), department: '', chatId: '',
                     })} className={iosBtnPrimary}>
-                        <Plus size={13} /> Сформировать отчёт
+                        <Plus size={14} /> Сформировать отчёт
                     </button>
                 </div>
             </div>
@@ -2098,89 +2345,68 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                     : reports === null ? <LoadingBlock />
                         : reports.length === 0 ? <EmptyBlock icon={FileSpreadsheet}>Отчётов пока не было</EmptyBlock>
                             : (
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-[13px]">
-                                        <thead className="bg-white/85 backdrop-blur-xl">
-                                            <tr className="border-b border-slate-200/70 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                                                <th className="px-4 py-2.5 text-left">Сформирован</th>
-                                                <th className="px-3 py-2.5 text-left">Период</th>
-                                                <th className="px-3 py-2.5 text-left">Отдел</th>
-                                                <th className="px-3 py-2.5 text-left">Инициатор</th>
-                                                <th className="px-3 py-2.5 text-right">Строк</th>
-                                                <th className="px-3 py-2.5 text-right">Опозданий</th>
-                                                <th className="px-3 py-2.5 text-right">Неявок</th>
-                                                <th className="px-3 py-2.5 text-left">Статус</th>
-                                                <th className="px-3 py-2.5" />
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100">
-                                            {reports.map((report) => (
-                                                <tr key={report.id} className="transition hover:bg-slate-50/80">
-                                                    <td className="px-4 py-2.5 whitespace-nowrap text-slate-600">
-                                                        {fmtDateTime(report.created_at)}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 whitespace-nowrap font-medium text-slate-900">
+                                <div className="divide-y divide-slate-100">
+                                    {reports.map((report) => {
+                                        const failed = report.status !== 'ok' && report.status !== 'running';
+                                        const counters = [
+                                            report.rows_count != null && `${fmtInt(report.rows_count)} ${pluralRu(report.rows_count, 'строка', 'строки', 'строк')}`,
+                                            report.late_count ? `${fmtInt(report.late_count)} ${pluralRu(report.late_count, 'опоздание', 'опоздания', 'опозданий')}` : null,
+                                            report.absent_count ? `${fmtInt(report.absent_count)} ${pluralRu(report.absent_count, 'неявка', 'неявки', 'неявок')}` : null,
+                                        ].filter(Boolean);
+                                        return (
+                                            <div key={report.id} className="flex items-center gap-3 px-4 py-3">
+                                                <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${
+                                                    failed ? 'bg-rose-50 text-rose-500' : 'bg-slate-100 text-slate-500'}`}>
+                                                    {report.status === 'running'
+                                                        ? <Loader2 size={16} className="animate-spin" />
+                                                        : <FileSpreadsheet size={17} />}
+                                                </span>
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="truncate text-[13.5px] font-medium text-slate-900">
                                                         {fmtPeriod(report.date_from, report.date_to)}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 text-slate-600">
-                                                        {report.department_filter || 'Все отделы'}
-                                                        {/* Иначе выгрузка по трём людям читается как выгрузка
-                                                            по всему отделу — и по ней делают выводы. */}
-                                                        {asArray(report.employee_filter).length > 0 && (
-                                                            <div className="text-[11px] text-slate-500"
-                                                                 title={asArray(report.employee_filter).join(', ')}>
-                                                                только {fmtInt(report.employee_filter.length)} чел.
-                                                            </div>
-                                                        )}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 text-slate-500">
+                                                        <span className="font-normal text-slate-500"> · {report.department_filter || 'Все отделы'}</span>
+                                                    </div>
+                                                    <div className="truncate text-[12px] text-slate-500">
+                                                        {fmtDateTime(report.created_at)}
+                                                        {' · '}
                                                         {report.source === 'web'
                                                             ? actorLabel(report.requested_by)
                                                             : (report.chat_title || report.requested_chat_id || 'Telegram')}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
-                                                        {report.rows_count === null || report.rows_count === undefined ? '—' : fmtInt(report.rows_count)}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
-                                                        {report.late_count === null || report.late_count === undefined ? '—' : fmtInt(report.late_count)}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
-                                                        {report.absent_count === null || report.absent_count === undefined ? '—' : fmtInt(report.absent_count)}
-                                                    </td>
-                                                    <td className="px-3 py-2.5">
-                                                        {report.status === 'running' ? (
-                                                            <IosBadge tone="blue">
-                                                                <Loader2 size={11} className="animate-spin" /> формируется
-                                                            </IosBadge>
-                                                        ) : report.status === 'ok' ? (
-                                                            <IosBadge tone="green">готов · {fmtSize(report.file_size)}</IosBadge>
-                                                        ) : (
-                                                            <IosBadge tone="red" title={report.error || ''}>ошибка</IosBadge>
+                                                        {/* Иначе выгрузка по трём людям читается как выгрузка
+                                                            по всему отделу — и по ней делают выводы. */}
+                                                        {asArray(report.employee_filter).length > 0 && (
+                                                            <span title={asArray(report.employee_filter).join(', ')}>
+                                                                {' · '}только {fmtInt(report.employee_filter.length)} чел.
+                                                            </span>
                                                         )}
-                                                    </td>
-                                                    <td className="px-3 py-2.5 text-right">
-                                                        {report.has_file && (
-                                                            <button onClick={() => downloadReport(report)}
-                                                                    disabled={busy === `file:${report.id}`}
-                                                                    className={iosBtnGhost}>
-                                                                {busy === `file:${report.id}`
-                                                                    ? <Loader2 size={13} className="animate-spin" />
-                                                                    : <Download size={13} />}
-                                                                Скачать
-                                                            </button>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
+                                                    </div>
+                                                    {counters.length > 0 && (
+                                                        <div className="truncate text-[11.5px] text-slate-400">{counters.join(' · ')}</div>
+                                                    )}
+                                                </div>
+                                                <div className="shrink-0">
+                                                    {report.status === 'running' ? (
+                                                        <IosBadge tone="blue">формируется</IosBadge>
+                                                    ) : failed ? (
+                                                        <IosBadge tone="red" title={report.error || ''}>ошибка</IosBadge>
+                                                    ) : report.has_file ? (
+                                                        <button onClick={() => downloadReport(report)}
+                                                                disabled={busy === `file:${report.id}`}
+                                                                className={iosBtnSecondary}
+                                                                title={report.file_size ? fmtSize(report.file_size) : undefined}>
+                                                            {busy === `file:${report.id}`
+                                                                ? <Loader2 size={14} className="animate-spin" />
+                                                                : <Download size={14} />}
+                                                            <span className="hidden sm:inline">Скачать</span>
+                                                        </button>
+                                                    ) : null}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             )}
             </div>
-            <p className="px-1 text-[11px] leading-relaxed text-slate-500">
-                Excel лежит в базе вместе с карточкой отчёта, поэтому его можно скачать здесь, не поднимая переписку
-                в Telegram. Отчёт за период тянет из Workpace каждый день диапазона — большой период считается минуты.
-            </p>
         </div>
     );
 
@@ -2616,40 +2842,69 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     return (
         <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
-                <div>
-                    <h2 className="text-lg font-semibold tracking-tight text-slate-900">
-                        Отметки{scoped ? ` · ${departmentScope}` : ''}
-                    </h2>
-                    <p className="text-xs text-slate-500">
-                        {scoped
-                            ? `Отметки прихода и ухода по отделу «${departmentScope}»: опоздания, отчёты и чаты отдела`
-                            : 'Отметки прихода и ухода: опоздания, отчёты и связки чатов с отделами'}
-                    </p>
+            <div className="mb-3 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+                    <div className="flex min-w-0 items-center gap-3">
+                        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-600 text-white shadow-sm">
+                            <Clock size={19} />
+                        </span>
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                                <h2 className="truncate text-[19px] font-bold leading-tight tracking-tight text-slate-900">
+                                    Отметки
+                                </h2>
+                                {/* Пояснение нужно один раз, а строку под заголовком
+                                    занимало всегда — прячем под «i», как в «Опросах». */}
+                                <IosHint
+                                    label="О разделе"
+                                    text={scoped
+                                        ? `Отметки прихода и ухода по отделу «${departmentScope}»: кто когда пришёл и ушёл, графики, отчёты и уведомления отдела в Telegram.`
+                                        : 'Отметки прихода и ухода по Воркпейсу и Клокстеру: кто когда пришёл и ушёл, свои графики смен, выгрузки в Excel и уведомления руководителям в Telegram.'}
+                                />
+                            </div>
+                            {scoped && (
+                                <p className="truncate text-[12px] text-slate-500">Отдел «{departmentScope}»</p>
+                            )}
+                        </div>
+                    </div>
                 </div>
-                <div className="flex items-center gap-2">
-                    <div className="flex flex-wrap rounded-xl bg-slate-100 p-1">
-                        {TABS.map((item) => (
-                            <SegButton key={item.key} active={tab === item.key}
-                                       onClick={() => setTab(item.key)} icon={item.icon}>
+
+                {/* Вкладок было девять, и на телефоне они складывались в три ряда.
+                    Пять из них — про Telegram-бота, кадровику они не нужны каждый
+                    день, поэтому живут вместе под «Уведомлениями». Ряд не
+                    переносится, а прокручивается: так он остаётся одной строкой. */}
+                <div className="overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                    <div className="inline-flex rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Разделы">
+                        {PRIMARY_TABS.map((item) => (
+                            <SegButton key={item.key} active={primaryTab === item.key}
+                                       onClick={() => openPrimaryTab(item.key)} icon={item.icon}>
                                 {item.label}
                             </SegButton>
                         ))}
                     </div>
-                    {tab === 'overview' && (
-                        <div className="flex rounded-xl bg-slate-100 p-1">
-                            {[7, 14, 30].map((days) => (
-                                <button key={days}
-                                        onClick={() => { setPeriodDays(days); loadOverview(days); }}
-                                        className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
-                                            periodDays === days ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
-                                                                : 'text-slate-500 hover:text-slate-700'}`}>
-                                    {days} дн.
-                                </button>
-                            ))}
-                        </div>
-                    )}
                 </div>
+
+                {primaryTab === 'bot' && (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="max-w-full overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                            <IosSegmented
+                                value={tab}
+                                onChange={(key) => setTab(key)}
+                                options={TABS.filter((item) => BOT_TAB_KEYS.includes(item.key))
+                                    .map((item) => ({ value: item.key, label: item.label }))}
+                                ariaLabel="Уведомления бота"
+                            />
+                        </div>
+                        {tab === 'overview' && (
+                            <IosSegmented
+                                value={periodDays}
+                                onChange={(days) => { setPeriodDays(days); loadOverview(days); }}
+                                options={[7, 14, 30].map((days) => ({ value: days, label: `${days} дн.` }))}
+                                ariaLabel="Период обзора"
+                            />
+                        )}
+                    </div>
+                )}
             </div>
 
             {overview && overview.workpace_configured === false && (
@@ -3048,6 +3303,15 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             </IosModal>
 
             <IosModal
+                open={Boolean(attendanceDetail)}
+                onClose={() => setAttendanceDetail(null)}
+                title="Отметки за день"
+                subtitle={attendanceDetail ? fmtDayLong(attendanceDetail.date) : ''}
+            >
+                {attendanceDetail && renderAttendanceDetail(attendanceDetail)}
+            </IosModal>
+
+            <IosModal
                 open={Boolean(planRuleModal)}
                 onClose={() => setPlanRuleModal(null)}
                 title={planRuleModal?.id ? 'График смен' : 'Новый график смен'}
@@ -3141,25 +3405,48 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                 ariaLabel="Как считать"
                             />
                         </div>
+                        {/* Время — общим IosTimePicker, перерыв и норма — списками: системные
+                            поля времени и числа рисует ОС, и рядом с карточками окна они
+                            выглядят деталью из другой программы. */}
                         {planRuleModal.mode === 'schedule' ? (
-                            <div className="grid grid-cols-3 gap-2">
-                                <div>
-                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Начало</label>
-                                    <input type="time" className={iosInput} value={planRuleModal.time_start || ''}
-                                           onChange={(e) => setPlanRuleModal({ ...planRuleModal, time_start: e.target.value })} />
+                            <div className="space-y-3">
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Начало</label>
+                                        <IosTimePicker
+                                            value={planRuleModal.time_start || ''}
+                                            onChange={(time_start) => setPlanRuleModal({ ...planRuleModal, time_start })}
+                                            step={15}
+                                            allowEmpty={false}
+                                            defaultTime="10:00"
+                                            ariaLabel="Начало смены"
+                                            className="w-full"
+                                            inputClassName={PLAN_TIME_INPUT}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Конец</label>
+                                        <IosTimePicker
+                                            value={planRuleModal.time_end || ''}
+                                            onChange={(time_end) => setPlanRuleModal({ ...planRuleModal, time_end })}
+                                            step={15}
+                                            allowEmpty={false}
+                                            defaultTime="19:00"
+                                            ariaLabel="Конец смены"
+                                            className="w-full"
+                                            inputClassName={PLAN_TIME_INPUT}
+                                        />
+                                    </div>
                                 </div>
                                 <div>
-                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Конец</label>
-                                    <input type="time" className={iosInput} value={planRuleModal.time_end || ''}
-                                           onChange={(e) => setPlanRuleModal({ ...planRuleModal, time_end: e.target.value })} />
-                                </div>
-                                <div>
-                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Перерыв, мин</label>
-                                    <input type="number" min="0" max="480" className={iosInput}
-                                           value={planRuleModal.break_minutes ?? ''}
-                                           onChange={(e) => setPlanRuleModal({
-                                               ...planRuleModal, break_minutes: e.target.value,
-                                           })} />
+                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Перерыв</label>
+                                    <CustomSelect
+                                        variant="ios"
+                                        value={Number(planRuleModal.break_minutes ?? 0)}
+                                        onChange={(value) => setPlanRuleModal({ ...planRuleModal, break_minutes: Number(value) })}
+                                        options={PLAN_BREAK_OPTIONS}
+                                        ariaLabel="Перерыв"
+                                    />
                                 </div>
                             </div>
                         ) : (
@@ -3167,11 +3454,14 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                 <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
                                     Норма часов в день
                                 </label>
-                                <input type="number" min="0.5" max="24" step="0.5" className={iosInput}
-                                       value={planRuleModal.hours_norm ?? ''}
-                                       onChange={(e) => setPlanRuleModal({
-                                           ...planRuleModal, hours_norm: e.target.value,
-                                       })} />
+                                <CustomSelect
+                                    variant="ios"
+                                    searchable={false}
+                                    value={Number(planRuleModal.hours_norm || 8)}
+                                    onChange={(value) => setPlanRuleModal({ ...planRuleModal, hours_norm: Number(value) })}
+                                    options={PLAN_HOURS_OPTIONS}
+                                    ariaLabel="Норма часов в день"
+                                />
                                 <div className="mt-1 px-1 text-[11px] text-slate-500">
                                     Опоздание у таких работников не считается, а отработанное время
                                     берётся по всем отметкам дня — с вычетом ухода на обед.
