@@ -14,6 +14,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import IosTimePicker from '../ui/TimePicker';
+import useIsMobileShell from '../common/useIsMobileShell';
 
 /* Раздел «Бот опозданий» — контроль отметок Workpace: наш бот следит за
  * нарушениями графика и шлёт их в рабочие чаты Telegram.
@@ -47,6 +48,7 @@ const ATTENDANCE_STATUS_TONES = {
     no_out: 'amber',
     off_schedule: 'slate',
     no_terminal: 'slate',
+    pending: 'slate',
     ok: 'slate',
 };
 
@@ -56,6 +58,7 @@ const ATTENDANCE_STATUS_CHIPS = [
     { value: 'absent', label: 'Не отметились' },
     { value: 'early_out', label: 'Ранний уход' },
     { value: 'no_out', label: 'Нет ухода' },
+    { value: 'pending', label: 'Ждём прихода' },
     { value: 'ok', label: 'Вовремя' },
     { value: 'off_schedule', label: 'Вне графика' },
     { value: 'no_terminal', label: 'Не отмечаются' },
@@ -242,6 +245,27 @@ const initialsOf = (name) => String(name || '')
     .trim().split(/\s+/).filter(Boolean).slice(0, 2)
     .map((part) => part.charAt(0).toUpperCase()).join('') || '·';
 
+/* Названия графиков, которые ничего не говорят: Клокстер отдаёт «Default» и
+ * «Title» почти у всех, и колонка из одних «Default» — шум, а не график. */
+const GENERIC_SCHEDULE_NAMES = new Set(['default', 'title', 'рабочее расписание']);
+const meaningfulScheduleName = (name) => {
+    const text = String(name || '').trim();
+    return text && !GENERIC_SCHEDULE_NAMES.has(text.toLowerCase()) ? text : null;
+};
+
+const planRangeLabel = (row) => {
+    if (row.plan_in && row.plan_out) return `${fmtTime(row.plan_in)}–${fmtTime(row.plan_out)}`;
+    if (row.plan_in) return `с ${fmtTime(row.plan_in)}`;
+    return null;
+};
+
+/* График строки — как его читает кадровик: отрезок «10:00–19:00». Название
+ * остаётся запасным вариантом, у часовика — «По часам · норма». */
+const scheduleLabel = (row) => {
+    if (row.plan_mode === 'hours') return row.schedule || 'По часам';
+    return planRangeLabel(row) || meaningfulScheduleName(row.schedule) || '—';
+};
+
 /* Кружок с инициалами — ориентир для глаза в длинном списке, как в «Контактах». */
 const Avatar = ({ name, size = 'md' }) => (
     <span className={`grid shrink-0 place-items-center rounded-full bg-slate-100 font-semibold text-slate-500 ${
@@ -263,10 +287,9 @@ const AttendanceStatusPill = ({ row }) => {
     );
 };
 
-const TimeCell = ({ fact, plan }) => (
-    <div className="text-center tabular-nums">
-        <div className={`text-[13.5px] ${fact ? 'text-slate-900' : 'text-slate-300'}`}>{fmtTime(fact)}</div>
-        {plan && <div className="text-[11.5px] text-slate-400">{fmtTime(plan)}</div>}
+const TimeCell = ({ fact }) => (
+    <div className={`text-center text-[13.5px] tabular-nums ${fact ? 'text-slate-900' : 'text-slate-300'}`}>
+        {fmtTime(fact)}
     </div>
 );
 
@@ -405,7 +428,7 @@ const StatTile = ({ label, value, hint, tone = 'slate', icon: Icon = null }) => 
 };
 
 const EmptyBlock = ({ children, icon: Icon = Bell }) => (
-    <div className="flex flex-col items-center justify-center gap-2 py-12 text-[13px] text-slate-400">
+    <div className="flex flex-col items-center justify-center gap-2 px-4 py-12 text-center text-[13px] text-slate-400">
         <Icon size={20} className="text-slate-300" />
         {children}
     </div>
@@ -722,6 +745,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         [withAccessTokenHeader],
     );
     const base = `${apiBaseUrl}/api/group_late_bot`;
+    const isMobileShell = useIsMobileShell();
 
     // «Отметки» — то, ради чего в раздел заходят чаще всего, поэтому они и открываются.
     const [tab, setTab] = useState('attendance');
@@ -1527,7 +1551,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 .filter((chip) => chip.count > 0 || chip.value === attendanceFilters.status),
         ];
         return (
-            <div className="flex gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}
+            /* flexWrap инлайном: общий мобильный слой (mobile-shell.css) переносит
+               ряды с gap-* правилом без !important, и классом его не отменить —
+               полоса статусов разваливалась на телефоне в три строки. */
+            <div className="flex gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none', flexWrap: 'nowrap' }}
                  role="tablist" aria-label="Статус дня">
                 {chips.map((chip) => {
                     const active = (attendanceFilters.status || '') === chip.value;
@@ -1567,10 +1594,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-slate-900">
                                 {row.employee || '—'}
                             </span>
-                            <span className="shrink-0 text-[12.5px] tabular-nums text-slate-500">
+                            <span className={`shrink-0 text-[12.5px] tabular-nums ${row.fact_in ? 'text-slate-600' : 'text-slate-400'}`}>
                                 {row.fact_in && row.fact_out
                                     ? `${fmtTime(row.fact_in)}–${fmtTime(row.fact_out)}`
-                                    : row.fact_in ? `с ${fmtTime(row.fact_in)}` : ''}
+                                    : row.fact_in ? `с ${fmtTime(row.fact_in)}`
+                                        : (planRangeLabel(row) ? `план ${planRangeLabel(row)}` : '')}
                             </span>
                         </div>
                         <div className="mt-1 flex min-w-0 items-center gap-2">
@@ -1600,15 +1628,15 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         </div>
                     </div>
                     <div className="min-w-0">
-                        <div className="truncate text-[13px] text-slate-700">{row.schedule || '—'}</div>
+                        <div className="truncate text-[13px] tabular-nums text-slate-700">{scheduleLabel(row)}</div>
                         {/* Откуда план, кадровик обязан видеть: с ручным графиком
                             опоздание считается от него, а не от смены в системе. */}
                         {row.plan_source === 'rule' && (
                             <div className="text-[11.5px] text-slate-400">наш график</div>
                         )}
                     </div>
-                    <TimeCell fact={row.fact_in} plan={row.plan_in} />
-                    <TimeCell fact={row.fact_out} plan={row.plan_out} />
+                    <TimeCell fact={row.fact_in} />
+                    <TimeCell fact={row.fact_out} />
                     <div className="text-right tabular-nums">
                         <div className="text-[13.5px] text-slate-800">{fmtWorked(row.work_seconds)}</div>
                         {row.plan_mode === 'hours' && row.hours_norm > 0 && (
@@ -1826,8 +1854,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                     <div className={`${iosGroupLabel} mb-1.5`}>День</div>
                     <div className="divide-y divide-slate-100 rounded-2xl bg-white ring-1 ring-slate-200/70">
                         <DetailRow label="График"
-                                   value={row.schedule || '—'}
-                                   hint={row.plan_source === 'rule' ? 'наш график' : null} />
+                                   value={scheduleLabel(row)}
+                                   hint={row.plan_source === 'rule'
+                                       ? 'наш график'
+                                       : (planRangeLabel(row) ? meaningfulScheduleName(row.schedule) : null)} />
                         <DetailRow label="Приход" value={fmtTime(row.fact_in)}
                                    hint={row.plan_in ? `план ${fmtTime(row.plan_in)}` : null} />
                         <DetailRow label="Уход" value={fmtTime(row.fact_out)}
@@ -1940,7 +1970,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             Ставятся только в дни, где у Воркпейса и Клокстера смены нет
                         </div>
                     </div>
-                    <button type="button" className={iosBtnPrimary}
+                    <button type="button" className={`${iosBtnPrimary} ${isMobileShell ? 'w-full' : ''}`}
                             onClick={() => setPlanRuleModal({ ...EMPTY_PLAN_RULE })}>
                         <Plus size={14} /> Добавить график
                     </button>
@@ -2319,25 +2349,23 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const renderReports = () => (
         <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-                <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 px-1">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
                     <span className="text-[15px] font-semibold text-slate-900">Выгрузки в Excel</span>
                     <IosHint
                         label="Об отчётах"
                         text="Здесь все отчёты: и заказанные на сайте, и по команде /report в чате. Файл хранится вместе с карточкой — скачать его можно без переписки в Telegram. Отчёт за период собирается по каждому дню диапазона, поэтому большой период считается несколько минут."
                     />
                 </div>
-                <div className="flex items-center gap-2">
-                    <button onClick={loadReports} className={iosBtnGhost}
-                            aria-label="Обновить список" title="Обновить список">
-                        <RefreshCw size={14} />
-                    </button>
-                    <button onClick={() => setReportModal({
-                        from: isoDate(new Date()), to: isoDate(new Date()), department: '', chatId: '',
-                    })} className={iosBtnPrimary}>
-                        <Plus size={14} /> Сформировать отчёт
-                    </button>
-                </div>
+                <button onClick={loadReports} className={iosBtnGhost}
+                        aria-label="Обновить список" title="Обновить список">
+                    <RefreshCw size={14} />
+                </button>
+                <button onClick={() => setReportModal({
+                    from: isoDate(new Date()), to: isoDate(new Date()), department: '', chatId: '',
+                })} className={`${iosBtnPrimary} ${isMobileShell ? 'w-full' : ''}`}>
+                    <Plus size={14} /> Сформировать отчёт
+                </button>
             </div>
 
             <div className={`${iosCard} overflow-hidden`}>
@@ -2841,7 +2869,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     };
 
     return (
-        <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
+        /* Поля на телефоне. Мобильная оболочка снимает у разделов боковые отступы
+           (раздел — во всю ширину), а карточки «Отметок» — внутренние, со своей
+           обводкой и скруглением: вплотную к краю экрана их углы срезались, и
+           контейнеров будто не было. Отступ — как у групп в шторке настроек. */
+        <div className={`w-full ${isMobileShell ? 'px-3.5' : ''}`} style={{ fontFamily: APPLE_FONT }}>
             <div className="mb-3 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3 px-1">
                     <div className="flex min-w-0 items-center gap-3">

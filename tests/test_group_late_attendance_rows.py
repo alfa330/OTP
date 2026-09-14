@@ -94,8 +94,9 @@ class StatusTests(unittest.TestCase):
     def test_absent_only_after_the_threshold(self):
         # Главный дефект существующей выгрузки: утренний отчёт помечал неявкой
         # всю вечернюю смену. До порога человек ещё не «не отметился».
+        # До порога — «ждём прихода», а не «вовремя»: человек ещё не пришёл.
         early = _dt(9, config.MISSING_IN_AFTER_MINUTES - 1)
-        self.assertEqual(self._one([_span()], [], early)["status"], attendance.STATUS_OK)
+        self.assertEqual(self._one([_span()], [], early)["status"], attendance.STATUS_PENDING)
         late = _dt(9, config.MISSING_IN_AFTER_MINUTES + 1)
         self.assertEqual(self._one([_span()], [], late)["status"], attendance.STATUS_ABSENT)
 

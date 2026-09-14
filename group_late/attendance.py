@@ -54,6 +54,10 @@ STATUS_EARLY_OUT = "early_out"
 STATUS_NO_OUT = "no_out"
 STATUS_OFF_SCHEDULE = "off_schedule"
 STATUS_NO_TERMINAL = "no_terminal"
+# Смена ещё не началась или порог прихода не прошёл, а отметки нет. Раньше такой
+# день значился «Вовремя», и утренний экран называл пришедшими вовремя всех, кто
+# выйдет только к двум часам дня.
+STATUS_PENDING = "pending"
 STATUS_OK = "ok"
 
 STATUS_LABELS = {
@@ -63,13 +67,14 @@ STATUS_LABELS = {
     STATUS_NO_OUT: "Нет отметки об уходе",
     STATUS_OFF_SCHEDULE: "Вне графика",
     STATUS_NO_TERMINAL: "Не отмечается",
+    STATUS_PENDING: "Ждём прихода",
     STATUS_OK: "Вовремя",
 }
 
 STATUS_ORDER = {
     STATUS_ABSENT: 0, STATUS_LATE: 1, STATUS_EARLY_OUT: 2,
     STATUS_NO_OUT: 3, STATUS_OFF_SCHEDULE: 4, STATUS_NO_TERMINAL: 5,
-    STATUS_OK: 6,
+    STATUS_PENDING: 6, STATUS_OK: 7,
 }
 
 # За сколько дней назад смотрим, пользуется ли человек терминалом вообще.
@@ -137,9 +142,10 @@ def _status(plan_in, fact_in, fact_out, late, early, now_local) -> str:
         return STATUS_OFF_SCHEDULE
     if not fact_in:
         # Пока смена не началась и порог не прошёл, человек ещё не «не отметился»:
-        # иначе утренний экран красит неявкой всю вечернюю смену.
+        # иначе утренний экран красит неявкой всю вечернюю смену. Но и «вовремя»
+        # он ещё не пришёл — отдельный статус ожидания.
         if now_local and now_local < plan_in + timedelta(minutes=config.MISSING_IN_AFTER_MINUTES):
-            return STATUS_OK
+            return STATUS_PENDING
         return STATUS_ABSENT
     if late >= config.LATE_THRESHOLD_MINUTES:
         return STATUS_LATE

@@ -93,6 +93,27 @@ class RedesignTests(unittest.TestCase):
         self.assertIn("options={PLAN_BREAK_OPTIONS}", VIEW)
         self.assertIn("options={PLAN_HOURS_OPTIONS}", VIEW)
 
+    def test_cards_keep_a_gutter_on_the_phone(self):
+        """Мобильная оболочка снимает у разделов боковые поля. Карточки «Отметок» —
+        внутренние, со своей обводкой: вплотную к краю экрана их углы срезались,
+        и «контейнеров не было» (жалоба владельца 14.09.2026)."""
+        self.assertIn("const isMobileShell = useIsMobileShell();", VIEW)
+        self.assertIn("<div className={`w-full ${isMobileShell ? 'px-3.5' : ''}`}", VIEW)
+
+    def test_status_strip_never_wraps(self):
+        # Общий слой переносит ряды с gap-* правилом без !important — только инлайн.
+        strip = VIEW[VIEW.index('aria-label="Статус дня"') - 400:VIEW.index('aria-label="Статус дня"')]
+        self.assertIn("flexWrap: 'nowrap'", strip)
+
+    def test_schedule_column_shows_the_time_span(self):
+        # «Default» и «Title» из Клокстера ни на что не отвечают.
+        self.assertIn("const GENERIC_SCHEDULE_NAMES = new Set(['default', 'title'", VIEW)
+        self.assertIn("{scheduleLabel(row)}", VIEW)
+
+    def test_not_yet_arrived_is_not_on_time(self):
+        self.assertIn("pending: 'slate',", VIEW)
+        self.assertIn("{ value: 'pending', label: 'Ждём прихода' }", VIEW)
+
     def test_long_explanations_live_behind_hints(self):
         self.assertIn('label="О разделе"', VIEW)
         self.assertIn('label="О графиках"', VIEW)
