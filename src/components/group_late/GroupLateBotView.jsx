@@ -2,13 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
     Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bell, BellOff, Building2,
-    CalendarClock, CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet, Loader2,
-    Link2, LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send, ShieldAlert,
-    Trash2, Users, UserX, X, Zap,
+    CalendarClock, CalendarRange, CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet,
+    Loader2, Link2, LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send,
+    ShieldAlert, Timer, Trash2, Users, UserX, X, Zap,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
-    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosToggle,
+    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosPager, IosSegmented,
+    IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
@@ -47,8 +48,12 @@ const ATTENDANCE_STATUS_TONES = {
 };
 
 /* Оси сортировки из постановки: подразделение, локация, приход/уход. Остальные
- * добавлены потому, что таблицу читают ради них же. */
+ * добавлены потому, что таблицу читают ради них же.
+ *
+ * Первой стоит свежесть, и она же по умолчанию (ТЗ #307): раздел открывают,
+ * чтобы увидеть последние отметки, а проблемные ищут отдельно и осознанно. */
 const ATTENDANCE_SORTS = [
+    { value: 'recent', label: 'Сначала свежие' },
     { value: 'status', label: 'Сначала проблемные' },
     { value: 'employee', label: 'По ФИО' },
     { value: 'department', label: 'По подразделению' },
@@ -75,6 +80,7 @@ const TABS = [
     { key: 'attendance', label: 'Отметки', icon: Clock },
     { key: 'overview', label: 'Обзор', icon: Activity },
     { key: 'employees', label: 'Сотрудники', icon: Users },
+    { key: 'plan', label: 'Графики', icon: CalendarRange },
     { key: 'events', label: 'Отбивки', icon: Bell },
     { key: 'reports', label: 'Отчёты', icon: FileSpreadsheet },
     { key: 'chats', label: 'Чаты', icon: MessageSquare },
@@ -83,6 +89,42 @@ const TABS = [
 ];
 
 const EVENTS_PAGE = 60;
+
+/* Сколько отметок показывать на странице. Просили выбор «50/100/т.д.» (ТЗ #307):
+ * у кадровика на экране помещается порядок полусотни строк, а листать тысячу
+ * одним куском — это не таблица, а лента. */
+const ATTENDANCE_PAGE_SIZES = [50, 100, 200, 500];
+
+const WEEKDAYS = [
+    { value: 1, label: 'Пн' }, { value: 2, label: 'Вт' }, { value: 3, label: 'Ср' },
+    { value: 4, label: 'Чт' }, { value: 5, label: 'Пт' }, { value: 6, label: 'Сб' },
+    { value: 7, label: 'Вс' },
+];
+
+const PLAN_SCOPE_LABELS = { department: 'Подразделение', employee: 'Сотрудник' };
+
+/* Пустое правило формы «добавить график». Отдельной константой, чтобы «Отмена» и
+ * «Добавить ещё одно» открывали одинаковую форму, а не остатки предыдущей. */
+const EMPTY_PLAN_RULE = {
+    id: null, scope: 'department', target: '', target_label: '', mode: 'schedule',
+    weekdays: [], date_from: '', date_to: '', time_start: '10:00', time_end: '19:00',
+    break_minutes: 60, hours_norm: 8, note: '',
+};
+
+const weekdaysLabel = (days) => {
+    const list = (days || []).slice().sort((a, b) => a - b);
+    if (!list.length) return 'каждый день';
+    if (list.length === 7) return 'каждый день';
+    return list.map((day) => WEEKDAYS.find((w) => w.value === day)?.label || day).join(', ');
+};
+
+const hoursLabel = (value) => {
+    const hours = Number(value || 0);
+    if (!hours) return '—';
+    const whole = Math.floor(hours);
+    const minutes = Math.round((hours - whole) * 60);
+    return `${whole}:${String(minutes).padStart(2, '0')}`;
+};
 
 /* Колонки таблицы дисциплины. `numeric` — и выравнивание, и то, что по такой
  * колонке сортируем по убыванию с первого клика: интересны нарушители сверху.
@@ -156,6 +198,12 @@ const actorLabel = (raw) => {
     }
     if (value.startsWith('telegram:')) return `Telegram ${value.slice(9)}`;
     return value;
+};
+
+const daysAhead = (n) => {
+    const d = new Date();
+    d.setDate(d.getDate() + n);
+    return d;
 };
 
 const daysAgo = (n) => {
@@ -614,10 +662,22 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [attendanceNotice, setAttendanceNotice] = useState(null);
     const [attendanceFilters, setAttendanceFilters] = useState({
         from: isoDate(new Date()), to: isoDate(new Date()),
-        department: '', q: '', kind: '', sort: 'status',
+        departments: [], q: '', kind: '', sort: 'recent',
     });
     const [attendanceSearch, setAttendanceSearch] = useState('');
     const [expandedMarks, setExpandedMarks] = useState(() => new Set());
+    const [attendancePage, setAttendancePage] = useState(1);
+    const [attendancePageSize, setAttendancePageSize] = useState(ATTENDANCE_PAGE_SIZES[0]);
+    const [attendancePending, setAttendancePending] = useState([]);
+
+    /* Справочник обоих источников: подразделения для фильтра и состав для выбора
+       людей. Отдельно от `departments` — тот про отделы Workpace и маршрутизацию
+       чатов, а здесь нужен ещё и центральный офис из Clockster (ТЗ #307). */
+    const [directory, setDirectory] = useState(null);
+
+    const [planRules, setPlanRules] = useState(null);
+    const [planRulesError, setPlanRulesError] = useState(null);
+    const [planRuleModal, setPlanRuleModal] = useState(null);
 
     const [employees, setEmployees] = useState(null);
     const [employeesError, setEmployeesError] = useState(null);
@@ -649,22 +709,85 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const reportPoll = useRef(null);
 
     const scoped = Boolean(departmentScope);
-    /* Список для выбора людей в отчёт. Сводка приходит НЕ плоским списком, а
-       отделами: {departments: [{department_name, employees: [...]}], totals}.
-       Разворачиваем и склеиваем тёзок из разных отделов в одну строку — отбор в
-       отчёте всё равно идёт по ФИО, и две одинаковые галочки сбивали бы с толку. */
-    const reportEmployeeNames = useMemo(() => {
-        const names = new Set();
-        for (const department of asArray(employees?.departments)) {
-            for (const person of asArray(department?.employees)) {
-                const name = String(person?.employee_name || '').trim();
-                if (name) names.add(name);
+    const departmentNames = departments?.items || [];
+
+    /* Подразделения обоих источников. Группируем по системе: в списке рядом
+       стоят «КЦ 3» из Workpace и «Центральный офис» из Clockster, и без подписи
+       непонятно, почему по одним приходят уведомления, а по другим нет. */
+    const directoryDepartmentOptions = useMemo(() => {
+        const groups = new Map();
+        for (const item of asArray(directory?.departments)) {
+            const group = item.source === 'clockster' ? 'Клокстер' : 'Воркпейс';
+            if (!groups.has(group)) groups.set(group, new Set());
+            groups.get(group).add(item.name);
+        }
+        // Пока справочник не приехал, показываем то, что уже есть: отделы
+        // Workpace из вкладки «Отделы». Пустой список читался бы как «нет данных».
+        if (!groups.size) {
+            return departmentNames.map((dept) => ({ value: dept.name, label: dept.name }));
+        }
+        const options = [];
+        for (const [group, names] of groups) {
+            for (const name of [...names].sort((a, b) => a.localeCompare(b, 'ru'))) {
+                options.push({ value: name, label: name, groupLabel: group });
             }
         }
-        return [...names].sort((a, b) => a.localeCompare(b, 'ru'));
-    }, [employees]);
+        return options;
+    }, [directory, departmentNames]);
+
+    /* Список для выбора людей в отчёт — из справочника ОБОИХ источников
+       (ТЗ #307): раньше он собирался из сводки нарушений, а её знает только
+       Workpace, и центрального офиса в выборе не было вовсе. Тёзок из разных
+       подразделений склеиваем в одну строку: отбор в отчёте идёт по ФИО, и две
+       одинаковые галочки сбивали бы с толку. */
+    const reportEmployees = useMemo(() => {
+        const byName = new Map();
+        for (const person of asArray(directory?.employees)) {
+            const name = String(person?.name || '').trim();
+            if (!name) continue;
+            const current = byName.get(name);
+            if (current) {
+                if (person.department && !current.departments.includes(person.department)) {
+                    current.departments.push(person.department);
+                }
+                continue;
+            }
+            byName.set(name, {
+                name,
+                departments: person.department ? [person.department] : [],
+                position: person.position || '',
+            });
+        }
+        if (!byName.size) {
+            for (const department of asArray(employees?.departments)) {
+                for (const person of asArray(department?.employees)) {
+                    const name = String(person?.employee_name || '').trim();
+                    if (name && !byName.has(name)) {
+                        byName.set(name, {
+                            name,
+                            departments: department?.department_name ? [department.department_name] : [],
+                            position: '',
+                        });
+                    }
+                }
+            }
+        }
+        return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    }, [directory, employees]);
     /* {отдел Workpace: сколько людей без карточки и карточек без человека} —
        считаем один раз, а не в каждой карточке отдела. */
+    /* Что реально видно в списке выбора людей: отбор по ФИО и должности.
+       Считается здесь, а не в разметке, — иначе фильтрация гоняется на каждый
+       щелчок галочки, а список у нас в две с лишним сотни человек. */
+    const visibleReportEmployees = useMemo(() => {
+        const needle = String(reportModal?.employeeQuery || '').trim().toLowerCase();
+        const picked = new Set(reportModal?.employees || []);
+        if (!needle) return reportEmployees;
+        return reportEmployees.filter((person) => picked.has(person.name)
+            || person.name.toLowerCase().includes(needle)
+            || String(person.position || '').toLowerCase().includes(needle));
+    }, [reportEmployees, reportModal?.employeeQuery, reportModal?.employees]);
+
     const planInfoByDepartment = useMemo(() => {
         if (!planLinks?.departments?.length) return {};
         const info = {};
@@ -683,7 +806,6 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         }
         return info;
     }, [planLinks]);
-    const departmentNames = departments?.items || [];
     const unknownDepartments = useMemo(
         () => (departments?.unknown || []).map((d) => d.name),
         [departments],
@@ -761,11 +883,15 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         });
     }, [base, headers, events]);
 
-    const loadAttendance = useCallback((filters) => {
+    /* Страница и размер страницы приходят параметрами, а не берутся из состояния:
+       фильтр меняется и страница сбрасывается на первую в одном вызове, и читать
+       при этом ещё не применённое состояние — верный способ отстать на шаг. */
+    const loadAttendance = useCallback((filters, { page = 1, pageSize, refresh = false } = {}) => {
         attendanceRequest.current.controller?.abort();
         const controller = new AbortController();
         const requestId = attendanceRequest.current.id + 1;
         attendanceRequest.current = { id: requestId, controller };
+        const limit = pageSize || ATTENDANCE_PAGE_SIZES[0];
         setAttendance(null);
         setAttendanceError(null);
         setAttendanceNotice(null);
@@ -774,16 +900,21 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             params: {
                 date_start: filters.from || undefined,
                 date_end: filters.to || undefined,
-                department: filters.department || undefined,
+                // Несколько подразделений уходят одной строкой через «;» — так их
+                // разбирает и сервер, и команда бота.
+                department: (filters.departments || []).join(';') || undefined,
                 q: filters.q || undefined,
                 kind: filters.kind || undefined,
                 sort: filters.sort || undefined,
-                limit: 500,
+                limit,
+                offset: Math.max(0, (page - 1) * limit),
+                refresh: refresh ? 1 : undefined,
             },
         }).then((r) => {
             if (requestId !== attendanceRequest.current.id) return;
             setAttendance(r.data.rows || []);
             setAttendanceTotal(r.data.total || 0);
+            setAttendancePending(asArray(r.data.pending_days));
             // Второй источник мог отвалиться — таблица при этом рабочая, но
             // неполная, и молчать об этом нельзя: пропал бы целый офис.
             if (r.data.clockster_error) {
@@ -795,6 +926,22 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             setAttendance([]);
             setAttendanceError(errText(e, 'Не удалось загрузить отметки'));
         });
+    }, [base, headers]);
+
+    const loadDirectory = useCallback(() => {
+        axios.get(`${base}/directory`, { headers: headers() })
+            .then((r) => setDirectory(r.data))
+            .catch(() => setDirectory({ departments: [], employees: [] }));
+    }, [base, headers]);
+
+    const loadPlanRules = useCallback(() => {
+        setPlanRulesError(null);
+        axios.get(`${base}/plan_rules`, { headers: headers() })
+            .then((r) => setPlanRules(r.data.items || []))
+            .catch((e) => {
+                setPlanRules([]);
+                setPlanRulesError(errText(e, 'Не удалось загрузить графики'));
+            });
     }, [base, headers]);
 
     const loadEmployees = useCallback((filters) => {
@@ -861,12 +1008,18 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         if (tab === 'overview') loadPollRuns();
         // id === 0 — лента ещё ни разу не грузилась. Переход на вкладку из
         // «Обзора» уже запускает загрузку со своим фильтром, второй запрос лишний.
-        if (tab === 'attendance' && attendanceRequest.current.id === 0) loadAttendance(attendanceFilters);
+        if (tab === 'attendance' && attendanceRequest.current.id === 0) {
+            loadAttendance(attendanceFilters, { page: 1, pageSize: attendancePageSize });
+        }
         if (tab === 'events' && eventsRequest.current.id === 0) loadEvents(eventFilters);
         if (tab === 'employees' && employeesRequest.current.id === 0) loadEmployees(employeeFilters);
         if (tab === 'employees' && planLinks === null) loadPlanLinks();
         if (tab === 'reports' && reports === null) loadReports();
         if (tab === 'mutes' && mutes === null) loadMutes();
+        if (tab === 'plan' && planRules === null) loadPlanRules();
+        // Справочник нужен трём вкладкам сразу (фильтр отметок, графики, выбор
+        // людей в отчёт) — грузим один раз на первую из них.
+        if (directory === null && ['attendance', 'plan', 'reports'].includes(tab)) loadDirectory();
         /* eslint-disable-next-line react-hooks/exhaustive-deps */
     }, [tab]);
 
@@ -958,7 +1111,26 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const applyAttendanceFilters = (patch) => {
         const next = { ...attendanceFilters, ...patch };
         setAttendanceFilters(next);
-        loadAttendance(next);
+        // Любая смена фильтра возвращает на первую страницу: седьмая страница
+        // прежней выборки после смены периода — это пустой экран без причины.
+        setAttendancePage(1);
+        loadAttendance(next, { page: 1, pageSize: attendancePageSize });
+    };
+
+    const goAttendancePage = (page) => {
+        setAttendancePage(page);
+        loadAttendance(attendanceFilters, { page, pageSize: attendancePageSize });
+    };
+
+    const changeAttendancePageSize = (size) => {
+        setAttendancePageSize(size);
+        setAttendancePage(1);
+        loadAttendance(attendanceFilters, { page: 1, pageSize: size });
+    };
+
+    const refreshAttendance = () => {
+        setAttendancePage(1);
+        loadAttendance(attendanceFilters, { page: 1, pageSize: attendancePageSize, refresh: true });
     };
 
     const onAttendanceSearch = (value) => {
@@ -966,6 +1138,26 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         clearTimeout(attendanceSearchDebounce.current);
         attendanceSearchDebounce.current = setTimeout(
             () => applyAttendanceFilters({ q: value.trim() }), 350);
+    };
+
+    const savePlanRule = (rule) => {
+        run('plan-rule-save', async () => {
+            await axios.post(`${base}/plan_rules`, rule, { headers: headers() });
+            setPlanRuleModal(null);
+            loadPlanRules();
+            // Правило меняет план, а по плану считаются опоздание и статус —
+            // таблица без перечитывания показывала бы вчерашнюю правду.
+            if (attendanceRequest.current.id > 0) {
+                loadAttendance(attendanceFilters, { page: 1, pageSize: attendancePageSize });
+            }
+        }, 'График сохранён');
+    };
+
+    const deletePlanRule = (rule) => {
+        run(`plan-rule-del:${rule.id}`, async () => {
+            await axios.delete(`${base}/plan_rules/${rule.id}`, { headers: headers() });
+            loadPlanRules();
+        }, 'График удалён');
     };
 
     const toggleMarks = (key) => setExpandedMarks((prev) => {
@@ -1233,18 +1425,20 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         />
                     </FilterField>
                     {!scoped && (
-                        <FilterField label="Подразделение" className="w-[210px]">
+                        <FilterField label="Подразделения" className="w-[230px]">
                             <CustomSelect
                                 variant="ios"
                                 searchable
-                                value={attendanceFilters.department}
-                                onChange={(department) => applyAttendanceFilters({ department })}
-                                options={[
-                                    { value: '', label: 'Все подразделения' },
-                                    ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
-                                ]}
+                                multiple
+                                value={attendanceFilters.departments}
+                                onChange={(departments) => applyAttendanceFilters({ departments })}
+                                options={directoryDepartmentOptions}
+                                placeholder="Все подразделения"
+                                renderValue={(values) => (values.length === 1
+                                    ? values[0]
+                                    : `Выбрано: ${values.length}`)}
                                 searchPlaceholder="Поиск подразделения…"
-                                ariaLabel="Подразделение"
+                                ariaLabel="Подразделения"
                             />
                         </FilterField>
                     )}
@@ -1257,7 +1451,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             ariaLabel="Сортировка"
                         />
                     </FilterField>
-                    <FilterField label="Поиск" className="flex-1 min-w-[220px]">
+                    <FilterField label="Поиск" className="flex-1 min-w-[200px]">
                         <div className="relative">
                             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                             <input
@@ -1268,8 +1462,26 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             />
                         </div>
                     </FilterField>
+                    {/* Прошедшие дни читаются из кэша — «Обновить» перечитывает их
+                        из Workpace и Clockster заново. Нужна редко, поэтому кнопка
+                        тихая и без подписи. */}
+                    <button type="button" onClick={refreshAttendance} className={iosBtnGhost}
+                            disabled={attendance === null}
+                            title="Перечитать период из Workpace и Clockster">
+                        <RefreshCw className={`h-4 w-4 ${attendance === null ? 'animate-spin' : ''}`} />
+                    </button>
                 </div>
             </div>
+
+            {attendancePending.length > 0 && (
+                <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-slate-600`}>
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />
+                    Ещё собираем {attendancePending.length}&nbsp;
+                    {pluralRu(attendancePending.length, 'день', 'дня', 'дней')} периода
+                    ({fmtDay(attendancePending[0])} — {fmtDay(attendancePending[attendancePending.length - 1])}).
+                    Нажмите «Обновить» через минуту — они появятся в таблице.
+                </div>
+            )}
 
             {attendanceNotice && (
                 <div className={`${iosCard} flex items-center gap-2 p-3 text-sm text-amber-800`}>
@@ -1298,11 +1510,29 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
             {attendance !== null && attendance.length > 0 && (
                 <div className={`${iosCard} overflow-hidden`}>
-                    <div className="flex items-center justify-between px-4 py-2.5 text-xs text-slate-500">
-                        <span>Показано {fmtInt(attendance.length)} из {fmtInt(attendanceTotal)}</span>
-                        <span className="tabular-nums">{attendanceFilters.from === attendanceFilters.to
-                            ? attendanceFilters.from
-                            : `${attendanceFilters.from} — ${attendanceFilters.to}`}</span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-xs text-slate-500">
+                        <span className="tabular-nums">
+                            {fmtInt((attendancePage - 1) * attendancePageSize + 1)}–
+                            {fmtInt((attendancePage - 1) * attendancePageSize + attendance.length)} из {fmtInt(attendanceTotal)}
+                        </span>
+                        <div className="flex items-center gap-2">
+                            <span className="tabular-nums">
+                                {fmtPeriod(attendanceFilters.from, attendanceFilters.to)}
+                            </span>
+                            {/* Размер страницы стоит рядом со счётчиком строк, а не в
+                                панели фильтров: он про эту таблицу, а не про выборку. */}
+                            <div className="w-[92px]">
+                                <CustomSelect
+                                    variant="ios"
+                                    value={attendancePageSize}
+                                    onChange={(size) => changeAttendancePageSize(Number(size))}
+                                    options={ATTENDANCE_PAGE_SIZES.map((size) => ({
+                                        value: size, label: `по ${size}`,
+                                    }))}
+                                    ariaLabel="Строк на странице"
+                                />
+                            </div>
+                        </div>
                     </div>
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[1040px] text-sm">
@@ -1342,7 +1572,15 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                         </div>
                                                     )}
                                                 </td>
-                                                <td className="px-3 py-2.5 text-slate-700">{row.schedule || '—'}</td>
+                                                <td className="px-3 py-2.5 text-slate-700">
+                                                    <div>{row.schedule || '—'}</div>
+                                                    {/* Откуда план, кадровик обязан видеть: с ручным
+                                                        графиком опоздание считается от него, а не от
+                                                        смены в Workpace или Clockster. */}
+                                                    {row.plan_source === 'rule' && (
+                                                        <div className="text-xs text-slate-400">наш график</div>
+                                                    )}
+                                                </td>
                                                 <td className="px-3 py-2.5 text-slate-600">{row.system_label}</td>
                                                 <td className="px-3 py-2.5 text-center tabular-nums">
                                                     <div className="text-slate-900">{fmtTime(row.fact_in)}</div>
@@ -1358,7 +1596,12 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                     {row.late_minutes > 0 ? `${fmtInt(row.late_minutes)} м` : '—'}
                                                 </td>
                                                 <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">
-                                                    {fmtWorked(row.work_seconds)}
+                                                    <div>{fmtWorked(row.work_seconds)}</div>
+                                                    {row.plan_mode === 'hours' && row.hours_norm > 0 && (
+                                                        <div className="text-xs text-slate-400">
+                                                            из {hoursLabel(row.hours_norm)}
+                                                        </div>
+                                                    )}
                                                 </td>
                                                 <td className="px-3 py-2.5">
                                                     <div className="flex items-center gap-2">
@@ -1376,7 +1619,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                             {open && (
                                                 <tr className="border-b border-slate-100 bg-slate-50/60">
                                                     <td colSpan={9} className="px-4 py-2.5">
-                                                        <div className="flex flex-wrap gap-1.5">
+                                                        <div className="flex flex-wrap items-center gap-1.5">
                                                             {asArray(row.marks).map((mark, i) => (
                                                                 <span key={i}
                                                                       className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-xs text-slate-600 ring-1 ring-slate-200/70">
@@ -1389,6 +1632,17 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                                     )}
                                                                 </span>
                                                             ))}
+                                                            {/* Сколько человек был на месте на самом деле:
+                                                                сумма отрезков «вход → выход». Показываем
+                                                                только когда это НЕ то же, что в колонке
+                                                                «В работе», — иначе одно число дважды. */}
+                                                            {row.present_seconds > 0
+                                                                && row.present_seconds !== row.work_seconds && (
+                                                                <span className="inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-xs text-slate-500 ring-1 ring-slate-200/70">
+                                                                    <Timer className="h-3 w-3 text-slate-400" />
+                                                                    на месте {fmtWorked(row.present_seconds)}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                     </td>
                                                 </tr>
@@ -1399,6 +1653,114 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             </tbody>
                         </table>
                     </div>
+                    {attendanceTotal > attendancePageSize && (
+                        <div className="border-t border-slate-100 px-3 py-2">
+                            <IosPager
+                                page={attendancePage}
+                                pageCount={Math.ceil(attendanceTotal / attendancePageSize)}
+                                total={attendanceTotal}
+                                from={(attendancePage - 1) * attendancePageSize + 1}
+                                to={(attendancePage - 1) * attendancePageSize + attendance.length}
+                                onPage={goAttendancePage}
+                                unit="отметки"
+                            />
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+
+    /* ─── «Графики»: свой план смен поверх Workpace и Clockster ──────────────
+     *
+     * Главное, что должно быть понятно с первого взгляда: наш график ДОПОЛНЯЕТ
+     * источники, а не спорит с ними. Он появляется только в те дни, где смены
+     * нет ни в Workpace, ни в Clockster, — ради этого правила и заведены (план
+     * на выходной). Иначе одно правило на отдел перебило бы настоящий сменный
+     * график колл-центра и сделало бы опоздавшим весь отдел разом. */
+    const renderPlanRules = () => (
+        <div className="space-y-3">
+            <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
+                <div className="max-w-2xl">
+                    <div className="text-[14px] font-semibold text-slate-900">График смен вручную</div>
+                    <div className="mt-1 text-[12.5px] leading-relaxed text-slate-500">
+                        План на подразделение целиком или на отдельного человека — в том числе
+                        на выходные, которых нет ни в Воркпейсе, ни в Клокстере. Ставится только
+                        в дни без смены: настоящий график систем он не перебивает.
+                        Режим «по часам» — для тех, кто отрабатывает часы, а не смену: у них
+                        не считается опоздание, а время берётся по всем отметкам дня.
+                    </div>
+                </div>
+                <button type="button" className={iosBtnPrimary}
+                        onClick={() => setPlanRuleModal({ ...EMPTY_PLAN_RULE })}>
+                    <Plus className="h-4 w-4" /> Добавить график
+                </button>
+            </div>
+
+            {planRulesError && <ErrorBlock>{planRulesError}</ErrorBlock>}
+            {planRules === null && <LoadingBlock />}
+
+            {planRules !== null && planRules.length === 0 && !planRulesError && (
+                <EmptyBlock icon={CalendarRange}>
+                    Графиков пока нет — план берётся только из Воркпейса и Клокстера
+                </EmptyBlock>
+            )}
+
+            {asArray(planRules).length > 0 && (
+                <div className={`${iosCard} divide-y divide-slate-100`}>
+                    {planRules.map((rule) => (
+                        <div key={rule.id} className="flex flex-wrap items-start gap-3 p-4">
+                            <div className="min-w-[220px] flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <IosBadge tone={rule.scope === 'employee' ? 'blue' : 'slate'}>
+                                        {PLAN_SCOPE_LABELS[rule.scope] || rule.scope}
+                                    </IosBadge>
+                                    <span className="text-[13.5px] font-medium text-slate-900">
+                                        {rule.target_label || rule.target}
+                                    </span>
+                                    {!rule.enabled && <IosBadge tone="amber">выключен</IosBadge>}
+                                </div>
+                                {rule.note && (
+                                    <div className="mt-1 text-[12px] text-slate-500">{rule.note}</div>
+                                )}
+                            </div>
+                            <div className="min-w-[200px] flex-1 text-[12.5px] text-slate-600">
+                                <div className="font-medium text-slate-800">
+                                    {rule.mode === 'hours'
+                                        ? `По часам · норма ${hoursLabel(rule.hours_norm)}`
+                                        : `${rule.time_start}–${rule.time_end}`}
+                                </div>
+                                <div className="mt-0.5 text-slate-500">
+                                    {weekdaysLabel(rule.weekdays)}
+                                    {rule.mode !== 'hours' && rule.break_minutes ? ` · перерыв ${rule.break_minutes} мин` : ''}
+                                </div>
+                                {(rule.date_from || rule.date_to) && (
+                                    <div className="mt-0.5 text-slate-500">
+                                        {rule.date_from ? fmtDay(rule.date_from) : '…'} — {rule.date_to ? fmtDay(rule.date_to) : '…'}
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <span className="mr-1 text-[11.5px] text-slate-400">
+                                    {rule.author_name || '—'}
+                                </span>
+                                <button type="button" className={iosBtnGhost}
+                                        onClick={() => setPlanRuleModal({
+                                            ...EMPTY_PLAN_RULE, ...rule,
+                                            date_from: rule.date_from || '',
+                                            date_to: rule.date_to || '',
+                                        })}>
+                                    Изменить
+                                </button>
+                                <button type="button" className={iosBtnGhost}
+                                        disabled={busy === `plan-rule-del:${rule.id}`}
+                                        onClick={() => deletePlanRule(rule)}
+                                        title="Удалить график">
+                                    <Trash2 className="h-4 w-4 text-rose-500" />
+                                </button>
+                            </div>
+                        </div>
+                    ))}
                 </div>
             )}
         </div>
@@ -2304,6 +2666,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             {tab === 'attendance' && renderAttendance()}
             {tab === 'overview' && renderOverview()}
             {tab === 'employees' && renderEmployees()}
+            {tab === 'plan' && renderPlanRules()}
             {tab === 'events' && renderEvents()}
             {tab === 'reports' && renderReports()}
             {tab === 'chats' && renderChats()}
@@ -2527,7 +2890,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 open={Boolean(reportModal)}
                 onClose={() => setReportModal(null)}
                 title="Сформировать отчёт"
-                subtitle="Excel по данным Workpace — тот же, что бот присылает по /report"
+                subtitle="Excel по Воркпейсу и Клокстеру — тот же, что бот присылает по /report"
                 footer={(
                     <>
                         <button onClick={() => setReportModal(null)} className={iosBtnSecondary}>Отмена</button>
@@ -2561,9 +2924,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                     searchable
                                     value={reportModal.department}
                                     onChange={(department) => setReportModal({ ...reportModal, department })}
+                                    // Отделы обоих источников: иначе выгрузку по центральному
+                                    // офису из Клокстера было бы не заказать (ТЗ #307).
                                     options={[
                                         { value: '', label: 'Все отделы' },
-                                        ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                        ...directoryDepartmentOptions,
                                     ]}
                                     searchPlaceholder="Поиск отдела…"
                                     ariaLabel="Отдел отчёта"
@@ -2577,13 +2942,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             {!reportModal.pickEmployees ? (
                                 <button type="button" className={iosBtnSecondary}
                                         onClick={() => {
-                                            setReportModal({ ...reportModal, pickEmployees: true });
-                                            if (employees === null) {
-                                                loadEmployees({
-                                                    from: reportModal.from, to: reportModal.to,
-                                                    department: reportModal.department, q: '',
-                                                });
-                                            }
+                                            setReportModal({ ...reportModal, pickEmployees: true, employeeQuery: '' });
+                                            if (directory === null) loadDirectory();
                                         }}>
                                     <Users className="h-4 w-4" /> Выбрать сотрудников
                                 </button>
@@ -2598,34 +2958,56 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                         <button type="button" className={iosBtnGhost}
                                                 onClick={() => setReportModal({
                                                     ...reportModal, pickEmployees: false, employees: [],
+                                                    employeeQuery: '',
                                                 })}>
                                             Сбросить
                                         </button>
                                     </div>
-                                    {employees === null ? (
+                                    {/* Поиск по ФИО вместо прокрутки алфавитного списка (ТЗ #307,
+                                        п. 6): в списке две с лишним сотни человек из обеих систем. */}
+                                    <div className="relative mb-1.5">
+                                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                                        <input
+                                            className={`${iosInput} pl-9`}
+                                            value={reportModal.employeeQuery || ''}
+                                            onChange={(e) => setReportModal({
+                                                ...reportModal, employeeQuery: e.target.value,
+                                            })}
+                                            placeholder="ФИО или должность"
+                                        />
+                                    </div>
+                                    {directory === null && employees === null ? (
                                         <div className="flex items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-3 text-[12.5px] text-slate-500">
                                             <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загружаем список…
                                         </div>
                                     ) : (
                                         <div className="max-h-52 overflow-y-auto rounded-xl ring-1 ring-slate-200/70">
-                                            {reportEmployeeNames.length === 0 && (
+                                            {visibleReportEmployees.length === 0 && (
                                                 <div className="px-3.5 py-3 text-[12.5px] text-slate-500">
-                                                    За выбранный период сотрудников не нашлось
+                                                    {(reportModal.employeeQuery || '').trim()
+                                                        ? 'Никого не нашли — проверьте написание'
+                                                        : 'Список сотрудников пуст'}
                                                 </div>
                                             )}
-                                            {reportEmployeeNames.map((name) => {
-                                                const picked = (reportModal.employees || []).includes(name);
+                                            {visibleReportEmployees.map((person) => {
+                                                const picked = (reportModal.employees || []).includes(person.name);
                                                 return (
-                                                    <label key={name}
+                                                    <label key={person.name}
                                                            className="flex cursor-pointer items-center gap-2.5 border-b border-slate-100 px-3.5 py-2 text-[13px] last:border-0 hover:bg-slate-50">
                                                         <input type="checkbox" checked={picked}
                                                                onChange={() => setReportModal({
                                                                    ...reportModal,
                                                                    employees: picked
-                                                                       ? (reportModal.employees || []).filter((x) => x !== name)
-                                                                       : [...(reportModal.employees || []), name],
+                                                                       ? (reportModal.employees || []).filter((x) => x !== person.name)
+                                                                       : [...(reportModal.employees || []), person.name],
                                                                })} />
-                                                        <span className="text-slate-800">{name}</span>
+                                                        <span className="min-w-0">
+                                                            <span className="block truncate text-slate-800">{person.name}</span>
+                                                            <span className="block truncate text-[11.5px] text-slate-400">
+                                                                {[person.departments.join(', '), person.position]
+                                                                    .filter(Boolean).join(' · ') || '—'}
+                                                            </span>
+                                                        </span>
                                                     </label>
                                                 );
                                             })}
@@ -2660,6 +3042,211 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             <CalendarClock size={14} className="mt-0.5 shrink-0 text-slate-400" />
                             Отчёт считается в фоне: строка появится в списке со статусом «формируется»
                             и сменится на «готов», когда файл будет собран.
+                        </div>
+                    </div>
+                )}
+            </IosModal>
+
+            <IosModal
+                open={Boolean(planRuleModal)}
+                onClose={() => setPlanRuleModal(null)}
+                title={planRuleModal?.id ? 'График смен' : 'Новый график смен'}
+                subtitle="Только для дней, где у систем нет смены"
+                footer={(
+                    <>
+                        <button onClick={() => setPlanRuleModal(null)} className={iosBtnSecondary}>
+                            Отмена
+                        </button>
+                        <button onClick={() => savePlanRule(planRuleModal)}
+                                disabled={busy === 'plan-rule-save' || !planRuleModal?.target}
+                                className={iosBtnPrimary}>
+                            {busy === 'plan-rule-save' && <Loader2 size={13} className="animate-spin" />}
+                            Сохранить
+                        </button>
+                    </>
+                )}
+            >
+                {planRuleModal && (
+                    <div className="space-y-4">
+                        <div>
+                            <div className={`${iosGroupLabel} mb-1.5`}>Кому</div>
+                            <IosSegmented
+                                stretch
+                                value={planRuleModal.scope}
+                                onChange={(scope) => setPlanRuleModal({
+                                    ...planRuleModal, scope, target: '', target_label: '',
+                                })}
+                                options={[
+                                    { value: 'department', label: 'Подразделению' },
+                                    { value: 'employee', label: 'Сотруднику' },
+                                ]}
+                                ariaLabel="Кому ставится график"
+                            />
+                        </div>
+                        <div>
+                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                {planRuleModal.scope === 'employee' ? 'Сотрудник' : 'Подразделение'}
+                            </label>
+                            {planRuleModal.scope === 'employee' ? (
+                                <CustomSelect
+                                    variant="ios"
+                                    searchable
+                                    value={planRuleModal.target}
+                                    onChange={(target) => {
+                                        const person = asArray(directory?.employees)
+                                            .find((item) => item.id === target);
+                                        setPlanRuleModal({
+                                            ...planRuleModal, target,
+                                            target_label: person
+                                                ? `${person.name} · ${person.department || '—'}`
+                                                : target,
+                                        });
+                                    }}
+                                    options={asArray(directory?.employees).map((person) => ({
+                                        value: person.id,
+                                        label: person.position
+                                            ? `${person.name} · ${person.position}`
+                                            : person.name,
+                                        groupLabel: person.department || 'Без отдела',
+                                    }))}
+                                    placeholder="Выберите сотрудника"
+                                    searchPlaceholder="Поиск по ФИО…"
+                                    ariaLabel="Сотрудник"
+                                />
+                            ) : (
+                                <CustomSelect
+                                    variant="ios"
+                                    searchable
+                                    value={planRuleModal.target}
+                                    onChange={(target) => setPlanRuleModal({
+                                        ...planRuleModal, target, target_label: target,
+                                    })}
+                                    options={directoryDepartmentOptions}
+                                    placeholder="Выберите подразделение"
+                                    searchPlaceholder="Поиск подразделения…"
+                                    ariaLabel="Подразделение"
+                                />
+                            )}
+                        </div>
+                        <div>
+                            <div className={`${iosGroupLabel} mb-1.5`}>Как считать</div>
+                            <IosSegmented
+                                stretch
+                                value={planRuleModal.mode}
+                                onChange={(mode) => setPlanRuleModal({ ...planRuleModal, mode })}
+                                options={[
+                                    { value: 'schedule', label: 'По графику' },
+                                    { value: 'hours', label: 'По часам' },
+                                ]}
+                                ariaLabel="Как считать"
+                            />
+                        </div>
+                        {planRuleModal.mode === 'schedule' ? (
+                            <div className="grid grid-cols-3 gap-2">
+                                <div>
+                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Начало</label>
+                                    <input type="time" className={iosInput} value={planRuleModal.time_start || ''}
+                                           onChange={(e) => setPlanRuleModal({ ...planRuleModal, time_start: e.target.value })} />
+                                </div>
+                                <div>
+                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Конец</label>
+                                    <input type="time" className={iosInput} value={planRuleModal.time_end || ''}
+                                           onChange={(e) => setPlanRuleModal({ ...planRuleModal, time_end: e.target.value })} />
+                                </div>
+                                <div>
+                                    <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Перерыв, мин</label>
+                                    <input type="number" min="0" max="480" className={iosInput}
+                                           value={planRuleModal.break_minutes ?? ''}
+                                           onChange={(e) => setPlanRuleModal({
+                                               ...planRuleModal, break_minutes: e.target.value,
+                                           })} />
+                                </div>
+                            </div>
+                        ) : (
+                            <div>
+                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                    Норма часов в день
+                                </label>
+                                <input type="number" min="0.5" max="24" step="0.5" className={iosInput}
+                                       value={planRuleModal.hours_norm ?? ''}
+                                       onChange={(e) => setPlanRuleModal({
+                                           ...planRuleModal, hours_norm: e.target.value,
+                                       })} />
+                                <div className="mt-1 px-1 text-[11px] text-slate-500">
+                                    Опоздание у таких работников не считается, а отработанное время
+                                    берётся по всем отметкам дня — с вычетом ухода на обед.
+                                </div>
+                            </div>
+                        )}
+                        <div>
+                            <div className={`${iosGroupLabel} mb-1.5`}>Дни недели</div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {WEEKDAYS.map((day) => {
+                                    const picked = (planRuleModal.weekdays || []).includes(day.value);
+                                    return (
+                                        <button
+                                            key={day.value}
+                                            type="button"
+                                            onClick={() => setPlanRuleModal({
+                                                ...planRuleModal,
+                                                weekdays: picked
+                                                    ? planRuleModal.weekdays.filter((d) => d !== day.value)
+                                                    : [...(planRuleModal.weekdays || []), day.value],
+                                            })}
+                                            className={`h-9 w-11 rounded-xl text-[13px] font-medium transition ${
+                                                picked
+                                                    ? 'bg-blue-600 text-white shadow-sm'
+                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                            }`}
+                                        >
+                                            {day.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            {!(planRuleModal.weekdays || []).length && (
+                                <div className="mt-1 px-1 text-[11px] text-slate-500">
+                                    Ничего не выбрано — график действует каждый день
+                                </div>
+                            )}
+                        </div>
+                        {/* Период действия спрятан за тумблер: в большинстве случаев
+                            график бессрочный, а два всегда открытых поля дат читались бы
+                            как обязательные. */}
+                        <div>
+                            <div className="flex items-center justify-between px-1">
+                                <span className="text-[12.5px] font-medium text-slate-700">
+                                    Ограничить период действия
+                                </span>
+                                <IosToggle
+                                    checked={Boolean(planRuleModal.date_from || planRuleModal.date_to)}
+                                    onChange={(on) => setPlanRuleModal({
+                                        ...planRuleModal,
+                                        date_from: on ? isoDate(new Date()) : '',
+                                        date_to: on ? isoDate(daysAhead(30)) : '',
+                                    })}
+                                />
+                            </div>
+                            {(planRuleModal.date_from || planRuleModal.date_to) && (
+                                <div className="mt-2">
+                                    <IosDateRangePicker
+                                        from={planRuleModal.date_from || isoDate(new Date())}
+                                        to={planRuleModal.date_to || isoDate(new Date())}
+                                        onChange={({ from, to }) => setPlanRuleModal({
+                                            ...planRuleModal, date_from: from, date_to: to,
+                                        })}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                        <div>
+                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                Примечание <span className="text-slate-400">(необязательно)</span>
+                            </label>
+                            <input className={iosInput} value={planRuleModal.note || ''}
+                                   maxLength={200}
+                                   placeholder="Например: работа в выходные на период отчётности"
+                                   onChange={(e) => setPlanRuleModal({ ...planRuleModal, note: e.target.value })} />
                         </div>
                     </div>
                 )}

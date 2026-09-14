@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from group_late import config, icore_plan
+from group_late import config, icore_plan, plan_rules
 from group_late.clockster import (
     MARK_SYSTEM as CLOCKSTER_SYSTEM,
     build_user_lookup as build_clockster_user_lookup,
@@ -36,6 +36,7 @@ from group_late.helpers import (
     mark_type as _mark_type,
     net_work_seconds as _net_work_seconds,
     parse_dt as _parse_dt,
+    presence_seconds as _presence_seconds,
 )
 from group_late.workpace import workpace_client
 
@@ -55,6 +56,121 @@ def _employee_selected(name, selected) -> bool:
     if not selected:
         return True
     return str(name or "").strip().casefold() in selected
+
+
+def _schedule_cell(span: dict, plan_in_dt, plan_out_dt) -> str:
+    """Колонка «График»: один столбец вместо двух столбцов плана (ТЗ #307, п. 4).
+
+    Кадровик читает график как отрезок времени, а не как его название: у записей
+    Clockster название почти всегда «Default», и столбец с ним не отвечал ни на
+    один вопрос. Название остаётся запасным вариантом — там, где отрезка нет."""
+    rule_label = (span or {}).get("planRuleLabel")
+    if rule_label:
+        return rule_label
+    if plan_in_dt and plan_out_dt:
+        return f"{plan_in_dt.strftime('%H:%M')}–{plan_out_dt.strftime('%H:%M')}"
+    if plan_in_dt:
+        return plan_in_dt.strftime("%H:%M")
+    return str((span or {}).get("scheduleName") or "").strip() or "—"
+
+
+def _plan_inputs(db):
+    """Свой график и состав обеих систем. Читаются один раз на всю выгрузку."""
+    if db is None:
+        return [], []
+    try:
+        rules = db.glb_plan_rules(enabled_only=True)
+    except Exception as exc:
+        logger.warning("Отчёт: правила графика недоступны (%s)", exc)
+        return [], []
+    if not rules:
+        return [], []
+    try:
+        roster = [
+            {"ext_id": person["id"], "full_name": person["name"],
+             "department_name": person["department"],
+             "position_name": person.get("position"), "source": person.get("source")}
+            for person in db.glb_attendance_directory().get("employees", [])
+        ]
+    except Exception as exc:
+        logger.warning("Отчёт: состав для правил графика недоступен (%s)", exc)
+        roster = []
+    return rules, roster
+
+
+def _apply_plan_rules(records, rules, roster, employee_lookup, date_iso):
+    """Дополняет записи дня своим графиком кадрового учёта.
+
+    Две вещи: план в дни, которых источники не дали (выходной), и перевод
+    человека на учёт по часам. Правила НЕ перебивают настоящую смену — см.
+    `group_late.plan_rules`; здесь ровно та же логика, что в разделе на сайте,
+    и держать её в двух реализациях нельзя: числа сверяют в одном окне."""
+    if not rules:
+        return records
+    out = list(records or [])
+    seen = set()
+    for record in out:
+        emp_id = _employee_id(record)
+        if emp_id:
+            seen.add(str(emp_id))
+        name = _employee_name(record)
+        department = resolve_department_name(record, employee_lookup)
+        rule = plan_rules.select_rule(rules, str(emp_id or ""), name, department, date_iso)
+        if not rule:
+            continue
+        if rule.get("mode") == plan_rules.MODE_HOURS:
+            record["planMode"] = plan_rules.MODE_HOURS
+            record["planRuleLabel"] = plan_rules.label(rule)
+            record["hoursNorm"] = rule.get("hours_norm")
+            record["workTimeStart"] = None
+            record["workTimeEnd"] = None
+            continue
+        if not record.get("workTimeStart"):
+            start, end = plan_rules.plan_bounds(rule, date_iso)
+            if start:
+                record["workTimeStart"] = start.isoformat()
+                record["workTimeEnd"] = end.isoformat() if end else None
+                record["planRuleLabel"] = plan_rules.label(rule)
+                rule_break = plan_rules.break_seconds(rule)
+                if rule_break is not None:
+                    record["breakSeconds"] = rule_break
+
+    active = plan_rules.covered_targets(rules, date_iso)
+    for person in (roster or []):
+        ext_id = str(person.get("ext_id") or "").strip()
+        if not ext_id or ext_id in seen:
+            continue
+        rule = plan_rules.select_rule(active, ext_id, person.get("full_name"),
+                                      person.get("department_name"), date_iso)
+        if not rule:
+            continue
+        seen.add(ext_id)
+        record = {
+            "employeeId": ext_id,
+            "employeeExternalId": ext_id,
+            "employeeName": person.get("full_name") or "—",
+            "departmentName": person.get("department_name") or None,
+            "positionName": person.get("position_name") or None,
+            "date": date_iso,
+            "markSystem": person.get("source") or None,
+            "employeeIsArchived": False,
+        }
+        if rule.get("mode") == plan_rules.MODE_HOURS:
+            record.update({"planMode": plan_rules.MODE_HOURS,
+                           "planRuleLabel": plan_rules.label(rule),
+                           "hoursNorm": rule.get("hours_norm")})
+        else:
+            start, end = plan_rules.plan_bounds(rule, date_iso)
+            if not start:
+                continue
+            record.update({"workTimeStart": start.isoformat(),
+                           "workTimeEnd": end.isoformat() if end else None,
+                           "planRuleLabel": plan_rules.label(rule)})
+            rule_break = plan_rules.break_seconds(rule)
+            if rule_break is not None:
+                record["breakSeconds"] = rule_break
+        out.append(record)
+    return out
 
 
 def generate_report(
@@ -98,6 +214,11 @@ def generate_report(
     selected_employees = {str(x).strip().casefold() for x in (employees or []) if str(x).strip()}
     department_filters = _normalize_department_filters(dept_filter)
     department_filter_label = _format_department_filter(dept_filter)
+
+    # Свой график кадрового учёта (ТЗ #307). Читаем ДО цикла дней: правила и
+    # состав одни на всю выгрузку, а внутри цикла это были бы два запроса в базу
+    # на каждый день периода.
+    rules, rule_roster = _plan_inputs(db)
 
     try:
         workpace_employees = workpace_client.get_employees()
@@ -198,6 +319,7 @@ def generate_report(
         # обе они про карточки Workpace, а у людей центрального офиса их нет.
         records = records + clockster_records_by_date.get(date_iso, [])
         marks = marks + clockster_marks_by_date.get(date_iso, [])
+        records = _apply_plan_rules(records, rules, rule_roster, employee_lookup, date_iso)
 
         # Group data
         emp_data = {}
@@ -278,11 +400,16 @@ def generate_report(
 
         # «Должность» и «Система» — требование ТЗ #273: кадровик ищет по должности,
         # а по системе отметки понимает, где смотреть первоисточник.
+        #
+        # Столбцов плана было два — «время прихода (план)» и «время ухода (план)».
+        # По ТЗ #307 (п. 4) вместо них один столбец «График»: план читается как
+        # отрезок 10:00–19:00, а разнесённый по двум колонкам он заставлял глазами
+        # склеивать половинки и мешался с фактом, который стоит рядом.
         headers = [
             "Отдел", "ФИО сотрудника", "Должность", "График", "Система",
             "Все отметки за день",
-            "Время прихода (план)", "Время прихода (факт)", "Опоздание (мин)",
-            "Время ухода (план)", "Время ухода (факт)", "Ранний уход (мин)",
+            "Время прихода (факт)", "Опоздание (мин)",
+            "Время ухода (факт)", "Ранний уход (мин)",
             "Отработано (без обеда)", "Отклонение (HH:MM)", "Статус"
         ]
         ws.append(headers)
@@ -337,12 +464,20 @@ def generate_report(
 
                 fact_in_dt = None
                 fact_out_dt = None
+                plan_in_dt = None
+                plan_out_dt = None
+                # Человек отрабатывает часы, а не график (ТЗ #307, п. 2): графика у
+                # него нет, поэтому нет и опоздания — ему не к чему опаздывать.
+                is_hours = (span or {}).get("planMode") == plan_rules.MODE_HOURS
 
                 if span:
                     plan_in_dt = _parse_dt(span.get("workTimeStart"))
                     fact_in_dt = _parse_dt(span.get("inMark"))
                     
-                    if not fact_in_dt and plan_in_dt:
+                    # Факт достаём из отметок и когда плана нет: у часовика графика
+                    # не бывает вовсе, а раньше без плана приход просто терялся и
+                    # человек с четырьмя отметками значился отсутствующим.
+                    if not fact_in_dt:
                         in_marks = [m for m in raw_marks if _mark_type(m) == 0]
                         if in_marks:
                             in_marks.sort(key=lambda x: _mark_date(x) or "")
@@ -351,7 +486,9 @@ def generate_report(
                     plan_in = plan_in_dt.strftime("%H:%M") if plan_in_dt else "—"
                     fact_in = fact_in_dt.strftime("%H:%M") if fact_in_dt else "—"
                     
-                    if plan_in_dt and fact_in_dt:
+                    if is_hours:
+                        late_in = 0
+                    elif plan_in_dt and fact_in_dt:
                         diff_mins = (fact_in_dt - plan_in_dt).total_seconds() / 60
                         late_in = max(0, int(diff_mins))
                     else:
@@ -360,7 +497,7 @@ def generate_report(
                     plan_out_dt = _parse_dt(span.get("workTimeEnd"))
                     fact_out_dt = _parse_dt(span.get("outMark"))
                     
-                    if not fact_out_dt and plan_out_dt:
+                    if not fact_out_dt:
                         out_marks = [m for m in raw_marks if _mark_type(m) == 1]
                         if out_marks:
                             out_marks.sort(key=lambda x: _mark_date(x) or "")
@@ -369,7 +506,9 @@ def generate_report(
                     plan_out = plan_out_dt.strftime("%H:%M") if plan_out_dt else "—"
                     fact_out = fact_out_dt.strftime("%H:%M") if fact_out_dt else "—"
 
-                    if plan_out_dt and fact_out_dt:
+                    if is_hours:
+                        early_out = 0
+                    elif plan_out_dt and fact_out_dt:
                         diff_out_mins = (plan_out_dt - fact_out_dt).total_seconds() / 60
                         early_out = max(0, int(diff_out_mins))
                     else:
@@ -432,7 +571,15 @@ def generate_report(
                 work_time_str = "—"
                 work_seconds = 0
                 lunch_sec = 0
-                if fact_in_dt and fact_out_dt:
+                if is_hours:
+                    # У часовика «отработано» — это сумма отрезков «вход → выход» по
+                    # ВСЕМ отметкам дня (ТЗ #307, п. 2). Плановый обед не вычитается:
+                    # уход на обед у него и так виден отметками, и вычет посчитал бы
+                    # этот час дважды.
+                    work_seconds = _presence_seconds(raw_marks)
+                    if work_seconds > 0:
+                        work_time_str = f"{int(work_seconds // 3600):02d}:{int((work_seconds % 3600) // 60):02d}"
+                elif fact_in_dt and fact_out_dt:
                     span_sec = (fact_out_dt - fact_in_dt).total_seconds()
                     if span_sec > 0:
                         # Настоящий перерыв этого человека, если источник его знает
@@ -445,7 +592,17 @@ def generate_report(
                         work_time_str = f"{h:02d}:{m:02d}"
 
                 deviation_str = "—"
-                if span and fact_in_dt and fact_out_dt:
+                if is_hours:
+                    # Отклонение у часовика считается от нормы часов, а не от смены.
+                    norm_hours = (span or {}).get("hoursNorm")
+                    norm_sec = int(float(norm_hours) * 3600) if norm_hours else 0
+                    if norm_sec > 0:
+                        diff_sec = work_seconds - norm_sec
+                        sign = "+" if diff_sec >= 0 else "-"
+                        abs_diff = abs(diff_sec)
+                        deviation_str = (f"{sign}{int(abs_diff // 3600):02d}:"
+                                         f"{int((abs_diff % 3600) // 60):02d}")
+                elif span and fact_in_dt and fact_out_dt:
                     plan_in_dt = _parse_dt(span.get("workTimeStart"))
                     plan_out_dt = _parse_dt(span.get("workTimeEnd"))
                     if plan_in_dt and plan_out_dt:
@@ -499,13 +656,20 @@ def generate_report(
                 # пометки нет, и отсутствие пометки и есть Workpace.
                 system_label = ("Клокстер" if row_span.get("markSystem") == CLOCKSTER_SYSTEM
                                 else "Воркпейс")
+                # У часовика лента отметок заменяется итогом: ТЗ #307 (п. 2) просит
+                # «сразу отработанные часы, а не по каждой отметке отдельно».
+                # Число отметок остаётся — по нему видно, что итог не с потолка.
+                marks_cell = marks_str
+                if is_hours:
+                    marks_cell = (f"Отработано {work_time_str} · {len(raw_marks)} отм."
+                                  if raw_marks else "нет отметок")
                 row_data = [
                     dept_name, name,
                     row_span.get("positionName") or "—",
-                    row_span.get("scheduleName") or "—",
+                    _schedule_cell(row_span, plan_in_dt, plan_out_dt),
                     system_label,
-                    marks_str, plan_in, fact_in, late_in if late_in > 0 else "—",
-                    plan_out, fact_out, early_out if early_out > 0 else "—",
+                    marks_cell, fact_in, late_in if late_in > 0 else "—",
+                    fact_out, early_out if early_out > 0 else "—",
                     work_time_str, deviation_str, status_text
                 ]
                 ws.append(row_data)

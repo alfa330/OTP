@@ -567,13 +567,31 @@ class SyncEmployeesTests(unittest.TestCase):
         ])
         self.assertEqual(count, 1)
         _, rows = CAPTURED_VALUES[0]
-        self.assertEqual(rows, [("wp-1", None, "Иванов Иван", "Регионы")])
+        self.assertEqual(rows, [("wp-1", None, "Иванов Иван", "Регионы", None, "workpace")])
 
     def test_missing_employees_are_deleted(self):
         self.db.glb_sync_employees([{"ext_id": "wp-1", "full_name": "Иванов Иван"}])
         delete_sql, params = next(c for c in self.cursor.calls if "DELETE FROM glb_employees" in c[0])
         self.assertIn("ext_id <> ALL(%s)", delete_sql)
-        self.assertEqual(params, (["wp-1"],))
+        self.assertEqual(params, ("workpace", ["wp-1"]))
+
+    def test_cleanup_never_leaves_its_own_source(self):
+        """Опрос Workpace идёт каждые две минуты. Без границы по источнику он
+        стирал бы между своими проходами весь центральный офис из Clockster."""
+        self.db.glb_sync_employees([{"ext_id": "clockster:7", "full_name": "Асанов Асан"}],
+                                   source="clockster")
+        delete_sql, params = next(c for c in self.cursor.calls if "DELETE FROM glb_employees" in c[0])
+        self.assertIn("source = %s", delete_sql)
+        self.assertEqual(params, ("clockster", ["clockster:7"]))
+
+    def test_position_reaches_the_cache(self):
+        """Должность нужна выбору людей в отчёт: без неё список — две сотни
+        одинаковых строк, а кадровик ищет и по должности (ТЗ #273)."""
+        self.db.glb_sync_employees([
+            {"ext_id": "wp-3", "full_name": "Петров Пётр", "position_name": "Супервайзер"},
+        ])
+        _, rows = CAPTURED_VALUES[0]
+        self.assertEqual(rows[0][4], "Супервайзер")
 
     def test_empty_payload_does_not_wipe_the_cache(self):
         # Пустой ответ Workpace — это сбой, а не «уволили всех».
@@ -597,6 +615,7 @@ class RosterHelperTests(unittest.TestCase):
         self.assertEqual(rows, [{
             "ext_id": "wp-1", "external_id": "ext-9",
             "full_name": "Иванов Иван", "department_name": "Регионы",
+            "position_name": None,
         }])
 
     def test_employee_without_id_or_name_is_skipped(self):

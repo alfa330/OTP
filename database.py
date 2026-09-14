@@ -8216,6 +8216,93 @@ class Database:
                 ON operator_schedule_status_periods(operator_id, start_date);
         """)
 
+        # Задача #307. Раздел перерос один источник: состав теперь приходит и из
+        # Clockster, период просмотра стал неограниченным, а план смены кадровик
+        # заводит сам. Всё это — отдельным блоком, чтобы правка не конфликтовала
+        # с DDL выше при параллельной работе двух машин.
+        cursor.execute("""
+            -- Откуда состав: Workpace или Clockster. Полная замена в glb_sync_*
+            -- обязана считаться ПО ИСТОЧНИКУ, иначе двухминутный опрос Workpace
+            -- каждый раз стирал бы центральный офис.
+            ALTER TABLE glb_employees ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'workpace';
+            ALTER TABLE glb_employees ADD COLUMN IF NOT EXISTS position_name TEXT;
+            CREATE INDEX IF NOT EXISTS idx_glb_employees_source ON glb_employees(source);
+
+            -- Кэш строк раздела «Отметки» по дням. Без него период на экране был
+            -- ограничен неделей: каждый день — два запроса в Workpace, и месяц
+            -- собирался бы около минуты прямо в HTTP-запросе. С кэшем прошедшие
+            -- дни читаются из базы, а живьём тянется только сегодняшний.
+            CREATE TABLE IF NOT EXISTS glb_attendance_rows (
+                day               DATE NOT NULL,
+                employee_id       TEXT NOT NULL,
+                seq               SMALLINT NOT NULL DEFAULT 0,
+                employee_name     TEXT NOT NULL,
+                department_name   TEXT,
+                position_name     TEXT,
+                location_name     TEXT,
+                schedule_name     TEXT,
+                system            TEXT NOT NULL,
+                plan_in           TIMESTAMPTZ,
+                plan_out          TIMESTAMPTZ,
+                fact_in           TIMESTAMPTZ,
+                fact_out          TIMESTAMPTZ,
+                late_minutes      INTEGER NOT NULL DEFAULT 0,
+                early_out_minutes INTEGER NOT NULL DEFAULT 0,
+                work_seconds      INTEGER NOT NULL DEFAULT 0,
+                present_seconds   INTEGER NOT NULL DEFAULT 0,
+                lunch_seconds     INTEGER NOT NULL DEFAULT 0,
+                status            TEXT NOT NULL,
+                plan_mode         TEXT NOT NULL DEFAULT 'schedule',
+                plan_source       TEXT,
+                hours_norm        NUMERIC(5,2),
+                marks             JSONB NOT NULL DEFAULT '[]'::jsonb,
+                PRIMARY KEY (day, employee_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_att_rows_day ON glb_attendance_rows(day DESC);
+            CREATE INDEX IF NOT EXISTS idx_glb_att_rows_dept
+                ON glb_attendance_rows(lower(COALESCE(department_name, '')));
+            CREATE INDEX IF NOT EXISTS idx_glb_att_rows_name
+                ON glb_attendance_rows(lower(employee_name));
+
+            -- Какие дни уже собраны. Отдельная таблица, а не признак у строк:
+            -- день без единой отметки — это тоже собранный день, и без отметки
+            -- «собран» он тянулся бы из Workpace заново при каждом открытии.
+            CREATE TABLE IF NOT EXISTS glb_attendance_days (
+                day        DATE PRIMARY KEY,
+                built_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                rows_count INTEGER NOT NULL DEFAULT 0,
+                sources    TEXT
+            );
+
+            -- Свой график смен (ТЗ #307, п. 5): кадровик заводит план на проект
+            -- целиком или на конкретного человека, в том числе на выходные дни.
+            -- Наш план ДОПОЛНЯЕТ источники, а не спорит с ними: он ставится
+            -- только в те дни, где ни Workpace, ни Clockster смены не дали.
+            -- Иначе одно правило «пн–пт 10:00–19:00» на отдел перебило бы
+            -- настоящий сменный график колл-центра и сделало бы опоздавшими всех.
+            CREATE TABLE IF NOT EXISTS glb_plan_rules (
+                id            SERIAL PRIMARY KEY,
+                scope         TEXT NOT NULL,
+                target        TEXT NOT NULL,
+                target_label  TEXT,
+                mode          TEXT NOT NULL DEFAULT 'schedule',
+                weekdays      SMALLINT[],
+                date_from     DATE,
+                date_to       DATE,
+                time_start    TEXT,
+                time_end      TEXT,
+                break_minutes INTEGER,
+                hours_norm    NUMERIC(5,2),
+                note          TEXT,
+                enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+                created_by    INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_plan_rules_target
+                ON glb_plan_rules(scope, lower(target)) WHERE enabled;
+        """)
+
     def _stamp_orphan_group_ids_tx(self, cursor, operator_id=None):
         """Проставляет group_id строкам daily_hours/work_hours, где он NULL: для daily —
         по дню строки, для work_hours — по концу месяца. Покрывающее членство приоритетнее;
@@ -58546,12 +58633,18 @@ class Database:
             cursor.execute("DELETE FROM glb_departments WHERE name <> ALL(%s)", (list(counts.keys()),))
         return len(counts)
 
-    def glb_sync_employees(self, rows):
-        """Кэш состава отделов Workpace для вкладки «Сотрудники».
+    def glb_sync_employees(self, rows, source='workpace'):
+        """Кэш состава для вкладки «Сотрудники» и выбора людей в отчёт.
 
-        Полная замена: Workpace отдаёт только действующих, поэтому уволенный
-        должен исчезнуть из состава. В таблице он всё равно останется, если за
-        период у него были нарушения, — их берём из glb_events."""
+        Полная замена — но ТОЛЬКО внутри своего источника: Workpace отдаёт лишь
+        действующих, поэтому уволенный должен исчезнуть из состава. В таблице он
+        всё равно останется, если за период у него были нарушения, — их берём из
+        glb_events.
+
+        Источников теперь два (задача #307), и чистка обязана считаться по
+        `source`: опрос Workpace идёт каждые две минуты, и без этого условия он
+        стирал бы из состава весь центральный офис между своими проходами."""
+        source = str(source or 'workpace').strip().lower() or 'workpace'
         clean = []
         seen = set()
         for row in rows or []:
@@ -58565,21 +58658,27 @@ class Database:
                 (str(row.get('external_id') or '').strip() or None),
                 full_name[:200],
                 (str(row.get('department_name') or '').strip() or None),
+                (str(row.get('position_name') or '').strip() or None),
+                source,
             ))
         if not clean:
             return 0
         with self._get_cursor() as cursor:
             execute_values(cursor, """
-                INSERT INTO glb_employees (ext_id, external_id, full_name, department_name, synced_at)
+                INSERT INTO glb_employees (ext_id, external_id, full_name, department_name,
+                                           position_name, source, synced_at)
                 VALUES %s
                 ON CONFLICT (ext_id) DO UPDATE SET
                     external_id = EXCLUDED.external_id,
                     full_name = EXCLUDED.full_name,
                     department_name = EXCLUDED.department_name,
+                    position_name = EXCLUDED.position_name,
+                    source = EXCLUDED.source,
                     synced_at = NOW()
-            """, clean, template="(%s, %s, %s, %s, NOW())")
-            cursor.execute("DELETE FROM glb_employees WHERE ext_id <> ALL(%s)",
-                           ([item[0] for item in clean],))
+            """, clean, template="(%s, %s, %s, %s, %s, %s, NOW())")
+            cursor.execute(
+                "DELETE FROM glb_employees WHERE source = %s AND ext_id <> ALL(%s)",
+                (source, [item[0] for item in clean]))
         return len(clean)
 
     # Периоды, на время которых смены оператора не считаются планом: человек в
@@ -58587,26 +58686,32 @@ class Database:
     # синхронизации статуса пользователя (`temporary_schedule_statuses`).
     GLB_PLAN_BLOCKING_STATUSES = ('bs', 'sick_leave', 'annual_leave', 'dismissal')
 
-    def glb_cached_employee_roster(self, department_names=None):
+    def glb_cached_employee_roster(self, department_names=None, source='workpace'):
         """Состав Workpace из кэша `glb_employees` в том же виде, что `employee_roster`.
 
         Раздел на сайте в Workpace не ходит: справочник ему достаётся опросом.
-        Живой список нужен только самому опросу — там он и так уже загружен."""
+        Живой список нужен только самому опросу — там он и так уже загружен.
+
+        `source` по умолчанию workpace: с появлением второго источника (#307) в
+        той же таблице лежит и центральный офис, а карточки Clockster этому
+        методу нужны только там, где их спросили явно. `source=None` — обе."""
         names = [str(name or '').strip() for name in (department_names or [])]
         names = [name for name in names if name]
+        src_filter = '' if source is None else ' AND source = %s'
+        src_params = () if source is None else (str(source),)
         with self._get_cursor() as cursor:
             if names:
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT ext_id, external_id, full_name, department_name
                     FROM glb_employees
-                    WHERE lower(COALESCE(department_name, '')) = ANY(%s)
+                    WHERE lower(COALESCE(department_name, '')) = ANY(%s){src_filter}
                     ORDER BY full_name
-                """, ([name.lower() for name in names],))
+                """, ([name.lower() for name in names],) + src_params)
             else:
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT ext_id, external_id, full_name, department_name
-                    FROM glb_employees ORDER BY full_name
-                """)
+                    FROM glb_employees WHERE TRUE{src_filter} ORDER BY full_name
+                """, src_params)
             return [
                 {'ext_id': row[0], 'external_id': row[1],
                  'full_name': row[2], 'department_name': row[3]}
@@ -59029,6 +59134,332 @@ class Database:
                 'seconds': seconds,
             }
         return out
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Раздел «Отметки»: кэш дней, справочники фильтров и свой график (ТЗ #307)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Глубина хранения кэша отметок. Строк около сотни в день, то есть даже год
+    # — это меньше сорока тысяч; чистка нужна не ради места, а чтобы таблица не
+    # росла бесконечно после ухода людей из обеих систем.
+    GLB_ATTENDANCE_RETENTION_DAYS = 400
+
+    # Колонки кэша в порядке вставки. Один список на запись и на чтение: разъехавшись,
+    # они дали бы молча перепутанные местами поля, а не ошибку.
+    GLB_ATTENDANCE_COLUMNS = (
+        'day', 'employee_id', 'seq', 'employee_name', 'department_name', 'position_name',
+        'location_name', 'schedule_name', 'system', 'plan_in', 'plan_out', 'fact_in',
+        'fact_out', 'late_minutes', 'early_out_minutes', 'work_seconds', 'present_seconds',
+        'lunch_seconds', 'status', 'plan_mode', 'plan_source', 'hours_norm', 'marks',
+    )
+
+    @staticmethod
+    def _glb_day(value):
+        """'ГГГГ-ММ-ДД' / date / datetime → date. Пустое значение → None."""
+        if value is None or value == '':
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+
+    def glb_attendance_built_days(self, day_from, day_to):
+        """Множество дней периода, уже собранных в кэш."""
+        start, end = self._glb_day(day_from), self._glb_day(day_to)
+        if not start or not end:
+            return set()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT day FROM glb_attendance_days
+                WHERE day BETWEEN %s AND %s
+            """, (start, end))
+            return {row[0] for row in cursor.fetchall()}
+
+    def glb_store_attendance_day(self, day, rows, sources=None):
+        """Кладёт в кэш ОДИН день целиком, заменяя всё, что там было.
+
+        Замена, а не доливка: смену в источнике могли отменить, и старая строка
+        иначе осталась бы висеть неявкой навсегда. День без единой строки тоже
+        отмечается собранным — иначе выходной тянулся бы из Workpace заново при
+        каждом открытии раздела."""
+        target = self._glb_day(day)
+        if not target:
+            return 0
+        payload = []
+        seq_by_employee = {}
+        for row in rows or []:
+            employee_id = str(row.get('employee_id') or '').strip()
+            if not employee_id:
+                continue
+            employee_id = employee_id[:128]
+            seq = seq_by_employee.get(employee_id, 0)
+            seq_by_employee[employee_id] = seq + 1
+            payload.append((
+                target,
+                employee_id,
+                seq,
+                str(row.get('employee') or '—')[:200],
+                (str(row.get('department') or '').strip() or None),
+                (str(row.get('position') or '').strip() or None),
+                (str(row.get('location') or '').strip() or None),
+                (str(row.get('schedule') or '').strip() or None),
+                str(row.get('system') or 'workpace')[:32],
+                row.get('plan_in'), row.get('plan_out'),
+                row.get('fact_in'), row.get('fact_out'),
+                int(row.get('late_minutes') or 0),
+                int(row.get('early_out_minutes') or 0),
+                int(row.get('work_seconds') or 0),
+                int(row.get('present_seconds') or 0),
+                int(row.get('lunch_seconds') or 0),
+                str(row.get('status') or 'ok')[:32],
+                str(row.get('plan_mode') or 'schedule')[:16],
+                (str(row.get('plan_source') or '').strip() or None),
+                row.get('hours_norm'),
+                Json(row.get('marks') or []),
+            ))
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM glb_attendance_rows WHERE day = %s", (target,))
+            if payload:
+                execute_values(cursor, f"""
+                    INSERT INTO glb_attendance_rows ({', '.join(self.GLB_ATTENDANCE_COLUMNS)})
+                    VALUES %s
+                """, payload)
+            cursor.execute("""
+                INSERT INTO glb_attendance_days (day, built_at, rows_count, sources)
+                VALUES (%s, NOW(), %s, %s)
+                ON CONFLICT (day) DO UPDATE SET
+                    built_at = NOW(), rows_count = EXCLUDED.rows_count,
+                    sources = EXCLUDED.sources
+            """, (target, len(payload), (sources or None)))
+        return len(payload)
+
+    def glb_read_attendance_rows(self, day_from, day_to, query=None, days=None):
+        """Строки раздела из кэша — в том же виде, в каком их строит attendance.
+
+        Фильтры подразделения, типа отметки и состава ЗДЕСЬ не применяются
+        намеренно: живой путь фильтрует их в Python, и второй набор правил в SQL
+        неминуемо разошёлся бы с ним на нестрогом сравнении названий отделов.
+        В SQL остаётся то, что по-настоящему режет объём, — период и поиск."""
+        start, end = self._glb_day(day_from), self._glb_day(day_to)
+        if not start or not end:
+            return []
+        wanted = None
+        if days is not None:
+            wanted = sorted({self._glb_day(value) for value in days if self._glb_day(value)})
+            if not wanted:
+                return []
+        conditions = ['day BETWEEN %s AND %s']
+        params = [start, end]
+        if wanted is not None:
+            conditions.append('day = ANY(%s)')
+            params.append(wanted)
+        needle = str(query or '').strip()
+        if needle:
+            conditions.append('(employee_name ILIKE %s OR COALESCE(position_name, \'\') ILIKE %s)')
+            params.extend([f'%{needle}%'] * 2)
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT {', '.join(self.GLB_ATTENDANCE_COLUMNS)}
+                FROM glb_attendance_rows
+                WHERE {' AND '.join(conditions)}
+                ORDER BY day, employee_name, seq
+            """, params)
+            return [dict(zip(self.GLB_ATTENDANCE_COLUMNS, row)) for row in cursor.fetchall()]
+
+    def glb_forget_attendance_days(self, day_from=None, day_to=None):
+        """Сбрасывает кэш дней: правила плана поменялись — прошлое надо пересчитать."""
+        start, end = self._glb_day(day_from), self._glb_day(day_to)
+        conditions, params = [], []
+        if start:
+            conditions.append('day >= %s')
+            params.append(start)
+        if end:
+            conditions.append('day <= %s')
+            params.append(end)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ''
+        with self._get_cursor() as cursor:
+            cursor.execute(f"DELETE FROM glb_attendance_rows {where}", params)
+            cursor.execute(f"DELETE FROM glb_attendance_days {where}", params)
+            return cursor.rowcount or 0
+
+    def glb_cleanup_attendance_cache(self, keep_days=None):
+        """Чистка кэша по глубине хранения. Гоняется той же ночной джобой."""
+        keep = int(keep_days or self.GLB_ATTENDANCE_RETENTION_DAYS)
+        edge = date.today() - timedelta(days=max(1, keep))
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM glb_attendance_rows WHERE day < %s", (edge,))
+            removed = cursor.rowcount or 0
+            cursor.execute("DELETE FROM glb_attendance_days WHERE day < %s", (edge,))
+        return removed
+
+    def glb_attendance_directory(self, department=None):
+        """Справочники фильтров раздела: подразделения и состав ОБОИХ источников.
+
+        Отдельно от `get_group_late_departments`: тот справочник — про отделы
+        Workpace и маршрутизацию чатов, а здесь нужны и подразделения Clockster,
+        которых в маршрутизации нет и быть не должно (уведомления по ним не
+        уходят — ТЗ #307, п. 3)."""
+        dept = self._glb_department(department)
+        scope_sql = '' if not dept else ' AND lower(COALESCE(department_name, \'\')) = lower(%s)'
+        scope_params = () if not dept else (dept,)
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT COALESCE(NULLIF(btrim(department_name), ''), 'Без отдела') AS name,
+                       source, COUNT(*)
+                FROM glb_employees
+                WHERE TRUE{scope_sql}
+                GROUP BY 1, 2
+                ORDER BY 1
+            """, scope_params)
+            departments = [{'name': row[0], 'source': row[1], 'employees_count': int(row[2] or 0)}
+                           for row in cursor.fetchall()]
+            cursor.execute(f"""
+                SELECT ext_id, full_name,
+                       COALESCE(NULLIF(btrim(department_name), ''), 'Без отдела'),
+                       position_name, source
+                FROM glb_employees
+                WHERE TRUE{scope_sql}
+                ORDER BY full_name
+            """, scope_params)
+            employees = [{'id': row[0], 'name': row[1], 'department': row[2],
+                          'position': row[3], 'source': row[4]}
+                         for row in cursor.fetchall()]
+        return {'departments': departments, 'employees': employees}
+
+    # ─── Свой график смен (ТЗ #307, п. 5) ────────────────────────────────────
+
+    GLB_PLAN_RULE_SCOPES = ('department', 'employee')
+    GLB_PLAN_RULE_MODES = ('schedule', 'hours')
+
+    @staticmethod
+    def _glb_plan_rule_row(row):
+        keys = ('id', 'scope', 'target', 'target_label', 'mode', 'weekdays', 'date_from',
+                'date_to', 'time_start', 'time_end', 'break_minutes', 'hours_norm', 'note',
+                'enabled', 'created_by', 'created_at', 'author_name')
+        item = dict(zip(keys, row))
+        item['weekdays'] = [int(day) for day in (item['weekdays'] or [])]
+        item['date_from'] = item['date_from'].isoformat() if item['date_from'] else None
+        item['date_to'] = item['date_to'].isoformat() if item['date_to'] else None
+        item['created_at'] = item['created_at'].isoformat() if item['created_at'] else None
+        item['hours_norm'] = float(item['hours_norm']) if item['hours_norm'] is not None else None
+        return item
+
+    def glb_plan_rules(self, department=None, enabled_only=False):
+        """Правила своего графика. Глава отдела видит только правила своего отдела."""
+        dept = self._glb_department(department)
+        conditions = []
+        params = []
+        if enabled_only:
+            conditions.append('r.enabled')
+        if dept:
+            # Адресное правило на человека чужого отдела за границу не пускаем:
+            # подпись правила хранит подразделение, по нему и режем.
+            conditions.append("""(
+                (r.scope = 'department' AND lower(r.target) = lower(%s))
+                OR (r.scope = 'employee' AND lower(COALESCE(r.target_label, '')) LIKE %s)
+            )""")
+            params.extend([dept, f'%{dept.lower()}%'])
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ''
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT r.id, r.scope, r.target, r.target_label, r.mode, r.weekdays,
+                       r.date_from, r.date_to, r.time_start, r.time_end, r.break_minutes,
+                       r.hours_norm, r.note, r.enabled, r.created_by, r.created_at, u.name
+                FROM glb_plan_rules r
+                LEFT JOIN users u ON u.id = r.created_by
+                {where}
+                ORDER BY r.scope, lower(COALESCE(r.target_label, r.target)), r.id
+            """, params)
+            return [self._glb_plan_rule_row(row) for row in cursor.fetchall()]
+
+    def glb_save_plan_rule(self, rule, created_by=None):
+        """Создаёт или правит правило и СБРАСЫВАЕТ кэш затронутых дней.
+
+        Сброс обязателен: строки кэша уже посчитаны со старым планом, и без него
+        новое правило проявилось бы только на днях, которые ещё не открывали."""
+        scope = str((rule or {}).get('scope') or '').strip().lower()
+        if scope not in self.GLB_PLAN_RULE_SCOPES:
+            raise ValueError('Правило ставится либо на подразделение, либо на сотрудника')
+        target = str((rule or {}).get('target') or '').strip()
+        if not target:
+            raise ValueError('Не указано, на кого ставится правило')
+        mode = str(rule.get('mode') or 'schedule').strip().lower()
+        if mode not in self.GLB_PLAN_RULE_MODES:
+            raise ValueError('Режим бывает «по графику» или «по часам»')
+
+        def _time(value):
+            text = str(value or '').strip()
+            if not text:
+                return None
+            try:
+                return datetime.strptime(text[:5], '%H:%M').strftime('%H:%M')
+            except ValueError:
+                raise ValueError('Время указывается как ЧЧ:ММ')
+
+        time_start = _time(rule.get('time_start'))
+        time_end = _time(rule.get('time_end'))
+        hours_norm = rule.get('hours_norm')
+        hours_norm = float(hours_norm) if hours_norm not in (None, '') else None
+        if mode == 'schedule' and not (time_start and time_end):
+            raise ValueError('У графика должны быть начало и конец смены')
+        if mode == 'hours' and not hours_norm:
+            raise ValueError('У режима «по часам» должна быть норма часов')
+        if hours_norm is not None and not (0 < hours_norm <= 24):
+            raise ValueError('Норма часов — от 0 до 24')
+
+        weekdays = sorted({int(day) for day in (rule.get('weekdays') or [])
+                           if str(day).strip().isdigit() and 1 <= int(day) <= 7})
+        date_from = self._glb_day(rule.get('date_from'))
+        date_to = self._glb_day(rule.get('date_to'))
+        if date_from and date_to and date_to < date_from:
+            date_from, date_to = date_to, date_from
+        break_minutes = rule.get('break_minutes')
+        break_minutes = int(break_minutes) if str(break_minutes or '').strip() != '' else None
+        if break_minutes is not None and not (0 <= break_minutes <= 480):
+            raise ValueError('Перерыв — от 0 до 480 минут')
+
+        values = (scope, target[:200], (str(rule.get('target_label') or '').strip()[:300] or None),
+                  mode, (weekdays or None), date_from, date_to, time_start, time_end,
+                  break_minutes, hours_norm,
+                  (str(rule.get('note') or '').strip()[:500] or None),
+                  bool(rule.get('enabled', True)))
+        rule_id = rule.get('id')
+        with self._get_cursor() as cursor:
+            if rule_id:
+                cursor.execute("""
+                    UPDATE glb_plan_rules SET
+                        scope = %s, target = %s, target_label = %s, mode = %s, weekdays = %s,
+                        date_from = %s, date_to = %s, time_start = %s, time_end = %s,
+                        break_minutes = %s, hours_norm = %s, note = %s, enabled = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                """, values + (int(rule_id),))
+            else:
+                cursor.execute("""
+                    INSERT INTO glb_plan_rules
+                        (scope, target, target_label, mode, weekdays, date_from, date_to,
+                         time_start, time_end, break_minutes, hours_norm, note, enabled, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, values + (int(created_by) if created_by else None,))
+            saved = cursor.fetchone()
+            if not saved:
+                raise ValueError('Правило не найдено')
+            rule_id = int(saved[0])
+        self.glb_forget_attendance_days(day_from=date_from)
+        return rule_id
+
+    def glb_delete_plan_rule(self, rule_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM glb_plan_rules WHERE id = %s RETURNING date_from",
+                           (int(rule_id),))
+            row = cursor.fetchone()
+        if not row:
+            return False
+        self.glb_forget_attendance_days(day_from=row[0])
+        return True
 
 
 # Initialize database

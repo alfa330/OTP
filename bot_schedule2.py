@@ -8016,7 +8016,11 @@ _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL = 600
 # Сколько дней отметок отдаётся на экран за один запрос. Данные тянутся из двух
 # внешних API прямо в запросе, и каждый лишний день — ещё два обращения к Workpace.
 # Неделя закрывает «посмотреть, что было», а месяц кадровик берёт выгрузкой.
-GROUP_LATE_ATTENDANCE_MAX_DAYS = 6
+# Потолок периода на экране. До задачи #307 он равнялся шести дням, потому что
+# каждый день собирался из Workpace прямо в запросе. С кэшем дней ограничение
+# перестало быть про скорость и осталось только страховкой от случайного запроса
+# на десятилетие: год открывается из базы, а не из чужого API.
+GROUP_LATE_ATTENDANCE_MAX_DAYS = 365
 
 # Сколько человек можно выбрать в одну выгрузку. Предел не от базы, а от смысла:
 # длинный список ФИО в фильтре — это уже «весь отдел», и его надо брать отделом.
@@ -8458,11 +8462,13 @@ def api_group_late_bot_events():
 @app.route('/api/group_late_bot/attendance', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_attendance():
-    """Отметки прихода и ухода за период по обоим источникам (задача #273).
+    """Отметки прихода и ухода за период по обоим источникам (задачи #273, #307).
 
-    Тянет из внешних API прямо в запросе: за день это два обращения к Workpace и
-    три к Clockster. Поэтому окно экрана короткое — длинные периоды собирает
-    выгрузка, она и считается в фоне."""
+    Период больше не ограничен неделей: прошедшие дни лежат в кэше
+    (`group_late.attendance_cache`), а из внешних API тянется только сегодняшний.
+    Дни, которые не успели добрать за один заход, возвращаются в `pending_days`
+    — молча обрезать период нельзя, иначе кадровик решит, что в эти дни никто не
+    отмечался."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     _, scope, err = _group_late_bot_guard()
@@ -8491,16 +8497,16 @@ def api_group_late_bot_attendance():
             date_start, date_end = date_end, date_start
         if (date_end - date_start).days > GROUP_LATE_ATTENDANCE_MAX_DAYS:
             return jsonify({
-                "error": f"На экране показывается не больше "
-                         f"{GROUP_LATE_ATTENDANCE_MAX_DAYS + 1} дн. "
-                         f"За больший период соберите выгрузку.",
+                "error": f"Период не должен превышать "
+                         f"{GROUP_LATE_ATTENDANCE_MAX_DAYS + 1} дн.",
                 "code": "PERIOD_TOO_LONG",
             }), 400
 
-        payload = _attendance.collect(
+        from group_late import attendance_cache as _attendance_cache
+        payload = _attendance_cache.rows_for(
             db, date_start, date_end,
             department=scope or request.args.get('department'),
-            now_local=now_local,
+            refresh=str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes'),
         )
         rows = _attendance.search_rows(payload['rows'], request.args.get('q'))
         rows = _attendance.sort_rows(rows, request.args.get('sort'))
@@ -8534,11 +8540,105 @@ def api_group_late_bot_attendance():
             'date_end': date_end.isoformat(),
             'department_scope': scope,
             'clockster_error': payload.get('clockster_error'),
+            'pending_days': payload.get('pending_days') or [],
+            'built_days': payload.get('built_days', 0),
+            'cached_days': payload.get('cached_days', 0),
         }), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
     except Exception as error:
         logging.exception("group_late_bot attendance failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/directory', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_directory():
+    """Справочники фильтров раздела «Отметки»: подразделения и состав (ТЗ #307).
+
+    Отдельно от `/departments`: тот справочник — про отделы Workpace и
+    маршрутизацию уведомлений по чатам, а здесь нужен ещё и центральный офис из
+    Clockster. Уведомления по нему не уходят и уходить не должны (п. 3), поэтому
+    в маршрутизации этих подразделений нет — а в фильтре и в выборе людей для
+    отчёта они обязаны быть."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, scope, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        payload = db.glb_attendance_directory(department=scope)
+        payload['status'] = 'success'
+        payload['department_scope'] = scope
+        return jsonify(payload), 200
+    except Exception as error:
+        logging.exception("group_late_bot directory failed")
+        return jsonify({"error": str(error)}), 500
+
+
+def _group_late_plan_rule_in_scope(rule, scope):
+    """Правило «своё», только если его адресат целиком внутри отдела запрашивающего."""
+    if not scope:
+        return True
+    needle = str(scope).strip().casefold()
+    if str(rule.get('scope') or '') == 'department':
+        return str(rule.get('target') or '').strip().casefold() == needle
+    return needle in str(rule.get('target_label') or '').casefold()
+
+
+@app.route('/api/group_late_bot/plan_rules', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_plan_rules():
+    """Свой график смен раздела «Отметки» (ТЗ #307, п. 5).
+
+    План ставится на проект целиком или на конкретного человека — в том числе на
+    выходные дни, которых нет ни в Workpace, ни в Clockster. Наш план ДОПОЛНЯЕТ
+    источники: он появляется только там, где смены нет. Иначе одно правило на
+    отдел перебило бы настоящий сменный график колл-центра."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, scope, err = _group_late_bot_guard()
+    if err:
+        return err
+    if request.method == 'GET':
+        try:
+            return jsonify({'status': 'success', 'items': db.glb_plan_rules(department=scope),
+                            'department_scope': scope}), 200
+        except Exception as error:
+            logging.exception("group_late_bot plan rules failed")
+            return jsonify({"error": str(error)}), 500
+
+    payload = request.get_json(silent=True) or {}
+    if not _group_late_plan_rule_in_scope(payload, scope):
+        return _group_late_bot_scope_forbidden('График на чужое подразделение')
+    try:
+        rule_id = db.glb_save_plan_rule(payload, created_by=requester_id)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot plan rule save failed")
+        return jsonify({"error": str(error)}), 500
+    return jsonify({'status': 'success', 'id': rule_id}), 200
+
+
+@app.route('/api/group_late_bot/plan_rules/<int:rule_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_plan_rule_item(rule_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, scope, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        if scope:
+            mine = {int(item['id']) for item in db.glb_plan_rules(department=scope)}
+            if int(rule_id) not in mine:
+                return _group_late_bot_scope_forbidden('График чужого подразделения')
+        if not db.glb_delete_plan_rule(rule_id):
+            return jsonify({"error": "Правило не найдено"}), 404
+        return jsonify({'status': 'success'}), 200
+    except Exception as error:
+        logging.exception("group_late_bot plan rule delete failed")
         return jsonify({"error": str(error)}), 500
 
 
@@ -60369,6 +60469,39 @@ async def group_late_poll_job():
         logging.exception("group_late: ошибка джобы опроса: %s", error)
 
 
+def group_late_nightly_job():
+    """Ночная джоба раздела «Отметки» (ТЗ #307): состав Clockster и кэш дней.
+
+    Три дела подряд и намеренно в одном месте: они делят один поход в Clockster.
+    Справочник `/users` там платится один раз, а дальше из него и состав для
+    фильтров, и подписи строк кэша.
+
+    Досбор идёт за неделю назад, а не за один вчерашний день: сервис на Render
+    засыпает и перезапускается, и пропущенная ночь иначе оставила бы дырку в
+    периоде навсегда — кадровик увидел бы пустой день вместо отметок."""
+    from group_late import attendance_cache as _attendance_cache
+    from group_late import clockster as _clockster
+    from group_late import config as _group_late_config
+    # Состав первым: строки кэша достраиваются по нему (правило графика на
+    # выходной должно найти человека, которого в этот день нет ни в одной системе).
+    if _group_late_config.is_clockster_configured():
+        try:
+            saved = db.glb_sync_employees(
+                _clockster.roster(_clockster.clockster_client.get_users()), source='clockster')
+            logging.info("Отметки: состав Clockster — %s чел.", saved)
+        except Exception:
+            logging.exception("Отметки: состав Clockster не обновлён")
+    try:
+        built = _attendance_cache.backfill(db, days=7)
+        if built:
+            logging.info("Отметки: дособрано дней — %s", built)
+        removed = db.glb_cleanup_attendance_cache()
+        if removed:
+            logging.info("Отметки: из кэша убрано строк — %s", removed)
+    except Exception:
+        logging.exception("Отметки: ночная джоба не удалась")
+
+
 async def _group_late_poll_cycle():
     """Полный цикл опроса: найти нарушения → разослать → записать результат."""
     loop = asyncio.get_event_loop()
@@ -61168,6 +61301,18 @@ if __name__ == '__main__':
             coalesce=True
         )
         logging.info("⏰ Контроль опозданий: опрос Workpace каждые 2 минуты")
+        # Кэш дней раздела «Отметки» и состав центрального офиса. 03:20 — после
+        # полуночи по Алматы, когда вчерашний день уже закрыт обоими источниками,
+        # и до утреннего наплыва на раздел.
+        scheduler.add_job(
+            group_late_nightly_job,
+            CronTrigger(hour=3, minute=20, timezone=group_late.TZ),
+            id='group_late_nightly',
+            misfire_grace_time=3600,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Отметки: ночной досбор кэша и состава в 03:20")
     else:
         logging.warning("⏰ Контроль опозданий выключен: не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD")
 

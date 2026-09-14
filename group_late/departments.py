@@ -110,6 +110,19 @@ def count_departments(employees: Iterable[dict]) -> dict[str, int]:
     return counts
 
 
+def _position_name(employee: dict) -> Optional[str]:
+    """Должность из карточки. Поле бывает и строкой, и объектом со `title` —
+    объект без разбора превратился бы в `{'id': 7, ...}` прямо в списке выбора."""
+    for field in ("positionName", "position", "jobTitle", "postName"):
+        value = employee.get(field)
+        if isinstance(value, dict):
+            value = value.get("title") or value.get("name")
+        value = _clean(value)
+        if value:
+            return value
+    return None
+
+
 def employee_roster(employees: Iterable[dict]) -> list[dict]:
     """Состав отделов для кэша `glb_employees`: id, ФИО, отдел.
 
@@ -127,6 +140,9 @@ def employee_roster(employees: Iterable[dict]) -> list[dict]:
                                   or employee.get("employeeExternalId")) or None,
             "full_name": full_name,
             "department_name": department_name_from_fields(employee) or NO_DEPARTMENT,
+            # Должность нужна выбору людей в отчёт: кадровик ищет и по ней
+            # (ТЗ #273), а список без неё — две сотни одинаковых строк.
+            "position_name": _position_name(employee),
         })
     return rows
 

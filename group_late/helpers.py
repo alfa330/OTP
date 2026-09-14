@@ -88,6 +88,41 @@ def net_work_seconds(span_seconds: float, planned_break_seconds=None) -> int:
     return max(0, int(span_seconds) - lunch_seconds(span_seconds, planned_break_seconds))
 
 
+def presence_seconds(marks) -> int:
+    """Сколько человек РЕАЛЬНО был на месте: сумма отрезков «вход → выход».
+
+    Отличается от `net_work_seconds` тем, что считает по ВСЕМ отметкам дня, а не
+    по первому входу и последнему выходу. Именно этого не хватало кадровому учёту
+    (ТЗ #307, п. 2, приложение «Просчет без учета всех отметок»): человек ушёл в
+    13:23 и вернулся в 14:31, а время в работе считалось так, будто он никуда не
+    уходил, и разошлось с табелем на час с лишним.
+
+    Незакрытый вход в конце дня отбрасывается: досчитывать его до конца суток
+    значило бы придумать уход, которого не было. Выход без пары игнорируется по
+    той же причине.
+
+    Оба числа живут рядом намеренно: по графику считается «время в работе» (там
+    вычитается обед), а по часам — присутствие. Сводить их в одно нельзя, потому
+    что у первого обед плановый, а у второго он и так виден отметками."""
+    total = 0
+    opened = None
+    for mark in sorted(marks or [], key=lambda item: str(mark_date(item) or "")):
+        when = parse_dt(mark_date(mark))
+        if not when:
+            continue
+        kind = mark_type(mark)
+        if kind == 0:
+            # Второй вход подряд — терминал не увидел выхода. Берём ПЕРВЫЙ из
+            # пары: иначе пропущенный выход съедал бы уже отработанное время.
+            if opened is None:
+                opened = when
+            continue
+        if kind == 1 and opened is not None:
+            total += max(0, int((when - opened).total_seconds()))
+            opened = None
+    return total
+
+
 def employee_name(item: dict) -> str:
     return item.get("employeeName") or item.get("name") or item.get("fullName") or "—"
 

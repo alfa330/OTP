@@ -255,6 +255,39 @@ def to_records(schedule_rows, user_lookup=None):
     return records, marks
 
 
+def roster(users) -> list[dict]:
+    """Состав Clockster для кэша `glb_employees` — в форме `employee_roster`.
+
+    Нужен затем же, зачем состав Workpace: без него центрального офиса нет ни в
+    фильтре подразделений, ни в выборе людей для отчёта (ТЗ #307). Уволенных
+    (`deleted_at`) пропускаем — иначе в списке копится история, которой в
+    Workpace-половине справочника нет.
+
+    Идентификатор тот же, что у строк раздела: `clockster:<id>`. Совпадение
+    обязательно — по нему адресное правило графика находит человека, а строки
+    кэша сходятся со справочником."""
+    rows: list[dict] = []
+    for user in users or []:
+        user_id = user.get("id")
+        if user_id is None or user.get("deleted_at"):
+            continue
+        name = full_name(user)
+        if not name:
+            continue
+        location = _titled(user.get("location"))
+        rows.append({
+            "ext_id": f"{MARK_SYSTEM}:{user_id}",
+            "external_id": str(user.get("code") or "").strip() or None,
+            "full_name": name,
+            # В справочнике отдел заполнен не у всех, а локация — почти у всех;
+            # тот же порядок, что в `to_records`, иначе один человек оказался бы
+            # в разных подразделениях в таблице и в фильтре.
+            "department_name": _titled(user.get("department")) or location,
+            "position_name": _titled(user.get("position")),
+        })
+    return rows
+
+
 def build_user_lookup(users) -> dict[str, dict]:
     """{id пользователя: должность/локация/отдел} — в клетке расписания они бывают
     пустыми, а в справочнике заполнены; иначе колонка «Должность» пустеет без причины."""
