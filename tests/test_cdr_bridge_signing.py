@@ -176,6 +176,28 @@ class KeygenTests(unittest.TestCase):
         self.assertIn(signer.key_id, text)
         self.assertNotIn(private_b64, text, 'закрытый ключ напечатан, хотя просили файл')
 
+    def test_keygen_refuses_to_write_inside_a_git_checkout(self):
+        # Репозиторий публичный: ключ, созданный внутри клона, уезжает в него
+        # первым же `git add -A`. Команда обязана отказаться, а не предупредить.
+        import io
+        from contextlib import redirect_stdout
+        root = tempfile.mkdtemp()
+        os.mkdir(os.path.join(root, '.git'))
+        target = os.path.join(root, 'cdr_bridge', 'agent.key')
+        os.makedirs(os.path.dirname(target))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = agent_mod.keygen(target)
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(target), 'ключ записан внутрь репозитория')
+        self.assertIn('репозитория', out.getvalue())
+
+    def test_inside_git_checkout_detects_parents_and_stops_at_root(self):
+        root = tempfile.mkdtemp()
+        self.assertFalse(agent_mod.inside_git_checkout(os.path.join(root, 'x', 'agent.key')))
+        os.mkdir(os.path.join(root, '.git'))
+        self.assertTrue(agent_mod.inside_git_checkout(os.path.join(root, 'x', 'y', 'agent.key')))
+
 
 if __name__ == '__main__':
     unittest.main()

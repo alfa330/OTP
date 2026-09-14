@@ -11,6 +11,12 @@
 
 Одиночный номер-пример в юнит-тесте не ловим намеренно: такой тест быстро
 начинают выключать. Нужен образец — берите заведомо выдуманный номер.
+
+Третий класс — секреты шлюза в корпоративную сеть: закрытый ключ подписи моста
+и его настройки. Они живут только в /etc/otp-gateway на самой машине; здесь
+проверяется, что ни файл с таким именем, ни заполненное значение ключа или
+токена не оказались под контролем Git. Образцы с плейсхолдерами (`<токен>`,
+пустое значение) проходят.
 """
 
 import io
@@ -48,6 +54,17 @@ _PERSONAL_MAIL_RE = re.compile(
 # Собственные линии компании лежат в bot_schedule2.py как рабочий конфиг —
 # это не персональные данные, а телефонная схема, по которой считается билинг.
 ALLOWED_DUMPS = {"bot_schedule2.py"}
+
+# Имена файлов с секретами шлюза. Совпадение по имени — уже утечка, содержимое
+# не смотрим: пустой agent.key в репозитории значит, что кто-то положил его туда
+# и следующая версия будет непустой.
+_SECRET_FILE_RE = re.compile(r"(^|/)(agent\.key(\..*)?|gw\.env|\.env\.codex\.local|[^/]+\.key)$")
+
+# Заполненные значения. Закрытый ключ Ed25519 — 32 байта, в base64 это ровно
+# 44 знака с одним «=» на конце; токен — 20+ знаков без пробелов и без «<»,
+# чтобы плейсхолдер `<токен>` из образцов не считался утечкой.
+_PRIVATE_KEY_RE = re.compile(r"CDR_AGENT_PRIVATE_KEY\s*[=:]\s*['\"]?([A-Za-z0-9+/]{43}=)")
+_TOKEN_VALUE_RE = re.compile(r"^\s*CDR_AGENT_TOKEN\s*=\s*['\"]?([^\s<'\"#]{20,})", re.MULTILINE)
 
 _SKIP_DIRS = ("node_modules/", "dist/", "build/", ".venv/")
 _SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2",
@@ -92,6 +109,37 @@ class NoPersonalDataTests(unittest.TestCase):
         self.assertEqual([], offenders,
                          "Личные почты в публичном репозитории:\n" +
                          "\n".join(offenders))
+
+    def test_no_gateway_secret_files(self):
+        offenders = [name for name in _tracked_files() if _SECRET_FILE_RE.search(name)]
+        self.assertEqual([], offenders,
+                         "Файлы с секретами шлюза под контролем Git:\n" +
+                         "\n".join(offenders))
+
+    def test_no_filled_in_gateway_secrets(self):
+        offenders = []
+        for name in _tracked_files():
+            text = _read(name)
+            if _PRIVATE_KEY_RE.search(text):
+                offenders.append("%s — закрытый ключ подписи моста" % name)
+            if _TOKEN_VALUE_RE.search(text):
+                offenders.append("%s — заполненный CDR_AGENT_TOKEN" % name)
+        self.assertEqual([], offenders,
+                         "Заполненные секреты шлюза в публичном репозитории:\n" +
+                         "\n".join(offenders))
+
+    def test_secret_patterns_catch_the_real_thing(self):
+        # Страж, который ничего не ловит, хуже отсутствия стража: проверяем на образцах.
+        self.assertTrue(_SECRET_FILE_RE.search("cdr_bridge/agent.key"))
+        self.assertTrue(_SECRET_FILE_RE.search("gateway/gw.env"))
+        self.assertTrue(_SECRET_FILE_RE.search(".env.codex.local"))
+        self.assertFalse(_SECRET_FILE_RE.search("gateway/gw.env.example"))
+        self.assertFalse(_SECRET_FILE_RE.search("src/keyboard.js"))
+        self.assertTrue(_PRIVATE_KEY_RE.search(
+            "CDR_AGENT_PRIVATE_KEY=" + "A" * 43 + "="))
+        self.assertTrue(_TOKEN_VALUE_RE.search("CDR_AGENT_TOKEN=abcdefghij0123456789xyz"))
+        self.assertFalse(_TOKEN_VALUE_RE.search("CDR_AGENT_TOKEN=<токен>"))
+        self.assertFalse(_TOKEN_VALUE_RE.search("# CDR_AGENT_TOKEN="))
 
 
 if __name__ == "__main__":

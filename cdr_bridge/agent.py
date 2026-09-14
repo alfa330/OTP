@@ -407,10 +407,29 @@ class Bridge:
                 error_sleep = min(error_sleep * 2, ERROR_SLEEP_MAX)
 
 
+def inside_git_checkout(path):
+    """Лежит ли путь внутри рабочей копии git — то есть там, откуда файл может
+    уехать в репозиторий одним неосторожным `git add -A`. Репозиторий проекта
+    публичный, поэтому закрытому ключу там не место ни под каким именем."""
+    current = os.path.dirname(os.path.abspath(path))
+    while True:
+        if os.path.exists(os.path.join(current, '.git')):
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def keygen(target):
     """Новый ключ подписи. Закрытая часть — в файл с правами 600 (или на экран,
     если файла не просили), открытая с идентификатором — всегда на экран: их
     вносят на портал в CDR_AGENT_KEYS."""
+    if target != '-' and inside_git_checkout(target):
+        print('Отказ: %s лежит внутри репозитория git. Закрытый ключ хранят вне клона — '
+              'например, в /etc/otp-gateway/agent.key или C:\\ProgramData\\otp\\agent.key.'
+              % target)
+        return 2
     private_b64, public_b64, kid = signing.generate()
     if target == '-':
         print('Закрытый ключ (CDR_AGENT_PRIVATE_KEY, никому не показывать):')

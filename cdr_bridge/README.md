@@ -93,8 +93,12 @@ pip install -r cdr_bridge\requirements.txt
 открытую часть, так что утечка настроек портала ничего не даёт. Создать:
 
 ```
-python -m cdr_bridge.agent --keygen C:\otp\agent.key
+python -m cdr_bridge.agent --keygen C:\ProgramData\otp\agent.key
 ```
+
+Путь — **вне клона репозитория**: внутрь рабочей копии git команда писать
+откажется (репозиторий публичный, и `git add -A` не спрашивает, что добавляет).
+На Linux-шлюзе ключ создаёт установщик и кладёт в `/etc/otp-gateway/agent.key`.
 
 Открытый ключ и его идентификатор мост напечатает — их вносят на портале в
 `CDR_AGENT_KEYS` (Render → переменные окружения; несколько ключей — через запятую,
