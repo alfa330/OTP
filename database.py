@@ -6507,6 +6507,7 @@ class Database:
             self._init_trainer_schema_tx(cursor)
             self._init_cdr_schema_tx(cursor)
             self._init_olx_amo_schema_tx(cursor)
+            self._init_olx_ads_schema_tx(cursor)
             self._init_op_funnel_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -7456,6 +7457,33 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT olx_amo_schema")
+
+    def _init_olx_ads_schema_tx(self, cursor):
+        """Схема раздела «Объявления OLX» (таблицы olx_ads_*).
+
+        Отдельно от «Лидов OLX» намеренно: разделы делят кабинеты и токены, но не
+        данные. Падение схемы объявлений не должно закрывать журнал лидов, а
+        падение схемы лидов — управление объявлениями.
+
+        SAVEPOINT — по той же причине, что у соседей: весь _init_db идёт одной
+        транзакцией, и падение здесь не должно ронять инициализацию всей базы.
+        При отказе раздел честно сообщает о себе через /api/olx_ads/ping
+        (schema_ready=false) и ничего не пишет в OLX.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT olx_ads_schema")
+        try:
+            from olx_ads.schema import init_olx_ads_schema
+            init_olx_ads_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT olx_ads_schema")
+            logging.exception(
+                "Схема раздела «Объявления OLX» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT olx_ads_schema")
 
     def _init_trainer_schema_tx(self, cursor):
         """Схема раздела «Тренажёр» (таблицы trainer_*).

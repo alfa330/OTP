@@ -208,6 +208,7 @@ const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsVi
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
 const OlxLeadsView = lazyWithRetry(() => import('./components/olx/OlxLeadsView'));
+const OlxAdsView = lazyWithRetry(() => import('./components/olx/OlxAdsView'));
 const TouchesView = lazyWithRetry(() => import('./components/cdr/TouchesView'));
 const OpFunnelView = lazyWithRetry(() => import('./components/op_funnel/OpFunnelView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
@@ -349,6 +350,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   touches — 'op' (TOUCHES_SECTION_DEPARTMENT_CODE);
  *   op_funnel — 'op' (OP_FUNNEL_SECTION_DEPARTMENT_CODE);
  *   olx_leads — OLX_LEADS_HEAD_DEPARTMENT_CODES;
+ *   olx_ads — тот же периметр, что у olx_leads (canAccessOlxAdsForUser);
  *   wazzup_chats — VERIFIER_CHATS_HEAD_DEPARTMENT_CODES;
  *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
@@ -378,6 +380,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     chatapp_chats: ['tez'],
     driver_chats: ['szov'],
     olx_leads: ['op', 'marketing'],
+    olx_ads: ['op', 'marketing'],
     touches: ['op'],
     op_funnel: ['op'],
     // Смены, часы, ресурсы
@@ -658,6 +661,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
     olx_leads: 'OLX leads',
+    olx_ads: 'OLX adverts',
     touches: 'Sales touches',
     op_funnel: 'Sales funnel',
     profile: 'Profile',
@@ -2010,6 +2014,15 @@ const canAccessOlxLeadsForUser = (userLike) => {
     if (isMarketingObserver(userLike)) return true;
     return isOlxLeadsDepartmentHead(userLike);
 };
+
+/* «Объявления OLX» — тексты объявлений тех же девяти кабинетов (задача #299).
+   Аудитория ровно та же, что у «Лидов OLX»: маркетолог готовит тексты, главы
+   «Маркетинга» и ОП отвечают за то, что уходит наружу. Поэтому предикат не
+   свой, а тот же — второй список отделов под ту же аудиторию разъехался бы с
+   первым (та же связка на бэкенде: olx_ads/access.py берёт периметр из
+   olx_amo/access.py). Право ПУБЛИКОВАТЬ в OLX режется отдельно — на бэкенде
+   (can_apply), а кнопки фронт прячет по capabilities, не по этому предикату. */
+const canAccessOlxAdsForUser = (userLike) => canAccessOlxLeadsForUser(userLike);
 
 // Раздел «Чаты ChatApp» — переписка ТП и ОП ТЭЗ. Доступ: админы, глава отдела
 // ТЭЗ и СВ этого же отдела. СВ и главу режем по отделу намеренно (граница
@@ -38104,6 +38117,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
+            const canAccessOlxAdsSection = canAccessOlxAdsForUser(user);
             // «Касания»: глобальные админы, глава отдела продаж и СВ ОП.
             const canAccessTouchesSection = canAccessTouchesSectionForUser(user);
             // «Воронка ОП»: та же аудитория, что у «Касаний».
@@ -46893,6 +46907,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // предикат по той же причине: раздел общий для «Маркетинга» и
                 // ОП, и в allowlist каждого его пришлось бы вписывать отдельно.
                 if (view === 'olx_leads' && canAccessOlxLeadsSection) return;
+                // «Объявления OLX» — тексты объявлений тех же кабинетов, аудитория
+                // та же, поэтому и предикат тот же (canAccessOlxAdsForUser).
+                if (view === 'olx_ads' && canAccessOlxAdsSection) return;
                 // «Касания» — свой предикат, не allowlist отдела: раздел про
                 // отдел продаж, но открыт и админам, которые в ОП не состоят.
                 if (view === 'touches' && canAccessTouchesSection) return;
@@ -46907,7 +46924,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -48766,6 +48783,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
                                         canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
+                                        canAccessOlxAdsSection && deptAllowsInner('olx_ads'),
                                         canAccessTouchesSection && deptAllowsInner('touches'),
                                         canAccessOpFunnelSection && deptAllowsInner('op_funnel'),
                                         canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isAiQaSupervisor(user),
@@ -48886,6 +48904,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-right-left"></FaIcon>
                                                 <span className="sidebar-text">Лиды OLX</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Объявления OLX» — тексты объявлений тех же девяти
+                                        кабинетов (задача #299): бриф месяца, ИИ пишет
+                                        свой текст каждому объявлению, публикация
+                                        пачкой и история правок с откатом. Пункт объявлен
+                                        ОДИН раз здесь, рядом с «Лидами OLX», по той же
+                                        причине: аудитория разнородная (глобальные админы,
+                                        главы «Маркетинга» и ОП, маркетолог), и по ролевым
+                                        ветвям его легко забыть в одной из них. */}
+                                    {canAccessOlxAdsSection && (
+                                    <SidebarDeptScope section="olx_ads" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'olx_ads')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'olx_ads' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-pen-to-square"></FaIcon>
+                                                <span className="sidebar-text">Объявления OLX</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -49886,6 +49927,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "olx_leads" && canAccessOlxLeadsSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
                                 <OlxLeadsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "olx_ads" && canAccessOlxAdsSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <OlxAdsView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}

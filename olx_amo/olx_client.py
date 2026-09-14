@@ -455,6 +455,65 @@ class OlxClient(object):
         data, _, _ = self._request('GET', '/adverts/%s' % (advert_id,))
         return data or {}
 
+    # -- объявления кабинета (раздел «Объявления OLX», задача #299) ---------
+    #
+    # Проверено на живом 14.09.2026, и три вывода стоят того, чтобы лежать рядом
+    # с кодом, а не в переписке:
+    #
+    # * `GET /adverts` отдаёт объявления, СОЗДАННЫЕ НА САЙТЕ (`external_id=null`),
+    #   и `PUT` по ним ПРОХОДИТ. Гейт «Advert not belongs to partner (no partner
+    #   code)», который отвечает на `/adverts/{id}/paid-features`, к чтению и
+    #   правке не относится — он только про платные услуги;
+    # * параметр `status` список ИГНОРИРУЕТ: даже выдуманное значение отдаёт всё
+    #   целиком. Активные отбираются на нашей стороне, иначе в выборку попадут
+    #   `outdated`;
+    # * `metadata` и `links` в ответе списка нет, поэтому «сколько всего» узнать
+    #   нечем: идём страницами, пока страница полная.
+    def adverts(self, limit=50, offset=0):
+        """Одна страница объявлений кабинета."""
+        data, _, _ = self._request('GET', '/adverts', params={
+            'limit': int(limit), 'offset': int(offset)})
+        return list(data or [])
+
+    def all_adverts(self, page_size=50, max_pages=40):
+        """Все объявления кабинета, страницами.
+
+        `max_pages` — предохранитель от бесконечного обхода, если OLX начнёт
+        отдавать полную страницу на любом смещении. Сегодня самый большой
+        кабинет — 36 объявлений, то есть одна страница.
+        """
+        rows, offset = [], 0
+        for _ in range(int(max_pages)):
+            page = self.adverts(limit=page_size, offset=offset)
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return rows
+
+    def update_advert(self, advert_id, body):
+        """Заменить объявление целиком.
+
+        PATCH у Partner API НЕТ, `PUT` — полная замена объекта: обязательны
+        title, description, category_id, advertiser_type, contact, location,
+        attributes. Значит единственный правильный приём — read-modify-write:
+        прочитать объявление, подменить два поля и вернуть всё остальное теми же
+        значениями (см. `olx_ads/service.py::build_update_body`).
+
+        `auto_extend_enabled` намеренно НЕ передаём: по документации отсутствие
+        поля означает «не менять», и проверка на живом это подтвердила —
+        автопродление не слетело.
+        """
+        data, _, _ = self._request('PUT', '/adverts/%s' % (advert_id,),
+                                   json_body=body)
+        return data or {}
+
+    def moderation_reason(self, advert_id):
+        """Почему объявление отклонили. Приходит HTML письма модерации."""
+        data, _, _ = self._request('GET', '/adverts/%s/moderation-reason'
+                                   % (advert_id,))
+        return data or {}
+
     def mark_read(self, thread_id):
         """Отметить чат прочитанным.
 
