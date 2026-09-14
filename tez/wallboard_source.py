@@ -44,7 +44,7 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
-import tez_status_sync
+from tez import status_sync as tez_status_sync
 
 logger = logging.getLogger(__name__)
 

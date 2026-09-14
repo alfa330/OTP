@@ -308,7 +308,7 @@ class TezSalaryFormulaTests(unittest.TestCase):
 
 class TezBinotelSyncTests(unittest.TestCase):
     def test_sync_module_has_login_and_code_map(self):
-        src = (ROOT / "tez_status_sync.py").read_text(encoding="utf-8")
+        src = (ROOT / "tez" / "status_sync.py").read_text(encoding="utf-8")
         self.assertIn("logining[email]", src)
         self.assertIn("logining[password]", src)
         self.assertIn("analyticsEmployeesOnTimeline", src)
@@ -356,7 +356,7 @@ class TezBinotelRandomCallTests(unittest.TestCase):
         import sys
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
-        import tez_binotel_calls as tb
+        from tez import binotel_calls as tb
         cls.tb = tb
 
     def test_normalize_call_exposes_employee_and_recording(self):

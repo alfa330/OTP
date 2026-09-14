@@ -609,7 +609,7 @@ class TezLeadsCallBucketTests(unittest.TestCase):
 
     def test_window_start_matches_the_success_rule(self):
         """Окно не должно разъехаться с расчётом успешки — источник правды один."""
-        from tez_op_leads import call_window_for_period
+        from tez.op_leads import call_window_for_period
 
         for year, month in ((2026, 1), (2026, 3), (2026, 7), (2026, 12)):
             start, _ = call_window_for_period(year, month)

@@ -30,7 +30,7 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time, timedelta
 
-from tez_op_leads import (
+from tez.op_leads import (
     ALMATY_TZ,
     DEFAULT_MIN_BILLSEC,
     STATUS_SUCCESS,

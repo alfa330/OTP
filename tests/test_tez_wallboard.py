@@ -42,7 +42,7 @@ from tests import source_cache
 
 # Модуль-источник импортируется обычным import: в нём нет ни Flask, ни database.py — это его
 # заявленная граница. Настоящие парсеры нужны, чтобы тест сторожил арифметику, а не заглушку.
-import tez_wallboard_source as tez_source_real
+from tez import wallboard_source as tez_source_real
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -429,11 +429,18 @@ class _FakeCabinetSession:
 def _patched_source(state):
     """Подменяет модуль-источник целиком, оставляя настоящими все его парсеры.
 
-    Функция табло берёт источник через `import tez_wallboard_source` ВНУТРИ себя, поэтому
-    подмена делается в sys.modules, а не в namespace. Заменяется ровно поход в кабинет —
+    Функция табло берёт источник через `from tez import wallboard_source` ВНУТРИ себя,
+    поэтому подмена делается не в namespace. Заменяется ровно поход в кабинет —
     `fetch_snapshot` и `CabinetSession`; арифметика (`day_totals`, `summarize_*`) остаётся
-    настоящей, иначе тест сторожил бы заглушку."""
-    stub = types.ModuleType('tez_wallboard_source')
+    настоящей, иначе тест сторожил бы заглушку.
+
+    Подменять надо В ДВУХ местах: `from tez import wallboard_source` берёт АТРИБУТ пакета
+    и до sys.modules не доходит, если модуль уже импортирован в этом процессе. Одной
+    записи в sys.modules мало — тест ушёл бы в настоящий кабинет Binotel, оставшись
+    зелёным."""
+    import tez
+
+    stub = types.ModuleType('tez.wallboard_source')
     for name in dir(tez_source_real):
         if not name.startswith('__'):
             setattr(stub, name, getattr(tez_source_real, name))
@@ -459,15 +466,22 @@ def _patched_source(state):
     stub.fetch_day_employees = fetch_day_employees
     stub.CabinetSession = _FakeCabinetSession
     stub.is_configured = lambda config=None: True
-    previous = sys.modules.get('tez_wallboard_source')
-    sys.modules['tez_wallboard_source'] = stub
+    previous = sys.modules.get('tez.wallboard_source')
+    previous_attr = getattr(tez, 'wallboard_source', None)
+    sys.modules['tez.wallboard_source'] = stub
+    tez.wallboard_source = stub
     try:
         yield stub
     finally:
         if previous is None:
-            sys.modules.pop('tez_wallboard_source', None)
+            sys.modules.pop('tez.wallboard_source', None)
         else:
-            sys.modules['tez_wallboard_source'] = previous
+            sys.modules['tez.wallboard_source'] = previous
+        if previous_attr is None:
+            if hasattr(tez, 'wallboard_source'):
+                del tez.wallboard_source
+        else:
+            tez.wallboard_source = previous_attr
 
 
 # --- ПРАВА ----------------------------------------------------------------------------------

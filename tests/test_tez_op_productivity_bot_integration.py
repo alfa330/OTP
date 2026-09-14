@@ -13,7 +13,7 @@ BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tez_op_productivity  # noqa: E402
+from tez import op_productivity as tez_op_productivity  # noqa: E402
 from tests import source_cache
 
 

@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tez_lead_service  # noqa: E402
-from tez_op_leads import ALMATY_TZ  # noqa: E402
+from tez import lead_service as tez_lead_service  # noqa: E402
+from tez.op_leads import ALMATY_TZ  # noqa: E402
 
 
 def _xlsx_bytes(rows):
@@ -480,7 +480,7 @@ class SuccessDropWarningTests(unittest.TestCase):
         lead = {'id': 'L1', 'phone_norm': '77000000000', 'full_name': 'Тест',
                 'month_first_order_at': None, 'prev_month_first_order_at': None, 'calls': []}
         db = FakeDb([lead], successes_before=7)
-        with self.assertLogs('tez_lead_service', level='WARNING') as logs:
+        with self.assertLogs('tez.lead_service', level='WARNING') as logs:
             tez_lead_service.recompute_outcomes(db, 2026, 7)
         self.assertTrue(any('УМЕНЬШИЛИСЬ' in line for line in logs.output))
 
@@ -490,7 +490,7 @@ class FirstOrdersContractTests(unittest.TestCase):
 
     def _client_with_capture(self, payload):
         import json as _json
-        from tez_first_orders import TezFirstOrdersClient
+        from tez.first_orders import TezFirstOrdersClient
         sent = {}
 
         class _Resp:
@@ -518,7 +518,7 @@ class FirstOrdersContractTests(unittest.TestCase):
         self.assertEqual(sent['drivers'][0]['phone'], '+77000000101')
 
     def test_month_is_validated(self):
-        from tez_first_orders import TezFirstOrdersClient
+        from tez.first_orders import TezFirstOrdersClient
         client = TezFirstOrdersClient(token='x')
         for bad in ('', None, '2026', '07-2026'):
             with self.assertRaises(ValueError):
@@ -559,7 +559,7 @@ class FirstOrdersContractTests(unittest.TestCase):
             'month_first_order_at': '2026-08-08T09:52:05+05:00',
         }]}
         client, _ = self._client_with_capture(payload)
-        with self.assertLogs('tez_first_orders', level='WARNING') as logs:
+        with self.assertLogs('tez.first_orders', level='WARNING') as logs:
             client.fetch_first_orders(['77000000101'], month='2026-08')
         self.assertTrue(any('last_order_before_at' in line for line in logs.output))
 
@@ -573,7 +573,7 @@ class FirstOrdersContractTests(unittest.TestCase):
     def test_bad_number_does_not_sink_whole_batch(self):
         """400 из-за одного битого номера не должен терять остальные из батча:
         клиент делит батч пополам и изолирует только битый номер."""
-        from tez_first_orders import TezFirstOrdersClient
+        from tez.first_orders import TezFirstOrdersClient
         bad = '77000000001'   # этот номер API «отвергает»
 
         class _OkResp:
@@ -611,7 +611,7 @@ class BinotelBatchTruncationTests(unittest.TestCase):
     клиент должен дробить пачку, чтобы не терять звонки (а с ними успешки)."""
 
     def _client(self, calls_by_phone, guard):
-        import tez_binotel_calls as tbc
+        from tez import binotel_calls as tbc
 
         class _Client(tbc.BinotelApiClient):
             def __init__(self):
@@ -635,7 +635,7 @@ class BinotelBatchTruncationTests(unittest.TestCase):
         return _Client()
 
     def test_batch_split_recovers_dropped_numbers(self):
-        import tez_binotel_calls as tbc
+        from tez import binotel_calls as tbc
         # 6 номеров по 100 звонков = 600 > guard(400): без дробления часть выпадет.
         calls = {}
         gid = 0
@@ -662,12 +662,12 @@ class CloudflareDetectionTests(unittest.TestCase):
     """403 от TEZ APP c Cloudflare-заглушкой должен опознаваться (а не течь в UI сырым)."""
 
     def test_detects_cloudflare_page(self):
-        from tez_first_orders import _looks_like_cloudflare_block
+        from tez.first_orders import _looks_like_cloudflare_block
         cf = '<!DOCTYPE html><html class="no-js" lang="en-US"> error code: 1020 cloudflare'
         self.assertTrue(_looks_like_cloudflare_block(cf))
 
     def test_ignores_normal_json(self):
-        from tez_first_orders import _looks_like_cloudflare_block
+        from tez.first_orders import _looks_like_cloudflare_block
         self.assertFalse(_looks_like_cloudflare_block('{"drivers": []}'))
 
     def test_cloudflare_403_raises_clean_message(self):
@@ -676,7 +676,7 @@ class CloudflareDetectionTests(unittest.TestCase):
         Ветка исполняется только на Cloudflare-пути (прод-IP), поэтому локальный
         smoke-тест её не задевал — тут прогоняем её напрямую через фейковую сессию.
         """
-        from tez_first_orders import TezFirstOrdersClient
+        from tez.first_orders import TezFirstOrdersClient
 
         class _Resp:
             status_code = 403

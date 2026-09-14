@@ -27,7 +27,7 @@ ENV (.env.codex.local или окружение):
     TEZ_BINOTEL_TZ=Asia/Almaty                            # опционально
 
 Проверка вручную (без БД), чтобы сверить имена полей с реальным ответом:
-    python tez_binotel_calls.py --internal 907 --start 2026-06-01 --stop 2026-06-03
+    python -m tez.binotel_calls --internal 907 --start 2026-06-01 --stop 2026-06-03
 """
 
 import argparse

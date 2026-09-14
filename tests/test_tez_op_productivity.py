@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tez_op_productivity as productivity  # noqa: E402
+from tez import op_productivity as productivity  # noqa: E402
 
 
 def _unix(year, month, day, hour=0, minute=0, second=0):

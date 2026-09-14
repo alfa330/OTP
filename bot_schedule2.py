@@ -6050,7 +6050,7 @@ def api_ai_qa_pull_call():
             # безусловный 400 «период не больше 7 дней», ни один запрос до
             # Binotel не доходил. Тот же расчёт в журнале уже сделан верно
             # (rcAddDays(endDate, -(RC_TEZ_MAX_DAYS - 1))).
-            import tez_binotel_calls
+            from tez import binotel_calls as tez_binotel_calls
             window_days = max(1, AI_QA_PULL_CALL_DAYS)
             if department == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE:
                 # Отдельный зажим на случай, если окно раздела расширят через env:
@@ -7479,7 +7479,7 @@ class _ChatAppDbTokenStore:
 
 def _chatapp_client():
     """(client, cfg, company_id) или (None, cfg, None), если доступы не заданы."""
-    import chatapp_client
+    from tez import chatapp_client
     cfg = chatapp_client.get_config()
     if not chatapp_client.api_ready(cfg):
         return None, cfg, None
@@ -7559,7 +7559,7 @@ def sync_chatapp_data(days=None, date_from=None, date_to=None, rebuild_episodes=
     У списка чатов ChatApp нет фильтра по датам, поэтому пул набирается
     листанием назад по lastTime. Объёмы маленькие (порядка 200 чатов и 1000
     сообщений в сутки на обе лицензии), так что тянем всё окно целиком."""
-    import chatapp_client
+    from tez import chatapp_client
     client, cfg, company_id = _chatapp_client()
     if client is None:
         logging.info("chatapp sync: доступы не заданы, пропускаем")
@@ -25708,7 +25708,7 @@ def _binotel_store_record(imported_id, general_call_id):
     проставляет imported_calls.audio_path. Возвращает audio_path или None (записи нет /
     не удалось скачать). Синхронное ядро — используется и фоном, и докачкой по требованию
     из аудио-эндпоинта, чтобы запись появлялась даже если фоновый поток не отработал."""
-    import tez_binotel_calls
+    from tez import binotel_calls as tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
         return None
@@ -25751,7 +25751,7 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
 
     Период ограничен 7 днями: тогда список тянется одним запросом к Binotel и не
     упирается в его лимит частоты (см. также ретрай в tez_binotel_calls._post)."""
-    import tez_binotel_calls
+    from tez import binotel_calls as tez_binotel_calls
     cfg = tez_binotel_calls.get_config()
     if not tez_binotel_calls.api_ready(cfg):
         return jsonify({"error": "Интеграция с Binotel недоступна"}), 503
@@ -27088,7 +27088,7 @@ def sip_config_binotel_resolve_employee_ids_endpoint():
 
         # Форму входа держим в одном месте с ночной выгрузкой статусов: она уже
         # знает про прогрев cookie и про признак «остались на форме логина».
-        import tez_status_sync
+        from tez import status_sync as tez_status_sync
 
         # Кнопку «Определить автоматически» жмут в карточке ДО сохранения:
         # в binotel_user_accounts ещё пусто, а введённая рядом учётка уже есть.
@@ -39418,7 +39418,7 @@ def _tez_wallboard_guard():
 
 def _tez_wallboard_session():
     """Одна сессия кабинета на процесс: учётка у Binotel одна, параллельные входы гасят cookie."""
-    import tez_wallboard_source as tez_source
+    from tez import wallboard_source as tez_source
     session = _tez_wallboard_session_holder.get('session')
     if session is None:
         session = tez_source.CabinetSession(timeout=TEZ_WALLBOARD_HTTP_TIMEOUT_SECONDS)
@@ -39619,8 +39619,8 @@ def _tez_wallboard_roster(people, direction, employees, live_statuses):
 
 def _tez_wallboard_journal_worker(day_key):
     """Один поход в Binotel API за журналом дня. Крутится в СВОЁМ потоке."""
-    import tez_binotel_calls
-    import tez_wallboard_source as tez_source
+    from tez import binotel_calls as tez_binotel_calls
+    from tez import wallboard_source as tez_source
 
     calls, error = None, None
     if not tez_binotel_calls.api_ready():
@@ -39684,7 +39684,7 @@ def _tez_wallboard_journal(day_key):
 
 def _tez_wallboard_fetch_snapshot():
     """Один обход кабинета Binotel на ОБА табло Тез КЦ."""
-    import tez_wallboard_source as tez_source
+    from tez import wallboard_source as tez_source
 
     session = _tez_wallboard_session()
     raw = tez_source.fetch_snapshot(
@@ -39863,7 +39863,7 @@ def _api_tez_wallboard_direction(direction):
     requester_id, err = _tez_wallboard_guard()
     if err:
         return err
-    import tez_wallboard_source as tez_source
+    from tez import wallboard_source as tez_source
     if not tez_source.is_configured():
         return jsonify({"error": "Интеграция с Binotel недоступна: BINOTEL_LOGIN/BINOTEL_PASSWORD не заданы"}), 503
     try:
@@ -39935,13 +39935,13 @@ def _tez_wallboard_export_range(date_from, date_to):
 
 def tez_wallboard_source_today():
     """Сегодня глазами кабинета: сутки у Тез закрываются по Алматы."""
-    import tez_wallboard_source as tez_source
+    from tez import wallboard_source as tez_source
     return tez_source.cabinet_today()
 
 
 def _tez_wallboard_export_collect(direction, date_from, date_to):
     """Период по дню на день: состав направления на дату + его счётчики из кабинета."""
-    import tez_wallboard_source as tez_source
+    from tez import wallboard_source as tez_source
 
     start, end = _tez_wallboard_export_range(date_from, date_to)
     session = _tez_wallboard_session()
@@ -39989,7 +39989,7 @@ def api_tez_wallboard_export():
     requester_id, err = _tez_wallboard_guard()
     if err:
         return err
-    import tez_wallboard_source as tez_source
+    from tez import wallboard_source as tez_source
     if not tez_source.is_configured():
         return jsonify({"error": "Интеграция с Binotel недоступна: BINOTEL_LOGIN/BINOTEL_PASSWORD не заданы"}), 503
     direction = 'op' if str(request.args.get('direction') or '').strip().lower() == 'op' else 'tp'
@@ -40004,7 +40004,7 @@ def api_tez_wallboard_export():
         logging.error("Табло Тез КЦ: выгрузка не собралась: %s", exc, exc_info=True)
         return jsonify({"error": "Не удалось собрать выгрузку", "detail": str(exc)[:300]}), 503
     try:
-        import tez_wallboard_export as tez_export
+        from tez import wallboard_export as tez_export
         content = tez_export.build_workbook(payload)
         file_name = tez_export.export_file_name(payload)
     except Exception as exc:
@@ -41943,7 +41943,7 @@ def backfill_binotel_call_end_parties(max_months=6, batch_size=20000):
     (несостоявшиеся CANCEL/BUSY), помечаем проверенными, чтобы они не заслоняли
     остальные в следующих проходах.
     """
-    import tez_status_sync
+    from tez import status_sync as tez_status_sync
     cfg = tez_status_sync.get_config()
     if not cfg.get('login') or not cfg.get('password'):
         return {'status': 'skipped', 'reason': 'missing_credentials', 'updated': 0}
@@ -42248,8 +42248,8 @@ def _binotel_panel_call_end_parties(date_from, date_to):
     (сеть, смена вёрстки, отвалившийся логин) гасим и возвращаем пустой словарь:
     наполнение пула оценок важнее плашки «кто положил трубку».
     """
-    import tez_binotel_calls
-    import tez_status_sync
+    from tez import binotel_calls as tez_binotel_calls
+    from tez import status_sync as tez_status_sync
     cache_key = (str(date_from), str(date_to))
     now = time.time()
     with _BINOTEL_PANEL_PARTIES_LOCK:
@@ -42334,7 +42334,7 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
     Binotel обслуживает именно его). force=True игнорирует флаг enabled в настройках.
     progress — колбэк фонового прогона (stage/progress уходят в состояние job'а).
     """
-    import tez_binotel_calls
+    from tez import binotel_calls as tez_binotel_calls
 
     def _report(**fields):
         if progress:
@@ -45726,7 +45726,7 @@ def _tez_leads_call_bucket(call_at, year, month):
     """
     if not call_at:
         return None
-    from tez_op_leads import call_window_for_period
+    from tez.op_leads import call_window_for_period
 
     try:
         day = datetime.fromisoformat(str(call_at)).date()
@@ -45827,7 +45827,7 @@ def sync_tez_op_productivity_metrics(
     triggered_by='manual',
 ):
     """Собрать дневные звонки/набор/разговор ОП через официальный Binotel API."""
-    import tez_op_productivity
+    from tez import op_productivity as tez_op_productivity
 
     summary = tez_op_productivity.run_sync(
         db,
@@ -45842,14 +45842,14 @@ def sync_tez_op_productivity_metrics(
 
 
 def _tez_leads_first_orders_client():
-    import tez_first_orders
+    from tez import first_orders as tez_first_orders
     if not tez_first_orders.api_ready():
         raise RuntimeError('TEZ_DRIVERS_API_TOKEN не задан — проверка первых заказов недоступна')
     return tez_first_orders.TezFirstOrdersClient.from_config()
 
 
 def _tez_leads_binotel_client():
-    import tez_binotel_calls
+    from tez import binotel_calls as tez_binotel_calls
     if not tez_binotel_calls.api_ready():
         raise RuntimeError('TEZ_BINOTEL_API_KEY/SECRET не заданы — история звонков недоступна')
     return tez_binotel_calls.BinotelApiClient.from_config()
@@ -45919,7 +45919,7 @@ def tez_leads_upload():
     if len(raw_bytes) > TEZ_LEADS_MAX_FILE_SIZE_BYTES:
         return jsonify({"error": f"Файл слишком большой. Лимит: {TEZ_LEADS_MAX_FILE_SIZE_MB} MB"}), 413
 
-    import tez_lead_service
+    from tez import lead_service as tez_lead_service
     try:
         rows = tez_lead_service.parse_leads_file(raw_bytes, file_ext)
     except ValueError as exc:
@@ -46256,7 +46256,7 @@ def tez_leads_recompute():
     if not year:
         return jsonify({"error": "Некорректный период (year/month)"}), 400
 
-    import tez_lead_service
+    from tez import lead_service as tez_lead_service
     try:
         first_orders_client = _tez_leads_first_orders_client()
         binotel_client = _tez_leads_binotel_client()
@@ -46946,7 +46946,7 @@ def sync_work_schedules_statuses_binotel():
                 )
             }), 400
 
-        import tez_status_sync
+        from tez import status_sync as tez_status_sync
         cfg = tez_status_sync.get_config()
         if not cfg.get('login') or not cfg.get('password'):
             return jsonify({"error": "BINOTEL_LOGIN/BINOTEL_PASSWORD не заданы"}), 400
@@ -60786,7 +60786,7 @@ if __name__ == '__main__':
             )
         else:
             try:
-                import tez_status_sync
+                from tez import status_sync as tez_status_sync
                 loop = asyncio.get_event_loop()
                 summary = await loop.run_in_executor(
                     executor_pool,
@@ -60843,7 +60843,7 @@ if __name__ == '__main__':
         # приходится по всей базе месяца, а звонки нужны лишь по единицам,
         # которые за сутки реально вышли на линию.
         try:
-            import tez_lead_service
+            from tez import lead_service as tez_lead_service
             loop = asyncio.get_event_loop()
 
             def _run():

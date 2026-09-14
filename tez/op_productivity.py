@@ -24,7 +24,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-import tez_binotel_calls
+from tez import binotel_calls as tez_binotel_calls
 
 try:
     from zoneinfo import ZoneInfo

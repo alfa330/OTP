@@ -22286,7 +22286,7 @@ class Database:
 
     def get_tez_lead_funnel(self, year, month):
         """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
-        from tez_op_leads import ALMATY_TZ, call_window_for_period
+        from tez.op_leads import ALMATY_TZ, call_window_for_period
         window_start, window_end = call_window_for_period(year, month)
         # Границы считаем в Python готовыми aware-датами, а не приведением даты
         # к зоне прямо в SQL: у Postgres тип date неявно приводится и к

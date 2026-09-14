@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tez_wallboard_source as source  # noqa: E402
+from tez import wallboard_source as source  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "tez_wallboard"
 
@@ -301,7 +301,7 @@ class QueueIdTests(unittest.TestCase):
     def test_no_hardcoded_queue_id_in_the_module(self):
         # Очередь в кабинете могут пересобрать: зашитый id молча показал бы
         # чужую очередь. Проверяем и живой id прода, и id фикстуры.
-        text = ROOT.joinpath("tez_wallboard_source.py").read_text(encoding="utf-8")
+        text = ROOT.joinpath("tez", "wallboard_source.py").read_text(encoding="utf-8")
         self.assertNotIn("6121", text)
         self.assertNotIn("queueID=4242", text)
 
@@ -857,7 +857,7 @@ class ModuleBoundaryTests(unittest.TestCase):
     def test_module_does_not_depend_on_flask_or_database(self):
         # Ради этого модуль и вынесен в отдельный файл: database.py на импорте
         # поднимает пул к боевой базе, и тесты разбора стали бы походом в прод.
-        tree = ast.parse(ROOT.joinpath("tez_wallboard_source.py").read_text(encoding="utf-8"))
+        tree = ast.parse(ROOT.joinpath("tez", "wallboard_source.py").read_text(encoding="utf-8"))
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

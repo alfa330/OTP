@@ -34,10 +34,10 @@ ENV (.env.codex.local или окружение):
     CHATAPP_API_URL=https://api.chatapp.online   # опционально
 
 Ручная сверка без БД (токен ляжет в .chatapp_token.json рядом со скриптом):
-    python chatapp_client.py --licenses
-    python chatapp_client.py --employees
-    python chatapp_client.py --chats --days 2
-    python chatapp_client.py --messages 77000000112 --license 72861 --days 2
+    python -m tez.chatapp_client --licenses
+    python -m tez.chatapp_client --employees
+    python -m tez.chatapp_client --chats --days 2
+    python -m tez.chatapp_client --messages 77000000112 --license 72861 --days 2
 """
 
 import argparse

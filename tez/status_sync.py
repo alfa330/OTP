@@ -33,7 +33,7 @@ ENV (.env.codex.local или окружение):
 Режимы:
   - в приложении: bot_schedule2 регистрирует ежедневный job, который вызывает
     run_sync(importer), где importer парсит CSV и пишет в БД;
-  - автономно (для теста): python tez_status_sync.py --start 02.06.2026
+  - автономно (для теста): python -m tez.status_sync --start 02.06.2026
     --stop 02.06.2026 --out statuses.csv   (только выгрузка CSV, без БД).
 """
 

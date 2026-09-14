@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
 DATABASE_PATH = ROOT / "database.py"
 FRONTEND_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"
-BINOTEL_PATH = ROOT / "tez_binotel_calls.py"
+BINOTEL_PATH = ROOT / "tez" / "binotel_calls.py"
 
 
 def _load_module_from_path(module_name, path):
@@ -453,7 +453,7 @@ class CallEndPartyFrontendContractTests(unittest.TestCase):
                 self.assertIn(fragment, self.source)
 
 
-STATUS_SYNC_PATH = ROOT / "tez_status_sync.py"
+STATUS_SYNC_PATH = ROOT / "tez" / "status_sync.py"
 
 tez_status_sync = _load_module_from_path(
     "_call_end_party_tez_status_sync",
@@ -490,25 +490,41 @@ class _FakeSession:
 
 @contextlib.contextmanager
 def _stubbed_binotel_modules(fetcher):
-    """Подменяет tez_status_sync/tez_binotel_calls, которые bot_schedule2 импортирует
-    внутри функций: тест не должен ни ходить в сеть, ни читать .env."""
-    stub = types.ModuleType("tez_status_sync")
+    """Подменяет tez.status_sync/tez.binotel_calls, которые bot_schedule2 импортирует
+    внутри функций: тест не должен ни ходить в сеть, ни читать .env.
+
+    Подменять надо В ДВУХ местах сразу. `from tez import status_sync` берёт АТРИБУТ
+    пакета, и до sys.modules дело не доходит, если модуль уже импортирован в этом
+    процессе (а он импортирован, как только любой другой тест тронул гроздь). Одна
+    запись в sys.modules заглушку не поставит: тест молча уйдёт в НАСТОЯЩИЙ кабинет
+    Binotel с боевыми учётками из .env и при этом останется зелёным."""
+    import tez
+
+    stub = types.ModuleType("tez.status_sync")
     stub.fetch_call_end_parties = fetcher
     stub.get_config = lambda *a, **kw: {"login": "l", "password": "p"}
-    saved = {
-        name: sys.modules.get(name)
-        for name in ("tez_status_sync", "tez_binotel_calls")
+    replacements = {"status_sync": stub, "binotel_calls": tez_binotel_calls}
+    saved_modules = {
+        "tez." + name: sys.modules.get("tez." + name) for name in replacements
     }
-    sys.modules["tez_status_sync"] = stub
-    sys.modules["tez_binotel_calls"] = tez_binotel_calls
+    saved_attrs = {name: getattr(tez, name, None) for name in replacements}
+    for name, module in replacements.items():
+        sys.modules["tez." + name] = module
+        setattr(tez, name, module)
     try:
         yield stub
     finally:
-        for name, module in saved.items():
+        for name, module in saved_modules.items():
             if module is None:
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = module
+        for name, module in saved_attrs.items():
+            if module is None:
+                if hasattr(tez, name):
+                    delattr(tez, name)
+            else:
+                setattr(tez, name, module)
 
 
 class BinotelPanelEndPartySourceTests(unittest.TestCase):
@@ -679,10 +695,15 @@ class BinotelCallEndPartyBackfillTests(unittest.TestCase):
         self.assertEqual(fake_db.checked, ["111", "222", "777", "999"])
 
     def test_backfill_skips_without_panel_credentials(self):
-        stub = types.ModuleType("tez_status_sync")
+        import tez
+
+        stub = types.ModuleType("tez.status_sync")
         stub.get_config = lambda *a, **kw: {"login": "", "password": ""}
-        saved = sys.modules.get("tez_status_sync")
-        sys.modules["tez_status_sync"] = stub
+        saved = sys.modules.get("tez.status_sync")
+        saved_attr = getattr(tez, "status_sync", None)
+        # И в sys.modules, и атрибутом пакета — см. _stubbed_binotel_modules.
+        sys.modules["tez.status_sync"] = stub
+        tez.status_sync = stub
         try:
             backfill = _load_bot_function(
                 "backfill_binotel_call_end_parties", {"logging": logging}
@@ -690,9 +711,14 @@ class BinotelCallEndPartyBackfillTests(unittest.TestCase):
             result = backfill()
         finally:
             if saved is None:
-                sys.modules.pop("tez_status_sync", None)
+                sys.modules.pop("tez.status_sync", None)
             else:
-                sys.modules["tez_status_sync"] = saved
+                sys.modules["tez.status_sync"] = saved
+            if saved_attr is None:
+                if hasattr(tez, "status_sync"):
+                    del tez.status_sync
+            else:
+                tez.status_sync = saved_attr
 
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(result["reason"], "missing_credentials")

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 BOT_PATH = ROOT / "bot_schedule2.py"
 
-import chatapp_client  # noqa: E402
+from tez import chatapp_client  # noqa: E402
 from tests import source_cache
 
 

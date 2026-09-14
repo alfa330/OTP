@@ -978,7 +978,7 @@ class PullCallTests(unittest.TestCase):
 
     def test_default_window_arithmetic_matches_the_guard(self):
         """Считаем ровно то же, что считает _binotel_random_call."""
-        import tez_binotel_calls
+        from tez import binotel_calls as tez_binotel_calls
         from datetime import date, timedelta
         window_days = min(7, tez_binotel_calls.MAX_WINDOW_DAYS)
         today = date(2026, 9, 8)

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tez_op_leads import (  # noqa: E402
+from tez.op_leads import (  # noqa: E402
     ALMATY_TZ,
     DEFAULT_REACTIVATION_GAP_DAYS,
     RULES_EFFECTIVE_FROM,

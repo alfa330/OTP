@@ -42,7 +42,7 @@ ENV (окружение или .env.codex.local):
 обязательно завести в переменных окружения сервиса, .env-файл там не работает.
 
 Проверка вручную:
-    python tez_first_orders.py --phones 77000000107,77000000101
+    python -m tez.first_orders --phones 77000000107,77000000101
 """
 
 import argparse
@@ -55,7 +55,7 @@ from pathlib import Path
 
 import requests
 
-from tez_op_leads import normalize_kz_phone, parse_first_order_at, to_e164
+from tez.op_leads import normalize_kz_phone, parse_first_order_at, to_e164
 
 
 log = logging.getLogger(__name__)

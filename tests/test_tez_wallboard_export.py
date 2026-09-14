@@ -9,7 +9,7 @@ from io import BytesIO
 
 from openpyxl import load_workbook
 
-import tez_wallboard_export as export
+from tez import wallboard_export as export
 
 
 def _person(name, **stats):
