@@ -223,6 +223,7 @@ const TrainingsView = lazyWithRetry(() => import('./components/trainings/Trainin
 const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
 const DriverMailingsView = lazyWithRetry(() => import('./components/driver_mailings/DriverMailingsView'));
+const PaymentsView = lazyWithRetry(() => import('./components/payments/PaymentsView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const TezWallboardView = lazyWithRetry(() => import('./components/monitoring/TezWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
@@ -317,6 +318,12 @@ const VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = new Set([183]);
 // десяткам людей, которым её никто не давал. Та же константа на бэкенде —
 // SECTION_ALLOWED_USER_IDS в driver_mailings/access.py.
 const DRIVER_MAILINGS_ALLOWED_USER_IDS = new Set([476]);
+// Раздел «Оплата счетов» (задача #179): бизнес-процесс согласования закупа и
+// оплаты счетов. На время выката открыт ОДНОМУ человеку — владельцу (id 2), его
+// прямое указание. Не «всем super_admin»: их пятеро, и согласование оплаты
+// никому из них ещё не выдавали. Та же константа на бэкенде —
+// SECTION_ALLOWED_USER_IDS в payments/access.py; списки сверяет тест.
+const PAYMENTS_ALLOWED_USER_IDS = new Set([2]);
 // «Настройки SIP» — телефония: адрес сервера, пароли, автодозвон и SIP-номера
 // операторов. Раздел НЕ «для любого главы отдела»: бэк-офис (Бухгалтерия, HR)
 // и фронт-офисы звонков не принимают, и панель с паролями SIP им не нужна.
@@ -668,6 +675,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     parcels: 'Unclaimed parcels',
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
+    payments: 'Invoice approval',
     olx_leads: 'OLX leads',
     olx_ads: 'OLX adverts',
     touches: 'Sales touches',
@@ -2203,6 +2211,13 @@ const canAccessFleetEdmForUser = (userLike) => {
 const canAccessDriverMailingsForUser = (userLike) => (
     normalizeRole(userLike?.role) === 'super_admin'
     || DRIVER_MAILINGS_ALLOWED_USER_IDS.has(Number(userLike?.id))
+);
+
+/* «Оплата счетов»: только поимённый список, БЕЗ роли — даже super_admin не
+   проходит, пока его id не вписан. Здесь решается лишь «показывать ли пункт
+   меню»; обязательную границу держит payments/access.py::can_open_section. */
+const canAccessPaymentsForUser = (userLike) => (
+    PAYMENTS_ALLOWED_USER_IDS.has(Number(userLike?.id))
 );
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
@@ -39134,6 +39149,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessFleetEdm = canAccessFleetEdmForUser(user);
             // «Рассылки»: супер-админы и поимённый список (см. canAccessDriverMailingsForUser).
             const canAccessDriverMailings = canAccessDriverMailingsForUser(user);
+            const canAccessPaymentsSection = canAccessPaymentsForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             const wikiSectionEnabled = wikiEnabledFor(user);
@@ -42581,6 +42597,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     // уезжала в раздел по умолчанию.
                     (requestedViewFromUrl !== 'oktell_guard' || canAccessOktellGuard) &&
                     (requestedViewFromUrl !== 'driver_mailings' || canAccessDriverMailings) &&
+                    // «Оплата счетов»: диплинк из Telegram ведёт на ?view=payments&request=<id>.
+                    (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
                     (requestedViewFromUrl !== 'op_funnel' || canAccessOpFunnelSection);
                 if (canOpenRequestedView) {
@@ -42592,7 +42610,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -47855,6 +47873,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'fleet_edm' && canAccessFleetEdm) return;
                 // «Рассылки» — сообщения водителям, периметр именной, вне allowlist отдела.
                 if (view === 'driver_mailings' && canAccessDriverMailings) return;
+                // «Оплата счетов» — периметр именной (payments/access.py), вне allowlist отдела.
+                if (view === 'payments' && canAccessPaymentsSection) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -47893,7 +47913,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -49962,6 +49982,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 (canAccessSipSettingsFleet || canAccessSipSettingsTez) && deptAllowsInner('sip_settings'),
                                                 canAccessFleetEdm && deptAllowsInner('fleet_edm'),
                                                 canAccessDriverMailings && deptAllowsInner('driver_mailings'),
+                                                canAccessPaymentsSection,
                                             )}
 
                                             {/* Блок 5 — телефония, интеграции и рассылки водителям. */}
@@ -50000,6 +50021,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
+                                            )}
+                                            {/* «Оплата счетов» — согласование закупа и оплата счетов по
+                                                шагам (задача #179). Периметр именной, как у «Рассылок», и
+                                                пункт по той же причине продублирован в ветке глав отделов. */}
+                                            {/* Без SidebarDeptScope намеренно: закупы идут по всем
+                                                отделам, раздел общефирменный и виден при любом
+                                                выбранном отделе — как «Вики» и «Обращения». */}
+                                            {canAccessPaymentsSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'payments')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'payments' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-file-invoice"></FaIcon> <span className="sidebar-text">Оплата счетов</span>
+                                                    </button>
+                                                </li>
                                             )}
                                             {renderDividerIfInner(deptAllowsInner('salary'), deptAllowsInner('contests'))}
 
@@ -50059,6 +50096,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'driver_mailings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-paper-plane"></FaIcon> <span className="sidebar-text">Рассылки</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessPaymentsSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'payments')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'payments' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-file-invoice"></FaIcon> <span className="sidebar-text">Оплата счетов</span>
                                                 </button>
                                             </li>
                                             )}
@@ -50424,6 +50471,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessTouchesSection,
                 canAccessOpFunnelSection,
                 canAccessDriverMailings,
+                canAccessPaymentsSection,
                 bellReadSource,
                 selectedSvId,
                 selectedReportMonth,
@@ -52512,6 +52560,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {( view === "driver_mailings" && canAccessDriverMailings && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <DriverMailingsView
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        ))}
+                        {( view === "payments" && canAccessPaymentsSection && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <PaymentsView
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}

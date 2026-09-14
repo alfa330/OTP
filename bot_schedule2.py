@@ -58165,6 +58165,72 @@ except Exception:
     logging.exception("Раздел «Посылки»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Оплата счетов» (бизнес-процесс «Согласование — Оплата счетов», #179) ──
+# Тот же приём, что у вики, обращений и посылок. Периметр на время выката —
+# один человек (payments/access.py), поэтому QR-гейта здесь нет: раздел открыт
+# только владельцу, а участники ролей процесса раздаются внутри раздела.
+#
+# Telegram-уведомления «наступил ваш шаг» уходят тем же отправителем, что у
+# задач; ссылка ведёт на ?view=payments&request=<id> того же адреса, куда ведут
+# ссылки из задач (TASK_WEB_APP_BASE_URL). Файлы заявок — счета, КП, платёжки —
+# лежат в бакете вложений задач (свой env GOOGLE_CLOUD_STORAGE_BUCKET_PAYMENTS
+# перекрывает его), отдаются через свой роут с обычной авторизацией.
+def _payments_bucket_name():
+    return (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_PAYMENTS')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+        or ''
+    ).strip()
+
+
+try:
+    from payments.routes import build_payments_blueprint  # noqa: E402
+
+    app.register_blueprint(build_payments_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        send_telegram=_send_telegram_text_message,
+        web_app_base_url=TASK_WEB_APP_BASE_URL,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+        gcs={'bucket_name': _payments_bucket_name, 'client': get_gcs_client},
+    ))
+    logging.info("Раздел «Оплата счетов»: Blueprint подключён на /api/payments")
+except Exception:
+    logging.exception("Раздел «Оплата счетов»: Blueprint НЕ подключён")
+
+
+def payments_fixed_generation_job():
+    """Календарь фиксированных платежей: создать заявки, у которых наступило начало периода.
+
+    Идёт раз в сутки утром по Алматы. Письма в Telegram уходят ПОСЛЕ коммита:
+    внутри транзакции заявки ещё нет, и ссылка в сообщении вела бы в пустоту.
+    """
+    try:
+        from payments import fixed as payments_fixed
+
+        with db._get_cursor() as cursor:
+            created, outbox = payments_fixed.generate(cursor, base_url=TASK_WEB_APP_BASE_URL)
+        payments_fixed.log_generation(created)
+        for chat_id, text, markup in outbox:
+            try:
+                _send_telegram_text_message(chat_id, text, parse_mode='HTML', reply_markup=markup)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Оплата счетов: Telegram недоступен при рассылке календаря: %s", exc)
+    except Exception:
+        logging.exception("Оплата счетов: календарь фиксированных платежей не отработал")
+
+
+async def payments_fixed_generation_async():
+    # Планировщик асинхронный, работа с базой — блокирующая: в пул, как у чистки сессий.
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, payments_fixed_generation_job)
+    except Exception:
+        logging.exception("payments fixed generation failed")
+
+
 # ── Раздел «Чаты водителей» (задача #271) ────────────────────────────────────
 # Оператор СЗоВ ищет переписку водителя по номеру телефона, открывает нужный
 # чат, снимает скриншот средствами системы и жмёт «Передан» — в этот же чат
@@ -61160,6 +61226,17 @@ if __name__ == '__main__':
         run_user_sessions_retention_async,
         CronTrigger(hour=3, minute=20, timezone=ZoneInfo('Asia/Almaty')),
         id='user_sessions_retention_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Оплата счетов»: заявки по календарю фиксированных платежей — утром по
+    # Алматы, чтобы ответственный увидел их к началу рабочего дня.
+    scheduler.add_job(
+        payments_fixed_generation_async,
+        CronTrigger(hour=6, minute=5, timezone=ZoneInfo('Asia/Almaty')),
+        id='payments_fixed_generation_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True

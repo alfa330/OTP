@@ -6509,6 +6509,7 @@ class Database:
             self._init_olx_amo_schema_tx(cursor)
             self._init_olx_ads_schema_tx(cursor)
             self._init_op_funnel_schema_tx(cursor)
+            self._init_payments_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -7355,6 +7356,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT crm_schema")
+
+    def _init_payments_schema_tx(self, cursor):
+        """Схема раздела «Оплата счетов» (задача #179): заявки, шаги маршрута,
+        справочники, договоры, Приказы, календарь фиксированных платежей.
+
+        DDL живёт в пакете payments/schema.py, импорт локальный (цикл). Под
+        SAVEPOINT по той же причине, что у посылок: падение здесь не должно
+        ронять инициализацию всей базы — раздел тогда честно скажет о себе
+        через /api/payments/ping (schema_ready=false).
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT payments_schema")
+        try:
+            from payments.schema import init_payments_schema
+            init_payments_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT payments_schema")
+            logging.exception(
+                "Схема раздела «Оплата счетов» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT payments_schema")
 
     def _init_parcels_schema_tx(self, cursor):
         """Схема раздела «Посылки» (таблицы parcels/parcel_events).
