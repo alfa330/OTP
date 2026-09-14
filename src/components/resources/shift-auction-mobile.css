@@ -1,0 +1,183 @@
+/* ── «Аукцион смен» на телефоне ──────────────────────────────────────────────
+
+   Разметка — ShiftAuctionMobile.jsx и ветки isMobileShell в ShiftAuctionView.jsx.
+   Здесь только то, чего утилитами не сделать: липкая полоса дней под стеклом
+   шапки, поля «от края до края», кегль заголовков, разделители строк.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_shift_auction_mobile.py).
+
+   ВЕС. Общий слой разделов (mobile-shell.css) задаёт h1/h2/h3 внутри
+   .main-content весом (0,2,2) — заголовки раздела перебиваются только правилом
+   с тремя классами. Своих цветов здесь нет: тёмный слой портала перекрашивает
+   утилиты Tailwind и переменные листов (--sheet-*), а hex из этого файла он не
+   видит. */
+
+body.mobile-shell .main-content .sa-m-root .sa-m-title {
+    font-size: 32px;
+    line-height: 38px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .main-content .sa-m-root .sa-m-day-title {
+    font-size: 22px;
+    line-height: 28px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+/* Подпись группы — капитель 13 px, как «ОСНОВНЫЕ» в настройках телефона.
+   11 px из общего примитива на экране телефона не читаются. */
+body.mobile-shell .main-content .sa-m-root .sa-m-group__label {
+    font-size: 13px;
+    line-height: 18px;
+    letter-spacing: 0.02em;
+}
+
+/* Заголовок шага инструкции: экран инструкции смонтирован внутри раздела, и
+   общий слой уменьшил бы его до 16 px — мельче текста шага. */
+body.mobile-shell .main-content .sa-m-heading {
+    font-size: 18px;
+    line-height: 24px;
+}
+
+/* ── Полоса дней ── */
+
+/* Липнет под стеклом шапки портала: оно проявляется при прокрутке и занимает
+   ровно столько же, сколько поле .main-content под колоколом (46 px + вырез).
+   Прибиваться к нулю нельзя — полоса ушла бы под стекло и колокол.
+
+   Во всю ширину экрана: поля страницы (16 px) полоса забирает отрицательным
+   отступом, а не классом -mx-*, — общий слой разделов переписывает
+   отрицательные поля у всех, кто их объявил в разметке. */
+body.mobile-shell .sa-m-root .sa-m-strip {
+    position: sticky;
+    top: calc(46px + max(10px, env(safe-area-inset-top)));
+    z-index: 20;
+    margin-inline: -16px;
+}
+
+/* СТЕКЛО — ОТДЕЛЬНЫМ СЛОЕМ, А НЕ ФОНОМ САМОЙ ПОЛОСЫ. Элемент с backdrop-filter
+   становится корнем подложки для своих потомков: размытие потомка видит только
+   то, что лежит внутри корня. Продолжение стекла вверх, сделанное потомком
+   такой полосы (::before), размывало пустоту и не рисовалось вовсе — замер
+   14.09.2026: над прилипшей полосой ехали чёткие карточки, хотя признак
+   прилипания стоял. Поэтому у полосы фильтра нет, он у слоя внутри неё.
+
+   Цвет раздела кладёт в --mobile-page-bg на body MobilePageChrome (им же
+   красится .main-content) — полоса того же стекла, что и верх экрана. Когда
+   переменной нет, остаётся одно размытие. */
+body.mobile-shell .sa-m-root .sa-m-strip__glass {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: color-mix(in srgb, var(--mobile-page-bg, transparent) 86%, transparent);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    pointer-events: none;
+}
+
+/* Прилипшая полоса продолжает стекло до верхней грани экрана. Без этого в полосе
+   под колоколом (46 px + вырез) страница ехала на виду: над днями просвечивали
+   заголовки групп и кнопки «Вернуть». Признак data-stuck ставит сама полоса
+   (AuctionPhoneDayStrip) — пока она в потоке, продолжение накрыло бы карточку
+   статуса над ней. */
+body.mobile-shell .sa-m-root .sa-m-strip[data-stuck] .sa-m-strip__glass {
+    top: calc(-1 * (46px + max(10px, env(safe-area-inset-top))));
+    box-shadow: 0 0.5px 0 var(--sheet-sep, rgba(60, 60, 67, 0.2));
+}
+
+/* Неделя — ровно в ширину: день занимает седьмую часть за вычетом шести зазоров.
+   Период короче недели растягивает дни, длиннее — прокручивается вбок. */
+body.mobile-shell .sa-m-root .sa-m-day {
+    flex: 1 0 calc((100% - 24px) / 7);
+    min-width: 44px;
+}
+
+body.mobile-shell .sa-m-root .sa-m-strip__scroll::-webkit-scrollbar,
+body.mobile-shell .sa-m-root .sa-m-chips::-webkit-scrollbar,
+body.mobile-shell .sa-m-root .sa-m-bleed::-webkit-scrollbar {
+    display: none;
+}
+
+/* Ленты, которые едут вбок (периоды, вкладки руководителя), начинаются от поля
+   страницы, а уезжают под край экрана — иначе обрываются на 16 px от него. */
+body.mobile-shell .sa-m-root .sa-m-chips,
+body.mobile-shell .sa-m-root .sa-m-bleed {
+    margin-inline: -16px;
+    padding-inline: 16px;
+}
+
+/* Вкладки руководителя: у общего переключателя 30 px в высоту — мельче пальца. */
+body.mobile-shell .sa-m-root .sa-m-segments > button {
+    padding: 7px 14px;
+    font-size: 14px;
+}
+
+/* ── Строки ── */
+
+body.mobile-shell .sa-m-row {
+    position: relative;
+    min-height: 52px;
+}
+
+/* Разделитель отступает от левого края до текста — примета списка телефона. */
+body.mobile-shell .sa-m-row + .sa-m-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep, rgba(60, 60, 67, 0.2));
+    pointer-events: none;
+}
+
+/* Минимальная ширина — здесь, а не утилитой min-w-[…]: общий слой разделов
+   обнуляет её у всех, кто объявил её в разметке. «Взять», «Вернуть» и
+   «Добрать» одной ширины — ряд кнопок в списке не пляшет. */
+body.mobile-shell .sa-m-pill {
+    min-width: 84px;
+}
+
+/* Поле времени: системное колесо iOS открывается по нажатию, само поле — плашка
+   с числом. 16 px — порог, ниже которого iOS приближает страницу при фокусе. */
+body.mobile-shell .sa-m-time {
+    -webkit-appearance: none;
+    appearance: none;
+    min-width: 96px;
+    text-align: center;
+    font-size: 16px;
+}
+
+/* Пояснение под выбором части смены приходит из раздела готовым абзацем с
+   настольным кеглем 12 px. */
+body.mobile-shell .sa-m-footnote p {
+    margin-top: 0;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+/* ── Лист подтверждения возврата ── */
+
+/* Вопрос над действиями — мелким серым по центру, как у системного листа.
+   Строки листа разделены своей чертой (mobile-shell.css), а вопрос строкой не
+   является, поэтому черту под ним ставим сами. */
+body.mobile-shell .mobile-actions .sa-m-sheet-title {
+    padding: 14px 18px 12px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--sheet-muted, rgba(60, 60, 67, 0.6));
+}
+
+body.mobile-shell .mobile-actions .sa-m-sheet-title b {
+    display: block;
+    margin-bottom: 2px;
+    font-weight: 600;
+}
+
+body.mobile-shell .mobile-actions .sa-m-sheet-title + .mobile-actions__row {
+    border-top: 0.5px solid var(--sheet-sep);
+}
