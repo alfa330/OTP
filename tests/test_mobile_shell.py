@@ -508,6 +508,76 @@ class SectionLayoutTests(unittest.TestCase):
         for path in ('src/App.jsx', 'src/components/ui/ios.jsx', 'src/components/common/FullscreenSheet.jsx'):
             self.assertIn('otp-modal-root', (ROOT / path).read_text(encoding='utf-8'), path)
 
+    def test_homemade_overlay_moves_the_shell_aside(self):
+        """САМОДЕЛЬНОЕ ОКНО НЕ ПОДНИМАЛОСЬ НАД БАРОМ И КОЛОКОЛОМ.
+
+        Окон `fixed inset-0` без метки otp-modal-root в портале шесть десятков.
+        В «Аукционе смен» инструкция открывается сама, и её «Назад» и «Далее»
+        (778-й пиксель) целиком лежали под баром (с 780-го), а крестик — под
+        колоколом: из окна нельзя было ни выйти, ни пролистать его. Поймано
+        замером elementFromPoint по каждой кнопке на стенде 390×844."""
+        rule = css_block(SHELL_CSS, 'body.mobile-shell:has([class~="fixed"][class~="inset-0"]', 400)
+        head = rule.split('{')[0]
+        self.assertIn(':is(.mobile-tabbar, .mobile-bell-slot)', head)
+        self.assertIn('display: none;', rule)
+        # Лексемы — целиком (~=): подстрока ловила бы варианты брейкпоинтов.
+        self.assertNotIn('[class*="fixed"]', head)
+        # Закрытые окна, оставшиеся в дереве, бар прятать не должны: иначе он
+        # пропал бы в разделе насовсем (мониторинговая шкала так и сделана).
+        for skip in ('.otp-modal-root', '[class~="hidden"]', '[class~="opacity-0"]',
+                     '[class~="pointer-events-none"]', '[aria-hidden="true"]'):
+            self.assertIn(skip, head, skip)
+        self.assertIn('fixed inset-0 z-[70] transition-opacity', APP)
+        self.assertIn("'opacity-0 pointer-events-none'", APP)
+        # Случай, с которого всё началось, — окно инструкции аукциона.
+        auction = (ROOT / 'src' / 'components' / 'resources' / 'ShiftAuctionView.jsx').read_text(encoding='utf-8')
+        self.assertIn('className="fixed inset-0 z-[70] flex items-stretch', auction)
+
+    def test_bottom_panels_rise_above_the_bar(self):
+        """ПАНЕЛИ РАЗДЕЛОВ У НИЖНЕЙ ГРАНИ УХОДИЛИ ПОД БАР.
+
+        `fixed bottom-2` у полосы дней в аукционе, `fixed bottom-4 right-4` у
+        переключателя вкладок в «Отделах»: на компьютере внизу пусто, на
+        телефоне там бар — пропадали все 14 кнопок дней и 4 кнопки вкладок."""
+        start = SHELL_CSS.index('body.mobile-shell:not(:has(.otp-modal-root))')
+        rule = SHELL_CSS[start:SHELL_CSS.index('}', start)]
+        head = rule.split('{')[0]
+        # Начало лексемы: пробел отсекает sm:bottom-3 и отрицательные -bottom-4.
+        self.assertIn('[class^="bottom-"]', head)
+        self.assertIn('[class*=" bottom-"]', head)
+        self.assertNotIn('[class*="bottom-"]', head)
+        # Сообщения подняты своим правилом — второе подняло бы их дважды.
+        self.assertIn('.otp-toasts', head)
+        # Панели во всю высоту поле сжало бы, а не подвинуло.
+        for skip in ('[class~="inset-0"]', '[class~="inset-y-0"]', '[class~="top-0"]'):
+            self.assertIn(skip, head, skip)
+        # Под открытым окном бара нет — и поднимать нечего.
+        self.assertIn(':not(:has([class~="fixed"][class~="inset-0"]', head)
+        self.assertIn('margin-bottom: var(--mtb-lift-bottom);', rule)
+        self.assertIn('margin-right: var(--mtb-lift-right);', rule)
+        self.assertIn('margin-left: var(--mtb-lift-left);', rule)
+        self.assertIn('--mtb-lift-bottom: calc(var(--mtb-thickness) + env(safe-area-inset-bottom));',
+                      css_block(SHELL_CSS, 'body.mobile-shell {\n    --mtb-lift-bottom', 200))
+        self.assertIn('--mtb-lift-right: calc(var(--mtb-thickness) + env(safe-area-inset-right));',
+                      css_block(SHELL_CSS, 'body[data-tabbar-side="right"].mobile-shell {\n    --mtb-lift', 200))
+        self.assertIn('--mtb-lift-left: calc(var(--mtb-thickness) + env(safe-area-inset-left));',
+                      css_block(SHELL_CSS, 'body[data-tabbar-side="left"].mobile-shell {\n    --mtb-lift', 200))
+        auction = (ROOT / 'src' / 'components' / 'resources' / 'ShiftAuctionView.jsx').read_text(encoding='utf-8')
+        self.assertIn('"fixed bottom-2 left-3 right-3', auction)
+
+    def test_hover_only_buttons_are_shown_on_a_phone(self):
+        """КНОПКИ, ПРОЯВЛЯВШИЕСЯ ТОЛЬКО ПОД КУРСОРОМ, НА ТЕЛЕФОНЕ НЕ ВИДНЫ.
+
+        opacity-0 + group-hover:opacity-100 — на телефоне наведения нет, и в
+        «Сессиях» пропадали все «Прервать все», в «Отделах» — «три точки»."""
+        block = css_block(SHELL_CSS, 'body.mobile-shell .main-content [class^="group-hover:opacity-100"]', 400)
+        head = block.split('{')[0]
+        self.assertIn('[class*=" group-hover:opacity-100"]', head)
+        # Подсказки по наведению сквозные — показывать их незачем.
+        self.assertEqual(head.count(':not([class~="pointer-events-none"])'), 2)
+        self.assertIn('opacity: 1;', block)
+        self.assertIn("'opacity-0 group-hover:opacity-100'", APP)
+
     def test_modal_footer_clears_the_home_bar(self):
         """Подвал окна прижат к нижней грани экрана, и без отступа кнопка
         попадала бы прямо под домашнюю полосу."""
