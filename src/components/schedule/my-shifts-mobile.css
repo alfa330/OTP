@@ -1,0 +1,44 @@
+/* ── «Мои смены» на телефоне ─────────────────────────────────────────────────
+
+   Разметка — MyShiftsMobile.jsx и ветка isNarrowShell в App.jsx
+   (ShiftPlannerViewWithCalendar). Полоса дней, строки, капсулы и лист
+   подтверждения — общие с «Аукционом смен» (sa-m-*, shift-auction-mobile.css,
+   подключается из MyShiftsMobile.jsx). Здесь только то, чего там нет.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_my_shifts_mobile.py). Своих цветов нет: тёмный
+   слой портала перекрашивает утилиты Tailwind, а hex отсюда он не видит. */
+
+/* Четыре вкладки в ширину экрана: у общего переключателя поля по 14 px, и
+   «Запросы» с «Коллеги» на 390 px уже не помещались в строку. */
+body.mobile-shell .main-content .ms-m-tabs > button {
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+/* Дата в строке формы — системный список (на iOS — колесо), а в строке видно
+   только выбранное значение у правого края, как в настройках телефона.
+   16 px — порог, ниже которого iOS приближает страницу при фокусе. */
+body.mobile-shell .ms-m-select {
+    -webkit-appearance: none;
+    appearance: none;
+    max-width: 60%;
+    background: transparent;
+    text-align: right;
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    outline: none;
+}
+
+/* Шаг «Тип запроса» и поля поиска с комментарием лежат прямо в карточке
+   группы, без строки-обёртки: строка добавила бы им разделитель и высоту 52 px. */
+body.mobile-shell .ms-m-inset {
+    padding: 10px 16px;
+}
+
+/* Полоса дней в «Коллегах» и «Сменах» одна и та же (sa-m-strip); строка со
+   стрелками над днями — свой ряд, ему нужен только отступ. */
+body.mobile-shell .ms-m-week {
+    padding: 6px 12px 0;
+}

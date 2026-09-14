@@ -202,7 +202,7 @@ const DAY_CAPTION_TONES = {
  * Полоса липкая: в дне бывает за три десятка смен, и возвращаться к ней
  * прокруткой наверх — лишний ход ради каждого переключения дня.
  */
-export const AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect }) => {
+export const AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect, header = null }) => {
   const stripRef = useRef(null);
   const scrollRef = useRef(null);
   const firstRunRef = useRef(true);
@@ -262,6 +262,10 @@ export const AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect }) => {
   return (
     <div ref={stripRef} className="sa-m-strip" data-stuck={stuck ? '' : undefined}>
       <span className="sa-m-strip__glass" aria-hidden="true" />
+      {/* Строка над днями («‹ 8 — 14 сентября ›» в «Моих сменах») липнет
+          вместе с ними: листать недели, вернувшись к верху страницы, —
+          лишний ход. У аукциона её нет: период там выбирают чипами. */}
+      {header}
       <div ref={scrollRef} role="tablist" aria-label="Дни периода" className="sa-m-strip__scroll flex gap-1 overflow-x-auto px-3 py-1.5" style={NO_WRAP}>
         {days.map((day) => {
           const active = day.date === activeDate;

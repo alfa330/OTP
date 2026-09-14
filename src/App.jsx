@@ -56,6 +56,13 @@ import MobileBellSlot from './components/common/MobileBellSlot';
 import MobileSheetTitle from './components/common/MobileSheetTitle';
 import MobileActionSheet from './components/common/MobileActionSheet';
 import {
+    MyShiftsCandidateRow, MyShiftsCheckRow, MyShiftsColleagueRow, MyShiftsNoteRow, MyShiftsPlainRow,
+    MyShiftsRequestCard, MyShiftsShiftRow, MyShiftsStatusCard, MyShiftsWeekHeader,
+    PHONE_BUTTON, PHONE_ICONS, PHONE_TIME_INPUT, PhoneChips, PhoneDayStrip, PhoneField, PhoneGroup,
+    PhoneLinkRow, PhoneRow, useLastPresent
+} from './components/schedule/MyShiftsMobile';
+import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
+import {
     MobileAccountScreen,
     MobileAccountGroup,
     MobileAccountField,
@@ -15073,6 +15080,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [myScheduleError, setMyScheduleError] = useState('');
             const [myScheduleReloadNonce, setMyScheduleReloadNonce] = useState(0);
             const [operatorSelfTab, setOperatorSelfTab] = useState('schedule');
+            /* Телефон: выбранный день недели в «Сменах» и в «Коллегах», лист
+               подтверждения отказа/отмены запроса, раскрытые списки запросов.
+               Компьютер этих состояний не читает (ветка isNarrowShell ниже). */
+            const [phoneSelectedDate, setPhoneSelectedDate] = useState(() => todayDateStr(new Date()));
+            const [phoneDirectionDate, setPhoneDirectionDate] = useState(() => todayDateStr(new Date()));
+            const [phoneSwapConfirm, setPhoneSwapConfirm] = useState(null);
+            const [phoneSwapListsExpanded, setPhoneSwapListsExpanded] = useState({});
+            // Лист уезжает ещё четверть секунды после закрытия — с пустым вопросом он бы моргал.
+            const phoneSwapConfirmShown = useLastPresent(phoneSwapConfirm);
             const [expandedMyDayCards, setExpandedMyDayCards] = useState({});
             const [expandedMyUpcomingShifts, setExpandedMyUpcomingShifts] = useState({});
             const [swapIncomingPage, setSwapIncomingPage] = useState(0);
@@ -16788,6 +16804,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Фронт офисы: оператору нельзя видеть смены коллег — табы
             // «Замены»/«Смены коллег» и кнопки обмена сменами скрыты.
             const operatorColleagueShiftsHidden = isOperatorSelfSchedules && departmentHidesColleagueSchedules(user);
+            /* На телефоне у оператора один период — неделя: полоса дней сверху и
+               список выбранного дня под ней. «День» и «Месяц» настольного вида
+               там не рисуются, и данные под них не нужны. */
+            useEffect(() => {
+                if (!isNarrowShell || !isOperatorSelfSchedules || viewMode === 'week') return;
+                setViewMode('week');
+            }, [isNarrowShell, isOperatorSelfSchedules, viewMode]);
             const operatorTodayKey = todayDateStr(new Date());
             const makeSelectedCellKey = (opId, date) => `${String(opId)}|${date}`;
             const sortSelectedTargets = (targets = []) => (
@@ -17207,6 +17230,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
+                // Телефон вот-вот переключит период на неделю — дневной запрос ушёл бы впустую.
+                if (isNarrowShell && viewMode !== 'week') return;
                 const startDate = visibleRange?.[0];
                 const endDate = visibleRange?.[visibleRange.length - 1];
                 if (!startDate || !endDate) return;
@@ -17243,7 +17268,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 loadMySchedules();
                 return () => { cancelled = true; };
-            }, [isOperatorSelfSchedules, user, visibleRange, myScheduleReloadNonce]);
+            }, [isOperatorSelfSchedules, user, visibleRange, myScheduleReloadNonce, isNarrowShell, viewMode]);
 
             useEffect(() => {
                 if (!isOperatorSelfSchedules || !user) return;
@@ -23156,6 +23181,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, []);
             useEffect(() => {
                 if (!showSwapCreateModal) return;
+                // На телефоне тип запроса — переключатель в форме, вопрос листом не нужен.
+                if (isNarrowShell) return;
                 if (isSwapExchangeMode) return;
                 if (!currentSwapFullShiftMatch) return;
                 let cancelled = false;
@@ -23197,7 +23224,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 swapForm.startTime,
                 swapForm.endTime,
                 swapTimeValidation.effectiveEndDate,
-                openSwapExchangeChoiceModalPrompt
+                openSwapExchangeChoiceModalPrompt,
+                isNarrowShell
             ]);
             useEffect(() => {
                 if (isSwapExchangeMode) return;
@@ -24459,12 +24487,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setSwapSubmitting(false);
                 }
             };
-            const handleRespondSwapRequest = async (requestItem, action) => {
+            const handleRespondSwapRequest = async (requestItem, action, { skipConfirm = false } = {}) => {
                 const requestId = Number(requestItem?.id || 0);
                 const actionNorm = String(action || '').toLowerCase();
                 if (!requestId || !['accept', 'reject', 'cancel'].includes(actionNorm)) return;
                 if (swapRespondingId) return;
-                if (actionNorm === 'reject' || actionNorm === 'cancel') {
+                // skipConfirm — телефон уже спросил листом (MobileActionSheet), второй вопрос лишний.
+                if (!skipConfirm && (actionNorm === 'reject' || actionNorm === 'cancel')) {
                     const requestMode = String(requestItem?.exchangeMode || '').toLowerCase();
                     const isExchangeRequest = requestMode.includes('exchange') || (Array.isArray(requestItem?.targetSegments) && requestItem.targetSegments.length > 0);
                     const ok = typeof window === 'undefined'
@@ -25339,6 +25368,1009 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                     );
                 };
+                /* Форма «Заявка по смене» — одна на оба вида: на компьютере окно,
+                   на телефоне экран (это делает сам IosModal). */
+                const shiftChangeModal = (
+                                    <IosModal
+                                        open={showShiftChangeModal}
+                                        onClose={() => setShowShiftChangeModal(false)}
+                                        title="Заявка по смене"
+                                        subtitle="Уйдёт вашему руководителю на согласование"
+                                        maxWidth="max-w-md"
+                                        footer={(
+                                            <div className="flex w-full flex-col gap-2 sm:flex-row sm:justify-end">
+                                                {/* На телефоне экран закрывает шеврон в шапке — вторая «Отмена» лишняя. */}
+                                                {!isNarrowShell && (
+                                                <button
+                                                    type="button"
+                                                    className={`${iosBtnSecondary} w-full sm:w-auto`}
+                                                    onClick={() => setShowShiftChangeModal(false)}
+                                                >
+                                                    Отмена
+                                                </button>
+                                                )}
+                                                <button
+                                                    type="button"
+                                                    className={`${iosBtnPrimary} w-full sm:w-auto`}
+                                                    disabled={!!shiftChangeFormProblem || shiftChangeSubmitting}
+                                                    onClick={submitShiftChangeRequest}
+                                                >
+                                                    {shiftChangeSubmitting ? 'Отправляем…' : 'Отправить'}
+                                                </button>
+                                            </div>
+                                        )}
+                                    >
+                                        <div className="space-y-4">
+                                            <IosSegmented
+                                                value={shiftChangeForm.kind}
+                                                onChange={setShiftChangeKind}
+                                                stretch
+                                                ariaLabel="Что нужно изменить"
+                                                options={[
+                                                    { value: 'shorten', label: 'Сократить' },
+                                                    { value: 'extra', label: 'Доп. часть' },
+                                                ]}
+                                            />
+
+                                            <div className="space-y-1.5">
+                                                <div className={iosGroupLabel}>День</div>
+                                                <IosDatePicker
+                                                    value={shiftChangeForm.date}
+                                                    onChange={setShiftChangeDate}
+                                                    min={todayDateStr(new Date())}
+                                                    max={todayDateStr(addDays(new Date(), 45))}
+                                                    ariaLabel="День смены"
+                                                />
+                                            </div>
+
+                                            {shiftChangeForm.kind === 'shorten' ? (
+                                                <>
+                                                    {shiftChangeDayShifts.length === 0 ? (
+                                                        <div className="rounded-xl bg-slate-100 px-3.5 py-2.5 text-[12.5px] text-slate-500">
+                                                            В этот день смен нет. Чтобы выйти дополнительно, переключитесь на «Доп. часть».
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            {/* Выбор куска показываем только когда их правда несколько:
+                                                                вопрос с одним ответом — тот самый лишний шум. */}
+                                                            {shiftChangeDayShifts.length > 1 && (
+                                                                <div className="space-y-1.5">
+                                                                    <div className={iosGroupLabel}>Какая смена</div>
+                                                                    <div className="flex flex-wrap gap-1.5">
+                                                                        {shiftChangeDayShifts.map((seg, idx) => {
+                                                                            const key = `${seg.start}|${seg.end}`;
+                                                                            const active = shiftChangeSegmentKey(shiftChangeSelectedSegment || {}) === key;
+                                                                            return (
+                                                                                <button
+                                                                                    key={`scr-seg-${idx}`}
+                                                                                    type="button"
+                                                                                    onClick={() => selectShiftChangeSegment(seg)}
+                                                                                    className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium tabular-nums transition active:scale-[0.98] ${
+                                                                                        active
+                                                                                            ? 'bg-blue-600 text-white shadow-sm'
+                                                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                                                    }`}
+                                                                                >
+                                                                                    {seg.start} — {seg.end}
+                                                                                </button>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                            <div className="grid grid-cols-2 gap-3">
+                                                                <div className="space-y-1.5">
+                                                                    <div className={iosGroupLabel}>Начало</div>
+                                                                    <IosTimePicker
+                                                                        value={shiftChangeForm.newStart}
+                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newStart: v }))}
+                                                                        ariaLabel="Новое начало смены"
+                                                                    />
+                                                                </div>
+                                                                <div className="space-y-1.5">
+                                                                    <div className={iosGroupLabel}>Конец</div>
+                                                                    <IosTimePicker
+                                                                        value={shiftChangeForm.newEnd}
+                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newEnd: v }))}
+                                                                        ariaLabel="Новый конец смены"
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            {shiftChangeSelectedSegment && (
+                                                                <div className="text-[12px] tabular-nums text-slate-500">
+                                                                    Сейчас {shiftChangeSelectedSegment.start} — {shiftChangeSelectedSegment.end}
+                                                                    <span className="text-slate-400"> · </span>
+                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </>
+                                            ) : (
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div className="space-y-1.5">
+                                                        <div className={iosGroupLabel}>Начало</div>
+                                                        <IosTimePicker
+                                                            value={shiftChangeForm.start}
+                                                            onChange={(v) => setShiftChangeForm(prev => ({ ...prev, start: v }))}
+                                                            ariaLabel="Начало дополнительной части"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5">
+                                                        <div className={iosGroupLabel}>Конец</div>
+                                                        <IosTimePicker
+                                                            value={shiftChangeForm.end}
+                                                            onChange={(v) => setShiftChangeForm(prev => ({ ...prev, end: v }))}
+                                                            ariaLabel="Конец дополнительной части"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Таймлайн дня: серым то, что стоит в графике, розовым
+                                                отрезаемое, цветным итог. Числа под ним — только
+                                                «было → станет», без повтора самих границ: они уже
+                                                стоят в полях выше. */}
+                                            {(shiftChangeTimeline.base.length > 0 || shiftChangeTimeline.add.length > 0) && (
+                                                <div className="space-y-2 rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/70">
+                                                    <ShiftChangeTimeline {...shiftChangeTimeline} />
+                                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums text-slate-500">
+                                                        {shiftChangeForm.kind === 'shorten' && shiftChangeSelectedSegment && (
+                                                            <span>
+                                                                Было <span className="font-semibold text-slate-700">
+                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
+                                                                </span>
+                                                            </span>
+                                                        )}
+                                                        {shiftChangeProposed && (
+                                                            <span>
+                                                                {shiftChangeForm.kind === 'extra' ? 'Добавится ' : 'Станет '}
+                                                                <span className={`font-semibold ${shiftChangeExtraConflict ? 'text-rose-600' : 'text-slate-700'}`}>
+                                                                    {formatMinutesOnly(shiftChangeProposed.endMin - shiftChangeProposed.startMin)}
+                                                                </span>
+                                                            </span>
+                                                        )}
+                                                        {/* Про склейку говорим прямо: иначе «доп. часть впритык»
+                                                            выглядит как вторая смена, а в графике станет одной. */}
+                                                        {shiftChangeForm.kind === 'extra' && !shiftChangeExtraConflict && shiftChangeProposed
+                                                            && shiftChangeDayIntervals.some(seg =>
+                                                                seg.endMin === shiftChangeProposed.startMin
+                                                                || seg.startMin === shiftChangeProposed.endMin) && (
+                                                            <span className="text-slate-400">— продлит смену, а не добавит вторую</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            <div className="space-y-1.5">
+                                                <div className={iosGroupLabel}>Комментарий · необязательно</div>
+                                                <textarea
+                                                    rows={2}
+                                                    value={shiftChangeForm.comment}
+                                                    onChange={(e) => setShiftChangeForm(prev => ({ ...prev, comment: e.target.value }))}
+                                                    placeholder="Причина — руководителю будет понятнее"
+                                                    className={`${iosInput} resize-none`}
+                                                />
+                                            </div>
+
+                                            {/* Одна строка на всё: и почему кнопка недоступна, и что
+                                                ответил сервер. Два разных места под одну мысль
+                                                читались бы как две разные проблемы. */}
+                                            {(shiftChangeError || shiftChangeFormProblem) && (
+                                                <div className={`rounded-xl px-3.5 py-2.5 text-[12.5px] ${
+                                                    shiftChangeError
+                                                        ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200/70'
+                                                        : 'bg-slate-100 text-slate-500'
+                                                }`}>
+                                                    {shiftChangeError || shiftChangeFormProblem}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </IosModal>
+                );
+
+                /* ── Телефон ────────────────────────────────────────────────
+                   Раздел — список настроек телефона: вкладки переключателем,
+                   неделя полосой дней, день — группой строк, запросы — экранами
+                   с одной кнопкой внизу. Разметка строк — MyShiftsMobile.jsx,
+                   подписи дней и порядок коллег — myShiftsPhoneDays.js. Данные и
+                   правила (что считается сменой, кто кандидат, можно ли обменять)
+                   — те же помощники, что у настольного вида ниже; тот не тронут:
+                   у него своя ветка return. */
+                if (isNarrowShell) {
+                    const phoneToday = todayDateStr(new Date());
+                    const capitalizeRu = (value) => {
+                        const text = String(value || '');
+                        return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+                    };
+                    const phoneDayTitle = (date) => `${capitalizeRu(formatWeekdayRu(date, 'long'))}, ${formatDateRuDayMonth(date)}`;
+                    const phoneStripDay = (date, caption, tone) => ({
+                        date,
+                        weekday: capitalizeRu(formatWeekdayRu(date, 'short')),
+                        dayNumber: parseDateStr(date).getDate(),
+                        caption,
+                        tone,
+                        ariaLabel: `${phoneDayTitle(date)}${caption ? `, ${caption}` : ''}`
+                    });
+                    const phoneErrorNote = (text) => (
+                        <p className="rounded-xl bg-rose-50 px-4 py-3 text-[14px] leading-snug text-rose-700">{text}</p>
+                    );
+                    const phoneCountBadge = (text) => <span className="shrink-0 text-[13px] tabular-nums text-slate-400">{text}</span>;
+
+                    /* «Смены»: неделя в полосе, выбранный день списком. Выбор дня
+                       внутри недели currentDate не трогает: weekRange пересчитался
+                       бы в новый массив и перезапросил ту же неделю. */
+                    const phoneDayDate = pickPhoneDayDate(phoneSelectedDate, weekRange, phoneToday);
+                    const phoneDay = myScheduleDayCards.find(day => day.date === phoneDayDate) || null;
+                    const phoneDays = weekRange.map(date => {
+                        const { caption, tone } = describeMyShiftsPhoneDay(myScheduleDayCards.find(day => day.date === date) || null);
+                        return phoneStripDay(date, caption, tone);
+                    });
+                    const stepPhoneWeek = (step) => {
+                        const next = addDays(parseDateStr(phoneDayDate), step * 7);
+                        setCurrentDate(next);
+                        setPhoneSelectedDate(todayDateStr(next));
+                    };
+                    const goPhoneToday = () => {
+                        setCurrentDate(new Date());
+                        setPhoneSelectedDate(phoneToday);
+                    };
+                    const jumpPhoneToDate = (date) => {
+                        if (!weekRange.includes(date)) setCurrentDate(parseDateStr(date));
+                        setPhoneSelectedDate(date);
+                    };
+                    const phoneShifts = phoneDay?.shifts || [];
+                    const phoneDayWorkMin = phoneShifts.reduce((acc, seg) => acc + (seg.durationMin || 0), 0);
+                    const phoneDayBreakMin = phoneShifts.reduce((acc, seg) => acc + (seg.breaks || []).reduce((sum, b) => sum + Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)), 0), 0);
+                    const phoneDayStatus = phoneDay?.scheduleStatus || null;
+                    const phoneDayIsToday = phoneDayDate === phoneToday;
+                    const normalizePhoneTimeline = (list) => (Array.isArray(list) ? list : []).map((seg, idx) => {
+                        const startRaw = Number(seg?.startMin ?? seg?.start_min ?? seg?.start ?? 0);
+                        const endRaw = Number(seg?.endMin ?? seg?.end_min ?? seg?.end ?? 0);
+                        if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw) || endRaw <= startRaw) return null;
+                        return {
+                            id: seg?.id ?? idx,
+                            startMin: Math.round(startRaw),
+                            endMin: Math.round(endRaw),
+                            reason: String(seg?.reason || '').trim(),
+                            comment: String(seg?.comment || '').trim()
+                        };
+                    }).filter(Boolean);
+                    const phoneTech = normalizePhoneTimeline(phoneDay?.technicalIssues);
+                    const phoneOffline = normalizePhoneTimeline(phoneDay?.offlineActivities);
+                    // Нули не пишем: «0 выходных» — шум, а без смен и выходных строки нет вовсе.
+                    const phoneWeekSummary = [
+                        myScheduleSummary.shiftsCount ? `${myScheduleSummary.shiftsCount} ${pluralRu(myScheduleSummary.shiftsCount, 'смена', 'смены', 'смен')} · ${formatHoursRu(myScheduleSummary.totalWorkMin)}` : '',
+                        myScheduleSummary.daysOffCount ? `${myScheduleSummary.daysOffCount} ${pluralRu(myScheduleSummary.daysOffCount, 'выходной', 'выходных', 'выходных')}` : ''
+                    ].filter(Boolean).join(' · ');
+                    const phonePermissionNote = breakReminderEnabled && breakReminderPermissionState && breakReminderPermissionState !== 'granted'
+                        ? ({
+                            denied: 'Уведомления запрещены в браузере — включите их в настройках сайта',
+                            default: 'Разрешение на уведомления будет запрошено при включении',
+                            unsupported: 'Браузер не поддерживает уведомления'
+                        })[breakReminderPermissionState] || null
+                        : null;
+
+                    const renderPhoneSchedule = () => (
+                        <>
+                            <MyShiftsStatusCard
+                                tileClassName={nowStatusVisual.tile}
+                                iconClassName={nowStatusVisual.icon}
+                                label={myNowStatus.label}
+                                live={myNowStatus.key === 'work'}
+                                hint={myNowStatus.hint}
+                                subHint={statusSubHint}
+                                reminderEnabled={breakReminderEnabled}
+                                onToggleReminder={handleToggleBreakReminder}
+                                leadMinutes={breakReminderLeadMinutes}
+                                leadOptions={[1, 2, 3, 5, 10, 15]}
+                                onLeadMinutes={setBreakReminderLeadMinutes}
+                                permissionNote={phonePermissionNote}
+                            />
+                            <PhoneDayStrip
+                                days={phoneDays}
+                                activeDate={phoneDayDate}
+                                onSelect={setPhoneSelectedDate}
+                                header={(
+                                    <MyShiftsWeekHeader
+                                        label={formatPhoneWeekLabel(weekRange)}
+                                        onPrev={() => stepPhoneWeek(-1)}
+                                        onNext={() => stepPhoneWeek(1)}
+                                        onToday={goPhoneToday}
+                                        showToday={!phoneDayIsToday}
+                                    />
+                                )}
+                            />
+                            {myScheduleError ? phoneErrorNote(myScheduleError) : null}
+                            <PhoneGroup
+                                label={phoneDayTitle(phoneDayDate)}
+                                right={phoneDayIsToday
+                                    ? <span className="shrink-0 text-[13px] font-semibold text-blue-600">Сегодня</span>
+                                    : (phoneShifts.length ? phoneCountBadge(formatHoursRu(phoneDayWorkMin)) : null)}
+                                hint={phoneDayBreakMin > 0
+                                    ? `Работа ${formatHoursRu(phoneDayWorkMin)} · чистое ${formatHoursMinutes(Math.max(0, phoneDayWorkMin - phoneDayBreakMin))} · перерывы ${formatMinutesOnly(phoneDayBreakMin)}`
+                                    : null}
+                            >
+                                {myScheduleLoading && !phoneDay ? (
+                                    <MyShiftsNoteRow tileClassName="bg-slate-300" iconClassName="fa-spinner fa-spin" title="Загружаю смены…" />
+                                ) : null}
+                                {phoneDayStatus ? (
+                                    <MyShiftsNoteRow
+                                        tileClassName="bg-amber-500"
+                                        iconClassName="fa-circle-info"
+                                        title={phoneDayStatus.label || 'Статус'}
+                                        subtitle={(phoneDayStatus.startDate || phoneDayStatus.endDate)
+                                            ? `${phoneDayStatus.startDate || '—'}${phoneDayStatus.endDate ? ` — ${phoneDayStatus.endDate}` : ''}`
+                                            : null}
+                                        note={phoneDayStatus.comment || null}
+                                    />
+                                ) : null}
+                                {phoneDay && !phoneShifts.length && !phoneDayStatus ? (
+                                    <MyShiftsNoteRow
+                                        tileClassName={phoneDay.isDayOff ? 'bg-sky-500' : 'bg-slate-300'}
+                                        iconClassName={phoneDay.isDayOff ? 'fa-umbrella-beach' : 'fa-calendar-xmark'}
+                                        title={phoneDay.isDayOff ? 'Выходной' : 'Смен нет'}
+                                        subtitle={phoneDay.isDayOff ? 'На этот день смен не назначено' : 'На этот день ничего не запланировано'}
+                                    />
+                                ) : null}
+                                {phoneShifts.map((seg, idx) => {
+                                    const visual = plannerShiftVisualMeta(seg);
+                                    const timeText = shiftTimeTextRu(seg);
+                                    const rows = [
+                                        <MyShiftsShiftRow
+                                            key={`phone-shift-${idx}`}
+                                            dotClassName={visual.dotClass}
+                                            time={timeText}
+                                            hours={formatHoursRu(seg.durationMin)}
+                                            typeLabel={plannerShiftTypeLabel(seg.shift_type ?? seg.shiftType)}
+                                            breaks={(Array.isArray(seg.breaks) ? seg.breaks : []).map(b => ({
+                                                label: `${formatBreakMinutePlain(b.start)} — ${formatBreakMinutePlain(b.end)}`,
+                                                duration: formatMinutesOnly(Math.max(0, (Number(b?.end) || 0) - (Number(b?.start) || 0)))
+                                            }))}
+                                        />
+                                    ];
+                                    // Фронт-офисам смены коллег закрыты — обменивать не с кем.
+                                    if (!operatorColleagueShiftsHidden) {
+                                        rows.push(
+                                            <PhoneLinkRow
+                                                key={`phone-swap-${idx}`}
+                                                icon={PHONE_ICONS.exchange}
+                                                tileClassName="bg-emerald-500"
+                                                title={phoneShifts.length > 1 ? `Обменять ${timeText}` : 'Обменять смену'}
+                                                onClick={() => handleOpenSwapModalForOwnShift(phoneDay, seg)}
+                                            />
+                                        );
+                                    }
+                                    // Прошедший день не меняем: часы за него уже посчитаны (правило сервера).
+                                    if (phoneDayDate >= phoneToday) {
+                                        rows.push(
+                                            <PhoneLinkRow
+                                                key={`phone-shorten-${idx}`}
+                                                icon={PHONE_ICONS.shorten}
+                                                tileClassName="bg-blue-500"
+                                                title={phoneShifts.length > 1 ? `Сократить ${timeText}` : 'Сократить смену'}
+                                                onClick={() => openShiftChangeModal('shorten', phoneDay, seg)}
+                                            />
+                                        );
+                                    }
+                                    return rows;
+                                })}
+                                {phoneTech.map(seg => (
+                                    <MyShiftsPlainRow
+                                        key={`phone-tech-${seg.id}`}
+                                        dotClassName="bg-violet-500"
+                                        title={`${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} · ${seg.reason || 'Тех. сбой'}`}
+                                        note={seg.comment || null}
+                                    />
+                                ))}
+                                {phoneOffline.map(seg => (
+                                    <MyShiftsPlainRow
+                                        key={`phone-offline-${seg.id}`}
+                                        dotClassName="bg-emerald-500"
+                                        title={`${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)} · офлайн`}
+                                        trailing={formatMinutesOnly(seg.endMin - seg.startMin)}
+                                        note={seg.comment || null}
+                                    />
+                                ))}
+                            </PhoneGroup>
+                            {phoneWeekSummary ? <p className="-mt-2 px-1 text-[13px] text-slate-500">Неделя: {phoneWeekSummary}</p> : null}
+                            <PhoneGroup label="Ближайшие смены" hint={myUpcomingShiftItems.length === 0 ? 'Когда график назначат, смены появятся здесь' : null}>
+                                {myUpcomingShiftItems.slice(0, 3).map(item => {
+                                    const nowTs = Date.now();
+                                    const isOngoing = item.startTs <= nowTs && item.endTs > nowTs;
+                                    const dateLabel = item.date === phoneToday
+                                        ? 'Сегодня'
+                                        : item.date === todayDateStr(new Date(nowTs + 86400000))
+                                            ? 'Завтра'
+                                            : `${capitalizeRu(formatWeekdayRu(item.date, 'short'))}, ${formatDateRuDayMonth(item.date)}`;
+                                    return (
+                                        <PhoneRow
+                                            key={`phone-upcoming-${item.key}`}
+                                            title={`${item.start} — ${item.end}`}
+                                            subtitle={isOngoing ? `${dateLabel} · идёт сейчас` : dateLabel}
+                                            trailing={<span className="shrink-0 text-[15px] tabular-nums text-slate-500">{formatHoursRu(item.durationMin)}</span>}
+                                            chevron
+                                            onClick={() => jumpPhoneToDate(item.date)}
+                                            ariaLabel={`${dateLabel}, ${item.start} — ${item.end}`}
+                                        />
+                                    );
+                                })}
+                            </PhoneGroup>
+                        </>
+                    );
+
+                    /* «Замены»: запросы карточками, ответ — капсулой в карточке,
+                       отказ и отмена — через лист подтверждения вместо window.confirm. */
+                    const SWAP_BADGE_TONES = { pending: 'amber', accepted: 'green', rejected: 'red', cancelled: 'slate' };
+                    const openPhoneSwapCreate = () => {
+                        setSwapCandidatesSearch('');
+                        setSwapDraftRequests([]);
+                        swapExchangePromptHandledRef.current.clear();
+                        setSwapForm(prev => ({ ...prev, requestType: 'replacement', targetOperatorId: '', targetSegments: [], comment: '' }));
+                        setShowSwapTargetSegmentsModal(false);
+                        setShowSwapCreateModal(true);
+                    };
+                    const closePhoneSwapCreate = () => {
+                        if (swapSubmitting) return false;
+                        setShowSwapCreateModal(false);
+                        setShowSwapTargetSegmentsModal(false);
+                        setSwapCandidatesSearch('');
+                        swapExchangePromptHandledRef.current.clear();
+                        return undefined;
+                    };
+                    const renderPhoneSwapRequest = (req, isIncoming) => {
+                        const statusMeta = getSwapStatusMeta(req?.status);
+                        const isExchangeRequest = isSwapExchangeRequest(req);
+                        const counterpartName = isIncoming ? (req?.requester?.name || 'Оператор') : (req?.target?.name || 'Оператор');
+                        const swapDateStr = req?.swapDate || req?.startDate || '';
+                        const periodLabel = (swapDateStr && req?.startTime && req?.endTime)
+                            ? `${formatDateRuDayMonth(swapDateStr)} · ${req.startTime} — ${req.endTime}`
+                            : formatSwapIntervalLabel(req);
+                        const counterHours = formatHoursRu(req?.exchangeSummary?.totalMinutes ?? 0);
+                        const directionText = isExchangeRequest
+                            ? `${isIncoming ? 'Взамен вы отдаёте' : 'Взамен получаете'} ${formatSwapSegmentsSummaryLabel(swapDateStr, req?.targetSegments)} · ${counterHours}`
+                            : (isIncoming ? 'Вам передают эту смену' : 'Вы передаёте эту смену');
+                        const busy = Number(swapRespondingId) === Number(req?.id);
+                        const actions = req?.status !== 'pending' ? [] : (isIncoming ? [
+                            { key: 'accept', label: 'Принять', tone: 'blue', busy, disabled: !!swapRespondingId, onClick: () => handleRespondSwapRequest(req, 'accept') },
+                            { key: 'reject', label: 'Отказать', tone: 'rose', disabled: !!swapRespondingId, onClick: () => setPhoneSwapConfirm({ req, action: 'reject' }) }
+                        ] : [
+                            { key: 'cancel', label: 'Отменить', tone: 'rose', busy, disabled: !!swapRespondingId, onClick: () => setPhoneSwapConfirm({ req, action: 'cancel' }) }
+                        ]);
+                        return (
+                            <MyShiftsRequestCard
+                                key={`phone-swap-${isIncoming ? 'in' : 'out'}-${req?.id}`}
+                                icon={isExchangeRequest ? PHONE_ICONS.exchange : PHONE_ICONS.replace}
+                                tileClassName={isExchangeRequest ? 'bg-emerald-500' : 'bg-blue-600'}
+                                title={counterpartName}
+                                badge={statusMeta.label}
+                                badgeTone={SWAP_BADGE_TONES[String(req?.status || '').toLowerCase()] || 'slate'}
+                                subtitle={`${periodLabel} · ${formatHoursRu(req?.summary?.totalMinutes ?? 0)}`}
+                                notes={[
+                                    directionText,
+                                    req?.requestComment || null,
+                                    req?.responseComment && req?.status !== 'pending' ? `Ответ: ${req.responseComment}` : null
+                                ]}
+                                actions={actions}
+                            />
+                        );
+                    };
+                    const renderPhoneSwapList = (key, label, items, emptyText) => {
+                        const list = Array.isArray(items) ? items : [];
+                        const visible = phoneSwapListsExpanded[key] ? list : list.slice(0, 6);
+                        return (
+                            <PhoneGroup
+                                label={label}
+                                right={list.length ? phoneCountBadge(list.length) : null}
+                                hint={swapRequestsLoading && !list.length ? 'Загружаю…' : (!list.length ? emptyText : null)}
+                            >
+                                {visible.map(req => renderPhoneSwapRequest(req, key === 'incoming'))}
+                                {list.length > visible.length ? (
+                                    <PhoneRow
+                                        key="more"
+                                        title={<span className="font-normal text-blue-600">Показать ещё {list.length - visible.length}</span>}
+                                        onClick={() => setPhoneSwapListsExpanded(prev => ({ ...prev, [key]: true }))}
+                                    />
+                                ) : null}
+                            </PhoneGroup>
+                        );
+                    };
+                    const renderPhoneSwaps = () => (
+                        <>
+                            <PhoneGroup>
+                                <PhoneLinkRow icon={PHONE_ICONS.plus} tileClassName="bg-blue-600" title="Новый запрос" subtitle="Замена или обмен сменами" onClick={openPhoneSwapCreate} />
+                            </PhoneGroup>
+                            {swapRequestsError ? phoneErrorNote(swapRequestsError) : null}
+                            {renderPhoneSwapList('incoming', 'Входящие', swapIncomingRequests, 'Нет входящих запросов')}
+                            {renderPhoneSwapList('outgoing', 'Исходящие', swapOutgoingRequests, 'Нет исходящих запросов')}
+                        </>
+                    );
+
+                    /* «Запросы»: заявки руководителю. Форма — тот же IosModal, что и
+                       на компьютере: на телефоне он и так экран. */
+                    const renderPhoneRequests = () => (
+                        <>
+                            <PhoneGroup hint="Заявка уходит вашему руководителю. После одобрения смена меняется в графике сама.">
+                                <PhoneLinkRow
+                                    icon={PHONE_ICONS.plus}
+                                    tileClassName="bg-blue-600"
+                                    title="Новый запрос"
+                                    subtitle="Сократить или добавить часть смены"
+                                    onClick={() => openShiftChangeModal('shorten', { date: phoneToday })}
+                                />
+                            </PhoneGroup>
+                            {shiftChangeError && !showShiftChangeModal ? phoneErrorNote(shiftChangeError) : null}
+                            <PhoneGroup
+                                label="Заявки"
+                                hint={shiftChangeLoading && shiftChangeRequests.length === 0
+                                    ? 'Загружаю заявки…'
+                                    : (shiftChangeRequests.length === 0 ? 'Заявок пока нет' : null)}
+                            >
+                                {shiftChangeRequests.map(item => {
+                                    const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
+                                    const deltaMin = Number(item?.minutesDelta) || 0;
+                                    const deltaText = deltaMin !== 0 ? ` (${deltaMin > 0 ? '+' : '−'}${formatMinutesOnly(Math.abs(deltaMin))})` : '';
+                                    return (
+                                        <MyShiftsRequestCard
+                                            key={`phone-scr-${item.id}`}
+                                            icon={item.kind === 'extra' ? PHONE_ICONS.extra : PHONE_ICONS.shorten}
+                                            tileClassName={item.kind === 'extra' ? 'bg-emerald-500' : 'bg-blue-500'}
+                                            title={SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
+                                            badge={statusMeta.label}
+                                            badgeTone={statusMeta.tone}
+                                            subtitle={`${formatDateRuDayMonth(parseDateStr(item.shiftDate))} · ${shiftChangeIntervalText(item)}${deltaText}`}
+                                            notes={[item.requestComment || null, item.responseComment ? `Ответ: ${item.responseComment}` : null]}
+                                            actions={item.status === 'pending' ? [{
+                                                key: 'cancel',
+                                                label: 'Отозвать',
+                                                tone: 'rose',
+                                                busy: shiftChangeCancellingId === item.id,
+                                                disabled: !!shiftChangeCancellingId,
+                                                onClick: () => cancelShiftChangeRequest(item.id)
+                                            }] : []}
+                                        />
+                                    );
+                                })}
+                            </PhoneGroup>
+                        </>
+                    );
+
+                    /* «Коллеги»: та же неделя полосой, под ней люди на выбранный
+                       день — работающие первыми (myShiftsPhoneDays.js). */
+                    const renderPhoneDirection = () => {
+                        const dirWeekDates = Array.from({ length: 7 }, (_, i) => {
+                            const d = new Date(directionSchedWeekStart + 'T00:00');
+                            d.setDate(d.getDate() + i);
+                            return todayDateStr(d);
+                        });
+                        const dirDate = pickPhoneDayDate(phoneDirectionDate, dirWeekDates, phoneToday);
+                        const dirDays = dirWeekDates.map(date => {
+                            const { caption, tone } = describeColleaguesPhoneDay(directionSchedOperators, date);
+                            return phoneStripDay(date, directionSchedLoading ? '' : caption, tone);
+                        });
+                        const stepDirectionWeek = (step) => {
+                            setDirectionSchedWeekStart(ws => todayDateStr(addDays(new Date(ws + 'T00:00'), step * 7)));
+                            setPhoneDirectionDate(todayDateStr(addDays(parseDateStr(dirDate), step * 7)));
+                        };
+                        const goDirectionToday = () => {
+                            const d = new Date();
+                            const weekday = d.getDay() || 7;
+                            d.setDate(d.getDate() - (weekday - 1));
+                            setDirectionSchedWeekStart(todayDateStr(d));
+                            setPhoneDirectionDate(phoneToday);
+                        };
+                        const rows = colleaguesForPhoneDay(directionSchedOperators, dirDate);
+                        const onShift = rows.filter(row => row.shifts.length).length;
+                        return (
+                            <>
+                                <PhoneDayStrip
+                                    days={dirDays}
+                                    activeDate={dirDate}
+                                    onSelect={setPhoneDirectionDate}
+                                    header={(
+                                        <MyShiftsWeekHeader
+                                            label={formatPhoneWeekLabel(dirWeekDates)}
+                                            onPrev={() => stepDirectionWeek(-1)}
+                                            onNext={() => stepDirectionWeek(1)}
+                                            onToday={goDirectionToday}
+                                            showToday={dirDate !== phoneToday}
+                                        />
+                                    )}
+                                />
+                                {directionSchedError ? phoneErrorNote(directionSchedError) : null}
+                                <PhoneGroup
+                                    label={phoneDayTitle(dirDate)}
+                                    right={rows.length ? phoneCountBadge(`на смене ${onShift} из ${rows.length}`) : null}
+                                    hint={directionSchedLoading ? 'Загружаю графики…' : (!rows.length ? 'Нет данных о графиках' : null)}
+                                >
+                                    {rows.map(({ op, shifts, isDayOff }) => (
+                                        <MyShiftsColleagueRow
+                                            key={`phone-colleague-${op.id}`}
+                                            name={op.name}
+                                            supervisor={op.supervisor_name || null}
+                                            isDayOff={isDayOff}
+                                            shifts={shifts.map((sh, si) => {
+                                                const sMin = timeToMinutes(sh.start);
+                                                const eMin = timeToMinutes(sh.end);
+                                                const overnight = eMin <= sMin && sh.end !== '00:00';
+                                                const isPracticeShift = isPlannerOfficePracticeShift(sh);
+                                                const isPhoneShift = isPlannerPhoneShift(sh);
+                                                return {
+                                                    key: si,
+                                                    kind: isPhoneShift ? 'phone' : (isPracticeShift ? 'practice' : (overnight ? 'night' : 'regular')),
+                                                    label: `${isPhoneShift ? 'ТФ ' : (isPracticeShift ? 'ПР ' : '')}${sh.start}–${sh.end}${overnight ? '↑' : ''}`
+                                                };
+                                            })}
+                                        />
+                                    ))}
+                                </PhoneGroup>
+                            </>
+                        );
+                    };
+
+                    /* Экраны запроса на замену. Настольное окно на две колонки со
+                       списком к отправке здесь не монтируется: экран — одна форма
+                       сверху вниз и одна кнопка «Отправить». Тип запроса — переключатель
+                       в форме, а не всплывающий вопрос; вопрос листом остаётся только
+                       у «Обменять смену» из списка дня, где тип ещё не выбран. */
+                    const selectPhoneOwnShift = (seg) => {
+                        const swapDate = String(swapForm.swapDate || '').trim();
+                        if (!swapDate || !seg?.sourceStart || !seg?.sourceEnd) return;
+                        setShowSwapTargetSegmentsModal(false);
+                        setSwapForm(prev => ({
+                            ...prev,
+                            endDate: seg.sourceEndsNextDay ? todayDateStr(addDays(parseDateStr(swapDate), 1)) : swapDate,
+                            startTime: String(seg.sourceStart),
+                            endTime: String(seg.sourceEnd),
+                            targetOperatorId: '',
+                            targetSegments: []
+                        }));
+                    };
+                    const setPhoneSwapType = (type) => {
+                        if (type === 'exchange' && !currentSwapFullShiftMatch) {
+                            notifySwapMessage('Обмен возможен только для целой смены — выберите её выше', 'warning');
+                            return;
+                        }
+                        setShowSwapTargetSegmentsModal(false);
+                        setSwapForm(prev => ({ ...prev, requestType: type, targetOperatorId: '', targetSegments: [] }));
+                    };
+                    const phoneSwapFieldChange = (patch) => {
+                        setShowSwapTargetSegmentsModal(false);
+                        setSwapForm(prev => ({ ...prev, ...patch, targetOperatorId: '', targetSegments: [] }));
+                    };
+                    const phoneSwapHeaderHint = !swapForm.swapDate
+                        ? 'Выберите дату и интервал смены'
+                        : (!swapTimeValidation.isValid
+                            ? 'Уточните интервал смены'
+                            : (swapForm.targetOperatorId
+                                ? 'Можно отправлять'
+                                : (isSwapExchangeMode ? 'Выберите коллегу для обмена' : 'Выберите коллегу для замены')));
+                    const phoneOwnShiftChips = swapDayTimeline.segments.filter(seg => seg.sourceStart && seg.sourceEnd).map(seg => ({
+                        id: seg.id,
+                        label: seg.fullLabel || seg.label,
+                        caption: `целиком · ${formatHoursRu(seg.fullMinutes ?? seg.minutes)}`,
+                        active: swapForm.startTime === seg.sourceStart && swapForm.endTime === seg.sourceEnd,
+                        seg
+                    }));
+                    const phoneCandidateTags = (item) => [
+                        Number(item?.priorityScore || 0) > 0 ? { key: 'priority', label: 'Приоритет', className: 'bg-emerald-100 text-emerald-700' } : null,
+                        item?.matchStartsAtRequestEnd ? { key: 'start', label: 'Стык: старт', className: 'bg-blue-100 text-blue-700' } : null,
+                        item?.matchEndsAtRequestStart ? { key: 'end', label: 'Стык: конец', className: 'bg-indigo-100 text-indigo-700' } : null,
+                        (item?.isDayOff ?? item?.is_day_off) ? { key: 'off', label: 'Выходной', className: 'bg-sky-100 text-sky-700' } : null
+                    ].filter(Boolean);
+                    const phoneCandidateShifts = (item) => {
+                        const dayShifts = Array.isArray(item?.dayShifts) ? item.dayShifts : [];
+                        const nextDayShifts = Array.isArray(item?.nextDayShifts) ? item.nextDayShifts : [];
+                        const parts = [];
+                        if (dayShifts.length) {
+                            parts.push(`${formatDateRuDayMonth(swapForm.swapDate)}: ${dayShifts.map(seg => `${seg?.start || ''} — ${seg?.end || ''}`).join(', ')}`);
+                        } else if (!(item?.isDayOff ?? item?.is_day_off)) {
+                            parts.push(`${formatDateRuDayMonth(swapForm.swapDate)}: нет смен`);
+                        }
+                        if (!isSwapExchangeMode && nextDayShifts.length && item?.nextDayDate) {
+                            parts.push(`${formatDateRuDayMonth(item.nextDayDate)}: ${nextDayShifts.map(seg => `${seg?.start || ''} — ${seg?.end || ''}`).join(', ')}`);
+                        }
+                        return parts.join(' · ') || null;
+                    };
+                    const phoneCandidatesHint = !swapTimeValidation.isValid
+                        ? 'Сначала укажите корректный интервал.'
+                        : (swapCandidatesLoading
+                            ? 'Подбираю кандидатов…'
+                            : (swapCandidatesError
+                                || (swapCandidatesFiltered.length === 0
+                                    ? (String(swapCandidatesSearch || '').trim()
+                                        ? 'По этому поиску никого нет.'
+                                        : (isSwapExchangeMode ? 'Нет доступных кандидатов для обмена.' : 'Нет операторов без пересечения на этот интервал.'))
+                                    : null)));
+                    const phoneSelectedSegmentsLabel = selectedSwapTargetSegments.length
+                        ? `${selectedSwapTargetSegments.length} · ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`
+                        : 'Не выбраны';
+                    const phoneConfirm = phoneSwapConfirmShown;
+                    const phoneConfirmIsCancel = phoneConfirm?.action === 'cancel';
+                    const renderPhoneSwapScreens = () => (
+                        <>
+                            <IosModal
+                                open={showSwapCreateModal}
+                                onClose={closePhoneSwapCreate}
+                                title={isSwapExchangeMode ? 'Запрос на обмен' : 'Запрос на замену'}
+                                subtitle={phoneSwapHeaderHint}
+                                footer={(
+                                    <button
+                                        type="button"
+                                        onClick={handleCreateSwapRequest}
+                                        disabled={swapSubmitting || !canSubmitCurrentSwapDraft}
+                                        className={PHONE_BUTTON.blue}
+                                    >
+                                        {swapSubmitting ? 'Отправляю…' : (isSwapExchangeMode ? 'Отправить обмен' : 'Отправить')}
+                                    </button>
+                                )}
+                            >
+                                <div className="space-y-4">
+                                    <PhoneGroup
+                                        label={isSwapExchangeMode ? 'Смена для обмена' : 'Смена для замены'}
+                                        hint={!swapTimeValidation.isValid
+                                            ? swapTimeValidation.message
+                                            : (currentSwapFullShiftMatch
+                                                ? null
+                                                : `Часть смены: ${formatSwapDateTimeRangeLabel(swapForm.swapDate, swapForm.startTime, swapForm.endTime, swapTimeValidation.effectiveEndDate || swapForm.endDate || swapForm.swapDate)} · ${formatHoursRu(swapTimeValidation.durationMin)}`)}
+                                    >
+                                        <PhoneField label="Дата">
+                                            <select
+                                                className="ms-m-select text-slate-900"
+                                                value={swapForm.swapDate}
+                                                onChange={(e) => phoneSwapFieldChange({ swapDate: e.target.value, endDate: e.target.value || '' })}
+                                                aria-label="Дата смены"
+                                            >
+                                                <option value="">Выберите</option>
+                                                {mySwapSourceShiftDays.map(dayKey => (
+                                                    <option key={`phone-swap-date-${dayKey}`} value={dayKey}>
+                                                        {formatDateRuShort(dayKey)} ({formatWeekdayRu(dayKey, 'short')})
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </PhoneField>
+                                        <PhoneField label="Начало">
+                                            <input
+                                                type="time"
+                                                step={300}
+                                                value={swapForm.startTime}
+                                                disabled={!swapForm.swapDate}
+                                                onChange={(e) => phoneSwapFieldChange({ startTime: e.target.value })}
+                                                className={PHONE_TIME_INPUT}
+                                            />
+                                        </PhoneField>
+                                        <PhoneField label="Конец">
+                                            <input
+                                                type="time"
+                                                step={300}
+                                                value={swapForm.endTime}
+                                                disabled={!swapForm.swapDate}
+                                                onChange={(e) => phoneSwapFieldChange({ endTime: e.target.value })}
+                                                className={PHONE_TIME_INPUT}
+                                            />
+                                        </PhoneField>
+                                        <PhoneRow
+                                            title={<span className="font-normal">Конец на следующий день</span>}
+                                            trailing={(
+                                                <IosToggle
+                                                    checked={swapEndsNextDay}
+                                                    disabled={!swapForm.swapDate}
+                                                    onChange={(next) => phoneSwapFieldChange({ endDate: next ? swapNextDayDate : (swapForm.swapDate || '') })}
+                                                />
+                                            )}
+                                        />
+                                    </PhoneGroup>
+                                    {phoneOwnShiftChips.length ? (
+                                        <PhoneChips
+                                            ariaLabel="Ваши смены в этот день"
+                                            items={phoneOwnShiftChips}
+                                            onSelect={(item) => selectPhoneOwnShift(item.seg)}
+                                        />
+                                    ) : null}
+                                    <PhoneGroup
+                                        label="Тип запроса"
+                                        hint={!currentSwapFullShiftMatch
+                                            ? 'Обмен возможен только для целой смены — выберите её выше.'
+                                            : (isSwapExchangeMode
+                                                ? 'Вы передаёте смену и выбираете смены коллеги взамен.'
+                                                : 'Вы передаёте смену; встречную выбирать не нужно.')}
+                                    >
+                                        <div className="ms-m-inset">
+                                            <IosSegmented
+                                                stretch
+                                                size="lg"
+                                                value={isSwapExchangeMode ? 'exchange' : 'replacement'}
+                                                onChange={setPhoneSwapType}
+                                                ariaLabel="Тип запроса"
+                                                options={[
+                                                    { value: 'replacement', label: 'Замена' },
+                                                    { value: 'exchange', label: 'Обмен' }
+                                                ]}
+                                            />
+                                        </div>
+                                    </PhoneGroup>
+                                    <PhoneGroup
+                                        label={isSwapExchangeMode ? 'Кому предложить обмен' : 'Кто заменит'}
+                                        right={swapTimeValidation.isValid && !swapCandidatesLoading && swapCandidatesFiltered.length ? phoneCountBadge(swapCandidatesFiltered.length) : null}
+                                        hint={phoneCandidatesHint}
+                                    >
+                                        {swapTimeValidation.isValid && swapCandidates.length > 6 ? (
+                                            <div className="ms-m-inset">
+                                                <input
+                                                    type="search"
+                                                    value={swapCandidatesSearch}
+                                                    onChange={(e) => setSwapCandidatesSearch(e.target.value)}
+                                                    placeholder="Поиск: ФИО или супервайзер"
+                                                    className={`${iosInput} text-[16px]`}
+                                                    aria-label="Поиск кандидата"
+                                                />
+                                            </div>
+                                        ) : null}
+                                        {swapTimeValidation.isValid && !swapCandidatesLoading ? swapCandidatesFiltered.map(item => {
+                                            const itemId = String(item?.id || '');
+                                            const isSelected = itemId === String(swapForm.targetOperatorId || '');
+                                            const canPickSegments = isSelected && isSwapExchangeMode && selectedSwapCandidateSelectableSegments.length > 1;
+                                            return (
+                                                <React.Fragment key={`phone-candidate-${itemId}`}>
+                                                    <MyShiftsCandidateRow
+                                                        name={item?.name || 'Оператор'}
+                                                        supervisor={item?.supervisorName || null}
+                                                        tags={phoneCandidateTags(item)}
+                                                        shiftsLabel={phoneCandidateShifts(item)}
+                                                        selected={isSelected}
+                                                        onClick={() => handleSelectSwapCandidate(item)}
+                                                    />
+                                                    {isSelected && isSwapExchangeMode ? (
+                                                        <PhoneRow
+                                                            title={<span className="font-normal">Смены коллеги взамен</span>}
+                                                            trailing={<span className="shrink-0 text-[15px] tabular-nums text-slate-500">{phoneSelectedSegmentsLabel}</span>}
+                                                            chevron={canPickSegments}
+                                                            onClick={canPickSegments ? () => setShowSwapTargetSegmentsModal(true) : null}
+                                                        />
+                                                    ) : null}
+                                                </React.Fragment>
+                                            );
+                                        }) : null}
+                                    </PhoneGroup>
+                                    <PhoneGroup label="Комментарий">
+                                        <div className="ms-m-inset">
+                                            <input
+                                                type="text"
+                                                maxLength={400}
+                                                value={swapForm.comment}
+                                                onChange={(e) => setSwapForm(prev => ({ ...prev, comment: e.target.value }))}
+                                                placeholder="Например: прошу подменить на время учёбы"
+                                                className={`${iosInput} text-[16px]`}
+                                                aria-label="Комментарий к запросу"
+                                            />
+                                        </div>
+                                    </PhoneGroup>
+                                </div>
+                            </IosModal>
+
+                            <IosModal
+                                open={showSwapTargetSegmentsModal && showSwapCreateModal && isSwapExchangeMode}
+                                onClose={() => setShowSwapTargetSegmentsModal(false)}
+                                title="Смены коллеги"
+                                subtitle={selectedSwapCandidate?.name || ''}
+                                footer={(
+                                    <button type="button" className={PHONE_BUTTON.blue} onClick={() => setShowSwapTargetSegmentsModal(false)}>
+                                        Готово
+                                    </button>
+                                )}
+                            >
+                                <PhoneGroup
+                                    label={`Взамен · ${swapForm.swapDate ? formatDateRuShort(swapForm.swapDate) : ''}`}
+                                    hint={selectedSwapTargetSegments.length === 0
+                                        ? 'Отметьте одну или несколько смен.'
+                                        : `Выбрано: ${selectedSwapTargetSegments.length} · ${formatMinutesOnly(selectedSwapTargetSegmentsTotalMinutes)}`}
+                                >
+                                    {selectedSwapCandidateSelectableSegments.map((seg, segIdx) => {
+                                        const payload = { start: seg.start, end: seg.end, dayOffset: seg.dayOffset };
+                                        return (
+                                            <MyShiftsCheckRow
+                                                key={`phone-segment-${segIdx}-${seg.start}-${seg.end}-${seg.dayOffset}`}
+                                                title={formatSwapSegmentLabel(swapForm.swapDate, seg)}
+                                                subtitle={formatMinutesOnly(seg.durationMin)}
+                                                checked={isSwapTargetSegmentSelected(payload)}
+                                                onClick={() => toggleSwapTargetSegmentSelection(selectedSwapCandidate?.id, payload)}
+                                            />
+                                        );
+                                    })}
+                                </PhoneGroup>
+                            </IosModal>
+
+                            <MobileActionSheet
+                                open={!!swapExchangeChoiceModal.open}
+                                onClose={() => closeSwapExchangeChoiceModal(false)}
+                                actions={[
+                                    {
+                                        key: 'question',
+                                        render: (
+                                            <div className="sa-m-sheet-title">
+                                                <b>Что сделать со сменой?</b>
+                                                <span>
+                                                    {formatSwapDateTimeRangeLabel(
+                                                        swapExchangeChoiceModal.swapDate,
+                                                        swapExchangeChoiceModal.startTime,
+                                                        swapExchangeChoiceModal.endTime,
+                                                        swapExchangeChoiceModal.endDate
+                                                    ) || 'Выбрана полная смена'}. Передать её коллеге или обменять на его смены.
+                                                </span>
+                                            </div>
+                                        )
+                                    },
+                                    { key: 'replacement', label: 'Обычная замена', onClick: () => closeSwapExchangeChoiceModal(false) },
+                                    { key: 'exchange', label: 'Обмен сменами', onClick: () => closeSwapExchangeChoiceModal(true) }
+                                ]}
+                            />
+
+                            <MobileActionSheet
+                                open={!!phoneSwapConfirm}
+                                onClose={() => setPhoneSwapConfirm(null)}
+                                actions={phoneConfirm ? [
+                                    {
+                                        key: 'question',
+                                        render: (
+                                            <div className="sa-m-sheet-title">
+                                                <b>{phoneConfirmIsCancel ? 'Отменить отправленный запрос?' : 'Отклонить запрос?'}</b>
+                                                <span>
+                                                    {formatSwapIntervalLabel(phoneConfirm.req)}
+                                                    {phoneConfirmIsCancel ? '. Коллега его больше не увидит.' : '. Коллеге придёт отказ.'}
+                                                </span>
+                                            </div>
+                                        )
+                                    },
+                                    {
+                                        key: 'confirm',
+                                        danger: true,
+                                        disabled: !!swapRespondingId,
+                                        label: phoneConfirmIsCancel ? 'Отменить запрос' : 'Отклонить',
+                                        onClick: () => {
+                                            const { req, action } = phoneConfirm;
+                                            setPhoneSwapConfirm(null);
+                                            handleRespondSwapRequest(req, action, { skipConfirm: true });
+                                        }
+                                    }
+                                ] : []}
+                            />
+                        </>
+                    );
+
+                    return (
+                        <div className="sa-m-root min-h-screen bg-slate-100" style={{ fontFamily: IOS_FONT }}>
+                            <div className="flex flex-col gap-4 px-4 pb-6">
+                                <header className="pt-1">
+                                    <h1 className="sa-m-title truncate text-slate-900">Мои смены</h1>
+                                    {(myScheduleData?.direction || user?.direction) ? (
+                                        <p className="text-[15px] text-slate-500">{myScheduleData?.direction || user?.direction}</p>
+                                    ) : null}
+                                </header>
+                                <IosSegmented
+                                    className="ms-m-tabs"
+                                    value={operatorSelfTab}
+                                    onChange={setOperatorSelfTab}
+                                    stretch
+                                    size="lg"
+                                    ariaLabel="Разделы «Моих смен»"
+                                    options={[
+                                        { value: 'schedule', label: 'Смены' },
+                                        operatorColleagueShiftsHidden ? null : { value: 'swaps', label: 'Замены', count: swapPendingIncomingCount },
+                                        { value: 'requests', label: 'Запросы', count: shiftChangeUnseenCount },
+                                        operatorColleagueShiftsHidden ? null : { value: 'direction', label: 'Коллеги' }
+                                    ]}
+                                />
+                                {operatorSelfTab === 'schedule' ? renderPhoneSchedule() : null}
+                                {operatorSelfTab === 'swaps' ? renderPhoneSwaps() : null}
+                                {operatorSelfTab === 'requests' ? renderPhoneRequests() : null}
+                                {operatorSelfTab === 'direction' ? renderPhoneDirection() : null}
+                            </div>
+                            {shiftChangeModal}
+                            {renderPhoneSwapScreens()}
+                        </div>
+                    );
+                }
+
                 return (
                     <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">
                         <ScheduleTimelineTooltip />
@@ -26044,205 +27076,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     )}
 
-                                    {/* ── Модалка «Новая заявка по смене» ───────────────────────── */}
-                                    <IosModal
-                                        open={showShiftChangeModal}
-                                        onClose={() => setShowShiftChangeModal(false)}
-                                        title="Заявка по смене"
-                                        subtitle="Уйдёт вашему руководителю на согласование"
-                                        maxWidth="max-w-md"
-                                        footer={(
-                                            <div className="flex w-full flex-col gap-2 sm:flex-row sm:justify-end">
-                                                <button
-                                                    type="button"
-                                                    className={`${iosBtnSecondary} w-full sm:w-auto`}
-                                                    onClick={() => setShowShiftChangeModal(false)}
-                                                >
-                                                    Отмена
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    className={`${iosBtnPrimary} w-full sm:w-auto`}
-                                                    disabled={!!shiftChangeFormProblem || shiftChangeSubmitting}
-                                                    onClick={submitShiftChangeRequest}
-                                                >
-                                                    {shiftChangeSubmitting ? 'Отправляем…' : 'Отправить'}
-                                                </button>
-                                            </div>
-                                        )}
-                                    >
-                                        <div className="space-y-4">
-                                            <IosSegmented
-                                                value={shiftChangeForm.kind}
-                                                onChange={setShiftChangeKind}
-                                                stretch
-                                                ariaLabel="Что нужно изменить"
-                                                options={[
-                                                    { value: 'shorten', label: 'Сократить' },
-                                                    { value: 'extra', label: 'Доп. часть' },
-                                                ]}
-                                            />
+                                    {/* ── Модалка «Новая заявка по смене» — одна на компьютер и телефон, собрана в shiftChangeModal выше ── */}
+                                    {shiftChangeModal}
 
-                                            <div className="space-y-1.5">
-                                                <div className={iosGroupLabel}>День</div>
-                                                <IosDatePicker
-                                                    value={shiftChangeForm.date}
-                                                    onChange={setShiftChangeDate}
-                                                    min={todayDateStr(new Date())}
-                                                    max={todayDateStr(addDays(new Date(), 45))}
-                                                    ariaLabel="День смены"
-                                                />
-                                            </div>
-
-                                            {shiftChangeForm.kind === 'shorten' ? (
-                                                <>
-                                                    {shiftChangeDayShifts.length === 0 ? (
-                                                        <div className="rounded-xl bg-slate-100 px-3.5 py-2.5 text-[12.5px] text-slate-500">
-                                                            В этот день смен нет. Чтобы выйти дополнительно, переключитесь на «Доп. часть».
-                                                        </div>
-                                                    ) : (
-                                                        <>
-                                                            {/* Выбор куска показываем только когда их правда несколько:
-                                                                вопрос с одним ответом — тот самый лишний шум. */}
-                                                            {shiftChangeDayShifts.length > 1 && (
-                                                                <div className="space-y-1.5">
-                                                                    <div className={iosGroupLabel}>Какая смена</div>
-                                                                    <div className="flex flex-wrap gap-1.5">
-                                                                        {shiftChangeDayShifts.map((seg, idx) => {
-                                                                            const key = `${seg.start}|${seg.end}`;
-                                                                            const active = shiftChangeSegmentKey(shiftChangeSelectedSegment || {}) === key;
-                                                                            return (
-                                                                                <button
-                                                                                    key={`scr-seg-${idx}`}
-                                                                                    type="button"
-                                                                                    onClick={() => selectShiftChangeSegment(seg)}
-                                                                                    className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium tabular-nums transition active:scale-[0.98] ${
-                                                                                        active
-                                                                                            ? 'bg-blue-600 text-white shadow-sm'
-                                                                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                                                                    }`}
-                                                                                >
-                                                                                    {seg.start} — {seg.end}
-                                                                                </button>
-                                                                            );
-                                                                        })}
-                                                                    </div>
-                                                                </div>
-                                                            )}
-                                                            <div className="grid grid-cols-2 gap-3">
-                                                                <div className="space-y-1.5">
-                                                                    <div className={iosGroupLabel}>Начало</div>
-                                                                    <IosTimePicker
-                                                                        value={shiftChangeForm.newStart}
-                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newStart: v }))}
-                                                                        ariaLabel="Новое начало смены"
-                                                                    />
-                                                                </div>
-                                                                <div className="space-y-1.5">
-                                                                    <div className={iosGroupLabel}>Конец</div>
-                                                                    <IosTimePicker
-                                                                        value={shiftChangeForm.newEnd}
-                                                                        onChange={(v) => setShiftChangeForm(prev => ({ ...prev, newEnd: v }))}
-                                                                        ariaLabel="Новый конец смены"
-                                                                    />
-                                                                </div>
-                                                            </div>
-                                                            {shiftChangeSelectedSegment && (
-                                                                <div className="text-[12px] tabular-nums text-slate-500">
-                                                                    Сейчас {shiftChangeSelectedSegment.start} — {shiftChangeSelectedSegment.end}
-                                                                    <span className="text-slate-400"> · </span>
-                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
-                                                                </div>
-                                                            )}
-                                                        </>
-                                                    )}
-                                                </>
-                                            ) : (
-                                                <div className="grid grid-cols-2 gap-3">
-                                                    <div className="space-y-1.5">
-                                                        <div className={iosGroupLabel}>Начало</div>
-                                                        <IosTimePicker
-                                                            value={shiftChangeForm.start}
-                                                            onChange={(v) => setShiftChangeForm(prev => ({ ...prev, start: v }))}
-                                                            ariaLabel="Начало дополнительной части"
-                                                        />
-                                                    </div>
-                                                    <div className="space-y-1.5">
-                                                        <div className={iosGroupLabel}>Конец</div>
-                                                        <IosTimePicker
-                                                            value={shiftChangeForm.end}
-                                                            onChange={(v) => setShiftChangeForm(prev => ({ ...prev, end: v }))}
-                                                            ariaLabel="Конец дополнительной части"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {/* Таймлайн дня: серым то, что стоит в графике, розовым
-                                                отрезаемое, цветным итог. Числа под ним — только
-                                                «было → станет», без повтора самих границ: они уже
-                                                стоят в полях выше. */}
-                                            {(shiftChangeTimeline.base.length > 0 || shiftChangeTimeline.add.length > 0) && (
-                                                <div className="space-y-2 rounded-xl bg-white px-3 py-2.5 ring-1 ring-slate-200/70">
-                                                    <ShiftChangeTimeline {...shiftChangeTimeline} />
-                                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums text-slate-500">
-                                                        {shiftChangeForm.kind === 'shorten' && shiftChangeSelectedSegment && (
-                                                            <span>
-                                                                Было <span className="font-semibold text-slate-700">
-                                                                    {formatMinutesOnly(shiftChangeSelectedSegment.endMin - shiftChangeSelectedSegment.startMin)}
-                                                                </span>
-                                                            </span>
-                                                        )}
-                                                        {shiftChangeProposed && (
-                                                            <span>
-                                                                {shiftChangeForm.kind === 'extra' ? 'Добавится ' : 'Станет '}
-                                                                <span className={`font-semibold ${shiftChangeExtraConflict ? 'text-rose-600' : 'text-slate-700'}`}>
-                                                                    {formatMinutesOnly(shiftChangeProposed.endMin - shiftChangeProposed.startMin)}
-                                                                </span>
-                                                            </span>
-                                                        )}
-                                                        {/* Про склейку говорим прямо: иначе «доп. часть впритык»
-                                                            выглядит как вторая смена, а в графике станет одной. */}
-                                                        {shiftChangeForm.kind === 'extra' && !shiftChangeExtraConflict && shiftChangeProposed
-                                                            && shiftChangeDayIntervals.some(seg =>
-                                                                seg.endMin === shiftChangeProposed.startMin
-                                                                || seg.startMin === shiftChangeProposed.endMin) && (
-                                                            <span className="text-slate-400">— продлит смену, а не добавит вторую</span>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            <div className="space-y-1.5">
-                                                <div className={iosGroupLabel}>Комментарий · необязательно</div>
-                                                <textarea
-                                                    rows={2}
-                                                    value={shiftChangeForm.comment}
-                                                    onChange={(e) => setShiftChangeForm(prev => ({ ...prev, comment: e.target.value }))}
-                                                    placeholder="Причина — руководителю будет понятнее"
-                                                    className={`${iosInput} resize-none`}
-                                                />
-                                            </div>
-
-                                            {/* Одна строка на всё: и почему кнопка недоступна, и что
-                                                ответил сервер. Два разных места под одну мысль
-                                                читались бы как две разные проблемы. */}
-                                            {(shiftChangeError || shiftChangeFormProblem) && (
-                                                <div className={`rounded-xl px-3.5 py-2.5 text-[12.5px] ${
-                                                    shiftChangeError
-                                                        ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200/70'
-                                                        : 'bg-slate-100 text-slate-500'
-                                                }`}>
-                                                    {shiftChangeError || shiftChangeFormProblem}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </IosModal>
-
-                                    {operatorSelfTab === 'swaps' && (
-                                        <div className="space-y-0 sm:space-y-3 pb-2">
+                                    {/* Окна запроса на замену живут ВНЕ вкладки «Замены». Раньше они были
+                                        смонтированы только внутри неё, и «Обменять смену» из вкладки
+                                        «Смены» открывал вопрос «замена или обмен?» в никуда: промис ждал
+                                        окно, которого не было в дереве, и ничего не происходило. На телефоне
+                                        эти три окна не монтируются — там свои экраны (ветка isNarrowShell). */}
                                             <SimpleModal
-                                                open={showSwapCreateModal}
+                                                open={showSwapCreateModal && !isNarrowShell}
                                                 onClose={() => {
                                                     setShowSwapCreateModal(false);
                                                     setShowSwapTargetSegmentsModal(false);
@@ -26952,7 +27795,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </SimpleModal>
                                             <SimpleModal
-                                                open={showSwapTargetSegmentsModal && showSwapCreateModal && isSwapExchangeMode}
+                                                open={showSwapTargetSegmentsModal && showSwapCreateModal && isSwapExchangeMode && !isNarrowShell}
                                                 onClose={() => setShowSwapTargetSegmentsModal(false)}
                                                 panelClassName="sm:w-[520px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-3xl"
                                             >
@@ -27027,7 +27870,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </SimpleModal>
                                             <SimpleModal
-                                                open={!!swapExchangeChoiceModal.open}
+                                                open={!!swapExchangeChoiceModal.open && !isNarrowShell}
                                                 onClose={() => closeSwapExchangeChoiceModal(false)}
                                                 panelClassName="sm:w-[460px] max-w-[calc(100vw-1rem)] p-0 sm:rounded-3xl"
                                             >
@@ -27089,6 +27932,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </div>
                                             </SimpleModal>
 
+                                    {operatorSelfTab === 'swaps' && (
+                                        <div className="space-y-0 sm:space-y-3 pb-2">
                                             {swapRequestsError && (
                                                 <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
                                                     {swapRequestsError}
