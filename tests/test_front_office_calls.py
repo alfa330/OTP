@@ -21,7 +21,7 @@ from openpyxl import load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import front_office_calls as foc
+from yataxi import front_office_calls as foc
 
 
 def _user(uid, name, email=None):

@@ -51,7 +51,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-import reg_contest
+from yataxi import reg_contest
 
 log = logging.getLogger(__name__)
 

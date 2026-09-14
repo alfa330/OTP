@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import log_secrets  # noqa: E402
+from common import log_secrets  # noqa: E402
 
 FAKE_GOOGLE = 'AIzaSyFAKEKEY_FOR_TESTS_000000000000000'
 FAKE_BOT = '1234567890:AAFAKE-bot-token-for-tests-000000000'

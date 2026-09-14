@@ -385,7 +385,7 @@ def amo_client_for_thread():
     """Клиент amoCRM текущего потока. Создаётся при первом обращении."""
     client = getattr(_thread_state, 'amo_client', None)
     if client is None:
-        import amo_leads
+        from amocrm import leads as amo_leads
         client = amo_leads.AmoClient()
         _thread_state.amo_client = client
     return client
@@ -689,7 +689,7 @@ def _text(value):
 
 def is_enabled():
     """Есть ли хоть один кабинет, которым можно ходить, и настроена ли amoCRM."""
-    import amo_leads
+    from amocrm import leads as amo_leads
     return bool(cabinets.configured()) and amo_leads.is_configured()
 
 

@@ -11,6 +11,7 @@
 Linux). Подменяем зависимость заглушкой, чтобы тест шёл и на Windows-машине разработчика.
 """
 import copy
+import importlib
 import sys
 import types
 import unittest
@@ -18,8 +19,18 @@ from unittest import mock
 
 
 def _load_service():
-    if "ai_feed_back_service" in sys.modules:
-        del sys.modules["ai_feed_back_service"]
+    """Поднимает ai_feedback.service заново, с заглушкой вместо настоящей базы.
+
+    Сбрасывать надо ОБЕ половины: и запись в sys.modules, и атрибут пакета. После
+    переезда модуля в пакет `from ai_feedback import service` берёт getattr на
+    пакете и до sys.modules не доходит — модуль вернулся бы из кэша, не выполнившись
+    заново, заглушка database не применилась бы, и тест поднял бы пул к БОЕВОЙ базе.
+    """
+    import ai_feedback
+
+    sys.modules.pop("ai_feedback.service", None)
+    if hasattr(ai_feedback, "service"):
+        del ai_feedback.service
     stub = types.ModuleType("database")
     stub.db = mock.MagicMock()
     stub.IT_TICKET_CATALOG = {
@@ -27,7 +38,7 @@ def _load_service():
         "szov": {"label": "СЗоВ", "categories": []},
     }
     with mock.patch.dict(sys.modules, {"database": stub}):
-        import ai_feed_back_service as service
+        service = importlib.import_module("ai_feedback.service")
     return service
 
 

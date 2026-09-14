@@ -38,14 +38,14 @@ import json
 import html
 from concurrent.futures import ThreadPoolExecutor
 import group_late
-import amo_leads
+from amocrm import leads as amo_leads
 # Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
 # выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
 # только stdlib, — и уронить старт приложения ему нечем.
 from trainings import reports as training_reports
-import reg_contest
-import front_office_calls
+from yataxi import reg_contest
+from yataxi import front_office_calls
 from database import (
     db,
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
@@ -85,7 +85,7 @@ from database import (
     CALCULATION_MODEL_ALLOWED,
     CALCULATION_MODEL_CHAT_MANAGER,
 )
-from resource_fte_service import (
+from resource_fte.service import (
     build_resource_schedule_preview,
     get_operator_rate_overrides,
     get_resource_day,
@@ -140,8 +140,8 @@ from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
 from zipfile import ZipFile, ZIP_DEFLATED
 from xml.etree import ElementTree as ET
-from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai, generate_it_ticket_with_ai
-from recruiting_parser import crawl_resumes_as_dicts
+from ai_feedback.service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai, generate_it_ticket_with_ai
+from recruiting.parser import crawl_resumes_as_dicts
 try:
     from PIL import Image, ImageOps, ImageDraw, ImageFont
 except Exception:
@@ -168,7 +168,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Чистка секретов в логах вынесена в отдельный модуль: её должны ставить и
 # другие точки входа (скрипты, воркеры), а не только монолит. Подробности и
 # причины — в log_secrets.py.
-import log_secrets
+from common import log_secrets
 
 log_secrets.install()
 

@@ -352,7 +352,7 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
     соединения посреди пагинации (замерено: 5 прогонов из 39 обрывались на
     десятой странице).
     """
-    import amo_leads  # локально: модуль читает окружение на импорте
+    from amocrm import leads as amo_leads  # локально: модуль читает окружение на импорте
 
     client = client or amo_leads.AmoClient()
     stage_names = load_amo_stage_names(client)

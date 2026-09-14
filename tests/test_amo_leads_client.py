@@ -18,7 +18,7 @@ from http.client import RemoteDisconnected
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import amo_leads
+from amocrm import leads as amo_leads
 
 
 class _FakeResponse:

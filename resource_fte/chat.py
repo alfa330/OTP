@@ -1259,7 +1259,7 @@ def get_chat_schedule_inputs(db, period_start_value: Any) -> Dict[str, Any]:
     if period_start is None:
         raise ValueError("INVALID_CHAT_DATE")
 
-    from resource_fte_service import _resource_work_shift_carry_in_tx
+    from resource_fte.service import _resource_work_shift_carry_in_tx
 
     with db._get_cursor() as cursor:
         capacity_info = _chat_operator_capacity_tx(cursor, period_start)
@@ -1287,7 +1287,7 @@ def get_chat_operator_availability(db, as_of_date_value: Optional[str] = None,
     Настройки направлений в `resource_settings` общие, и делить их между разделами
     нельзя, поэтому список направлений передаём явно.
     """
-    from resource_fte_service import get_resource_operator_availability_details
+    from resource_fte.service import get_resource_operator_availability_details
 
     with db._get_cursor() as cursor:
         direction_ids = _chat_direction_ids_tx(cursor)

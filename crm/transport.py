@@ -16,7 +16,7 @@ import os
 
 import requests
 
-import log_secrets
+from common import log_secrets
 
 API_ROOT = 'https://api.telegram.org'
 DEFAULT_TIMEOUT = 15

@@ -106,7 +106,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-import reg_contest
+from yataxi import reg_contest
 
 log = logging.getLogger(__name__)
 

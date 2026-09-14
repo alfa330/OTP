@@ -16,7 +16,7 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATABASE = os.path.join(REPO_ROOT, "database.py")
-SERVICE = os.path.join(REPO_ROOT, "resource_fte_service.py")
+SERVICE = os.path.join(REPO_ROOT, "resource_fte", "service.py")
 CHAT = os.path.join(REPO_ROOT, "resource_fte", "chat.py")
 BACKEND = os.path.join(REPO_ROOT, "bot_schedule2.py")
 VIEW = os.path.join(REPO_ROOT, "src", "components", "resources", "ResourceFteView.jsx")

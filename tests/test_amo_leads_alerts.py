@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import amo_leads
+from amocrm import leads as amo_leads
 
 CURRENT = {"Google": 107, "YouTube": 41, "SEO": 39, "TikTok": 385, "FB": 263,
            "OLX": 33, "Яндекс": 96, "2GIS": 25, "Звонки": 251}

@@ -44,7 +44,7 @@ from resource_fte.schedule_generation import (  # noqa: E402
     _generate_schedule_preview_from_forecast,
     _normalize_shift_templates,
 )
-from resource_fte_service import (  # noqa: E402
+from resource_fte.service import (  # noqa: E402
     _current_operator_fte_tx,
     _get_settings_tx,
     _resource_work_shift_carry_in_tx,
