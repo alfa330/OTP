@@ -1,0 +1,755 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   ВИКИ НА ТЕЛЕФОНЕ.
+
+   Всё в этом файле заперто на body.mobile-shell — признак мобильной оболочки
+   портала (src/utils/mobileShell.js). На компьютере ни одно правило отсюда не
+   срабатывает, раздел остаётся ровно таким, каким свёрстан.
+
+   С чего началось (жалоба владельца 14.09.2026: «ничего не читабельно»). Замер
+   на стенде 390×844: на главной вики текст набран кеглем 9–13,5 px (сорок семь
+   подписей из шестидесяти пяти — мельче 13 px), шапка раздела занимала пол-экрана
+   — сверху пустой отступ под гамбургер, которого больше нет, и три кнопки в две
+   строки, — у статьи шесть кнопок стояли столбиком в три ряда перед заголовком,
+   а текст был зажат в карточку шириной 318 px. В каталоге строка статьи
+   распадалась: иконка, заголовок, стрелка и «три точки» — каждая своей строкой.
+
+   Образец — системные приложения iOS: крупный заголовок, серое полотно с белыми
+   группами строк, подписи от 12 px, основной текст 17 px, назад — синим словом.
+
+   Слой отдельным файлом, а не строками в mobile-shell.css: правила знают
+   устройство разметки вики, и жить им рядом с ней. Подключён первой строкой
+   wiki-theme.css.
+
+   ВЕС СЕЛЕКТОРОВ. Разметка раздела на утилитах Tailwind, а они в бандле идут
+   ПОЗЖЕ файлов компонентов, то есть при равном весе выигрывают
+   (см. память component-css-loses-to-tailwind). Поэтому каждый селектор несёт
+   body.mobile-shell + .wiki-scope — это (0,2,1) и больше, без !important.
+   ───────────────────────────────────────────────────────────────────────── */
+
+body.mobile-shell .wiki-scope {
+    /* Системная заливка полей и круглых кнопок iOS (tertiarySystemFill). */
+    --wiki-m-fill: rgba(118, 118, 128, 0.12);
+    --wiki-m-sep: rgba(60, 60, 67, 0.18);
+    -webkit-font-smoothing: antialiased;
+}
+
+html[data-otp-theme="dark"] body.mobile-shell .wiki-scope {
+    --wiki-m-fill: rgba(118, 118, 128, 0.24);
+    --wiki-m-sep: rgba(84, 84, 88, 0.6);
+}
+
+/* ── 1. Отмена общего слоя разделов ─────────────────────────────────────────
+
+   В mobile-shell.css есть слой «содержимое разделов под телефон»: он встаёт в
+   колонку любой ряд `flex items-start` с растягивающимся блоком и разрешает
+   перенос любому ряду с gap. Для «Учета часов» с его «панель слева — работа
+   справа» это спасение, а вики уже свёрстана адаптивно (колонки она раскладывает
+   сама по lg:), и слой ломал ей строки: в каталоге иконка статьи вставала НАД
+   заголовком, стрелка — под ним, меню — отдельной строкой ниже.
+
+   Возвращаем ряды внутри .wiki-scope. Ряды, которым перенос прописан в разметке
+   (flex-wrap) или которые и так колонка (flex-col), не трогаем. */
+body.mobile-shell .main-content .wiki-scope .flex.items-start:has(> .flex-1):not(.flex-col) {
+    flex-direction: row;
+    align-items: flex-start;
+}
+
+body.mobile-shell .main-content .wiki-scope .flex.items-stretch:has(> .flex-1):not(.flex-col) {
+    flex-direction: row;
+    align-items: stretch;
+}
+
+body.mobile-shell .main-content .wiki-scope .flex[class*="gap-"]:not(.flex-col):not([class~="flex-wrap"]),
+body.mobile-shell .main-content .wiki-scope .flex.items-center.justify-between:not([class~="flex-wrap"]),
+body.mobile-shell .main-content .wiki-scope .flex.items-start.justify-between:not([class~="flex-wrap"]) {
+    flex-wrap: nowrap;
+}
+
+/* ── 2. Полотно раздела ──────────────────────────────────────────────────── */
+
+/* Отступ pt-[68px] писался под фиксированный гамбургер 44×44. Гамбургера нет с
+   переезда навигации в нижний бар, а место под колокол уже отдаёт сама
+   .main-content — вместе выходило больше ста пикселей пустоты над заголовком. */
+body.mobile-shell .main-content .wiki-scope:not([class~="fixed"]) {
+    padding: 2px 16px 28px;
+    background: var(--sheet-bg);
+}
+
+body.mobile-shell .wiki-scope > div {
+    row-gap: 16px;
+}
+
+/* ── 3. Кегль ────────────────────────────────────────────────────────────────
+
+   Размеры в разметке раздела заданы пикселями прямо в классах — таких мест
+   больше четырёхсот, и переписывать каждое значило бы развести телефон и
+   компьютер. Ступени сдвигаем здесь, по лестнице кеглей iOS:
+     9–10,5 → 12 (caption), 11–12 → 13 (footnote), 12,5–13 → 15 (subheadline),
+     13,5–14 → 16 (callout).
+   Отбор через `~=` — по ЦЕЛОЙ лексеме: `sm:text-[13px]` на телефоне не
+   действует и ловиться не должен. */
+body.mobile-shell .wiki-scope :is([class~="text-[9px]"], [class~="text-[9.5px]"],
+    [class~="text-[10px]"], [class~="text-[10.5px]"]) {
+    font-size: 12px;
+}
+
+body.mobile-shell .wiki-scope :is([class~="text-[11px]"], [class~="text-[11.5px]"],
+    [class~="text-[12px]"], [class~="text-xs"]) {
+    font-size: 13px;
+}
+
+body.mobile-shell .wiki-scope :is([class~="text-[12.5px]"], [class~="text-[13px]"],
+    [class~="text-sm"]) {
+    font-size: 15px;
+}
+
+body.mobile-shell .wiki-scope :is([class~="text-[13.5px]"], [class~="text-[14px]"]) {
+    font-size: 16px;
+}
+
+/* Подписи групп (ИЗБРАННОЕ, РАЗДЕЛЫ И СТАТЬИ): заглавные вразрядку в 10 px
+   читались сыпью букв. В iOS заголовок группы — 13 px, разрядка почти нулевая. */
+body.mobile-shell .wiki-scope [class~="uppercase"]:is([class*="tracking-"]) {
+    letter-spacing: 0.02em;
+}
+
+/* ── 4. Шапка раздела ────────────────────────────────────────────────────────
+
+   Разметка шапки живёт в WikiView.jsx, и меток у неё нет — отбираем по месту:
+   это единственный <header> прямо в колонке раздела.
+
+   Раскладка как у системного приложения: крупный заголовок слева, переключатель
+   пространств справа от него, ниже одной строкой поле поиска и круглые кнопки.
+   Подписи у кнопок скрыты кеглем 0 — текст остаётся в дереве доступности, и
+   экранный диктор по-прежнему читает «Обновить», «Новая статья». */
+body.mobile-shell .wiki-scope > div > header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px 10px;
+}
+
+body.mobile-shell .wiki-scope > div > header > [role="button"] {
+    margin: 0;
+    padding: 0;
+    gap: 0;
+}
+
+/* Плитка с книгой и подпись «База знаний компании» — у крупного заголовка iOS
+   ни значка, ни подзаголовка нет: название раздела и так в нижнем баре. */
+body.mobile-shell .wiki-scope > div > header > [role="button"] > div:first-child,
+body.mobile-shell .wiki-scope > div > header > [role="button"] p {
+    display: none;
+}
+
+body.mobile-shell .wiki-scope > div > header > [role="button"] h1 {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .wiki-scope > div > header > div:last-child {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin: 0;
+}
+
+/* Поле поиска забирает всю строку за вычетом кнопок. */
+body.mobile-shell .wiki-scope > div > header > div:last-child > div:has(> button[aria-haspopup="dialog"]) {
+    order: 0;
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+}
+
+body.mobile-shell .wiki-scope > div > header button[aria-haspopup="dialog"] {
+    height: 40px;
+    padding: 0 12px;
+    gap: 8px;
+    border-radius: 12px;
+    background: var(--wiki-m-fill);
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope > div > header button[aria-haspopup="dialog"] span {
+    font-size: 17px;
+}
+
+body.mobile-shell .wiki-scope > div > header button[aria-haspopup="dialog"] svg {
+    width: 18px;
+    height: 18px;
+}
+
+body.mobile-shell .wiki-scope > div > header > div:last-child > button {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    gap: 0;
+    border-radius: 999px;
+    font-size: 0;
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope > div > header > div:last-child > button:not([class~="bg-blue-600"]) {
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope > div > header > div:last-child > button svg {
+    width: 19px;
+    height: 19px;
+}
+
+/* ── 5. Переключатели: вкладки раздела, половины каталога, корзины ─────────────
+
+   На компьютере — сегмент-контрол в серой подложке. На телефоне вкладок восемь,
+   и подложка превращалась в обрезанную по краям ленту. Здесь — лента «чипов»,
+   как фильтры в App Store: выбранный залит цветом текста, остальные системной
+   заливкой. Лента идёт от края до края экрана и прокручивается пальцем. */
+body.mobile-shell .wiki-scope > div > div[class~="overflow-x-auto"][class~="bg-slate-100"],
+body.mobile-shell .wiki-scope .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"] {
+    gap: 8px;
+    padding: 2px 0;
+    border-radius: 0;
+    background: transparent;
+    scrollbar-width: none;
+}
+
+/* max-width: none — общий слой ставит лентам вкладок max-width: 100%, и лента с
+   отрицательными полями не дотягивалась до правого края экрана: последний чип
+   обрезался на 358-м пикселе. Вес .main-content нужен, чтобы перебить его. */
+body.mobile-shell .main-content .wiki-scope > div > div[class~="overflow-x-auto"][class~="bg-slate-100"] {
+    max-width: none;
+    margin-inline: -16px;
+    padding-inline: 16px;
+    scroll-padding-inline: 16px;
+}
+
+body.mobile-shell .wiki-scope :is(
+    div[class~="overflow-x-auto"][class~="bg-slate-100"],
+    .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"]
+) > button {
+    height: 36px;
+    padding: 0 14px;
+    gap: 6px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--wiki-ink);
+    background: var(--wiki-m-fill);
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope :is(
+    div[class~="overflow-x-auto"][class~="bg-slate-100"],
+    .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"]
+) > button[class~="bg-white"] {
+    color: var(--wiki-surface);
+    background: var(--wiki-ink);
+}
+
+body.mobile-shell .wiki-scope :is(
+    div[class~="overflow-x-auto"][class~="bg-slate-100"],
+    .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"]
+) > button svg {
+    width: 16px;
+    height: 16px;
+    color: inherit;
+}
+
+/* Вложенные переключатели каталога (половина вкладки, корзина) стоят двумя
+   рядами прямо под вкладками. Три ряда тёмных чипов подряд читались одним
+   тяжёлым механизмом; уровнем ниже выбранный чип — мягкий акцентный. */
+body.mobile-shell .wiki-scope .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"] > button {
+    height: 34px;
+    padding: 0 12px;
+}
+
+body.mobile-shell .wiki-scope .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"] > button[class~="bg-white"] {
+    color: var(--wiki-accent);
+    background: var(--wiki-accent-soft);
+}
+
+/* Счётчик в корзине на тёмном чипе: светлая плашка индиго на заливке цвета
+   текста выглядела наклейкой. */
+body.mobile-shell .wiki-scope .inline-flex[class~="overflow-x-auto"][class~="bg-slate-100"] > button > span {
+    font-size: 13px;
+    color: inherit;
+    background: rgba(127, 127, 127, 0.18);
+}
+
+/* ── 6. Группы строк: общий вид карточек раздела ─────────────────────────────
+
+   Карточки раздела (iosCard) — белые прямоугольники с тенью и обводкой. На сером
+   полотне iOS группа строк — просто белая плашка со скруглением 14 px, без тени. */
+body.mobile-shell .wiki-scope :is(.wiki-m-panel, .wiki-m-popular, .wiki-m-stats, .wiki-m-parks > div, .wiki-m-index > div) {
+    border-radius: 14px;
+    background: var(--wiki-surface);
+    box-shadow: none;
+}
+
+/* ── 7. Главная ──────────────────────────────────────────────────────────── */
+
+/* Обложка витрины («Все статьи вики в одном месте» + второе поле поиска).
+   На телефоне поиск уже стоит в шапке раздела строкой выше, и два поля подряд
+   — это один и тот же вопрос дважды, а слоган занимал весь первый экран. */
+body.mobile-shell .wiki-scope .wiki-m-hero {
+    display: none;
+}
+
+/* Рельс парков — лента логотипов. */
+body.mobile-shell .wiki-scope .wiki-m-parks > div {
+    gap: 10px;
+    padding: 10px 12px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-parks button {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+}
+
+/* Счётчики редактора. */
+body.mobile-shell .wiki-scope .wiki-m-stats {
+    gap: 8px;
+    padding: 8px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-stat {
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--sheet-bg);
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-stat [class~="text-[19px]"] {
+    font-size: 24px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-stat svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* Подпись полки — строка над списком. */
+body.mobile-shell .wiki-scope :is(.wiki-m-panel, .wiki-m-popular) > div:first-child {
+    gap: 6px;
+    padding: 14px 16px 6px;
+    font-size: 13px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .wiki-scope :is(.wiki-m-panel, .wiki-m-popular) > div:first-child svg {
+    width: 14px;
+    height: 14px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-panel > div:not(:first-child):not(.wiki-m-panel-list) {
+    padding: 4px 16px 16px;
+    font-size: 15px;
+    line-height: 1.4;
+}
+
+/* Карточки в две колонки на 390 px обрезали название статьи до «Черновик №50 —
+   рег…». Список в одну колонку со строками во всю ширину — как «Недавние» в
+   «Файлах»: название целиком, под ним описание, давность — мелкой строкой. */
+body.mobile-shell .wiki-scope :is(.wiki-m-panel-list, .wiki-m-popular-list) {
+    display: block;
+    padding: 0 0 4px;
+}
+
+body.mobile-shell .wiki-scope :is(.wiki-m-mini, .wiki-m-pop) {
+    position: relative;
+    display: grid;
+    width: 100%;
+    min-height: 0;
+    padding: 11px 16px;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+/* Разделитель строк — от текста, а не от края, как в системных списках. */
+body.mobile-shell .wiki-scope :is(.wiki-m-mini, .wiki-m-pop) + :is(.wiki-m-mini, .wiki-m-pop)::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 16px;
+    height: 1px;
+    transform: scaleY(0.5);
+    background: var(--wiki-m-sep);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-pop + .wiki-m-pop::before {
+    left: 62px;
+}
+
+body.mobile-shell .wiki-scope :is(.wiki-m-mini, .wiki-m-pop):active {
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-mini > :first-child {
+    font-size: 17px;
+    font-weight: 500;
+    white-space: normal;
+    line-height: 1.3;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-mini > :nth-child(2) {
+    margin-top: 2px;
+    font-size: 15px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-mini > :nth-child(3) {
+    margin-top: 4px;
+    font-size: 13px;
+}
+
+/* Популярные: значок слева, название и описание в столбик, просмотры справа. */
+body.mobile-shell .wiki-scope .wiki-m-pop {
+    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-areas:
+        "icon title"
+        "icon sub"
+        "icon views";
+    column-gap: 12px;
+    align-items: start;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-pop > :nth-child(1) {
+    grid-area: icon;
+    width: 34px;
+    height: 34px;
+    margin: 1px 0 0;
+    border-radius: 9px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-pop > :nth-child(2) {
+    grid-area: title;
+    font-size: 17px;
+    font-weight: 500;
+    line-height: 1.3;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-pop > :nth-child(3) {
+    grid-area: sub;
+    margin-top: 2px;
+    font-size: 15px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-pop > :nth-child(4) {
+    grid-area: views;
+    margin: 4px 0 0;
+    padding: 0;
+    font-size: 13px;
+}
+
+/* Оглавление «Разделы и статьи». */
+body.mobile-shell .wiki-scope .wiki-m-index > div > div:first-child {
+    padding: 14px 16px 8px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-index > div > div:first-child > span:first-child {
+    font-size: 13px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-index > div > div:nth-child(2) {
+    height: 40px;
+    margin: 0 12px 10px;
+    padding: 0 12px;
+    border-radius: 12px;
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-index input {
+    font-size: 17px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-index button {
+    min-height: 44px;
+}
+
+/* ── 8. Статья ───────────────────────────────────────────────────────────── */
+
+/* Панель над статьёй — полоса навигации iOS: «назад» синим словом слева,
+   действия круглыми значками справа, всё одной строкой. На компьютере это
+   шесть подписанных кнопок; на телефоне они вставали столбиком в три ряда и
+   отодвигали заголовок статьи на второй экран. */
+body.mobile-shell .wiki-scope .wiki-m-toolbar {
+    flex-wrap: nowrap;
+    gap: 4px;
+    margin: -2px -6px 0;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-back {
+    min-width: 0;
+    height: 40px;
+    padding: 0 6px;
+    gap: 2px;
+    overflow: hidden;
+    font-size: 17px;
+    font-weight: 400;
+    white-space: nowrap;
+    color: var(--sheet-accent);
+    background: transparent;
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-back svg {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-actions {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 2px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-actions > button {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    gap: 0;
+    border-radius: 999px;
+    font-size: 0;
+    color: var(--sheet-accent);
+    background: transparent;
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-actions > button:active {
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-actions > button svg {
+    width: 21px;
+    height: 21px;
+}
+
+/* «Во весь экран» нужен широкой таблице на мониторе. На телефоне статья и так
+   во всю ширину, а полноэкранный режим — это ещё один слой поверх раздела,
+   который прячется под баром. */
+body.mobile-shell .wiki-scope .wiki-m-actions > button:is([title^="Читать во весь экран"], [title^="Выйти из полноэкранного"]) {
+    display: none;
+}
+
+/* Карточка статьи — страница от края до края, как в «Заметках»: рамка и поля
+   карточки съедали по 36 px с каждой стороны, и на строку оставалось 318 px. */
+/* max-width: none !important — единственный !important слоя, и он вынужденный.
+   Общий слой mobile-shell.css ставит `max-width: 100% !important` всему, в чьём
+   классе есть подстрока `w-[`, а она нашлась в `shadow-[0_1px_2px…]` карточки
+   (shado-W-[). Карточка с отрицательными полями из-за этого оставалась шириной
+   358 px и не доходила до правого края — справа стояла серая полоса.
+   Между двумя !important решает вес: у общего правила (0,5,1), поэтому здесь
+   .main-content и удвоенная метка — (0,5,2). */
+body.mobile-shell .main-content .wiki-scope article.wiki-m-article.wiki-m-article {
+    max-width: none !important;
+    margin-inline: -16px;
+    border-radius: 0;
+    background: var(--wiki-surface);
+    box-shadow: none;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-head {
+    padding: 16px 20px 14px;
+    border-bottom: 0.5px solid var(--wiki-m-sep);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-head h1 {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-head h1 + p {
+    margin-top: 8px;
+    font-size: 17px;
+    line-height: 1.4;
+}
+
+/* Автор, дата, просмотры, избранное: ряд значков 12 px с подписями терялся. */
+body.mobile-shell .wiki-scope .wiki-m-article-head > div:last-child {
+    margin-top: 12px;
+    gap: 6px 16px;
+    font-size: 14px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-head > div:last-child svg {
+    width: 15px;
+    height: 15px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-head > div:last-child > button {
+    min-height: 32px;
+    padding: 0 2px;
+    font-size: 14px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-body {
+    gap: 18px;
+    padding: 16px 20px 20px;
+}
+
+/* Оглавление статьи — плашкой над текстом, строки высотой в палец. */
+body.mobile-shell .wiki-scope .wiki-m-toc > div {
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-toc ul {
+    border-left: 0;
+    padding-left: 0;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-toc li button {
+    padding: 6px 0;
+    font-size: 16px;
+    line-height: 1.3;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-article-foot {
+    padding: 16px 20px;
+}
+
+/* Текст статьи. Лестница кеглей iOS: основной текст 17 px с интерлиньяжем
+   1,5 — на узкой полосе длинный интерлиньяж 1,75 от монитора разваливал абзац
+   на отдельные строки. Заголовки — 24 / 21 / 19 / 17. Цвет текста не трогаем:
+   его перекрашивает тёмная тема, и своим значением здесь её легко перебить. */
+body.mobile-shell .wiki-scope .wiki-prose {
+    font-size: 17px;
+    line-height: 1.5;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose p {
+    margin: 0.65em 0;
+    line-height: 1.5;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose h1 {
+    margin: 1.75rem 0 0.75rem;
+    padding: 0 0 0.5rem 0.875rem;
+    font-size: 24px;
+    line-height: 1.2;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose > h1:first-child {
+    margin-top: 0.25rem;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose h2 {
+    margin: 1.5rem 0 0.5rem;
+    font-size: 21px;
+    line-height: 1.25;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose h3 {
+    margin: 1.25rem 0 0.4rem;
+    font-size: 19px;
+    line-height: 1.3;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose h4 {
+    font-size: 17px;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose :is(ul, ol) {
+    padding-left: 1.35em;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose li {
+    margin: 0.3em 0;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose blockquote {
+    font-size: 17px;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose :is(th, td) {
+    padding: 0.55rem 0.7rem;
+    font-size: 15px;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose pre {
+    margin-inline: -20px;
+    padding: 14px 20px;
+    font-size: 13px;
+}
+
+body.mobile-shell .wiki-scope .wiki-prose img {
+    border-radius: 12px;
+}
+
+/* Оформительские блоки (wiki-blocks.css) набраны в rem под монитор: плашки и
+   шаги выходили 14–15 px — мельче текста вокруг. Держим их вровень с текстом. */
+body.mobile-shell .wiki-scope .wiki-prose [data-wiki-block] :is(p, li),
+body.mobile-shell .wiki-scope .wiki-prose ol[data-variant] > li {
+    font-size: 17px;
+    line-height: 1.45;
+}
+
+/* ── 9. Каталог ──────────────────────────────────────────────────────────── */
+
+body.mobile-shell .wiki-scope .wiki-m-row > button {
+    gap: 12px;
+    padding: 12px 4px 12px 16px;
+}
+
+/* Стрелка «открыть» рядом с «тремя точками» — два знака на правом краю узкой
+   строки. Строка и так нажимается целиком, а ширина нужнее заголовку. */
+body.mobile-shell .wiki-scope .wiki-m-row > button > svg:last-child {
+    display: none;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-row > button > span:first-child {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-row [class~="text-[13.5px]"] {
+    font-size: 17px;
+    font-weight: 500;
+    line-height: 1.3;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-row > span:last-child {
+    width: 40px;
+    height: 40px;
+    margin: 8px 4px 0 0;
+}
+
+/* ── 10. Поиск: лист во весь экран ────────────────────────────────────────── */
+
+/* Лист рисуется порталом в body со своей меткой .wiki-scope, поэтому правила
+   слоя до него достают. Поле — 17 px: меньше 16 px Safari на фокусе приближал
+   бы страницу, а у системного поиска кегль именно такой. */
+body.mobile-shell .wiki-scope[class~="fixed"] input {
+    font-size: 17px;
+}
+
+/* Рамка фокуса вокруг поля: в листе поиска поле и есть весь экран, фокус в нём
+   всегда, и контур вокруг слова читался рамкой ошибки. Каретка остаётся. */
+body.mobile-shell .wiki-scope[class~="fixed"] input:focus-visible {
+    outline: none;
+}
+
+body.mobile-shell .wiki-scope[class~="fixed"] [role="dialog"] > div:first-child {
+    gap: 10px;
+    padding-inline: 16px;
+}
+
+body.mobile-shell .wiki-scope[class~="fixed"] [role="dialog"] > div:first-child > button:last-child {
+    width: 32px;
+    height: 32px;
+}

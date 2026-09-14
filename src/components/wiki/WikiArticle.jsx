@@ -755,12 +755,12 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                обнуляется на мобильном, где сайдбар скрыт. */
             style={immersive ? { left: 'var(--app-sidebar-offset, 0px)' } : undefined}
         >
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 wiki-m-toolbar">
                 {/* Куда ведёт возврат, зависит от того, как человек сюда попал:
                     из списка — в список, по ссылке из другой статьи — в неё.
                     Подпись обязана это называть, иначе кнопка обещает одно, а
                     делает другое (см. articleTrail.js). */}
-                <button type="button" className={iosBtnSecondary} onClick={onBack}
+                <button type="button" className={`${iosBtnSecondary} wiki-m-back`} onClick={onBack}
                         title={backTo?.title ? `Вернуться к статье «${backTo.title}»` : undefined}>
                     <ArrowLeft size={14} /> {backLabel(backTo)}
                 </button>
@@ -772,7 +772,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     правила доступа, и роль их не описывает. */}
                 {/* Перенос обязателен: кнопок в строке четыре, и на телефоне они
                     иначе уезжают за правый край экрана — «Править» не достать. */}
-                <div className="flex flex-wrap items-center justify-end gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2 wiki-m-actions">
                     {/* Удаление МЯГКОЕ: статья уходит в архив, потому что жёсткое
                         снесло бы каскадом версии, просмотры, назначения на
                         ознакомление и избранное. Кнопка так и называется — «В
@@ -864,13 +864,13 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 скопировались как ни в чём не бывало. */}
             <article
                 ref={protectedRef}
-                className={`${iosCard} overflow-clip${protectText ? ' wiki-no-copy' : ''}`}
+                className={`${iosCard} overflow-clip${protectText ? ' wiki-no-copy' : ''} wiki-m-article`}
                 /* Перетаскивание — тот же вынос наружу, только мышью: кусок
                    текста и картинку роняют в соседнее окно, и запрета на буфер
                    обмена это не касается. */
                 onDragStart={protectText ? (event) => event.preventDefault() : undefined}
             >
-                <header className="border-b border-slate-100 px-5 py-4 sm:px-7 sm:py-6">
+                <header className="border-b border-slate-100 px-5 py-4 sm:px-7 sm:py-6 wiki-m-article-head">
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
                         <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
                             {STATUS_LABELS[article.status] || article.status}
@@ -963,9 +963,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     </div>
                 </header>
 
-                <div className="flex flex-col gap-6 px-5 py-5 sm:px-7 sm:py-7 lg:flex-row-reverse">
+                <div className="flex flex-col gap-6 px-5 py-5 sm:px-7 sm:py-7 lg:flex-row-reverse wiki-m-article-body">
                     {toc.length > 1 && (
-                        <nav className="lg:w-56 lg:shrink-0">
+                        <nav className="lg:w-56 lg:shrink-0 wiki-m-toc">
                             {/* Длинное оглавление прокручивается само, а не
                                 вылезает за экран: закреплённый блок обязан
                                 помещаться в окно целиком. */}
@@ -1018,7 +1018,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 </div>
 
                 {(related.length > 0 || backlinks.length > 0) && (
-                    <footer className="space-y-4 border-t border-slate-100 px-5 py-4 sm:px-7">
+                    <footer className="space-y-4 border-t border-slate-100 px-5 py-4 sm:px-7 wiki-m-article-foot">
                         {related.length > 0 && (
                             <ArticleLinkList
                                 icon={ArrowUpRight}

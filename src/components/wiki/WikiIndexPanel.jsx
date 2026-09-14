@@ -310,7 +310,7 @@ export default function WikiIndexPanel({ tree, articles: perimeter, onOpen, load
         /* self-stretch: без него колонка высотой в саму панель, и sticky
            «отлипает», как только её низ уходит вверх. Растянутая на всю строку,
            она даёт панели ездить до конца центральной колонки. */
-        <aside className="lg:w-[272px] lg:shrink-0 lg:self-stretch 2xl:w-[306px]">
+        <aside className="wiki-m-index lg:w-[272px] lg:shrink-0 lg:self-stretch 2xl:w-[306px]">
             <div
                 ref={boxRef}
                 className={`${iosCard} flex flex-col overflow-hidden lg:sticky lg:top-4 lg:max-h-[calc(100vh-2.5rem)]`}

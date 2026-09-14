@@ -655,7 +655,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
             <div className="flex min-w-0 flex-1 flex-col gap-3">
                 {/* Обложка витрины: где человек находится и одно поле, с которого
                     начинается почти любой заход в базу знаний. */}
-                <section className={`${iosCard} px-5 py-6 text-center sm:px-8`}>
+                <section className={`${iosCard} wiki-m-hero px-5 py-6 text-center sm:px-8`}>
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-[10.5px] font-bold text-indigo-600">
                         <Sparkles size={11} />
                         {isEditor ? 'Режим редактора' : 'База знаний компании'}

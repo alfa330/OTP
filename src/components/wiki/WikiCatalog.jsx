@@ -302,7 +302,7 @@ const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where }) 
     const type = typeBadge(article.article_type);
     const ago = fmtAgo(article.updated_at);
     return (
-        <div className="flex items-start transition hover:bg-slate-50">
+        <div className="wiki-m-row flex items-start transition hover:bg-slate-50">
             <button
                 type="button"
                 onClick={onOpen}

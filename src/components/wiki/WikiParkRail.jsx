@@ -52,7 +52,7 @@ export default function WikiParkRail({ parks, canManage, onOpenPark, onOpenParks
     return (
         /* self-stretch — чтобы sticky-рельс ехал вдоль всей витрины, а не
            «отлипал», когда закончится его собственная высота. */
-        <aside className="lg:w-[64px] lg:shrink-0 lg:self-stretch">
+        <aside className="wiki-m-parks lg:w-[64px] lg:shrink-0 lg:self-stretch">
             <div className={`${iosCard} flex items-center gap-2 overflow-x-auto p-2 lg:sticky lg:top-4 lg:flex-col lg:items-center lg:overflow-visible lg:py-2.5`}>
                 <span className="shrink-0 px-1 text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400 lg:mb-0.5">
                     Парки

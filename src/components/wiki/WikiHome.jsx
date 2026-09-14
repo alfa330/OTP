@@ -40,7 +40,7 @@ const StatTile = ({ icon: Icon, value, label, hint, onClick }) => (
         type="button"
         onClick={onClick}
         title={hint}
-        className="group rounded-xl px-3 py-2.5 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 hover:ring-slate-300 active:scale-[0.98]"
+        className="wiki-m-stat group rounded-xl px-3 py-2.5 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 hover:ring-slate-300 active:scale-[0.98]"
     >
         <div className="flex items-center gap-1.5">
             <Icon size={11} className="shrink-0 text-slate-400 transition group-hover:text-indigo-500" />
@@ -56,7 +56,7 @@ const MiniCard = ({ title, subtitle, meta, onClick }) => (
     <button
         type="button"
         onClick={onClick}
-        className="min-w-0 rounded-xl px-2.5 py-2 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.99]"
+        className="wiki-m-mini min-w-0 rounded-xl px-2.5 py-2 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.99]"
     >
         <div className="truncate text-[12px] font-semibold tracking-[-0.01em] text-slate-900">{title}</div>
         <div className="mt-0.5 truncate text-[10.5px] text-slate-500">{subtitle}</div>
@@ -71,13 +71,13 @@ const MiniCard = ({ title, subtitle, meta, onClick }) => (
    ряд, и полка читалась как недогруженная. Полка на такой странице просто
    ниже — ровно так же ведут себя таблицы отчётов (PagedTable). */
 const Panel = ({ icon: Icon, title, empty, items, children, footer = null }) => (
-    <div className={`${iosCard} flex min-w-0 flex-col`}>
+    <div className={`${iosCard} wiki-m-panel flex min-w-0 flex-col`}>
         <div className="flex items-center gap-1.5 px-3 pb-1.5 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
             <Icon size={12} /> {title}
         </div>
         {items.length === 0
             ? <div className="px-3 pb-4 pt-2 text-[11.5px] leading-relaxed text-slate-400">{empty}</div>
-            : <div className="grid grid-cols-2 gap-2 px-2.5 pb-2.5">{children}</div>}
+            : <div className="wiki-m-panel-list grid grid-cols-2 gap-2 px-2.5 pb-2.5">{children}</div>}
         {footer && <div className="border-t border-slate-100 px-2 pb-1.5 pt-1.5">{footer}</div>}
     </div>
 );
@@ -127,7 +127,7 @@ export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
                 Сравнение с null, а не с нулём: ноль парков — это «справочник
                 есть и он пуст», и такую плитку прятать нельзя. */}
             {isEditor && totals && (
-                <div className={`${iosCard} grid grid-cols-2 gap-2 p-2.5 ${
+                <div className={`${iosCard} wiki-m-stats grid grid-cols-2 gap-2 p-2.5 ${
                     parksCount == null ? 'sm:grid-cols-3' : 'sm:grid-cols-4'}`}>
                     <StatTile
                         icon={FileText}
@@ -224,17 +224,17 @@ export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
             </div>
 
             {popular.length > 0 && (
-                <div className={iosCard}>
+                <div className={`${iosCard} wiki-m-popular`}>
                     <div className="px-3 pb-1.5 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
                         Популярные статьи
                     </div>
-                    <div className="grid grid-cols-1 gap-2.5 p-2.5 pt-1 sm:grid-cols-2 2xl:grid-cols-4">
+                    <div className="wiki-m-popular-list grid grid-cols-1 gap-2.5 p-2.5 pt-1 sm:grid-cols-2 2xl:grid-cols-4">
                         {popular.map((article, index) => (
                             <button
                                 key={article.id}
                                 type="button"
                                 onClick={() => onOpen(article.slug)}
-                                className="flex min-h-[112px] min-w-0 flex-col rounded-xl p-2.5 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.99]"
+                                className="wiki-m-pop flex min-h-[112px] min-w-0 flex-col rounded-xl p-2.5 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 active:scale-[0.99]"
                             >
                                 <span className={`mb-2 grid h-7 w-7 place-items-center rounded-lg ${POP_TONES[index % POP_TONES.length]}`}>
                                     <FileText size={14} />
