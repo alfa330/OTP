@@ -37,6 +37,7 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
     const [draft, setDraft] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    const [escalating, setEscalating] = useState(null);   // id реплики, которую передаём
 
     const threadRequest = useRef(0);
     // Для перечитки по тычку: пока вопрос в полёте, лента держит локальный
@@ -158,6 +159,21 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
             .catch((error) => { mark(previous); throw error; });
     }, [base, headers]);
 
+    /* «Отправить супервайзеру». Пометку ставим по ответу сервера, а не заранее:
+       строка «вопрос передан» под пузырём обещает ответ, и обещать его до того,
+       как очередь приняла вопрос, нельзя. Тост об отказе — у вызывающей панели. */
+    const escalate = useCallback((messageId) => {
+        setEscalating(messageId);
+        return axios.post(`${base}/ai/messages/${messageId}/escalate`,
+                          { space_id: spaceId }, { headers })
+            .then((r) => {
+                const escalation = r.data?.escalation || null;
+                setMessages((prev) => (prev || []).map(
+                    (m) => (m.id === messageId ? { ...m, escalation } : m)));
+            })
+            .finally(() => setEscalating(null));
+    }, [base, headers, spaceId]);
+
     const removeChat = useCallback((chatId) => (
         axios.delete(`${base}/ai/chats/${chatId}`, { headers })
             .then(() => {
@@ -192,5 +208,6 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
         chats, chatsLoading, activeId, messages, draft, busy, error,
         setDraft, setError, setMessages,
         loadStatus, loadChats, startNewChat, openChat, ask, sendFeedback, removeChat,
+        escalate, escalating, canEscalate: !!status?.can_escalate,
     };
 }

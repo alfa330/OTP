@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, FileText, Quote, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { AlertCircle, FileText, Loader2, Quote, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { iosBtnGhost, IosBadge } from '../ui/ios';
 import { ChatBubble } from '../ui/chat';
 import Markdown from '../ui/markdown';
@@ -163,6 +163,10 @@ export const ESCALATION_NOTES = {
     dismissed: 'Супервайзер закрыл вопрос без ответа',
 };
 
+/* Что оператор вправе передать супервайзеру сам. Копия правила сервера
+   (wiki/questions.py: ASKER_ESCALATION_KINDS) — тест сверяет, что не разошлись. */
+export const ESCALATABLE_KINDS = ['answer', 'clarify', 'no_answer'];
+
 /**
  * Одна реплика ленты — своя или ответ помощника со всей его обвязкой.
  *
@@ -172,7 +176,8 @@ export const ESCALATION_NOTES = {
  * справку, но не повод перестать показывать, откуда взят ответ. Ровно на этом
  * держится доверие к помощнику, и в узкой панели оно нужно не меньше.
  */
-export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact = false }) => {
+export const AssistantMessage = ({ message, onOpenArticle, onFeedback, onEscalate = null,
+                                  escalating = null, compact = false }) => {
     if (message.role === 'user') {
         return (
             <ChatBubble out meta={compact ? null : fmtTime(message.created_at)}>
@@ -186,6 +191,12 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
         : message.kind === 'no_answer' ? 'muted' : null;
     const fromSupervisor = message.kind === 'supervisor';
     const escalationNote = ESCALATION_NOTES[message.escalation?.status] || null;
+    /* «Отправить супервайзеру» — ответ оператора не устроил (задача #321). Кнопку
+       дают только тем, кому передача положена (onEscalate приходит, когда сервер
+       сказал can_escalate), и только пока вопрос не передан: у переданного под
+       пузырём уже стоит строка о передаче. */
+    const canEscalate = !!onEscalate && !message.escalation
+        && ESCALATABLE_KINDS.includes(message.kind);
     // Ширина обвязки идёт за пузырём: в узкой колонке источники, прижатые к
     // 78 %, отрывались бы от ответа, к которому относятся.
     const width = compact ? 'max-w-full' : 'max-w-[78%]';
@@ -278,7 +289,7 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
             {/* Оценка — ответу помощника. Ответ супервайзера ею не оценивается:
                 «Помогло / Нет» копит качество модели, а не человека. */}
             {message.id && !fromSupervisor && !String(message.id).startsWith('local-') && (
-                <div className="flex gap-1 px-4">
+                <div className="flex flex-wrap gap-1 px-4">
                     <button
                         type="button"
                         aria-pressed={message.feedback === 1}
@@ -298,6 +309,19 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
                     >
                         <ThumbsDown size={13} /> Нет
                     </button>
+                    {canEscalate && (
+                        <button
+                            type="button"
+                            onClick={() => onEscalate(message.id)}
+                            disabled={escalating === message.id}
+                            className={iosBtnGhost}
+                        >
+                            {escalating === message.id
+                                ? <Loader2 size={13} className="animate-spin" />
+                                : <Send size={13} />}
+                            Отправить супервайзеру
+                        </button>
+                    )}
                     {message.degraded_search && (
                         <IosBadge tone="amber" className="self-center">
                             поиск без векторов

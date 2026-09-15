@@ -424,7 +424,7 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
             <IosModal
                 open={open}
                 onClose={onClose}
-                title={post ? 'Новость' : 'Новая новость'}
+                title={post?.id ? 'Новость' : 'Новая новость'}
                 /* Подзаголовка нет: у опубликованной там стояло «правка не
                    сбрасывает подтверждения», и IosModal резал эту строку
                    посередине (subtitle рисуется с truncate). Сказать её надо
@@ -866,7 +866,8 @@ function NewsReport({ open, post, apiBaseUrl, headers, onClose }) {
 // Витрина
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function WikiNews({ apiBaseUrl, headers, showToast }) {
+export default function WikiNews({ apiBaseUrl, headers, showToast, compose = null,
+                                   onComposeFinished }) {
     const [bucket, setBucket] = useState('published');
     const [items, setItems] = useState([]);
     const [access, setAccess] = useState(null);
@@ -875,6 +876,35 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
     const [saving, setSaving] = useState(false);
     const [formPost, setFormPost] = useState(undefined);   // undefined — закрыта
     const [reportPost, setReportPost] = useState(null);
+
+    /* «Опубликовать как новость» из вкладки «Вопросы» (задача #321): форма
+       открывается сама — с заголовком, текстом и отделом оператора. Один раз на
+       просьбу (nonce) и только когда права уже приехали: форме нужна задержка
+       кнопки по умолчанию. Чем закончилась форма, узнаёт тот, кто просил. */
+    const composeActive = useRef(null);
+    const composeOpened = useRef(null);
+    const finishCompose = useRef(onComposeFinished);
+    useEffect(() => { finishCompose.current = onComposeFinished; }, [onComposeFinished]);
+    useEffect(() => {
+        if (!compose?.nonce || !access?.can_publish) return;
+        if (composeOpened.current === compose.nonce) return;
+        composeOpened.current = compose.nonce;
+        composeActive.current = compose;
+        setFormPost({
+            title: compose.draft?.title || '',
+            body: compose.draft?.body || '',
+            audience: compose.draft?.audience || [],
+            is_mandatory: true,
+            confirm_delay_seconds: access.default_confirm_delay_seconds ?? 10,
+            expires_at: null,
+            photos: [],
+        });
+    }, [compose, access]);
+    const closeCompose = useCallback((newsId) => {
+        const request = composeActive.current;
+        composeActive.current = null;
+        if (request) finishCompose.current?.(request, newsId || null);
+    }, []);
 
     /* showToast приходит из App новой функцией на каждом её рендере. В
        зависимостях загрузчика это означало бы перезапрос списка на каждый чужой
@@ -921,8 +951,9 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
                     : r))
             : axios.post(`${apiBaseUrl}/api/news/posts`, payload, { headers });
         request
-            .then(() => {
+            .then((response) => {
                 setFormPost(undefined);
+                closeCompose(payload.publish ? response?.data?.id : null);
                 toastRef.current?.(payload.publish ? 'Новость опубликована' : 'Черновик сохранён',
                                    'success');
                 /* Уводим в ту корзину, где сохранённое теперь лежит: иначе
@@ -934,7 +965,7 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
             })
             .catch((e) => toastRef.current?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
-    }, [apiBaseUrl, headers, formPost, bucket, load]);
+    }, [apiBaseUrl, headers, formPost, bucket, load, closeCompose]);
 
     const act = useCallback((post, action) => {
         const url = `${apiBaseUrl}/api/news/posts/${post.id}${action === 'delete' ? '' : `/${action}`}`;
@@ -1091,7 +1122,10 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
                 saving={saving}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
-                onClose={() => setFormPost(undefined)}
+                onClose={() => {
+                    setFormPost(undefined);
+                    closeCompose(null);
+                }}
                 onSave={save}
             />
             <NewsReport

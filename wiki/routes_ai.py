@@ -144,6 +144,10 @@ def register(bp, wiki_route, db, log_ip):
         payload = {
             'space_id': space_id,
             'spaces': spaces,
+            # Кнопка «Отправить супервайзеру» под ответом (задача #321). Решает
+            # сервер, чтобы лестница ролей не жила второй копией во фронте.
+            'can_escalate': (wiki_questions.may_escalate_by_hand(ctx['otp_role'])
+                             and wiki_questions.table_ready(cursor)),
             # Подсказки считаются ТОЛЬКО по просьбе. Этот же роут дёргает шарик
             # на каждой загрузке портала, чтобы решить, показываться ли ему, и
             # платить за них лишним запросом там незачем: пустой экран чата он
@@ -449,3 +453,31 @@ def register(bp, wiki_route, db, log_ip):
         if not ai_store.set_feedback(cursor, ctx['user_id'], message_id, int(raw)):
             return jsonify({'error': 'реплика не найдена'}), 404
         return jsonify({'ok': True})
+
+    @wiki_route('/ai/messages/<int:message_id>/escalate', methods=('POST',))
+    def wiki_ai_escalate(cursor, ctx, message_id):
+        """«Отправить супервайзеру»: ответ помощника оператора не устроил (задача #321).
+
+        Та же очередь, что у автоматической передачи отказа: вопрос уходит
+        супервайзеру отдела, ответ приходит в этот же разговор. Отдел обязателен —
+        без него вопрос лёг бы в очередь, которую не видит ни один супервайзер, и
+        оператор ждал бы ответа, которого не будет.
+        """
+        if not wiki_questions.may_escalate_by_hand(ctx['otp_role']):
+            return jsonify({'error': 'Передать вопрос супервайзеру может оператор или стажёр',
+                            'code': 'WIKI_ESCALATE_FORBIDDEN'}), 403
+        if not wiki_questions.table_ready(cursor):
+            return jsonify({'error': 'Передача вопросов ещё разворачивается — попробуйте позже',
+                            'code': 'WIKI_QUESTIONS_NOT_READY'}), 503
+        if not ctx.get('department_id'):
+            return jsonify({'error': 'У вас не указан отдел — вопрос некому передать',
+                            'code': 'WIKI_ESCALATE_NO_DEPARTMENT'}), 409
+        escalation, refusal = wiki_questions.escalate_by_asker(
+            cursor, asker_id=ctx['user_id'], department_id=ctx['department_id'],
+            space_id=effective_space(cursor, ctx, _space_id()), message_id=message_id)
+        if refusal == 'not_found':
+            return jsonify({'error': 'реплика не найдена'}), 404
+        if refusal:
+            return jsonify({'error': 'Супервайзеру передаётся ответ помощника',
+                            'code': 'WIKI_ESCALATE_NOT_ANSWER'}), 409
+        return jsonify({'escalation': escalation})

@@ -18,7 +18,11 @@
     ответ, признавший, что спрошенного в статьях нет (should_escalate);
   * ответ супервайзера приходит оператору СРАЗУ, статья оформляется следом —
     оператор на линии не ждёт публикации;
-  * разбирают вопросы во вкладке «Вопросы» раздела «Вики», о новом будит колокол.
+  * разбирают вопросы во вкладке «Вопросы» раздела «Вики», о новом будит колокол;
+  * оператор передаёт вопрос и сам — кнопкой «Отправить супервайзеру» под ответом,
+    который его не устроил (escalate_by_asker);
+  * ответ можно выпустить отделу и одной новостью, без статьи: «Опубликовать как
+    новость» открывает форму «Новостей» с заполненными полями (kb_status news).
 
 КТО ПЕРЕДАЁТ. Только оператор и стажёр — так сказано в постановке. Помощника
 спрашивают и супервайзер, и тренер, и бухгалтерия, но их отказ ушёл бы либо
@@ -64,7 +68,8 @@ MAX_ANSWER_LENGTH = 4000
 # аналитика вики различает виды отказа по точному тексту (wiki/analytics.py:
 # «unverified»), и подменённый текст молча перевёл бы их в другую графу.
 
-KB_STATUSES = ('published', 'skipped')
+# news — ответ ушёл отделу новостью без статьи («Опубликовать как новость»).
+KB_STATUSES = ('published', 'skipped', 'news')
 
 # Корзины вкладки. «Ждут статьи» — отвеченные, но ещё не оформленные в базу
 # знаний: без своей корзины они растворились бы среди разобранных, и вторая
@@ -147,22 +152,88 @@ def table_ready(cursor):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def escalate(cursor, *, asker_id, department_id, space_id, chat_id,
-             question_message_id, refusal_message_id, question):
+             question_message_id, refusal_message_id, question, requested_by_asker=False):
     """Передать вопрос отделу. Возвращает {'id', 'status'}."""
     cursor.execute(
         """
         INSERT INTO wiki_operator_questions
                (asker_id, department_id, space_id, chat_id, question_message_id,
-                refusal_message_id, question)
+                refusal_message_id, question, requested_by_asker)
         VALUES (%(asker)s, %(department)s, %(space)s, %(chat)s,
-                %(question_message)s, %(refusal_message)s, %(question)s)
+                %(question_message)s, %(refusal_message)s, %(question)s, %(requested)s)
         RETURNING id
         """,
         {'asker': asker_id, 'department': department_id, 'space': space_id,
          'chat': chat_id, 'question_message': question_message_id,
-         'refusal_message': refusal_message_id, 'question': question},
+         'refusal_message': refusal_message_id, 'question': question,
+         'requested': bool(requested_by_asker)},
     )
     return {'id': int(cursor.fetchone()[0]), 'status': 'open'}
+
+
+# Что оператор вправе передать сам: ответ, уточняющий вопрос и отказ, если тот
+# почему-то не ушёл автоматически. Ответ супервайзера — нет: с ним возвращаются к
+# самому супервайзеру, а не заводят второй вопрос. Копия — во фронте
+# (assistantThread.jsx: ESCALATABLE_KINDS), тест сверяет.
+ASKER_ESCALATION_KINDS = ('answer', 'clarify', 'no_answer')
+
+
+def may_escalate_by_hand(otp_role):
+    """Положена ли кнопка «Отправить супервайзеру» — та же лестница, что у передачи."""
+    return wiki_access.normalize_role(otp_role) in ESCALATING_ROLES
+
+
+def escalate_by_asker(cursor, *, asker_id, department_id, space_id, message_id):
+    """«Отправить супервайзеру»: оператора не устроил ответ помощника.
+
+    Возвращает (передача, отказ). Отказ — 'not_found' (реплики нет, разговор
+    чужой или удалён) или 'not_answer' (это не ответ помощника). Повторное нажатие
+    по той же реплике отдаёт уже созданную передачу: второй вопрос с тем же текстом
+    в очереди отдела был бы дублем.
+
+    Вопрос — последняя реплика оператора ПЕРЕД этим ответом, а не последняя в
+    разговоре: кнопку жмут и под старым ответом, когда ниже спросили уже другое.
+    Пространство — разговора, где дан ответ; у старых разговоров его нет, и тогда
+    берётся то, что открыто сейчас.
+    """
+    cursor.execute(
+        """
+        SELECT m.chat_id, m.seq, m.role, m.kind, c.space_id
+          FROM wiki_ai_messages m
+          JOIN wiki_ai_chats c ON c.id = m.chat_id
+         WHERE m.id = %(message)s AND c.user_id = %(asker)s AND c.deleted_at IS NULL
+        """,
+        {'message': message_id, 'asker': asker_id},
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None, 'not_found'
+    chat_id, seq, role, kind, chat_space_id = row
+    if role != 'assistant' or kind not in ASKER_ESCALATION_KINDS:
+        return None, 'not_answer'
+    cursor.execute(
+        'SELECT id, status FROM wiki_operator_questions WHERE refusal_message_id = %s '
+        'ORDER BY id LIMIT 1',
+        (message_id,),
+    )
+    existing = cursor.fetchone()
+    if existing:
+        return {'id': int(existing[0]), 'status': existing[1]}, None
+    cursor.execute(
+        """
+        SELECT id, text FROM wiki_ai_messages
+         WHERE chat_id = %s AND role = 'user' AND seq < %s
+         ORDER BY seq DESC LIMIT 1
+        """,
+        (chat_id, seq),
+    )
+    asked = cursor.fetchone()
+    if not asked:
+        return None, 'not_answer'
+    return escalate(cursor, asker_id=asker_id, department_id=department_id,
+                    space_id=chat_space_id or space_id, chat_id=chat_id,
+                    question_message_id=asked[0], refusal_message_id=message_id,
+                    question=asked[1], requested_by_asker=True), None
 
 
 _MARK_KEYS = ('id', 'status', 'refusal_message_id', 'answer_message_id',
@@ -232,20 +303,22 @@ SELECT q.id, q.question, q.status, q.created_at, q.space_id, q.chat_id,
        q.asker_id, asker.name, q.department_id, d.name,
        q.answer, q.resolved_at, q.resolved_by, resolver.name,
        q.kb_status, q.kb_at, q.kb_article_id, a.title, a.slug, q.kb_news_id,
-       q.answer_message_id, sp.name
+       q.answer_message_id, sp.name, q.requested_by_asker, reply.text
   FROM wiki_operator_questions q
   LEFT JOIN users asker ON asker.id = q.asker_id
   LEFT JOIN users resolver ON resolver.id = q.resolved_by
   LEFT JOIN departments d ON d.id = q.department_id
   LEFT JOIN wiki_articles a ON a.id = q.kb_article_id
   LEFT JOIN wiki_spaces sp ON sp.id = q.space_id
+  LEFT JOIN wiki_ai_messages reply ON reply.id = q.refusal_message_id
 """
 
 _ROW_KEYS = ('id', 'question', 'status', 'created_at', 'space_id', 'chat_id',
              'asker_id', 'asker_name', 'department_id', 'department_name',
              'answer', 'resolved_at', 'resolved_by', 'resolved_by_name',
              'kb_status', 'kb_at', 'kb_article_id', 'kb_article_title',
-             'kb_article_slug', 'kb_news_id', 'answer_message_id', 'space_name')
+             'kb_article_slug', 'kb_news_id', 'answer_message_id', 'space_name',
+             'requested_by_asker', 'assistant_text')
 
 
 def _row(row):

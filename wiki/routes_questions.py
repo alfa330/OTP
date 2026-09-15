@@ -501,6 +501,32 @@ def register(bp, wiki_route, db, log_ip, edit_helpers):
         return jsonify({'item': _fresh(cursor, question_id), 'article': target,
                         'news_id': post_id})
 
+    @wiki_route('/questions/<int:question_id>/knowledge/news-post', methods=('POST',))
+    def wiki_questions_news_post(cursor, ctx, question_id):
+        """«Опубликовать как новость»: ответ ушёл отделу новостью, без статьи.
+
+        Саму новость выпускает раздел «Новости» своей формой — вкладка открывается
+        с заполненными полями (WikiQuestions.jsx → WikiNews.jsx), и адресата, права
+        и фотографии проверяет его же сервер. Здесь только отметка на вопросе,
+        чтобы он ушёл из «Ждут статьи».
+
+        Новость обязана быть ОПУБЛИКОВАННОЙ и выпущенной ЭТИМ человеком: иначе id
+        любого объявления закрывал бы вопрос, о котором отделу ничего не сообщали.
+        """
+        _item, error = _load(cursor, ctx, question_id, stage='knowledge')
+        if error:
+            return error
+        news_id = _int_or_none(_body().get('news_id'))
+        post = (news_queries.get_post(cursor, news_id)
+                if news_id and news_schema.schema_is_ready(cursor) else None)
+        if not post or post['status'] != 'published' or post['author_id'] != ctx['user_id']:
+            return _refusal('Новость не найдена среди опубликованных вами', 404,
+                            'WIKI_QUESTION_NEWS_NOT_FOUND')
+        if not wiki_questions.finish_knowledge(cursor, question_id=question_id, status='news',
+                                               by=ctx['user_id'], news_id=news_id):
+            return _refusal('Этот вопрос уже оформил коллега', 409, 'WIKI_QUESTION_STAGE')
+        return jsonify({'item': _fresh(cursor, question_id)})
+
     @wiki_route('/questions/<int:question_id>/knowledge/skip', methods=('POST',))
     def wiki_questions_skip(cursor, ctx, question_id):
         """«Не для базы знаний» — разовый вопрос, которому место не в статье.

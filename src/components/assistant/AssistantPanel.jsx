@@ -151,6 +151,11 @@ export default function AssistantPanel({
             .catch(() => showToast?.('Не удалось сохранить оценку', 'error'));
     }, [chat, showToast]);
 
+    const escalate = useCallback((messageId) => {
+        chat.escalate(messageId)
+            .catch((e) => showToast?.(e?.response?.data?.error || 'Не удалось передать вопрос', 'error'));
+    }, [chat, showToast]);
+
     const confirmDelete = useCallback(() => {
         const target = pendingDelete;
         if (!target) return;
@@ -334,6 +339,8 @@ export default function AssistantPanel({
                                 compact
                                 onOpenArticle={onOpenArticle}
                                 onFeedback={feedback}
+                                onEscalate={chat.canEscalate ? escalate : null}
+                                escalating={chat.escalating}
                             />
                         ))}
 

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    ArrowLeft, Check, FilePlus2, FileText, Loader2, Plus, Sparkles, X,
+    ArrowLeft, Check, ChevronDown, FilePlus2, FileText, Loader2, Megaphone, Plus, Sparkles, X,
 } from 'lucide-react';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
@@ -17,6 +17,7 @@ import {
     QUIZ_MAX_OPTIONS, QUIZ_MAX_QUESTIONS, QUIZ_MIN_OPTIONS, QUIZ_MIN_QUESTIONS,
     dropOption, emptyQuestion, quizForForm, quizProblem,
 } from './questionQuiz';
+import { newsDraftFromQuestion } from './questionNews';
 
 /* Вкладка «Вопросы» — вопросы операторов, на которые не ответил помощник.
  *
@@ -61,11 +62,13 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
 
 export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
                                         spaceId = null, spaces = [], onSpaceChange,
+                                        canComposeNews = false, onComposeNews,
                                         focusRequest = null, onFocusConsumed }) {
     const toast = useStableCallback(showToast);
     const openArticle = useStableCallback(onOpenArticle);
     const consumeFocus = useStableCallback(onFocusConsumed);
     const changeSpace = useStableCallback(onSpaceChange);
+    const composeNews = useStableCallback(onComposeNews);
     const isMobile = useIsMobileShell();
 
     const [bucket, setBucket] = useState('open');
@@ -210,6 +213,8 @@ export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
                     headers={headers}
                     toast={toast}
                     showDepartment={list.manyDepartments}
+                    canComposeNews={canComposeNews}
+                    onComposeNews={composeNews}
                     onBack={isMobile ? () => setSelected(null) : null}
                     onChanged={applyChange}
                     onOpenArticle={openArticle}
@@ -234,12 +239,15 @@ function EmptyBucket({ bucket }) {
 }
 
 function QuestionRow({ item, bucket, active, showDepartment, spaceId, onOpen }) {
-    /* Метка — только в «Разобранных» и только у исключений: «записано в статью»
-       там норма и не подписывается, а «без ответа» и «не для базы» — другая
-       судьба вопроса, и по строке её не угадать. */
-    const mark = bucket !== 'done' ? null
-        : item.status === 'dismissed' ? 'без ответа'
-            : item.kb_status === 'skipped' ? 'не для базы' : null;
+    /* Метка — только у исключений. В «Разобранных» «записано в статью» — норма и
+       не подписывается, а «без ответа», «не для базы» и «новостью» — другая судьба
+       вопроса. В «Новых» — вопрос, который оператор передал сам: помощник ему
+       ответил, и без метки строка читалась бы ошибкой передачи. */
+    const mark = bucket === 'open' ? (item.requested_by_asker ? 'ответ не устроил' : null)
+        : bucket !== 'done' ? null
+            : item.status === 'dismissed' ? 'без ответа'
+                : item.kb_status === 'skipped' ? 'не для базы'
+                    : item.kb_status === 'news' ? 'новостью' : null;
     const department = showDepartment ? item.department_name : null;
     /* Чужая вика в списке бывает только у вопроса, который иначе потерялся бы
        (wiki/questions.py: _space_scope), — и по строке это должно быть видно. */
@@ -275,7 +283,8 @@ function QuestionRow({ item, bucket, active, showDepartment, spaceId, onOpen }) 
     );
 }
 
-function QuestionCard({ item, base, headers, toast, showDepartment, onBack, onChanged, onOpenArticle }) {
+function QuestionCard({ item, base, headers, toast, showDepartment, canComposeNews, onComposeNews,
+                        onBack, onChanged, onOpenArticle }) {
     const meta = [item.asker_name, showDepartment ? item.department_name : null,
                   publishedLabel(item.created_at)].filter(Boolean).join(' · ');
     return (
@@ -300,6 +309,8 @@ function QuestionCard({ item, base, headers, toast, showDepartment, onBack, onCh
             </div>
 
             <div className="space-y-4 px-4 py-4">
+                <AssistantReply text={item.assistant_text} requested={item.requested_by_asker} />
+
                 {item.status === 'open' && (
                     <AnswerForm item={item} base={base} headers={headers} toast={toast} onChanged={onChanged} />
                 )}
@@ -324,7 +335,9 @@ function QuestionCard({ item, base, headers, toast, showDepartment, onBack, onCh
 
                         {!item.kb_status && (
                             <KnowledgeFlow key={item.id} item={item} base={base} headers={headers}
-                                           toast={toast} onChanged={onChanged} />
+                                           toast={toast} onChanged={onChanged}
+                                           canComposeNews={canComposeNews}
+                                           onComposeNews={onComposeNews} />
                         )}
 
                         {item.kb_status === 'published' && (
@@ -347,9 +360,41 @@ function QuestionCard({ item, base, headers, toast, showDepartment, onBack, onCh
                         {item.kb_status === 'skipped' && (
                             <p className="text-[13px] text-slate-500">В базу знаний не записывался</p>
                         )}
+
+                        {item.kb_status === 'news' && (
+                            <p className="rounded-xl bg-emerald-50 px-3.5 py-2.5 text-[13px] text-emerald-900 ring-1 ring-emerald-100">
+                                Опубликовано новостью · отдел увидит её при входе
+                            </p>
+                        )}
                     </>
                 )}
             </div>
+        </div>
+    );
+}
+
+/* Что ответил помощник. Оператор, передавший вопрос сам, спорит именно с этим
+   ответом — поэтому у такого вопроса он раскрыт сразу. У отказа там «в статьях
+   этого нет», и раскрытым он был бы шумом над полем ответа. */
+function AssistantReply({ text, requested }) {
+    const [open, setOpen] = useState(!!requested);
+    if (!text) return null;
+    return (
+        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5">
+            <button
+                type="button"
+                onClick={() => setOpen((value) => !value)}
+                aria-expanded={open}
+                className="flex w-full items-center justify-between gap-2 text-left text-[11.5px] text-slate-400"
+            >
+                <span>{requested ? 'Ответ помощника · оператора он не устроил' : 'Ответ помощника'}</span>
+                <ChevronDown size={14} className={`shrink-0 transition ${open ? 'rotate-180' : ''}`} />
+            </button>
+            {open && (
+                <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-slate-600">
+                    {text}
+                </p>
+            )}
         </div>
     );
 }
@@ -434,7 +479,7 @@ function AnswerForm({ item, base, headers, toast, onChanged }) {
 }
 
 /* Запись ответа в базу знаний: куда → черновик → проверка → публикация. */
-function KnowledgeFlow({ item, base, headers, toast, onChanged }) {
+function KnowledgeFlow({ item, base, headers, toast, onChanged, canComposeNews, onComposeNews }) {
     const url = `${base}/questions/${item.id}/knowledge`;
     const [targets, setTargets] = useState(null);
     const [targetsFailed, setTargetsFailed] = useState(false);
@@ -717,15 +762,36 @@ function KnowledgeFlow({ item, base, headers, toast, onChanged }) {
                 <button type="button" onClick={skip} disabled={busy} className={iosBtnGhost}>
                     Не для базы знаний
                 </button>
-                <button
-                    type="button"
-                    onClick={prepare}
-                    disabled={busy || !choice || (choice.action === 'create' && !choice.section_id)}
-                    className={iosBtnPrimary}
-                >
-                    <Sparkles size={15} /> Подготовить изменения
-                </button>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                    {/* Короткий путь без статьи: форма «Новостей» с заполненными
+                        полями — поправить, приложить фото и выпустить. */}
+                    <button
+                        type="button"
+                        onClick={() => onComposeNews?.({
+                            questionId: item.id, draft: newsDraftFromQuestion(item), nonce: Date.now(),
+                        })}
+                        disabled={busy || !canComposeNews}
+                        className={iosBtnSecondary}
+                    >
+                        <Megaphone size={15} /> Опубликовать как новость
+                    </button>
+                    <button
+                        type="button"
+                        onClick={prepare}
+                        disabled={busy || !choice || (choice.action === 'create' && !choice.section_id)}
+                        className={iosBtnPrimary}
+                    >
+                        <Sparkles size={15} /> Подготовить изменения
+                    </button>
+                </div>
             </div>
+            {/* Вкладка «Новости» выключена настройками пространства — выпустить
+                новость руками здесь негде, и молча серая кнопка это не объяснит. */}
+            {!canComposeNews && (
+                <p className="text-right text-[12px] text-slate-400">
+                    Новостью не опубликовать: вкладка «Новости» выключена в настройках пространства
+                </p>
+            )}
         </section>
     );
 }

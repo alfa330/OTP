@@ -578,5 +578,86 @@ class SpaceBoundaryTests(unittest.TestCase):
                       _function(source, 'wiki_questions_list'))
 
 
+class AskerEscalationTests(unittest.TestCase):
+    """«Отправить супервайзеру»: оператор передаёт вопрос сам (15.09.2026)."""
+
+    def test_the_button_follows_the_escalation_ladder(self):
+        for role in ('operator', 'trainee'):
+            self.assertTrue(wiki_questions.may_escalate_by_hand(role), role)
+        for role in ('sv', 'supervisor', 'trainer', 'admin', 'super_admin', '', None):
+            self.assertFalse(wiki_questions.may_escalate_by_hand(role), role)
+
+    def test_front_and_server_agree_on_what_can_be_sent(self):
+        thread = _read('src', 'components', 'assistant', 'assistantThread.jsx')
+        kinds = re.search(r"ESCALATABLE_KINDS = \[([^\]]*)\]", thread).group(1)
+        self.assertEqual(tuple(re.findall(r"'(\w+)'", kinds)),
+                         wiki_questions.ASKER_ESCALATION_KINDS)
+        self.assertNotIn(wiki_questions.SUPERVISOR_KIND, wiki_questions.ASKER_ESCALATION_KINDS)
+
+    def test_only_own_live_chat_and_one_question_per_answer(self):
+        body = _sql_and_code(_function(_read('wiki', 'questions.py'), 'escalate_by_asker'))
+        self.assertIn('c.user_id = %(asker)s AND c.deleted_at IS NULL', body)
+        self.assertIn("role != 'assistant'", body)
+        self.assertIn('WHERE refusal_message_id = %s', body)
+        self.assertIn("role = 'user' AND seq < %s", body)
+        self.assertIn('requested_by_asker=True', body)
+
+    def test_route_checks_role_table_and_department_before_writing(self):
+        source = _code_only(_read('wiki', 'routes_ai.py'))
+        route = _function(source, 'wiki_ai_escalate')
+        checks = [route.index('may_escalate_by_hand'), route.index('table_ready'),
+                  route.index("ctx.get('department_id')"), route.index('escalate_by_asker(')]
+        self.assertEqual(checks, sorted(checks))
+        self.assertIn("'can_escalate'", _function(source, 'wiki_ai_status'))
+
+    def test_both_assistant_surfaces_offer_the_button_only_when_the_server_allows(self):
+        self.assertIn('onEscalate={chat.canEscalate ? escalate : null}',
+                      _read('src', 'components', 'assistant', 'AssistantPanel.jsx'))
+        self.assertIn('canEscalate: !!status?.can_escalate',
+                      _read('src', 'components', 'assistant', 'useAssistantChat.js'))
+        self.assertIn('onEscalate={status?.can_escalate ? escalate : null}',
+                      _read('src', 'components', 'wiki', 'WikiAssistant.jsx'))
+        thread = _jsx_code_only(_read('src', 'components', 'assistant', 'assistantThread.jsx'))
+        self.assertIn('!!onEscalate && !message.escalation', thread)
+
+    def test_supervisor_sees_what_the_assistant_answered(self):
+        source = _read('wiki', 'questions.py')
+        self.assertIn('LEFT JOIN wiki_ai_messages reply ON reply.id = q.refusal_message_id', source)
+        self.assertIn("'requested_by_asker', 'assistant_text'", source)
+        self.assertIn('<AssistantReply text={item.assistant_text} requested={item.requested_by_asker} />',
+                      _read('src', 'components', 'wiki', 'WikiQuestions.jsx'))
+
+
+class NewsOnlyTests(unittest.TestCase):
+    """«Опубликовать как новость»: ответ уходит отделу новостью без статьи (15.09.2026)."""
+
+    def test_news_is_a_known_outcome_in_code_and_schema(self):
+        self.assertIn('news', wiki_questions.KB_STATUSES)
+        schema = _read('wiki', 'schema.py')
+        self.assertIn("CHECK (kb_status IN ('published', 'skipped', 'news'))", schema)
+        # Проверка переписывается только при нужде — не блокировкой на каждом старте.
+        self.assertIn("position('news' in pg_get_constraintdef(oid)) > 0", schema)
+        self.assertIn('requested_by_asker BOOLEAN NOT NULL DEFAULT FALSE', schema)
+
+    def test_mark_requires_own_published_news(self):
+        route = _function(_code_only(_read('wiki', 'routes_questions.py')),
+                          'wiki_questions_news_post')
+        self.assertIn("stage='knowledge'", route)
+        self.assertIn("post['status'] != 'published'", route)
+        self.assertIn("post['author_id'] != ctx['user_id']", route)
+        self.assertIn("status='news'", route)
+
+    def test_button_opens_the_news_form_and_returns_to_the_question(self):
+        tab = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiQuestions.jsx'))
+        self.assertIn('Опубликовать как новость', tab)
+        self.assertIn('draft: newsDraftFromQuestion(item)', tab)
+        view = _read('src', 'components', 'wiki', 'WikiView.jsx')
+        self.assertIn('compose={newsCompose}', view)
+        self.assertIn('/knowledge/news-post', view)
+        self.assertIn('canComposeNews={features.news && canPublishNews}', view)
+        news = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiNews.jsx'))
+        self.assertIn('closeCompose(payload.publish ? response?.data?.id : null)', news)
+
+
 if __name__ == '__main__':
     unittest.main()

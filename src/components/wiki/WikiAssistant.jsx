@@ -67,6 +67,7 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [confirmDelete, setConfirmDelete] = useState(null);
+    const [escalating, setEscalating] = useState(null);   // id реплики, которую передаём
     // Просьба встать в строку ввода: приехал вопрос из поиска раздела.
     const [composerFocus, setComposerFocus] = useState(null);
 
@@ -169,6 +170,20 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                 toast('Не удалось сохранить оценку', 'error');
             });
     }, [base, headers, toast]);
+
+    /* «Отправить супервайзеру» — пометка по ответу сервера, как у шарика
+       (assistant/useAssistantChat.js: escalate). */
+    const escalate = useCallback((messageId) => {
+        setEscalating(messageId);
+        axios.post(`${base}/ai/messages/${messageId}/escalate`, { space_id: spaceId }, { headers })
+            .then((r) => {
+                const escalation = r.data?.escalation || null;
+                setMessages((prev) => (prev || []).map(
+                    (m) => (m.id === messageId ? { ...m, escalation } : m)));
+            })
+            .catch((e) => toast(errText(e, 'Не удалось передать вопрос'), 'error'))
+            .finally(() => setEscalating(null));
+    }, [base, headers, spaceId, toast]);
 
     const removeChat = useCallback((chatId) => {
         axios.delete(`${base}/ai/chats/${chatId}`, { headers })
@@ -333,6 +348,8 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                                 message={message}
                                 onOpenArticle={openArticle}
                                 onFeedback={sendFeedback}
+                                onEscalate={status?.can_escalate ? escalate : null}
+                                escalating={escalating}
                             />
                         ))}
 

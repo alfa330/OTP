@@ -180,6 +180,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        вопроса, оператору — разговор с ответом. Одноразовые, как assistantAsk. */
     const [questionFocus, setQuestionFocus] = useState(null);   // {id, nonce}
     const [assistantChat, setAssistantChat] = useState(null);   // {chatId, nonce}
+    const [newsCompose, setNewsCompose] = useState(null);       // {questionId, draft, nonce}
     /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
        двум причинам: счётчики на главной берут из них свои числа (иначе «29
        статей» и список за плиткой считались бы разными запросами и разошлись),
@@ -530,6 +531,34 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         else setQuestionFocus({ id: bellFocus.id, nonce: bellFocus.nonce });
         onBellFocusConsumed?.();
     }, [bellFocus, tabs, onBellFocusConsumed]);
+
+    /* «Опубликовать как новость» из «Вопросов» живёт, пока открыта вкладка
+       «Новости»: ушли с неё иначе — просьба снимается, и следующий заход в
+       «Новости» не откроет форму давно разобранного вопроса. */
+    useEffect(() => {
+        if (tab !== 'news') setNewsCompose(null);
+    }, [tab]);
+
+    /* Форма закрыта — возвращаемся к вопросу, с которого пришли. Выпущенная
+       новость закрывает его отметкой «новостью»; черновик или отмена оставляют
+       вопрос в «Ждут статьи». */
+    const finishNewsCompose = useCallback((request, newsId) => {
+        setNewsCompose(null);
+        if (!request?.questionId) return;
+        const back = () => {
+            setTab('questions');
+            setQuestionFocus({ id: request.questionId, nonce: Date.now() });
+        };
+        if (!newsId) {
+            back();
+            return;
+        }
+        axios.post(`${base}/questions/${request.questionId}/knowledge/news-post`,
+                   { news_id: newsId }, { headers })
+            .catch((e) => showToast?.(e?.response?.data?.error
+                || 'Новость вышла, но вопрос не отмечен', 'error'))
+            .finally(back);
+    }, [base, headers, showToast]);
 
     /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
        даже если в прошлый раз ушли, например, в «Структуру». */
@@ -952,6 +981,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             spaceId={activeSpace?.id || null}
                             spaces={spaces}
                             onSpaceChange={setSpaceId}
+                            canComposeNews={features.news && canPublishNews}
+                            onComposeNews={(request) => {
+                                setNewsCompose(request);
+                                setTab('news');
+                            }}
                             focusRequest={questionFocus}
                             onFocusConsumed={() => setQuestionFocus(null)}
                             onOpenArticle={(slug) => {
@@ -1121,7 +1155,13 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             <span className="text-[13px]">Загружаем новости…</span>
                         </div>
                     )}>
-                        <WikiNews apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast} />
+                        <WikiNews
+                            apiBaseUrl={apiBaseUrl}
+                            headers={headers}
+                            showToast={showToast}
+                            compose={newsCompose}
+                            onComposeFinished={finishNewsCompose}
+                        />
                     </Suspense>
                 )}
 

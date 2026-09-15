@@ -1512,7 +1512,7 @@ _QUESTION_STATEMENTS = [
         -- Оператор открыл разговор с ответом — уведомление погасло.
         asker_seen_at       TIMESTAMP,
         -- Вторая половина цепочки. NULL — ещё не оформлено в базу знаний.
-        kb_status           VARCHAR(16) CHECK (kb_status IN ('published', 'skipped')),
+        kb_status           VARCHAR(16) CHECK (kb_status IN ('published', 'skipped', 'news')),
         kb_article_id       INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL,
         -- Без внешнего ключа намеренно: news_posts разворачивается ПОСЛЕ вики
         -- и своим пакетом (database.py: _init_news_schema_tx).
@@ -1533,6 +1533,33 @@ _QUESTION_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_operator_questions_unseen "
     "ON wiki_operator_questions (asker_id) "
     "WHERE status = 'answered' AND asker_seen_at IS NULL;",
+    # Третий исход второй половины цепочки — «Опубликовать как новость» (15.09.2026):
+    # ответ ушёл отделу новостью без статьи. Проверку переписываем, только когда
+    # нового значения в ней ещё нет: DROP/ADD на каждом старте брали бы
+    # эксклюзивную блокировку таблицы, пока соседний экземпляр ещё обслуживает
+    # запросы, — а взаимоблокировки на старте деплоя в логах и так бывают.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conrelid = 'wiki_operator_questions'::regclass
+               AND conname = 'wiki_operator_questions_kb_status_check'
+               AND position('news' in pg_get_constraintdef(oid)) > 0
+        ) THEN
+            ALTER TABLE wiki_operator_questions
+                DROP CONSTRAINT IF EXISTS wiki_operator_questions_kb_status_check;
+            ALTER TABLE wiki_operator_questions
+                ADD CONSTRAINT wiki_operator_questions_kb_status_check
+                CHECK (kb_status IN ('published', 'skipped', 'news'));
+        END IF;
+    END $$;
+    """,
+    # Вопрос передал сам оператор кнопкой «Отправить супервайзеру»: ответ помощника
+    # его не устроил. Супервайзеру это видно в карточке — иначе вопрос, на который
+    # помощник вроде бы ответил, выглядел бы ошибкой передачи.
+    "ALTER TABLE wiki_operator_questions ADD COLUMN IF NOT EXISTS "
+    "requested_by_asker BOOLEAN NOT NULL DEFAULT FALSE;",
 ]
 
 # ── Векторы кусков ───────────────────────────────────────────────────────────
