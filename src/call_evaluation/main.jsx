@@ -4,13 +4,13 @@ import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
 import FaIcon from '../components/common/FaIcon';
+import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody } from '../utils/authRefresh';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
-let refreshPromise = null;
 const audioUrlCache = {};
 const authRuntimeState = {
     transport: null,
@@ -536,21 +536,97 @@ const persistRotatedBearerTokens = (response, data = null) => {
     });
 };
 
-const isRecoverableAuthError = (body = null) => {
-    const code = body?.code;
-    const apiErrorText = body?.error;
-    return (
-        code === 'TOKEN_EXPIRED' ||
-        code === 'INVALID_TOKEN' ||
-        code === 'INVALID_TOKEN_TYPE' ||
-        code === 'MISSING_TOKEN' ||
-        code === 'REFRESH_TOKEN_MISMATCH' ||
-        code === 'SESSION_EXPIRED' ||
-        code === 'SESSION_NOT_FOUND' ||
-        code === 'SESSION_REVOKED' ||
-        apiErrorText === 'JWT authentication failed'
-    );
+// Токен прямо из хранилища, мимо копии в памяти. Порядок тот же, что у getStoredAuthToken.
+const readPersistedAuthToken = (storageKey) => {
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    const [first, second] = shouldUseLegacyMobileBearerStorage()
+        ? [localStorageRef, sessionStorageRef]
+        : [sessionStorageRef, localStorageRef];
+    return safeStorageGetItem(first, storageKey) || safeStorageGetItem(second, storageKey);
 };
+
+/* Хранилище у фрейма общее с порталом, а токены в памяти — свои. Если сессию
+   успел обновить портал, наш refresh-токен сервер уже отвергает: берём тот, что
+   лежит в хранилище, и пробуем ещё раз. */
+const adoptTokensRotatedElsewhere = (sentRefreshToken) => {
+    const accessToken = readPersistedAuthToken(ACCESS_TOKEN_STORAGE_KEY);
+    const refreshToken = readPersistedAuthToken(REFRESH_TOKEN_STORAGE_KEY);
+    if (!sentRefreshToken || !accessToken || !refreshToken || refreshToken === sentRefreshToken) {
+        return false;
+    }
+    authRuntimeState.accessToken = accessToken;
+    authRuntimeState.refreshToken = refreshToken;
+    return true;
+};
+
+const requestAuthRefresh = async () => {
+    const refreshTransport = getPreferredAuthTransport();
+    const refreshToken = refreshTransport === 'bearer'
+        ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+        : '';
+
+    const refreshResponse = await fetch(AUTH_REFRESH_URL, {
+        method: 'POST',
+        credentials: 'include',
+        headers: withAccessTokenHeader(
+            { 'Content-Type': 'application/json' },
+            {
+                includeRefreshToken: true,
+                transportOverride: refreshTransport
+            }
+        ),
+        body: JSON.stringify(
+            refreshTransport === 'bearer'
+                ? {
+                    auth_transport: 'bearer',
+                    refresh_token: refreshToken || undefined
+                }
+                : {
+                    auth_transport: 'cookie'
+                }
+        )
+    });
+    if (!refreshResponse.ok) {
+        return { status: refreshResponse.status, sentRefreshToken: refreshToken };
+    }
+
+    const refreshData = await readJsonSafe(refreshResponse.clone());
+    const refreshResolvedTransport = shouldForceBearerAuthTransport()
+        ? 'bearer'
+        : (
+            normalizeClientAuthTransport(refreshData?.auth_transport) ||
+            normalizeClientAuthTransport(refreshResponse.headers.get('x-auth-transport')) ||
+            getPreferredAuthTransport()
+        );
+    if (refreshResolvedTransport !== 'bearer') {
+        activateCookieAuthTransport();
+        return { status: refreshResponse.status };
+    }
+    return {
+        status: refreshResponse.status,
+        sessionAccepted: persistBearerAuthTokens({
+            access_token:
+                refreshResponse.headers.get('x-new-access-token') ||
+                refreshData?.access_token,
+            refresh_token:
+                refreshResponse.headers.get('x-new-refresh-token') ||
+                refreshData?.refresh_token
+        })
+    };
+};
+
+/* Правила те же, что у портала (src/utils/authRefresh.js): обновление одно на фрейм,
+   а токены стираются, только когда сервер отверг сессию. Раньше фрейм чистил общее с
+   порталом хранилище и на обрыве сети, и на 502 во время деплоя — и следующая
+   перезагрузка портала выкидывала человека на вход. */
+const refreshAuthSession = createSharedAuthRefresh(async () => {
+    const result = await requestAuthRefresh();
+    if (result.status === 401 && adoptTokensRotatedElsewhere(result.sentRefreshToken)) {
+        return requestAuthRefresh();
+    }
+    return result;
+});
 
 const authFetch = async (url, opts = {}, retry = true) => {
     const requestHeaders = withAccessTokenHeader(opts.headers || {});
@@ -574,76 +650,14 @@ const authFetch = async (url, opts = {}, retry = true) => {
         activateCookieAuthTransport();
     }
 
-    if (res.status !== 401 || !retry || !isRecoverableAuthError(body)) return res;
+    if (res.status !== 401 || !retry || !isRecoverableAuthBody(body)) return res;
 
-    if (!refreshPromise) {
-        const refreshTransport = getPreferredAuthTransport();
-        const refreshToken = refreshTransport === 'bearer'
-            ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
-            : '';
-
-        refreshPromise = fetch(AUTH_REFRESH_URL, {
-            method: 'POST',
-            credentials: 'include',
-            headers: withAccessTokenHeader(
-                { 'Content-Type': 'application/json' },
-                {
-                    includeRefreshToken: true,
-                    transportOverride: refreshTransport
-                }
-            ),
-            body: JSON.stringify(
-                refreshTransport === 'bearer'
-                    ? {
-                        auth_transport: 'bearer',
-                        refresh_token: refreshToken || undefined
-                    }
-                    : {
-                        auth_transport: 'cookie'
-                    }
-            )
-        }).then(async (refreshResponse) => {
-            const refreshData = await readJsonSafe(refreshResponse.clone());
-            if (!refreshResponse.ok) {
-                clearAuthTokens();
-                return refreshResponse;
-            }
-
-            const refreshResolvedTransport = shouldForceBearerAuthTransport()
-                ? 'bearer'
-                : (
-                    normalizeClientAuthTransport(refreshData?.auth_transport) ||
-                    normalizeClientAuthTransport(refreshResponse.headers.get('x-auth-transport')) ||
-                    getPreferredAuthTransport()
-                );
-
-            if (refreshResolvedTransport === 'bearer') {
-                if (!persistBearerAuthTokens({
-                    access_token:
-                        refreshResponse.headers.get('x-new-access-token') ||
-                        refreshData?.access_token,
-                    refresh_token:
-                        refreshResponse.headers.get('x-new-refresh-token') ||
-                        refreshData?.refresh_token
-                })) {
-                    clearAuthTokens();
-                    throw new Error('Bearer refresh succeeded without rotated tokens');
-                }
-            } else {
-                activateCookieAuthTransport();
-            }
-
-            return refreshResponse;
-        }).catch((refreshError) => {
-            clearAuthTokens();
-            throw refreshError;
-        }).finally(() => {
-            refreshPromise = null;
-        });
+    const { outcome } = await refreshAuthSession();
+    if (outcome === AUTH_REFRESH_OUTCOME.REJECTED) {
+        clearAuthTokens();
+        return res;
     }
-
-    const rr = await refreshPromise;
-    if (!rr.ok) return res;
+    if (outcome !== AUTH_REFRESH_OUTCOME.REFRESHED) return res;
     return authFetch(url, opts, false);
 };
 
