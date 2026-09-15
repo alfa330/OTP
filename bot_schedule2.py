@@ -58780,6 +58780,54 @@ try:
 except Exception:
     logging.exception("Раздел «Касания»: Blueprint НЕ подключён")
 
+# --- Табло ОП: отдел продаж на FreePBX -----------------------------------------------------
+# Аналог табло СЗоВ по «Линии», но портал к станции не ходит: цифры дня — из касаний,
+# которые мост досылает живым хвостом (cdr_bridge/live.py), люди и статусы — из событий
+# iCORE Phone. Кэш снимков, каталог статусов и проверки прав — общие с СЗоВ и Тез, поэтому
+# они передаются в пакет аргументами, а не копируются.
+try:
+    from op_wallboard import routes as op_wallboard_routes  # noqa: E402
+
+    _op_wallboard_department_id = op_wallboard_routes.make_department_resolver(db)
+    _op_wallboard_guard = op_wallboard_routes.make_guard(
+        db=db,
+        department_id=_op_wallboard_department_id,
+        get_authenticated_requester=_get_authenticated_requester,
+        normalize_user_role=_normalize_user_role,
+        is_global_admin_requester=_is_global_admin_requester,
+        headed_department_id=_headed_department_id,
+        is_supervisor_role=_is_supervisor_role,
+    )
+
+    def _op_wallboard_people(department_id, day):
+        # Тот же запрос состава, что у Тез КЦ (действующие сотрудники отдела с SIP);
+        # на табло — только те, кто на линии: глава и СВ звонков не принимают.
+        rows = db.get_tez_wallboard_operators(department_id, day) or []
+        return [row for row in rows
+                if str(row.get('role') or '').strip().lower() in ('operator', 'trainee')]
+
+    app.register_blueprint(op_wallboard_routes.build_op_wallboard_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        guard=_op_wallboard_guard,
+        department_id=_op_wallboard_department_id,
+        snapshot_with_cache=_wallboard_snapshot_with_cache,
+        restore_cache=_wallboard_restore_cache,
+        persist_cache=_wallboard_persist_cache,
+        status_entry=_tez_wallboard_status_entry,
+        load_people=_op_wallboard_people,
+        live_statuses=db.get_operator_live_statuses,
+        ttl_seconds=_env_int('OP_WALLBOARD_CACHE_TTL_SECONDS', 10, minimum=3, maximum=120),
+        stale_max_seconds=_env_int('OP_WALLBOARD_STALE_MAX_SECONDS', 600, minimum=60, maximum=3600),
+        sl_seconds=_env_int('OP_WALLBOARD_SL_SECONDS', 20, minimum=5, maximum=120),
+        ar_min_percent=_env_int('OP_WALLBOARD_AR_MIN_PERCENT', 3, minimum=0, maximum=50),
+        ar_max_percent=_env_int('OP_WALLBOARD_AR_MAX_PERCENT', 5, minimum=0, maximum=50),
+    ))
+    logging.info("Табло ОП: Blueprint подключён на /api/op_wallboard")
+except Exception:
+    logging.exception("Табло ОП: Blueprint НЕ подключён")
+
 
 # ── Раздел «Воронка ОП»: ежедневная воронка обзвона по направлениям продаж ────
 # Задачи #301, #302, #303, #305 — четыре супервайзера вели одну и ту же

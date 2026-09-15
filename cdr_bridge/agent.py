@@ -84,7 +84,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr import touches as touches_mod  # noqa: E402
-from cdr_bridge import signing  # noqa: E402
+from cdr_bridge import live, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
 VERSION = '1.1.0'
@@ -149,6 +149,9 @@ def load_config(argv_overrides=None):
         'ca_bundle': value('CDR_PORTAL_CA_BUNDLE'),
         # Пусто — пульс не пишется вовсе: при локальной отладке сторожа нет.
         'heartbeat_file': value('CDR_HEARTBEAT_FILE'),
+        # Живой хвост сегодняшних суток (cdr_bridge/live.py): раз в столько секунд мост
+        # досылает порталу изменившиеся касания дня. 0 — выключен.
+        'live_interval': value('CDR_LIVE_INTERVAL_SECONDS', '20'),
     }
     config.update({k: v for k, v in (argv_overrides or {}).items() if v})
     return config
@@ -188,6 +191,12 @@ class Bridge:
         self.station = station or Station(config['station'], config['login'],
                                           config['password'])
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
+        try:
+            live_interval = int(str(config.get('live_interval') or '0').strip() or 0)
+        except ValueError:
+            live_interval = 0
+        self.live = (live.LiveTail(self._post, self.station, live_interval)
+                     if live_interval > 0 else None)
 
     @staticmethod
     def _build_session(config):
@@ -385,14 +394,25 @@ class Bridge:
                  VERSION, self.portal, self.auth_label, self.config['station'],
                  self.agent_id)
         error_sleep = ERROR_SLEEP_SECONDS
+        next_poll = 0.0
         while True:
             try:
-                had_work = self.tick()
-                self.beat()
-                error_sleep = ERROR_SLEEP_SECONDS
-                # Была работа — сразу за следующей: очередь может быть длинной,
-                # и ждать минуту между сутками значило бы растянуть месяц на час.
-                time.sleep(0 if had_work else IDLE_SLEEP_SECONDS)
+                now = time.time()
+                if now >= next_poll:
+                    had_work = self.tick()
+                    self.beat()
+                    error_sleep = ERROR_SLEEP_SECONDS
+                    # Была работа — сразу за следующей: очередь может быть длинной,
+                    # и ждать минуту между сутками значило бы растянуть месяц на час.
+                    next_poll = now if had_work else now + IDLE_SLEEP_SECONDS
+                # Живой хвост идёт между заданиями, по своему расписанию, и мост не роняет:
+                # его ошибки остаются внутри maybe_step.
+                if self.live is not None:
+                    self.live.maybe_step()
+                wait = next_poll - time.time()
+                if self.live is not None:
+                    wait = min(wait, self.live.seconds_until_due())
+                time.sleep(max(0.0, min(wait, IDLE_SLEEP_SECONDS)))
             except KeyboardInterrupt:
                 log.info('Остановлен с клавиатуры')
                 return 0

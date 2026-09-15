@@ -275,8 +275,57 @@ def replace_day_touches(cursor, day, touches):
 # Состояние моста
 # ─────────────────────────────────────────────────────────────────────────────
 
+_TOUCH_UPSERT_SQL = """
+        INSERT INTO cdr_touches (
+            linkedid, phone, call_day, started_at, answered_at, ext, call_type,
+            result, talk_seconds, dial_seconds, queue, recording_url, legs)
+        VALUES %s
+        ON CONFLICT (linkedid, phone) DO UPDATE SET
+            call_day = EXCLUDED.call_day, started_at = EXCLUDED.started_at,
+            answered_at = EXCLUDED.answered_at, ext = EXCLUDED.ext,
+            call_type = EXCLUDED.call_type, result = EXCLUDED.result,
+            talk_seconds = EXCLUDED.talk_seconds, dial_seconds = EXCLUDED.dial_seconds,
+            queue = EXCLUDED.queue, recording_url = EXCLUDED.recording_url,
+            legs = EXCLUDED.legs
+"""
+
+
+def _touch_values(day, touches):
+    return [(
+        str(touch['linkedid'])[:64], touch['phone'][:16], day,
+        touch['started_at'], touch['answered_at'] or None,
+        (touch['ext'] or '')[:8], touch['call_type'][:32], touch['result'][:32],
+        int(touch['talk_seconds']), int(touch['dial_seconds']),
+        (touch['queue'] or '')[:64], touch['recording_url'] or None,
+        min(int(touch['legs']), 32000),
+    ) for touch in touches]
+
+
+def upsert_touches(cursor, day, touches):
+    """Живое приращение сегодняшних суток: только присланные касания, без сноса
+    остальных. Так мост каждые двадцать секунд досылает то, что изменилось, а
+    ночной полный проход по суткам (`replace_day_touches`) потом кладёт
+    окончательную версию поверх — он остаётся истиной, приращение — черновиком."""
+    if not touches:
+        return 0
+    execute_values(cursor, _TOUCH_UPSERT_SQL, _touch_values(day, touches))
+    return len(touches)
+
+
+def delete_touches(cursor, day, keys):
+    """Убрать касания, которых в живом снимке моста больше нет (станция переписала
+    плечи, и звонок сменил linkedid). Единицы в сутки, поэтому построчно."""
+    removed = 0
+    for key in keys or ():
+        cursor.execute(
+            "DELETE FROM cdr_touches WHERE call_day = %s AND linkedid = %s AND phone = %s",
+            (day, str(key.get('linkedid') or '')[:64], str(key.get('phone') or '')[:16]))
+        removed += cursor.rowcount or 0
+    return removed
+
+
 def agent_seen(cursor, *, hostname=None, version=None, station_url=None,
-               error=None, days_sent=0, rows_read=0, agent_key=None):
+               error=None, days_sent=0, rows_read=0, agent_key=None, live=False):
     """Отметка «мост на связи». Зовётся на каждом его запросе.
 
     Счётчики накопительные: по ним видно, работает мост или просто здоровается.
@@ -285,15 +334,17 @@ def agent_seen(cursor, *, hostname=None, version=None, station_url=None,
     «последняя ошибка минуту назад».
 
     agent_key — идентификатор ключа подписи. По нему при ротации видно, что
-    мост уже говорит новым ключом и старый можно убирать.
+    мост уже говорит новым ключом и старый можно убирать. live — отметка
+    живого приращения сегодняшних суток, отдельная от общего «на связи».
     """
     cursor.execute("""
         INSERT INTO cdr_agent_state (id, last_seen_at, hostname, version,
                                      station_url, last_error, last_error_at,
-                                     days_sent, rows_read, agent_key)
+                                     days_sent, rows_read, agent_key, live_at)
         VALUES (1, NOW(), %(host)s, %(version)s, %(station)s, %(error)s,
                 CASE WHEN %(error)s IS NULL THEN NULL ELSE NOW() END,
-                %(days)s, %(rows)s, %(key)s)
+                %(days)s, %(rows)s, %(key)s,
+                CASE WHEN %(live)s THEN NOW() ELSE NULL END)
         ON CONFLICT (id) DO UPDATE SET
             last_seen_at  = NOW(),
             hostname      = COALESCE(EXCLUDED.hostname, cdr_agent_state.hostname),
@@ -304,17 +355,19 @@ def agent_seen(cursor, *, hostname=None, version=None, station_url=None,
                                  THEN cdr_agent_state.last_error_at ELSE NOW() END,
             days_sent     = cdr_agent_state.days_sent + %(days)s,
             rows_read     = cdr_agent_state.rows_read + %(rows)s,
-            agent_key     = COALESCE(EXCLUDED.agent_key, cdr_agent_state.agent_key)
+            agent_key     = COALESCE(EXCLUDED.agent_key, cdr_agent_state.agent_key),
+            live_at       = CASE WHEN %(live)s THEN NOW() ELSE cdr_agent_state.live_at END
     """, {'host': hostname, 'version': version, 'station': station_url,
           'error': (str(error)[:500] if error else None),
           'days': int(days_sent), 'rows': int(rows_read),
-          'key': (str(agent_key)[:32] if agent_key else None)})
+          'key': (str(agent_key)[:32] if agent_key else None),
+          'live': bool(live)})
 
 
 def agent_state(cursor):
     cursor.execute("""
         SELECT last_seen_at, hostname, version, station_url, last_error,
-               last_error_at, days_sent, rows_read, agents_at, agent_key
+               last_error_at, days_sent, rows_read, agents_at, agent_key, live_at
           FROM cdr_agent_state WHERE id = 1
     """)
     row = cursor.fetchone()
@@ -329,6 +382,7 @@ def agent_state(cursor):
         'days_sent': row[6], 'rows_read': row[7],
         'agents_at': row[8].isoformat() if row[8] else None,
         'agent_key': row[9],
+        'live_at': row[10].isoformat() if len(row) > 10 and row[10] else None,
     }
 
 
@@ -542,6 +596,25 @@ def daily_stats(cursor, day_from, day_to, filters=None):
     return [{'day': row[0].isoformat(), 'touches': int(row[1]),
              'talks': int(row[2]), 'talk_seconds': int(row[3])}
             for row in cursor.fetchall()]
+
+
+def day_touches_compact(cursor, day):
+    """Касания одних суток без телефона и ссылки на запись — ровно то, что нужно
+    табло для итогов, разрезов по линиям, часам и операторам. Один SELECT по
+    индексу call_day, тысячи строк, считается в памяти за миллисекунды."""
+    cursor.execute("""
+        SELECT started_at, answered_at, ext, call_type, result, talk_seconds,
+               dial_seconds, queue
+          FROM cdr_touches
+         WHERE call_day = %s
+    """, (day,))
+    return [{
+        'started_at': row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else '',
+        'answered_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else '',
+        'ext': row[2] or '', 'call_type': row[3] or '', 'result': row[4] or '',
+        'talk_seconds': int(row[5] or 0), 'dial_seconds': int(row[6] or 0),
+        'queue': row[7] or '',
+    } for row in cursor.fetchall()]
 
 
 def filter_values(cursor, day_from, day_to):

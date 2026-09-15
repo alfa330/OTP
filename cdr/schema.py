@@ -170,6 +170,9 @@ CREATE TABLE IF NOT EXISTS cdr_agent_state (
 # существующую не тронет, поэтому колонку добавляем отдельным идемпотентным шагом.
 CDR_SCHEMA_MIGRATIONS = (
     "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS agent_key TEXT",
+    # Когда мост в последний раз прислал ЖИВОЕ приращение сегодняшних суток. Табло по нему
+    # отличает «данные свежие» от «мост на связи, но сегодняшний хвост давно не обновлялся».
+    "ALTER TABLE cdr_agent_state ADD COLUMN IF NOT EXISTS live_at TIMESTAMPTZ",
 )
 
 

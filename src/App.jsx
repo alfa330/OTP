@@ -232,6 +232,7 @@ const DriverMailingsView = lazyWithRetry(() => import('./components/driver_maili
 const PaymentsView = lazyWithRetry(() => import('./components/payments/PaymentsView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const TezWallboardView = lazyWithRetry(() => import('./components/monitoring/TezWallboardView'));
+const OpWallboardView = lazyWithRetry(() => import('./components/monitoring/OpWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
 const ShiftHistoryPopover = lazyWithRetry(() => import('./components/schedule/ShiftHistoryPopover'));
 const ShiftHistoryList = lazyWithRetry(() => import('./components/schedule/ShiftHistoryList'));
@@ -414,6 +415,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // Табло
     szov_wallboard: ['szov'],
     tez_wallboard: ['tez'],
+    op_wallboard: ['op'],
     // Телефония и программы
     sip_settings: ['op', 'tez'],
     oktell_guard: ['szov'],
@@ -676,6 +678,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     monitoring_scale: 'Monitoring scale',
     szov_wallboard: 'SZoV wallboard',
     tez_wallboard: 'Tez KC wallboard',
+    op_wallboard: 'Sales wallboard',
     fleet_edm: 'EDM provider',
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
@@ -2117,6 +2120,27 @@ const canAccessTezWallboardForUser = (userLike) => {
     return isSupervisorRole(role)
         && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
             === TEZ_WALLBOARD_DEPARTMENT_CODE;
+};
+
+// «Табло ОП» — отдел продаж на FreePBX. Та же лестница, что у табло Тез, и по той же
+// причине предикат свой, а не общий с «Касаниями»: там периметр раздела включает
+// операторов-выгрузчиков и правится под отчёт, а табло на стене — только руководству
+// линии. На бэкенде то же самое держит op_wallboard.routes.make_guard.
+const OP_WALLBOARD_DEPARTMENT_CODE = 'op';
+
+const isOpWallboardDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).includes(OP_WALLBOARD_DEPARTMENT_CODE)
+);
+
+const canAccessOpWallboardForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isOpWallboardDepartmentHead(userLike)) return true;
+    return isSupervisorRole(role)
+        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+            === OP_WALLBOARD_DEPARTMENT_CODE;
 };
 
 // Раздел «Ограничитель «Перезвона»» — правило, выкидывающее оператора из Oktell,
@@ -39022,6 +39046,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessOpFunnelSection = canAccessOpFunnelSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             const canAccessTezWallboardSection = canAccessTezWallboardForUser(user);
+            const canAccessOpWallboardSection = canAccessOpWallboardForUser(user);
             // Виджет табло живёт здесь, а не в разделе: закрывается только своим крестиком.
             // Какое направление табло открыто виджетом: null | 'osnova' | 'chat'. Окно поверх
             // других у документа одно, поэтому и здесь одно значение, а не флаг на каждое.
@@ -42569,6 +42594,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'group_late_bot' || canAccessGroupLateBotSection) &&
                     (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
                     (requestedViewFromUrl !== 'tez_wallboard' || canAccessTezWallboardSection) &&
+                    (requestedViewFromUrl !== 'op_wallboard' || canAccessOpWallboardSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection) &&
                     (requestedViewFromUrl !== 'fleet_edm' || canAccessFleetEdm) &&
                     // Без этой строки раздел не открывался по адресу вообще ни у
@@ -42590,7 +42616,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -42691,6 +42717,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isSupervisorRole(user?.role)) redirectToView('operators');
                     else redirectToView('hours');
                 }
+                if (view === 'op_wallboard' && !canAccessOpWallboardSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else redirectToView('hours');
+                }
                 if (view === 'four_you' && !canAccessFourYouSection) {
                     if (isAdminLikeRole) redirectToView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
@@ -42698,7 +42729,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -48030,6 +48061,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // «Табло СЗоВ» гейтится своим предикатом (глава/СВ СЗоВ), а не allowlist'ом отдела.
                 if (view === 'szov_wallboard' && canAccessSzovWallboardSection) return;
                 if (view === 'tez_wallboard' && canAccessTezWallboardSection) return;
+                if (view === 'op_wallboard' && canAccessOpWallboardSection) return;
                 // «Бот опозданий» — тоже свой предикат: раздел общий, а не «раздел отдела».
                 if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
@@ -48081,7 +48113,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -49489,6 +49521,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 canAccessSzovWallboardSection && deptAllowsInner('szov_wallboard'),
                                                 canAccessOktellGuard && deptAllowsInner('oktell_guard'),
                                                 canAccessTezWallboardSection && deptAllowsInner('tez_wallboard'),
+                                                canAccessOpWallboardSection && deptAllowsInner('op_wallboard'),
                                             )}
 
                                             {/* Блок 4 — онлайн-нагрузка линии: табло и ограничитель,
@@ -49513,6 +49546,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
                                                         >
                                                             <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
+                                                        </button>
+                                                    </li>
+                                                </SidebarDeptScope>
+                                            )}
+                                            {canAccessOpWallboardSection && (
+                                                <SidebarDeptScope section="op_wallboard" activeCode={activeDeptCode}>
+                                                    <li>
+                                                        <button
+                                                            onClick={(e) => handleSidebarViewNavigation(e, 'op_wallboard')}
+                                                            className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'op_wallboard' ? 'bg-blue-700' : ''}`}
+                                                        >
+                                                            <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло ОП</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -49744,7 +49789,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </li>
                                             )}
 
-                                            {renderDividerIfInner(canAccessSzovWallboardSection, canAccessOktellGuard, canAccessTezWallboardSection)}
+                                            {renderDividerIfInner(canAccessSzovWallboardSection, canAccessOktellGuard, canAccessTezWallboardSection, canAccessOpWallboardSection)}
 
                                             {canAccessSzovWallboardSection && (
                                             <li>
@@ -49763,6 +49808,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessOpWallboardSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'op_wallboard')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'op_wallboard' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло ОП</span>
                                                 </button>
                                             </li>
                                             )}
@@ -50621,6 +50676,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessVerifierChatsSection,
                 canAccessSzovWallboardSection,
                 canAccessTezWallboardSection,
+                canAccessOpWallboardSection,
                 canAccessFourYouSection,
                 canManageFourYouSection,
                 canAccessDevLetterSection,
@@ -51168,6 +51224,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     widgetOpen={szovWallboardWidget}
                                     onToggleWidget={setSzovWallboardWidget}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "op_wallboard" && canAccessOpWallboardSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
+                                <OpWallboardView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
                                 />
                             </Suspense>
                         )}

@@ -498,6 +498,39 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                  day_value, rows_fetched, len(clean))
         return jsonify({'status': 'ok', 'stored': len(clean), 'complete': complete})
 
+    @agent_route('/agent/live')
+    def live(payload):
+        """Живое приращение сегодняшних суток: что изменилось за последние секунды.
+
+        Мост держит хвост дня в памяти и каждые двадцать секунд досылает только
+        новые и изменившиеся касания (и ключи исчезнувших). Принимаем ТОЛЬКО
+        сегодняшние и вчерашние сутки: чужой день сюда прислать нельзя даже
+        подписанным запросом — прошлое переписывает лишь полный проход по суткам.
+        """
+        day_value = sync.parse_day(payload.get('day'), 'сутки')
+        today = queries.today_almaty()
+        if not (today - timedelta(days=1) <= day_value <= today):
+            raise ValueError('Живое приращение принимается только за сегодня и вчера, '
+                             'а не за %s' % day_value.isoformat())
+        touches = payload.get('touches')
+        if touches is None:
+            touches = []
+        if not isinstance(touches, list):
+            raise ValueError('Ожидался список касаний в поле touches')
+        if len(touches) > MAX_TOUCHES_PER_DAY:
+            raise ValueError('Слишком много касаний за сутки: %d при потолке %d'
+                             % (len(touches), MAX_TOUCHES_PER_DAY))
+        removed = payload.get('removed') or []
+        if not isinstance(removed, list) or len(removed) > MAX_TOUCHES_PER_DAY:
+            raise ValueError('Поле removed должно быть небольшим списком ключей')
+        clean = _dedupe(_clean_touch(item, day_value) for item in touches)
+        with db._get_cursor() as cursor:
+            stored = queries.upsert_touches(cursor, day_value, clean)
+            dropped = queries.delete_touches(
+                cursor, day_value, [k for k in removed if isinstance(k, dict)])
+            queries.agent_seen(cursor, live=True, agent_key=g.get('cdr_agent_key'))
+        return jsonify({'status': 'ok', 'stored': stored, 'removed': dropped})
+
     @agent_route('/agent/directory')
     def agent_directory(payload):
         """Справочник агентов станции: ext → имя. Только станция знает, кто
