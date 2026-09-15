@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useLayoutEffect, useRef } from 'react';
 import { AlertCircle, FileText, Loader2, Quote, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { iosBtnGhost, IosBadge } from '../ui/ios';
-import { ChatBubble } from '../ui/chat';
+import { ChatBubble, useThreadScroll } from '../ui/chat';
+import { threadScrollIntent } from './threadScroll';
 import Markdown from '../ui/markdown';
 
 /* Лента ответов помощника — общая для вкладки в вике и для мини-чата шарика.
@@ -168,6 +169,49 @@ export const ESCALATION_NOTES = {
 export const ESCALATABLE_KINDS = ['answer', 'clarify', 'no_answer'];
 
 /**
+ * Прокрутка ленты помощника. КУДА встать, решает threadScrollIntent
+ * (threadScroll.js — там и почему новый ответ встаёт началом); здесь только
+ * исполнение.
+ *
+ * Прежний список откатывается, если кадр с прыжком не наступил: вторая смена
+ * списка до кадра (и двойной прогон эффекта в StrictMode) должна решать от
+ * последнего ИСПОЛНЕННОГО состояния, иначе прыжок к только что пришедшему
+ * ответу молча терялся бы.
+ */
+export const useReplyScroll = (messages) => {
+    const thread = useThreadScroll();
+    const { boxRef, isAtEnd, scrollToEnd, scrollToStart } = thread;
+    const shown = useRef(null);
+
+    useLayoutEffect(() => {
+        const prev = shown.current;
+        shown.current = messages;
+        const intent = threadScrollIntent(prev, messages);
+        if (!intent || !boxRef.current) return undefined;
+        if (intent === 'reply' && !isAtEnd()) return undefined;
+        let done = false;
+        // requestAnimationFrame: до кадра высота ещё старая (см. useThreadAutoScroll).
+        const id = requestAnimationFrame(() => {
+            done = true;
+            const box = boxRef.current;
+            if (!box) return;
+            if (intent === 'end') {
+                scrollToEnd();
+                return;
+            }
+            const replies = box.querySelectorAll('[data-thread-reply]');
+            scrollToStart(replies[replies.length - 1]);
+        });
+        return () => {
+            cancelAnimationFrame(id);
+            if (!done) shown.current = prev;
+        };
+    }, [messages, boxRef, isAtEnd, scrollToEnd, scrollToStart]);
+
+    return thread;
+};
+
+/**
  * Одна реплика ленты — своя или ответ помощника со всей его обвязкой.
  *
  * compact сжимает ответ под узкую колонку мини-чата: пузырь занимает почти всю
@@ -202,7 +246,8 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, onEscalat
     const width = compact ? 'max-w-full' : 'max-w-[78%]';
 
     return (
-        <div className="space-y-1.5">
+        // data-thread-reply — отсюда useReplyScroll берёт начало ответа.
+        <div className="space-y-1.5" data-thread-reply="">
             <ChatBubble
                 tone={tone}
                 plain={false}

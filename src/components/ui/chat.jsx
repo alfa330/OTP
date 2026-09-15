@@ -14,9 +14,9 @@ import { CornerDownLeft, Loader2 } from 'lucide-react';
  * Два примитива здесь НОВЫЕ, их в проекте не было ни одного:
  *   * ChatComposer — поля ввода сообщения не существовало нигде (ни отправки по
  *     Enter, ни авторесайза): все три чата проекта только читают историю;
- *   * useThreadAutoScroll — автопрокрутки тоже не было ни в одном. Читающему
- *     чату она не нужна, а помощнику нужна: ответ появляется после вопроса, и
- *     прыгать к нему руками пользователь не должен.
+ *   * useThreadScroll — автопрокрутки тоже не было ни в одном. Читающему чату
+ *     она не нужна, а помощнику нужна: ответ появляется после вопроса, и
+ *     искать его руками пользователь не должен.
  *
  * Тёмной темы в проекте нет, классы dark:* здесь запрещены — Tailwind настроен
  * без darkMode, то есть они сработали бы от системной темы.
@@ -85,13 +85,16 @@ export const ChatEmpty = ({ icon: Icon, title, hint = null }) => (
 );
 
 /**
- * Прокрутка ленты: липнет к низу, только если пользователь и так у низа.
+ * Прокрутка ленты: коробка, признак «человек у конца» и два прыжка — к концу и
+ * к началу реплики. КОГДА прыгать, здесь не решается: переписке хватает
+ * useThreadAutoScroll ниже, а у помощника своё правило
+ * (assistant/threadScroll.js).
  *
- * Так сделано намеренно. Безусловный прыжок вниз на каждое обновление вырвал бы
- * человека из чтения старого ответа, а это в помощнике происходит часто: ответы
- * длинные, и их дочитывают, пока задаётся следующий вопрос.
+ * Признак «у конца» — главное. Безусловный прыжок на каждое обновление вырвал
+ * бы человека из чтения старого ответа, а это в помощнике происходит часто:
+ * ответы длинные, и их дочитывают, пока задаётся следующий вопрос.
  */
-export const useThreadAutoScroll = (dependency, { threshold = 120 } = {}) => {
+export const useThreadScroll = ({ threshold = 120 } = {}) => {
     const boxRef = useRef(null);
     const stickRef = useRef(true);
 
@@ -101,15 +104,7 @@ export const useThreadAutoScroll = (dependency, { threshold = 120 } = {}) => {
         stickRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < threshold;
     }, [threshold]);
 
-    useLayoutEffect(() => {
-        const box = boxRef.current;
-        if (!box || !stickRef.current) return;
-        // requestAnimationFrame: до кадра высота ещё старая, и прыжок недоскакивает.
-        const id = requestAnimationFrame(() => {
-            if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
-        });
-        return () => cancelAnimationFrame(id);
-    }, [dependency]);
+    const isAtEnd = useCallback(() => stickRef.current, []);
 
     const scrollToEnd = useCallback(() => {
         stickRef.current = true;
@@ -117,7 +112,40 @@ export const useThreadAutoScroll = (dependency, { threshold = 120 } = {}) => {
         if (box) box.scrollTop = box.scrollHeight;
     }, []);
 
-    return { boxRef, onScroll, scrollToEnd };
+    /* Начало реплики — к верхнему краю ленты, с её же верхним отступом. Плавно:
+       глаз ведёт реплику от места, где она появилась, и не теряет её; при
+       «меньше движения» — прыжком. Окно берётся у самой ленты, а не глобальное:
+       помощник бывает откреплён в окно поверх других окон. Дальше конца браузер
+       не прокрутит — короткая реплика так и остаётся у низа целиком. */
+    const scrollToStart = useCallback((element) => {
+        const box = boxRef.current;
+        if (!box || !element) return;
+        const view = box.ownerDocument.defaultView;
+        const gap = parseFloat(view.getComputedStyle(box).paddingTop) || 0;
+        const top = element.getBoundingClientRect().top
+            - box.getBoundingClientRect().top + box.scrollTop - gap;
+        const calm = view.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+        box.scrollTo({ top: Math.max(0, top), behavior: calm ? 'auto' : 'smooth' });
+    }, []);
+
+    return { boxRef, onScroll, isAtEnd, scrollToEnd, scrollToStart };
+};
+
+/** Прокрутка переписки: на каждое обновление — к концу, если человек и так у конца. */
+export const useThreadAutoScroll = (dependency, options) => {
+    const thread = useThreadScroll(options);
+    const { boxRef, isAtEnd } = thread;
+
+    useLayoutEffect(() => {
+        if (!boxRef.current || !isAtEnd()) return undefined;
+        // requestAnimationFrame: до кадра высота ещё старая, и прыжок недоскакивает.
+        const id = requestAnimationFrame(() => {
+            if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
+        });
+        return () => cancelAnimationFrame(id);
+    }, [dependency, boxRef, isAtEnd]);
+
+    return thread;
 };
 
 /**

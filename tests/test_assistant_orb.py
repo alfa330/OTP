@@ -268,6 +268,22 @@ class SharedThreadTests(unittest.TestCase):
         # Спрятать под compact разрешено только время и модель.
         self.assertIn('compact ? null :', compact_block)
 
+    def test_новый_ответ_встаёт_началом_а_не_источниками(self):
+        """Жалоба 15.09.2026: лента уезжала к концу ответа — к источникам, — и
+        сам ответ приходилось искать прокруткой вверх. Обе ленты помощника
+        прокручиваются одним правилом (threadScroll.js); общий хук переписки
+        липнет к концу и помощнику не годится."""
+        wiki_tab = ROOT / 'src' / 'components' / 'wiki' / 'WikiAssistant.jsx'
+        for path in (PANEL, wiki_tab):
+            source = path.read_text(encoding='utf-8')
+            self.assertIn('useReplyScroll(', source, path.name)
+            self.assertNotIn('useThreadAutoScroll', source, path.name)
+        thread = THREAD.read_text(encoding='utf-8')
+        self.assertIn('threadScrollIntent(', thread)
+        # Начало ответа прыжок находит по метке на обёртке реплики.
+        message_block = thread[thread.index('export const AssistantMessage'):]
+        self.assertIn('data-thread-reply', message_block)
+
 
 class DetachedWindowTests(unittest.TestCase):
     """Помощник, вынесенный в окно поверх других окон.

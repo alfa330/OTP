@@ -3,8 +3,8 @@ import {
     AlertCircle, ArrowUpRight, Check, ChevronLeft, History, Loader2, Lock,
     Minimize2, PictureInPicture2, Plus, Trash2, X,
 } from 'lucide-react';
-import { ChatComposer, useThreadAutoScroll } from '../ui/chat';
-import { AssistantMessage, fmtChatDate } from './assistantThread.jsx';
+import { ChatComposer } from '../ui/chat';
+import { AssistantMessage, fmtChatDate, useReplyScroll } from './assistantThread.jsx';
 import Orb from './Orb.jsx';
 
 /* Мини-чат шарика: тот же помощник, что во вкладке вики, в колонке 384 пикселя.
@@ -135,7 +135,7 @@ export default function AssistantPanel({
     onOpenArticle, onOpenFullAssistant, onClose, showToast,
     detached = false, canDetach = false, onDetach, onAttach,
 }) {
-    const { boxRef, onScroll } = useThreadAutoScroll(chat.messages);
+    const { boxRef, onScroll } = useReplyScroll(chat.messages);
     const [screen, setScreen] = useState('thread');
     const [pendingDelete, setPendingDelete] = useState(null);
 

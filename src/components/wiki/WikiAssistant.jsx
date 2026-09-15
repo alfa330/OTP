@@ -7,10 +7,10 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosCard, IosModal,
 } from '../ui/ios';
 import {
-    ChatComposer, ChatEmpty, useThreadAutoScroll,
+    ChatComposer, ChatEmpty,
 } from '../ui/chat';
 import {
-    AssistantMessage, errText, fmtChatDate,
+    AssistantMessage, errText, fmtChatDate, useReplyScroll,
 } from '../assistant/assistantThread.jsx';
 import useSupervisorReply from '../assistant/useSupervisorReply';
 import useStableCallback from './useStableCallback';
@@ -77,7 +77,7 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
     // вопроса, который ещё в полёте.
     const busyRef = useRef(false);
     busyRef.current = busy;
-    const { boxRef, onScroll } = useThreadAutoScroll(messages);
+    const { boxRef, onScroll } = useReplyScroll(messages);
 
     const loadStatus = useCallback(() => {
         axios.get(`${base}/ai/status`, { headers, params: { space_id: spaceId } })
