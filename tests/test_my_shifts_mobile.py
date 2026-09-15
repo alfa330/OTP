@@ -54,6 +54,15 @@ class PhoneLayerTests(unittest.TestCase):
             self.assertNotIn(trap, code, trap)
         self.assertIsNone(re.search(r'className="[^"]*(?:-actions|-tabs|-filters|toolbar|topbar)"', code))
 
+    def test_request_card_does_not_truncate_the_period(self):
+        """Бейдж статуса рядом с заголовком резал и заголовок, и период
+        («Сокращение см…», «09:00 — 1…»): статус живёт в начале второй строки,
+        период за ним переносится."""
+        card = block(PHONE, 'export const MyShiftsRequestCard', 'export const MyShiftsCandidateRow')
+        self.assertIn('<p className="mt-1 pl-[42px] text-[14px] leading-snug tabular-nums text-slate-500">', card)
+        self.assertIn('{badge ? <IosBadge tone={badgeTone} className="mr-1.5 align-[1px]">{badge}</IosBadge> : null}', card)
+        self.assertNotIn('block truncate text-[14px] tabular-nums text-slate-500">{subtitle}', card)
+
     def test_day_strip_accepts_a_header_row(self):
         """Строка «‹ › 14 — 20 сентября · Сегодня» липнет вместе с днями."""
         self.assertIn('AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect, header = null })', STRIP)

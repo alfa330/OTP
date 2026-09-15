@@ -296,8 +296,9 @@ export const MyShiftsPlainRow = ({ dotClassName = 'bg-slate-400', title, trailin
 );
 
 /*
- * Карточка запроса (замена, обмен, заявка руководителю): значок в плитке,
- * заголовок с бейджем статуса, строка периода, пояснения и ряд действий.
+ * Карточка запроса (замена, обмен, заявка руководителю): значок в плитке и
+ * заголовок, под ними статус и период одной переносимой строкой, пояснения и
+ * ряд действий.
  * Действия — капсулы в отдельной строке: в заголовке им места нет, а у
  * ожидающего запроса они и есть главное.
  */
@@ -316,12 +317,18 @@ export const MyShiftsRequestCard = ({
       <span className={`grid h-[30px] w-[30px] shrink-0 place-items-center rounded-lg text-white ${tileClassName}`}>
         <Icon size={16} aria-hidden="true" />
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[16px] font-semibold text-slate-900">{title}</span>
-        {subtitle ? <span className="block truncate text-[14px] tabular-nums text-slate-500">{subtitle}</span> : null}
-      </span>
-      {badge ? <IosBadge tone={badgeTone} className="shrink-0">{badge}</IosBadge> : null}
+      <span className="min-w-0 flex-1 truncate text-[16px] font-semibold text-slate-900">{title}</span>
     </div>
+    {/* Статус — в начале второй строки, а период за ним ПЕРЕНОСИТСЯ, а не режется.
+        Рядом с заголовком бейдж «На рассмотрении» забирал треть ширины, и в
+        карточке оставалось «Сокращение см…» и «09:00 — 1…» — ровно то, ради чего
+        её открывают (замер 15.09.2026, 390 px). */}
+    {badge || subtitle ? (
+      <p className="mt-1 pl-[42px] text-[14px] leading-snug tabular-nums text-slate-500">
+        {badge ? <IosBadge tone={badgeTone} className="mr-1.5 align-[1px]">{badge}</IosBadge> : null}
+        {subtitle}
+      </p>
+    ) : null}
     {notes.filter(Boolean).map((note, index) => (
       // Пояснения статичны — индекс честный ключ.
       // eslint-disable-next-line react/no-array-index-key
