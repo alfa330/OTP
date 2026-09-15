@@ -2460,6 +2460,16 @@ const canManageSzovBroadcastForUser = (userLike) => {
     return isSzovWallboardDepartmentHead(userLike);
 };
 
+// Отбивка «Табло ОП» — та же граница, но хозяин другой: глава отдела продаж. СВ табло
+// видят, а кому и когда уходит сводка руководству, решает руководитель. На бэкенде это
+// _szov_broadcast_guard с направлением «op».
+const canManageOpBroadcastForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    return isOpWallboardDepartmentHead(userLike);
+};
+
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
 const normalizeDevLetterAccessName = (value) =>
     String(value || '')
@@ -51232,6 +51242,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <OpWallboardView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    canManageBroadcast={canManageOpBroadcastForUser(user)}
                                 />
                             </Suspense>
                         )}

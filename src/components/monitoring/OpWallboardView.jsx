@@ -5,6 +5,7 @@ import FullscreenSheet from '../common/FullscreenSheet';
 import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
 import { formatClock, formatInt, wallboardStaleNotice } from './szovWallboardShared';
 import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
+import { BroadcastControls } from './SzovWallboardView';
 import {
     OP_METRIC_MAP,
     formatCount,
@@ -233,7 +234,15 @@ const clockLabel = (snapshot) => {
     return at ? `данные на ${formatClock(at)}` : null;
 };
 
-export default function OpWallboardView({ apiBaseUrl, withAccessTokenHeader }) {
+const BROADCAST_HINT = (
+    <>
+        Отклонением считаем то же, что подсвечено на табло: AR вне коридора нормы, SL ниже 80 %
+        или мост «Касаний» замолчал и цифры на табло замерли. Проценты считаются, когда за день
+        накопилось хотя бы 20 входящих — утренние единицы звонков поводом не считаются.
+    </>
+);
+
+export default function OpWallboardView({ apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false }) {
     const { snapshot, error, loading, refresh } = useOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
 
@@ -259,6 +268,16 @@ export default function OpWallboardView({ apiBaseUrl, withAccessTokenHeader }) {
                 ) : null}
             </div>
             <div className="flex items-center gap-2">
+                {canManageBroadcast ? (
+                    <BroadcastControls
+                        direction="op"
+                        directionLabel="ОП"
+                        deviationHint={BROADCAST_HINT}
+                        apiBaseUrl={apiBaseUrl}
+                        withAccessTokenHeader={withAccessTokenHeader}
+                        showToast={showToast}
+                    />
+                ) : null}
                 <button type="button" className={`${iosBtnGhost} disabled:opacity-40`} disabled={loading} onClick={() => refresh()}>
                     <FaIcon className={`fas fa-rotate ${loading ? 'animate-spin' : ''}`}></FaIcon>
                     Обновить

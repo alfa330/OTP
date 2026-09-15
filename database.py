@@ -4745,7 +4745,7 @@ class Database:
                     CONSTRAINT szov_wallboard_broadcast_chats_mode
                         CHECK (mode IN ('always', 'deviations')),
                     CONSTRAINT szov_wallboard_broadcast_chats_direction
-                        CHECK (direction IN ('osnova', 'chat'))
+                        CHECK (direction IN ('osnova', 'chat', 'op'))
                 );
             """)
             # Таблица старше направлений: там ключом был один chat_id. Досыпаем колонку и
@@ -4786,6 +4786,19 @@ class Database:
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD PRIMARY KEY (direction, chat_id);
                         END IF;
+                        -- Список направлений растёт («Табло ОП» — третье, 16.09.2026).
+                        -- Ограничение, заведённое старым кодом со списком из двух, снимаем
+                        -- и заводим заново; ищем старое по отсутствию нового ключа в его
+                        -- определении, а не по имени версии.
+                        IF EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conrelid = 'szov_wallboard_broadcast_chats'::regclass
+                              AND conname = 'szov_wallboard_broadcast_chats_direction'
+                              AND position('''op''' IN pg_get_constraintdef(oid)) = 0
+                        ) THEN
+                            ALTER TABLE szov_wallboard_broadcast_chats
+                                DROP CONSTRAINT szov_wallboard_broadcast_chats_direction;
+                        END IF;
                         IF NOT EXISTS (
                             SELECT 1 FROM pg_constraint
                             WHERE conrelid = 'szov_wallboard_broadcast_chats'::regclass
@@ -4793,7 +4806,7 @@ class Database:
                         ) THEN
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD CONSTRAINT szov_wallboard_broadcast_chats_direction
-                                CHECK (direction IN ('osnova', 'chat'));
+                                CHECK (direction IN ('osnova', 'chat', 'op'));
                         END IF;
                     END $$;
                 """)

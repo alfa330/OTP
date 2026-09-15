@@ -105,6 +105,13 @@ class SzovWallboardBackendGuardTests(unittest.TestCase):
             ),
             '_is_supervisor_role': lambda r: str(r or '').lower() == 'sv',
             '_headed_department_id': lambda rid: headed_department_id,
+            # Гейт отбивки с 16.09.2026 смотрит на направление запроса: «Табло ОП» — третье
+            # направление со своим хозяином. Здесь запрос без направления = «Линия».
+            'request': type('Req', (), {'method': 'GET',
+                                        'get_json': staticmethod(lambda silent=True: None)})(),
+            'SZOV_BROADCAST_DIRECTION_LINE': 'osnova',
+            'SZOV_BROADCAST_DIRECTION_OP': 'op',
+            '_szov_broadcast_direction_arg': lambda payload=None: 'osnova',
         }
         _load_names(source, {
             'SZOV_WALLBOARD_DEPARTMENT_CODE',
@@ -1546,7 +1553,10 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova'",
                       self.db)
         self.assertIn("ADD PRIMARY KEY (direction, chat_id)", self.db)
-        self.assertIn("CHECK (direction IN ('osnova', 'chat'))", self.db)
+        # Третье направление — «Табло ОП» (16.09.2026): список в ограничении вырос, и старое
+        # ограничение из двух значений на проде снимается миграцией, а не остаётся навсегда.
+        self.assertIn("CHECK (direction IN ('osnova', 'chat', 'op'))", self.db)
+        self.assertIn("DROP CONSTRAINT szov_wallboard_broadcast_chats_direction", self.db)
         # Под SAVEPOINT: весь _init_db — одна транзакция, и упавшая смена ключа откатила бы
         # инициализацию всей схемы, то есть уронила бы приложение ради одной таблицы.
         self.assertIn('cursor.execute("SAVEPOINT sp_szov_broadcast_direction")', self.db)
@@ -1670,9 +1680,11 @@ class SzovBroadcastWiringTests(unittest.TestCase):
                           flags=re.DOTALL).group(0)
         self.assertIn("for chat in db.get_szov_broadcast_chats(direction)}", block)
         self.assertIn('return jsonify({"error": "Сначала выберите чат"}), 400', block)
-        # Кнопка шлёт отбивку ТОГО направления, из которого её нажали.
-        self.assertIn("send = (_szov_chat_broadcast_send if direction == SZOV_BROADCAST_DIRECTION_CHAT",
-                      block)
+        # Кнопка шлёт отбивку ТОГО направления, из которого её нажали; направлений три,
+        # и неизвестное падает на «Линию» так же, как раньше.
+        self.assertIn("SZOV_BROADCAST_DIRECTION_CHAT: _szov_chat_broadcast_send,", block)
+        self.assertIn("SZOV_BROADCAST_DIRECTION_OP: _op_broadcast_send,", block)
+        self.assertIn("}.get(direction, _szov_broadcast_send)", block)
 
     def test_bot_loop_is_captured_for_flask_triggered_sends(self):
         """Из потока Flask нельзя слать через чужой цикл — ссылку берём на старте бота."""

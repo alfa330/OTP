@@ -632,11 +632,18 @@ const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHin
  * Модалка идёт через портал, как и полноэкранный режим: она не должна зависеть от
  * вертикальных отступов шапки, а шапка рисуется во всех состояниях экрана.
  */
-const BroadcastControls = ({ direction, targetSeconds, apiBaseUrl, withAccessTokenHeader,
-                            showToast }) => {
+/*
+ * Кнопка «Отбивка» с модалкой получателей. Экспортируется: «Табло ОП» ставит её в свою
+ * шапку с direction="op" — ручки настройки общие на все направления. Подпись направления
+ * и подсказку отклонений ОП передаёт сам (directionLabel, deviationHint): в справочнике
+ * направлений СЗоВ его нет намеренно — иначе он появился бы третьим в переключателе.
+ */
+export const BroadcastControls = ({ direction, targetSeconds, apiBaseUrl, withAccessTokenHeader,
+                                   showToast, directionLabel = null, deviationHint = null }) => {
     const [broadcastOpen, setBroadcastOpen] = useState(false);
-    const label = wallboardDirection(direction).label;
-    const hint = BROADCAST_DEVIATION_HINT[direction] || BROADCAST_DEVIATION_HINT.osnova;
+    const label = directionLabel || wallboardDirection(direction).label;
+    const defaultHint = BROADCAST_DEVIATION_HINT[direction] || BROADCAST_DEVIATION_HINT.osnova;
+    const hint = deviationHint ? () => deviationHint : defaultHint;
     return (
         <>
             <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>

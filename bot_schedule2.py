@@ -36830,7 +36830,20 @@ def _szov_broadcast_guard():
     role = _normalize_user_role(requester[3])
     if _is_global_admin_requester(role, requester_id):
         return requester_id, None
-    department_id = _szov_wallboard_department_id()
+    # Направление решает, чей глава здесь хозяин: отбивку «Табло ОП» настраивает глава
+    # отдела продаж, а не СЗоВ. Неизвестное направление гейт не отвергает сам — это
+    # сделает ручка честным 400; здесь оно просто считается «Линией».
+    direction = SZOV_BROADCAST_DIRECTION_LINE
+    try:
+        direction = _szov_broadcast_direction_arg(
+            request.get_json(silent=True) if request.method == 'POST' else None)
+    except ValueError:
+        pass
+    if direction == SZOV_BROADCAST_DIRECTION_OP:
+        resolver = globals().get('_op_wallboard_department_id')
+        department_id = resolver() if resolver else None
+    else:
+        department_id = _szov_wallboard_department_id()
     if department_id is not None and _headed_department_id(requester_id) == department_id:
         return requester_id, None
     return requester_id, (jsonify({"error": "forbidden"}), 403)
@@ -37310,7 +37323,11 @@ SZOV_BROADCAST_MODE_DEVIATIONS = 'deviations'
 # виджета в localStorage у каждого пользователя.
 SZOV_BROADCAST_DIRECTION_LINE = 'osnova'
 SZOV_BROADCAST_DIRECTION_CHAT = 'chat'
-SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT)
+# «Табло ОП» — третье направление той же отбивки: свои получатели, показатели и расписание,
+# но тот же обход получателей, те же ручки настройки и та же таблица в БД.
+SZOV_BROADCAST_DIRECTION_OP = 'op'
+SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT,
+                             SZOV_BROADCAST_DIRECTION_OP)
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None):
@@ -41495,6 +41512,233 @@ async def szov_chat_broadcast_job():
         on_delivered=_szov_chat_break_violations_mark_reported)
 
 
+# === Отбивка «Табло ОП» ==========================================================================
+# Третье направление той же отбивки. Источник — снимок табло ОП (op_wallboard), который портал
+# считает из своей базы: касания досылает мост, статусы — iCORE Phone. Ни одного внешнего
+# запроса отбивка не делает, поэтому предпросмотр и тестовая отправка бесплатны.
+#
+# Расписание по умолчанию — как у «Линии»: владелец просил «такой же аналог». Разойтись
+# расписаниям даём отдельной переменной.
+OP_BROADCAST_SEND_TIMES = (os.getenv('OP_BROADCAST_SEND_TIMES') or SZOV_BROADCAST_SEND_TIMES).strip()
+# Сколько входящих должно накопиться, чтобы AR и SL можно было считать поводом написать в чат:
+# утренние 3 % от одного потерянного из семи — это не показатель, а случай. На саму норму
+# не влияет — плитка на табло краснеет как обычно.
+OP_BROADCAST_MIN_CALLS = _env_int('OP_BROADCAST_MIN_CALLS', 20, minimum=1, maximum=10000)
+# Порог SL — тот же, при котором плитка перестаёт быть зелёной (slTone на фронте: 80 %).
+OP_BROADCAST_SL_MIN_PERCENT = float(os.getenv('OP_BROADCAST_SL_MIN_PERCENT') or 80)
+# Замерший мост — отклонение: цифры на стене стоят, и знать об этом надо. Десять минут —
+# вдвое больше полного прохода живого хвоста, чтобы не писать о секундной задержке.
+OP_BROADCAST_LIVE_STALE_SECONDS = _env_int('OP_BROADCAST_LIVE_STALE_SECONDS', 600,
+                                           minimum=60, maximum=86400)
+
+
+def _op_broadcast_send_times():
+    """[(час, минута), ...] из OP_BROADCAST_SEND_TIMES — направление «Табло ОП»."""
+    return _szov_broadcast_parse_times(OP_BROADCAST_SEND_TIMES, "Отбивка табло ОП")
+
+
+def _op_broadcast_collect(scheduled=False):
+    """Снимок табло ОП из общего кэша раздела: ровно то, что видят на стене."""
+    provider = globals().get('_op_wallboard_snapshot')
+    if provider is None:
+        raise RuntimeError('Табло ОП не подключено — отбивке нечего собирать')
+    data = dict(provider())
+    stamp = str(data.get('captured_at') or '')
+    data['stamp'] = ('%s.%s %s' % (stamp[8:10], stamp[5:7], stamp[11:16])) if len(stamp) >= 16 else ''
+    return data
+
+
+def _op_broadcast_percent(ratio):
+    if ratio is None:
+        return '—'
+    return ('%.1f %%' % (float(ratio) * 100)).replace('.', ',')
+
+
+def _op_broadcast_duration(seconds):
+    if seconds is None:
+        return '—'
+    seconds = int(seconds)
+    return '%d:%02d' % (seconds // 60, seconds % 60)
+
+
+def _op_broadcast_deviations(data):
+    """Отклонения от нормы направления «Табло ОП». Пустой список — всё в норме.
+
+    Норма — ровно та, что красит плитки: AR вне коридора (ar_min/ar_max из снимка),
+    SL ниже OP_BROADCAST_SL_MIN_PERCENT. Поправка одна — размер выборки
+    (OP_BROADCAST_MIN_CALLS): на утренних единицах звонков процент не показатель.
+    Замерший или молчащий мост — отклонение всегда: цифры на стене замерли."""
+    notes = []
+    totals = data.get('totals') or {}
+    arrived = _szov_wallboard_int(totals.get('arrived'))
+    ar = totals.get('ar')
+    sl = totals.get('sl')
+    ar_min = float(data.get('ar_min_percent') or 0)
+    ar_max = float(data.get('ar_max_percent') or 100)
+    if arrived >= OP_BROADCAST_MIN_CALLS and ar is not None:
+        percent = float(ar) * 100
+        if percent > ar_max + 1e-9:
+            notes.append('Обратите внимание: потеряно %s входящих при норме до %s %%.'
+                         % (_op_broadcast_percent(ar), ('%g' % ar_max).replace('.', ',')))
+        elif percent < ar_min - 1e-9:
+            notes.append('Обратите внимание: потеряно %s входящих — ниже коридора %s–%s %%, '
+                         'операторов на линии больше, чем нужно.'
+                         % (_op_broadcast_percent(ar), ('%g' % ar_min).replace('.', ','),
+                            ('%g' % ar_max).replace('.', ',')))
+    if arrived >= OP_BROADCAST_MIN_CALLS and sl is not None \
+            and float(sl) * 100 < OP_BROADCAST_SL_MIN_PERCENT - 1e-9:
+        notes.append('Обратите внимание: SL %s при норме от %s %%.'
+                     % (_op_broadcast_percent(sl),
+                        ('%g' % OP_BROADCAST_SL_MIN_PERCENT).replace('.', ',')))
+    bridge = data.get('bridge') or {}
+    age = bridge.get('live_age_seconds')
+    if age is None:
+        notes.append('Мост «Касаний» ещё не присылал живых данных за сегодня — цифры дня '
+                     'могут быть неполными.')
+    elif int(age) > OP_BROADCAST_LIVE_STALE_SECONDS:
+        notes.append('Мост «Касаний» молчит %d мин — цифры на табло замерли.' % (int(age) // 60))
+    return notes
+
+
+def _op_broadcast_lines(data):
+    """Строки по линиям — то, ради чего отбивка «по Линии»: очередь, принято/потеряно, AR."""
+    rows = []
+    for queue in (data.get('queues') or []):
+        if not queue.get('arrived') and not queue.get('outgoing'):
+            continue
+        rows.append('• Линия %s: входящих %d, принято %d, потеряно %d (AR %s), SL %s'
+                    % (queue.get('queue') or '—', _szov_wallboard_int(queue.get('arrived')),
+                       _szov_wallboard_int(queue.get('answered')),
+                       _szov_wallboard_int(queue.get('missed')),
+                       _op_broadcast_percent(queue.get('ar')), _op_broadcast_percent(queue.get('sl'))))
+    return rows
+
+
+def _op_broadcast_text(data):
+    """Текст отбивки ОП. HTML parse_mode: заголовок жирный.
+
+    Итоги дня повторяются картинкой, поэтому в тексте — отклонения, строки по линиям
+    и дежурная строка о людях: этого хватает, чтобы понять положение без картинки."""
+    totals = data.get('totals') or {}
+    now = data.get('now') or {}
+    lines = ['<b>Табло ОП</b> (%s):' % (data.get('stamp') or '')]
+    notes = _op_broadcast_deviations(data)
+    if notes:
+        lines.append('')
+        lines.extend(notes)
+    lines.append('')
+    lines.append('Входящих %d · принято %d · потеряно %d · AR %s · SL %s'
+                 % (_szov_wallboard_int(totals.get('arrived')),
+                    _szov_wallboard_int(totals.get('answered')),
+                    _szov_wallboard_int(totals.get('missed')),
+                    _op_broadcast_percent(totals.get('ar')), _op_broadcast_percent(totals.get('sl'))))
+    lines.append('Онлайн %d · в разговоре %d · на перерыве %d'
+                 % (_szov_wallboard_int(now.get('operators_online')),
+                    _szov_wallboard_int(now.get('operators_talking')),
+                    _szov_wallboard_int(now.get('operators_on_break'))))
+    per_line = _op_broadcast_lines(data)
+    if len(per_line) > 1:
+        lines.append('')
+        lines.extend(per_line)
+    return '\n'.join(lines)
+
+
+def _op_render_wallboard_png(data):
+    """PNG «Табло ОП»: те же плитки, что на стене, тем же рисовальщиком, что у СЗоВ."""
+    totals = data.get('totals') or {}
+    now = data.get('now') or {}
+    ar = totals.get('ar')
+    ar_min = float(data.get('ar_min_percent') or 0)
+    ar_max = float(data.get('ar_max_percent') or 100)
+    if ar is None:
+        ar_colors = ('#f1f5f9', '#334155')
+    elif ar_min - 1e-9 <= float(ar) * 100 <= ar_max + 1e-9:
+        ar_colors = ('#d1fae5', '#047857')
+    else:
+        ar_colors = ('#ffe4e6', '#be123c')
+    missed = _szov_wallboard_int(totals.get('missed'))
+    key_tiles = [
+        ('Входящих', str(_szov_wallboard_int(totals.get('arrived'))), '#dbeafe', '#1d4ed8'),
+        ('Принято', str(_szov_wallboard_int(totals.get('answered'))), '#d1fae5', '#047857'),
+        ('Потеряно', str(missed), ('#fef3c7', '#b45309') if missed else ('#f1f5f9', '#334155')),
+        ('AR', _op_broadcast_percent(ar), ar_colors),
+    ]
+    # Кортежи выравниваем к форме (подпись, значение, фон, цвет текста).
+    key_tiles = [(t[0], t[1], *(t[2] if isinstance(t[2], tuple) else (t[2], t[3])))
+                 for t in key_tiles]
+    stat_tiles = [
+        ('SL', _op_broadcast_percent(totals.get('sl'))),
+        ('Разговор', _op_broadcast_duration(totals.get('avg_talk_seconds'))),
+        ('Онлайн', str(_szov_wallboard_int(now.get('operators_online')))),
+        ('В разговоре', str(_szov_wallboard_int(now.get('operators_talking')))),
+        ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break')))),
+        ('Исходящих', str(_szov_wallboard_int(totals.get('outgoing')))),
+    ]
+    return _szov_render_tiles_png('Табло ОП', 'Отдел продаж · %s' % (data.get('stamp') or ''),
+                                  key_tiles, stat_tiles)
+
+
+def _op_broadcast_preview():
+    """Предпросмотр отбивки ОП: текст и картинка, ничего не отправляя. Снимок — из кэша
+    табло, так что предпросмотр не стоит ни одного запроса к мосту или станции."""
+    try:
+        data = _op_broadcast_collect()
+    except Exception as exc:
+        logging.error("Предпросмотр отбивки (ОП): данные не собрались: %s", exc)
+        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
+    if (request.args.get('image') or '').strip() == 'board':
+        try:
+            blob = _op_render_wallboard_png(data)
+        except Exception as exc:
+            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
+        response = Response(blob, mimetype='image/png')
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    regular, _bold = _szov_font_paths()
+    return jsonify({
+        "text": _op_broadcast_text(data),
+        "font_path": regular,
+        "images_available": bool(regular),
+        "deviations": _op_broadcast_deviations(data),
+    })
+
+
+async def _op_broadcast_prepare(scheduled=False):
+    """Собрать отбивку ОП целиком: данные, текст и картинку. Снимок читается из базы
+    синхронно — в пуле потоков, а не на event loop бота."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(executor_pool, _op_broadcast_collect, scheduled)
+    text = _op_broadcast_text(data)
+    media = []
+    try:
+        board_png = await loop.run_in_executor(executor_pool, _op_render_wallboard_png, data)
+        media = [('op_board.png', board_png)]
+    except Exception as exc:
+        # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинки.
+        logging.error("Отбивка табло ОП: не удалось собрать картинку: %s", exc)
+    return data, text, media
+
+
+async def _op_broadcast_send(chat_id):
+    """Собрать и отправить отбивку ОП в один чат — кнопка «Отправить сейчас»."""
+    data, text, media = await _op_broadcast_prepare()
+    await _szov_broadcast_deliver(chat_id, text, media)
+    return data
+
+
+async def _op_broadcast_prepare_scheduled():
+    return await _op_broadcast_prepare(scheduled=True)
+
+
+async def op_broadcast_job():
+    """Плановая отбивка направления «Табло ОП»."""
+    await _szov_broadcast_run_job(
+        direction=SZOV_BROADCAST_DIRECTION_OP,
+        label="Отбивка табло ОП",
+        prepare=_op_broadcast_prepare_scheduled,
+        deviations=_op_broadcast_deviations)
+
+
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
 
 def amo_leads_sync(days=None):
@@ -42109,8 +42353,12 @@ def _szov_broadcast_direction_arg(payload=None):
 
 def _szov_broadcast_direction_times(direction):
     """Расписание направления — то, что форма показывает подписью под заголовком."""
-    times = (_szov_chat_broadcast_send_times() if direction == SZOV_BROADCAST_DIRECTION_CHAT
-             else _szov_broadcast_send_times())
+    if direction == SZOV_BROADCAST_DIRECTION_CHAT:
+        times = _szov_chat_broadcast_send_times()
+    elif direction == SZOV_BROADCAST_DIRECTION_OP:
+        times = _op_broadcast_send_times()
+    else:
+        times = _szov_broadcast_send_times()
     return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
 
 
@@ -42174,6 +42422,8 @@ def api_szov_wallboard_broadcast_preview():
         return jsonify({"error": str(exc)}), 400
     if direction == SZOV_BROADCAST_DIRECTION_CHAT:
         return _szov_chat_broadcast_preview()
+    if direction == SZOV_BROADCAST_DIRECTION_OP:
+        return _op_broadcast_preview()
     hour_raw = (request.args.get('hour') or '').strip()
     hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
 
@@ -42271,8 +42521,10 @@ def api_szov_wallboard_broadcast_test():
     if str(raw) not in recipients:
         return jsonify({"error": "Сначала выберите чат"}), 400
     chat_id = recipients[str(raw)]['chat_id']
-    send = (_szov_chat_broadcast_send if direction == SZOV_BROADCAST_DIRECTION_CHAT
-            else _szov_broadcast_send)
+    send = {
+        SZOV_BROADCAST_DIRECTION_CHAT: _szov_chat_broadcast_send,
+        SZOV_BROADCAST_DIRECTION_OP: _op_broadcast_send,
+    }.get(direction, _szov_broadcast_send)
     try:
         loop = _bot_event_loop()
         if loop is None:
@@ -58806,7 +59058,7 @@ try:
         return [row for row in rows
                 if str(row.get('role') or '').strip().lower() in ('operator', 'trainee')]
 
-    app.register_blueprint(op_wallboard_routes.build_op_wallboard_blueprint(
+    _op_wallboard_bp = op_wallboard_routes.build_op_wallboard_blueprint(
         db=db,
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
@@ -58823,7 +59075,11 @@ try:
         sl_seconds=_env_int('OP_WALLBOARD_SL_SECONDS', 20, minimum=5, maximum=120),
         ar_min_percent=_env_int('OP_WALLBOARD_AR_MIN_PERCENT', 3, minimum=0, maximum=50),
         ar_max_percent=_env_int('OP_WALLBOARD_AR_MAX_PERCENT', 5, minimum=0, maximum=50),
-    ))
+    )
+    # Снимок из того же кэша — отбивке (op_broadcast_job): картинка в Telegram обязана
+    # совпадать с экраном, а второй запрос к базе ради этого не нужен.
+    _op_wallboard_snapshot = _op_wallboard_bp.snapshot
+    app.register_blueprint(_op_wallboard_bp)
     logging.info("Табло ОП: Blueprint подключён на /api/op_wallboard")
 except Exception:
     logging.exception("Табло ОП: Blueprint НЕ подключён")
@@ -62018,6 +62274,18 @@ if __name__ == '__main__':
             szov_chat_broadcast_job,
             CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
             id=f'szov_chat_wallboard_broadcast_{_hour:02d}{_minute:02d}',
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+
+    # И для «Табло ОП»: свои получатели и своё расписание (по умолчанию — как у «Линии»).
+    # Источник — снимок табло из нашей базы, так что пустая джоба ничего не дёргает.
+    for _hour, _minute in _op_broadcast_send_times():
+        scheduler.add_job(
+            op_broadcast_job,
+            CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
+            id=f'op_wallboard_broadcast_{_hour:02d}{_minute:02d}',
             misfire_grace_time=600,
             max_instances=1,
             coalesce=True

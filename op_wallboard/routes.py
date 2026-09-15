@@ -114,6 +114,20 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             bridge_state=bridge_state, now=now, sl_seconds=sl_seconds,
             ar_min_percent=ar_min_percent, ar_max_percent=ar_max_percent)
 
+    def _snapshot():
+        """Снимок из общего кэша — один на всех зрителей и на отбивку. Бросает, если
+        данных нет вовсе: ни свежих, ни сохранённых."""
+        return snapshot_with_cache(
+            cache=cache, lock=lock, fetch=_fetch, source='мост «Касаний»',
+            ttl=ttl_seconds, stale_max=stale_max_seconds, retry_after=retry_after_seconds,
+            lock_wait=lock_wait_seconds, label=label,
+            before=lambda: restore_cache(cache, 'op', stale_max_seconds, label),
+            after=lambda data, at: persist_cache(cache, 'op', persist_interval_seconds,
+                                                 data, at, label))
+
+    # Отбивка в Telegram берёт снимок отсюда же, чтобы картинка не расходилась с экраном.
+    bp.snapshot = _snapshot
+
     @bp.route('/snapshot', methods=['GET', 'OPTIONS'])
     @require_api_key
     def api_snapshot():
@@ -123,13 +137,7 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         if refusal is not None:
             return refusal
         try:
-            payload = snapshot_with_cache(
-                cache=cache, lock=lock, fetch=_fetch, source='мост «Касаний»',
-                ttl=ttl_seconds, stale_max=stale_max_seconds, retry_after=retry_after_seconds,
-                lock_wait=lock_wait_seconds, label=label,
-                before=lambda: restore_cache(cache, 'op', stale_max_seconds, label),
-                after=lambda data, at: persist_cache(cache, 'op', persist_interval_seconds,
-                                                     data, at, label))
+            payload = _snapshot()
         except Exception as exc:  # noqa: BLE001
             # Данных нет вовсе (ни свежих, ни сохранённых): экран говорит это словами,
             # а не пятисоткой — на стене разница между «портал упал» и «касаний ещё нет».
