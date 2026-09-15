@@ -9,6 +9,8 @@
 
 const isBlank = (value) => value === null || value === undefined || value === '';
 
+const departmentOf = (item) => item?.department_id ?? item?.departmentId ?? null;
+
 /**
  * Направление в карточке после выбора группы.
  *
@@ -16,10 +18,16 @@ const isBlank = (value) => value === null || value === undefined || value === ''
  * возврате к исходной группе и у группы без направления — исходное направление
  * карточки (в форме создания это пустое поле). Подстановка не копится: выбрать
  * группу, передумать и вернуть прежнюю — значит вернуть и прежнее направление.
+ *
+ * Исходное направление возвращается только в свой отдел: после смены отдела
+ * сотрудника группа нового отдела без направления оставляет поле пустым, и
+ * проверка «Направление обязательно» заставляет выбрать его руками — иначе
+ * оператор уехал бы в новый отдел с направлением старого.
  */
 export function directionForPickedGroup({
     groupId,
     groups,
+    directions,
     originalGroupId,
     originalDirectionId,
     currentDirectionId,
@@ -29,7 +37,15 @@ export function directionForPickedGroup({
     const original = isBlank(originalDirectionId) ? '' : originalDirectionId;
     if (!isBlank(originalGroupId) && String(groupId) === String(originalGroupId)) return original;
     const group = (groups || []).find((item) => String(item?.id) === String(groupId));
-    return isBlank(group?.effective_direction_id) ? original : group.effective_direction_id;
+    if (!isBlank(group?.effective_direction_id)) return group.effective_direction_id;
+    const originalDirection = (directions || []).find((item) => String(item?.id) === String(original));
+    const originalDepartment = departmentOf(originalDirection);
+    const groupDepartment = departmentOf(group);
+    if (!isBlank(originalDepartment) && !isBlank(groupDepartment)
+        && Number(originalDepartment) !== Number(groupDepartment)) {
+        return '';
+    }
+    return original;
 }
 
 /**

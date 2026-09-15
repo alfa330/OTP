@@ -652,6 +652,17 @@ class ExistingUserGroupEditTests(unittest.TestCase):
         self.assertIn("onChange={(e) => handleGroupChange(e.target.value)}", USER_MODAL)
         # подстановка не перетирает направление, выбранное руками, — в обоих селектах
         self.assertEqual(USER_MODAL.count("direction_picked_by_hand: true"), 2)
+        # смена отдела сбрасывает и признак «выбрано руками»
+        self.assertIn("next.direction_picked_by_hand = false;", USER_MODAL)
+        # исходное направление возвращается только в свой отдел
+        self.assertIn("directions,\n                originalGroupId: userToEdit?.group_id,", USER_MODAL)
+
+    def test_edit_modal_offers_only_departments_directions(self):
+        # Глава нескольких отделов получает направления всех своих отделов; чужое
+        # направление сервер отклонит уже после перевода в группу — половина карточки
+        # осталась бы сохранённой. Список фильтруется, как и в форме создания.
+        self.assertNotIn("{directions.map((dir) => (", USER_MODAL)
+        self.assertEqual(USER_MODAL.count("directionsForSelectedDept(effectiveDeptId).map((dir) => ("), 2)
 
     def test_bulk_panel_uses_groups(self):
         self.assertIn("Группа: не менять", APP)

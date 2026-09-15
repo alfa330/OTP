@@ -146,7 +146,12 @@ class _ScriptedCursor:
         elif flat.startswith("UPDATE users SET role = 'operator'"):
             if self._raise_on_role_update:
                 raise _UniqueNameRoleViolation()
+            # Направление, записанное шагом 2, — его увидит синхронизация по
+            # группе, если её по ошибке запустят при заведении в группу.
+            self.written_direction = params[0]
             self._next_one = (self._user_row[0], self._user_row[1])
+        elif flat.startswith("SELECT role, direction_id FROM users"):
+            self._next_one = ("operator", getattr(self, "written_direction", None))
         elif "SELECT gsm.supervisor_id" in flat:
             group_id = int(params[0])
             sv = self._group_supervisors.get(group_id)
@@ -408,12 +413,17 @@ class DemotionCascadeTests(unittest.TestCase):
 
     def test_enrolment_does_not_sync_direction_a_second_time(self):
         """Направление и его строка истории уже записаны шагом 2 — заведение в
-        группу не должно писать их повторно."""
-        _, cursor, _ = self._run(
+        группу не должно писать их повторно. Явное направление сильнее
+        направления группы, поэтому синхронизация по группе не должна даже
+        запускаться: иначе она перетёрла бы 77 направлением группы 70."""
+        result, cursor, _ = self._run(
             user_row=_user_row(direction_id=69),
             group_row=_group_row(direction_id=70),
+            direction_id=77,
         )
+        self.assertEqual(result["direction_id"], 77)
         sql = cursor.sql_log()
+        self.assertFalse([item for item in sql if item.startswith("SELECT role, direction_id FROM users")])
         self.assertFalse([item for item in sql if item.startswith("UPDATE users SET direction_id")])
         self.assertFalse([item for item in sql if "INSERT INTO user_history" in item])
 

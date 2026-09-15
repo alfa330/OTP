@@ -364,7 +364,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             if (prev?.direction_id) {
                 const dir = (directions || []).find((d) => String(d.id) === String(prev.direction_id));
                 if (dir && effDept != null && Number(directionDeptOf(dir)) !== Number(effDept)) {
+                    // Направление другого отдела сброшено — выбранным руками оно
+                    // больше не считается, иначе группа нового отдела его не подставит.
                     next.direction_id = '';
+                    next.direction_picked_by_hand = false;
                 }
             }
             if (prev?.group_id) {
@@ -386,6 +389,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             direction_id: directionForPickedGroup({
                 groupId: groupValue,
                 groups,
+                directions,
                 originalGroupId: userToEdit?.group_id,
                 originalDirectionId: userToEdit?.direction_id,
                 currentDirectionId: prev?.direction_id,
@@ -2524,7 +2528,11 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 disabled={isLoading}
                                 >
                                 <option value="">Выберите направление</option>
-                                {directions.map((dir) => (
+                                {/* Только направления отдела сотрудника — как в форме создания.
+                                    Глава нескольких отделов получает их списком по всем своим
+                                    отделам, а чужое направление сервер отклонит уже после
+                                    перевода в группу. */}
+                                {directionsForSelectedDept(effectiveDeptId).map((dir) => (
                                     <option key={dir.id} value={dir.id}>
                                     {dir.name}
                                     </option>
