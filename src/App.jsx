@@ -88,6 +88,7 @@ import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmploye
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
+import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh } from './utils/authRefresh';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
@@ -2709,22 +2710,6 @@ const persistRotatedBearerTokens = ({ accessToken, refreshToken, transportHint =
     });
 };
 
-const isRecoverableAuthResponse = (body = {}) => {
-    const code = body?.code;
-    const apiErrorText = body?.error;
-    return (
-        code === 'TOKEN_EXPIRED' ||
-        code === 'INVALID_TOKEN' ||
-        code === 'INVALID_TOKEN_TYPE' ||
-        code === 'MISSING_TOKEN' ||
-        code === 'REFRESH_TOKEN_MISMATCH' ||
-        code === 'SESSION_EXPIRED' ||
-        code === 'SESSION_NOT_FOUND' ||
-        code === 'SESSION_REVOKED' ||
-        apiErrorText === 'JWT authentication failed'
-    );
-};
-
 const readResponseJsonSafe = async (response) => {
     try {
         return await response.clone().json();
@@ -2733,12 +2718,91 @@ const readResponseJsonSafe = async (response) => {
     }
 };
 
-const isFailedRefreshResponse = (response) => {
-    if (!response) return true;
-    if (typeof response.ok === 'boolean') return !response.ok;
-    const status = Number(response.status);
-    return Number.isFinite(status) && (status < 200 || status >= 300);
+// Токен прямо из хранилища, мимо копии в памяти. Порядок тот же, что у getStoredAuthToken.
+const readPersistedAuthToken = (storageKey) => {
+    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
+    const localStorageRef = safeGetBrowserStorage('localStorage');
+    const [first, second] = shouldUseLegacyMobileBearerStorage()
+        ? [localStorageRef, sessionStorageRef]
+        : [sessionStorageRef, localStorageRef];
+    return safeStorageGetItem(first, storageKey) || safeStorageGetItem(second, storageKey);
 };
+
+/* Токены могла повернуть не эта страница: iframe «Журнала оценок» делит с порталом
+   sessionStorage и обновляет сессию сам, а на телефоне localStorage общий у всех вкладок.
+   Копия в памяти (authRuntimeState) об этом не узнаёт, и через 90 секунд сервер её
+   refresh-токен отвергает. Если в хранилище уже лежит другой — берём его. */
+const adoptTokensRotatedElsewhere = (sentRefreshToken) => {
+    const accessToken = readPersistedAuthToken(ACCESS_TOKEN_STORAGE_KEY);
+    const refreshToken = readPersistedAuthToken(REFRESH_TOKEN_STORAGE_KEY);
+    if (!sentRefreshToken || !accessToken || !refreshToken || refreshToken === sentRefreshToken) {
+        return false;
+    }
+    authRuntimeState.accessToken = accessToken;
+    authRuntimeState.refreshToken = refreshToken;
+    return true;
+};
+
+const requestAuthRefresh = async () => {
+    const refreshTransport = getPreferredAuthTransport();
+    const refreshToken = refreshTransport === 'bearer'
+        ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
+        : '';
+    // Мимо fetch-перехватчика: он сам ждёт этого обновления.
+    const fetchImpl = window.__otpNativeFetch || window.fetch.bind(window);
+    const response = await fetchImpl(AUTH_REFRESH_URL, {
+        method: 'POST',
+        credentials: 'include',
+        headers: withAccessTokenHeader(
+            { 'Content-Type': 'application/json' },
+            {
+                includeRefreshToken: true,
+                transportOverride: refreshTransport
+            }
+        ),
+        body: JSON.stringify(
+            refreshTransport === 'bearer'
+                ? {
+                    auth_transport: 'bearer',
+                    refresh_token: refreshToken || undefined
+                }
+                : {
+                    auth_transport: 'cookie'
+                }
+        )
+    });
+    if (!response.ok) {
+        return { status: response.status, sentRefreshToken: refreshToken };
+    }
+
+    const data = (await readResponseJsonSafe(response)) || {};
+    const resolvedTransport = shouldForceBearerAuthTransport()
+        ? 'bearer'
+        : (
+            normalizeClientAuthTransport(response.headers.get('x-auth-transport') || data.auth_transport) ||
+            getPreferredAuthTransport()
+        );
+    if (resolvedTransport !== 'bearer') {
+        activateCookieAuthTransport();
+        return { status: response.status };
+    }
+    return {
+        status: response.status,
+        sessionAccepted: persistBearerAuthTokens({
+            access_token: response.headers.get('x-new-access-token') || data.access_token,
+            refresh_token: response.headers.get('x-new-refresh-token') || data.refresh_token
+        })
+    };
+};
+
+// Одно обновление на вкладку — и для fetch, и для axios (почему — src/utils/authRefresh.js).
+const refreshAuthSession = createSharedAuthRefresh(async () => {
+    const result = await requestAuthRefresh();
+    if (result.status === 401 && adoptTokensRotatedElsewhere(result.sentRefreshToken)) {
+        return requestAuthRefresh();
+    }
+    return result;
+});
 
 const forceReloadAfterFailedAuthRefresh = () => {
     if (typeof window === 'undefined') return Promise.reject(new Error('Window is unavailable'));
@@ -2763,123 +2827,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
     if (!window.__otpFetchAuthInterceptorInstalled && typeof window.fetch === 'function') {
         window.__otpFetchAuthInterceptorInstalled = true;
         const nativeFetch = window.fetch.bind(window);
-        window.fetch = async (...args) => {
-            const originalInput = args[0];
-            const originalInit = args[1] || {};
-            const response = await nativeFetch(...args);
-            try {
-                persistRotatedBearerTokens({
-                    accessToken:
-                        response?.headers?.get?.('x-new-access-token') ||
-                        response?.headers?.get?.('X-New-Access-Token'),
-                    refreshToken:
-                        response?.headers?.get?.('x-new-refresh-token') ||
-                        response?.headers?.get?.('X-New-Refresh-Token'),
-                    transportHint:
-                        response?.headers?.get?.('x-auth-transport') ||
-                        response?.headers?.get?.('X-Auth-Transport')
-                });
-            } catch (error) {
-                // Ignore token sync failures and keep original response semantics.
-            }
-
-            const requestUrl = typeof originalInput === 'string'
-                ? originalInput
-                : String(originalInput?.url || '');
-            const canRetryAuth =
-                response?.status === 401 &&
-                requestUrl &&
-                !requestUrl.includes('/api/login') &&
-                !requestUrl.includes('/api/auth/refresh') &&
-                !originalInit?.__otpAuthRetry;
-            if (!canRetryAuth) {
-                return response;
-            }
-
-            const body = await readResponseJsonSafe(response);
-            if (!isRecoverableAuthResponse(body)) {
-                return response;
-            }
-
-            const shouldReloadAfterFailedRefresh = isRecoverableAuthResponse(body);
-            try {
-                if (!window.__otpRefreshPromise) {
-                    const refreshTransport = getPreferredAuthTransport();
-                    const refreshToken = refreshTransport === 'bearer'
-                        ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
-                        : '';
-                    window.__otpRefreshPromise = nativeFetch(AUTH_REFRESH_URL, {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: withAccessTokenHeader(
-                            { 'Content-Type': 'application/json' },
-                            {
-                                includeRefreshToken: true,
-                                transportOverride: refreshTransport
-                            }
-                        ),
-                        body: JSON.stringify(
-                            refreshTransport === 'bearer'
-                                ? {
-                                    auth_transport: 'bearer',
-                                    refresh_token: refreshToken || undefined
-                                }
-                                : {
-                                    auth_transport: 'cookie'
-                                }
-                        )
-                    }).then(async (refreshResponse) => {
-                        const refreshData = await readResponseJsonSafe(refreshResponse);
-                        if (refreshResponse.ok) {
-                            persistRotatedBearerTokens({
-                                accessToken:
-                                    refreshResponse?.headers?.get?.('x-new-access-token') ||
-                                    refreshResponse?.headers?.get?.('X-New-Access-Token') ||
-                                    refreshData?.access_token,
-                                refreshToken:
-                                    refreshResponse?.headers?.get?.('x-new-refresh-token') ||
-                                    refreshResponse?.headers?.get?.('X-New-Refresh-Token') ||
-                                    refreshData?.refresh_token,
-                                transportHint:
-                                    refreshResponse?.headers?.get?.('x-auth-transport') ||
-                                    refreshResponse?.headers?.get?.('X-Auth-Transport') ||
-                                    refreshData?.auth_transport
-                            });
-                        }
-                        return refreshResponse;
-                    }).finally(() => {
-                        window.__otpRefreshPromise = null;
-                    });
-                }
-
-                const refreshResponse = await window.__otpRefreshPromise;
-                if (!refreshResponse?.ok) {
-                    if (shouldReloadAfterFailedRefresh) {
-                        return forceReloadAfterFailedAuthRefresh();
-                    }
-                    return response;
-                }
-
-                const retryInit = {
-                    ...originalInit,
-                    __otpAuthRetry: true,
-                    headers: withAccessTokenHeader(originalInit?.headers || {})
-                };
-                const retryResponse = await nativeFetch(originalInput, retryInit);
-                if (shouldReloadAfterFailedRefresh && retryResponse?.status === 401) {
-                    const retryBody = await readResponseJsonSafe(retryResponse);
-                    if (isRecoverableAuthResponse(retryBody)) {
-                        return forceReloadAfterFailedAuthRefresh();
-                    }
-                }
-                return retryResponse;
-            } catch (_error) {
-                if (shouldReloadAfterFailedRefresh) {
-                    return forceReloadAfterFailedAuthRefresh();
-                }
-                return response;
-            }
-        };
+        window.__otpNativeFetch = nativeFetch;
+        window.fetch = createAuthRetryingFetch({
+            nativeFetch,
+            refreshAuthSession,
+            getCurrentAccessToken: () => getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+            buildRetryHeaders: (headers) => withAccessTokenHeader(headers || {}),
+            onSessionRejected: forceReloadAfterFailedAuthRefresh,
+            onResponse: (response) => persistRotatedBearerTokens({
+                accessToken: response?.headers?.get?.('x-new-access-token'),
+                refreshToken: response?.headers?.get?.('x-new-refresh-token'),
+                transportHint: response?.headers?.get?.('x-auth-transport')
+            })
+        });
     }
 
     axios.defaults.withCredentials = true;
@@ -2923,7 +2883,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (!window.__otpAxiosAuthInterceptorInstalled) {
                 window.__otpAxiosAuthInterceptorInstalled = true;
-                window.__otpRefreshPromise = null;
 
                 axios.interceptors.response.use(
                     (response) => {
@@ -2935,104 +2894,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         return response;
                     },
-                    async (error) => {
-                        const status = error?.response?.status;
-                        const originalRequest = error?.config;
-                        const url = originalRequest?.url || '';
-                        const isRefreshCall = url.includes('/api/auth/refresh');
-                        const isLoginCall = url.includes('/api/login');
-                        const isRecoverableAuthError = isRecoverableAuthResponse(error?.response?.data);
-                        const shouldReloadAfterFailedRefresh = isRecoverableAuthError;
-
-                        if (
-                            status === 401 &&
-                            shouldReloadAfterFailedRefresh &&
-                            originalRequest?.__isRetryRequest &&
-                            !isRefreshCall &&
-                            !isLoginCall
-                        ) {
-                            return forceReloadAfterFailedAuthRefresh();
-                        }
-
-                        if (
-                            status === 401 &&
-                            isRecoverableAuthError &&
-                            originalRequest &&
-                            !originalRequest.__isRetryRequest &&
-                            !isRefreshCall &&
-                            !isLoginCall
-                        ) {
-                            originalRequest.__isRetryRequest = true;
-                            if (!window.__otpRefreshPromise) {
-                                const refreshTransport = getPreferredAuthTransport();
-                                const refreshToken = refreshTransport === 'bearer'
-                                    ? getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY)
-                                    : '';
-                                window.__otpRefreshPromise = axios.post(
-                                    AUTH_REFRESH_URL,
-                                    refreshTransport === 'bearer'
-                                        ? {
-                                            auth_transport: 'bearer',
-                                            refresh_token: refreshToken || undefined
-                                        }
-                                        : {},
-                                    {
-                                        withCredentials: true,
-                                        headers: withAccessTokenHeader(
-                                            {},
-                                            {
-                                                includeRefreshToken: true,
-                                                transportOverride: refreshTransport
-                                            }
-                                        )
-                                    }
-                                ).then((refreshResponse) => {
-                                    const refreshData = refreshResponse?.data || {};
-                                    const resolvedTransport = shouldForceBearerAuthTransport()
-                                        ? 'bearer'
-                                        : (normalizeClientAuthTransport(refreshData.auth_transport) || getPreferredAuthTransport());
-                                    if (resolvedTransport === 'bearer') {
-                                        if (!persistBearerAuthTokens(refreshData)) {
-                                            throw new Error('Bearer refresh succeeded without rotated tokens');
-                                        }
-                                    } else {
-                                        activateCookieAuthTransport();
-                                    }
-                                    return refreshResponse;
-                                }).catch((refreshError) => {
-                                    clearAuthTokens();
-                                    throw refreshError;
-                                }).finally(() => {
-                                    window.__otpRefreshPromise = null;
-                                });
-                            }
-
-                            let refreshResponse;
-                            try {
-                                refreshResponse = await window.__otpRefreshPromise;
-                            } catch (refreshError) {
-                                if (shouldReloadAfterFailedRefresh) {
-                                    return forceReloadAfterFailedAuthRefresh();
-                                }
-                                throw refreshError;
-                            }
-                            if (isFailedRefreshResponse(refreshResponse)) {
-                                if (shouldReloadAfterFailedRefresh) {
-                                    return forceReloadAfterFailedAuthRefresh();
-                                }
-                                return Promise.reject(redactAuthFromError(error));
-                            }
-                            // Strip stale auth headers so the request interceptor
-                            // re-injects fresh tokens on retry.
-                            if (originalRequest.headers) {
-                                delete originalRequest.headers['Authorization'];
-                                delete originalRequest.headers['authorization'];
-                            }
-                            return axios(originalRequest);
-                        }
-
-                        return Promise.reject(redactAuthFromError(error));
-                    }
+                    createAxiosAuthErrorHandler({
+                        // Через axios: request-перехватчик выше подставит текущий токен.
+                        replay: (request) => axios(request),
+                        refreshAuthSession,
+                        getCurrentAccessToken: () => getStoredAuthToken(ACCESS_TOKEN_STORAGE_KEY),
+                        onSessionRejected: forceReloadAfterFailedAuthRefresh,
+                        redact: redactAuthFromError
+                    })
                 );
             }
         }
