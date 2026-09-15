@@ -15,7 +15,7 @@
 """
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from cdr import touches as touches_mod
 
@@ -31,12 +31,39 @@ PAUSE_STATUS_KEYS = ('break', 'tech', 'training')
 _INCOMING_TYPES = (touches_mod.TYPE_IN, touches_mod.TYPE_IN_MISSED)
 
 
+# Смещение Алматы от UTC — сдвигом, а не ZoneInfo, как в cdr/queries.py: у Казахстана
+# с 01.03.2024 одна зона без перевода часов, а tzdata на контейнере может не оказаться.
+_ALMATY = timezone(timedelta(hours=5))
+
+
 def _parse(text):
-    text = str(text or '')[:19].replace('T', ' ')
-    try:
-        return datetime.strptime(text, '%Y-%m-%d %H:%M:%S')
-    except ValueError:
+    """Отметка из базы или моста → наивное время Алматы.
+
+    `cdr_agent_state` хранит TIMESTAMPTZ, а сессия Postgres на Render живёт в UTC, поэтому
+    `live_at` приезжает строкой «2026-09-15T20:18:53+00:00». Раньше хвост с поясом просто
+    срезался, и UTC сравнивался с алматинским «сейчас»: табло писало «данные на 20:18:53»
+    вместо 01:18:53 и «последнее обновление 5:00:10 назад» при живом мосте, а отбивка
+    считала мост замолчавшим. Отметки без пояса (касания) уже местные и не трогаются."""
+    raw = str(text or '').strip()
+    if not raw:
         return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            value = datetime.strptime(raw[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return None
+    if value.tzinfo is not None:
+        value = value.astimezone(_ALMATY).replace(tzinfo=None)
+    return value
+
+
+def _local_stamp(value):
+    """Отметка для экрана: время Алматы без пояса. formatClock на фронте берёт часы
+    из строки как есть и ничего не переводит — UTC он показал бы как местное."""
+    parsed = _parse(value)
+    return parsed.strftime('%Y-%m-%dT%H:%M:%S') if parsed else None
 
 
 def _ratio(numerator, denominator):
@@ -229,8 +256,8 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
         'operators': rows,
         'bridge': {
             'connected': bool(bridge_state and bridge_state.get('connected')),
-            'last_seen_at': (bridge_state or {}).get('last_seen_at'),
-            'live_at': (bridge_state or {}).get('live_at'),
+            'last_seen_at': _local_stamp((bridge_state or {}).get('last_seen_at')),
+            'live_at': _local_stamp((bridge_state or {}).get('live_at')),
             'live_age_seconds': live_age,
         },
     }

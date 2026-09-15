@@ -144,6 +144,21 @@ class PeopleTests(unittest.TestCase):
         self.assertEqual(snap['day'], '2026-09-15')
         self.assertEqual(len(snap['operators']), 3)
 
+    def test_bridge_time_from_timestamptz_is_shown_in_almaty(self):
+        # cdr_agent_state.live_at — TIMESTAMPTZ, сессия Postgres в UTC: строка приезжает с
+        # «+00:00». Табло показывало «данные на 20:18:53» и «последнее обновление 5:00:10
+        # назад» при живом мосте — UTC сравнивался с алматинским «сейчас».
+        snap = S.assemble(day=date(2026, 9, 15), touches=[touch()], people=self.people,
+                          live_statuses=self.live, status_entry=status_entry, resolve_name=None,
+                          bridge_state={'connected': True,
+                                        'live_at': '2026-09-15T20:18:53+00:00',
+                                        'last_seen_at': '2026-09-15T20:19:00.450000+00:00'},
+                          now=datetime(2026, 9, 16, 1, 19, 3))
+        self.assertEqual(snap['bridge']['live_age_seconds'], 10)
+        # formatClock на фронте берёт часы из строки как есть — они обязаны быть местными.
+        self.assertEqual(snap['bridge']['live_at'], '2026-09-16T01:18:53')
+        self.assertEqual(snap['bridge']['last_seen_at'], '2026-09-16T01:19:00')
+
 
 # ── ручка ─────────────────────────────────────────────────────────────────────
 
