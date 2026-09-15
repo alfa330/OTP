@@ -6430,6 +6430,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let sumTezPlan = 0; // сумма индивидуальных планов успешек (только tez_op)
             let sumTezSuccesses = 0; // успешки только по видимым строкам
             let hasTezPlanRows = false;
+            // Общее FTE — сумма ставок видимых строк: так FTE считают план ТЭЗ
+            // и «Расчёт ресурсов». Строка без ставки в сумму не входит.
+            let sumRate = 0;
+            let hasRateRows = false;
 
             for (const op of filteredOperators) {
             const aggr = op.aggregates || {};
@@ -6487,6 +6491,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumRegular += regular;
             sumProd += prodDiff;
             sumNorm += norm;
+            const rateValue = op.rate === null || op.rate === undefined || op.rate === '' ? NaN : Number(op.rate);
+            if (Number.isFinite(rateValue)) {
+                sumRate += rateValue;
+                hasRateRows = true;
+            }
             sumEff += effTotal;
             trainingsTotal += totalHoursAll;
             trainingsCounted += totalHoursCounted;
@@ -6529,6 +6538,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             sumRegular,
             sumProd,
             sumNorm,
+            sumRate,
+            hasRateRows,
             sumEff,
             sumFines,
             sumBonuses,
@@ -9177,7 +9188,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {filteredOperators.length > 0 && (
                     <div className="flex w-max items-center border-t bg-gray-50 text-sm font-semibold">
                         <div className={`${hoursOperatorColClass} sticky left-0 z-20 bg-gray-50`}>Итого</div>
-                        <div className={hoursRateColClass}>—</div>
+                        <div className={hoursRateColClass} title="Общее FTE — сумма ставок сотрудников в таблице">
+                            {footerTotals.hasRateRows
+                                ? `${footerTotals.sumRate.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} FTE`
+                                : '—'}
+                        </div>
                         <div className={hoursNormColClass}>{footerTotals.sumNorm}</div>
                         {showTezPlanColumn && (
                         <div className={hoursNormColClass}>
@@ -23962,6 +23977,42 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     : (reviewRequests || [])
             ), [reviewRequests, reviewStatusFilter]);
 
+            /* Очередь делится на группы СВ (задача #298): заявки видит весь
+               отдел, и операторы разных групп иначе путаются между собой.
+               Своя группа идёт первой, заявки без группы — последними. */
+            const reviewRequestGroups = useMemo(() => {
+                const myId = Number(user?.id) || null;
+                const byKey = new Map();
+                for (const item of reviewVisibleRequests) {
+                    const groupId = item?.group?.id ?? null;
+                    const key = groupId == null ? 'none' : String(groupId);
+                    if (!byKey.has(key)) {
+                        // Имя группы уже содержит СВ («Кастек Гаухар группа
+                        // Основа») — второй подписью его не дублируем.
+                        byKey.set(key, {
+                            key,
+                            label: groupId == null ? 'Без группы' : (item.group.name || 'Группа'),
+                            isMine: false,
+                            hasGroup: groupId != null,
+                            items: []
+                        });
+                    }
+                    const entry = byKey.get(key);
+                    // СВ группы берётся на дату смены, и после смены СВ старые
+                    // заявки помнят прежнего — поэтому «моя» группа та, где я СВ
+                    // хотя бы по одной заявке, а не по первой попавшейся.
+                    if (groupId != null && myId != null && Number(item?.group?.supervisorId) === myId) {
+                        entry.isMine = true;
+                    }
+                    entry.items.push(item);
+                }
+                return Array.from(byKey.values()).sort((a, b) => (
+                    (Number(b.isMine) - Number(a.isMine))
+                    || (Number(b.hasGroup) - Number(a.hasGroup))
+                    || a.label.localeCompare(b.label, 'ru')
+                ));
+            }, [reviewVisibleRequests, user?.id]);
+
             /* Подписи вида и статуса — один словарь на оба экрана. Две копии
                разошлись бы на первой же правке формулировки. */
             const SHIFT_CHANGE_KIND_LABELS = {
@@ -35334,93 +35385,105 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             </div>
                         ) : (
-                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                                {reviewVisibleRequests.map(item => {
-                                    const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
-                                    const deltaMin = Number(item?.minutesDelta) || 0;
-                                    const busy = reviewRespondingId === item.id;
-                                    return (
-                                        <div key={`review-${item.id}`} className="px-4 py-3">
-                                            <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-                                                <div className="min-w-0">
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <span className="text-[14px] font-semibold text-slate-900">
-                                                            {item.operator?.name || 'Сотрудник'}
-                                                        </span>
-                                                        {item.status !== 'pending' && (
-                                                            <IosBadge tone={statusMeta.tone}>{statusMeta.label}</IosBadge>
-                                                        )}
-                                                    </div>
-                                                    <div className="mt-0.5 text-[12.5px] text-slate-500">
-                                                        {SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
-                                                        {item.operator?.direction && (
-                                                            <>
-                                                                <span className="text-slate-300"> · </span>
-                                                                {item.operator.direction}
-                                                            </>
-                                                        )}
-                                                    </div>
-                                                    <div className="mt-1 text-[12.5px] tabular-nums text-slate-600">
-                                                        {formatDateRuDayMonth(parseDateStr(item.shiftDate))}
-                                                        <span className="text-slate-400"> · </span>
-                                                        {shiftChangeIntervalText(item)}
-                                                        {deltaMin !== 0 && (
-                                                            <span className={deltaMin < 0 ? ' text-rose-600' : ' text-emerald-600'}>
-                                                                {' '}({deltaMin > 0 ? '+' : '−'}{formatMinutesOnly(Math.abs(deltaMin))})
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    {item.requestComment && (
-                                                        <div className="mt-1 text-[12px] leading-snug text-slate-500">
-                                                            {item.requestComment}
-                                                        </div>
-                                                    )}
-                                                    {item.status !== 'pending' && item.responseComment && (
-                                                        <div className="mt-1 text-[12px] leading-snug text-slate-600">
-                                                            <span className="text-slate-400">Ответ: </span>
-                                                            {item.responseComment}
-                                                        </div>
-                                                    )}
-                                                    {item.status !== 'pending' && item.reviewedBy?.name && (
-                                                        <div className="mt-0.5 text-[11.5px] text-slate-400">
-                                                            {statusMeta.label}: {item.reviewedBy.name}
-                                                        </div>
-                                                    )}
-                                                </div>
+                            <div className="space-y-3">
+                                {reviewRequestGroups.map(group => (
+                                    <section key={`review-group-${group.key}`}>
+                                        {reviewRequestGroups.length > 1 && (
+                                            <div className="mb-1.5 flex items-baseline justify-between gap-2 px-1">
+                                                <span className="truncate text-[12.5px] font-semibold text-slate-700">{group.label}</span>
+                                                <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{group.items.length}</span>
                                             </div>
-
-                                            {item.status === 'pending' && reviewCanReview && (
-                                                <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:items-center">
-                                                    <input
-                                                        type="text"
-                                                        value={reviewComments?.[item.id] || ''}
-                                                        onChange={(e) => setReviewComments(prev => ({ ...prev, [item.id]: e.target.value }))}
-                                                        placeholder="Комментарий · необязательно"
-                                                        className={`${iosInput} flex-1 !py-2 !text-[13px]`}
-                                                    />
-                                                    <div className="flex shrink-0 gap-2">
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => respondReviewRequest(item.id, 'reject')}
-                                                            disabled={busy}
-                                                            className="rounded-xl bg-slate-100 px-3.5 py-2 text-[13px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
-                                                        >
-                                                            Отклонить
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => respondReviewRequest(item.id, 'approve')}
-                                                            disabled={busy}
-                                                            className="rounded-xl bg-blue-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50"
-                                                        >
-                                                            {busy ? 'Применяем…' : 'Одобрить'}
-                                                        </button>
+                                        )}
+                                        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                            {group.items.map(item => {
+                                            const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
+                                            const deltaMin = Number(item?.minutesDelta) || 0;
+                                            const busy = reviewRespondingId === item.id;
+                                            return (
+                                                <div key={`review-${item.id}`} className="px-4 py-3">
+                                                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                                                        <div className="min-w-0">
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                <span className="text-[14px] font-semibold text-slate-900">
+                                                                    {item.operator?.name || 'Сотрудник'}
+                                                                </span>
+                                                                {item.status !== 'pending' && (
+                                                                    <IosBadge tone={statusMeta.tone}>{statusMeta.label}</IosBadge>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-0.5 text-[12.5px] text-slate-500">
+                                                                {SHIFT_CHANGE_KIND_LABELS[item.kind] || 'Заявка'}
+                                                                {item.operator?.direction && (
+                                                                    <>
+                                                                        <span className="text-slate-300"> · </span>
+                                                                        {item.operator.direction}
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-1 text-[12.5px] tabular-nums text-slate-600">
+                                                                {formatDateRuDayMonth(parseDateStr(item.shiftDate))}
+                                                                <span className="text-slate-400"> · </span>
+                                                                {shiftChangeIntervalText(item)}
+                                                                {deltaMin !== 0 && (
+                                                                    <span className={deltaMin < 0 ? ' text-rose-600' : ' text-emerald-600'}>
+                                                                        {' '}({deltaMin > 0 ? '+' : '−'}{formatMinutesOnly(Math.abs(deltaMin))})
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            {item.requestComment && (
+                                                                <div className="mt-1 text-[12px] leading-snug text-slate-500">
+                                                                    {item.requestComment}
+                                                                </div>
+                                                            )}
+                                                            {item.status !== 'pending' && item.responseComment && (
+                                                                <div className="mt-1 text-[12px] leading-snug text-slate-600">
+                                                                    <span className="text-slate-400">Ответ: </span>
+                                                                    {item.responseComment}
+                                                                </div>
+                                                            )}
+                                                            {item.status !== 'pending' && item.reviewedBy?.name && (
+                                                                <div className="mt-0.5 text-[11.5px] text-slate-400">
+                                                                    {statusMeta.label}: {item.reviewedBy.name}
+                                                                </div>
+                                                            )}
+                                                        </div>
                                                     </div>
+
+                                                    {item.status === 'pending' && reviewCanReview && (
+                                                        <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                            <input
+                                                                type="text"
+                                                                value={reviewComments?.[item.id] || ''}
+                                                                onChange={(e) => setReviewComments(prev => ({ ...prev, [item.id]: e.target.value }))}
+                                                                placeholder="Комментарий · необязательно"
+                                                                className={`${iosInput} flex-1 !py-2 !text-[13px]`}
+                                                            />
+                                                            <div className="flex shrink-0 gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => respondReviewRequest(item.id, 'reject')}
+                                                                    disabled={busy}
+                                                                    className="rounded-xl bg-slate-100 px-3.5 py-2 text-[13px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
+                                                                >
+                                                                    Отклонить
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => respondReviewRequest(item.id, 'approve')}
+                                                                    disabled={busy}
+                                                                    className="rounded-xl bg-blue-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50"
+                                                                >
+                                                                    {busy ? 'Применяем…' : 'Одобрить'}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                            )}
+                                            );
+                                            })}
                                         </div>
-                                    );
-                                })}
+                                    </section>
+                                ))}
                             </div>
                         )}
                     </div>

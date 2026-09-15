@@ -35365,6 +35365,7 @@ OKTELL_BILLING_SL_DEFAULT_SECONDS = int(os.getenv('OKTELL_BILLING_SL_SECONDS', '
 _OKTELL_BILLING_METRICS = (
     'arrived', 'served', 'lost', 'served_sl', 'greet_drop',
     'talk_seconds', 'wait_ok_seconds', 'wait_lost_seconds', 'total_seconds',
+    'rating_sum', 'rating_count',
 )
 
 
@@ -35450,9 +35451,18 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS wait_ok_seconds, "
         f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds, "
+        # Оценка водителя после разговора (задача #298): IVR-опрос пишет балл 1–5 в quality_employes
+        # по цепочке звонка, '0' — водитель ничего не нажал, в среднее не идёт. Считаем только у
+        # обслуженных: оценивают разговор с оператором. GROUP BY chainid держит одну оценку на
+        # цепочку, чтобы повторный опрос не удвоил звонок в сумме.
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN qe.rating ELSE 0 END) AS rating_sum, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN 1 ELSE 0 END) AS rating_count "
         "FROM oktell.dbo.Call_Systems_hst t "
         f"{line_join}"
+        "LEFT JOIN (SELECT chainid, MAX(CASE WHEN answer IN (N'1', N'2', N'3', N'4', N'5') "
+        "THEN CAST(answer AS int) END) AS rating FROM oktell.dbo.quality_employes GROUP BY chainid) qe "
+        "ON qe.chainid = t.chainid "
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"{minute_filter}"
@@ -35532,6 +35542,10 @@ def _oktell_billing_build_report(raw_rows, include_line=False):
             'wait_ok_seconds': _oktell_billing_sec(raw.get('wait_ok_seconds')),
             'wait_lost_seconds': _oktell_billing_sec(raw.get('wait_lost_seconds')),
             'total_seconds': _oktell_billing_sec(raw.get('total_seconds')),
+            # Сумма и число оценок, а не готовое среднее: иначе итог за день и за период
+            # пришлось бы считать средним средних, и маленький парк весил бы как большой.
+            'rating_sum': max(0, _oktell_billing_int(raw.get('rating_sum'))),
+            'rating_count': max(0, _oktell_billing_int(raw.get('rating_count'))),
         }
         day_parks = days_map.setdefault(report_date, {})
         _merge(day_parks.setdefault(key, _blank()), row)
@@ -35972,20 +35986,24 @@ def _oktell_billing_export_columns(mode):
         widths = [20, 28, 24, 20, 15, 34, 19]
         formats = {1: 'dd.mm.yyyy hh:mm:ss', 7: dur}
     elif mode == 'operator':
-        headers = ['Оператор', 'Обслужено', 'АТТ', 'АНТ', 'Разговоры вх.', 'Разговоры исх.',
+        # Рядом с каждой средней длительностью разговора — она же целыми секундами:
+        # отчётность СЗоВ ведётся в секундах (задача #298).
+        headers = ['Оператор', 'Обслужено', 'АТТ', 'АТТ, сек', 'АНТ', 'Разговоры вх.', 'Разговоры исх.',
                    'Постобработка', 'Удержание', 'Ожидание', 'Пауза', 'OCC', 'UTZ']
-        widths = [32, 11, 10, 10, 13, 13, 14, 11, 11, 10, 8, 8]
-        formats = {3: dur, 4: dur, 5: dur, 6: dur, 7: dur, 8: dur, 9: dur, 10: dur, 11: pct, 12: pct}
+        widths = [32, 11, 10, 10, 10, 13, 13, 14, 11, 11, 10, 8, 8]
+        formats = {3: dur, 5: dur, 6: dur, 7: dur, 8: dur, 9: dur, 10: dur, 11: dur, 12: pct, 13: pct}
     elif mode == 'line':
         headers = ['Номер', 'Название', 'Таксопарк', 'Поступило', 'Обслужено', 'Потеряно', 'AR', 'SL',
-                   'Ср. разговор', 'Ср. ожидание', 'Время разговора', 'Общее время', 'Сброс на приветствии']
-        widths = [14, 18, 16, 11, 11, 10, 8, 8, 12, 12, 14, 13, 12]
-        formats = {7: pct, 8: pct, 9: dur, 10: dur, 11: dur, 12: dur}
+                   'Ср. разговор', 'Ср. разговор, сек', 'Ср. ожидание', 'Время разговора', 'Общее время',
+                   'Сброс на приветствии', 'Ср. оценка']
+        widths = [14, 18, 16, 11, 11, 10, 8, 8, 12, 14, 12, 14, 13, 12, 11]
+        formats = {7: pct, 8: pct, 9: dur, 11: dur, 12: dur, 13: dur, 15: '0.00'}
     else:
         headers = ['Таксопарк', 'Поступило', 'Обслужено', 'Потеряно', 'AR', 'SL',
-                   'Ср. разговор', 'Ср. ожидание', 'Время разговора', 'Общее время', 'Сброс на приветствии']
-        widths = [20, 11, 11, 10, 8, 8, 12, 12, 14, 13, 12]
-        formats = {5: pct, 6: pct, 7: dur, 8: dur, 9: dur, 10: dur}
+                   'Ср. разговор', 'Ср. разговор, сек', 'Ср. ожидание', 'Время разговора', 'Общее время',
+                   'Сброс на приветствии', 'Ср. оценка']
+        widths = [20, 11, 11, 10, 8, 8, 12, 14, 12, 14, 13, 12, 11]
+        formats = {5: pct, 6: pct, 7: dur, 9: dur, 10: dur, 11: dur, 13: '0.00'}
     return headers, widths, formats
 
 
@@ -36031,6 +36049,7 @@ def _oktell_billing_export_values(mode, item, label=None):
             label if label is not None else item.get('operator') or '',
             served,
             _opt(None if att is None else _dur(att)),
+            _opt(None if att is None else int(round(att))),
             _opt(None if aht is None else _dur(aht)),
             _dur(item.get('talk_in_seconds')),
             _dur(item.get('talk_out_seconds')),
@@ -36052,10 +36071,13 @@ def _oktell_billing_export_values(mode, item, label=None):
         # SL: знаменатель — все попавшие в очередь (обслуженные + потерянные), не только отвеченные
         _opt(_oktell_billing_ratio(item.get('served_sl'), arrived)),
         _opt(None if served <= 0 else _dur(float(item.get('talk_seconds') or 0) / served)),
+        _opt(None if served <= 0 else int(round(float(item.get('talk_seconds') or 0) / served))),
         _opt(None if served <= 0 else _dur(float(item.get('wait_ok_seconds') or 0) / served)),
         _dur(item.get('talk_seconds')),
         _dur(item.get('total_seconds')),
         item.get('greet_drop') or 0,
+        # Средняя оценка водителя: сумма баллов / число оценок; без оценок — прочерк, а не 0.
+        _opt(_oktell_billing_ratio(item.get('rating_sum'), item.get('rating_count'))),
     ]
     if mode == 'line':
         if label is not None:

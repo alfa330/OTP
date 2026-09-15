@@ -102,6 +102,7 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
         "_OKTELL_BILLING_METRICS": (
             "arrived", "served", "lost", "served_sl", "greet_drop",
             "talk_seconds", "wait_ok_seconds", "wait_lost_seconds", "total_seconds",
+            "rating_sum", "rating_count",
         ),
         "_OKTELL_BILLING_OPERATOR_METRICS": (
             "served", "talk_seconds", "talk_in_seconds", "talk_out_seconds", "postproc_seconds",
@@ -385,6 +386,7 @@ class BuildReportTests(unittest.TestCase):
         self.assertEqual(report, {"days": [], "parks": [], "totals": {
             "arrived": 0, "served": 0, "lost": 0, "served_sl": 0, "greet_drop": 0,
             "talk_seconds": 0, "wait_ok_seconds": 0, "wait_lost_seconds": 0, "total_seconds": 0,
+            "rating_sum": 0, "rating_count": 0,
         }})
 
     def test_line_grouping_splits_park(self):
@@ -534,8 +536,9 @@ class BuildOperatorReportTests(unittest.TestCase):
         # SL = отвеченные за порог / все попавшие в очередь (60/100), а не / обслуженные (60/80)
         self.assertAlmostEqual(values[5], 0.6)
         self.assertAlmostEqual(values[6], (8000 / 80) / 86400.0)  # АТТ как доля суток
-        self.assertAlmostEqual(values[8], 8000 / 86400.0)
-        self.assertEqual(values[10], 2)
+        self.assertEqual(values[7], 100)  # тот же АТТ целыми секундами (задача #298)
+        self.assertAlmostEqual(values[9], 8000 / 86400.0)
+        self.assertEqual(values[11], 2)
 
     def test_sl_denominator_is_queue_arrivals(self):
         """SL считается от всех попавших в очередь; потерянные и сбросы на IVR не путаем."""
@@ -568,6 +571,7 @@ class BuildOperatorReportTests(unittest.TestCase):
         self.assertEqual(values[6], "—")
         self.assertEqual(values[7], "—")
         self.assertEqual(values[8], "—")
+        self.assertEqual(values[9], "—")
 
     def test_detail_export_columns_and_values(self):
         ns = _extract_namespace()

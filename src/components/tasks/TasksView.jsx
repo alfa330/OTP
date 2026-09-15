@@ -2920,6 +2920,8 @@ const WORKSPACE_TABS = [
  * иначе задача навсегда осталась бы на проверке. Те же правила проверяет API.
  */
 export const canReviewTask = (task, currentUserId, currentUserRole) => {
+  // Задача коллеги-СВ открыта только на просмотр (задача #298).
+  if (task?.viewer_is_observer) return false;
   const creatorId = Number(task?.creator?.id || 0);
   const requesterId = Number(task?.requested_by?.id || 0);
   const authorityId = requesterId || creatorId;
@@ -2932,6 +2934,8 @@ export const canReviewTask = (task, currentUserId, currentUserRole) => {
 };
 
 const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
+  // Задача коллеги-СВ: смотреть можно, действовать — нет (задача #298).
+  if (task?.viewer_is_observer) return [];
   const creatorId  = Number(task?.creator?.id  || 0);
   // Принять в работу и сдать может любой исполнитель — они равноправны.
   const isAssignee = isTaskAssignee(task, currentUserId);
@@ -5573,7 +5577,7 @@ const TaskDrawer = React.memo(({
                             type="checkbox"
                             className="tv-checklist-checkbox"
                             checked={!!item.is_done}
-                            disabled={!!loading}
+                            disabled={!!loading || !!task?.viewer_is_observer}
                             onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
                           />
                           <span className="tv-checklist-title">{item.title}</span>
@@ -6620,7 +6624,7 @@ export const PinnedTaskWidget = React.memo(({
                           type="checkbox"
                           className="tv-checklist-checkbox"
                           checked={!!item.is_done}
-                          disabled={actionLoadingKey === `${task.id}:checklist:${item.id}`}
+                          disabled={actionLoadingKey === `${task.id}:checklist:${item.id}` || !!task?.viewer_is_observer}
                           onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
                         />
                         <span className="tv-checklist-title">{item.title}</span>
@@ -6717,7 +6721,7 @@ export const PinnedTaskWidget = React.memo(({
                 );
               })}
               {!(canEditTask && onEditTask) && !(canDeleteTask && onDeleteTask) && actionButtons.length === 0 && (
-                <span className="tv-pin-empty-actions">Для текущего статуса быстрых действий нет.</span>
+                <span className="tv-pin-empty-actions">{task?.viewer_is_observer ? 'Задача коллеги — только просмотр.' : 'Для текущего статуса быстрых действий нет.'}</span>
               )}
             </div>
 

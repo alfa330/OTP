@@ -2431,6 +2431,8 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
     const slRatio = safeRatio(item.served_sl, item.arrived);
     const attSeconds = safeRatio(item.talk_seconds, item.served);
     const waitSeconds = safeRatio(item.wait_ok_seconds, item.served);
+    // Оценка водителя после разговора (IVR, 1–5): сумма баллов на число оценок.
+    const ratingAvg = safeRatio(item.rating_sum, item.rating_count);
     return (
       <>
         <td className="px-3 py-2.5 text-right font-semibold text-slate-900">{formatInt(item.arrived)}</td>
@@ -2443,17 +2445,24 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
           {slRatio === null ? '—' : formatPercent(slRatio, 1)}
         </td>
         <td className="px-3 py-2.5 text-right text-slate-700">{attSeconds === null ? '—' : formatDurationHms(attSeconds)}</td>
+        <td className="px-3 py-2.5 text-right text-slate-500">{attSeconds === null ? '—' : formatInt(attSeconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-700">{waitSeconds === null ? '—' : formatDurationHms(waitSeconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-900">{formatDurationHms(item.talk_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.total_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatInt(item.greet_drop)}</td>
+        <td
+          className="px-3 py-2.5 text-right text-slate-700"
+          title={Number(item.rating_count) > 0 ? `Оценок водителей: ${formatInt(item.rating_count)}` : 'Водители не оценили ни одного разговора'}
+        >
+          {ratingAvg === null ? '—' : formatNumber(ratingAvg, 2)}
+        </td>
       </>
     );
   };
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1120px] divide-y divide-slate-200 text-sm tabular-nums">
+      <table className="w-full min-w-[1280px] divide-y divide-slate-200 text-sm tabular-nums">
         <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2.5 text-left font-semibold">{mode === 'line' ? 'Номер' : 'Таксопарк'}</th>
@@ -2463,10 +2472,14 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
             <th className="px-3 py-2.5 text-right font-semibold">AR</th>
             <th className="px-3 py-2.5 text-right font-semibold">SL</th>
             <th className="px-3 py-2.5 text-right font-semibold">Ср. разговор</th>
+            {/* Отчётность СЗоВ ведётся в секундах (задача #298), поэтому рядом с
+                ч:мм:сс — то же среднее целым числом секунд. */}
+            <th className="px-3 py-2.5 text-right font-semibold" title="Среднее время разговора (ATT) в секундах">Ср. разговор, сек</th>
             <th className="px-3 py-2.5 text-right font-semibold">Ср. ожидание</th>
             <th className="px-3 py-2.5 text-right font-semibold">Время разговора</th>
             <th className="px-3 py-2.5 text-right font-semibold">Общее время</th>
             <th className="px-3 py-2.5 text-right font-semibold">Сброс на приветствии</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Средний балл 1–5, который водитель ставит в IVR после разговора с оператором. Разговоры без оценки в среднее не входят.">Ср. оценка</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -2559,6 +2572,7 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
       <>
         <td className="px-3 py-2.5 text-right font-semibold text-slate-900">{formatInt(item.served)}</td>
         <td className="px-3 py-2.5 text-right text-slate-700">{attSeconds === null ? '—' : formatDurationHms(attSeconds)}</td>
+        <td className="px-3 py-2.5 text-right text-slate-500">{attSeconds === null ? '—' : formatInt(attSeconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-700">{ahtSeconds === null ? '—' : formatDurationHms(ahtSeconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-900">{formatDurationHms(item.talk_in_seconds)}</td>
         <td className="px-3 py-2.5 text-right text-slate-500">{formatDurationHms(item.talk_out_seconds)}</td>
@@ -2577,7 +2591,7 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1120px] divide-y divide-slate-200 text-sm tabular-nums">
+      <table className="w-full min-w-[1200px] divide-y divide-slate-200 text-sm tabular-nums">
         <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2.5 text-left font-semibold">Оператор</th>
@@ -2588,6 +2602,7 @@ const BillingOperatorTable = ({ rows, totals, totalsLabel = 'Итого' }) => {
                 опечатка. Расшифровки повешены в title — без них четыре сокращения
                 подряд не читает никто, кроме их автора. */}
             <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time — среднее время разговора">ATT</th>
+            <th className="px-3 py-2.5 text-right font-semibold" title="Average Talk Time в секундах">ATT, сек</th>
             <th className="px-3 py-2.5 text-right font-semibold" title="Average Handling Time — разговор + удержание + постобработка">AHT</th>
             <th className="px-3 py-2.5 text-right font-semibold">Разговоры вх.</th>
             <th className="px-3 py-2.5 text-right font-semibold">Разговоры исх.</th>
@@ -5525,7 +5540,7 @@ const ResourceFteView = ({
                   <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
                     <StatCard icon={CheckCircle2} label="Обслужено" value={formatInt(billingTotals.served)} hint="Входящие, отвеченные оператором" tone="emerald" />
                     <StatCard icon={Clock3} label="Время разговора" value={formatDurationHms(billingTotals.talk_in_seconds)} hint={`Исходящие ${formatDurationHms(billingTotals.talk_out_seconds)}`} tone="blue" />
-                    <StatCard icon={PhoneCall} label="ATT" value={billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds)} hint="Ср. время разговора" tone="slate" />
+                    <StatCard icon={PhoneCall} label="ATT" value={billingAttSeconds === null ? '—' : formatDurationHms(billingAttSeconds)} hint={billingAttSeconds === null ? 'Ср. время разговора' : `Ср. время разговора · ${formatInt(billingAttSeconds)} сек`} tone="slate" />
                     <StatCard icon={ListChecks} label="AHT" value={billingAhtSeconds === null ? '—' : formatDurationHms(billingAhtSeconds)} hint="Разговор + удержание + постобработка" tone="slate" />
                     <StatCard
                       icon={TrendingUp}

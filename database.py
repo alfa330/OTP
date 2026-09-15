@@ -47289,13 +47289,40 @@ class Database:
             r.operator_seen_at,
             r.created_at,
             r.updated_at,
-            dir.name AS direction_name
+            dir.name AS direction_name,
+            grp.id AS group_id,
+            grp.name AS group_name,
+            grp_sv.id AS group_supervisor_id,
+            grp_sv.name AS group_supervisor_name
         FROM work_shift_change_requests r
         JOIN users op ON op.id = r.operator_id
         LEFT JOIN departments dep ON dep.id = r.department_id
         LEFT JOIN users sv ON sv.id = r.supervisor_id
         LEFT JOIN users rev ON rev.id = r.reviewed_by
         LEFT JOIN directions dir ON dir.id = op.direction_id
+        -- Группа оператора на дату смены: по ней очередь «Запросы» делится на
+        -- группы СВ. Правило то же, что у записи дня часов
+        -- (_get_operator_group_id_tx): покрывающее членство, иначе ближайшее
+        -- членство того же месяца.
+        LEFT JOIN LATERAL (
+            SELECT gr.id, gr.name
+            FROM group_operator_memberships gom
+            JOIN groups gr ON gr.id = gom.group_id
+            WHERE gom.operator_id = r.operator_id
+              AND """ + MEMBERSHIP_MONTH_OVERLAP_SQL.format(m='gom', day='r.shift_date') + """
+            ORDER BY """ + MEMBERSHIP_DAY_DISTANCE_SQL.format(m='gom', day='r.shift_date') + """, gom.start_date DESC
+            LIMIT 1
+        ) grp ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT gsv.id, gsv.name
+            FROM group_supervisor_memberships gsm
+            JOIN users gsv ON gsv.id = gsm.supervisor_id
+            WHERE gsm.group_id = grp.id
+              AND gsm.start_date <= r.shift_date
+              AND (gsm.end_date IS NULL OR gsm.end_date >= r.shift_date)
+            ORDER BY gsm.start_date DESC
+            LIMIT 1
+        ) grp_sv ON TRUE
     """
 
     def _serialize_shift_change_request_row(self, row):
@@ -47305,7 +47332,8 @@ class Database:
             request_id, operator_id, operator_name, department_id, department_name,
             supervisor_id, supervisor_name, request_kind, shift_date, payload_json,
             status, request_comment, response_comment, reviewed_by, reviewed_by_name,
-            reviewed_at, operator_seen_at, created_at, updated_at, direction_name
+            reviewed_at, operator_seen_at, created_at, updated_at, direction_name,
+            group_id, group_name, group_supervisor_id, group_supervisor_name
         ) = row
 
         payload = payload_json if isinstance(payload_json, dict) else {}
@@ -47339,6 +47367,14 @@ class Database:
             'supervisor': {
                 'id': int(supervisor_id) if supervisor_id is not None else None,
                 'name': supervisor_name,
+            },
+            # Группа оператора на дату смены и её СВ — не снимок на момент
+            # подачи, как supervisor выше: очередь делится по группам сейчас.
+            'group': {
+                'id': int(group_id) if group_id is not None else None,
+                'name': group_name,
+                'supervisorId': int(group_supervisor_id) if group_supervisor_id is not None else None,
+                'supervisorName': group_supervisor_name,
             },
             'kind': kind,
             'shiftDate': shift_date.strftime('%Y-%m-%d') if isinstance(shift_date, date) else str(shift_date),
@@ -53378,6 +53414,19 @@ class Database:
         " WHERE ta_f.task_id = t.id AND ta_f.user_id = %s))"
     )
 
+    # Задачу поставил СВ того же отдела, что и смотрящий СВ (задача #298: видеть
+    # задачи коллег, чтобы не ставить одну и ту же дважды). Отдел — по
+    # users.department_id обоих: своей колонки отдела у задачи нет. Один
+    # плейсхолдер — id смотрящего.
+    _TASK_COLLEAGUE_SV_SQL = (
+        "EXISTS (SELECT 1 FROM users task_sv_creator"
+        " JOIN users task_sv_viewer ON task_sv_viewer.id = %s"
+        " WHERE task_sv_creator.id = t.created_by"
+        " AND task_sv_creator.role = 'sv'"
+        " AND task_sv_viewer.department_id IS NOT NULL"
+        " AND task_sv_creator.department_id = task_sv_viewer.department_id)"
+    )
+
     @staticmethod
     def _task_assignee_tuples(assignees):
         """Состав исполнителей в едином виде [(user_id, role, supervisor_id), ...].
@@ -53525,6 +53574,37 @@ class Database:
         ):
             return True
         return False
+
+    @staticmethod
+    def _task_viewer_is_observer(requester_role, requester_id, creator_id, requested_by_id, assignees):
+        """Задача попала к СВ только потому, что её поставил коллега-СВ (задача #298).
+
+        По этому флагу фронт прячет действия — приёмку, чек-лист, перенос на
+        доске. Участник задачи (постановщик, поручитель, любой исполнитель)
+        наблюдателем не бывает.
+        """
+        if normalize_role_value(requester_role) != 'sv':
+            return False
+        requester_id = int(requester_id)
+        if requester_id in (int(creator_id or 0), int(requested_by_id or 0)):
+            return False
+        return not any(int((person or {}).get('id') or 0) == requester_id for person in (assignees or []))
+
+    def _task_observable_by_colleague_tx(self, cursor, requester_role, requester_id, created_by):
+        """СВ читает задачу, поставленную коллегой-СВ своего отдела (задача #298).
+
+        Только чтение. Отдельно от _task_visible_for_requester намеренно: тот
+        решает и действия — приёмку, чек-лист, отчёты, уточнения, — а коллега
+        задачу лишь смотрит, чтобы не поставить такую же второй раз.
+        """
+        if normalize_role_value(requester_role) != 'sv' or created_by is None:
+            return False
+        cursor.execute(
+            "SELECT " + self._TASK_COLLEAGUE_SV_SQL.replace("t.created_by", "%s"),
+            (int(requester_id), int(created_by)),
+        )
+        row = cursor.fetchone()
+        return bool(row and row[0])
 
     def _task_review_authority(self, created_by, assigned_to, requested_by):
         # assigned_to в расчёте не участвует и оставлен только ради единой формы
@@ -54577,8 +54657,12 @@ class Database:
         LEFT JOIN users author ON author.id = r.author_id
     """
 
-    def _task_report_access_tx(self, cursor, task_id, requester_id, role):
-        """Возвращает (created_by, assignee_ids) или бросает, если задача недоступна."""
+    def _task_report_access_tx(self, cursor, task_id, requester_id, role, allow_observer=False):
+        """Возвращает (created_by, assignee_ids) или бросает, если задача недоступна.
+
+        allow_observer — только для чтения журнала: СВ-коллега задачу видит, но
+        писать, править и удалять отчёты в ней не может.
+        """
         cursor.execute("""
             SELECT t.id, t.created_by, t.requested_by_id
             FROM tasks t
@@ -54590,14 +54674,15 @@ class Database:
         created_by, requested_by = row[1], row[2]
         assignee_scope = self._task_assignee_scope_tx(cursor, int(task_id))
         if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, requested_by):
-            raise PermissionError("TASK_FORBIDDEN")
+            if not (allow_observer and self._task_observable_by_colleague_tx(cursor, role, requester_id, created_by)):
+                raise PermissionError("TASK_FORBIDDEN")
         return created_by, [person_id for person_id, _role, _supervisor in assignee_scope]
 
     def get_task_reports(self, task_id, requester_id, requester_role):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
         with self._get_cursor() as cursor:
-            self._task_report_access_tx(cursor, task_id, requester_id, role)
+            self._task_report_access_tx(cursor, task_id, requester_id, role, allow_observer=True)
             cursor.execute(
                 self._TASK_REPORT_SELECT + " WHERE r.task_id = %s ORDER BY r.created_at ASC, r.id ASC",
                 (int(task_id),)
@@ -54816,7 +54901,7 @@ class Database:
             })
         return grouped
 
-    def _task_message_access_tx(self, cursor, task_id, requester_id, role, lock=False):
+    def _task_message_access_tx(self, cursor, task_id, requester_id, role, lock=False, allow_observer=False):
         """Задача глазами ленты уточнений: кто есть кто и есть ли открытый запрос.
 
         lock — блокировка строки задачи на время записи: правило «открытый запрос
@@ -54836,7 +54921,9 @@ class Database:
         # FOR UPDATE тянуть незачем.
         assignee_scope = self._task_assignee_scope_tx(cursor, int(row[0]))
         if not self._task_visible_for_requester(role, requester_id, row[1], assignee_scope, row[3]):
-            raise PermissionError("TASK_FORBIDDEN")
+            # Ленту уточнений СВ-коллега читает (allow_observer), но не пишет в неё.
+            if not (allow_observer and self._task_observable_by_colleague_tx(cursor, role, requester_id, row[1])):
+                raise PermissionError("TASK_FORBIDDEN")
         return {
             "id": row[0],
             "created_by": row[1],
@@ -54861,7 +54948,7 @@ class Database:
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
         with self._get_cursor() as cursor:
-            self._task_message_access_tx(cursor, task_id, requester_id, role)
+            self._task_message_access_tx(cursor, task_id, requester_id, role, allow_observer=True)
             cursor.execute(
                 self._TASK_MESSAGE_SELECT + " WHERE m.task_id = %s ORDER BY m.created_at ASC, m.id ASC",
                 (int(task_id),)
@@ -55851,10 +55938,17 @@ class Database:
             pass
         elif role in TASK_PERSONAL_SCOPE_ROLES:
             # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
-            conditions.append(
-                f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
-            )
-            params.extend([requester_id, requester_id, requester_id, requester_id])
+            participant_sql = f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
+            participant_params = [requester_id, requester_id, requester_id, requester_id]
+            if role == 'sv':
+                # СВ видит и задачи, поставленные коллегами-СВ своего отдела, — на
+                # просмотр (задача #298). Действия над чужой задачей по-прежнему
+                # решает _task_visible_for_requester, а не этот охват.
+                conditions.append(f"({participant_sql} OR {self._TASK_COLLEAGUE_SV_SQL})")
+                params.extend(participant_params + [requester_id])
+            else:
+                conditions.append(participant_sql)
+                params.extend(participant_params)
         else:
             return None
 
@@ -56363,6 +56457,10 @@ class Database:
                 # Полный состав по порядку показа. Права у исполнителей равные,
                 # первый в списке — просто первый.
                 "assignees": assignee_map.get(task_id, []),
+                # Задача коллеги-СВ: видна, но только на просмотр (задача #298).
+                "viewer_is_observer": self._task_viewer_is_observer(
+                    role, requester_id, row[26], row[36], assignee_map.get(task_id, [])
+                ),
                 "creator": {
                     "id": row[26],
                     "name": row[27],
@@ -56815,7 +56913,9 @@ class Database:
             assignee_scope = self._task_assignee_scope_tx(cursor, int(row[9]))
 
             if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, row[12]):
-                raise PermissionError("TASK_FORBIDDEN")
+                # Файлы задачи коллеги-СВ открываются так же, как её карточка, — на чтение.
+                if not self._task_observable_by_colleague_tx(cursor, role, requester_id, created_by):
+                    raise PermissionError("TASK_FORBIDDEN")
 
             storage_type = row[6] or 'db'
             file_data = row[4]

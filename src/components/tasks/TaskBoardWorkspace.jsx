@@ -227,6 +227,8 @@ const actualEndOf = (task) => {
 export const resolveBoardDrop = (task, toColumn, ctx) => {
   const from = columnOfTask(task);
   if (from === toColumn) return { type: 'noop' };
+  // Задача коллеги-СВ открыта только на просмотр (задача #298).
+  if (task?.viewer_is_observer) return { type: 'blocked', reason: 'Это задача коллеги — её можно только посмотреть' };
 
   const creatorId = Number(task?.creator?.id || 0);
   const requesterId = Number(task?.requested_by?.id || 0);
@@ -725,7 +727,7 @@ const BacklogRow = ({
 
   return (
     <div
-      draggable
+      draggable={!task?.viewer_is_observer}
       onDragStart={(event) => onDragStart(event, task)}
       onDragOver={(event) => onDragOver(event, index)}
       onDrop={(event) => { event.stopPropagation(); onDrop(event, index); }}
@@ -776,13 +778,15 @@ const BacklogRow = ({
         >
           <ClockIcon />
         </button>
-        <button
-          type="button"
-          onClick={(event) => { event.stopPropagation(); onPromote(task); }}
-          className="tb-promote-btn rounded-lg bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 transition hover:bg-slate-900 hover:text-white active:scale-[0.98]"
-        >
-          В работу
-        </button>
+        {!task?.viewer_is_observer && (
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onPromote(task); }}
+            className="tb-promote-btn rounded-lg bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 transition hover:bg-slate-900 hover:text-white active:scale-[0.98]"
+          >
+            В работу
+          </button>
+        )}
         {planOpen && (
           <PlanPopover
             task={task}
@@ -1345,7 +1349,7 @@ const BoardView = ({
                 isDragging={dragged?.task?.id === entry.task.id}
                 onOpen={onOpen}
                 onApplyPlan={onApplyPlan}
-                onDragStart={(event, task) => handleDragStart(event, task, entry.resolve)}
+                onDragStart={entry.task?.viewer_is_observer ? undefined : (event, task) => handleDragStart(event, task, entry.resolve)}
                 onDragEnd={handleDragEnd}
               />
             ))
