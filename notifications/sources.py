@@ -30,8 +30,11 @@ from datetime import datetime, time as day_time, timedelta
 # падает, а просто расходится числами на экране, поэтому все три сверяются
 # тестами: tests/test_notifications.py::TasksSourceRulesTest и
 # tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
-SOURCES = ('wiki_ack', 'tasks', 'checkpoints', 'shift_requests', 'crm', 'lms',
-           'surveys', 'events', 'four_you', 'birthdays')
+#
+# «Вопросы операторов» — сразу за задачами: на той стороне оператор, которому
+# помощник не ответил, и ответ ему нужен сейчас, а не к дедлайну.
+SOURCES = ('wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests',
+           'crm', 'lms', 'surveys', 'events', 'four_you', 'birthdays')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -741,9 +744,73 @@ def shift_requests(cursor, viewer, limit):
     } for row in rows]
 
 
+# ── Вопросы операторов ───────────────────────────────────────────────────────
+def wiki_questions(cursor, viewer, limit):
+    """Вопросы, на которые помощник не ответил (задача #321, wiki/questions.py).
+
+    Источник двусторонний, и обе стороны гаснут ДЕЙСТВИЕМ, а не взглядом на
+    колокол:
+      * супервайзеру — открытые вопросы его отдела; снимает их ответ или
+        «закрыть без ответа». Главе отдела — только когда супервайзеров в отделе
+        нет, иначе вопрос не увидел бы никто. Правило то же, что у триггера
+        (database.py: bell_notify_change), и тест сверяет обе копии;
+      * оператору — ответы, которых он ещё не открыл; снимает их открытие
+        разговора (questions.mark_answers_seen).
+    """
+    cursor.execute(
+        """
+        SELECT q.id, q.question, q.created_at, asker.name, 'open', NULL::bigint
+          FROM wiki_operator_questions q
+          JOIN users me ON me.id = %(user_id)s
+          LEFT JOIN users asker ON asker.id = q.asker_id
+         WHERE q.status = 'open'
+           AND (
+                (me.department_id = q.department_id
+                 AND lower(me.role) IN ('sv', 'supervisor'))
+             OR (EXISTS (SELECT 1 FROM departments d
+                          WHERE d.id = q.department_id AND d.head_user_id = me.id)
+                 AND NOT EXISTS (SELECT 1 FROM users s
+                                  WHERE s.department_id = q.department_id
+                                    AND s.status = 'working'
+                                    AND lower(s.role) IN ('sv', 'supervisor')))
+           )
+        UNION ALL
+        SELECT q.id, q.question, q.resolved_at, NULL, 'answered', q.chat_id
+          FROM wiki_operator_questions q
+         WHERE q.asker_id = %(user_id)s
+           AND q.status = 'answered' AND q.asker_seen_at IS NULL
+        """,
+        {'user_id': viewer['user_id']},
+    )
+    # Ответы — первыми: их ждут, а очередь отдела старыми вопросами вверх.
+    rows = sorted(cursor.fetchall(), key=lambda row: (row[4] != 'answered', row[2] or datetime.min))
+    items = []
+    for question_id, text, at, asker_name, kind, chat_id in rows[:limit]:
+        body = ' '.join(str(text or '').split())[:160]
+        if kind == 'answered':
+            items.append({
+                'source': 'wiki_questions', 'id': question_id,
+                'title': 'Супервайзер ответил на ваш вопрос', 'body': body,
+                'at': _iso(at), 'view': 'wiki',
+                # Ответ лежит в разговоре помощника — туда и ведём.
+                'target': 'assistant:%d' % chat_id if chat_id else None,
+                'tone': 'default',
+            })
+        else:
+            items.append({
+                'source': 'wiki_questions', 'id': question_id,
+                'title': asker_name or 'Вопрос оператора', 'body': body,
+                'at': _iso(at), 'view': 'wiki',
+                'target': 'questions:%d' % question_id,
+                'tone': 'default',
+            })
+    return len(rows), items
+
+
 _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
+    'wiki_questions': wiki_questions,
     'checkpoints': checkpoints,
     'shift_requests': shift_requests,
     'crm': crm,

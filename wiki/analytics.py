@@ -544,6 +544,9 @@ SELECT l.query_norm,
 # начали позавчера.
 _SEARCH_SINCE_SQL = "SELECT min(created_at) FROM wiki_search_log"
 
+# Ответ супервайзера на переданный вопрос («Вопросы операторов», задача #321)
+# лежит в той же ленте с ролью assistant, но ответом помощника не является: без
+# отсечения он раздувал бы «всего вопросов», не попадая ни в одну из трёх граф.
 _ASSISTANT_TOTALS_SQL = """
 SELECT count(*),
        count(*) FILTER (WHERE m.kind = 'answer'),
@@ -553,6 +556,7 @@ SELECT count(*),
   FROM wiki_ai_messages m
   JOIN wiki_ai_chats c ON c.id = m.chat_id
  WHERE m.role = 'assistant'
+   AND m.kind <> 'supervisor'
    AND (%(space)s::int IS NULL OR c.space_id IS NULL OR c.space_id = %(space)s)
 """ + _period('m.created_at')
 

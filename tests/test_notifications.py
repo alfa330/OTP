@@ -1026,6 +1026,9 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'event_reads', 'four_you_reads', 'birthday_reads',
                            'crm_tickets', 'operator_checkpoints',
                            'work_shift_change_requests',
+                           # Вопросы операторов: вопрос пришёл отделу, ответ —
+                           # оператору (wiki/questions.py).
+                           'wiki_operator_questions',
                            # news_posts источником колокола НЕ является: новость
                            # показывается окном, а не строкой в списке. Триггер
                            # ей всё равно нужен — тычок будит открытые вкладки,

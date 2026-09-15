@@ -154,6 +154,15 @@ const VOTE_ON = {
     down: '!text-rose-500 bg-rose-50 hover:!bg-rose-100',
 };
 
+/* Строка под отказом, переданным супервайзеру (задача #321, wiki/questions.py).
+   Одна тихая строка, а не плашка: сам отказ уже сказал «в статьях этого нет», и
+   второй цветной блок рядом читался бы как вторая ошибка. У отвеченного вопроса
+   строки нет вовсе — ответ стоит в ленте ниже и говорит сам за себя. */
+export const ESCALATION_NOTES = {
+    open: 'Вопрос передан супервайзеру отдела — ответ придёт в этот чат',
+    dismissed: 'Супервайзер закрыл вопрос без ответа',
+};
+
 /**
  * Одна реплика ленты — своя или ответ помощника со всей его обвязкой.
  *
@@ -175,6 +184,8 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
     const tone = message.kind === 'clarify'
         ? 'warn'
         : message.kind === 'no_answer' ? 'muted' : null;
+    const fromSupervisor = message.kind === 'supervisor';
+    const escalationNote = ESCALATION_NOTES[message.escalation?.status] || null;
     // Ширина обвязки идёт за пузырём: в узкой колонке источники, прижатые к
     // 78 %, отрывались бы от ответа, к которому относятся.
     const width = compact ? 'max-w-full' : 'max-w-[78%]';
@@ -198,10 +209,26 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
                     </>
                 )}
             >
+                {/* Ответ супервайзера подписан: оператор должен отличать слова
+                    человека от пересказа статьи моделью — и знать, к кому
+                    вернуться с уточнением. */}
+                {fromSupervisor && (
+                    <div className="mb-1 text-[11.5px] font-semibold text-slate-500">
+                        Ответ супервайзера{message.supervisor_name ? ` · ${message.supervisor_name}` : ''}
+                    </div>
+                )}
                 {/* Ответ размечен: списки, выделения и ТАБЛИЦЫ — главный формат
                     справочных данных вики (город, цена, срок, парк). */}
                 <Markdown text={message.text} />
             </ChatBubble>
+
+            {escalationNote && (
+                <div className="px-4">
+                    <div className={`${width} px-1 text-[11.5px] text-slate-400`}>
+                        {escalationNote}
+                    </div>
+                </div>
+            )}
 
             {STALE_CAVEATS.map(([kind, lead, tail]) => {
                 const titles = staleTitles(message.sources, kind);
@@ -248,7 +275,9 @@ export const AssistantMessage = ({ message, onOpenArticle, onFeedback, compact =
                 </div>
             )}
 
-            {message.id && !String(message.id).startsWith('local-') && (
+            {/* Оценка — ответу помощника. Ответ супервайзера ею не оценивается:
+                «Помогло / Нет» копит качество модели, а не человека. */}
+            {message.id && !fromSupervisor && !String(message.id).startsWith('local-') && (
                 <div className="flex gap-1 px-4">
                     <button
                         type="button"

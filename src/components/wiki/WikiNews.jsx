@@ -664,7 +664,12 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                                 />
                             </p>
                         </div>
-                        <IosToggle checked={mandatory} onChange={setMandatory} />
+                        {/* У новости с тестом («Вопросы операторов») обязательность
+                            не снимается: у необязательной крестик подтверждал бы
+                            прочтение без единого ответа. Сервер держит то же
+                            правило (NEWS_QUIZ_MANDATORY). */}
+                        <IosToggle checked={mandatory} onChange={setMandatory}
+                                   disabled={(post?.quiz_count || post?.quiz?.length || 0) > 0} />
                     </div>
                     {/* Задержка нужна только обязательной: у необязательной
                         кнопки «Прочитал» нет вовсе, и поле рядом с ней было бы
@@ -1021,6 +1026,9 @@ export default function WikiNews({ apiBaseUrl, headers, showToast }) {
                                     {post.photo_count}
                                 </span>
                             )}
+                            {/* Метка, а не число: тест меняет у сотрудника сам
+                                способ закрыть окно. */}
+                            {post.quiz_count > 0 && <IosBadge tone="slate">с тестом</IosBadge>}
                         </div>
                         <p className="mt-1 truncate text-[12px] text-slate-400">
                             {[post.author_name, post.author_department,

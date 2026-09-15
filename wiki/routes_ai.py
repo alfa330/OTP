@@ -23,12 +23,14 @@ can_manage_structure по всему индексу» — выглядит бе�
 порциями, отдельным вызовом.
 """
 
+import logging
 from datetime import date
 
 from flask import jsonify, request
 
 from . import perimeter as wiki_perimeter
 from . import queries
+from . import questions as wiki_questions
 from . import schema
 from . import structure
 from .ai import answer as ai_answer
@@ -285,6 +287,14 @@ def register(bp, wiki_route, db, log_ip):
             cursor, ctx, effective_space(cursor, ctx, _space_id()))
         messages = ai_store.chat_messages(
             cursor, chat_id, visible_article_ids=scope['article_ids'])
+        # Вопросы, переданные супервайзеру (wiki/questions.py): отказ получает
+        # состояние передачи, ответ — имя супервайзера. Открыл разговор — значит
+        # увидел ответ, и уведомление о нём гаснет.
+        if wiki_questions.table_ready(cursor):
+            wiki_questions.decorate_messages(
+                messages, wiki_questions.chat_marks(cursor, chat_id))
+            wiki_questions.mark_answers_seen(cursor, asker_id=ctx['user_id'],
+                                             chat_id=chat_id)
         return jsonify({'chat': chat, 'messages': messages})
 
     @wiki_route('/ai/chats/<int:chat_id>', methods=('PATCH',))
@@ -317,8 +327,8 @@ def register(bp, wiki_route, db, log_ip):
         if not chat:
             return jsonify({'error': 'чат не найден'}), 404
 
-        scope = wiki_perimeter.assistant_perimeter(
-            cursor, ctx, effective_space(cursor, ctx, _space_id()))
+        space_id = effective_space(cursor, ctx, _space_id())
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, space_id)
         if not scope['article_ids']:
             return jsonify({'error': 'нет доступных статей',
                             'detail': 'помощнику не выдан доступ ни к одной статье'
@@ -344,8 +354,8 @@ def register(bp, wiki_route, db, log_ip):
             cursor, article_ids=scope['article_ids'], query=search_query,
             query_vector=query_vector, limit=8, per_article=3)
 
-        ai_store.append_message(cursor, chat_id, role='user', kind='question',
-                                text=question)
+        asked = ai_store.append_message(cursor, chat_id, role='user', kind='question',
+                                        text=question)
         try:
             result = ai_answer.compose(
                 question, found['rows'], ai_providers.generate,
@@ -376,9 +386,32 @@ def register(bp, wiki_route, db, log_ip):
         ai_store.touch_chat(cursor, ctx['user_id'], chat_id,
                             first_question=question)
 
+        # Отказ оператору уходит супервайзеру его отдела (задача #321,
+        # wiki/questions.py). Под савпоинтом: передача — продолжение ответа, а
+        # не его условие, и сломавшаяся очередь не должна отнимать у оператора
+        # сам ответ.
+        escalation = None
+        if (wiki_questions.should_escalate(ctx['otp_role'], result['kind'])
+                and wiki_questions.table_ready(cursor)):
+            cursor.execute('SAVEPOINT wiki_question_escalate')
+            try:
+                escalation = wiki_questions.escalate(
+                    cursor, asker_id=ctx['user_id'],
+                    department_id=ctx['department_id'], space_id=space_id,
+                    chat_id=chat_id, question_message_id=asked['id'],
+                    refusal_message_id=stored['id'], question=question)
+            except Exception:                            # noqa: BLE001
+                cursor.execute('ROLLBACK TO SAVEPOINT wiki_question_escalate')
+                logging.exception('Помощник: отказ не передан супервайзеру')
+            else:
+                cursor.execute('RELEASE SAVEPOINT wiki_question_escalate')
+
         return jsonify({
             'message_id': stored['id'],
             'kind': result['kind'],
+            # Передан ли отказ супервайзеру. Витрина рисует по нему строку под
+            # пузырём и начинает ждать ответа (assistant/useSupervisorReply.js).
+            'escalation': escalation,
             'text': result['text'],
             'notes': result.get('notes') or [],
             'sources': [{

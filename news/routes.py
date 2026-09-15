@@ -29,7 +29,8 @@ from . import access as news_access
 from . import photos as news_photos
 from . import queries
 from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_LOOSE_PHOTOS_PER_USER,
-                     photos_ready as schema_photos_ready, schema_is_ready)
+                     photos_ready as schema_photos_ready,
+                     quiz_ready as schema_quiz_ready, schema_is_ready)
 
 # Отказ, который видит не-редактор. Одной строкой: текст показывают человеку,
 # и «недостаточно прав» без объяснения отправляет его писать в поддержку.
@@ -79,6 +80,14 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if not _photos_table['ready']:
             _photos_table['ready'] = schema_photos_ready(cursor)
         return _photos_table['ready']
+
+    # Готовность таблицы теста в окне — тем же приёмом и по той же причине.
+    _quiz_table = {'ready': False}
+
+    def _quiz_ready(cursor):
+        if not _quiz_table['ready']:
+            _quiz_table['ready'] = schema_quiz_ready(cursor)
+        return _quiz_table['ready']
 
     def news_route(rule, methods=('GET',), publisher=False, rights=False,
                    defer_cursor=False):
@@ -276,6 +285,9 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         post = _with_rights(ctx, post)
         post['photos'] = (news_photos.sign_urls(gcs, queries.post_photos(cursor, post['id']))
                           if _photos_ready(cursor) else [])
+        # Тест С ВЕРНЫМИ ответами — только карточке редактора: сюда приходят
+        # после _may_read_post, а окну сотрудника ответы не уходят никогда.
+        post['quiz'] = queries.post_quiz(cursor, post['id']) if _quiz_ready(cursor) else []
         return post
 
     def _set_photos_refusal(cursor, ctx, post_id, payload):
@@ -337,7 +349,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         with_photos = _photos_ready(cursor)
         items = queries.pending_for_user(
             cursor, user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            subjects=ctx['subjects'], with_photos=with_photos)
+            subjects=ctx['subjects'], with_photos=with_photos,
+            with_quiz=_quiz_ready(cursor))
         if with_photos:
             # Подписи берутся из процессного кэша и базу не трогают: обращений к
             # ней у этого роута столько же, сколько было до фотографий.
@@ -355,16 +368,22 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     @news_route('/<int:post_id>/read', methods=('POST',))
     def news_read(cursor, ctx, post_id):
-        """«Прочитал». Задержку проверяет сервер (queries.confirm_read)."""
-        status, remaining = queries.confirm_read(
+        """«Прочитал». Задержку и тест проверяет сервер (queries.confirm_read)."""
+        payload = request.get_json(silent=True) or {}
+        status, detail = queries.confirm_read(
             cursor, news_id=post_id, user_id=ctx['user_id'],
-            otp_role=ctx['otp_role'], subjects=ctx['subjects'])
+            otp_role=ctx['otp_role'], subjects=ctx['subjects'],
+            answers=payload.get('answers'), with_quiz=_quiz_ready(cursor))
         if status == 'not_found':
             return jsonify({"error": "Новость не найдена"}), 404
         if status == 'too_early':
             return jsonify({"error": "Кнопка станет активной чуть позже",
                             "code": "NEWS_TOO_EARLY",
-                            "remaining_seconds": remaining}), 409
+                            "remaining_seconds": detail}), 409
+        if status == 'quiz_wrong':
+            return jsonify({"error": "Есть неверные ответы — перечитайте новость",
+                            "code": "NEWS_QUIZ_WRONG",
+                            "wrong": detail}), 409
         return jsonify({"status": "ok"})
 
     # ── ВЫПУСК: супервайзер и выше ───────────────────────────────────────
@@ -402,7 +421,8 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             cursor, viewer_id=ctx['user_id'],
             viewer_level=news_access.effective_role_level(ctx['otp_role']),
             departments=ctx['departments'], status=status,
-            limit=limit, offset=offset, with_photos=_photos_ready(cursor))
+            limit=limit, offset=offset, with_photos=_photos_ready(cursor),
+            with_quiz=_quiz_ready(cursor))
         return jsonify({"items": [_with_rights(ctx, item) for item in items],
                         "total": total})
 
@@ -490,6 +510,14 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 "error": "У опубликованной новости обязательность не меняется — "
                          "снимите её с показа и опубликуйте заново",
                 "code": "NEWS_MANDATORY_LOCKED",
+            }), 409
+        # С тестом — тем более: у необязательной новости крестик и есть
+        # подтверждение, без единого ответа.
+        if (not wants_mandatory and _quiz_ready(cursor)
+                and queries.quiz_answer_key(cursor, post_id)):
+            return jsonify({
+                "error": "У новости с тестом обязательность не снимается",
+                "code": "NEWS_QUIZ_MANDATORY",
             }), 409
 
         queries.update_post(

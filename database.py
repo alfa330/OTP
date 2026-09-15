@@ -6730,6 +6730,35 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.supervisor_id];
                     END IF;
+                ELSIF TG_TABLE_NAME = 'wiki_operator_questions' THEN
+                    -- Вопрос оператора, на который не ответил помощник
+                    -- (wiki/questions.py). Смена статуса — дело отдела:
+                    -- будим супервайзеров отдела вопроса, а главу — только
+                    -- когда супервайзеров нет, иначе вопрос не увидел бы
+                    -- никто (то же правило у notifications/sources.py:
+                    -- wiki_questions). Автора — на ответ и закрытие.
+                    -- Отметка «оператор открыл ответ» касается только его.
+                    IF TG_OP = 'UPDATE'
+                       AND OLD.status IS NOT DISTINCT FROM NEW.status THEN
+                        targets := ARRAY[NEW.asker_id];
+                    ELSE
+                        targets := ARRAY(
+                            SELECT u.id FROM users u
+                             WHERE u.department_id = NEW.department_id
+                               AND u.status = 'working'
+                               AND lower(u.role) IN ('sv', 'supervisor')
+                        );
+                        IF array_length(targets, 1) IS NULL THEN
+                            targets := ARRAY(
+                                SELECT d.head_user_id FROM departments d
+                                 WHERE d.id = NEW.department_id
+                                   AND d.head_user_id IS NOT NULL
+                            );
+                        END IF;
+                        IF TG_OP = 'UPDATE' THEN
+                            targets := targets || ARRAY[NEW.asker_id];
+                        END IF;
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'task_assignees' THEN
                     -- Состав поменялся: будим и добавленного, и снятого. Здесь
                     -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
@@ -6868,6 +6897,21 @@ class Database:
                 'AFTER UPDATE OF status, audience_max_role_level',
                 """WHEN (OLD.status IS DISTINCT FROM NEW.status
                         OR NEW.status = 'published')""",
+            ),
+            # Вопросы операторов (задача #321): вопрос пришёл отделу, на него
+            # ответили или его закрыли, оператор открыл ответ. WHEN на UPDATE
+            # обязателен: оформление разобранного вопроса в статью и новость
+            # (kb_*) сводку колокола не меняет, и будить им отдел незачем.
+            ('trg_bell_wiki_questions_insert', 'wiki_operator_questions',
+             'AFTER INSERT', ''),
+            (
+                'trg_bell_wiki_questions',
+                'wiki_operator_questions',
+                'AFTER UPDATE OF status, asker_seen_at',
+                """WHEN (
+                    OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.asker_seen_at IS DISTINCT FROM NEW.asker_seen_at
+                )""",
             ),
             # Заявка на изменение смены: подача (INSERT) и решение/отзыв/отметка
             # прочтения (UPDATE). WHEN на UPDATE обязателен — updated_at трогает

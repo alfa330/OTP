@@ -37,11 +37,77 @@ import './news-modal.css';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Тест в окне новости («Вопросы операторов», задача #321): «после ознакомления
+ * оператор проходит небольшой тест из 2–3 вопросов … при правильных ответах
+ * нажимает «Подтвердить», после чего плашка исчезает».
+ *
+ * Варианты — кнопками на всю ширину: окно читают и с телефона, между звонками,
+ * и в кружок на 16 пикселей пальцем не попасть. Верного ответа здесь нет и не
+ * бывает — сервер отдаёт только формулировки и сверяет сам. Цвет — только у
+ * ошибки и только у выбранного варианта: подкрасить остальные значило бы
+ * подсказать.
+ */
+function NewsQuiz({ quiz, answers, wrong, onAnswer }) {
+    return (
+        <div className="mt-5 space-y-4 border-t border-slate-100 pt-4">
+            {quiz.map((item, index) => {
+                const missed = wrong.includes(item.id);
+                return (
+                    <fieldset key={item.id} className="space-y-2">
+                        <legend className="text-[14px] font-medium leading-snug text-slate-900">
+                            {index + 1}. {item.prompt}
+                        </legend>
+                        <div className="space-y-1.5" role="radiogroup">
+                            {(item.options || []).map((option, optionIndex) => {
+                                const chosen = answers[item.id] === optionIndex;
+                                const miss = missed && chosen;
+                                return (
+                                    <button
+                                        key={optionIndex}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={chosen}
+                                        onClick={() => onAnswer(item.id, optionIndex)}
+                                        className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-[14px] ring-1 transition active:scale-[0.99] ${
+                                            miss
+                                                ? 'bg-rose-50 text-rose-900 ring-rose-200'
+                                                : chosen
+                                                    ? 'bg-indigo-50 text-slate-900 ring-indigo-200'
+                                                    : 'bg-white text-slate-700 ring-slate-200 hover:bg-slate-50'
+                                        }`}
+                                    >
+                                        <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full ring-1 ${
+                                            chosen
+                                                ? (miss ? 'bg-rose-500 ring-rose-500' : 'bg-indigo-600 ring-indigo-600')
+                                                : 'bg-white ring-slate-300'
+                                        }`}>
+                                            {chosen && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                        </span>
+                                        <span className="min-w-0 break-words">{option}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        {missed && (
+                            <p className="text-[12px] text-rose-600">
+                                Неверно — перечитайте новость и выберите другой вариант
+                            </p>
+                        )}
+                    </fieldset>
+                );
+            })}
+        </div>
+    );
+}
+
 export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     const [queue, setQueue] = useState([]);
     const [remaining, setRemaining] = useState(0);
     const [sending, setSending] = useState(false);
     const [error, setError] = useState('');
+    /* Тест: выбранные варианты и вопросы, где сервер нашёл ошибку. */
+    const [answers, setAnswers] = useState({});
+    const [wrong, setWrong] = useState([]);
     /* Уже показанное в этой вкладке. Нужно, чтобы перезапрос (тычок канала,
        возврат во вкладку) не сбрасывал отсчёт у открытой карточки: сервер
        считает остаток от ПЕРВОГО показа, а человек в этот момент читает. */
@@ -49,6 +115,8 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
 
     const headers = useMemo(() => (getHeaders ? getHeaders() : {}), [getHeaders]);
     const current = queue[0] || null;
+    const quiz = current?.quiz || [];
+    const quizAnswered = quiz.every((item) => Number.isInteger(answers[item.id]));
     /* Когда ходили последний раз. Тычок канала колокола широковещателен и
        приходит на ЛЮБОЕ его событие — чужую задачу, опрос, ивент, — а не только
        на публикацию новости; плюс возврат во вкладку поднимает сразу два
@@ -111,6 +179,12 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
         setError('');
     }, [current]);
 
+    // Следующая новость — свой тест с чистого листа.
+    useEffect(() => {
+        setAnswers({});
+        setWrong([]);
+    }, [current?.id]);
+
     useEffect(() => {
         if (remaining <= 0) return undefined;
         const timer = setTimeout(() => setRemaining((value) => Math.max(0, value - 1)), 1000);
@@ -132,9 +206,10 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     }, []);
 
     const confirm = useCallback(() => {
-        if (!current || sending || remaining > 0) return;
+        if (!current || sending || remaining > 0 || !quizAnswered) return;
         setSending(true);
-        axios.post(`${apiBaseUrl}/api/news/${current.id}/read`, {}, { headers })
+        axios.post(`${apiBaseUrl}/api/news/${current.id}/read`,
+                   quiz.length ? { answers } : {}, { headers })
             .then(() => {
                 dropCurrent();
                 /* Сервер отмечает «показали» только ТОЙ новости, что человек
@@ -145,6 +220,13 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 load(true);
             })
             .catch((e) => {
+                /* Неверные ответы подсвечиваются у вопросов, а не строкой
+                   ошибки у кнопки: человек видит, где именно ошибся. */
+                if (e?.response?.data?.code === 'NEWS_QUIZ_WRONG') {
+                    setWrong(e.response.data.wrong || []);
+                    setError('');
+                    return;
+                }
                 // 409 — сервер считает, что читали слишком быстро. Не спорим:
                 // берём его остаток и досчитываем. Расхождение бывает от
                 // рассинхрона часов, и правым здесь всегда сервер.
@@ -157,7 +239,8 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                 }
             })
             .finally(() => setSending(false));
-    }, [apiBaseUrl, current, dropCurrent, headers, remaining, sending]);
+    }, [answers, apiBaseUrl, current, dropCurrent, headers, quiz.length, quizAnswered,
+        remaining, sending]);
 
     /* Необязательную новость закрывают крестиком, и это ТОЖЕ отметка о
        прочтении: иначе она возвращалась бы при каждом заходе, а «закрыл» —
@@ -193,6 +276,9 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
     if (!current) return null;
 
     const ready = remaining <= 0;
+    const canConfirm = ready && !sending && quizAnswered;
+    // С тестом нажатие означает не «прочитал», а «прочитал и ответил».
+    const verb = quiz.length ? 'Подтвердить' : 'Прочитал';
 
     return (
         <div
@@ -244,6 +330,18 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                         видом карусели. */}
                     <NewsGallery photos={current.photos} onBroken={() => load(true)} />
                     <div className="news-body" dangerouslySetInnerHTML={{ __html: current.body || '' }} />
+                    {/* Тест — ПОД текстом: сначала прочитать, потом ответить. */}
+                    {quiz.length > 0 && (
+                        <NewsQuiz
+                            quiz={quiz}
+                            answers={answers}
+                            wrong={wrong}
+                            onAnswer={(questionId, index) => {
+                                setAnswers((prev) => ({ ...prev, [questionId]: index }));
+                                setWrong((prev) => prev.filter((id) => id !== questionId));
+                            }}
+                        />
+                    )}
                 </div>
 
                 {/* Подписи «Окно нельзя закрыть или свернуть» здесь нет
@@ -257,9 +355,9 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                         <button
                             type="button"
                             onClick={confirm}
-                            disabled={!ready || sending}
+                            disabled={!canConfirm}
                             className={`inline-flex h-10 items-center justify-center gap-1.5 rounded-xl px-5 text-[14px] font-medium transition active:scale-[0.98] sm:h-9 ${
-                                ready && !sending
+                                canConfirm
                                     ? 'bg-indigo-600 text-white hover:bg-indigo-700'
                                     : 'cursor-not-allowed bg-slate-100 text-slate-400'
                             }`}
@@ -271,8 +369,8 @@ export default function NewsOfDayModal({ apiBaseUrl, user, getHeaders }) {
                         >
                             {sending
                                 ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                                : ready && <Check className="h-4 w-4" aria-hidden="true" />}
-                            {ready ? 'Прочитал' : `Прочитал · ${remaining} с`}
+                                : canConfirm && <Check className="h-4 w-4" aria-hidden="true" />}
+                            {ready ? verb : `${verb} · ${remaining} с`}
                         </button>
                     </div>
                 </div>

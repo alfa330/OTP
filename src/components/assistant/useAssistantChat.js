@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { errText } from './errText';
+import useSupervisorReply from './useSupervisorReply';
 
 /* Состояние разговора с помощником — одно на вкладку в вике и на мини-чат шарика.
  *
@@ -38,6 +39,10 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
     const [error, setError] = useState('');
 
     const threadRequest = useRef(0);
+    // Для перечитки по тычку: пока вопрос в полёте, лента держит локальный
+    // пузырь, и перечитка стёрла бы его до ответа сервера.
+    const busyRef = useRef(false);
+    busyRef.current = busy;
 
     const loadStatus = useCallback(() => {
         if (!enabled) return Promise.resolve();
@@ -128,6 +133,7 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
                 model: data.model,
                 elapsed_ms: data.elapsed != null ? Math.round(data.elapsed * 1000) : null,
                 degraded_search: data.degraded_search,
+                escalation: data.escalation || null,
                 created_at: new Date().toISOString(),
             }]);
             loadChats();
@@ -159,6 +165,21 @@ export default function useAssistantChat({ base, headers, spaceId = null, enable
                 if (activeId === chatId) startNewChat();
             })
     ), [activeId, base, headers, startNewChat]);
+
+    /* Перечитать открытый разговор НА МЕСТЕ — без «Загрузка…» и сброса ленты.
+       Так в чат приходит ответ супервайзера на переданный вопрос. */
+    const refreshChat = useCallback(() => {
+        if (!activeId || busyRef.current) return Promise.resolve();
+        const request = threadRequest.current;
+        return axios.get(`${base}/ai/chats/${activeId}`, { headers, params: { space_id: spaceId } })
+            .then((r) => {
+                if (request !== threadRequest.current || busyRef.current) return;
+                setMessages(r.data?.messages || []);
+            })
+            .catch(() => { /* тихо: следующий тычок или возврат во вкладку попробует снова */ });
+    }, [activeId, base, headers, spaceId]);
+
+    useSupervisorReply(messages, refreshChat);
 
     const perimeter = status?.perimeter;
     const suggestions = status?.suggestions || [];

@@ -6,7 +6,7 @@ import {
     Layers, MapPin,
     Network,
     Building2, LineChart, Loader2, Megaphone, Plus, RefreshCw,
-    ScrollText, ShieldCheck, Sparkles, Users,
+    MessageCircleQuestion, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
@@ -33,6 +33,7 @@ const WikiAssistant = lazy(() => import('./WikiAssistant'));
    вкладку, а не каждый вошедший в вики. Без ленивости чанк раздела вырос бы
    на треть у всех читателей. */
 const WikiNews = lazy(() => import('./WikiNews'));
+const WikiQuestions = lazy(() => import('./WikiQuestions'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import { getScrollContainer, scrollPortalTo } from './scrollContainer';
 import { CAPABILITY_LABELS } from './sectionGrants';
@@ -156,7 +157,8 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
 );
 
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
-                                   initialArticleSlug, onInitialArticleConsumed }) {
+                                   initialArticleSlug, onInitialArticleConsumed,
+                                   bellFocus = null, onBellFocusConsumed }) {
     const headers = useMemo(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -175,6 +177,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        один и тот же запрос, заданный дважды подряд, обязан уйти дважды. */
     const [assistantAsk, setAssistantAsk] = useState(null);   // {id, text}
     /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
+    /* Переходы из колокола по «Вопросам операторов»: супервайзеру — карточка
+       вопроса, оператору — разговор с ответом. Одноразовые, как assistantAsk. */
+    const [questionFocus, setQuestionFocus] = useState(null);   // {id, nonce}
+    const [assistantChat, setAssistantChat] = useState(null);   // {chatId, nonce}
        двум причинам: счётчики на главной берут из них свои числа (иначе «29
        статей» и список за плиткой считались бы разными запросами и разошлись),
        и «Обновить» в шапке обязана обновлять и их тоже. */
@@ -393,6 +399,13 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // ниже выкидывал бы человека из открытого чата.
         { key: 'assistant', label: 'Помощник', icon: Sparkles, show: features.assistant },
         /* Каталог и правка структуры — один пункт меню: «что лежит в разделе»
+        /* «Вопросы» — вопросы операторов, на которые не ответил помощник
+           (задача #321). Разбирает тот, кто вправе адресовать отделу новость:
+           разбор ею и заканчивается, поэтому признак тот же, что у «Новостей»
+           (wiki/questions.py: reviewer_scope). Без помощника вопросам взяться
+           неоткуда — отсюда и его тумблер. */
+        { key: 'questions', label: 'Вопросы', icon: MessageCircleQuestion,
+          show: features.assistant && canPublishNews },
            и «как разделы устроены» это две половины одной работы, и раньше
            между ними приходилось прыгать по вкладкам. Внутри — переключатель.
            Показываем тому, у кого есть хоть одна из половин. */
@@ -505,6 +518,20 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     }, [tabs, tab]);
 
     /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
+    /* Пришли из колокола по «Вопросам операторов». Вкладку открываем, только
+       когда она уже есть в наборе: права приезжают с ping ПОЗЖЕ первого
+       рендера, и раньше времени эффект выше вернул бы человека на главную.
+       До этого просьба просто ждёт, а гасится — когда выполнена. */
+    useEffect(() => {
+        if (!bellFocus?.id) return;
+        const target = bellFocus.kind === 'assistant' ? 'assistant' : 'questions';
+        if (!tabs.some((t) => t.key === target)) return;
+        setTab(target);
+        if (target === 'assistant') setAssistantChat({ chatId: bellFocus.id, nonce: bellFocus.nonce });
+        else setQuestionFocus({ id: bellFocus.id, nonce: bellFocus.nonce });
+        onBellFocusConsumed?.();
+    }, [bellFocus, tabs, onBellFocusConsumed]);
+
        даже если в прошлый раз ушли, например, в «Структуру». */
     useEffect(() => {
         if (initialArticleSlug) setTab('library');
@@ -902,6 +929,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             askRequest={assistantAsk}
                             onAskRequestConsumed={() => setAssistantAsk(null)}
                             onOpenArticle={(slug, highlight) => {
+                            openChatRequest={assistantChat}
+                            onOpenChatRequestConsumed={() => setAssistantChat(null)}
                                 setTab('library');
                                 setSearchTarget({ slug, highlight, from: returnDoor('assistant') });
                             }}
@@ -910,6 +939,27 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 )}
 
                 {tab === 'catalog' && (
+                {tab === 'questions' && (
+                    <Suspense fallback={(
+                        <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
+                            <Loader2 size={18} className="animate-spin" />
+                            <span className="text-[13px]">Загружаем вопросы…</span>
+                        </div>
+                    )}>
+                        <WikiQuestions
+                            base={base}
+                            headers={headers}
+                            showToast={showToast}
+                            focusRequest={questionFocus}
+                            onFocusConsumed={() => setQuestionFocus(null)}
+                            onOpenArticle={(slug) => {
+                                setTab('library');
+                                setSearchTarget({ slug, from: returnDoor('questions') });
+                            }}
+                        />
+                    </Suspense>
+                )}
+
                     <div className="space-y-3">
                         {/* Оба переключателя в одной строке: половина вкладки
                             слева, корзина справа. Друг под другом два одинаковых

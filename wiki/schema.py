@@ -1483,6 +1483,58 @@ _AI_STATEMENTS = [
     "ALTER TABLE wiki_ai_chats ADD COLUMN IF NOT EXISTS space_id INTEGER;",
 ]
 
+# ── Вопросы операторов (задача #321) ─────────────────────────────────────────
+#
+# Отказ помощника, переданный супервайзеру отдела, и его дальнейшая судьба:
+# ответ, статья, новость с тестом. Логика и решения — wiki/questions.py.
+_QUESTION_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_operator_questions (
+        id                  BIGSERIAL PRIMARY KEY,
+        asker_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        -- Отдел и пространство — СНИМОК момента вопроса: переведут оператора
+        -- завтра, вопрос останется у тех, кто его получил.
+        department_id       INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+        space_id            INTEGER,
+        chat_id             BIGINT REFERENCES wiki_ai_chats(id) ON DELETE SET NULL,
+        question_message_id BIGINT REFERENCES wiki_ai_messages(id) ON DELETE SET NULL,
+        refusal_message_id  BIGINT REFERENCES wiki_ai_messages(id) ON DELETE SET NULL,
+        -- Текст вопроса копией: очередь супервайзера не должна зависеть от того,
+        -- что оператор делает со своей историей.
+        question            TEXT NOT NULL,
+        status              VARCHAR(16) NOT NULL DEFAULT 'open'
+                            CHECK (status IN ('open', 'answered', 'dismissed')),
+        answer              TEXT,
+        answer_message_id   BIGINT REFERENCES wiki_ai_messages(id) ON DELETE SET NULL,
+        -- Кто разобрал: ответил или закрыл без ответа.
+        resolved_by         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        resolved_at         TIMESTAMP,
+        -- Оператор открыл разговор с ответом — уведомление погасло.
+        asker_seen_at       TIMESTAMP,
+        -- Вторая половина цепочки. NULL — ещё не оформлено в базу знаний.
+        kb_status           VARCHAR(16) CHECK (kb_status IN ('published', 'skipped')),
+        kb_article_id       INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL,
+        -- Без внешнего ключа намеренно: news_posts разворачивается ПОСЛЕ вики
+        -- и своим пакетом (database.py: _init_news_schema_tx).
+        kb_news_id          INTEGER,
+        kb_by               INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        kb_at               TIMESTAMP,
+        created_at          TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at          TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    # Очередь отдела и счётчики вкладки ходят по отделу и статусу.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_operator_questions_department "
+    "ON wiki_operator_questions (department_id, status, kb_status);",
+    # Пометки в ленте разговора: «этот отказ передан, вот ответ».
+    "CREATE INDEX IF NOT EXISTS idx_wiki_operator_questions_chat "
+    "ON wiki_operator_questions (chat_id);",
+    # Колокол оператора: «супервайзер ответил, а вы ещё не открыли».
+    "CREATE INDEX IF NOT EXISTS idx_wiki_operator_questions_unseen "
+    "ON wiki_operator_questions (asker_id) "
+    "WHERE status = 'answered' AND asker_seen_at IS NULL;",
+]
+
 # ── Векторы кусков ───────────────────────────────────────────────────────────
 #
 # Под ОТДЕЛЬНЫМ савпоинтом, как pg_trgm: расширение vector может быть недоступно
@@ -2551,6 +2603,23 @@ def init_wiki_schema(cursor):
     # передаётся, поэтому psycopg2 %(now)s сам не раскрыл бы.
     for statement in _AI_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Вопросы операторов — сразу за таблицами чата: строка ссылается на реплики.
+    # Своим савпоинтом: вике без очереди вопросов жить можно, а откат всей
+    # схемы раздела из-за новой таблицы оставил бы без вики всех.
+    cursor.execute('SAVEPOINT wiki_operator_questions')
+    try:
+        for statement in _QUESTION_STATEMENTS:
+            cursor.execute(statement.replace('%(now)s', _NOW))
+    except Exception:
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_operator_questions')
+        import logging
+        logging.exception(
+            'Раздел «Вики»: таблица вопросов операторов не развернулась — '
+            'отказы помощника супервайзерам не передаются'
+        )
+    else:
+        cursor.execute('RELEASE SAVEPOINT wiki_operator_questions')
 
     # Куски пересобирать не нужно: chunk_tsv генерируемая, и постгрес пересчитал
     # её сам при создании колонки. Эмбеддинги к свёртке отношения не имеют — они

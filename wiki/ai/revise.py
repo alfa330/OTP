@@ -345,8 +345,15 @@ def update_from_document(*, current_title, current_html, document_html='',
                    sources_text=sources, meta=meta, links=links)
 
 
-def edit_by_instruction(*, current_title, current_html, instruction, generate_fn):
-    """Правка по указанию редактора («сократи», «добавь раздел про…»)."""
+def edit_by_instruction(*, current_title, current_html, instruction, generate_fn,
+                        extra_sources=''):
+    """Правка по указанию редактора («сократи», «добавь раздел про…»).
+
+    extra_sources — текст, из которого указание ЗАКОННО приносит новые числа:
+    ответ супервайзера, дописываемый в статью («Вопросы операторов»,
+    wiki/ai/knowledge.py). Без него каждое такое число вышло бы предупреждением
+    «нет в документе», и настоящая выдумка потерялась бы среди ложных.
+    """
     instruction = ' '.join(str(instruction or '').split())
     if not instruction:
         raise ValueError('нужно указание')
@@ -363,10 +370,11 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
     prompt += '\n\nУКАЗАНИЕ РЕДАКТОРА:\n' + instruction
 
     text, meta = generate_fn(EDIT_PROMPT, prompt, max_tokens=MAX_OUTPUT_TOKENS)
+    sources_text = '%s\n%s' % (current_title or '', to_plain_text(current_html))
+    if extra_sources:
+        sources_text += '\n' + str(extra_sources)
     result = _finish(text, current_html=current_html, tables=tables, images=images,
-                     sources_text='%s\n%s' % (current_title or '',
-                                              to_plain_text(current_html)),
-                     meta=meta)
+                     sources_text=sources_text, meta=meta)
     result['instruction'] = instruction
     return result
 

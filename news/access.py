@@ -28,7 +28,9 @@ import json
 from wiki import access as wiki_access
 from wiki.access import ROLE_LEVELS, normalize_role, role_level_of  # noqa: F401  (реэкспорт)
 
-from .schema import DEFAULT_CONFIRM_DELAY_SECONDS, MAX_CONFIRM_DELAY_SECONDS
+from .schema import (DEFAULT_CONFIRM_DELAY_SECONDS, MAX_CONFIRM_DELAY_SECONDS,
+                     QUIZ_MAX_OPTION_LENGTH, QUIZ_MAX_OPTIONS, QUIZ_MAX_PROMPT_LENGTH,
+                     QUIZ_MAX_QUESTIONS, QUIZ_MIN_OPTIONS, QUIZ_MIN_QUESTIONS)
 
 # Длина заголовка — колонка VARCHAR(255); режем на входе, чтобы отказ был
 # внятным, а не «value too long for type character varying(255)».
@@ -312,3 +314,78 @@ def audience_params(subjects, user_id, otp_role):
         'role_level': effective_role_level(otp_role),
         'role_canon': json.dumps(ROLE_CANON),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТЕСТ В ОКНЕ НОВОСТИ
+#
+# Постановка «Вопросов операторов» (задача #321): «после ознакомления оператор
+# проходит небольшой тест из 2–3 вопросов … при правильных ответах нажимает
+# «Подтвердить», после чего плашка исчезает». Обе функции чистые: проверку
+# теста при выпуске и проверку ответов при подтверждении можно тестировать без
+# базы, а правило одно на ИИ-черновик, форму и сервер.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def normalize_quiz(raw):
+    """Тест из формы или от ИИ, приведённый к виду таблицы. (вопросы, отказ).
+
+    Отказ — готовая строка для человека и называет НОМЕР вопроса: тест правят
+    на экране, и «тест заполнен неверно» не сказало бы, где именно.
+    """
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return [], 'Тест не заполнен'
+    quiz = []
+    for number, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            return [], 'Вопрос %d заполнен неверно' % number
+        prompt = ' '.join(str(item.get('prompt') or '').split())[:QUIZ_MAX_PROMPT_LENGTH]
+        if not prompt:
+            return [], 'В вопросе %d нет текста' % number
+        raw_options = item.get('options')
+        if not isinstance(raw_options, (list, tuple)):
+            return [], 'В вопросе %d нет вариантов ответа' % number
+        options = [' '.join(str(option or '').split())[:QUIZ_MAX_OPTION_LENGTH]
+                   for option in raw_options]
+        if not all(options):
+            return [], 'В вопросе %d есть пустой вариант ответа' % number
+        if not QUIZ_MIN_OPTIONS <= len(options) <= QUIZ_MAX_OPTIONS:
+            return [], 'В вопросе %d должно быть от %d до %d вариантов' % (
+                number, QUIZ_MIN_OPTIONS, QUIZ_MAX_OPTIONS)
+        if len({option.lower() for option in options}) != len(options):
+            return [], 'В вопросе %d варианты повторяются' % number
+        correct = item.get('correct')
+        # bool — подкласс int: True прошёл бы как «второй вариант».
+        if isinstance(correct, bool) or not isinstance(correct, int) \
+                or not 0 <= correct < len(options):
+            return [], 'В вопросе %d не отмечен верный вариант' % number
+        quiz.append({'prompt': prompt, 'options': options, 'correct': correct})
+    if not QUIZ_MIN_QUESTIONS <= len(quiz) <= QUIZ_MAX_QUESTIONS:
+        return [], 'В тесте должно быть %d–%d вопроса' % (QUIZ_MIN_QUESTIONS,
+                                                          QUIZ_MAX_QUESTIONS)
+    return quiz, None
+
+
+def quiz_mistakes(answer_key, answers):
+    """Вопросы, на которые ответили неверно или не ответили вовсе.
+
+    answer_key — [(id вопроса, индекс верного варианта)], из базы;
+    answers    — {id вопроса: индекс выбранного}, из тела запроса. Ключи в JSON
+                 приезжают строками, поэтому сверяем оба написания.
+
+    Верные ответы клиенту не отдаются вовсе (news/queries.py: pending_for_user),
+    поэтому проверка возможна только здесь, и она же — единственная граница:
+    подтверждение из консоли без ответов упрётся в тот же список ошибок.
+    """
+    given = answers if isinstance(answers, dict) else {}
+    wrong = []
+    for question_id, correct in answer_key:
+        value = given.get(str(question_id), given.get(question_id))
+        if isinstance(value, bool):
+            value = None
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = None
+        if value != int(correct):
+            wrong.append(int(question_id))
+    return wrong

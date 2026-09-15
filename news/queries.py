@@ -192,7 +192,8 @@ def is_wiki_admin(cursor, user_id):
 # ВЫДАЧА ОКНА
 # ─────────────────────────────────────────────────────────────────────────────
 
-def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False):
+def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False,
+                     with_quiz=False):
     """Новости, которые этому человеку сейчас показывают. Свои — не показываем.
 
     Порядок: обязательные раньше необязательных, внутри — по публикации. Автор
@@ -241,8 +242,9 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False):
          ORDER BY p.is_mandatory DESC, p.published_at, p.id
          LIMIT 20
         """)
-    if with_photos:
-        params['max_photos'] = MAX_PHOTOS_PER_POST
+    if with_photos or with_quiz:
+        if with_photos:
+            params['max_photos'] = MAX_PHOTOS_PER_POST
         # Кадры СКАЛЯРНЫМ подзапросом, а не джойном, и СНАРУЖИ лимита.
         #
         # Джойн испортил бы две вещи сразу. Во-первых, размножил бы строку
@@ -258,11 +260,7 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False):
         # bucket и blob_path здесь есть — без них нечего подписывать, — но
         # наружу не уходят: роут гонит список через news_photos.sign_urls, а тот
         # собирает новый словарь по белому списку ключей.
-        sql = ("""
-        WITH queue AS (""" + sql + """)
-        SELECT q.id, q.title, q.body, q.is_mandatory, q.confirm_delay_seconds,
-               q.shown_at, q.remaining_seconds,
-               COALESCE((
+        photos = ("""COALESCE((
                    SELECT json_agg(json_build_object(
                               'id', f.id, 'bucket', f.bucket,
                               'blob_path', f.blob_path, 'content_type', f.content_type,
@@ -275,7 +273,24 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False):
                             WHERE news_id = q.id
                             ORDER BY sort_order, id
                             LIMIT %(max_photos)s) f
-               ), '[]'::json) AS photos
+               ), '[]'::json)""" if with_photos else "'[]'::json")
+        # Тест в окне — тем же приёмом и по той же причине: скалярно и снаружи
+        # лимита. ВЕРНОГО ВАРИАНТА здесь нет и быть не должно: окно показывает
+        # только формулировки, а сверку делает сервер (confirm_read). Отдай мы
+        # индекс верного варианта, тест проходился бы из вкладки «Сеть».
+        quiz = ("""COALESCE((
+                   SELECT json_agg(json_build_object(
+                              'id', z.id, 'prompt', z.prompt, 'options', z.options)
+                          ORDER BY z.position, z.id)
+                     FROM news_quiz_questions z
+                    WHERE z.news_id = q.id
+               ), '[]'::json)""" if with_quiz else "'[]'::json")
+        sql = ("""
+        WITH queue AS (""" + sql + """)
+        SELECT q.id, q.title, q.body, q.is_mandatory, q.confirm_delay_seconds,
+               q.shown_at, q.remaining_seconds,
+               """ + photos + """ AS photos,
+               """ + quiz + """ AS quiz
           FROM queue q
          ORDER BY q.is_mandatory DESC, q.published_at, q.id
         """)
@@ -299,6 +314,8 @@ def pending_for_user(cursor, *, user_id, otp_role, subjects, with_photos=False):
         # Сырые строки кадров: подписывает и чистит их роут. Здесь они ещё с
         # bucket/blob_path — наружу в таком виде не уходят.
         'photos': (row[7] or []) if with_photos else [],
+        # Формулировки и варианты, без верных ответов (см. выше).
+        'quiz': (row[8] or []) if with_quiz else [],
     } for row in cursor.fetchall()]
 
 
@@ -325,14 +342,68 @@ def mark_shown(cursor, *, news_ids, user_id):
     )
 
 
-def confirm_read(cursor, *, news_id, user_id, otp_role, subjects):
-    """Принять «Прочитал». (status, оставшиеся секунды).
+# ─────────────────────────────────────────────────────────────────────────────
+# ТЕСТ В ОКНЕ («Вопросы операторов», задача #321)
+#
+# Стоит ПОСЛЕ mark_shown и отдельными функциями, а не внутри выдачи: /pending
+# забирает формулировки тем же единственным запросом (pending_for_user), а
+# верные ответы читаются только здесь — при подтверждении и в карточке
+# редактора.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def quiz_answer_key(cursor, news_id):
+    """[(id вопроса, индекс верного варианта)] — только для сверки на сервере."""
+    cursor.execute(
+        """
+        SELECT id, correct_index FROM news_quiz_questions
+         WHERE news_id = %s ORDER BY position, id
+        """,
+        (news_id,),
+    )
+    return [(int(row[0]), int(row[1])) for row in cursor.fetchall()]
+
+
+def post_quiz(cursor, post_id):
+    """Тест новости С ВЕРНЫМИ ОТВЕТАМИ — для витрины редактора, не для окна."""
+    cursor.execute(
+        """
+        SELECT id, prompt, options, correct_index FROM news_quiz_questions
+         WHERE news_id = %s ORDER BY position, id
+        """,
+        (post_id,),
+    )
+    return [{'id': int(row[0]), 'prompt': row[1], 'options': list(row[2] or []),
+             'correct': int(row[3])} for row in cursor.fetchall()]
+
+
+def set_quiz(cursor, *, post_id, quiz):
+    """Полная замена теста. quiz уже прошёл news_access.normalize_quiz."""
+    cursor.execute('DELETE FROM news_quiz_questions WHERE news_id = %s', (post_id,))
+    for position, item in enumerate(quiz or ()):
+        cursor.execute(
+            """
+            INSERT INTO news_quiz_questions (news_id, position, prompt, options,
+                                             correct_index)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            """,
+            (post_id, position, item['prompt'],
+             json.dumps(item['options'], ensure_ascii=False), item['correct']),
+        )
+
+
+def confirm_read(cursor, *, news_id, user_id, otp_role, subjects, answers=None,
+                 with_quiz=False):
+    """Принять «Прочитал». (status, подробность).
+
+    Подробность — оставшиеся секунды у 'too_early' и id вопросов с неверным
+    ответом у 'quiz_wrong'.
 
     Задержку проверяет СЕРВЕР — по своей же отметке о показе. Клиентский
     таймер это удобство: без серверной проверки подтверждение уходило бы из
     консоли мгновенно, и весь смысл задержки («нельзя пролистать за секунду»)
     держался бы на честном слове браузера. Тот же принцип, что у гейта
-    «дочитал до конца» в обязательном ознакомлении вики.
+    «дочитал до конца» в обязательном ознакомлении вики. Тест в окне проверяется
+    здесь же и по той же причине: верных ответов у клиента нет вовсе.
     """
     params = news_access.audience_params(subjects, user_id, otp_role)
     params.update(_role_params())
@@ -366,6 +437,13 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects):
     is_mandatory, shown_at, confirmed_at, remaining = row
     if confirmed_at is not None:
         return 'already', 0
+
+    # Новость с тестом обязательна ВСЕГДА, что бы ни стояло в записи: крестик
+    # необязательной подтверждал бы прочтение без единого ответа, и тест
+    # обходился бы одним нажатием.
+    answer_key = quiz_answer_key(cursor, news_id) if with_quiz else []
+    if answer_key:
+        is_mandatory = True
 
     # У НЕОБЯЗАТЕЛЬНОЙ новости кнопки «Прочитал» нет вовсе — её закрывают
     # крестиком, и это закрытие и есть отметка. Гейт задержки здесь означал бы,
@@ -401,6 +479,13 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects):
     if int(remaining or 0) > 0:
         return 'too_early', int(remaining)
 
+    if answer_key:
+        wrong = news_access.quiz_mistakes(answer_key, answers)
+        if wrong:
+            # Ошибку называем по вопросу, а верный вариант — нет: окно подсветит
+            # вопрос, и человек перечитает новость, а не подберёт ответ перебором.
+            return 'quiz_wrong', wrong
+
     cursor.execute(
         """
         UPDATE news_reads
@@ -418,7 +503,7 @@ def confirm_read(cursor, *, news_id, user_id, otp_role, subjects):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
-               limit=50, offset=0, with_photos=False):
+               limit=50, offset=0, with_photos=False, with_quiz=False):
     """Новости, которые этот редактор вправе видеть в разделе.
 
     departments=None — без границы (супер-админ, администратор вики): все.
@@ -437,7 +522,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
                p.published_at, p.expires_at, p.created_at, p.updated_at,
                u.name AS author_name, d.name AS author_department,
                p.author_id, u.role AS author_role,
-               {photo_count} AS photo_count
+               {photo_count} AS photo_count,
+               {quiz_count} AS quiz_count
           FROM news_posts p
           LEFT JOIN users u ON u.id = p.author_id
           LEFT JOIN departments d ON d.id = p.author_department_id
@@ -459,6 +545,9 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
             # несуществующей таблице уронил бы список редактора пятисоткой.
             photo_count=("(SELECT COUNT(*) FROM news_photos f WHERE f.news_id = p.id)"
                          if with_photos else "0"),
+            # Тест — тем же приёмом и с той же оговоркой про таблицу.
+            quiz_count=("(SELECT COUNT(*) FROM news_quiz_questions z WHERE z.news_id = p.id)"
+                        if with_quiz else "0"),
         ),
         params,
     )
@@ -500,6 +589,8 @@ def list_posts(cursor, *, viewer_id, viewer_level, departments, status=None,
         # Сколько кадров прикреплено. Числом, а не фразой: строка списка
         # отвечает на «что это за новость», а не рассказывает про её устройство.
         'photo_count': int(row[13] or 0),
+        # Сколько вопросов в тесте окна. Форма по нему запирает обязательность.
+        'quiz_count': int(row[14] or 0),
         # Заполняется ниже одним запросом на всю страницу: считать его
         # подзапросом по news_reads значило бы считать НЕ ТО, что показывает
         # журнал (там знаменатель — нынешние адресаты), и «Прочитали: 14» на

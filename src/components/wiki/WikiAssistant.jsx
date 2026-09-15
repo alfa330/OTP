@@ -12,6 +12,7 @@ import {
 import {
     AssistantMessage, errText, fmtChatDate,
 } from '../assistant/assistantThread.jsx';
+import useSupervisorReply from '../assistant/useSupervisorReply';
 import useStableCallback from './useStableCallback';
 
 /* Вкладка «Помощник» — чат по доступным пользователю статьям вики.
@@ -50,10 +51,12 @@ import useStableCallback from './useStableCallback';
 
 export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                                         spaceId = null,
-                                        askRequest = null, onAskRequestConsumed }) {
+                                        askRequest = null, onAskRequestConsumed,
+                                        openChatRequest = null, onOpenChatRequestConsumed }) {
     const toast = useStableCallback(showToast);
     const openArticle = useStableCallback(onOpenArticle);
     const consumeAskRequest = useStableCallback(onAskRequestConsumed);
+    const consumeOpenChat = useStableCallback(onOpenChatRequestConsumed);
 
     const [status, setStatus] = useState(null);
     const [chats, setChats] = useState([]);
@@ -69,6 +72,10 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
 
     // Гонки: ответ на старый чат не должен затирать открытый (приём из Wazzup).
     const threadRequest = useRef(0);
+    // См. useAssistantChat.js: перечитка по тычку не должна стирать пузырь
+    // вопроса, который ещё в полёте.
+    const busyRef = useRef(false);
+    busyRef.current = busy;
     const { boxRef, onScroll } = useThreadAutoScroll(messages);
 
     const loadStatus = useCallback(() => {
@@ -135,6 +142,7 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
                 provider: data.provider, model: data.model,
                 elapsed_ms: data.elapsed ? Math.round(data.elapsed * 1000) : null,
                 degraded_search: data.degraded_search,
+                escalation: data.escalation || null,
                 created_at: new Date().toISOString(),
             }]);
             loadChats();
@@ -172,6 +180,29 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
             .catch((e) => toast(errText(e, 'Не удалось удалить чат'), 'error'))
             .finally(() => setConfirmDelete(null));
     }, [activeId, base, headers, startNewChat, toast]);
+
+    /* Ответ супервайзера на переданный вопрос приходит в открытый чат —
+       перечитываем его на месте, без «Загрузка переписки…». */
+    const refreshChat = useCallback(() => {
+        if (!activeId || busyRef.current) return Promise.resolve();
+        const request = threadRequest.current;
+        return axios.get(`${base}/ai/chats/${activeId}`, { headers, params: { space_id: spaceId } })
+            .then((r) => {
+                if (request !== threadRequest.current || busyRef.current) return;
+                setMessages(r.data?.messages || []);
+            })
+            .catch(() => { /* тихо: следующий тычок или возврат во вкладку попробует снова */ });
+    }, [activeId, base, headers, spaceId]);
+
+    useSupervisorReply(messages, refreshChat);
+
+    /* Пришли из колокола «Супервайзер ответил»: открываем тот самый разговор.
+       Просьбу гасим сразу — иначе возврат на вкладку открывал бы его снова. */
+    useEffect(() => {
+        if (!openChatRequest?.chatId) return;
+        openChat(openChatRequest.chatId);
+        consumeOpenChat();
+    }, [openChatRequest, openChat, consumeOpenChat]);
 
     const perimeter = status?.perimeter;
     const indexReady = (status?.index?.chunks || 0) > 0;

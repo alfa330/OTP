@@ -57,7 +57,18 @@ MAX_LOOSE_PHOTOS_PER_USER = 30
 # блобами. Сутки, а не час: форму закрывают и возвращаются к ней завтра.
 LOOSE_PHOTO_TTL_HOURS = 24
 
-_NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+# Тест в окне новости («Вопросы операторов», задача #321). Постановка: «после
+# ознакомления оператор проходит небольшой тест из 2–3 вопросов». Границы
+# держатся и здесь, и в форме: окно обязательной новости не закрывается, и тест
+# на десять вопросов в нём запер бы смену так же, как опечатка в задержке.
+QUIZ_MIN_QUESTIONS = 2
+QUIZ_MAX_QUESTIONS = 3
+QUIZ_MIN_OPTIONS = 2
+QUIZ_MAX_OPTIONS = 4
+QUIZ_MAX_PROMPT_LENGTH = 300
+QUIZ_MAX_OPTION_LENGTH = 200
+
+_NOW ="(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
 _STATEMENTS = [
     """
@@ -188,6 +199,24 @@ _STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_news_reads_user ON news_reads(user_id) WHERE confirmed_at IS NULL;",
+    # ── Тест в окне ──────────────────────────────────────────────────────────
+    # Есть у новости вопросы — «Прочитал» становится «Подтвердить» и
+    # принимается только с верными ответами (news/queries.py: confirm_read).
+    """
+    CREATE TABLE IF NOT EXISTS news_quiz_questions (
+        id            SERIAL PRIMARY KEY,
+        news_id       INTEGER NOT NULL REFERENCES news_posts(id) ON DELETE CASCADE,
+        position      SMALLINT NOT NULL DEFAULT 0,
+        prompt        TEXT NOT NULL,
+        -- Варианты массивом строк, верный — индексом. Своя таблица вариантов
+        -- ради трёх строк означала бы ещё один подзапрос на /pending, а
+        -- спрашивают варианты всегда целиком.
+        options       JSONB NOT NULL CHECK (jsonb_typeof(options) = 'array'),
+        correct_index SMALLINT NOT NULL CHECK (correct_index >= 0),
+        created_at    TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_news_quiz_post ON news_quiz_questions(news_id, position, id);",
 ]
 
 
@@ -219,5 +248,17 @@ def photos_ready(cursor):
     пятисоткой КАЖДОМУ вошедшему — на самом горячем роуте портала.
     """
     cursor.execute("SELECT to_regclass('public.news_photos') IS NOT NULL")
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def quiz_ready(cursor):
+    """Развёрнута ли таблица теста. Отдельно — по той же причине, что кадры.
+
+    Нет таблицы — у новостей просто нет тестов: /pending не должен отвечать
+    пятисоткой каждому вошедшему на тот единственный деплой, когда код уже
+    приехал, а DDL ещё не отработал.
+    """
+    cursor.execute("SELECT to_regclass('public.news_quiz_questions') IS NOT NULL")
     row = cursor.fetchone()
     return bool(row and row[0])
