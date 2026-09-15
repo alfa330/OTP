@@ -89,7 +89,7 @@ import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmploye
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
-import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh } from './utils/authRefresh';
+import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh, watchAuthTokensFromOtherTabs } from './utils/authRefresh';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
@@ -1010,38 +1010,25 @@ const getStoredAuthToken = (storageKey) => {
     const runtimeToken = runtimeField ? String(authRuntimeState[runtimeField] || '').trim() : '';
     if (runtimeToken) return runtimeToken;
 
+    /* localStorage — основное хранилище: он общий у вкладок, и ссылка, вставленная в
+       новую вкладку, открывается без входа. С апреля на компьютере токены жили только
+       в sessionStorage (он у каждой вкладки свой): в Chrome это прятала кука, которую он
+       шлёт на API, а Яндекс Браузер сторонних кук не отправляет — и просил вход в каждой
+       новой вкладке. sessionStorage остаётся запасом на случай, когда localStorage
+       недоступен, и оттуда же подхватываются токены, сохранённые прежней сборкой. */
     const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
     const localStorageRef = safeGetBrowserStorage('localStorage');
-
-    if (shouldUseLegacyMobileBearerStorage()) {
-        const mobileLocalToken = safeStorageGetItem(localStorageRef, storageKey);
-        if (mobileLocalToken) {
-            if (runtimeField) authRuntimeState[runtimeField] = mobileLocalToken;
-            return mobileLocalToken;
-        }
-        const mobileSessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
-        if (mobileSessionToken) {
-            if (runtimeField) authRuntimeState[runtimeField] = mobileSessionToken;
-            return mobileSessionToken;
-        }
-        return '';
+    const localToken = safeStorageGetItem(localStorageRef, storageKey);
+    if (localToken) {
+        if (runtimeField) authRuntimeState[runtimeField] = localToken;
+        return localToken;
     }
-
     const sessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
     if (sessionToken) {
         if (runtimeField) authRuntimeState[runtimeField] = sessionToken;
+        safeStorageSetItem(localStorageRef, storageKey, sessionToken);
         return sessionToken;
     }
-
-    const legacyToken = safeStorageGetItem(localStorageRef, storageKey);
-    if (legacyToken) {
-        if (runtimeField) authRuntimeState[runtimeField] = legacyToken;
-        if (safeStorageSetItem(sessionStorageRef, storageKey, legacyToken)) {
-            safeStorageRemoveItem(localStorageRef, storageKey);
-        }
-        return legacyToken;
-    }
-
     return '';
 };
 const hasStoredBearerTokens = () => {
@@ -1088,9 +1075,6 @@ const isCrossOriginApiContext = () => {
 const shouldForceBearerAuthTransport = () => {
     return isCrossOriginApiContext() || isLikelyCookieRestrictedMobileContext();
 };
-const shouldUseLegacyMobileBearerStorage = () => {
-    return isLikelyCookieRestrictedMobileContext();
-};
 const getPreferredAuthTransport = () => {
     if (hasStoredBearerTokens()) return 'bearer';
     if (shouldForceBearerAuthTransport()) return 'bearer';
@@ -1112,29 +1096,14 @@ const persistBearerAuthTokens = (payload) => {
     authRuntimeState.accessToken = accessToken;
     authRuntimeState.refreshToken = refreshToken;
 
+    // В оба хранилища: localStorage — общий для вкладок, sessionStorage — запас на
+    // случай, когда localStorage закрыт или вычищен приватным режимом.
     const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
     const localStorageRef = safeGetBrowserStorage('localStorage');
-
-    if (shouldUseLegacyMobileBearerStorage()) {
-        // Store tokens in localStorage (persistent across reloads) AND sessionStorage
-        // (same-session fallback when localStorage is blocked or cleared by ITP/private mode).
-        safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-        safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-        safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        setStoredAuthTransport('bearer');
-        return true;
-    }
-
-    const accessPersistedToSession = safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-    const refreshPersistedToSession = safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-
-    if (accessPersistedToSession) safeStorageRemoveItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY);
-    else safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-
-    if (refreshPersistedToSession) safeStorageRemoveItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY);
-    else safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-
+    safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+    safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
     setStoredAuthTransport('bearer');
     return true;
 };
@@ -2720,19 +2689,16 @@ const readResponseJsonSafe = async (response) => {
 };
 
 // Токен прямо из хранилища, мимо копии в памяти. Порядок тот же, что у getStoredAuthToken.
-const readPersistedAuthToken = (storageKey) => {
-    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
-    const localStorageRef = safeGetBrowserStorage('localStorage');
-    const [first, second] = shouldUseLegacyMobileBearerStorage()
-        ? [localStorageRef, sessionStorageRef]
-        : [sessionStorageRef, localStorageRef];
-    return safeStorageGetItem(first, storageKey) || safeStorageGetItem(second, storageKey);
-};
+const readPersistedAuthToken = (storageKey) => (
+    safeStorageGetItem(safeGetBrowserStorage('localStorage'), storageKey)
+    || safeStorageGetItem(safeGetBrowserStorage('sessionStorage'), storageKey)
+);
 
-/* Токены могла повернуть не эта страница: iframe «Журнала оценок» делит с порталом
-   sessionStorage и обновляет сессию сам, а на телефоне localStorage общий у всех вкладок.
-   Копия в памяти (authRuntimeState) об этом не узнаёт, и через 90 секунд сервер её
-   refresh-токен отвергает. Если в хранилище уже лежит другой — берём его. */
+/* Токены могла повернуть не эта страница: другая вкладка на общем localStorage или
+   iframe «Журнала оценок», который обновляет сессию сам. Копия в памяти
+   (authRuntimeState) об этом узнаёт из события storage, но не всегда вовремя, а через
+   90 секунд сервер прежний refresh-токен отвергает. Если в хранилище лежит другой —
+   берём его. */
 const adoptTokensRotatedElsewhere = (sentRefreshToken) => {
     const accessToken = readPersistedAuthToken(ACCESS_TOKEN_STORAGE_KEY);
     const refreshToken = readPersistedAuthToken(REFRESH_TOKEN_STORAGE_KEY);
@@ -2798,12 +2764,23 @@ const requestAuthRefresh = async () => {
 
 // Одно обновление на вкладку — и для fetch, и для axios (почему — src/utils/authRefresh.js).
 const refreshAuthSession = createSharedAuthRefresh(async () => {
+    // Под замком: пока ждали своей очереди, другая вкладка могла уже обновить сессию —
+    // тогда идём с её токеном, а не со своим, который сервер вот-вот перестанет принимать.
+    adoptTokensRotatedElsewhere(getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY));
     const result = await requestAuthRefresh();
     if (result.status === 401 && adoptTokensRotatedElsewhere(result.sentRefreshToken)) {
         return requestAuthRefresh();
     }
     return result;
-});
+}, { lockName: 'otp-auth-refresh' });
+
+if (typeof window !== 'undefined' && !window.__otpAuthStorageWatcherInstalled) {
+    window.__otpAuthStorageWatcherInstalled = true;
+    watchAuthTokensFromOtherTabs([ACCESS_TOKEN_STORAGE_KEY, REFRESH_TOKEN_STORAGE_KEY], (key, value) => {
+        const field = resolveRuntimeTokenField(key);
+        if (field) authRuntimeState[field] = value;
+    });
+}
 
 const forceReloadAfterFailedAuthRefresh = () => {
     if (typeof window === 'undefined') return Promise.reject(new Error('Window is unavailable'));

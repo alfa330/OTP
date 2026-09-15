@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './styles.css';
 import FaIcon from '../components/common/FaIcon';
-import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody } from '../utils/authRefresh';
+import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody, watchAuthTokensFromOtherTabs } from '../utils/authRefresh';
 const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
@@ -285,10 +285,6 @@ const shouldForceBearerAuthTransport = () => {
     return isCrossOriginApiContext() || isLikelyCookieRestrictedMobileContext();
 };
 
-const shouldUseLegacyMobileBearerStorage = () => {
-    return isLikelyCookieRestrictedMobileContext();
-};
-
 const resolveRuntimeTokenField = (storageKey) => {
     if (storageKey === ACCESS_TOKEN_STORAGE_KEY) return 'accessToken';
     if (storageKey === REFRESH_TOKEN_STORAGE_KEY) return 'refreshToken';
@@ -340,36 +336,20 @@ const getStoredAuthToken = (storageKey) => {
     const runtimeToken = runtimeField ? String(authRuntimeState[runtimeField] || '').trim() : '';
     if (runtimeToken) return runtimeToken;
 
+    // Тот же порядок, что у портала (App.jsx, getStoredAuthToken): localStorage —
+    // основное хранилище, общее для вкладок; sessionStorage — запас.
     const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
     const localStorageRef = safeGetBrowserStorage('localStorage');
-
-    if (shouldUseLegacyMobileBearerStorage()) {
-        const mobileLocalToken = safeStorageGetItem(localStorageRef, storageKey);
-        if (mobileLocalToken) {
-            if (runtimeField) authRuntimeState[runtimeField] = mobileLocalToken;
-            return mobileLocalToken;
-        }
-        const mobileSessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
-        if (mobileSessionToken) {
-            if (runtimeField) authRuntimeState[runtimeField] = mobileSessionToken;
-            return mobileSessionToken;
-        }
-        return '';
+    const localToken = safeStorageGetItem(localStorageRef, storageKey);
+    if (localToken) {
+        if (runtimeField) authRuntimeState[runtimeField] = localToken;
+        return localToken;
     }
-
     const sessionToken = safeStorageGetItem(sessionStorageRef, storageKey);
     if (sessionToken) {
         if (runtimeField) authRuntimeState[runtimeField] = sessionToken;
+        safeStorageSetItem(localStorageRef, storageKey, sessionToken);
         return sessionToken;
-    }
-
-    const legacyToken = safeStorageGetItem(localStorageRef, storageKey);
-    if (legacyToken) {
-        if (runtimeField) authRuntimeState[runtimeField] = legacyToken;
-        if (safeStorageSetItem(sessionStorageRef, storageKey, legacyToken)) {
-            safeStorageRemoveItem(localStorageRef, storageKey);
-        }
-        return legacyToken;
     }
     return '';
 };
@@ -424,22 +404,10 @@ const persistBearerAuthTokens = (payload) => {
 
     const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
     const localStorageRef = safeGetBrowserStorage('localStorage');
-
-    if (shouldUseLegacyMobileBearerStorage()) {
-        safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-        safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-        safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        setStoredAuthTransport('bearer');
-        return true;
-    }
-
-    const accessPersistedToSession = safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-    const refreshPersistedToSession = safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-    if (accessPersistedToSession) safeStorageRemoveItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY);
-    else safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-    if (refreshPersistedToSession) safeStorageRemoveItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY);
-    else safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+    safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
+    safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
     setStoredAuthTransport('bearer');
     return true;
 };
@@ -450,24 +418,22 @@ const hydrateAuthSnapshot = (auth = null) => {
     const transport = normalizeClientAuthTransport(auth.transport || auth.auth_transport);
     const accessToken = String(auth.accessToken || auth.access_token || '').trim();
     const refreshToken = String(auth.refreshToken || auth.refresh_token || '').trim();
-    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
-    const localStorageRef = safeGetBrowserStorage('localStorage');
 
-    if (accessToken) {
-        authRuntimeState.accessToken = accessToken;
-        safeStorageSetItem(sessionStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
-        if (shouldUseLegacyMobileBearerStorage()) {
-            safeStorageSetItem(localStorageRef, ACCESS_TOKEN_STORAGE_KEY, accessToken);
+    /* Хранилище у фрейма общее с порталом. Если токены там уже лежат, они не старее
+       присланных (портал сам берёт их оттуда), а перезапись снимком из памяти портала
+       могла бы затереть поколение, повёрнутое другой вкладкой. Пишем, только когда
+       хранилище пусто. */
+    const adopt = (storageKey, field, snapshotToken) => {
+        if (!snapshotToken) return;
+        const persisted = readPersistedAuthToken(storageKey);
+        authRuntimeState[field] = persisted || snapshotToken;
+        if (!persisted) {
+            safeStorageSetItem(safeGetBrowserStorage('localStorage'), storageKey, snapshotToken);
+            safeStorageSetItem(safeGetBrowserStorage('sessionStorage'), storageKey, snapshotToken);
         }
-    }
-
-    if (refreshToken) {
-        authRuntimeState.refreshToken = refreshToken;
-        safeStorageSetItem(sessionStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        if (shouldUseLegacyMobileBearerStorage()) {
-            safeStorageSetItem(localStorageRef, REFRESH_TOKEN_STORAGE_KEY, refreshToken);
-        }
-    }
+    };
+    adopt(ACCESS_TOKEN_STORAGE_KEY, 'accessToken', accessToken);
+    adopt(REFRESH_TOKEN_STORAGE_KEY, 'refreshToken', refreshToken);
 
     if (accessToken || refreshToken) {
         setStoredAuthTransport('bearer');
@@ -537,14 +503,10 @@ const persistRotatedBearerTokens = (response, data = null) => {
 };
 
 // Токен прямо из хранилища, мимо копии в памяти. Порядок тот же, что у getStoredAuthToken.
-const readPersistedAuthToken = (storageKey) => {
-    const sessionStorageRef = safeGetBrowserStorage('sessionStorage');
-    const localStorageRef = safeGetBrowserStorage('localStorage');
-    const [first, second] = shouldUseLegacyMobileBearerStorage()
-        ? [localStorageRef, sessionStorageRef]
-        : [sessionStorageRef, localStorageRef];
-    return safeStorageGetItem(first, storageKey) || safeStorageGetItem(second, storageKey);
-};
+const readPersistedAuthToken = (storageKey) => (
+    safeStorageGetItem(safeGetBrowserStorage('localStorage'), storageKey)
+    || safeStorageGetItem(safeGetBrowserStorage('sessionStorage'), storageKey)
+);
 
 /* Хранилище у фрейма общее с порталом, а токены в памяти — свои. Если сессию
    успел обновить портал, наш refresh-токен сервер уже отвергает: берём тот, что
@@ -621,11 +583,18 @@ const requestAuthRefresh = async () => {
    порталом хранилище и на обрыве сети, и на 502 во время деплоя — и следующая
    перезагрузка портала выкидывала человека на вход. */
 const refreshAuthSession = createSharedAuthRefresh(async () => {
+    // Под общим с порталом замком: пока ждали, сессию мог обновить портал или другая вкладка.
+    adoptTokensRotatedElsewhere(getStoredAuthToken(REFRESH_TOKEN_STORAGE_KEY));
     const result = await requestAuthRefresh();
     if (result.status === 401 && adoptTokensRotatedElsewhere(result.sentRefreshToken)) {
         return requestAuthRefresh();
     }
     return result;
+}, { lockName: 'otp-auth-refresh' });
+
+watchAuthTokensFromOtherTabs([ACCESS_TOKEN_STORAGE_KEY, REFRESH_TOKEN_STORAGE_KEY], (key, value) => {
+    const field = resolveRuntimeTokenField(key);
+    if (field) authRuntimeState[field] = value;
 });
 
 const authFetch = async (url, opts = {}, retry = true) => {

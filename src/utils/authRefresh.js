@@ -61,13 +61,25 @@ export const classifyAuthRefreshResult = (result) => {
     return AUTH_REFRESH_OUTCOME.UNAVAILABLE;
 };
 
+/* Замок на все вкладки и фреймы одного сайта (Web Locks API). Токены общие для
+   вкладок (localStorage), а сервер при каждом обновлении поворачивает refresh-токен
+   и держит в запасе ОДНО предыдущее поколение на 90 секунд. Две вкладки, ушедшие
+   обновляться одновременно с одним токеном, получают два разных поколения, и одна
+   из них через полчаса вылетает. Под замком вторая вкладка входит уже после первой,
+   видит в хранилище повёрнутый токен и обновляется им. Где замков нет — как раньше. */
+const withCrossTabLock = (name, task) => {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : null;
+    if (!name || !locks || typeof locks.request !== 'function') return task();
+    return locks.request(name, task);
+};
+
 /* Все, кто попросил обновление, пока оно в полёте, получают ОДИН и тот же итог
    { outcome, status }. Промис не отклоняется никогда: брошенное исключение — это сеть. */
-export const createSharedAuthRefresh = (performRefresh) => {
+export const createSharedAuthRefresh = (performRefresh, { lockName = null } = {}) => {
     let inFlight = null;
     return () => {
         if (inFlight) return inFlight;
-        const settled = new Promise((resolve) => resolve(performRefresh())).then(
+        const settled = new Promise((resolve) => resolve(withCrossTabLock(lockName, performRefresh))).then(
             (result) => ({ outcome: classifyAuthRefreshResult(result), status: Number(result?.status) || 0 }),
             () => ({ outcome: AUTH_REFRESH_OUTCOME.UNAVAILABLE, status: 0 })
         );
@@ -77,6 +89,25 @@ export const createSharedAuthRefresh = (performRefresh) => {
         });
         return settled;
     };
+};
+
+/* Токены повернула другая вкладка (или фрейм) — подхватить сразу, не дожидаясь 401.
+   Событие storage приходит во все контексты сайта, кроме того, что писал. Выход в
+   другой вкладке приходит как удаление ключа: тогда apply получает пустую строку,
+   и эта вкладка тоже уходит на вход при следующем запросе. */
+export const watchAuthTokensFromOtherTabs = (storageKeys, apply) => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {};
+    const keys = new Set(storageKeys);
+    const onStorage = (event) => {
+        if (!event || !keys.has(event.key)) return;
+        try {
+            apply(event.key, String(event.newValue || '').trim());
+        } catch (_error) {
+            // Сбой синхронизации не должен ломать обработку события.
+        }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
 };
 
 // Токен из заголовков fetch (объект или Headers) и axios (объект или AxiosHeaders).

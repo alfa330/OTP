@@ -9,6 +9,7 @@ import {
   createSharedAuthRefresh,
   isRecoverableAuthBody,
   readBearerToken,
+  watchAuthTokensFromOtherTabs,
 } from '../src/utils/authRefresh.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -227,6 +228,94 @@ test('общее обновление: одно на всех, пока в по�
 
   await refresh();
   assert.equal(calls, 2);
+});
+
+test('две вкладки обновляются под одним замком — вторая идёт уже с токеном первой', async () => {
+  // Web Locks в Node нет: замок изображает очередь на одно имя, как navigator.locks.
+  const queues = new Map();
+  const request = (name, task) => {
+    const prev = queues.get(name) || Promise.resolve();
+    const run = prev.then(() => task());
+    queues.set(name, run.catch(() => {}));
+    return run;
+  };
+  // В Node `navigator` — глобальный геттер, присваиванием его не подменить.
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { locks: { request } }, configurable: true });
+  try {
+    // Общее хранилище (localStorage) и сервер: принимает текущий токен и одно предыдущее поколение.
+    const storage = { refresh: 'R1' };
+    const server = { current: 'R1', previous: null, rotations: 0 };
+    const rotate = (sent) => {
+      if (sent !== server.current && sent !== server.previous) return { status: 401 };
+      server.rotations += 1;
+      server.previous = server.current;
+      server.current = `R${server.rotations + 1}`;
+      storage.refresh = server.current;
+      return { status: 200 };
+    };
+    const makeTab = () => {
+      const tab = { refresh: 'R1' };
+      tab.refreshAuthSession = createSharedAuthRefresh(async () => {
+        if (storage.refresh !== tab.refresh) tab.refresh = storage.refresh; // подхват под замком
+        await sleep(20);
+        const result = rotate(tab.refresh);
+        if (result.status === 200) tab.refresh = server.current;
+        return result;
+      }, { lockName: 'otp-auth-refresh' });
+      return tab;
+    };
+    const a = makeTab();
+    const b = makeTab();
+
+    const [ra, rb] = await Promise.all([a.refreshAuthSession(), b.refreshAuthSession()]);
+    assert.equal(ra.outcome, AUTH_REFRESH_OUTCOME.REFRESHED);
+    assert.equal(rb.outcome, AUTH_REFRESH_OUTCOME.REFRESHED);
+    assert.equal(server.rotations, 2, 'вторая вкладка обновилась токеном первой, а не тем же R1');
+    // Обе вкладки на актуальном поколении: 90 секунд запаса не понадобятся.
+    assert.equal(a.refresh, 'R2');
+    assert.equal(b.refresh, 'R3');
+    assert.equal(storage.refresh, 'R3');
+  } finally {
+    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test('без Web Locks обновление работает как раньше', async () => {
+  assert.equal(typeof globalThis.navigator?.locks, 'undefined');
+  const refresh = createSharedAuthRefresh(async () => ({ status: 200 }), { lockName: 'otp-auth-refresh' });
+  assert.deepEqual(await refresh(), { outcome: AUTH_REFRESH_OUTCOME.REFRESHED, status: 200 });
+});
+
+test('токены из другой вкладки подхватываются событием storage, выход там — тоже', async () => {
+  const listeners = new Map();
+  globalThis.window = {
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  try {
+    const applied = [];
+    const stop = watchAuthTokensFromOtherTabs(['otp_access_token', 'otp_refresh_token'], (key, value) => {
+      applied.push([key, value]);
+    });
+    const fire = (key, newValue) => listeners.get('storage')({ key, newValue });
+
+    fire('otp_access_token', 'A2');
+    fire('otp_refresh_token', ' R2 ');
+    fire('user', '{"id":1}');          // чужой ключ — мимо
+    fire('otp_access_token', null);    // выход в другой вкладке
+    assert.deepEqual(applied, [
+      ['otp_access_token', 'A2'],
+      ['otp_refresh_token', 'R2'],
+      ['otp_access_token', ''],
+    ]);
+
+    stop();
+    assert.equal(listeners.has('storage'), false);
+  } finally {
+    delete globalThis.window;
+  }
 });
 
 test('общее обновление не отклоняется, даже если процедура бросила синхронно', async () => {
