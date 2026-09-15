@@ -176,11 +176,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        createRequest: помощник её выполняет и гасит. Своим id, а не текстом —
        один и тот же запрос, заданный дважды подряд, обязан уйти дважды. */
     const [assistantAsk, setAssistantAsk] = useState(null);   // {id, text}
-    /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
     /* Переходы из колокола по «Вопросам операторов»: супервайзеру — карточка
        вопроса, оператору — разговор с ответом. Одноразовые, как assistantAsk. */
     const [questionFocus, setQuestionFocus] = useState(null);   // {id, nonce}
     const [assistantChat, setAssistantChat] = useState(null);   // {chatId, nonce}
+    /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
        двум причинам: счётчики на главной берут из них свои числа (иначе «29
        статей» и список за плиткой считались бы разными запросами и разошлись),
        и «Обновить» в шапке обязана обновлять и их тоже. */
@@ -398,7 +398,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // был бы вреден — он мигал бы false во время загрузки ping, а эффект
         // ниже выкидывал бы человека из открытого чата.
         { key: 'assistant', label: 'Помощник', icon: Sparkles, show: features.assistant },
-        /* Каталог и правка структуры — один пункт меню: «что лежит в разделе»
         /* «Вопросы» — вопросы операторов, на которые не ответил помощник
            (задача #321). Разбирает тот, кто вправе адресовать отделу новость:
            разбор ею и заканчивается, поэтому признак тот же, что у «Новостей»
@@ -406,6 +405,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
            неоткуда — отсюда и его тумблер. */
         { key: 'questions', label: 'Вопросы', icon: MessageCircleQuestion,
           show: features.assistant && canPublishNews },
+        /* Каталог и правка структуры — один пункт меню: «что лежит в разделе»
            и «как разделы устроены» это две половины одной работы, и раньше
            между ними приходилось прыгать по вкладкам. Внутри — переключатель.
            Показываем тому, у кого есть хоть одна из половин. */
@@ -517,7 +517,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         if (tabs.length && !tabs.some((t) => t.key === tab)) setTab('library');
     }, [tabs, tab]);
 
-    /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
     /* Пришли из колокола по «Вопросам операторов». Вкладку открываем, только
        когда она уже есть в наборе: права приезжают с ping ПОЗЖЕ первого
        рендера, и раньше времени эффект выше вернул бы человека на главную.
@@ -532,6 +531,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         onBellFocusConsumed?.();
     }, [bellFocus, tabs, onBellFocusConsumed]);
 
+    /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
        даже если в прошлый раз ушли, например, в «Структуру». */
     useEffect(() => {
         if (initialArticleSlug) setTab('library');
@@ -928,9 +928,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             spaceId={activeSpace?.id || null}
                             askRequest={assistantAsk}
                             onAskRequestConsumed={() => setAssistantAsk(null)}
-                            onOpenArticle={(slug, highlight) => {
                             openChatRequest={assistantChat}
                             onOpenChatRequestConsumed={() => setAssistantChat(null)}
+                            onOpenArticle={(slug, highlight) => {
                                 setTab('library');
                                 setSearchTarget({ slug, highlight, from: returnDoor('assistant') });
                             }}
@@ -938,7 +938,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </Suspense>
                 )}
 
-                {tab === 'catalog' && (
                 {tab === 'questions' && (
                     <Suspense fallback={(
                         <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
@@ -960,6 +959,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </Suspense>
                 )}
 
+                {tab === 'catalog' && (
                     <div className="space-y-3">
                         {/* Оба переключателя в одной строке: половина вкладки
                             слева, корзина справа. Друг под другом два одинаковых
