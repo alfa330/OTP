@@ -908,5 +908,89 @@ class NewsPhotoTests(unittest.TestCase):
         self.assertIn("photos: photos.filter((photo) => photo.id)", tab)
 
 
+class NewsFormQuizTests(unittest.TestCase):
+    """Тест в форме новости: «Добавить вопросы» или «Составить ИИ» (15.09.2026)."""
+
+    GOOD = ('ТЕСТ:\n1. Сколько стоит аренда в сутки?\n- 3000 ₸\n+ 5000 ₸\n- 7000 ₸\n'
+            '2. Где оформляется аренда?\n+ В офисе\n- В приложении\n- По телефону')
+    BODY = ('<p>Аренда — <strong>5000 ₸</strong> в сутки.</p>'
+            '<ul><li><p>Оформляется в офисе.</p></li></ul>')
+
+    @staticmethod
+    def _generate(*replies):
+        calls = []
+
+        def generate(system, user, **kwargs):
+            calls.append((system, user))
+            return replies[min(len(calls), len(replies)) - 1], {'model': 'stub'}
+        return generate, calls
+
+    def test_news_text_keeps_sentences_whole_and_lists_once(self):
+        from wiki.ai import knowledge
+        self.assertEqual(knowledge.news_text(self.BODY),
+                         'Аренда — 5000 ₸ в сутки.\nОформляется в офисе.')
+
+    def test_quiz_is_drafted_from_the_news_text(self):
+        from wiki.ai import knowledge
+        generate, calls = self._generate(self.GOOD)
+        result = knowledge.draft_quiz(title='Аренда', body=self.BODY, generate_fn=generate)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('5000 ₸ в сутки', calls[0][1])
+        self.assertEqual([item['correct'] for item in result['quiz']], [1, 0])
+        self.assertEqual(result['warnings'], [])
+
+    def test_reply_without_the_marker_is_still_a_quiz(self):
+        from wiki.ai import knowledge
+        generate, _calls = self._generate(self.GOOD.replace('ТЕСТ:\n', ''))
+        self.assertEqual(len(knowledge.draft_quiz(title='', body=self.BODY,
+                                                  generate_fn=generate)['quiz']), 2)
+
+    def test_broken_reply_is_retried_once_then_handed_over(self):
+        from wiki.ai import knowledge
+        generate, calls = self._generate('Не могу составить тест.')
+        result = knowledge.draft_quiz(title='', body=self.BODY, generate_fn=generate)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('Предыдущий ответ не принят', calls[1][1])
+        self.assertTrue(result['warnings'])
+
+    def test_invented_number_in_the_right_answer_is_flagged(self):
+        from wiki.ai import knowledge
+        generate, _calls = self._generate(self.GOOD.replace('+ 5000 ₸', '+ 9000 ₸'))
+        result = knowledge.draft_quiz(title='', body=self.BODY, generate_fn=generate)
+        self.assertTrue(any('9000' in warning for warning in result['warnings']), result)
+
+    def test_create_checks_the_quiz_before_writing_and_attaches_it_before_publishing(self):
+        routes = _read('news', 'routes.py')
+        create = routes[routes.index('def news_post_create('):routes.index('def news_post_update(')]
+        self.assertLess(create.index('_quiz_from_request('), create.index('queries.create_post('))
+        self.assertLess(create.index('queries.set_quiz('), create.index('queries.publish_post('))
+        self.assertIn('or bool(quiz)', create)
+
+    def test_quiz_of_a_published_news_is_locked(self):
+        routes = _read('news', 'routes.py')
+        update = routes[routes.index('def news_post_update('):routes.index('def news_post_publish(')]
+        self.assertIn('NEWS_QUIZ_LOCKED', update)
+        self.assertLess(update.index('NEWS_QUIZ_LOCKED'), update.index('queries.update_post('))
+
+    def test_ai_draft_does_not_hold_a_pool_slot(self):
+        routes = _read('news', 'routes.py')
+        self.assertIn("@news_route('/quiz/draft', methods=('POST',), publisher=True, "
+                      "defer_cursor=True)", routes)
+        body = routes[routes.index('def news_quiz_draft('):]
+        body = body[:body.index('@news_route(')]
+        self.assertIn('ProviderError', body)
+        self.assertNotIn('_get_cursor', body)
+
+    def test_form_offers_manual_and_ai_quiz_with_one_shared_editor(self):
+        form = _read('src', 'components', 'wiki', 'WikiNews.jsx')
+        questions = _read('src', 'components', 'wiki', 'WikiQuestions.jsx')
+        for text in ('Составить ИИ', 'Добавить вопросы', '/api/news/quiz/draft',
+                     '...(quizLocked ? {} : {'):
+            self.assertIn(text, form)
+        for source in (form, questions):
+            self.assertIn("import NewsQuizEditor from '../news/NewsQuizEditor'", source)
+        self.assertNotIn('function QuizEditor', questions)
+
+
 if __name__ == '__main__':
     unittest.main()

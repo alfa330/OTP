@@ -7,14 +7,16 @@ import Link from '@tiptap/extension-link';
 import Highlight from '@tiptap/extension-highlight';
 import {
     Bold, Check, Image as ImageIcon, Italic, Link2, List, ListOrdered, Loader2,
-    Megaphone, Plus, Underline as UnderlineIcon, Users, X,
+    Megaphone, Plus, Sparkles, Underline as UnderlineIcon, Users, X,
 } from 'lucide-react';
 import {
-    iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
+    iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
     IosBadge, IosHint, IosMenu, IosModal, IosSegmented, IosToggle,
 } from '../ui/ios';
 import { publishedLabel, roleTitle } from '../news/newsShared';
 import NewsGallery from '../news/NewsGallery';
+import NewsQuizEditor from '../news/NewsQuizEditor';
+import { quizForForm, quizProblem } from './questionQuiz';
 /* Клиентский конвейер берём готовым у «Посылок»: модуль ничего не импортирует
    и уже решает три вещи, которые пришлось бы решать заново и хуже — поворот из
    EXIF (иначе половина снимков с телефона ляжет боком), сторож зависшего
@@ -233,6 +235,16 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
     const [photos, setPhotos] = useState([]);
     const [photoError, setPhotoError] = useState('');
     const [preview, setPreview] = useState(false);
+    /* Тест в окне новости: пустой список — теста нет. Составляют руками или
+       кнопкой «Составить ИИ» по заголовку и тексту; правила те же, что у сервера
+       (questionQuiz.js ↔ news/access.py: normalize_quiz). У опубликованной
+       новости тест не меняется: часть отдела уже ответила на эти вопросы, и
+       подменённый тест сделал бы журнал «Кто прочитал» журналом другой новости. */
+    const [quiz, setQuiz] = useState([]);
+    const [quizBusy, setQuizBusy] = useState(false);
+    const [quizNotes, setQuizNotes] = useState([]);
+    // По published_at, как на сервере: снятая с показа новость ответы уже собрала.
+    const quizLocked = !!post?.published_at;
     // Что отдали в URL.createObjectURL — освобождаем при закрытии формы, иначе
     // байты кадров висят в памяти вкладки до перезагрузки страницы.
     const localUrls = useRef([]);
@@ -271,12 +283,44 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         setError('');
         setPhotoError('');
         setPreview(false);
+        setQuiz(post?.quiz?.length ? quizForForm(post.quiz) : []);
+        setQuizNotes([]);
+        setQuizBusy(false);
         // Уже прикреплённые кадры приезжают с карточкой готовыми адресами.
         setPhotos((post?.photos || []).map((photo) => ({
             key: `id:${photo.id}`, id: photo.id, url: photo.url,
         })));
         editor?.commands.setContent(post?.body || '');
     }, [open, post, access, editor]);
+
+    // Новость с тестом всегда обязательна: у необязательной крестик подтверждал
+    // бы прочтение без единого ответа (сервер: NEWS_QUIZ_MANDATORY).
+    useEffect(() => {
+        if (quiz.length) setMandatory(true);
+    }, [quiz.length]);
+
+    /* «Составить ИИ» — по тому, что уже написано в форме. Ответ модели ложится
+       в тот же редактор: проверить и поправить его человек обязан сам, выпускает
+       тест кнопка «Опубликовать», а не модель. */
+    const draftQuiz = async () => {
+        if (quizBusy) return;
+        if (!editor?.getText().trim()) {
+            setError('Сначала напишите текст новости — тест составляется по нему');
+            return;
+        }
+        setQuizBusy(true);
+        setError('');
+        try {
+            const { data } = await axios.post(`${apiBaseUrl}/api/news/quiz/draft`,
+                                              { title, body: editor.getHTML() }, { headers });
+            setQuiz(quizForForm(data?.quiz));
+            setQuizNotes(data?.warnings || []);
+        } catch (e) {
+            setError(errText(e, 'ИИ не составил тест — добавьте вопросы вручную'));
+        } finally {
+            setQuizBusy(false);
+        }
+    };
 
     // Закрыли форму — отпускаем локальные адреса кадров.
     useEffect(() => {
@@ -386,11 +430,19 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
         // Пустой абзац TipTap отдаёт как <p></p> — для проверки «текст есть»
         // это ничем не отличается от пустого поля.
         if (!editor?.getText().trim()) { setError('Напишите текст новости'); return; }
+        if (quizBusy) { setError('Дождитесь, пока ИИ составит тест'); return; }
+        const quizIssue = quiz.length && !quizLocked ? quizProblem(quiz) : null;
+        if (quizIssue) { setError(quizIssue); return; }
         setError('');
         onSave({
             title: text,
             body,
-            is_mandatory: mandatory,
+            is_mandatory: mandatory || quiz.length > 0,
+            // Тест опубликованной новости не отправляется вовсе: сервер его не
+            // меняет (NEWS_QUIZ_LOCKED), а пустой список читался бы как «убрать».
+            ...(quizLocked ? {} : {
+                quiz: quiz.map(({ prompt, options, correct }) => ({ prompt, options, correct })),
+            }),
             confirm_delay_seconds: Number(delay) || 0,
             expires_at: expires || null,
             audience: audience.map((rule) => ({
@@ -604,6 +656,73 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                     )}
                 </div>
 
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                    <span className={`${iosGroupLabel} flex items-center gap-1.5`}>
+                        Тест
+                        <IosHint
+                            label="Что даёт тест"
+                            text="Сотрудник закроет окно новости, только ответив на вопросы верно: ошибка подсвечивается у вопроса, правильный ответ не подсказывается. Новость с тестом всегда обязательна. В тесте 2–3 вопроса."
+                        />
+                    </span>
+                    {quiz.length > 0 && !quizLocked && (
+                        <span className="flex flex-wrap items-center gap-1">
+                            <button type="button" onClick={draftQuiz} disabled={quizBusy}
+                                    className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
+                                {quizBusy
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                                    : <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />}
+                                {quizBusy ? 'Составляем…' : 'Составить заново'}
+                            </button>
+                            <button type="button" disabled={quizBusy}
+                                    onClick={() => { setQuiz([]); setQuizNotes([]); }}
+                                    className={`${iosBtnGhost} !py-1 text-[12.5px]`}>
+                                Убрать тест
+                            </button>
+                        </span>
+                    )}
+                </div>
+                <div className={`${iosCard} p-3`}>
+                    {quiz.length === 0 ? (
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-[12.5px] text-slate-500">
+                                {quizLocked
+                                    ? 'Теста нет — к опубликованной новости его не добавить'
+                                    : 'Без теста сотрудник подтверждает прочтение кнопкой'}
+                            </p>
+                            {!quizLocked && (
+                                <span className="flex flex-wrap gap-2">
+                                    <button type="button" className={iosBtnSecondary} disabled={quizBusy}
+                                            onClick={() => setQuiz(quizForForm([]))}>
+                                        <Plus className="mr-1 inline h-4 w-4" aria-hidden="true" />
+                                        Добавить вопросы
+                                    </button>
+                                    <button type="button" className={iosBtnSecondary} disabled={quizBusy}
+                                            onClick={draftQuiz}>
+                                        {quizBusy
+                                            ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" aria-hidden="true" />
+                                            : <Sparkles className="mr-1 inline h-4 w-4" aria-hidden="true" />}
+                                        {quizBusy ? 'Составляем…' : 'Составить ИИ'}
+                                    </button>
+                                </span>
+                            )}
+                        </div>
+                    ) : (
+                        <>
+                            {quizLocked && (
+                                <p className="mb-2 text-[12px] text-slate-500">
+                                    Тест опубликованной новости не меняется: часть отдела уже ответила
+                                </p>
+                            )}
+                            <NewsQuizEditor quiz={quiz} onChange={setQuiz} disabled={quizBusy || quizLocked} />
+                            {quizNotes.length > 0 && (
+                                <ul className="mt-2 space-y-1 rounded-xl bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-900 ring-1 ring-amber-200/70">
+                                    {quizNotes.map((note) => <li key={note}>{note}</li>)}
+                                </ul>
+                            )}
+                        </>
+                    )}
+                </div>
+
                 <label className={`${iosGroupLabel} mt-4`}>Кому</label>
                 <div className={`${iosCard} p-3`}>
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -664,12 +783,12 @@ function NewsForm({ open, post, access, onClose, onSave, saving, apiBaseUrl, hea
                                 />
                             </p>
                         </div>
-                        {/* У новости с тестом («Вопросы операторов») обязательность
+                        {/* У новости с тестом обязательность
                             не снимается: у необязательной крестик подтверждал бы
                             прочтение без единого ответа. Сервер держит то же
                             правило (NEWS_QUIZ_MANDATORY). */}
                         <IosToggle checked={mandatory} onChange={setMandatory}
-                                   disabled={(post?.quiz_count || post?.quiz?.length || 0) > 0} />
+                                   disabled={quiz.length > 0 || (post?.quiz_count || post?.quiz?.length || 0) > 0} />
                     </div>
                     {/* Задержка нужна только обязательной: у необязательной
                         кнопки «Прочитал» нет вовсе, и поле рядом с ней было бы

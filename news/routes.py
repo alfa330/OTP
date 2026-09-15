@@ -290,6 +290,25 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         post['quiz'] = queries.post_quiz(cursor, post['id']) if _quiz_ready(cursor) else []
         return post
 
+    def _quiz_from_request(cursor, payload):
+        """(тест, отказ) из тела запроса. Нет ключа или пустой список — теста нет.
+
+        Проверка — та же normalize_quiz, что у «Вопросов операторов»: форма
+        новости, ИИ и разбор вопроса дают тест одного вида, а окно сотрудника
+        сверяет ответы по одной таблице.
+        """
+        raw = payload.get('quiz')
+        if not raw:
+            return [], None
+        if not _quiz_ready(cursor):
+            return None, (jsonify({"error": "Тесты к новостям ещё разворачиваются — "
+                                            "сохраните без теста или загляните позже",
+                                   "code": "NEWS_QUIZ_NOT_READY"}), 503)
+        quiz, problem = news_access.normalize_quiz(raw)
+        if problem:
+            return None, (jsonify({"error": problem, "code": "NEWS_QUIZ_INVALID"}), 400)
+        return quiz, None
+
     def _set_photos_refusal(cursor, ctx, post_id, payload):
         """Привязка кадров, если форма их прислала. Строка отказа или None.
 
@@ -447,11 +466,18 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         refusal = _audience_refusal(cursor, ctx, rules)
         if refusal:
             return jsonify({"error": refusal, "code": "NEWS_AUDIENCE"}), 403
+        # Тест проверяется ДО первой записи: отказ после create_post оставил бы
+        # в базе новость без теста, который автор считал приложенным.
+        quiz, quiz_refusal = _quiz_from_request(cursor, payload)
+        if quiz_refusal:
+            return quiz_refusal
 
         post_id = queries.create_post(
             cursor, title=title, body=body, author_id=ctx['user_id'],
             author_department_id=ctx['department_id'],
-            is_mandatory=bool(payload.get('is_mandatory', True)),
+            # С тестом — всегда обязательна: у необязательной крестик
+            # подтверждал бы прочтение без единого ответа.
+            is_mandatory=bool(payload.get('is_mandatory', True)) or bool(quiz),
             confirm_delay_seconds=news_access.normalize_delay(
                 payload.get('confirm_delay_seconds', DEFAULT_CONFIRM_DELAY_SECONDS)),
             expires_at=_timestamp_or_none(payload.get('expires_at')),
@@ -465,6 +491,10 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
         if photo_refusal:
             return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
+        # Тест — тоже ДО публикации и в той же транзакции, по той же причине, что
+        # кадры: окно, всплывшее у отдела без вопросов, второй раз не всплывёт.
+        if quiz:
+            queries.set_quiz(cursor, post_id=post_id, quiz=quiz)
         if payload.get('publish'):
             queries.publish_post(cursor, post_id=post_id,
                                  audience_max_role_level=ctx['ceiling'])
@@ -505,6 +535,23 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # «подтвердил прочтение» у всех, кто уже успел её закрыть, и журнал
         # соврал бы ровно там, где к нему обращаются.
         wants_mandatory = bool(payload.get('is_mandatory', post['is_mandatory']))
+        # Тест ВЫПУСКАВШЕЙСЯ новости не меняется: часть отдела уже ответила на эти
+        # вопросы, и подменённый тест сделал бы журнал «Кто прочитал» журналом
+        # другой новости. По published_at, а не по статусу — как у удаления: снятая
+        # с показа новость свои ответы тоже уже собрала. Нужен другой тест —
+        # публикуется новая новость.
+        quiz = None
+        if 'quiz' in payload:
+            if post['published_at']:
+                return jsonify({
+                    "error": "Тест опубликованной новости не меняется — опубликуйте новую новость",
+                    "code": "NEWS_QUIZ_LOCKED",
+                }), 409
+            quiz, quiz_refusal = _quiz_from_request(cursor, payload)
+            if quiz_refusal:
+                return quiz_refusal
+            if quiz:
+                wants_mandatory = True
         if post['status'] == 'published' and wants_mandatory != bool(post['is_mandatory']):
             return jsonify({
                 "error": "У опубликованной новости обязательность не меняется — "
@@ -513,8 +560,10 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
             }), 409
         # С тестом — тем более: у необязательной новости крестик и есть
         # подтверждение, без единого ответа.
-        if (not wants_mandatory and _quiz_ready(cursor)
-                and queries.quiz_answer_key(cursor, post_id)):
+        # Тест, который останется у новости: присланный в этой правке или прежний.
+        keeps_quiz = (bool(quiz) if quiz is not None
+                      else bool(_quiz_ready(cursor) and queries.quiz_answer_key(cursor, post_id)))
+        if not wants_mandatory and keeps_quiz:
             return jsonify({
                 "error": "У новости с тестом обязательность не снимается",
                 "code": "NEWS_QUIZ_MANDATORY",
@@ -530,6 +579,9 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if 'audience' in payload:
             queries.set_audience(cursor, post_id=post_id, rules=rules,
                                  audience_max_role_level=ctx['ceiling'])
+        # Пустой список у черновика — «убрать тест».
+        if quiz is not None and _quiz_ready(cursor):
+            queries.set_quiz(cursor, post_id=post_id, quiz=quiz)
         photo_refusal = _set_photos_refusal(cursor, ctx, post_id, payload)
         if photo_refusal:
             return jsonify({"error": photo_refusal, "code": "NEWS_PHOTO_LIMIT"}), 400
@@ -588,6 +640,36 @@ def build_news_blueprint(*, db, require_api_key, build_cors_preflight_response,
     # мобильном её SameSite понижается до Lax и кросс-сайтовый запрос её не
     # приложит. Браузер идёт прямо в GCS по подписи; подробности и честная
     # оговорка про пересылку адреса — в шапке news/photos.py.
+    @news_route('/quiz/draft', methods=('POST',), publisher=True, defer_cursor=True)
+    def news_quiz_draft(ctx):
+        """«Составить ИИ» в форме новости: тест по заголовку и тексту. Ничего не пишет.
+
+        Курсор отдан в пул ДО вызова модели (defer_cursor): черновик теста — это
+        десятки секунд чужой сети, а слотов в пуле сорок на весь портал. Модель и
+        разбор — те же, что пишут новость с тестом во «Вопросах операторов»
+        (wiki/ai/knowledge.py). Импорт ленивый: модуль ИИ вики тянет за собой
+        поиск и векторы, и поднимать его ради каждого /pending незачем — а
+        заодно так нет кольца импорта (knowledge сам читает news.access).
+        """
+        from wiki.ai import knowledge as ai_knowledge
+        from wiki.ai import providers as ai_providers
+
+        payload = request.get_json(silent=True) or {}
+        title = news_access.normalize_title(payload.get('title'))
+        # Потолок на разбор HTML: в модель всё равно уходит QUIZ_MAX_SOURCE знаков.
+        body = str(payload.get('body') or '')[:200000]
+        if not ai_knowledge.news_text(body).strip():
+            return jsonify({"error": "Сначала напишите текст новости — тест составляется по нему",
+                            "code": "NEWS_QUIZ_NO_TEXT"}), 400
+        try:
+            result = ai_knowledge.draft_quiz(title=title, body=body,
+                                             generate_fn=ai_providers.generate_article)
+        except ai_providers.ProviderError as exc:
+            return jsonify({"error": "ИИ недоступен — добавьте вопросы вручную",
+                            "detail": str(exc)[:300], "code": "NEWS_AI_UNAVAILABLE"}), 503
+        return jsonify({'quiz': result['quiz'], 'warnings': result['warnings'],
+                        'model': (result.get('meta') or {}).get('model')})
+
     @news_route('/photos', methods=('POST',), publisher=True, defer_cursor=True)
     def news_photo_add(ctx):
         """Приложить фотографию. Один файл на запрос.

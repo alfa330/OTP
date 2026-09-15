@@ -27,6 +27,8 @@ news.access.normalize_quiz — той же, через которую прохо
 import html
 import re
 
+from bs4 import BeautifulSoup
+
 from news import access as news_access
 from news.schema import QUIZ_MAX_QUESTIONS, QUIZ_MAX_OPTIONS
 
@@ -371,6 +373,105 @@ def draft_news(*, question, answer, article_title, changes, generate_fn):
                         % ', '.join(invented[:8]))
     return {'title': parsed['title'], 'body': parsed['body'], 'quiz': quiz,
             'warnings': warnings, 'meta': meta}
+
+
+# ── Тест к готовой новости (кнопка «Составить ИИ» в форме «Новостей») ──────────
+#
+# Тот же конверт «ТЕСТ:», что у новости из «Вопросов операторов», — и тот же
+# разбор: две копии правил «+ — верный, два + — не угадываем» разошлись бы молча.
+
+QUIZ_SYSTEM_PROMPT = """Ты составляешь короткий тест к объявлению для операторов колл-центра таксопарка: оператор закроет окно новости, только ответив верно, поэтому тест проверяет, что главное из объявления понято.
+
+ФОРМАТ ОТВЕТА — только тест, без вступления и пояснений:
+ТЕСТ:
+1. Вопрос по объявлению?
+- неверный вариант
++ верный вариант
+- неверный вариант
+2. Следующий вопрос?
+…
+
+ПРАВИЛА
+1. 2 или 3 вопроса — по числу главных фактов объявления; в каждом 3 варианта ответа, ровно один верный — он отмечен «+», остальные «-».
+2. Вопросы только о том, что сказано в объявлении, а не об общих знаниях.
+3. Числа, суммы, сроки, адреса и названия — дословно из объявления. Ничего не додумывай.
+4. Неверные варианты правдоподобны, но однозначно неверны по объявлению.
+5. Язык — русский. Никакой разметки."""
+
+# Потолок текста новости в запросе. Объявление на экран — не статья; всё, что
+# длиннее, модель всё равно не превратит в три вопроса лучше.
+QUIZ_MAX_SOURCE = 6000
+
+_TEXT_BLOCKS = ('p', 'li', 'h1', 'h2', 'h3', 'blockquote')
+
+
+def news_text(body):
+    """Текст новости из редактора (HTML TipTap) → простой текст по абзацам.
+
+    Абзацы — по блокам, а не по узлам текста: get_text('\n') разорвал бы строкой
+    фразу с выделенным «**5000 ₸**» посередине. Блок, внутри которого есть другой
+    блок (пункт списка с абзацем), пропускается — иначе текст пришёл бы дважды.
+    """
+    soup = BeautifulSoup(str(body or ''), 'html.parser')
+    for line_break in soup.find_all('br'):
+        line_break.replace_with('\n')
+    blocks = [element.get_text(' ', strip=True) for element in soup.find_all(_TEXT_BLOCKS)
+              if not element.find(_TEXT_BLOCKS)]
+    text = '\n'.join(block for block in blocks if block)
+    return text or soup.get_text(' ', strip=True)
+
+
+def build_quiz_prompt(*, title, body):
+    parts = []
+    if _one_line(title):
+        parts.append('ТЕМА ОБЪЯВЛЕНИЯ: %s' % _one_line(title))
+    parts.append('ОБЪЯВЛЕНИЕ:\n%s' % news_text(body)[:QUIZ_MAX_SOURCE])
+    return '\n\n'.join(parts)
+
+
+def parse_quiz_reply(text):
+    """Ответ модели → вопросы теста. Без «ТЕСТ:» тестом считается весь ответ:
+    модель, которой велели отвечать одним тестом, метку нередко опускает."""
+    raw = str(text or '')
+    if not _TEST_RE.search(_FENCE_RE.sub('', raw).replace('**', '')):
+        raw = 'ТЕСТ:\n' + raw
+    return parse_news_reply(raw)['quiz']
+
+
+def draft_quiz(*, title, body, generate_fn):
+    """Тест к написанной новости: {quiz, warnings, meta}. Ничего не записывается.
+
+    Одна повторная попытка с названной причиной, как у draft_news; дальше —
+    ручная правка на экране: недособранный тест лучше круга запросов.
+    """
+    prompt = build_quiz_prompt(title=title, body=body)
+    text, meta = generate_fn(QUIZ_SYSTEM_PROMPT, prompt, max_tokens=NEWS_MAX_TOKENS)
+    raw_quiz = parse_quiz_reply(text)
+    quiz, problem = news_access.normalize_quiz(raw_quiz)
+    if problem:
+        text, meta = generate_fn(
+            QUIZ_SYSTEM_PROMPT,
+            prompt + '\n\nПредыдущий ответ не принят: %s. Ответь строго в формате теста.'
+            % problem,
+            max_tokens=NEWS_MAX_TOKENS)
+        raw_quiz = parse_quiz_reply(text)
+        quiz, problem = news_access.normalize_quiz(raw_quiz)
+
+    warnings = []
+    if problem:
+        warnings.append('ИИ не собрал тест по формату (%s) — доведите его вручную' % problem)
+        quiz = salvage_quiz(raw_quiz)
+    # Сверяются формулировки и ВЕРНЫЕ варианты — по той же причине, что в
+    # draft_news: число в неверном варианте и есть неверный вариант.
+    shown = '\n'.join('%s %s' % (item['prompt'],
+                                 item['options'][item['correct']]
+                                 if isinstance(item.get('correct'), int) else '')
+                      for item in quiz)
+    invented = revise.invented_numbers(shown, title, news_text(body))
+    if invented:
+        warnings.append('Числа, которых нет в тексте новости: %s — проверьте их'
+                        % ', '.join(invented[:8]))
+    return {'quiz': quiz, 'warnings': warnings, 'meta': meta}
 
 
 def news_body_html(text):
