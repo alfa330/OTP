@@ -13,6 +13,7 @@ import {
     wallboardStaleNotice,
 } from './szovWallboardShared';
 import { TEZ_WALLBOARD_DIRECTIONS, tezWallboardDirection } from './tezWallboardShared';
+import { OP_WALLBOARD_DIRECTIONS, opWallboardDirection } from './opWallboardShared';
 
 /*
  * Виджет «Табло СЗоВ» — то же табло отдельным окном поверх других окон (картинка в картинке)
@@ -34,14 +35,25 @@ import { TEZ_WALLBOARD_DIRECTIONS, tezWallboardDirection } from './tezWallboardS
 const PIP_WIDTH = 460;
 
 /*
- * Окно одно на приложение, а табло у нас два — СЗоВ и Тез КЦ, — поэтому направление виджета
- * ищется в обоих каталогах. Реестры описаны одинаково (подпись, источник, хук опроса, каталог
+ * Окно одно на приложение, а табло у нас три — СЗоВ, Тез КЦ и ОП, — поэтому направление виджета
+ * ищется во всех каталогах. Реестры описаны одинаково (подпись, источник, хук опроса, каталог
  * показателей и набор по умолчанию), и виджету всё равно, чьё направление он показывает: он
  * читает только эти поля. Отсюда и одно состояние на приложение — открытие виджета Тез
  * закрывает виджет СЗоВ, потому что окно физически одно.
+ *
+ * Необязательные поля реестра, которыми пользуется только ОП: `readMetric` (показатели читают
+ * снимок целиком), `clockLabel` (часы не в поле снимка, а в bridge.live_at) и
+ * `freshnessNotice` (предупреждение «мост замолчал» — у Oktell и Binotel такого нет).
  */
 const widgetDirection = (key) => (
-    TEZ_WALLBOARD_DIRECTIONS[key] ? tezWallboardDirection(key) : wallboardDirection(key)
+    TEZ_WALLBOARD_DIRECTIONS[key] ? tezWallboardDirection(key)
+        : OP_WALLBOARD_DIRECTIONS[key] ? opWallboardDirection(key)
+            : wallboardDirection(key)
+);
+
+// Подсказка к плитке: у ОП она бывает функцией от снимка (порог SL приходит с сервера).
+const metricHint = (metric, snapshot) => (
+    typeof metric.hint === 'function' ? metric.hint(snapshot) : (metric.hint || metric.label)
 );
 
 const TILE_MIN_WIDTH = 132;
@@ -132,12 +144,12 @@ const estimatePipHeight = (metricKeys, metricMap) => {
     return Math.round(clamp(height, 260, 760));
 };
 
-const MetricTile = ({ metric, snapshot, typography }) => {
-    const { value, secondary, tone } = readWallboardMetric(metric, snapshot);
+const MetricTile = ({ metric, snapshot, typography, read }) => {
+    const { value, secondary, tone } = read(metric, snapshot);
     return (
         <div
             className="flex min-w-0 flex-col items-center justify-center gap-1.5 overflow-hidden rounded-2xl bg-white px-2.5 py-3 text-center ring-1 ring-slate-900/5"
-            title={metric.hint || metric.label}
+            title={metricHint(metric, snapshot)}
         >
             {/* Подпись переносим, а не режем: «Сброс на прив…» на табло бесполезен. */}
             <div
@@ -163,8 +175,8 @@ const MetricTile = ({ metric, snapshot, typography }) => {
  * Список статусов. Причину показываем чипом ТОЛЬКО когда это не обычный перерыв: иначе тренинг
  * и тех.причина молча смешались бы с перерывом, а лишних чипов на экране не будет.
  */
-const MetricList = ({ metric, snapshot }) => {
-    const { items } = readWallboardMetric(metric, snapshot);
+const MetricList = ({ metric, snapshot, read }) => {
+    const { items } = read(metric, snapshot);
     const entries = items || [];
     return (
         <div className="rounded-2xl bg-white px-3 py-2.5 ring-1 ring-slate-900/5">
@@ -259,7 +271,7 @@ const SettingsPanel = ({ config, selected, onToggle, onReset, onDone }) => {
                                         type="button"
                                         role="switch"
                                         aria-checked={on}
-                                        title={metric.hint || metric.label}
+                                        title={metricHint(metric, null)}
                                         onClick={() => onToggle(metric.key)}
                                         className="flex w-full items-center gap-2.5 px-3 py-2 text-left transition hover:bg-slate-50"
                                     >
@@ -436,8 +448,12 @@ export default function SzovWallboardWidget({
 
     const resetMetrics = useCallback(() => persistMetrics([...config.defaultMetrics]), [persistMetrics, config]);
 
-    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, config.source),
-                                [snapshot, error, config]);
+    // Замершие данные: ошибка запроса или устаревший снимок с сервера — как в разделе; у ОП
+    // сверх того молчание моста, о котором снимок сообщает отдельно.
+    const staleNotice = useMemo(() => (
+        wallboardStaleNotice(snapshot, error, config.source)
+        || (snapshot && config.freshnessNotice ? config.freshnessNotice(snapshot) : null)
+    ), [snapshot, error, config]);
     const visibleMetrics = useMemo(
         () => metrics.map((key) => config.metricMap[key]).filter(Boolean),
         [metrics, config]
@@ -445,13 +461,16 @@ export default function SzovWallboardWidget({
 
     if (!pipContainer) return null;
 
+    const read = config.readMetric || readWallboardMetric;
     const tiles = visibleMetrics.filter((metric) => metric.kind !== 'list');
     const lists = visibleMetrics.filter((metric) => metric.kind === 'list');
     const columns = columnsFor(frameWidth, tiles.length);
     const typography = tileTypography(frameWidth, columns);
     const clock = snapshot?.[config.clockField];
-    const subtitle = staleNotice
-        || (clock ? `Данные ${config.source} на ${formatClock(clock)}` : config.hint);
+    const clockLine = config.clockLabel
+        ? config.clockLabel(snapshot)
+        : (clock ? `Данные ${config.source} на ${formatClock(clock)}` : null);
+    const subtitle = staleNotice || clockLine || config.hint;
 
     return createPortal(
         // Ровно высота окна, а не минимум: иначе при длинном наборе прокручивался бы весь
@@ -515,12 +534,13 @@ export default function SzovWallboardWidget({
                                         metric={metric}
                                         snapshot={snapshot}
                                         typography={typography}
+                                        read={read}
                                     />
                                 ))}
                             </div>
                         ) : null}
                         {lists.map((metric) => (
-                            <MetricList key={metric.key} metric={metric} snapshot={snapshot} />
+                            <MetricList key={metric.key} metric={metric} snapshot={snapshot} read={read} />
                         ))}
                     </div>
                 )}

@@ -3,15 +3,14 @@ import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
-import { formatClock, formatInt, wallboardStaleNotice } from './szovWallboardShared';
+import { formatInt, wallboardStaleNotice } from './szovWallboardShared';
 import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
-import { BroadcastControls } from './SzovWallboardView';
+import { BroadcastControls, WidgetButton } from './SzovWallboardView';
 import {
     OP_METRIC_MAP,
     formatCount,
-    formatRatio,
     formatSeconds,
-    opArTone,
+    opClockLabel,
     opFreshnessNotice,
     opMetricHint,
     opStatusChip,
@@ -21,10 +20,14 @@ import {
 
 /*
  * «Табло ОП» — отдел продаж на FreePBX. Раскладка та же, что у табло СЗоВ и Тез: ключевые
- * плитки «сейчас» и итоги дня сверху, разрезы по линиям и часам, поимённый список — чтобы
- * глазу не переучиваться при переходе между стенами. Экран рассчитан на стену: обновляется
- * сам, цветом помечено только то, что несёт смысл (AR вне коридора, SL ниже порога, статусы
- * людей), при отставании данных — янтарный чип, а не пустой экран.
+ * плитки «сейчас» и итоги дня сверху, разрез по часам, поимённый список — чтобы глазу не
+ * переучиваться при переходе между стенами. Экран рассчитан на стену: обновляется сам, цветом
+ * помечено только то, что несёт смысл (AR вне коридора, SL ниже порога, статусы людей), при
+ * отставании данных — янтарный чип, а не пустой экран.
+ *
+ * Разреза «по линиям» на экране нет (снят 16.09.2026 по решению владельца): очереди станции —
+ * это внутренние номера вида 3010, на стене они читались как шум. Снимок разрез по-прежнему
+ * несёт (`queues`) — его читает отбивка в Telegram.
  */
 
 const FULLSCREEN_Z = 150;
@@ -40,54 +43,6 @@ const MetricStatTile = ({ metricKey, snapshot, scale = 1 }) => {
     const metric = OP_METRIC_MAP[metricKey];
     const { value, secondary, tone } = readOpMetric(metric, snapshot);
     return <StatTile label={metric.label} value={value} secondary={secondary} tone={tone} scale={scale} />;
-};
-
-const toneText = { good: 'text-green-700', warn: 'text-amber-700', bad: 'text-rose-700', neutral: 'text-slate-800', info: 'text-blue-700' };
-
-/** Разрез по линиям (очередям станции): та же арифметика, что в итогах, на каждую строку. */
-const QueuesTable = ({ snapshot, scale = 1 }) => {
-    const rows = snapshot?.queues || [];
-    if (!rows.length) {
-        return <div className="text-[13px] text-slate-500">Сегодня входящих на линии ещё не было.</div>;
-    }
-    const cell = 'px-3 py-2 text-right tabular-nums';
-    return (
-        <div className="overflow-x-auto">
-            <table className="w-full text-left" style={{ fontSize: `${13 * scale}px` }}>
-                <thead className="text-slate-500">
-                    <tr>
-                        <th className="px-3 py-2">Линия</th>
-                        <th className={cell}>Входящих</th>
-                        <th className={cell}>Принято</th>
-                        <th className={cell}>Потеряно</th>
-                        <th className={cell}>AR</th>
-                        <th className={cell}>SL</th>
-                        <th className={cell}>Разговор</th>
-                        <th className={cell}>Ожидание</th>
-                        <th className={cell}>Исходящих</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows.map((row) => (
-                        <tr key={row.queue} className="border-t border-slate-100">
-                            <td className="px-3 py-2 font-medium text-slate-800">{row.queue}</td>
-                            <td className={cell}>{formatCount(row.arrived)}</td>
-                            <td className={cell}>{formatCount(row.answered)}</td>
-                            <td className={`${cell} ${row.missed ? 'text-amber-700' : ''}`}>{formatCount(row.missed)}</td>
-                            <td className={`${cell} font-semibold ${toneText[opArTone(row.ar, snapshot)]}`}>{formatRatio(row.ar)}</td>
-                            <td className={cell}>{formatRatio(row.sl)}</td>
-                            <td className={cell}>{formatSeconds(row.avg_talk_seconds)}</td>
-                            <td className={cell}>{formatSeconds(row.avg_wait_seconds)}</td>
-                            <td className={cell}>
-                                {formatCount(row.outgoing)}
-                                {row.outgoing ? <span className="text-slate-400"> → {formatInt(row.outgoing_answered)}</span> : null}
-                            </td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </div>
-    );
 };
 
 /*
@@ -214,14 +169,9 @@ function OpWallboardBody({ snapshot, scale = 1 }) {
                     </Grid>
                 </div>
             </Section>
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                <Section icon="fa-phone" title="По линиям">
-                    <QueuesTable snapshot={snapshot} scale={scale} />
-                </Section>
-                <Section icon="fa-clock" title="По часам" right={<HourlyLegend />}>
-                    <HourlyBars snapshot={snapshot} scale={scale} />
-                </Section>
-            </div>
+            <Section icon="fa-clock" title="По часам" right={<HourlyLegend />}>
+                <HourlyBars snapshot={snapshot} scale={scale} />
+            </Section>
             <Section icon="fa-users" title="Сотрудники" right={<span className="text-[12px] text-slate-500">статусы — iCORE Phone, счётчики — касания за день</span>}>
                 <OperatorsTable snapshot={snapshot} scale={scale} />
             </Section>
@@ -229,10 +179,7 @@ function OpWallboardBody({ snapshot, scale = 1 }) {
     );
 }
 
-const clockLabel = (snapshot) => {
-    const at = snapshot?.bridge?.live_at || snapshot?.captured_at;
-    return at ? `данные на ${formatClock(at)}` : null;
-};
+const clockLabel = opClockLabel;
 
 const BROADCAST_HINT = (
     <>
@@ -242,7 +189,9 @@ const BROADCAST_HINT = (
     </>
 );
 
-export default function OpWallboardView({ apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false }) {
+export default function OpWallboardView({
+    apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast = false, widgetOpen, onToggleWidget,
+}) {
     const { snapshot, error, loading, refresh } = useOpWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
 
@@ -282,6 +231,10 @@ export default function OpWallboardView({ apiBaseUrl, withAccessTokenHeader, sho
                     <FaIcon className={`fas fa-rotate ${loading ? 'animate-spin' : ''}`}></FaIcon>
                     Обновить
                 </button>
+                {/* Виджет — окно поверх других программ, как у СЗоВ: остаётся открытым после
+                    ухода из раздела, набор показателей выбирается в самом окне. */}
+                {onToggleWidget ? <WidgetButton direction="op" widgetOpen={widgetOpen}
+                                                onToggleWidget={onToggleWidget} /> : null}
                 <button type="button" className={iosBtnGhost} onClick={() => setFullscreen(true)} title="На весь экран — для вывода на стену">
                     <FaIcon className="fas fa-expand"></FaIcon>
                     На стену

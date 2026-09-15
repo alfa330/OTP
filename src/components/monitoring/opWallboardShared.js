@@ -1,6 +1,7 @@
 import {
     arTone,
     createSnapshotFeed,
+    formatClock,
     formatDuration,
     formatInt,
     formatPercent,
@@ -84,8 +85,11 @@ export const opStatusChip = (row) => {
 
 /*
  * Каталог показателей: единственное место, где сказано «как называется, откуда берётся,
- * каким цветом». Экран берёт отсюда подпись, значение и тон; виджет «поверх окон», когда
- * дойдёт до ОП, возьмёт тот же каталог.
+ * каким цветом». Экран берёт отсюда подпись, значение и тон; виджет «поверх окон» — тот же
+ * каталог через реестр направления ниже (OP_WALLBOARD_DIRECTIONS).
+ *
+ * `read` получает снимок целиком, а не пару (now, today), как у СЗоВ: у табло ОП итоги дня
+ * лежат в `totals`, и виджету об этом знать незачем — он читает через `readMetric` из реестра.
  */
 export const OP_METRICS = [
     {
@@ -99,8 +103,11 @@ export const OP_METRICS = [
         read: (s) => ({ value: formatCount(s.totals?.answered) }),
     },
     {
+        // Потерян — дошёл до линии, а до разговора с сотрудником не дошло: сброс в очереди,
+        // занято, нет ответа. Очередь станции сама «отвечает» звонок (в CDR он ANSWERED),
+        // поэтому в отчёте FreePBX такие звонки пропущенными не считаются — а здесь считаются.
         key: 'op_missed', group: 'day', label: 'Потеряно',
-        hint: 'Входящих без разговора',
+        hint: 'Дошли до линии, разговора с сотрудником не было',
         read: (s) => ({
             value: formatCount(s.totals?.missed),
             tone: (s.totals?.missed || 0) > 0 ? 'warn' : 'neutral',
@@ -194,3 +201,60 @@ export const opFreshnessNotice = (snapshot) => {
     }
     return null;
 };
+
+/** Отметка времени для шапки: по последнему живому приращению моста, а не по снимку. */
+export const opClockLabel = (snapshot) => {
+    const at = snapshot?.bridge?.live_at || snapshot?.captured_at;
+    return at ? `данные на ${formatClock(at)}` : null;
+};
+
+/*
+ * Реестр направления для виджета «поверх окон» — той же формы, что WALLBOARD_DIRECTIONS СЗоВ и
+ * TEZ_WALLBOARD_DIRECTIONS, и по той же причине свой, а не запись в чужом словаре: словарь СЗоВ
+ * напрямую питает переключатель направлений в его разделе, и «ОП» там был бы лишним пунктом.
+ *
+ * Три поля сверх общей формы — потому что источник другой:
+ *   - readMetric: показатели ОП читают снимок целиком (см. OP_METRICS), общий
+ *     readWallboardMetric отдал бы им `now` вместо снимка и прочерки во всех плитках;
+ *   - clockLabel: часы берутся из bridge.live_at, а не из поля вида `oktell_now`;
+ *   - freshnessNotice: «мост замолчал» — предупреждение этого табло, у снимка Oktell его нет.
+ */
+export const OP_METRIC_GROUPS = [
+    { key: 'now', title: 'Сейчас' },
+    { key: 'day', title: 'За день' },
+];
+
+// По умолчанию — то же, что крупными плитками на стене: кто на линии и сколько потеряли.
+export const DEFAULT_OP_WIDGET_METRICS = [
+    'op_online',
+    'op_talking',
+    'op_free',
+    'op_arrived',
+    'op_missed',
+    'op_ar',
+];
+
+export const OP_WALLBOARD_DIRECTIONS = {
+    op: {
+        key: 'op',
+        label: 'ОП',
+        hint: 'Отдел продаж: FreePBX',
+        title: 'Табло ОП',
+        source: 'мост «Касаний»',
+        clockField: 'captured_at',
+        icon: 'fa-tachometer-alt',
+        useSnapshot: useOpWallboardSnapshot,
+        metrics: OP_METRICS,
+        metricMap: OP_METRIC_MAP,
+        metricGroups: OP_METRIC_GROUPS,
+        defaultMetrics: DEFAULT_OP_WIDGET_METRICS,
+        readMetric: readOpMetric,
+        clockLabel: (snapshot) => {
+            const clock = opClockLabel(snapshot);
+            return clock ? `Мост «Касаний», ${clock}` : null;
+        },
+        freshnessNotice: opFreshnessNotice,
+    },
+};
+
+export const opWallboardDirection = (key) => OP_WALLBOARD_DIRECTIONS[key] || OP_WALLBOARD_DIRECTIONS.op;

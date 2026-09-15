@@ -51468,6 +51468,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
                                     canManageBroadcast={canManageOpBroadcastForUser(user)}
+                                    widgetOpen={szovWallboardWidget}
+                                    onToggleWidget={setSzovWallboardWidget}
                                 />
                             </Suspense>
                         )}
@@ -57931,13 +57933,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                     </div>
 
-                    {/* Окно «поверх других» одно на приложение, а табло два: направления Тез
-                        начинаются с `tez_`, и права у них свои — виджет обязан спрашивать про
-                        доступ того раздела, чьё направление сейчас открыто, иначе табло Тез
-                        показывалось бы тому, кому закрыт сам раздел. */}
+                    {/* Окно «поверх других» одно на приложение, а табло три: направления Тез
+                        начинаются с `tez_`, у ОП ключ `op`, и права у каждого свои — виджет
+                        обязан спрашивать про доступ того раздела, чьё направление сейчас
+                        открыто, иначе табло Тез или ОП показывалось бы тому, кому закрыт
+                        сам раздел. */}
                     {szovWallboardWidget && (String(szovWallboardWidget).startsWith('tez_')
                         ? canAccessTezWallboardSection
-                        : canAccessSzovWallboardSection) && (
+                        : szovWallboardWidget === 'op'
+                            ? canAccessOpWallboardSection
+                            : canAccessSzovWallboardSection) && (
                         <SzovWallboardWidget
                             // key по направлению: у направлений разные источники, и смена
                             // направления должна пересоздать окно, а не менять хук опроса на лету.

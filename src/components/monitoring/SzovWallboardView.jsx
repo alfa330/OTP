@@ -799,8 +799,9 @@ const WallboardHeader = ({
 /*
  * Кнопка виджета. Открытое окно всегда одно, поэтому кнопка «зажата» только у того направления,
  * чей виджет сейчас открыт; нажатие на соседнем направлении переоткрывает окно под него.
+ * Экспортируется: «Табло ОП» ставит в шапку ту же кнопку со своим направлением.
  */
-const WidgetButton = ({ direction, widgetOpen, onToggleWidget }) => {
+export const WidgetButton = ({ direction, widgetOpen, onToggleWidget }) => {
     // Умеет ли браузер окно поверх других, выясняем здесь, чтобы кнопка не обещала того, чего не будет.
     const supported = useMemo(() => canOpenWallboardWidget(), []);
     const isOpen = widgetOpen === direction;

@@ -14,6 +14,7 @@
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime
+from pathlib import Path
 from unittest import mock
 
 from flask import Flask
@@ -264,6 +265,76 @@ class RouteTests(unittest.TestCase):
         response = self.client.get('/api/op_wallboard/snapshot')
         self.assertEqual(response.status_code, 503)
         self.assertIn('данных пока нет', response.get_json()['error'])
+
+
+# ── фронт ─────────────────────────────────────────────────────────────────────
+# По исходнику, как у табло СЗоВ и Тез: сборки React в тестах нет, а структура экрана и
+# проводка виджета — решения владельца, которые должны переживать правки соседей.
+
+ROOT = Path(__file__).resolve().parents[1]
+MONITORING = ROOT / 'src' / 'components' / 'monitoring'
+
+
+class FrontendTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.view = (MONITORING / 'OpWallboardView.jsx').read_text(encoding='utf-8-sig')
+        cls.shared = (MONITORING / 'opWallboardShared.js').read_text(encoding='utf-8-sig')
+        cls.widget = (MONITORING / 'SzovWallboardWidget.jsx').read_text(encoding='utf-8-sig')
+        cls.szov_view = (MONITORING / 'SzovWallboardView.jsx').read_text(encoding='utf-8-sig')
+        cls.app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8-sig')
+
+    def test_lines_panel_is_gone_from_the_wall(self):
+        """Решение владельца 16.09.2026: разрез «По линиям» с экрана снят. Снимок его
+        по-прежнему несёт — отбивка в Telegram пишет строки по линиям из `queues`."""
+        self.assertNotIn('По линиям', self.view)
+        self.assertNotIn('QueuesTable', self.view)
+        self.assertIn('title="По часам"', self.view)
+        self.assertIn("'queues': queue_rows", (ROOT / 'op_wallboard' / 'snapshot.py')
+                      .read_text(encoding='utf-8-sig'))
+
+    def test_widget_button_is_the_same_as_szov(self):
+        """Кнопка виджета — общая с СЗоВ (экспорт), а не третья копия."""
+        self.assertIn('export const WidgetButton', self.szov_view)
+        self.assertIn("import { BroadcastControls, WidgetButton } from './SzovWallboardView';", self.view)
+        self.assertIn('<WidgetButton direction="op" widgetOpen={widgetOpen}', self.view)
+        self.assertIn('onToggleWidget={onToggleWidget}', self.view)
+
+    def test_widget_resolves_op_direction_from_its_own_registry(self):
+        """Реестр ОП свой: словарь СЗоВ питает переключатель направлений его раздела."""
+        self.assertIn("import { OP_WALLBOARD_DIRECTIONS, opWallboardDirection } from './opWallboardShared';",
+                      self.widget)
+        self.assertIn('OP_WALLBOARD_DIRECTIONS[key] ? opWallboardDirection(key)', self.widget)
+        registry = self.shared[self.shared.index('export const OP_WALLBOARD_DIRECTIONS'):]
+        for field in ("key: 'op'", 'useSnapshot: useOpWallboardSnapshot', 'metrics: OP_METRICS',
+                      'metricMap: OP_METRIC_MAP', 'metricGroups: OP_METRIC_GROUPS',
+                      'defaultMetrics: DEFAULT_OP_WIDGET_METRICS', 'readMetric: readOpMetric',
+                      'freshnessNotice: opFreshnessNotice'):
+            self.assertIn(field, registry, field)
+        # Набор по умолчанию — только ключи каталога.
+        self.assertTrue(all(("key: '%s'" % key) in self.shared for key in
+                            ('op_online', 'op_talking', 'op_free', 'op_arrived', 'op_missed', 'op_ar')))
+
+    def test_widget_reads_op_metrics_through_the_registry(self):
+        """Показатели ОП читают снимок целиком; общий readWallboardMetric отдал бы им `now`
+        и прочерки во всех плитках. Подсказка бывает функцией — в title её надо вызвать."""
+        self.assertIn('const read = config.readMetric || readWallboardMetric;', self.widget)
+        self.assertIn('read={read}', self.widget)
+        self.assertIn("typeof metric.hint === 'function' ? metric.hint(snapshot)", self.widget)
+        self.assertNotIn('title={metric.hint || metric.label}', self.widget)
+        self.assertIn('config.freshnessNotice(snapshot)', self.widget)
+        self.assertIn('config.clockLabel', self.widget)
+
+    def test_app_wires_the_widget_with_the_sections_own_access(self):
+        """Окно поверх других одно на приложение; право на него — у раздела «Табло ОП»."""
+        self.assertIn('widgetOpen={szovWallboardWidget}\n'
+                      '                                    onToggleWidget={setSzovWallboardWidget}\n'
+                      '                                />\n'
+                      '                            </Suspense>\n'
+                      '                        )}\n'
+                      '                        {view === "tez_wallboard"', self.app)
+        self.assertIn(": szovWallboardWidget === 'op'\n"
+                      "                            ? canAccessOpWallboardSection", self.app)
 
 
 if __name__ == '__main__':

@@ -154,6 +154,13 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("position('''op''' IN pg_get_constraintdef(oid)) = 0", source)
         self.assertIn("DROP CONSTRAINT szov_wallboard_broadcast_chats_direction", source)
 
+    def test_db_layer_accepts_op_direction(self):
+        """Кнопка «Отбивка» на табло ОП отвечала 500: ручка и CHECK знали 'op', а список
+        направлений в database.py — нет, и get_szov_broadcast_chats('op') бросал ValueError."""
+        source = DB_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op')", source)
+        self.assertNotIn("SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')\n", source)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -27273,8 +27273,11 @@ class Database:
     SZOV_BROADCAST_MODES = ('always', 'deviations')
     # Направления табло: у каждого свой список получателей, свои показатели и своё
     # расписание. 'osnova' — историческое имя направления «Линия» (на экране подпись
-    # сменили, ключ остался: по нему лежат строки на проде).
-    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')
+    # сменили, ключ остался: по нему лежат строки на проде). 'op' — «Табло ОП».
+    # Список ОБЯЗАН совпадать с SZOV_BROADCAST_DIRECTIONS в bot_schedule2 и с CHECK
+    # на szov_wallboard_broadcast_chats: 16.09.2026 'op' добавили в ручку и в CHECK, а
+    # здесь забыли — кнопка «Отбивка» на табло ОП отвечала 500 из этого ValueError.
+    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat', 'op')
     SZOV_BROADCAST_DIRECTION_DEFAULT = 'osnova'
 
     def _szov_broadcast_direction(self, value) -> str:
