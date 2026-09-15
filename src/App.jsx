@@ -39342,6 +39342,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                в раздел снова открывал бы ту же статью. */
             const [wikiInitialSlug, setWikiInitialSlug] = useState(null);
             const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
+            /* Переход из колокола по «Вопросам операторов» ведёт не в статью, а во
+               вкладку вики: супервайзеру — карточка вопроса, оператору — разговор
+               с ответом. nonce — чтобы повторный клик по тому же уведомлению
+               сработал снова. */
+            const [wikiBellFocus, setWikiBellFocus] = useState(null);
+            const clearWikiBellFocus = useCallback(() => setWikiBellFocus(null), []);
             /* Чат Wazzup, который надо открыть сразу при входе в «Чаты
                Верификаторов» — приходит ссылкой из переписки. Гасится так же,
                как слаг статьи: иначе следующий обычный вход в раздел снова
@@ -48604,7 +48610,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                    карточка открывается тем же механизмом, что у закреплённой
                    задачи (focusTaskRequest). В «Ивентах» и «Опросах» нужный
                    элемент и так наверху списка — им достаточно перехода. */
-                if (nextView === 'wiki' && target) setWikiInitialSlug(String(target));
+                if (nextView === 'wiki' && target) {
+                    // «questions:<id>» и «assistant:<id>» — цели «Вопросов
+                    // операторов» (notifications/sources.py: wiki_questions).
+                    const focus = /^(questions|assistant):(\d+)$/.exec(String(target));
+                    if (focus) {
+                        setWikiBellFocus((prev) => ({
+                            kind: focus[1],
+                            id: Number(focus[2]),
+                            nonce: Number(prev?.nonce || 0) + 1,
+                        }));
+                    } else {
+                        setWikiInitialSlug(String(target));
+                    }
+                }
                 if (nextView === 'crm_tickets' && Number(target)) {
                     setCrmFocusRequest((prev) => ({
                         ticketId: Number(target),
@@ -51318,6 +51337,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     initialArticleSlug={wikiInitialSlug}
                                     onInitialArticleConsumed={clearWikiInitialSlug}
+                                    bellFocus={wikiBellFocus}
+                                    onBellFocusConsumed={clearWikiBellFocus}
                                 />
                             </Suspense>
                         ))}
