@@ -89,6 +89,7 @@ from resource_fte.service import (
     build_resource_schedule_preview,
     get_operator_rate_overrides,
     get_resource_day,
+    get_resource_hourly_forecast,
     get_resource_operator_availability_details,
     get_resource_overview,
     get_resource_settings,
@@ -9217,6 +9218,15 @@ def _oktell_billing_response_meta(params):
     }
 
 
+def _oktell_billing_parse_sl_seconds():
+    """(порог SL в секундах, None) или (None, ответ с ошибкой)."""
+    try:
+        sl_seconds = int(request.args.get('sl_seconds') or OKTELL_BILLING_SL_DEFAULT_SECONDS)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "sl_seconds должен быть целым числом"}), 400)
+    return max(1, min(600, sl_seconds)), None
+
+
 @app.route('/api/resource_fte/oktell_billing', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_oktell_billing():
@@ -9234,11 +9244,9 @@ def api_resource_fte_oktell_billing():
     if group_by not in ('park', 'line'):
         return jsonify({"error": "group_by должен быть park или line"}), 400
 
-    try:
-        sl_seconds = int(request.args.get('sl_seconds') or OKTELL_BILLING_SL_DEFAULT_SECONDS)
-    except (TypeError, ValueError):
-        return jsonify({"error": "sl_seconds должен быть целым числом"}), 400
-    sl_seconds = max(1, min(600, sl_seconds))
+    sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
+    if sl_error is not None:
+        return sl_error
 
     try:
         raw_rows = _oktell_fetch_billing_rows(
@@ -9338,6 +9346,92 @@ def api_resource_fte_oktell_billing_details():
     }), 200
 
 
+@app.route('/api/resource_fte/oktell_billing_grouping', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_oktell_billing_grouping():
+    """«Биллинг Oktell → Группировка»: день x час — звонки, смены и комментарии."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    params, error_response, error_status = _oktell_billing_parse_request_args()
+    if params is None:
+        return error_response, error_status
+    sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
+    if sl_error is not None:
+        return sl_error
+
+    try:
+        raw_rows = _oktell_fetch_billing_rows(
+            params['start_day'], params['end_day'],
+            params['minute_from'], params['minute_to'], sl_seconds, 'hour')
+    except Exception:
+        logging.exception("Oktell billing grouping report failed")
+        return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
+
+    report = _oktell_billing_grouping_report(params, raw_rows)
+    return jsonify({
+        "status": "success",
+        "sl_threshold_seconds": sl_seconds,
+        **_oktell_billing_response_meta(params),
+        **report,
+    }), 200
+
+
+@app.route('/api/resource_fte/oktell_billing_grouping_comment', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def api_resource_fte_oktell_billing_grouping_comment():
+    """Комментарий к отрезку часов дня в «Группировке»; пустой текст снимает его."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, guard_response, guard_status = _resource_fte_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    payload = request.get_json(silent=True) or {}
+    report_date = _oktell_parse_date(payload.get('date'))
+    if report_date is None:
+        return jsonify({"error": "date обязателен в формате YYYY-MM-DD"}), 400
+
+    def _hour(key):
+        value = payload.get(key)
+        if value is None or value == '' or isinstance(value, bool):
+            return None
+        try:
+            hour = int(value)
+        except (TypeError, ValueError):
+            return None
+        return hour if 0 <= hour <= 23 else None
+
+    hour_from, hour_to = _hour('hour_from'), _hour('hour_to')
+    if hour_from is None or hour_to is None or hour_to < hour_from:
+        return jsonify({"error": "Часы комментария — от 0 до 23, и «по» не раньше «с»"}), 400
+    previous_from, previous_to = _hour('previous_hour_from'), _hour('previous_hour_to')
+    if (previous_from is None) != (previous_to is None) or (
+            previous_from is not None and previous_to < previous_from):
+        return jsonify({"error": "Прежний отрезок комментария задан неверно"}), 400
+
+    comment = str(payload.get('comment') or '').strip()
+    if len(comment) > OKTELL_BILLING_COMMENT_MAX_LENGTH:
+        return jsonify({"error": f"Комментарий длиннее {OKTELL_BILLING_COMMENT_MAX_LENGTH} символов"}), 400
+
+    try:
+        comments = db.save_oktell_billing_hour_comment(
+            report_date, hour_from, hour_to, comment, updated_by=requester_id,
+            previous_hour_from=previous_from, previous_hour_to=previous_to)
+    except Exception:
+        logging.exception("Oktell billing grouping comment save failed")
+        return jsonify({"error": "Не удалось сохранить комментарий"}), 500
+
+    return jsonify({
+        "status": "success",
+        "date": report_date.strftime('%Y-%m-%d'),
+        "comments": {str(hour): note for hour, note in comments.items()},
+    }), 200
+
+
 @app.route('/api/resource_fte/oktell_billing_export', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_resource_fte_oktell_billing_export():
@@ -9393,14 +9487,12 @@ def api_resource_fte_oktell_billing_export():
         return error_response, error_status
 
     mode = str(request.args.get('mode') or 'park').strip().lower()
-    if mode not in ('park', 'line', 'operator', 'detail'):
-        return jsonify({"error": "mode должен быть park, line, operator или detail"}), 400
+    if mode not in ('park', 'line', 'operator', 'detail', 'grouping'):
+        return jsonify({"error": "mode должен быть park, line, operator, detail или grouping"}), 400
 
-    try:
-        sl_seconds = int(request.args.get('sl_seconds') or OKTELL_BILLING_SL_DEFAULT_SECONDS)
-    except (TypeError, ValueError):
-        return jsonify({"error": "sl_seconds должен быть целым числом"}), 400
-    sl_seconds = max(1, min(600, sl_seconds))
+    sl_seconds, sl_error = _oktell_billing_parse_sl_seconds()
+    if sl_error is not None:
+        return sl_error
 
     try:
         if mode == 'operator':
@@ -9413,6 +9505,11 @@ def api_resource_fte_oktell_billing_export():
                 params['start_day'], params['end_day'],
                 params['minute_from'], params['minute_to'])
             report = {'rows': detail_rows}
+        elif mode == 'grouping':
+            raw_rows = _oktell_fetch_billing_rows(
+                params['start_day'], params['end_day'],
+                params['minute_from'], params['minute_to'], sl_seconds, 'hour')
+            report = _oktell_billing_grouping_report(params, raw_rows)
         else:
             raw_rows = _oktell_fetch_billing_rows(
                 params['start_day'], params['end_day'],
@@ -9422,7 +9519,8 @@ def api_resource_fte_oktell_billing_export():
         logging.exception("Oktell billing export failed")
         return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
 
-    output = _oktell_billing_export_workbook(mode, params, report, sl_seconds)
+    output = (_oktell_billing_grouping_workbook(report) if mode == 'grouping'
+              else _oktell_billing_export_workbook(mode, params, report, sl_seconds))
     filename = (
         f"oktell_billing_{mode}_"
         f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
@@ -35425,6 +35523,31 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
     line_select = ''
     line_join = ''
     line_group = ''
+    # Разрез «Группировка» — день x час без таксопарка. Метрики те же, что у остальных
+    # разрезов, поэтому итог дня по часам сходится с итогом по таксопаркам.
+    key_select = "t.taxi_park AS taxi_park, "
+    key_group = "t.taxi_park"
+    if group_by == 'hour':
+        key_select = "DATEPART(HOUR, t.dt_insert) AS report_hour, "
+        key_group = "DATEPART(HOUR, t.dt_insert)"
+    # Оценка водителя после разговора (задача #298): IVR-опрос пишет балл 1–5 в quality_employes
+    # по цепочке звонка, '0' — водитель ничего не нажал, в среднее не идёт. Считаем только у
+    # обслуженных: оценивают разговор с оператором. GROUP BY chainid держит одну оценку на
+    # цепочку, чтобы повторный опрос не удвоил звонок в сумме.
+    rating_select = (
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN qe.rating ELSE 0 END) AS rating_sum, "
+        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN 1 ELSE 0 END) AS rating_count "
+    )
+    rating_join = (
+        "LEFT JOIN (SELECT chainid, MAX(CASE WHEN answer IN (N'1', N'2', N'3', N'4', N'5') "
+        "THEN CAST(answer AS int) END) AS rating FROM oktell.dbo.quality_employes GROUP BY chainid) qe "
+        "ON qe.chainid = t.chainid "
+    )
+    if group_by == 'hour':
+        # В «Группировке» оценки не показываются, а подзапрос по quality_employes
+        # агрегирует всю таблицу опросов — в этом разрезе его не гоняем.
+        rating_select = "0 AS rating_sum, 0 AS rating_count "
+        rating_join = ''
     if group_by == 'line':
         # Набранная SIP-линия: лег ConnectionType=4 (снаружи в IVR) той же цепочки.
         # Цепочки бывают с несколькими легами ct=4 (повторные заходы в IVR) — дедуп через MIN;
@@ -35441,7 +35564,7 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         line_group = ", COALESCE(c.line_number, N'')"
     return (
         "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
-        "t.taxi_park AS taxi_park, "
+        f"{key_select}"
         f"{line_select}"
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS arrived, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END) AS served, "
@@ -35452,21 +35575,14 @@ def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, mi
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS wait_ok_seconds, "
         f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds, "
         f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds, "
-        # Оценка водителя после разговора (задача #298): IVR-опрос пишет балл 1–5 в quality_employes
-        # по цепочке звонка, '0' — водитель ничего не нажал, в среднее не идёт. Считаем только у
-        # обслуженных: оценивают разговор с оператором. GROUP BY chainid держит одну оценку на
-        # цепочку, чтобы повторный опрос не удвоил звонок в сумме.
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN qe.rating ELSE 0 END) AS rating_sum, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN 1 ELSE 0 END) AS rating_count "
+        f"{rating_select}"
         "FROM oktell.dbo.Call_Systems_hst t "
         f"{line_join}"
-        "LEFT JOIN (SELECT chainid, MAX(CASE WHEN answer IN (N'1', N'2', N'3', N'4', N'5') "
-        "THEN CAST(answer AS int) END) AS rating FROM oktell.dbo.quality_employes GROUP BY chainid) qe "
-        "ON qe.chainid = t.chainid "
+        f"{rating_join}"
         f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
         f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
         f"{minute_filter}"
-        f"GROUP BY CONVERT(varchar(10), t.dt_insert, 23), t.taxi_park{line_group}"
+        f"GROUP BY CONVERT(varchar(10), t.dt_insert, 23), {key_group}{line_group}"
     )
 
 
@@ -35511,6 +35627,27 @@ def _oktell_billing_sec(value):
         return 0
 
 
+def _oktell_billing_metrics_row(raw):
+    """Сырая строка Oktell -> счётчики биллинга в целых числах; одна на все разрезы."""
+    arrived = max(0, _oktell_billing_int(raw.get('arrived')))
+    served = max(0, _oktell_billing_int(raw.get('served')))
+    return {
+        'arrived': arrived,
+        'served': served,
+        'lost': max(0, arrived - served),
+        'served_sl': max(0, _oktell_billing_int(raw.get('served_sl'))),
+        'greet_drop': max(0, _oktell_billing_int(raw.get('greet_drop'))),
+        'talk_seconds': _oktell_billing_sec(raw.get('talk_seconds')),
+        'wait_ok_seconds': _oktell_billing_sec(raw.get('wait_ok_seconds')),
+        'wait_lost_seconds': _oktell_billing_sec(raw.get('wait_lost_seconds')),
+        'total_seconds': _oktell_billing_sec(raw.get('total_seconds')),
+        # Сумма и число оценок, а не готовое среднее: иначе итог за день и за период
+        # пришлось бы считать средним средних, и маленький парк весил бы как большой.
+        'rating_sum': max(0, _oktell_billing_int(raw.get('rating_sum'))),
+        'rating_count': max(0, _oktell_billing_int(raw.get('rating_count'))),
+    }
+
+
 def _oktell_billing_build_report(raw_rows, include_line=False):
     """Сырые строки (день x таксопарк [x линия]) -> {days, parks, totals}. Суммы в целых
     секундах; проценты/средние считает фронтенд из сырых счётчиков."""
@@ -35530,23 +35667,7 @@ def _oktell_billing_build_report(raw_rows, include_line=False):
         if not report_date or not park:
             continue
         key = (park, _oktell_billing_line_key(raw.get('line_number'))) if include_line else (park, '')
-        arrived = max(0, _oktell_billing_int(raw.get('arrived')))
-        served = max(0, _oktell_billing_int(raw.get('served')))
-        row = {
-            'arrived': arrived,
-            'served': served,
-            'lost': max(0, arrived - served),
-            'served_sl': max(0, _oktell_billing_int(raw.get('served_sl'))),
-            'greet_drop': max(0, _oktell_billing_int(raw.get('greet_drop'))),
-            'talk_seconds': _oktell_billing_sec(raw.get('talk_seconds')),
-            'wait_ok_seconds': _oktell_billing_sec(raw.get('wait_ok_seconds')),
-            'wait_lost_seconds': _oktell_billing_sec(raw.get('wait_lost_seconds')),
-            'total_seconds': _oktell_billing_sec(raw.get('total_seconds')),
-            # Сумма и число оценок, а не готовое среднее: иначе итог за день и за период
-            # пришлось бы считать средним средних, и маленький парк весил бы как большой.
-            'rating_sum': max(0, _oktell_billing_int(raw.get('rating_sum'))),
-            'rating_count': max(0, _oktell_billing_int(raw.get('rating_count'))),
-        }
+        row = _oktell_billing_metrics_row(raw)
         day_parks = days_map.setdefault(report_date, {})
         _merge(day_parks.setdefault(key, _blank()), row)
         _merge(parks_map.setdefault(key, _blank()), row)
@@ -35572,6 +35693,93 @@ def _oktell_billing_build_report(raw_rows, include_line=False):
         days.append({'date': report_date, 'parks': park_rows, 'totals': day_totals})
 
     return {'days': days, 'parks': _sorted_parks(parks_map), 'totals': totals}
+
+
+# --- «Биллинг Oktell»: почасовая «Группировка» ---------------------------------------------------
+# Таблица дня по образцу таблицы владельца: звонки по часам из Oktell, к ним прогноз, план и факт
+# смен (тот же расчёт, что у почасовой отбивки табло СЗоВ) и комментарии супервайзеров по часам.
+# Доля неотвеченных, ВЫШЕ которой час заливается красным: в таблице владельца 4 % без заливки,
+# 8 % уже залиты. Фронт держит тот же порог в BILLING_GROUPING_AR_ALERT (billingGrouping.js).
+OKTELL_BILLING_GROUPING_AR_ALERT = 0.05
+OKTELL_BILLING_COMMENT_MAX_LENGTH = 500
+
+
+def _oktell_billing_build_hourly_report(raw_rows, minute_from=0, minute_to=1439):
+    """Сырые строки (день x час) -> {days: [{date, hours, totals}], totals}.
+
+    В дне — каждый час окна подряд, даже без звонков: у пустого часа всё равно есть прогноз,
+    план и факт смен, а дырка в таблице читалась бы как сбой. Дни — только те, где Oktell
+    вернул звонки, как и в остальных разрезах."""
+    first_hour = max(0, int(minute_from) // 60)
+    last_hour = min(23, int(minute_to) // 60)
+
+    def _blank():
+        return {key: 0 for key in _OKTELL_BILLING_METRICS}
+
+    days_map = {}
+    totals = _blank()
+    for raw in raw_rows:
+        report_date = str(raw.get('report_date') or '').strip()
+        try:
+            hour = int(raw.get('report_hour'))
+        except (TypeError, ValueError):
+            continue
+        if not report_date or not first_hour <= hour <= last_hour:
+            continue
+        row = _oktell_billing_metrics_row(raw)
+        target = days_map.setdefault(report_date, {}).setdefault(hour, _blank())
+        for key in _OKTELL_BILLING_METRICS:
+            target[key] += row[key]
+            totals[key] += row[key]
+
+    days = []
+    for report_date in sorted(days_map):
+        hours = [
+            {'hour': hour, **days_map[report_date].get(hour, _blank())}
+            for hour in range(first_hour, last_hour + 1)
+        ]
+        day_totals = _blank()
+        for item in hours:
+            for key in _OKTELL_BILLING_METRICS:
+                day_totals[key] += item[key]
+        days.append({'date': report_date, 'hours': hours, 'totals': day_totals})
+    return {'days': days, 'totals': totals}
+
+
+def _oktell_billing_attach_grouping(report, shift_rows, comments):
+    """Приклеивает к часам смены и комментарии. Нет данных — None: ноль смен и «статусы ещё
+    не приехали» в отчёте разные вещи."""
+    for day in report.get('days') or []:
+        day_shifts = (shift_rows or {}).get(day['date']) or {}
+        day_comments = (comments or {}).get(day['date']) or {}
+        for item in day.get('hours') or []:
+            shift = day_shifts.get(item['hour']) or {}
+            note = day_comments.get(item['hour']) or {}
+            item['forecast'] = shift.get('forecast')
+            item['planned'] = shift.get('planned')
+            item['fact'] = shift.get('fact')
+            item['comment'] = note.get('comment') or ''
+            item['comment_author'] = note.get('author') or ''
+    return report
+
+
+def _oktell_billing_grouping_report(params, raw_rows):
+    """Отчёт «Группировки» из строк Oktell (день x час): звонки + смены + комментарии.
+
+    Смены и комментарии живут в нашей базе, и их сбой не должен стоить звонковой части —
+    колонки просто останутся прочерками. Смены считаем только за дни, где есть звонки."""
+    report = _oktell_billing_build_hourly_report(raw_rows, params['minute_from'], params['minute_to'])
+    if not report['days']:
+        return report
+    first_day = datetime.strptime(report['days'][0]['date'], '%Y-%m-%d').date()
+    last_day = datetime.strptime(report['days'][-1]['date'], '%Y-%m-%d').date()
+    shift_rows = _szov_shift_rows_for_range(first_day, last_day)
+    try:
+        comments = db.get_oktell_billing_hour_comments(first_day, last_day)
+    except Exception as exc:
+        logging.warning("Биллинг Oktell: комментарии группировки недоступны: %s", exc)
+        comments = {}
+    return _oktell_billing_attach_grouping(report, shift_rows, comments)
 
 
 # --- «Биллинг Oktell»: построчная детализация звонков -------------------------------------------
@@ -36179,6 +36387,144 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds):
     for i, width in enumerate([12] + widths, start=1):
         ws_days.column_dimensions[get_column_letter(i)].width = width
     ws_days.freeze_panes = 'A2'
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+# Колонки «Группировки»: (ключ, подпись, ширина). Подписи и порядок — как в таблице владельца;
+# фронт повторяет их в BILLING_GROUPING_COLUMNS (billingGrouping.js), совпадение сторожит тест.
+_OKTELL_BILLING_GROUPING_COLUMNS = (
+    ('hour', 'С', 6),
+    ('arrived', 'Получено', 11),
+    ('served', 'Принято', 10),
+    ('lost', 'Потеряно', 10),
+    ('ar', '% Неотв', 10),
+    ('talk', 'Средн. Прод.', 11),
+    ('wait', 'Средн. время ожидания', 13),
+    ('forecast', 'Прогноз смен', 11),
+    ('planned', 'Запланировано смен', 14),
+    ('fact', 'Факт смен', 9),
+    ('delta', 'Разница факта от прогноза', 14),
+    ('comment', 'Комментарии', 46),
+)
+# Правая половина таблицы — про смены: у владельца она на голубой подложке.
+_OKTELL_BILLING_GROUPING_SHIFT_KEYS = frozenset({'forecast', 'planned', 'fact', 'delta'})
+
+
+def _oktell_billing_grouping_values(item):
+    """Значения строки часа — та же математика, что billingGroupingRow на фронте.
+    None — прочерк: без звонков нет средних и доли, без данных о сменах нет разницы."""
+    arrived = max(0, _oktell_billing_int(item.get('arrived')))
+    served = max(0, _oktell_billing_int(item.get('served')))
+    lost = max(0, _oktell_billing_int(item.get('lost')))
+
+    def _shift(value):
+        if value is None or value == '':
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    forecast = _shift(item.get('forecast'))
+    fact = _shift(item.get('fact'))
+    return {
+        'hour': _oktell_billing_int(item.get('hour')),
+        'arrived': arrived,
+        'served': served,
+        'lost': lost,
+        'ar': (lost / arrived) if arrived > 0 else None,
+        # Средние — целые секунды усечением, как в отчёте владельца и в отбивке табло;
+        # ожидание — у принятых звонков, как «Ср. ожидание» соседних разрезов.
+        'talk': int(float(item.get('talk_seconds') or 0) / served) if served > 0 else None,
+        'wait': int(float(item.get('wait_ok_seconds') or 0) / served) if served > 0 else None,
+        'forecast': forecast,
+        'planned': _shift(item.get('planned')),
+        'fact': fact,
+        # Разница считается от ПРОГНОЗА, а не от плана — правило владельца.
+        'delta': None if forecast is None or fact is None else fact - forecast,
+        'comment': str(item.get('comment') or '').strip(),
+    }
+
+
+def _oktell_billing_grouping_workbook(report):
+    """Excel «Группировки» по образцу таблицы владельца: лист на день, голубая шапка, смены на
+    голубой подложке, «% Неотв» выше порога залит красным, отставание от прогноза — красным
+    шрифтом, одинаковый комментарий соседних часов — одна объединённая ячейка."""
+    header_fill = PatternFill(start_color='B4C6E7', end_color='B4C6E7', fill_type='solid')
+    shift_fill = PatternFill(start_color='DDEBF7', end_color='DDEBF7', fill_type='solid')
+    alert_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+    alert_font = Font(color='9C0006')
+    shortfall_font = Font(color='C00000')
+    bold_font = Font(bold=True)
+    side = Side(style='thin', color='808080')
+    border = Border(left=side, right=side, top=side, bottom=side)
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    keys = [key for key, _title, _width in _OKTELL_BILLING_GROUPING_COLUMNS]
+
+    wb = Workbook()
+    days = report.get('days') or []
+    if not days:
+        ws = wb.active
+        ws.title = 'Группировка'
+        ws.append(['Oktell не вернул входящих звонков за выбранный период и окно времени'])
+    for index, day in enumerate(days):
+        try:
+            title = datetime.strptime(day.get('date') or '', '%Y-%m-%d').strftime('%d.%m.%Y')
+        except ValueError:
+            title = f'День {index + 1}'
+        ws = wb.active if index == 0 else wb.create_sheet()
+        ws.title = title
+        for column, (_key, header, width) in enumerate(_OKTELL_BILLING_GROUPING_COLUMNS, start=1):
+            cell = ws.cell(row=1, column=column, value=header)
+            cell.fill = header_fill
+            cell.font = bold_font
+            cell.alignment = center
+            cell.border = border
+            ws.column_dimensions[get_column_letter(column)].width = width
+        ws.row_dimensions[1].height = 32
+
+        rows = [_oktell_billing_grouping_values(item) for item in day.get('hours') or []]
+        for offset, values in enumerate(rows):
+            row_idx = offset + 2
+            for column, key in enumerate(keys, start=1):
+                value = values[key]
+                if key == 'comment':
+                    value = value or None
+                elif value is None:
+                    value = '—'
+                cell = ws.cell(row=row_idx, column=column, value=value)
+                cell.alignment = center
+                cell.border = border
+                if key in _OKTELL_BILLING_GROUPING_SHIFT_KEYS:
+                    cell.fill = shift_fill
+                if key == 'hour':
+                    cell.font = bold_font
+                elif key == 'ar' and values['ar'] is not None:
+                    cell.number_format = '0%'
+                    if values['ar'] > OKTELL_BILLING_GROUPING_AR_ALERT:
+                        cell.fill = alert_fill
+                        cell.font = alert_font
+                elif key == 'delta' and values['delta'] is not None and values['delta'] < 0:
+                    cell.font = shortfall_font
+
+        # Соседние часы с одинаковым комментарием — одна ячейка, как в таблице владельца.
+        comment_column = keys.index('comment') + 1
+        start = 0
+        while start < len(rows):
+            end = start
+            text = rows[start]['comment']
+            while (text and end + 1 < len(rows) and rows[end + 1]['comment'] == text
+                   and rows[end + 1]['hour'] == rows[end]['hour'] + 1):
+                end += 1
+            if end > start:
+                ws.merge_cells(start_row=start + 2, start_column=comment_column,
+                               end_row=end + 2, end_column=comment_column)
+            start = end + 1
+        ws.freeze_panes = 'A2'
 
     output = BytesIO()
     wb.save(output)
@@ -36999,41 +37345,51 @@ def _szov_broadcast_hourly_rows(hour_to=None):
     return rows
 
 
-def _szov_broadcast_shift_rows(day_iso):
-    """{час: {forecast, planned, fact}} за дату — прогноз, план и факт смен.
+def _szov_shift_rows_for_range(start_day, end_day):
+    """{дата: {час: {forecast, planned, fact}}} за период — прогноз, план и факт смен.
 
-    План и факт считает один серверный расчёт (db.get_hourly_shift_grouping), тот же,
-    что стоит за разделом «Графики работы → Группировка по операторам». Прогноз берём из
-    «Расчёта ресурсов» — там он и живёт. Любой сбой не роняет отбивку: колонки просто
-    останутся пустыми, звонковые показатели важнее."""
+    Общий для почасовой отбивки табло и вкладки «Биллинг Oktell → Группировка», чтобы цифры
+    смен в Telegram и в разделе не разошлись. План и факт считает один серверный расчёт
+    (db.get_hourly_shift_grouping_range), тот же, что стоит за разделом «Графики работы →
+    Группировка по операторам». Прогноз берём из «Расчёта ресурсов» — там он и живёт.
+    Любой сбой не роняет отчёт: колонки просто останутся пустыми, звонковые показатели важнее."""
     rows = {}
     try:
-        grouping = db.get_hourly_shift_grouping(day_iso, _szov_wallboard_department_id())
-        for item in grouping or []:
-            fact = item.get('fact')
-            rows[int(item['hour'])] = {
-                'planned': int(item.get('planned') or 0),
-                # None = статусы за этот час ещё не приехали; в таблице это прочерк, не ноль.
-                'fact': None if fact is None else int(fact),
-                'forecast': None,
-            }
+        grouping = db.get_hourly_shift_grouping_range(
+            start_day, end_day, _szov_wallboard_department_id())
+        for day_iso, items in (grouping or {}).items():
+            day_rows = rows.setdefault(day_iso, {})
+            for item in items or []:
+                fact = item.get('fact')
+                day_rows[int(item['hour'])] = {
+                    'planned': int(item.get('planned') or 0),
+                    # None = статусы за этот час ещё не приехали; в таблице это прочерк, не ноль.
+                    'fact': None if fact is None else int(fact),
+                    'forecast': None,
+                }
     except Exception as exc:
-        logging.warning("Отбивка табло: план/факт смен недоступны: %s", exc)
+        logging.warning("Смены по часам: план/факт недоступны: %s", exc)
 
     try:
-        payload = get_resource_overview(
-            db, forecast_date_from_value=day_iso, forecast_date_to_value=day_iso)
-        days = ((payload or {}).get('next_week_forecast') or {}).get('days') or []
-        day_row = next((item for item in days
-                        if str(item.get('forecast_date') or '') == day_iso), days[0] if days else None)
-        for item in ((day_row or {}).get('hourly_forecast') or []):
-            hour = int(item.get('hour') or 0)
-            # Прогноз приходит дробным FTE; в таблице это «смены», поэтому целое.
-            forecast = int(round(float(item.get('forecast_fte') or 0)))
-            rows.setdefault(hour, {'planned': 0, 'fact': 0, 'forecast': None})['forecast'] = forecast
+        forecast = get_resource_hourly_forecast(db, start_day, end_day)
+        for day_iso, hours in (forecast or {}).items():
+            day_rows = rows.setdefault(day_iso, {})
+            for hour, fte in (hours or {}).items():
+                slot = day_rows.setdefault(int(hour), {'planned': None, 'fact': None, 'forecast': None})
+                # Прогноз приходит дробным FTE; в таблице это «смены», поэтому целое.
+                slot['forecast'] = int(round(float(fte or 0)))
     except Exception as exc:
-        logging.warning("Отбивка табло: прогноз смен недоступен: %s", exc)
+        logging.warning("Смены по часам: прогноз недоступен: %s", exc)
     return rows
+
+
+def _szov_broadcast_shift_rows(day_iso):
+    """{час: {forecast, planned, fact}} за дату — общий расчёт смен на один день."""
+    try:
+        day = datetime.strptime(str(day_iso), '%Y-%m-%d').date()
+    except ValueError:
+        return {}
+    return _szov_shift_rows_for_range(day, day).get(day_iso) or {}
 
 
 # --- Выходы на перерыв мимо графика (задача #114) ----------------------------------------------

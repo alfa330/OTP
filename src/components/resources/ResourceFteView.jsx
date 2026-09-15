@@ -1,6 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { createPortal } from 'react-dom';
 import ResourceSchedulePlanner from './ResourceSchedulePlanner';
+import {
+  BILLING_GROUPING_COLUMNS,
+  BILLING_GROUPING_SHIFT_KEYS,
+  billingGroupingCommentBlocks,
+  billingGroupingPercent,
+  billingGroupingRow,
+} from './billingGrouping';
 import {
   AlertTriangle,
   BarChart3,
@@ -27,6 +35,7 @@ import {
   SlidersHorizontal,
   PhoneCall,
   PhoneMissed,
+  Plus,
   ShieldAlert,
   Target,
   Timer,
@@ -358,6 +367,7 @@ const BILLING_MODES = [
   { key: 'line', label: 'Номера' },
   { key: 'operator', label: 'Операторы' },
   { key: 'detail', label: 'Детализация' },
+  { key: 'grouping', label: 'Группировка' },
 ];
 
 const BILLING_DETAIL_PAGE_SIZE = 25;
@@ -2514,6 +2524,320 @@ const BillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' 
   );
 };
 
+// «Группировка»: почасовая таблица дня по образцу таблицы владельца. Правила строки —
+// усечение средних, порог заливки, разница от прогноза — живут в billingGrouping.js.
+const BILLING_GROUPING_NUMBER_CELL = 'px-3 py-2 text-right';
+const BILLING_GROUPING_SHIFT_CELL = 'bg-sky-50/70';
+
+const BillingGroupingTable = ({ date, hours, onEditComment }) => {
+  const rows = useMemo(() => (hours || []).map((item) => billingGroupingRow(item)), [hours]);
+  const blocks = useMemo(
+    () => new Map(billingGroupingCommentBlocks(rows).map((block) => [block.index, block])),
+    [rows],
+  );
+  const dash = <span className="text-slate-300">—</span>;
+  const shiftCount = (value) => (value === null ? dash : formatInt(value));
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[1180px] text-sm tabular-nums">
+        <thead className="text-[11px] uppercase tracking-wide text-slate-500">
+          <tr className="border-b border-slate-200">
+            {BILLING_GROUPING_COLUMNS.map((column) => (
+              <th
+                key={column.key}
+                scope="col"
+                className={`px-3 py-2.5 align-bottom font-semibold leading-tight ${
+                  column.key === 'hour' ? 'text-left' : column.key === 'comment' ? 'min-w-[260px] text-center' : 'text-right'
+                } ${BILLING_GROUPING_SHIFT_KEYS.has(column.key) ? 'bg-sky-50' : 'bg-slate-50'}`}
+              >
+                {column.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const block = blocks.get(index);
+            return (
+              <tr key={row.hour} className="border-b border-slate-100 last:border-b-0">
+                <td className="px-3 py-2 font-semibold text-slate-900">{row.hour}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} font-semibold text-slate-900`}>{formatInt(row.arrived)}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} text-slate-700`}>{formatInt(row.served)}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} text-slate-700`}>{formatInt(row.lost)}</td>
+                <td className={BILLING_GROUPING_NUMBER_CELL}>
+                  {row.ar === null ? dash : (
+                    <span
+                      className={row.arAlert
+                        ? '-my-0.5 inline-block min-w-[3rem] rounded-md bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-700'
+                        : 'inline-block min-w-[3rem] px-1.5 text-slate-500'}
+                    >
+                      {billingGroupingPercent(row.ar)}
+                    </span>
+                  )}
+                </td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} text-slate-700`}>{row.talk === null ? dash : formatInt(row.talk)}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} text-slate-700`}>{row.wait === null ? dash : formatInt(row.wait)}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} ${BILLING_GROUPING_SHIFT_CELL} text-slate-900`}>{shiftCount(row.forecast)}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} ${BILLING_GROUPING_SHIFT_CELL} text-slate-900`}>{shiftCount(row.planned)}</td>
+                <td className={`${BILLING_GROUPING_NUMBER_CELL} ${BILLING_GROUPING_SHIFT_CELL} text-slate-900`}>{shiftCount(row.fact)}</td>
+                <td
+                  className={`${BILLING_GROUPING_NUMBER_CELL} ${BILLING_GROUPING_SHIFT_CELL} ${
+                    row.delta !== null && row.delta < 0 ? 'font-semibold text-rose-600' : 'text-slate-700'
+                  }`}
+                >
+                  {row.delta === null ? dash : formatInt(row.delta)}
+                </td>
+                {block ? (
+                  // Соседние часы с одним текстом — одна ячейка, как у владельца. Щелчок
+                  // ловит сама ячейка, чтобы по высокой объединённой ячейке попадать где угодно;
+                  // кнопка внутри — для клавиатуры (Enter на ней всплывает сюда же).
+                  <td
+                    rowSpan={block.span}
+                    onClick={(event) => onEditComment?.({
+                      date,
+                      hourFrom: block.hourFrom,
+                      hourTo: block.hourTo,
+                      comment: block.comment,
+                      anchor: event.currentTarget,
+                    })}
+                    className="group cursor-pointer border-l border-slate-100 px-3 py-2 text-center align-middle transition hover:bg-slate-50"
+                  >
+                    <button
+                      type="button"
+                      title={block.comment && row.commentAuthor ? `Последняя правка: ${row.commentAuthor}` : undefined}
+                      aria-label={block.comment
+                        ? `Изменить комментарий к часам ${block.hourFrom}–${block.hourTo}`
+                        : `Добавить комментарий к часу ${block.hourFrom}`}
+                      className="w-full rounded-md text-[13px] leading-snug text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                    >
+                      {block.comment || (
+                        <Plus size={14} className="mx-auto text-slate-300 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100" />
+                      )}
+                    </button>
+                  </td>
+                ) : null}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+const BILLING_COMMENT_PANEL_WIDTH = 340;
+const BILLING_COMMENT_EDGE_GAP = 8;
+
+// Час — степпером, а не списком: выпадашка внутри поповера сама ушла бы в портал, и
+// щелчок по её пункту закрывал бы поповер как «щелчок мимо».
+const BillingHourStepper = ({ label, value, min, max, onChange }) => (
+  <div className="flex items-center gap-1.5">
+    <span className="text-xs text-slate-500">{label}</span>
+    <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange(value - 1)}
+        disabled={value <= min}
+        aria-label={`${label}: на час раньше`}
+        className="flex h-7 w-7 items-center justify-center rounded-md text-slate-600 transition hover:bg-white hover:shadow-sm disabled:pointer-events-none disabled:opacity-30"
+      >
+        <ChevronLeft size={14} />
+      </button>
+      <span className="w-7 text-center text-sm font-semibold tabular-nums text-slate-900">{value}</span>
+      <button
+        type="button"
+        onClick={() => onChange(value + 1)}
+        disabled={value >= max}
+        aria-label={`${label}: на час позже`}
+        className="flex h-7 w-7 items-center justify-center rounded-md text-slate-600 transition hover:bg-white hover:shadow-sm disabled:pointer-events-none disabled:opacity-30"
+      >
+        <ChevronRight size={14} />
+      </button>
+    </div>
+  </div>
+);
+
+// Редактор комментария — поповер у ячейки, в портале: карточка дня с overflow-hidden
+// обрезала бы его. Вид — как у поповера CustomSelect variant="ios".
+const BillingGroupingCommentEditor = ({ editor, hours, saving, onSave, onClose }) => {
+  const minHour = hours.length ? hours[0] : editor.hourFrom;
+  const maxHour = hours.length ? hours[hours.length - 1] : editor.hourTo;
+  const [text, setText] = useState(editor.comment || '');
+  const [hourFrom, setHourFrom] = useState(editor.hourFrom);
+  const [hourTo, setHourTo] = useState(editor.hourTo);
+  const [coords, setCoords] = useState(null);
+  const panelRef = useRef(null);
+  const textareaRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const { anchor } = editor;
+  const doc = anchor?.ownerDocument || document;
+
+  const place = useCallback(() => {
+    const panel = panelRef.current;
+    if (!anchor || !panel) return;
+    // Ячейки больше нет — день свернули или отчёт перестроился: крепиться не к чему.
+    if (!anchor.isConnected) {
+      onCloseRef.current?.();
+      return;
+    }
+    const view = anchor.ownerDocument?.defaultView || window;
+    const rect = anchor.getBoundingClientRect();
+    const gap = BILLING_COMMENT_EDGE_GAP;
+    const width = Math.min(BILLING_COMMENT_PANEL_WIDTH, view.innerWidth - gap * 2);
+    // Высоту меряем по-настоящему, а не прикидываем: fixed-панель, уехавшую за край
+    // окна, не прокрутить ничем.
+    const height = panel.offsetHeight;
+    // Колонка комментариев крайняя справа, поэтому поповер встаёт слева от ячейки и
+    // накрывает соседние колонки. Места слева нет (узкое окно) — встаёт под ячейкой.
+    let left = rect.left - gap - width;
+    let top = rect.top;
+    if (left < gap) {
+      left = rect.right - width;
+      top = rect.bottom + 6;
+      if (top + height > view.innerHeight - gap) top = rect.top - 6 - height;
+    }
+    left = Math.round(Math.max(gap, Math.min(left, view.innerWidth - gap - width)));
+    top = Math.round(Math.max(gap, Math.min(top, view.innerHeight - gap - height)));
+    setCoords((prev) => (prev && prev.left === left && prev.top === top && prev.width === width
+      ? prev
+      : { left, top, width }));
+  }, [anchor]);
+
+  useLayoutEffect(() => {
+    place();
+  }, [place, text, hourFrom, hourTo]);
+
+  // Фокус — только когда панель видна: до первого замера она visibility: hidden, а
+  // скрытый элемент фокус не принимает, и набранный текст уходил бы в никуда.
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    const field = textareaRef.current;
+    if (!coords || !field || focusedRef.current) return;
+    focusedRef.current = true;
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, [coords]);
+
+  useEffect(() => {
+    const view = doc.defaultView || window;
+    const handlePointerDown = (event) => {
+      if (panelRef.current?.contains(event.target)) return;
+      // Щелчок по той же ячейке не закрывает: иначе поповер закрылся бы на mousedown
+      // и тут же открылся заново на click.
+      if (anchor?.contains(event.target)) return;
+      onCloseRef.current?.();
+    };
+    const handleKeyDown = (event) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onCloseRef.current?.();
+    };
+    doc.addEventListener('mousedown', handlePointerDown);
+    doc.addEventListener('keydown', handleKeyDown);
+    // Прокрутка страницы двигает ячейку — поповер едет за ней, а не закрывается.
+    doc.addEventListener('scroll', place, true);
+    view.addEventListener('resize', place);
+    return () => {
+      doc.removeEventListener('mousedown', handlePointerDown);
+      doc.removeEventListener('keydown', handleKeyDown);
+      doc.removeEventListener('scroll', place, true);
+      view.removeEventListener('resize', place);
+    };
+  }, [anchor, doc, place]);
+
+  const trimmed = text.trim();
+  const original = String(editor.comment || '').trim();
+  const unchanged = trimmed === original && hourFrom === editor.hourFrom && hourTo === editor.hourTo;
+  // Пустой текст у существующего комментария — это его снятие, у нового — нечего сохранять.
+  const canSave = !saving && !unchanged && (trimmed.length > 0 || original.length > 0);
+  const save = () => {
+    if (canSave) onSave({ hourFrom, hourTo, comment: trimmed });
+  };
+  const changeFrom = (value) => {
+    setHourFrom(value);
+    if (value > hourTo) setHourTo(value);
+  };
+  const changeTo = (value) => {
+    setHourTo(value);
+    if (value < hourFrom) setHourFrom(value);
+  };
+
+  return createPortal(
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label="Комментарий к часам"
+      style={{
+        position: 'fixed',
+        zIndex: 99999,
+        left: coords ? coords.left : -9999,
+        top: coords ? coords.top : 0,
+        width: coords ? coords.width : BILLING_COMMENT_PANEL_WIDTH,
+        visibility: coords ? 'visible' : 'hidden',
+      }}
+      className="rounded-2xl bg-white p-3 shadow-[0_14px_40px_rgba(15,23,42,0.16)] ring-1 ring-slate-200/80"
+    >
+      <div className="flex items-baseline justify-between gap-2 px-0.5">
+        <span className="text-sm font-semibold text-slate-950">Комментарий</span>
+        <span className="text-xs tabular-nums text-slate-500">
+          {formatDate(editor.date)} · {hourFrom === hourTo ? `час ${hourFrom}` : `часы ${hourFrom}–${hourTo}`}
+        </span>
+      </div>
+      <textarea
+        ref={textareaRef}
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            save();
+          }
+        }}
+        rows={3}
+        maxLength={500}
+        placeholder="Что происходило в эти часы"
+        className="mt-2 w-full resize-none rounded-xl border-0 bg-slate-100 px-3 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-sky-400/60"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <BillingHourStepper label="с" value={hourFrom} min={minHour} max={maxHour} onChange={changeFrom} />
+        <BillingHourStepper label="по" value={hourTo} min={minHour} max={maxHour} onChange={changeTo} />
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
+        {original ? (
+          <button
+            type="button"
+            onClick={() => onSave({ hourFrom: editor.hourFrom, hourTo: editor.hourTo, comment: '' })}
+            disabled={saving}
+            className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:opacity-50"
+          >
+            Удалить
+          </button>
+        ) : <span />}
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            disabled={!canSave}
+            className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-sky-300"
+          >
+            {saving ? 'Сохраняем…' : 'Сохранить'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    doc.body,
+  );
+};
+
 const BillingDetailTable = ({ rows }) => (
   <div className="overflow-x-auto">
     <table className="w-full min-w-[1180px] divide-y divide-slate-200 text-sm tabular-nums">
@@ -2887,13 +3211,16 @@ const ResourceFteView = ({
     timeFrom: '00:00',
     timeTo: '23:59',
   }));
-  const [billingReports, setBillingReports] = useState({ park: null, line: null, operator: null, detail: null });
+  const [billingReports, setBillingReports] = useState({ park: null, line: null, operator: null, detail: null, grouping: null });
   const [isBillingLoading, setIsBillingLoading] = useState(false);
   const [isBillingExporting, setIsBillingExporting] = useState(false);
   const [billingExportType, setBillingExportType] = useState('general');
-  const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '', detail: '' });
+  const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '', detail: '', grouping: '' });
   const [billingExpandedDays, setBillingExpandedDays] = useState(() => new Set());
   const [billingDetailPage, setBillingDetailPage] = useState(1);
+  // Открытый редактор комментария «Группировки»: день, отрезок часов и ячейка-якорь.
+  const [billingCommentEditor, setBillingCommentEditor] = useState(null);
+  const [isBillingCommentSaving, setIsBillingCommentSaving] = useState(false);
   const billingAttemptedRef = useRef({});
   // Метки актуальности загрузок. Быстрый перещёлк периода держит в полёте
   // несколько запросов, и поздний ответ на РАННИЙ запрос затирал свежие данные.
@@ -3056,7 +3383,9 @@ const ResourceFteView = ({
         ? `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_details`
         : targetMode === 'operator'
           ? `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_operators`
-          : `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}`;
+          : targetMode === 'grouping'
+            ? `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_grouping`
+            : `${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}`;
       const params = {
         date_from: billingApplied.from,
         date_to: billingApplied.to,
@@ -3067,7 +3396,7 @@ const ResourceFteView = ({
         params.page = page;
         params.per_page = BILLING_DETAIL_PAGE_SIZE;
         if (snapshotId) params.snapshot_id = snapshotId;
-      } else if (targetMode !== 'operator') {
+      } else if (targetMode === 'park' || targetMode === 'line') {
         params.group_by = targetMode;
       }
       const response = await axios.get(endpoint, { params, headers: buildHeaders() });
@@ -3090,9 +3419,10 @@ const ResourceFteView = ({
 
   const buildBillingReport = useCallback(() => {
     billingAttemptedRef.current = {};
-    setBillingReports({ park: null, line: null, operator: null, detail: null });
-    setBillingErrors({ park: '', line: '', operator: '', detail: '' });
+    setBillingReports({ park: null, line: null, operator: null, detail: null, grouping: null });
+    setBillingErrors({ park: '', line: '', operator: '', detail: '', grouping: '' });
     setBillingDetailPage(1);
+    setBillingCommentEditor(null);
     setBillingApplied({ from: billingFrom, to: billingTo, timeFrom: billingTimeFrom, timeTo: billingTimeTo });
   }, [billingFrom, billingTimeFrom, billingTimeTo, billingTo]);
 
@@ -3135,6 +3465,48 @@ const ResourceFteView = ({
       setIsBillingExporting(false);
     }
   }, [apiRoot, billingApplied, billingExportType, billingMode, buildHeaders, cfg, notify]);
+
+  const saveBillingGroupingComment = useCallback(async ({ hourFrom, hourTo, comment }) => {
+    const editor = billingCommentEditor;
+    if (!apiRoot || !editor) return;
+    setIsBillingCommentSaving(true);
+    try {
+      const response = await axios.put(`${apiRoot}${cfg.apiPrefix}/${cfg.billing.endpoint}_grouping_comment`, {
+        date: editor.date,
+        hour_from: hourFrom,
+        hour_to: hourTo,
+        comment,
+        // Прежний отрезок очищается первым: при сужении отрезка отпавшие часы
+        // не должны остаться со старым текстом.
+        ...(editor.comment ? { previous_hour_from: editor.hourFrom, previous_hour_to: editor.hourTo } : {}),
+      }, { headers: buildHeaders() });
+      const saved = response.data?.comments || {};
+      // Отчёт не перезапрашиваем: звонки идут из Oktell, а поменялись только комментарии дня.
+      setBillingReports((current) => {
+        const report = current.grouping;
+        if (!report) return current;
+        return {
+          ...current,
+          grouping: {
+            ...report,
+            days: (report.days || []).map((day) => (day.date !== editor.date ? day : {
+              ...day,
+              hours: (day.hours || []).map((item) => ({
+                ...item,
+                comment: saved[item.hour]?.comment || '',
+                comment_author: saved[item.hour]?.author || '',
+              })),
+            })),
+          },
+        };
+      });
+      setBillingCommentEditor(null);
+    } catch (error) {
+      notify(error?.response?.data?.error || 'Не удалось сохранить комментарий', 'error');
+    } finally {
+      setIsBillingCommentSaving(false);
+    }
+  }, [apiRoot, billingCommentEditor, buildHeaders, cfg, notify]);
 
   useEffect(() => {
     fetchOverview();
@@ -5452,7 +5824,7 @@ const ResourceFteView = ({
                 </div>
               </div>
               <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="inline-flex max-w-full w-fit overflow-x-auto rounded-xl bg-slate-100 p-1">
+                <div className="inline-flex max-w-full w-fit shrink-0 overflow-x-auto rounded-xl bg-slate-100 p-1">
                   {cfg.billing.modes.map((item) => (
                     <button
                       key={item.key}
@@ -5468,7 +5840,7 @@ const ResourceFteView = ({
                     </button>
                   ))}
                 </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                   <span className="tabular-nums">{billingPeriodDays > 0 ? `${billingPeriodDays} дн. · ${formatDate(billingFrom)} — ${formatDate(billingTo)}` : 'Период не выбран'}</span>
                   <span className="tabular-nums">время {billingTimeFrom}–{billingTimeTo} включительно</span>
                   {cfg.hasBillingExportTypes && billingExportType === 'efficiency' ? (
@@ -5480,6 +5852,8 @@ const ResourceFteView = ({
                     <span>OCC — разговоры и обработка ко всему времени в системе; UTZ — время без пауз</span>
                   ) : billingMode === 'detail' ? (
                     <span>Одна строка — один звонок; на странице 25 звонков</span>
+                  ) : billingMode === 'grouping' ? (
+                    <span>Разница — факт смен минус прогноз; комментарий к часу — щелчок по ячейке</span>
                   ) : (
                     <span>SL — отвечено за ≤ {billingSlSeconds} сек ожидания в очереди ко всем звонкам, попавшим в очередь</span>
                   )}
@@ -5629,6 +6003,7 @@ const ResourceFteView = ({
                   </section>
                 ) : (
                   <>
+                    {billingMode !== 'grouping' && (
                     <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                       <div className="border-b border-slate-100 px-4 py-3">
                         <h3 className="text-base font-semibold text-slate-950">
@@ -5642,6 +6017,7 @@ const ResourceFteView = ({
                         <BillingSummaryTable rows={billingReport.parks || []} totals={billingTotals} totalsLabel="Итого за период" mode={billingMode} />
                       )}
                     </section>
+                    )}
 
                     <div className="flex items-center justify-between">
                       <h3 className="text-base font-semibold text-slate-950">По дням</h3>
@@ -5713,6 +6089,8 @@ const ResourceFteView = ({
                               <div className="border-t border-slate-100">
                                 {billingMode === 'operator' ? (
                                   <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
+                                ) : billingMode === 'grouping' ? (
+                                  <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />
                                 ) : (
                                   <BillingSummaryTable rows={day.parks || []} totals={day.totals} totalsLabel="Итого за день" mode={billingMode} />
                                 )}
@@ -5742,6 +6120,17 @@ const ResourceFteView = ({
                 text={cfg.billing.idleText}
               />
             )}
+
+            {billingMode === 'grouping' && billingCommentEditor ? (
+              <BillingGroupingCommentEditor
+                key={`${billingCommentEditor.date}|${billingCommentEditor.hourFrom}`}
+                editor={billingCommentEditor}
+                hours={(billingDays.find((day) => day.date === billingCommentEditor.date)?.hours || []).map((item) => item.hour)}
+                saving={isBillingCommentSaving}
+                onSave={saveBillingGroupingComment}
+                onClose={() => setBillingCommentEditor(null)}
+              />
+            ) : null}
           </>
         )}
 

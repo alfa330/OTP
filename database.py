@@ -4546,6 +4546,22 @@ class Database:
                 VALUES (1)
                 ON CONFLICT (id) DO NOTHING;
             """)
+            # «Биллинг Oktell → Группировка»: комментарий к часу дня («во время поступления
+            # звонка оператор находился в разговоре»). Хранится ПО ЧАСУ, а не отрезком:
+            # объединённая ячейка на экране и в Excel — это подряд идущие часы с одним
+            # текстом, и перекрывающихся отрезков тогда не бывает по построению. Звонки
+            # Oktell у нас не хранятся, поэтому ключ — дата и час, без ссылки на отчёт.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oktell_billing_hour_comments (
+                    report_date DATE NOT NULL,
+                    hour SMALLINT NOT NULL,
+                    comment TEXT NOT NULL,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (report_date, hour),
+                    CONSTRAINT oktell_billing_hour_comments_hour_check CHECK (hour BETWEEN 0 AND 23)
+                );
+            """)
             # Ёмкость чата больше не вводится руками: она выводится из цели по ответу
             # внутри чата через снятую по нашим данным кривую exp(a + b × нагрузка),
             # поэтому её коэффициенты приезжают с дефолтами калибровки. Кривая ПЕРВОГО
@@ -27668,7 +27684,8 @@ class Database:
         Факт — операторы, у которых статусы «на смене» занимают не меньше 30 минут часа.
         Чат-менеджеры не участвуют: они живут на статусах Chat2Desk, а не Oktell.
 
-        Возвращает [{hour, planned, fact}] на 24 часа."""
+        Возвращает [{hour, planned, fact}] на 24 часа. Это частный случай
+        get_hourly_shift_grouping_range на один день — правило живёт в одном месте."""
         if hasattr(target_date, 'strftime'):
             date_obj = target_date
         else:
@@ -27676,27 +27693,46 @@ class Database:
                 date_obj = datetime.strptime(str(target_date), '%Y-%m-%d').date()
             except Exception:
                 return [{'hour': hour, 'planned': 0, 'fact': 0} for hour in range(24)]
-        day_key = date_obj.strftime('%Y-%m-%d')
+        by_day = self.get_hourly_shift_grouping_range(date_obj, date_obj, department_id)
+        return by_day.get(date_obj.strftime('%Y-%m-%d')) or []
 
-        # Лоты тянем отдельным вызовом: у него свой курсор, вложенность тут ни к чему.
-        auction = self.get_shift_auction_lots_for_planner_date(date_obj) or {}
+    def get_hourly_shift_grouping_range(self, date_from, date_to, department_id=None):
+        """{'ГГГГ-ММ-ДД': [{hour, planned, fact}] на 24 часа} за каждый день периода.
 
-        planned_by_hour = [set() for _ in range(24)]
-        for lot in (auction.get('lots') or []):
-            if str(lot.get('status') or '').strip().lower() != 'claimed':
-                continue
-            try:
-                operator_id = int(lot.get('claimed_by') or 0)
-            except (TypeError, ValueError):
-                continue
-            if operator_id <= 0:
-                continue
-            for start, end in self._hourly_lot_parts_for_date(lot, day_key):
-                for hour in range(24):
-                    if min(end, hour * 60 + 60) - max(start, hour * 60) > 0:
-                        planned_by_hour[hour].add(operator_id)
+        Правила — как у get_hourly_shift_grouping. Пакетом ради «Биллинг Oktell →
+        Группировка», где период доходит до 31 дня: состав отдела и модели расчёта
+        читаются один раз, статусы — одним запросом на весь период. Лоты аукциона
+        собираются по дню: для каждой даты отдельно решается, брать активный план
+        или опубликованную историю (get_shift_auction_lots_for_planner_date)."""
+        days = []
+        current = date_from
+        while current <= date_to:
+            days.append(current)
+            current += timedelta(days=1)
+        if not days:
+            return {}
 
-        fact_by_hour = [set() for _ in range(24)]
+        planned_by_day = {}
+        for day in days:
+            day_key = day.strftime('%Y-%m-%d')
+            # Лоты тянем отдельным вызовом: у него свой курсор, вложенность тут ни к чему.
+            auction = self.get_shift_auction_lots_for_planner_date(day) or {}
+            planned_by_hour = [set() for _ in range(24)]
+            for lot in (auction.get('lots') or []):
+                if str(lot.get('status') or '').strip().lower() != 'claimed':
+                    continue
+                try:
+                    operator_id = int(lot.get('claimed_by') or 0)
+                except (TypeError, ValueError):
+                    continue
+                if operator_id <= 0:
+                    continue
+                for start, end in self._hourly_lot_parts_for_date(lot, day_key):
+                    for hour in range(24):
+                        if min(end, hour * 60 + 60) - max(start, hour * 60) > 0:
+                            planned_by_hour[hour].add(operator_id)
+            planned_by_day[day_key] = planned_by_hour
+
         with self._get_cursor() as cursor:
             if department_id is not None:
                 cursor.execute(
@@ -27711,45 +27747,50 @@ class Database:
                     if str(models.get(op_id) or '').strip().lower() != CALCULATION_MODEL_CHAT_MANAGER
                 ]
             timeline = self._load_imported_status_segments_for_operators(
-                cursor, operator_ids, date_obj, date_obj) if operator_ids else {}
+                cursor, operator_ids, days[0], days[-1]) if operator_ids else {}
 
-        # Докуда вообще доехали статусы. Синк Oktell идёт несколько раз в сутки и отстаёт,
-        # поэтому за последним известным моментом «ноль на смене» означает не «никто не
-        # работал», а «данных ещё нет» — и такие часы отдаём как None, а не 0.
-        data_until_minute = 0
-        for operator_id, days in (timeline or {}).items():
-            segments = (days or {}).get(day_key) or []
-            on_shift = []
-            for segment in segments:
-                key = str(segment.get('stateKey') or '').strip().lower()
-                if not key or key in self._HOURLY_NOT_ON_SHIFT_STATUS_KEYS:
+        result = {}
+        for day in days:
+            day_key = day.strftime('%Y-%m-%d')
+            fact_by_hour = [set() for _ in range(24)]
+            # Докуда вообще доехали статусы. Синк Oktell идёт несколько раз в сутки и отстаёт,
+            # поэтому за последним известным моментом «ноль на смене» означает не «никто не
+            # работал», а «данных ещё нет» — и такие часы отдаём как None, а не 0.
+            data_until_minute = 0
+            for operator_id, operator_days in (timeline or {}).items():
+                segments = (operator_days or {}).get(day_key) or []
+                on_shift = []
+                for segment in segments:
+                    key = str(segment.get('stateKey') or '').strip().lower()
+                    if not key or key in self._HOURLY_NOT_ON_SHIFT_STATUS_KEYS:
+                        continue
+                    start_min = self._hourly_iso_to_minutes(segment.get('start'), day)
+                    end_min = self._hourly_iso_to_minutes(segment.get('end'), day)
+                    if start_min is None or end_min is None or end_min <= start_min:
+                        continue
+                    clipped_start, clipped_end = max(0, start_min), min(1440, end_min)
+                    on_shift.append((clipped_start, clipped_end))
+                    data_until_minute = max(data_until_minute, clipped_end)
+                if not on_shift:
                     continue
-                start_min = self._hourly_iso_to_minutes(segment.get('start'), date_obj)
-                end_min = self._hourly_iso_to_minutes(segment.get('end'), date_obj)
-                if start_min is None or end_min is None or end_min <= start_min:
-                    continue
-                clipped_start, clipped_end = max(0, start_min), min(1440, end_min)
-                on_shift.append((clipped_start, clipped_end))
-                data_until_minute = max(data_until_minute, clipped_end)
-            if not on_shift:
-                continue
+                for hour in range(24):
+                    h_start, h_end = hour * 60, hour * 60 + 60
+                    clipped = [(max(h_start, s), min(h_end, e)) for s, e in on_shift]
+                    if self._hourly_merge_minutes(clipped) >= self._HOURLY_FACT_MIN_MINUTES:
+                        fact_by_hour[hour].add(int(operator_id))
+
+            rows = []
             for hour in range(24):
-                h_start, h_end = hour * 60, hour * 60 + 60
-                clipped = [(max(h_start, s), min(h_end, e)) for s, e in on_shift]
-                if self._hourly_merge_minutes(clipped) >= self._HOURLY_FACT_MIN_MINUTES:
-                    fact_by_hour[hour].add(int(operator_id))
-
-        rows = []
-        for hour in range(24):
-            # Час считается «известным», если статусы доехали хотя бы до его половины —
-            # иначе засчитать 30 минут в нём всё равно было бы невозможно.
-            has_data = data_until_minute >= hour * 60 + self._HOURLY_FACT_MIN_MINUTES
-            rows.append({
-                'hour': hour,
-                'planned': len(planned_by_hour[hour]),
-                'fact': len(fact_by_hour[hour]) if has_data else None,
-            })
-        return rows
+                # Час считается «известным», если статусы доехали хотя бы до его половины —
+                # иначе засчитать 30 минут в нём всё равно было бы невозможно.
+                has_data = data_until_minute >= hour * 60 + self._HOURLY_FACT_MIN_MINUTES
+                rows.append({
+                    'hour': hour,
+                    'planned': len(planned_by_day[day_key][hour]),
+                    'fact': len(fact_by_hour[hour]) if has_data else None,
+                })
+            result[day_key] = rows
+        return result
 
     @staticmethod
     def _hourly_iso_to_minutes(value, date_obj):
@@ -27814,6 +27855,60 @@ class Database:
         part_start = max(0, offset + start)
         part_end = min(1440, offset + end)
         return [(part_start, part_end)] if part_end > part_start else []
+
+    def get_oktell_billing_hour_comments(self, date_from, date_to):
+        """Комментарии «Биллинг Oktell → Группировка»: {'ГГГГ-ММ-ДД': {час: {comment, author, updated_at}}}."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c.report_date, c.hour, c.comment, u.name, c.updated_at
+                FROM oktell_billing_hour_comments c
+                LEFT JOIN users u ON u.id = c.updated_by
+                WHERE c.report_date BETWEEN %s AND %s
+                ORDER BY c.report_date, c.hour
+            """, (date_from, date_to))
+            rows = cursor.fetchall() or []
+        result = {}
+        for report_date, hour, comment, author, updated_at in rows:
+            day_key = report_date.strftime('%Y-%m-%d') if hasattr(report_date, 'strftime') else str(report_date)
+            result.setdefault(day_key, {})[int(hour)] = {
+                'comment': comment or '',
+                'author': author or '',
+                'updated_at': updated_at.isoformat() if updated_at else None,
+            }
+        return result
+
+    def save_oktell_billing_hour_comment(self, report_date, hour_from, hour_to, comment,
+                                         updated_by=None, previous_hour_from=None,
+                                         previous_hour_to=None):
+        """Комментарий на отрезок часов одного дня; пустой текст — снять его.
+
+        previous_* — отрезок, который комментарий занимал до правки. Его часы сначала
+        очищаются: иначе при сужении отрезка отпавшие часы остались бы со старым текстом.
+        Чужой комментарий под новым отрезком перезаписывается — побеждает последняя правка.
+        Возвращает комментарии этого дня в виде get_oktell_billing_hour_comments."""
+        with self._get_cursor() as cursor:
+            if previous_hour_from is not None and previous_hour_to is not None:
+                cursor.execute("""
+                    DELETE FROM oktell_billing_hour_comments
+                    WHERE report_date = %s AND hour BETWEEN %s AND %s
+                """, (report_date, int(previous_hour_from), int(previous_hour_to)))
+            if comment:
+                cursor.execute("""
+                    INSERT INTO oktell_billing_hour_comments (report_date, hour, comment, updated_by)
+                    SELECT %s, h, %s, %s
+                    FROM generate_series(%s::int, %s::int) AS h
+                    ON CONFLICT (report_date, hour) DO UPDATE
+                    SET comment = EXCLUDED.comment,
+                        updated_by = EXCLUDED.updated_by,
+                        updated_at = CURRENT_TIMESTAMP
+                """, (report_date, comment, updated_by, int(hour_from), int(hour_to)))
+            else:
+                cursor.execute("""
+                    DELETE FROM oktell_billing_hour_comments
+                    WHERE report_date = %s AND hour BETWEEN %s AND %s
+                """, (report_date, int(hour_from), int(hour_to)))
+        day_key = report_date.strftime('%Y-%m-%d') if hasattr(report_date, 'strftime') else str(report_date)
+        return self.get_oktell_billing_hour_comments(report_date, report_date).get(day_key) or {}
 
     def get_sip_department_configs(self, department_ids=None) -> list:
         """Настройки SIP по отделам + сколько в отделе сотрудников с телефоном.

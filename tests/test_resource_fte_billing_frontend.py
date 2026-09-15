@@ -1,5 +1,6 @@
 """Регрессии выбора формата Excel в «Расчёт часов → Биллинг»."""
 
+import re
 import unittest
 from pathlib import Path
 
@@ -107,6 +108,58 @@ class BillingLineKeyTests(unittest.TestCase):
         # ключ — ровно 10 цифр национального номера, иначе поиск подписи не сработает
         for digits in front_map:
             self.assertTrue(digits.startswith("7"), digits)
+
+
+class BillingGroupingFrontendTests(unittest.TestCase):
+    """«Группировка» — пятая вкладка «Биллинга Oktell»: проводка экрана и ручек."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
+        cls.backend = BOT_PATH.read_text(encoding="utf-8-sig")
+
+    def _block(self, start, end):
+        begin = self.source.index(start)
+        return self.source[begin:self.source.index(end, begin)]
+
+    def test_grouping_is_the_fifth_tab_in_the_same_row(self):
+        block = self._block("const BILLING_MODES = [", "];")
+        self.assertEqual(re.findall(r"key: '(\w+)'", block),
+                         ["park", "line", "operator", "detail", "grouping"])
+        self.assertIn("{ key: 'grouping', label: 'Группировка' }", block)
+
+    def test_chat_billing_has_no_grouping(self):
+        self.assertNotIn("grouping", self._block("const CHAT_BILLING_MODES = [", "];"))
+
+    def test_grouping_goes_to_its_own_routes_and_export(self):
+        self.assertIn("${cfg.billing.endpoint}_grouping`", self.source)
+        self.assertIn("${cfg.billing.endpoint}_grouping_comment`", self.source)
+        self.assertIn("@app.route('/api/resource_fte/oktell_billing_grouping', methods=['GET', 'OPTIONS'])",
+                      self.backend)
+        self.assertIn("@app.route('/api/resource_fte/oktell_billing_grouping_comment', methods=['PUT', 'OPTIONS'])",
+                      self.backend)
+        self.assertIn("if mode not in ('park', 'line', 'operator', 'detail', 'grouping'):", self.backend)
+        self.assertIn("_oktell_billing_grouping_workbook(report) if mode == 'grouping'", self.backend)
+        # разрез по часам не должен уходить на ручку парков с group_by=grouping
+        self.assertIn("} else if (targetMode === 'park' || targetMode === 'line') {", self.source)
+
+    def test_day_table_renders_hours_and_skips_period_summary(self):
+        self.assertIn("<BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />",
+                      self.source)
+        self.assertIn("{billingMode !== 'grouping' && (", self.source)
+
+    def test_comment_editor_is_a_popover_without_system_controls(self):
+        block = self._block("const BillingHourStepper = ", "\nconst BillingDetailTable = ")
+        for forbidden in ("<select", 'type="time"', 'type="number"', "window.prompt", "IosModal"):
+            self.assertNotIn(forbidden, block)
+        self.assertIn("createPortal(", block)
+        self.assertIn("event.key !== 'Escape'", block)
+
+    def test_saving_a_comment_does_not_refetch_oktell(self):
+        block = self._block("const saveBillingGroupingComment = useCallback(",
+                            "}, [apiRoot, billingCommentEditor, buildHeaders, cfg, notify]);")
+        self.assertNotIn("fetchBillingReport", block)
+        self.assertIn("previous_hour_from: editor.hourFrom", block)
 
 
 if __name__ == "__main__":

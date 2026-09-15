@@ -9,9 +9,11 @@ bot_schedule2.py через AST и исполняются в изолирова�
 """
 
 import ast
+import logging
 import re
 import textwrap
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -35,7 +37,11 @@ FUNCTION_NAMES = [
     "_oktell_fetch_billing_rows",
     "_oktell_billing_int",
     "_oktell_billing_sec",
+    "_oktell_billing_metrics_row",
     "_oktell_billing_build_report",
+    "_oktell_billing_build_hourly_report",
+    "_oktell_billing_attach_grouping",
+    "_oktell_billing_grouping_report",
     "_oktell_billing_detail_source_sql",
     "_oktell_billing_detail_select_sql",
     "_oktell_billing_detail_line_apply_sql",
@@ -58,6 +64,8 @@ FUNCTION_NAMES = [
     "_oktell_billing_export_values",
     "_oktell_billing_export_workbook",
     "_oktell_billing_efficiency_workbook",
+    "_oktell_billing_grouping_values",
+    "_oktell_billing_grouping_workbook",
 ]
 
 CONST_NAMES = (
@@ -67,6 +75,9 @@ CONST_NAMES = (
     "_OKTELL_BILLING_LINE_TAIL_MIN",
     "_OKTELL_BILLING_EXPORT_DUR_FMT",
     "_OKTELL_BILLING_EXPORT_PCT_FMT",
+    "OKTELL_BILLING_GROUPING_AR_ALERT",
+    "_OKTELL_BILLING_GROUPING_COLUMNS",
+    "_OKTELL_BILLING_GROUPING_SHIFT_KEYS",
 )
 
 
@@ -894,6 +905,388 @@ class FetchChunkingTests(unittest.TestCase):
         # окно из одного дня не дробится (a == b) — страница остаётся как есть
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(rows), 5)
+
+
+class GroupingReportTests(unittest.TestCase):
+    """«Биллинг Oktell → Группировка»: день x час, смены, комментарии и выгрузка по образцу
+    таблицы владельца."""
+
+    def setUp(self):
+        self.ns = _extract_namespace()
+
+    def test_hour_sql_groups_by_hour_without_park_and_ratings(self):
+        sql = self.ns["_oktell_billing_sql"]("20260915", "20260916", 0, 1439, 20, "hour")
+        self.assertIn("DATEPART(HOUR, t.dt_insert) AS report_hour", sql)
+        self.assertIn("GROUP BY CONVERT(varchar(10), t.dt_insert, 23), DATEPART(HOUR, t.dt_insert)", sql)
+        self.assertNotIn("t.taxi_park AS taxi_park", sql)
+        # оценки в «Группировке» не показываются — подзапрос по всей таблице опросов не гоняем
+        self.assertNotIn("quality_employes", sql)
+        self.assertIn("0 AS rating_sum, 0 AS rating_count", sql)
+        # фильтры и формулы — те же, что у разреза по паркам: итоги дня обязаны сходиться
+        self.assertIn("t.taxi_park <> ''", sql)
+        self.assertIn("t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS arrived", sql)
+        self.assertIn("t.LenQueue <= 20 THEN 1 ELSE 0 END) AS served_sl", sql)
+        self.assertNotIn(";", sql)
+
+    def test_park_and_line_sql_keep_ratings(self):
+        for group_by in ("park", "line"):
+            sql = self.ns["_oktell_billing_sql"]("20260915", "20260916", 0, 1439, 20, group_by)
+            self.assertIn("FROM oktell.dbo.quality_employes GROUP BY chainid) qe", sql)
+            self.assertIn("THEN qe.rating ELSE 0 END) AS rating_sum", sql)
+            self.assertIn("t.taxi_park AS taxi_park", sql)
+            self.assertNotIn("report_hour", sql)
+
+    def test_hourly_report_fills_every_hour_of_the_window(self):
+        build = self.ns["_oktell_billing_build_hourly_report"]
+        report = build([
+            {"report_date": "2026-09-15", "report_hour": 9, "arrived": 64, "served": 63,
+             "talk_seconds": 63 * 218, "wait_ok_seconds": 63 * 36},
+            {"report_date": "2026-09-15", "report_hour": "11", "arrived": 96, "served": 96},
+            {"report_date": "2026-09-15", "report_hour": 7, "arrived": 5, "served": 5},
+            {"report_date": "2026-09-14", "report_hour": 10, "arrived": 3, "served": 1},
+            {"report_date": "", "report_hour": 10, "arrived": 3, "served": 1},
+            {"report_date": "2026-09-14", "report_hour": None, "arrived": 3, "served": 1},
+        ], 480, 719)
+        self.assertEqual([day["date"] for day in report["days"]], ["2026-09-14", "2026-09-15"])
+        day = report["days"][1]
+        # окно 08:00–11:59 — часы с 8 по 11 подряд, 7-й час за окном отброшен
+        self.assertEqual([item["hour"] for item in day["hours"]], [8, 9, 10, 11])
+        self.assertEqual(day["hours"][0]["arrived"], 0)
+        self.assertEqual(day["hours"][1]["lost"], 1)
+        self.assertEqual(day["hours"][1]["talk_seconds"], 63 * 218)
+        self.assertEqual(day["totals"]["arrived"], 160)
+        self.assertEqual(report["totals"]["arrived"], 163)
+        self.assertEqual(report["totals"]["lost"], 3)
+
+    def test_hourly_report_without_calls_is_empty(self):
+        report = self.ns["_oktell_billing_build_hourly_report"]([], 0, 1439)
+        self.assertEqual(report["days"], [])
+        self.assertEqual(report["totals"]["arrived"], 0)
+
+    def _grouping_ns(self, comments=None):
+        calls = []
+        ns = self.ns
+
+        def shift_rows(first, last):
+            calls.append(("shifts", first, last))
+            return {"2026-09-15": {0: {"forecast": 3, "planned": 3, "fact": None}}}
+
+        class FakeDb:
+            def get_oktell_billing_hour_comments(self, first, last):
+                calls.append(("comments", first, last))
+                if isinstance(comments, Exception):
+                    raise comments
+                return comments or {}
+
+        ns["_szov_shift_rows_for_range"] = shift_rows
+        ns["db"] = FakeDb()
+        ns["logging"] = logging
+        return ns, calls
+
+    def test_grouping_report_attaches_shifts_and_comments_for_days_with_calls(self):
+        ns, calls = self._grouping_ns({"2026-09-15": {0: {"comment": "СМЗ", "author": "Супервайзер"}}})
+        params = {"start_day": date(2026, 9, 1), "end_day": date(2026, 9, 30),
+                  "minute_from": 0, "minute_to": 119}
+        report = ns["_oktell_billing_grouping_report"](params, [
+            {"report_date": "2026-09-15", "report_hour": 0, "arrived": 29, "served": 18},
+        ])
+        # смены и комментарии — только за дни, где есть звонки, а не за весь месяц
+        day = date(2026, 9, 15)
+        self.assertEqual(calls, [("shifts", day, day), ("comments", day, day)])
+        first, second = report["days"][0]["hours"]
+        self.assertEqual((first["forecast"], first["planned"], first["fact"]), (3, 3, None))
+        self.assertEqual((first["comment"], first["comment_author"]), ("СМЗ", "Супервайзер"))
+        # часа нет в расчёте смен — прочерк, а не ноль
+        self.assertEqual((second["forecast"], second["planned"], second["fact"], second["comment"]),
+                         (None, None, None, ""))
+
+    def test_empty_period_does_not_touch_the_database(self):
+        ns, calls = self._grouping_ns()
+        params = {"start_day": date(2026, 9, 1), "end_day": date(2026, 9, 2),
+                  "minute_from": 0, "minute_to": 1439}
+        report = ns["_oktell_billing_grouping_report"](params, [])
+        self.assertEqual(report["days"], [])
+        self.assertEqual(calls, [])
+
+    def test_comment_failure_keeps_the_calls(self):
+        ns, _calls = self._grouping_ns(RuntimeError("база недоступна"))
+        params = {"start_day": date(2026, 9, 15), "end_day": date(2026, 9, 15),
+                  "minute_from": 0, "minute_to": 59}
+        with self.assertLogs(level="WARNING"):
+            report = ns["_oktell_billing_grouping_report"](params, [
+                {"report_date": "2026-09-15", "report_hour": 0, "arrived": 29, "served": 18},
+            ])
+        hour = report["days"][0]["hours"][0]
+        self.assertEqual((hour["arrived"], hour["forecast"], hour["comment"]), (29, 3, ""))
+
+    def test_values_follow_the_owner_table(self):
+        values = self.ns["_oktell_billing_grouping_values"]
+        row = values({"hour": 0, "arrived": 29, "served": 18, "lost": 11,
+                      "talk_seconds": 18 * 335 + 17, "wait_ok_seconds": 18 * 192 + 5,
+                      "forecast": 3, "planned": 3, "fact": 3, "comment": " СМЗ "})
+        # средние — целые секунды усечением
+        self.assertEqual((row["talk"], row["wait"]), (335, 192))
+        self.assertAlmostEqual(row["ar"], 11 / 29)
+        self.assertEqual((row["delta"], row["comment"]), (0, "СМЗ"))
+        # разница — факт минус ПРОГНОЗ, а не минус план
+        self.assertEqual(values({"hour": 15, "arrived": 180, "served": 63, "lost": 117,
+                                 "forecast": 10, "planned": 6, "fact": 14})["delta"], 4)
+        empty = values({"hour": 4, "arrived": 0, "served": 0, "lost": 0,
+                        "forecast": None, "planned": 0, "fact": 0})
+        self.assertIsNone(empty["ar"])
+        self.assertIsNone(empty["talk"])
+        self.assertIsNone(empty["wait"])
+        self.assertIsNone(empty["delta"])
+        self.assertEqual(empty["planned"], 0)
+
+    def test_workbook_matches_the_owner_table(self):
+        said = "Во время поступления звонка оператор находился в разговоре"
+        report = {"days": [
+            {"date": "2026-09-15", "hours": [
+                {"hour": 0, "arrived": 29, "served": 18, "lost": 11, "talk_seconds": 18 * 335,
+                 "wait_ok_seconds": 18 * 192, "forecast": 3, "planned": 3, "fact": 3, "comment": said},
+                {"hour": 1, "arrived": 13, "served": 9, "lost": 4, "talk_seconds": 9 * 459,
+                 "wait_ok_seconds": 9 * 269, "forecast": 1, "planned": 7, "fact": 2, "comment": said},
+                {"hour": 2, "arrived": 50, "served": 48, "lost": 2, "talk_seconds": 48 * 225,
+                 "wait_ok_seconds": 48 * 65, "forecast": 3, "planned": 12, "fact": 1, "comment": ""},
+                {"hour": 3, "arrived": 0, "served": 0, "lost": 0, "forecast": None,
+                 "planned": None, "fact": None, "comment": said},
+            ]},
+            {"date": "2026-09-16", "hours": [
+                {"hour": 0, "arrived": 1, "served": 1, "lost": 0, "forecast": 1, "planned": 1, "fact": 1},
+            ]},
+        ]}
+        wb = load_workbook(self.ns["_oktell_billing_grouping_workbook"](report))
+        self.assertEqual(wb.sheetnames, ["15.09.2026", "16.09.2026"])
+        ws = wb["15.09.2026"]
+        self.assertEqual([cell.value for cell in ws[1]], [
+            "С", "Получено", "Принято", "Потеряно", "% Неотв", "Средн. Прод.",
+            "Средн. время ожидания", "Прогноз смен", "Запланировано смен", "Факт смен",
+            "Разница факта от прогноза", "Комментарии",
+        ])
+        first = [cell.value for cell in ws[2]]
+        self.assertEqual(first[:4], [0, 29, 18, 11])
+        self.assertAlmostEqual(first[4], 11 / 29)
+        self.assertEqual(first[5:11], [335, 192, 3, 3, 3, 0])
+        self.assertEqual(ws["E2"].number_format, "0%")
+        # 38 % залито красным, 4 % — нет
+        self.assertEqual(ws["E2"].fill.fgColor.rgb[-6:], "FFC7CE")
+        self.assertNotEqual(ws["E4"].fill.fgColor.rgb[-6:], "FFC7CE")
+        # смены — на голубой подложке, отставание от прогноза — красным
+        self.assertEqual(ws["H2"].fill.fgColor.rgb[-6:], "DDEBF7")
+        self.assertEqual(ws["K4"].value, -2)
+        self.assertEqual(ws["K4"].font.color.rgb[-6:], "C00000")
+        # без звонков и без данных о сменах — прочерки
+        self.assertEqual([ws["E5"].value, ws["F5"].value, ws["H5"].value, ws["K5"].value],
+                         ["—", "—", "—", "—"])
+        # два соседних часа с одним текстом — одна ячейка; через пустой час не склеиваются
+        merged = {str(item) for item in ws.merged_cells.ranges}
+        self.assertEqual(merged, {"L2:L3"})
+        self.assertEqual(ws["L2"].value, said)
+        self.assertEqual(ws["L5"].value, said)
+        self.assertEqual(ws.freeze_panes, "A2")
+
+    def test_empty_workbook_says_so(self):
+        wb = load_workbook(self.ns["_oktell_billing_grouping_workbook"]({"days": []}))
+        self.assertEqual(wb.sheetnames, ["Группировка"])
+        self.assertIn("не вернул", wb.active["A1"].value)
+
+    def test_columns_and_alert_match_the_frontend(self):
+        front = (BOT_PATH.parent / "src" / "components" / "resources" / "billingGrouping.js").read_text(encoding="utf-8")
+        block = front[front.index("export const BILLING_GROUPING_COLUMNS = ["):]
+        block = block[:block.index("];")]
+        front_columns = re.findall(r"\{ key: '(\w+)', label: '([^']+)' \}", block)
+        back_columns = [(key, title) for key, title, _width in self.ns["_OKTELL_BILLING_GROUPING_COLUMNS"]]
+        self.assertEqual(front_columns, back_columns)
+        self.assertIn("export const BILLING_GROUPING_AR_ALERT = 0.05;", front)
+        self.assertEqual(self.ns["OKTELL_BILLING_GROUPING_AR_ALERT"], 0.05)
+        shift_keys = set(re.findall(r"'(\w+)'", front[front.index("BILLING_GROUPING_SHIFT_KEYS = new Set(["):].split(")")[0]))
+        self.assertEqual(shift_keys, set(self.ns["_OKTELL_BILLING_GROUPING_SHIFT_KEYS"]))
+
+
+class ShiftRowsForRangeTests(unittest.TestCase):
+    """Прогноз/план/факт смен по часам — общий расчёт отбивки табло и «Группировки»."""
+
+    def _ns(self, grouping=None, forecast=None):
+        module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
+        wanted = {"_szov_shift_rows_for_range", "_szov_broadcast_shift_rows"}
+        nodes = [node for node in module.body
+                 if isinstance(node, ast.FunctionDef) and node.name in wanted]
+        self.assertEqual({node.name for node in nodes}, wanted)
+        calls = []
+
+        class FakeDb:
+            def get_hourly_shift_grouping_range(self, first, last, department_id):
+                calls.append((first, last, department_id))
+                if isinstance(grouping, Exception):
+                    raise grouping
+                return grouping or {}
+
+        def fake_forecast(_db, first, last):
+            if isinstance(forecast, Exception):
+                raise forecast
+            return forecast or {}
+
+        ns = {
+            "db": FakeDb(),
+            "datetime": datetime,
+            "logging": logging,
+            "get_resource_hourly_forecast": fake_forecast,
+            "_szov_wallboard_department_id": lambda: 7,
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT_PATH), "exec"), ns)
+        return ns, calls
+
+    def test_plan_fact_and_rounded_forecast_are_merged_by_day_and_hour(self):
+        ns, calls = self._ns(
+            grouping={"2026-09-15": [{"hour": 0, "planned": 3, "fact": 2},
+                                     {"hour": 1, "planned": 1, "fact": None}]},
+            forecast={"2026-09-15": {0: 2.6, 1: 0.4}},
+        )
+        rows = ns["_szov_shift_rows_for_range"](date(2026, 9, 14), date(2026, 9, 15))
+        self.assertEqual(calls, [(date(2026, 9, 14), date(2026, 9, 15), 7)])
+        self.assertEqual(rows["2026-09-15"][0], {"planned": 3, "fact": 2, "forecast": 3})
+        self.assertEqual(rows["2026-09-15"][1], {"planned": 1, "fact": None, "forecast": 0})
+
+    def test_failed_plan_leaves_dashes_not_zeros(self):
+        ns, _calls = self._ns(grouping=RuntimeError("нет базы"), forecast={"2026-09-15": {0: 3.2}})
+        with self.assertLogs(level="WARNING"):
+            rows = ns["_szov_shift_rows_for_range"](date(2026, 9, 15), date(2026, 9, 15))
+        self.assertEqual(rows["2026-09-15"][0], {"planned": None, "fact": None, "forecast": 3})
+
+    def test_failed_or_missing_forecast_keeps_plan_and_fact(self):
+        ns, _calls = self._ns(grouping={"2026-09-15": [{"hour": 0, "planned": 2, "fact": 1}]},
+                              forecast=RuntimeError("нет истории"))
+        with self.assertLogs(level="WARNING"):
+            rows = ns["_szov_shift_rows_for_range"](date(2026, 9, 15), date(2026, 9, 15))
+        self.assertEqual(rows["2026-09-15"][0], {"planned": 2, "fact": 1, "forecast": None})
+        ns, _calls = self._ns(grouping={"2026-09-15": [{"hour": 0, "planned": 2, "fact": 1}]},
+                              forecast={"2026-09-15": {}})
+        rows = ns["_szov_shift_rows_for_range"](date(2026, 9, 15), date(2026, 9, 15))
+        self.assertIsNone(rows["2026-09-15"][0]["forecast"])
+
+    def test_broadcast_takes_one_day_of_the_shared_calculation(self):
+        ns, calls = self._ns(grouping={"2026-09-15": [{"hour": 9, "planned": 5, "fact": 4}]})
+        self.assertEqual(ns["_szov_broadcast_shift_rows"]("2026-09-15"),
+                         {9: {"planned": 5, "fact": 4, "forecast": None}})
+        self.assertEqual(calls, [(date(2026, 9, 15), date(2026, 9, 15), 7)])
+        self.assertEqual(ns["_szov_broadcast_shift_rows"]("не дата"), {})
+
+
+class HourlyShiftGroupingRangeTests(unittest.TestCase):
+    """План/факт смен за период пакетом — те же правила, что за один день."""
+
+    METHODS = ("get_hourly_shift_grouping", "get_hourly_shift_grouping_range",
+               "_hourly_merge_minutes", "_hourly_iso_to_minutes", "_hourly_lot_parts_for_date")
+    CONSTS = ("_HOURLY_NOT_ON_SHIFT_STATUS_KEYS", "_HOURLY_FACT_MIN_MINUTES")
+
+    @classmethod
+    def setUpClass(cls):
+        source = DATABASE_PATH.read_text(encoding="utf-8-sig")
+        lines = source.splitlines()
+        klass = next(node for node in source_cache.parse(source).body
+                     if isinstance(node, ast.ClassDef) and node.name == "Database")
+        parts = []
+        for node in klass.body:
+            is_method = isinstance(node, ast.FunctionDef) and node.name in cls.METHODS
+            is_const = isinstance(node, ast.Assign) and any(
+                getattr(target, "id", "") in cls.CONSTS for target in node.targets)
+            if not (is_method or is_const):
+                continue
+            first = min([item.lineno for item in getattr(node, "decorator_list", [])] + [node.lineno])
+            parts.append(textwrap.indent(textwrap.dedent("\n".join(lines[first - 1:node.end_lineno])), "    "))
+        ns = {"datetime": datetime, "timedelta": timedelta, "date": date,
+              "CALCULATION_MODEL_CHAT_MANAGER": "chat_manager"}
+        exec("class Database:\n" + "\n\n".join(parts), ns)
+        cls.Database = ns["Database"]
+
+    def _db(self, lots_by_day, segments, users=(1, 2, 3), models=None):
+        base = self.Database
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                self.sql = sql
+
+            def fetchall(self):
+                return [(user_id,) for user_id in users]
+
+        class FakeDb(base):
+            def __init__(self):
+                self.lots_calls = []
+                self.segment_calls = []
+
+            @contextmanager
+            def _get_cursor(self):
+                yield Cursor()
+
+            def get_shift_auction_lots_for_planner_date(self, day):
+                self.lots_calls.append(day)
+                return {"lots": lots_by_day.get(day.isoformat(), [])}
+
+            def _load_operator_calculation_models_tx(self, cursor, operator_ids):
+                return models or {}
+
+            def _load_imported_status_segments_for_operators(self, cursor, operator_ids, first, last):
+                self.segment_calls.append((tuple(operator_ids), first, last))
+                return {op: days for op, days in segments.items() if op in operator_ids}
+
+        return FakeDb()
+
+    def _fixture(self):
+        night = {"shift_date": "2026-09-14", "start_time": "22:00", "end_time": "06:00",
+                 "status": "claimed", "claimed_by": 1}
+        lots = {
+            "2026-09-14": [night],
+            "2026-09-15": [
+                night,
+                {"shift_date": "2026-09-15", "start_time": "09:00", "end_time": "11:00",
+                 "status": "claimed", "claimed_by": 2},
+                {"shift_date": "2026-09-15", "start_time": "09:00", "end_time": "18:00",
+                 "status": "available", "claimed_by": None},
+            ],
+        }
+        segments = {
+            1: {"2026-09-15": [{"stateKey": "свободен", "start": "2026-09-15T00:00:00",
+                                "end": "2026-09-15T05:40:00"}]},
+            2: {"2026-09-15": [
+                {"stateKey": "разговор", "start": "2026-09-15T09:10:00", "end": "2026-09-15T10:20:00"},
+                {"stateKey": "нет на месте", "start": "2026-09-15T10:20:00", "end": "2026-09-15T11:00:00"},
+            ]},
+            # чат-менеджер в почасовом факте не участвует
+            3: {"2026-09-15": [{"stateKey": "свободен", "start": "2026-09-15T00:00:00",
+                                "end": "2026-09-15T23:00:00"}]},
+        }
+        return lots, segments
+
+    def test_range_loads_statuses_once_and_keeps_the_day_rules(self):
+        lots, segments = self._fixture()
+        db = self._db(lots, segments, models={3: "chat_manager"})
+        result = db.get_hourly_shift_grouping_range(date(2026, 9, 14), date(2026, 9, 15), department_id=1)
+        self.assertEqual(sorted(result), ["2026-09-14", "2026-09-15"])
+        self.assertEqual(db.segment_calls, [((1, 2), date(2026, 9, 14), date(2026, 9, 15))])
+        self.assertEqual(db.lots_calls, [date(2026, 9, 14), date(2026, 9, 15)])
+
+        day = {row["hour"]: row for row in result["2026-09-15"]}
+        # хвост ночной смены 14-го — в часах 0–5 следующих суток
+        self.assertEqual([day[hour]["planned"] for hour in range(12)], [1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0])
+        # 40 минут в 5-м часу засчитываются, 20 минут в 10-м — нет; статусы доехали до 10:20,
+        # поэтому с 10-го часа факт неизвестен, а не ноль
+        self.assertEqual([day[hour]["fact"] for hour in range(10)], [1, 1, 1, 1, 1, 1, 0, 0, 0, 1])
+        self.assertIsNone(day[10]["fact"])
+        self.assertIsNone(day[23]["fact"])
+
+        previous = {row["hour"]: row for row in result["2026-09-14"]}
+        self.assertEqual((previous[22]["planned"], previous[23]["planned"]), (1, 1))
+        self.assertIsNone(previous[0]["fact"])
+
+    def test_single_day_is_the_same_calculation(self):
+        lots, segments = self._fixture()
+        range_rows = self._db(lots, segments).get_hourly_shift_grouping_range(
+            date(2026, 9, 15), date(2026, 9, 15))["2026-09-15"]
+        self.assertEqual(self._db(lots, segments).get_hourly_shift_grouping("2026-09-15"), range_rows)
+        self.assertEqual(len(range_rows), 24)
+        broken = self._db(lots, segments).get_hourly_shift_grouping("не дата")
+        self.assertEqual(broken, [{"hour": hour, "planned": 0, "fact": 0} for hour in range(24)])
 
 
 if __name__ == "__main__":

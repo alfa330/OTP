@@ -191,6 +191,33 @@ def get_resource_settings(db) -> Dict[str, Any]:
         return _get_settings_tx(cursor)
 
 
+def get_resource_hourly_forecast(db, date_from, date_to) -> Dict[str, Dict[int, float]]:
+    """Прогноз FTE по часам за период: {'ГГГГ-ММ-ДД': {час: FTE}}.
+
+    Числа те же, что у get_resource_overview в next_week_forecast.days[].hourly_forecast[]
+    .forecast_fte — там это hourly_profile[].fte того же профиля. Но без остального обзора:
+    ёмкость штата, доступность операторов и всплеск инцидентов почасовым таблицам не нужны,
+    а за месяц они делают обзор самым дорогим запросом раздела.
+    День без истории (нет отчётов ни за −21, ни за −14 дней) приходит пустым: прогноза
+    нет, и ноль в таблице выдавал бы себя за посчитанный."""
+    with db._get_cursor() as cursor:
+        settings = _get_settings_tx(cursor)
+        profiles = _compute_period_forecast_profiles_tx(cursor, date_from, date_to, settings)
+    result: Dict[str, Dict[int, float]] = {}
+    for profile in profiles:
+        day_key = str(profile.get("forecast_date") or "")
+        if not day_key:
+            continue
+        if not profile.get("history_dates"):
+            result[day_key] = {}
+            continue
+        result[day_key] = {
+            _to_int(row.get("hour")): _to_float(row.get("fte"))
+            for row in profile.get("hourly_profile") or []
+        }
+    return result
+
+
 def update_resource_settings(db, payload: Dict[str, Any], user_id: Optional[int] = None) -> Dict[str, Any]:
     current = get_resource_settings(db)
     next_settings = dict(current)

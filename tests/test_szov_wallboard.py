@@ -2003,7 +2003,11 @@ class SzovShiftColumnsWiringTests(unittest.TestCase):
 
     def test_plan_and_fact_come_from_one_backend_calculation(self):
         self.assertIn("def get_hourly_shift_grouping", self.db)
-        self.assertIn("db.get_hourly_shift_grouping(day_iso, _szov_wallboard_department_id())", self.api)
+        self.assertIn("def get_hourly_shift_grouping_range", self.db)
+        # Отбивка и «Биллинг Oktell → Группировка» берут смены из одного расчёта за период.
+        self.assertIn("grouping = db.get_hourly_shift_grouping_range(\n"
+                      "            start_day, end_day, _szov_wallboard_department_id())", self.api)
+        self.assertIn("return _szov_shift_rows_for_range(day, day).get(day_iso) or {}", self.api)
 
     def test_on_shift_rule_matches_the_section(self):
         """«На смене» — всё, кроме отключения: перерыв и тренинг сменой считаются."""
