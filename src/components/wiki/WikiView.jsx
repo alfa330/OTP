@@ -949,6 +949,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             base={base}
                             headers={headers}
                             showToast={showToast}
+                            spaceId={activeSpace?.id || null}
+                            spaces={spaces}
+                            onSpaceChange={setSpaceId}
                             focusRequest={questionFocus}
                             onFocusConsumed={() => setQuestionFocus(null)}
                             onOpenArticle={(slug) => {

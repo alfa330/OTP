@@ -232,19 +232,20 @@ SELECT q.id, q.question, q.status, q.created_at, q.space_id, q.chat_id,
        q.asker_id, asker.name, q.department_id, d.name,
        q.answer, q.resolved_at, q.resolved_by, resolver.name,
        q.kb_status, q.kb_at, q.kb_article_id, a.title, a.slug, q.kb_news_id,
-       q.answer_message_id
+       q.answer_message_id, sp.name
   FROM wiki_operator_questions q
   LEFT JOIN users asker ON asker.id = q.asker_id
   LEFT JOIN users resolver ON resolver.id = q.resolved_by
   LEFT JOIN departments d ON d.id = q.department_id
   LEFT JOIN wiki_articles a ON a.id = q.kb_article_id
+  LEFT JOIN wiki_spaces sp ON sp.id = q.space_id
 """
 
 _ROW_KEYS = ('id', 'question', 'status', 'created_at', 'space_id', 'chat_id',
              'asker_id', 'asker_name', 'department_id', 'department_name',
              'answer', 'resolved_at', 'resolved_by', 'resolved_by_name',
              'kb_status', 'kb_at', 'kb_article_id', 'kb_article_title',
-             'kb_article_slug', 'kb_news_id', 'answer_message_id')
+             'kb_article_slug', 'kb_news_id', 'answer_message_id', 'space_name')
 
 
 def _row(row):
@@ -263,9 +264,42 @@ def _scope(departments):
             {'departments': sorted({int(value) for value in departments}) or [-1]})
 
 
-def list_questions(cursor, *, departments, bucket, limit, offset):
-    """(строки корзины, счётчики всех корзин) — двумя запросами на любую корзину."""
+def _space_scope(space_id, reachable_spaces):
+    """Граница вики: вопрос виден в том пространстве, где его задали.
+
+    Граница отдела отвечает на «чей вопрос», а не на «в какой вике он живёт».
+    Без этой вопрос оператора Тез КЦ, заданный в «Тез», показывался в
+    «Таксопарках» каждому, кто разбирает оба отдела (жалоба исполнителя
+    15.09.2026), — хотя статью по нему подбирают в вике вопроса
+    (routes_questions: wiki_questions_targets), а не в той, что на экране.
+
+    Два исключения, оба затем, чтобы вопрос не потерялся:
+      * пространство не записано (NULL) — отнести вопрос к вике было бы догадкой;
+      * пространство разбирающему не открыто: оператору выдали чужую вику
+        гостем, а его супервайзер туда не ходит. Такой вопрос виден в любой
+        вике разбирающего — иначе его не увидел бы никто.
+
+    space_id None — открытых вик нет вовсе, сужать нечем.
+    """
+    if not space_id:
+        return 'TRUE', {}
+    reachable = sorted({int(value) for value in reachable_spaces or ()}) or [-1]
+    return ('(q.space_id = %(space)s OR q.space_id IS NULL'
+            ' OR NOT (q.space_id = ANY(%(reachable_spaces)s)))',
+            {'space': int(space_id), 'reachable_spaces': reachable})
+
+
+def list_questions(cursor, *, departments, bucket, limit, offset,
+                   space_id=None, reachable_spaces=()):
+    """(строки корзины, счётчики всех корзин) — двумя запросами на любую корзину.
+
+    Счётчики — под той же границей вики, что и строки: число на корзине, за
+    которым список пуст, звало бы искать то, чего в этой вике нет.
+    """
     where, params = _scope(departments)
+    space_where, space_params = _space_scope(space_id, reachable_spaces)
+    where = '%s AND %s' % (where, space_where)
+    params.update(space_params)
     params.update({'limit': limit, 'offset': offset})
     cursor.execute(
         _ROW_SQL
@@ -291,6 +325,8 @@ def list_questions(cursor, *, departments, bucket, limit, offset):
 
 
 def get_question(cursor, question_id, *, departments):
+    # Границы вики здесь нет намеренно: карточку открывают из колокола, находясь
+    # в другой вике, и вкладка сама переключает шапку на вику вопроса.
     where, params = _scope(departments)
     params['id'] = question_id
     cursor.execute(_ROW_SQL + ' WHERE q.id = %(id)s AND ' + where, params)

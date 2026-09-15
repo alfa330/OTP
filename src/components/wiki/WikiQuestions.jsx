@@ -60,10 +60,12 @@ const EMPTY_TEXT = {
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
 export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
+                                        spaceId = null, spaces = [], onSpaceChange,
                                         focusRequest = null, onFocusConsumed }) {
     const toast = useStableCallback(showToast);
     const openArticle = useStableCallback(onOpenArticle);
     const consumeFocus = useStableCallback(onFocusConsumed);
+    const changeSpace = useStableCallback(onSpaceChange);
     const isMobile = useIsMobileShell();
 
     const [bucket, setBucket] = useState('open');
@@ -74,9 +76,18 @@ export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
     // Гонка корзин: ответ по прежней корзине не должен лечь поверх новой.
     const listRequest = useRef(0);
 
+    /* Вика в шапке и открытые человеку вики — ещё и ссылками: их читает ответ
+       сервера, а в зависимостях эффектов список вик перезапускал бы их на
+       каждом ping — он приходит оттуда новым массивом. */
+    const spaceRef = useRef(spaceId);
+    const reachableRef = useRef(new Set());
+    useEffect(() => { spaceRef.current = spaceId; }, [spaceId]);
+    useEffect(() => { reachableRef.current = new Set(spaces.map((sp) => sp.id)); }, [spaces]);
+
     const load = useCallback(() => {
         const request = ++listRequest.current;
-        return axios.get(`${base}/questions`, { headers, params: { bucket } })
+        // Вопросы — той вики, что открыта в шапке (wiki/questions.py: _space_scope).
+        return axios.get(`${base}/questions`, { headers, params: { bucket, space_id: spaceId } })
             .then((r) => {
                 if (request !== listRequest.current) return;
                 setList({
@@ -91,9 +102,19 @@ export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
             .finally(() => {
                 if (request === listRequest.current) setLoading(false);
             });
-    }, [base, headers, bucket, toast]);
+    }, [base, headers, bucket, spaceId, toast]);
 
     useEffect(() => { load(); }, [load]);
+
+    /* Сменили вику в шапке — строки прежней не стоят на экране, пока едет новый
+       список, а открытая из неё карточка закрывается. Вопрос из вики, которую
+       человек открыть не может, остаётся: он и виден в любой. */
+    useEffect(() => {
+        setLoading(true);
+        setList((prev) => ({ ...prev, items: [] }));
+        setSelected((prev) => (prev?.space_id && prev.space_id !== spaceId
+            && reachableRef.current.has(prev.space_id) ? null : prev));
+    }, [spaceId]);
 
     /* Новый вопрос отделу, пока вкладка открыта, — тычок канала колокола.
        Склейка, а не таймер: тычок приходит на любое событие колокола, и на пачку
@@ -105,7 +126,17 @@ export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
     useEffect(() => {
         if (!focusRequest?.id) return;
         axios.get(`${base}/questions/${focusRequest.id}`, { headers })
-            .then((r) => { if (r.data?.item) setSelected(r.data.item); })
+            .then((r) => {
+                const item = r.data?.item;
+                if (!item) return;
+                /* Вопрос из другой вики — переключаем шапку на неё, а не кладём
+                   карточку поверх чужого списка. */
+                if (item.space_id && item.space_id !== spaceRef.current
+                    && reachableRef.current.has(item.space_id)) {
+                    changeSpace(item.space_id);
+                }
+                setSelected(item);
+            })
             .catch((e) => toast(errText(e, 'Вопрос не открылся'), 'error'))
             .finally(() => consumeFocus());
     }, [focusRequest, base, headers, toast, consumeFocus]);
@@ -163,6 +194,7 @@ export default function WikiQuestions({ base, headers, showToast, onOpenArticle,
                                 bucket={bucket}
                                 active={selected?.id === item.id}
                                 showDepartment={list.manyDepartments}
+                                spaceId={spaceId}
                                 onOpen={() => setSelected(item)}
                             />
                         ))}
@@ -201,7 +233,7 @@ function EmptyBucket({ bucket }) {
     );
 }
 
-function QuestionRow({ item, bucket, active, showDepartment, onOpen }) {
+function QuestionRow({ item, bucket, active, showDepartment, spaceId, onOpen }) {
     /* Метка — только в «Разобранных» и только у исключений: «записано в статью»
        там норма и не подписывается, а «без ответа» и «не для базы» — другая
        судьба вопроса, и по строке её не угадать. */
@@ -209,6 +241,9 @@ function QuestionRow({ item, bucket, active, showDepartment, onOpen }) {
         : item.status === 'dismissed' ? 'без ответа'
             : item.kb_status === 'skipped' ? 'не для базы' : null;
     const department = showDepartment ? item.department_name : null;
+    /* Чужая вика в списке бывает только у вопроса, который иначе потерялся бы
+       (wiki/questions.py: _space_scope), — и по строке это должно быть видно. */
+    const space = item.space_id && item.space_id !== spaceId ? item.space_name : null;
     return (
         <button
             type="button"
@@ -229,10 +264,11 @@ function QuestionRow({ item, bucket, active, showDepartment, onOpen }) {
             <p className="mt-0.5 line-clamp-2 break-words text-[13px] leading-snug text-slate-600">
                 {item.question}
             </p>
-            {(mark || department) && (
+            {(mark || department || space) && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                     {mark && <IosBadge tone="slate">{mark}</IosBadge>}
                     {department && <span className="truncate text-[11.5px] text-slate-400">{department}</span>}
+                    {space && <span className="truncate text-[11.5px] text-slate-400">пространство «{space}»</span>}
                 </div>
             )}
         </button>

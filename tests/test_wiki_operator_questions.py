@@ -528,6 +528,55 @@ class FrontendTests(unittest.TestCase):
         bell = _read('src', 'components', 'notifications', 'NotificationsBell.jsx')
         self.assertIn("wiki_questions: { label: 'Вопросы операторов'", bell)
 
+    def test_tab_lists_the_space_on_screen_and_follows_the_bell_into_its_space(self):
+        tab = _jsx_code_only(_read('src', 'components', 'wiki', 'WikiQuestions.jsx'))
+        self.assertIn('params: { bucket, space_id: spaceId }', tab)
+        self.assertIn('[base, headers, bucket, spaceId, toast]', tab)
+        self.assertIn('changeSpace(item.space_id)', tab)
+        view = _read('src', 'components', 'wiki', 'WikiView.jsx')
+        self.assertIn('onSpaceChange={setSpaceId}', view)
+
+
+class SpaceBoundaryTests(unittest.TestCase):
+    """Вопрос виден в той вике, где его задали.
+
+    Жалоба исполнителя 15.09.2026: вопрос оператора Тез КЦ, заданный в «Тез»,
+    показывался в «Таксопарках» — граница отдела отвечает на «чей вопрос», а не
+    на «в какой вике он живёт».
+    """
+
+    def test_list_is_bounded_by_the_space_on_screen(self):
+        where, params = wiki_questions._space_scope(12, [11, 12])
+        self.assertIn('q.space_id = %(space)s', where)
+        self.assertEqual(params, {'space': 12, 'reachable_spaces': [11, 12]})
+
+    def test_questions_that_would_be_lost_stay_visible(self):
+        where, _params = wiki_questions._space_scope(11, [11])
+        self.assertIn('q.space_id IS NULL', where)
+        self.assertIn('NOT (q.space_id = ANY(%(reachable_spaces)s))', where)
+
+    def test_nothing_reachable_does_not_break_the_array(self):
+        self.assertEqual(wiki_questions._space_scope(11, [])[1]['reachable_spaces'], [-1])
+
+    def test_no_space_means_no_boundary(self):
+        self.assertEqual(wiki_questions._space_scope(None, [11]), ('TRUE', {}))
+
+    def test_list_and_counters_share_the_boundary_but_the_card_does_not(self):
+        """Карточку открывают из колокола, находясь в другой вике, — по id граница
+        только отдела, а вику вкладка переключает сама."""
+        source = _code_only(_read('wiki', 'questions.py'))
+        self.assertIn('_space_scope(space_id, reachable_spaces)',
+                      _function(source, 'list_questions'))
+        self.assertNotIn('_space_scope', _function(source, 'get_question'))
+
+    def test_route_takes_only_a_space_the_reviewer_can_open(self):
+        source = _code_only(_read('wiki', 'routes_questions.py'))
+        helper = _function(source, '_space')
+        self.assertIn('queries.spaces_for_user(cursor, ctx)', helper)
+        self.assertIn("request.args.get('space_id')", helper)
+        self.assertIn('space_id=space_id, reachable_spaces=reachable',
+                      _function(source, 'wiki_questions_list'))
+
 
 if __name__ == '__main__':
     unittest.main()

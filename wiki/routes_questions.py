@@ -21,6 +21,11 @@ wiki/ai/knowledge.py. Здесь двери и порядок шагов.
 отдела, новость без статьи рассказывала бы о том, чего в базе нет. Проверки
 прав стоят ДО первой записи; после неё откатывать приходится только гонку двух
 супервайзеров, и её закрывает савпоинт.
+
+ГРАНИЦ ДВЕ. Отдел — чей это вопрос, пространство — в какой вике он живёт.
+Список идёт по обеим (questions._space_scope), пути по id — только по отделу:
+карточку открывают из колокола, находясь в другой вике, и вкладка сама
+переключает шапку на вику вопроса (WikiQuestions.jsx).
 """
 
 from flask import jsonify, request
@@ -166,6 +171,26 @@ def register(bp, wiki_route, db, log_ip, edit_helpers):
 
     # ── Очередь и разбор ─────────────────────────────────────────────────────
 
+    def _space(cursor, ctx):
+        """(вика на экране, вики, открытые разбирающему — в порядке переключателя).
+
+        Вика приходит из запроса, но берётся только из открытых человеку. Чужое
+        или устаревшее значение заменяется первой по переключателю, а не снятием
+        границы — тот же довод, что у помощника (routes_ai.effective_space):
+        «не понял — не сужаю» вернуло бы ровно ту смесь вопросов разных вик,
+        от которой граница и заведена.
+        """
+        # Порядок — как в переключателе (position, id), но без подсчёта разделов
+        # structure.list_spaces: список перечитывается на каждый тычок колокола.
+        cursor.execute('SELECT id FROM wiki_spaces WHERE id = ANY(%s) ORDER BY position, id',
+                       (sorted(queries.spaces_for_user(cursor, ctx)) or [-1],))
+        ordered = [row[0] for row in cursor.fetchall()]
+        reachable = set(ordered)
+        requested = _int_or_none(request.args.get('space_id'))
+        if requested in reachable:
+            return requested, ordered
+        return (ordered[0] if ordered else None), ordered
+
     @wiki_route('/questions')
     def wiki_questions_list(cursor, ctx):
         departments, error = _reviewer(cursor, ctx)
@@ -176,8 +201,10 @@ def register(bp, wiki_route, db, log_ip, edit_helpers):
             bucket = 'open'
         limit = max(1, min(_int_or_none(request.args.get('limit')) or _LIST_LIMIT, 100))
         offset = max(0, _int_or_none(request.args.get('offset')) or 0)
+        space_id, reachable = _space(cursor, ctx)
         items, counts = wiki_questions.list_questions(
-            cursor, departments=departments, bucket=bucket, limit=limit, offset=offset)
+            cursor, departments=departments, bucket=bucket, limit=limit, offset=offset,
+            space_id=space_id, reachable_spaces=reachable)
         return jsonify({
             'bucket': bucket, 'items': items, 'counts': counts,
             # Отдел в строке нужен только тому, кто видит больше одного: у
