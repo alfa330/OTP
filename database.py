@@ -3497,6 +3497,20 @@ class Database:
                     changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+            # Заявка на отправку суточной сводки об изменениях графика
+            # («Уведомления об изменениях» в меню раздела). Render поднимает
+            # новый процесс до остановки старого, и если окно накрыло время
+            # рассылки, оба планировщика разошлют одну и ту же сводку:
+            # max_instances защищает только внутри одного процесса. Ключ —
+            # «сутки + получатель», строка занимается ДО отправки.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schedule_change_report_sends (
+                    period_start DATE NOT NULL,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    sent_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (period_start, user_id)
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_schedule_break_rules (
                     id SERIAL PRIMARY KEY,
@@ -5548,6 +5562,10 @@ class Database:
                 ON work_shift_changes(operator_id, shift_date, changed_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_work_shift_changes_date
                 ON work_shift_changes(shift_date, changed_at DESC);
+                -- Сводка за сутки идёт по окну changed_at, а оба индекса выше
+                -- ведут shift_date — им она воспользоваться не может.
+                CREATE INDEX IF NOT EXISTS idx_work_shift_changes_changed_at
+                ON work_shift_changes(changed_at);
                 CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_target_status
                 ON work_shift_swap_requests(target_operator_id, status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_requester_status
@@ -6023,6 +6041,13 @@ class Database:
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS training_report_daily_enabled BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS training_report_weekly_enabled BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS training_report_monthly_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+                -- «Уведомления об изменениях» в разделе «Графики работы»:
+                -- утренняя сводка за прошедшие сутки. Флаг ровно один —
+                -- периодичность в постановке одна («сводку за день»), а лишняя
+                -- периодичность здесь означала бы лишнее письмо, то есть ровно
+                -- тот спам, которого владелец просил избежать.
+                ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS schedule_change_report_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 
                 -- Indexes for new tables
                 CREATE INDEX IF NOT EXISTS idx_departments_code ON departments(code);
@@ -48369,6 +48394,285 @@ class Database:
             'items': [self._serialize_work_shift_change_row(row) for row in rows],
             'total': total
         }
+
+    # ── «Уведомления об изменениях»: подписка и данные суточной сводки ───────
+    #
+    # Кому можно подписаться. Правило РАЗДЕЛА, а не правило остальных
+    # Telegram-отчётов портала, и это не описка. У отчётов условие «роль admin
+    # -> все отделы», но на бою ВСЕ шесть глав отделов имеют роль admin — по
+    # тому правилу каждый из них получал бы сводку по всей компании, хотя в
+    # самом разделе видит только свой отдел (_is_global_admin_requester:
+    # админ глобален, только если он супер-админ ИЛИ не возглавляет отдел).
+    # Сводка обязана совпадать с тем, что человек видит на экране.
+    #
+    # Тренер исключён явно: графики ему доступны только на чтение, и звать его
+    # к чужим правкам, по которым он ничего не решает, — чистый шум. То же
+    # решение принято для подписки на заявки (_shift_change_can_watch_department).
+    #
+    # Роль сравнивается вместе с написаниями из ROLE_ALIASES: в базе встречается
+    # и 'superadmin', маршрут его нормализует, и SQL не должен от маршрута
+    # отличаться.
+    SCHEDULE_CHANGE_REPORT_SUBSCRIBER_SQL = """
+        LOWER(COALESCE(u.role, '')) <> 'trainer'
+        AND (
+            LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin', 'superadmin', 'super-admin', 'super admin')
+            OR EXISTS (
+                SELECT 1 FROM departments d
+                 WHERE d.head_user_id = u.id
+                   AND COALESCE(d.is_active, TRUE) = TRUE
+            )
+        )
+    """
+
+    def get_schedule_change_report_subscription(self, user_id) -> Optional[bool]:
+        """Включена ли сводка об изменениях графика.
+
+        None — пользователя нет или подписываться ему нельзя. Пустого профиля
+        достаточно: строку в admin_profiles заводит только запись.
+        """
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COALESCE(ap.schedule_change_report_enabled, FALSE)
+                  FROM users u
+                  LEFT JOIN admin_profiles ap ON ap.user_id = u.id
+                 WHERE u.id = %%s
+                   AND (%s)
+                 LIMIT 1
+            """ % self.SCHEDULE_CHANGE_REPORT_SUBSCRIBER_SQL, (uid,))
+            row = cursor.fetchone()
+            return bool(row[0]) if row else None
+
+    def set_schedule_change_report_subscription(self, user_id, enabled) -> Optional[bool]:
+        """Включить/выключить сводку.
+
+        Право проверяется и на записи, а не только на чтении: UPDATE молча
+        ничего не изменил бы, но INSERT в admin_profiles прошёл бы — и
+        настройка появилась бы у того, кому она не положена.
+        """
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT 1 FROM users u
+                 WHERE u.id = %%s AND (%s) LIMIT 1
+            """ % self.SCHEDULE_CHANGE_REPORT_SUBSCRIBER_SQL, (uid,))
+            if not cursor.fetchone():
+                return None
+
+            cursor.execute("""
+                INSERT INTO admin_profiles (user_id, schedule_change_report_enabled)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                   SET schedule_change_report_enabled = EXCLUDED.schedule_change_report_enabled
+                RETURNING schedule_change_report_enabled
+            """, (uid, bool(enabled)))
+            row = cursor.fetchone()
+            return bool(row[0]) if row else None
+
+    @staticmethod
+    def _schedule_change_report_scope_row(role, headed_ids, headed_names):
+        """Область одного получателя по правилу раздела (см. комментарий выше)."""
+        role_norm = normalize_role_value(role)
+        department_ids = [int(value) for value in (headed_ids or []) if value is not None]
+        department_names = sorted(str(value) for value in (headed_names or []) if value)
+        # Супер-админ видит всё даже будучи главой отдела: так же считает
+        # _is_global_admin_requester, и сводка не должна расходиться с экраном.
+        if department_ids and role_norm != 'super_admin':
+            return {
+                'scope': 'department',
+                'department_ids': department_ids,
+                'department_names': department_names,
+                'scope_label': ', '.join(department_names) or 'Отдел главы',
+            }
+        return {
+            'scope': 'global',
+            'department_ids': None,
+            'department_names': [],
+            'scope_label': 'Все отделы',
+        }
+
+    def get_schedule_change_report_recipients(self) -> List[Dict[str, Any]]:
+        """Кому уходит суточная сводка об изменениях графика.
+
+        Без привязанного Telegram получателя в списке нет — отправлять некуда.
+        Уволенный тоже: увольнение не снимает ни telegram_id, ни роль 'admin',
+        и без фильтра человек продолжал бы получать сводку по отделу, из
+        которого ушёл.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.telegram_id,
+                    LOWER(COALESCE(u.role, '')) AS role_norm,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT d.id ORDER BY d.id) FILTER (WHERE d.id IS NOT NULL),
+                        ARRAY[]::INTEGER[]
+                    ) AS headed_ids,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT d.name) FILTER (WHERE d.name IS NOT NULL),
+                        ARRAY[]::VARCHAR[]
+                    ) AS headed_names
+                  FROM users u
+                  JOIN admin_profiles ap ON ap.user_id = u.id
+                  LEFT JOIN departments d
+                    ON d.head_user_id = u.id
+                   AND COALESCE(d.is_active, TRUE) = TRUE
+                 WHERE u.telegram_id IS NOT NULL
+                   -- 'dismissal' — такое же увольнение, как 'fired': триггер
+                   -- гасит по нему сессии, и остальные рассылки портала
+                   -- отсекают оба значения.
+                   AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                   AND LOWER(COALESCE(u.role, '')) <> 'trainer'
+                   AND (
+                       LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin', 'superadmin', 'super-admin', 'super admin')
+                       OR d.id IS NOT NULL
+                   )
+                   AND COALESCE(ap.schedule_change_report_enabled, FALSE) = TRUE
+                 GROUP BY u.id, u.name, u.telegram_id, u.role
+                 ORDER BY u.name
+            """)
+            rows = cursor.fetchall() or []
+
+        recipients = []
+        for row in rows:
+            recipient = {
+                'id': int(row[0]),
+                'name': row[1] or '',
+                'telegram_id': int(row[2]),
+            }
+            recipient.update(self._schedule_change_report_scope_row(row[3], row[4], row[5]))
+            recipients.append(recipient)
+        return recipients
+
+    def get_schedule_change_report_entries(self, window_start, window_end,
+                                           department_ids=None) -> List[Dict[str, Any]]:
+        """Записи журнала, ВНЕСЁННЫЕ в окно [window_start, window_end).
+
+        window_start/window_end — naive-datetime в локальном времени Алматы:
+        именно так лежит `changed_at` (DEFAULT `CURRENT_TIMESTAMP AT TIME ZONE
+        'Asia/Almaty'`), а сессия Postgres на Render живёт в UTC. Границы
+        поэтому считаются в Python и приходят параметрами.
+
+        Окно по changed_at, а не по shift_date: три существующих читателя
+        журнала (get_work_shift_change_operator_ids / _summary / _changes)
+        фильтруют по дню ГРАФИКА и для суточной сводки не годятся ни один —
+        правка, внесённая вчера на октябрь, им не видна.
+
+        department_ids — отдел ОПЕРАТОРА, чей график меняли, а не автора
+        правки: операторам отдела регулярно правит график глобальный админ, и
+        такая правка обязана попасть в сводку главы этого отдела. None —
+        все отделы.
+        """
+        if department_ids is not None:
+            department_ids = [int(value) for value in department_ids if value is not None]
+            if not department_ids:
+                # Пустая область — честно пустая сводка, а не весь портал.
+                return []
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c.operator_id, op.name, c.shift_date, c.action, c.source,
+                       c.start_time, c.end_time, c.prev_start_time, c.prev_end_time,
+                       c.actor_id,
+                       COALESCE(NULLIF(c.actor_name, ''), actor.name, ''),
+                       COALESCE(c.actor_role, ''),
+                       c.changed_at
+                  FROM work_shift_changes c
+                  JOIN users op ON op.id = c.operator_id
+                  LEFT JOIN users actor ON actor.id = c.actor_id
+                 WHERE c.changed_at >= %s AND c.changed_at < %s
+                   AND (%s::INTEGER[] IS NULL OR op.department_id = ANY(%s::INTEGER[]))
+                 ORDER BY c.changed_at, c.id
+            """, (window_start, window_end, department_ids, department_ids))
+            rows = cursor.fetchall() or []
+
+        return [
+            {
+                'operator_id': int(row[0]),
+                'operator_name': row[1] or '',
+                'shift_date': row[2],
+                'action': row[3],
+                'source': row[4],
+                'start': row[5],
+                'end': row[6],
+                'prev_start': row[7],
+                'prev_end': row[8],
+                'actor_id': int(row[9]) if row[9] is not None else None,
+                'actor_name': row[10] or '',
+                'actor_role': row[11] or '',
+                'changed_at': row[12],
+            }
+            for row in rows
+        ]
+
+    def claim_schedule_change_report_send(self, period_start, user_id) -> bool:
+        """Занять отправку сводки за сутки: True — отправляем, False — уже ушла.
+
+        Атомарно на уровне базы. Заявка берётся ДО отправки, а не отмечается
+        после: «отмечу потом» оставляет между проверкой и отправкой то самое
+        окно, ради которого всё это и делается.
+        """
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return False
+
+        with self._get_cursor() as cursor:
+            # На свежем проде таблица может ещё не появиться. Без неё рассылка
+            # обязана работать (просто без защиты от дубля), а не молчать.
+            cursor.execute("SELECT to_regclass('public.schedule_change_report_sends') IS NOT NULL")
+            row = cursor.fetchone()
+            if not (row and row[0]):
+                logging.warning("schedule_change_report_sends отсутствует — отправка без защиты от дубля")
+                return True
+
+            cursor.execute("""
+                INSERT INTO schedule_change_report_sends (period_start, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT (period_start, user_id) DO NOTHING
+                RETURNING user_id
+            """, (period_start, uid))
+            return cursor.fetchone() is not None
+
+    def release_schedule_change_report_send(self, period_start, user_id) -> None:
+        """Снять заявку — отправка не удалась, следующий прогон попробует снова."""
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM schedule_change_report_sends
+                     WHERE period_start = %s AND user_id = %s
+                """, (period_start, uid))
+        except Exception:
+            # Не смогли снять — хуже пропущенной сводки только упавшая джоба.
+            logging.exception("Не удалось снять заявку на сводку об изменениях графика")
+
+    def prune_schedule_change_report_sends(self, keep_days: int = 400) -> int:
+        """Подчистить журнал заявок: он нужен только чтобы отличить «уже
+        отправляли» от «ещё нет», и расти вечно ему незачем."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT to_regclass('public.schedule_change_report_sends') IS NOT NULL")
+            row = cursor.fetchone()
+            if not (row and row[0]):
+                return 0
+            cursor.execute("""
+                DELETE FROM schedule_change_report_sends
+                 WHERE period_start < (CURRENT_DATE - %s::INTEGER)
+            """, (int(keep_days),))
+            return cursor.rowcount or 0
 
     def save_shift(
         self,

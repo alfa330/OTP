@@ -15091,6 +15091,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [reviewWatching, setReviewWatching] = useState(false);
             const [reviewWatchSaving, setReviewWatchSaving] = useState(false);
 
+            /* «Уведомления об изменениях» — суточная сводка правок графика в
+               Telegram. Это НЕ то же самое, что подписка на заявки выше: та
+               про очередь «Запросы» и приходит в момент заявки, эта — одно
+               письмо утром про прошедшие сутки. Названия и подписи разведены
+               намеренно, иначе два тумблера в одном разделе не различить.
+               canSubscribe считает сервер: спрятанный пункт меню доступом не
+               является, и повторять правило ролей на фронте нельзя. */
+            const [changeReport, setChangeReport] = useState({
+                canSubscribe: false,
+                enabled: false,
+                telegramConnected: false,
+                scopeLabel: '',
+                hint: '',
+            });
+            const [showChangeReportModal, setShowChangeReportModal] = useState(false);
+            const [changeReportSaving, setChangeReportSaving] = useState(false);
+            const [changeReportSending, setChangeReportSending] = useState(false);
+            const [changeReportError, setChangeReportError] = useState('');
+            const [changeReportNotice, setChangeReportNotice] = useState('');
+
             const swapDraftColorPalette = useMemo(() => ([
                 {
                     key: 'amber',
@@ -23855,6 +23875,100 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [reviewWatchSaving]);
 
+            /* Состояние подписки на суточную сводку. Отдельным запросом, а не
+               довеском к /api/work_schedules/operators: тот дёргается на каждую
+               смену диапазона и тянет весь график, а это — одна строка настроек
+               на монтирование раздела. 403 здесь не ошибка, а штатный ответ
+               «подписываться нельзя»: пункт меню тогда просто не появляется. */
+            const loadChangeReportState = useCallback(async () => {
+                if (isOperatorSelfSchedules || !user) return;
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/change_report`, {
+                        credentials: 'include',
+                        headers: withAccessTokenHeader()
+                    });
+                    if (response.status === 403) {
+                        setChangeReport(prev => ({ ...prev, canSubscribe: false }));
+                        return;
+                    }
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+                    setChangeReport({
+                        canSubscribe: true,
+                        enabled: Boolean(payload?.enabled),
+                        telegramConnected: Boolean(payload?.telegram_connected),
+                        scopeLabel: String(payload?.scope_label || ''),
+                        hint: String(payload?.hint || ''),
+                    });
+                } catch (error) {
+                    console.warn('Error loading schedule change report subscription:', error);
+                }
+            }, [isOperatorSelfSchedules, user]);
+
+            useEffect(() => {
+                if (isOperatorSelfSchedules || !user) return;
+                loadChangeReportState();
+            }, [isOperatorSelfSchedules, user, loadChangeReportState]);
+
+            const toggleChangeReport = useCallback(async (next) => {
+                if (changeReportSaving) return;
+                setChangeReportSaving(true);
+                setChangeReportError('');
+                setChangeReportNotice('');
+                // Оптимистично: значение булево, ответ сервера с ним совпадёт.
+                setChangeReport(prev => ({ ...prev, enabled: next }));
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/change_report`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() },
+                        body: JSON.stringify({ enabled: next })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                    // Ответ несёт всё состояние, а не только тумблер: Telegram могли
+                    // привязать, пока окно было открыто, — предупреждение и кнопка
+                    // «Отправить сейчас» обязаны это увидеть.
+                    setChangeReport(prev => ({
+                        ...prev,
+                        enabled: Boolean(data?.enabled),
+                        telegramConnected: Boolean(data?.telegram_connected),
+                        scopeLabel: String(data?.scope_label || prev.scopeLabel || ''),
+                        hint: String(data?.hint || prev.hint || ''),
+                    }));
+                } catch (error) {
+                    setChangeReport(prev => ({ ...prev, enabled: !next }));
+                    setChangeReportError(error?.message || 'Не удалось изменить подписку');
+                } finally {
+                    setChangeReportSaving(false);
+                }
+            }, [changeReportSaving]);
+
+            /* «Отправить сейчас» — единственный способ увидеть сводку, не
+               дожидаясь утра: локально сквозную отправку не проверить, токен
+               бота живёт только в окружении прода. */
+            const sendChangeReportNow = useCallback(async () => {
+                if (changeReportSending) return;
+                setChangeReportSending(true);
+                setChangeReportError('');
+                setChangeReportNotice('');
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/work_schedules/change_report/preview`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...withAccessTokenHeader() },
+                        body: JSON.stringify({})
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                    setChangeReportNotice('Сводка отправлена в Telegram');
+                } catch (error) {
+                    setChangeReportError(error?.message || 'Не удалось отправить сводку');
+                } finally {
+                    setChangeReportSending(false);
+                }
+            }, [changeReportSending]);
+
             const reviewVisibleRequests = useMemo(() => (
                 reviewStatusFilter === 'pending'
                     ? (reviewRequests || []).filter(item => item?.status === 'pending')
@@ -28691,6 +28805,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-right-left text-slate-400"></FaIcon>
                                                 Журнал замен
+                                            </button>
+                                        )}
+                                        {/* Право на подписку считает сервер (changeReport.canSubscribe):
+                                            повторять правило ролей здесь значило бы завести вторую
+                                            точку правды и рано или поздно показать пункт, который
+                                            отвечает 403. Меню закрываем ДО открытия окна: панель
+                                            меню живёт на z-[80] и перекрыла бы окно на SimpleModal,
+                                            а щелчки внутри окна не закрывали бы её. */}
+                                        {changeReport.canSubscribe && (
+                                            <button
+                                                onClick={() => {
+                                                    setShowPlannerTopActionsMenu(false);
+                                                    setChangeReportError('');
+                                                    setChangeReportNotice('');
+                                                    // Перечитываем состояние: Telegram могли привязать
+                                                    // уже после того, как раздел открылся.
+                                                    loadChangeReportState();
+                                                    setShowChangeReportModal(true);
+                                                }}
+                                                className={PLANNER_MENU_ITEM}
+                                                title="Сводка изменений графика за день в Telegram"
+                                            >
+                                                <FaIcon className={`fas fa-bell ${changeReport.enabled ? 'text-blue-500' : 'text-slate-400'}`}></FaIcon>
+                                                <span className="min-w-0 flex-1 truncate">Уведомления об изменениях</span>
+                                                <span className="shrink-0 text-[11.5px] text-slate-400">
+                                                    {changeReport.enabled ? 'вкл' : 'выкл'}
+                                                </span>
                                             </button>
                                         )}
 
@@ -35368,6 +35509,89 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     </section>
                                 ))}
+                            </div>
+                        )}
+                    </div>
+                </IosModal>
+
+                {/* ── «Уведомления об изменениях»: суточная сводка правок ─────────
+                    Окно рендерится здесь, рядом с остальными модалками, а НЕ
+                    внутри контейнера меню «3 точки»: меню закрывается
+                    обработчиком mousedown с проверкой «щёлкнули вне контейнера»,
+                    и окно внутри него не давало бы меню закрыться. */}
+                <IosModal
+                    open={showChangeReportModal}
+                    onClose={() => setShowChangeReportModal(false)}
+                    title="Уведомления об изменениях"
+                    subtitle="Сводка правок графика за день — в Telegram"
+                    maxWidth="max-w-md"
+                    footer={(
+                        <div className="flex w-full items-center justify-between gap-2">
+                            <button
+                                type="button"
+                                className={`${iosBtnGhost} shrink-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent`}
+                                onClick={sendChangeReportNow}
+                                disabled={changeReportSending || !changeReport.telegramConnected}
+                                title="Прислать сводку за вчера прямо сейчас — проверить, как она выглядит"
+                            >
+                                <FaIcon className={`fas ${changeReportSending ? 'fa-spinner fa-spin' : 'fa-paper-plane'} text-[11px] text-slate-400`}></FaIcon>
+                                {changeReportSending ? 'Отправляем…' : 'Отправить сейчас'}
+                            </button>
+                            <button
+                                type="button"
+                                className={`${iosBtnSecondary} shrink-0`}
+                                onClick={() => setShowChangeReportModal(false)}
+                            >
+                                Закрыть
+                            </button>
+                        </div>
+                    )}
+                >
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
+                            <div className="min-w-0 text-[13px] font-medium leading-snug text-slate-700">
+                                Присылать сводку изменений
+                                <div className="mt-0.5 text-[12px] font-normal text-slate-500">
+                                    {changeReport.hint}
+                                </div>
+                            </div>
+                            <IosToggle
+                                checked={changeReport.enabled}
+                                onChange={toggleChangeReport}
+                                disabled={changeReportSaving}
+                            />
+                        </div>
+
+                        {/* Область написана прямо в окне: у главы отдела она уже
+                            своя, и расхождение с тем, что человек видит в сетке,
+                            не должно выглядеть ошибкой. */}
+                        <div className="rounded-xl bg-white px-3.5 py-2.5 text-[12.5px] text-slate-600 ring-1 ring-slate-200/70">
+                            <span className="text-slate-500">Область сводки: </span>
+                            <span className="font-medium text-slate-800">{changeReport.scopeLabel || '—'}</span>
+                        </div>
+
+                        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12px] leading-relaxed text-slate-500 ring-1 ring-slate-200/70">
+                            Кто и сколько раз менял график, кому меняли и какие дни
+                            задело. Массовые операции идут одной строкой, обмены и
+                            доборы операторов — счётчиком без имён. Перерывы не входят.
+                        </div>
+
+                        {!changeReport.telegramConnected && (
+                            <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-[12.5px] text-amber-800 ring-1 ring-amber-200/70">
+                                К вашей учётной записи не привязан Telegram — сводку отправлять
+                                некуда. Привязка делается в боте портала.
+                            </div>
+                        )}
+
+                        {changeReportNotice && (
+                            <div className="rounded-xl bg-emerald-50 px-3.5 py-2.5 text-[12.5px] text-emerald-700 ring-1 ring-emerald-200/70">
+                                {changeReportNotice}
+                            </div>
+                        )}
+
+                        {changeReportError && (
+                            <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
+                                {changeReportError}
                             </div>
                         )}
                     </div>

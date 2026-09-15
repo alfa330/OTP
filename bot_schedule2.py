@@ -44,6 +44,10 @@ from amocrm import leads as amo_leads
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
 # только stdlib, — и уронить старт приложения ему нечем.
 from trainings import reports as training_reports
+# Суточная сводка об изменениях графика («Уведомления об изменениях» в меню
+# раздела «Графики работы»). Тот же случай, что и у тренингов: чистая логика
+# без базы и без сети, обычный импорт.
+from work_schedules import change_digest as schedule_change_digest
 from yataxi import reg_contest
 from yataxi import front_office_calls
 from database import (
@@ -60678,6 +60682,293 @@ def training_report_preview():
         return jsonify({"error": "Внутренняя ошибка"}), 500
 
 
+# ── «Уведомления об изменениях» графика работы ──────────────────────────────
+#
+# Постановка (владелец): в разделе «Графики работы», в меню «3 точки», —
+# переключатель, по которому в Telegram приходит сводка за день: кто сколько
+# раз менял график, кому сколько раз меняли и по каким дням были изменения.
+# Главам отделов — только по своему отделу. И отдельным требованием: «нельзя,
+# чтобы это выглядело как спам».
+#
+# Против спама здесь работают четыре вещи, и убирать их поодиночке нельзя:
+#   одно письмо в сутки вместо уведомления на каждую правку;
+#   сутки без изменений молчат совсем;
+#   массовые операции (загрузка файла, публикация аукциона) свёрнуты в строку
+#     со способом и числом заходов, иначе одна загрузка даёт «369 изменений»;
+#   обмены и доборы, которые операторы делают сами, идут счётчиком без имён.
+# Сама вёрстка текста и все пороги — в work_schedules/change_digest.py, тесты
+# на них не требуют ни базы, ни сети. Здесь только доставка и расписание.
+
+def _schedule_change_report_scope(requester_id, requester):
+    """Область сводки для одного человека: (можно ли подписаться, id отделов,
+    подпись области).
+
+    Правило — РАЗДЕЛА, а не остальных Telegram-отчётов портала. У отчётов
+    условие «роль admin -> все отделы», но все главы отделов на бою имеют роль
+    admin: по тому правилу глава СЗоВ получал бы сводку по всей компании, хотя
+    в самом разделе видит только свой отдел. Сводка обязана совпадать с
+    экраном, поэтому здесь то же деление, что в _is_global_admin_requester.
+
+    Правило выписано и тут, и на SQL в get_schedule_change_report_recipients:
+    там оно по всей таблице, здесь — по одному человеку, и сводить их в один
+    запрос значило бы тянуть весь список ради одной строки.
+    """
+    role = _normalize_user_role(requester[3]) if requester else ''
+    # Тренер видит графики только на чтение — см. докстроку
+    # _shift_change_scope_for_requester: звать его к правкам, по которым он
+    # ничего не решает, это шум, а не уведомление.
+    if role == 'trainer':
+        return False, None, None
+    headed = db.get_headed_departments_for_user(requester_id) or []
+    if headed and not _is_super_admin_role(role):
+        names = sorted(str(item.get('name') or '') for item in headed if item.get('name'))
+        return (True,
+                [int(item['id']) for item in headed],
+                ', '.join(names) or 'Отдел главы')
+    if _is_admin_role(role):
+        return True, None, 'Все отделы'
+    return False, None, None
+
+
+def _build_schedule_change_report_payload(day, department_ids, scope_label, generated_label):
+    """(записи журнала, текст сообщения) для одной области видимости."""
+    window_start, window_end = schedule_change_digest.day_window(day)
+    entries = db.get_schedule_change_report_entries(
+        window_start, window_end, department_ids=department_ids)
+    text = schedule_change_digest.build_digest(
+        day, entries, scope_label,
+        generated_label=generated_label,
+        escape=_escape_telegram_html,
+    )
+    return entries, text
+
+
+def _send_schedule_change_report_to(recipient, day, now_dt, force=False, cache=None):
+    """Отправить сводку одному получателю.
+
+    force=True — разовая отправка по кнопке «Отправить сейчас»: тогда сводка
+    уходит даже за сутки без изменений, потому что человек нажал кнопку и
+    обязан увидеть ответ.
+
+    Возвращает (sent, reason). sent=False с reason='empty' — не ошибка, а
+    штатное «за сутки график не меняли, молчим».
+    """
+    chat_id = recipient.get('telegram_id')
+    if not chat_id:
+        return False, 'no_telegram'
+
+    department_ids = recipient.get('department_ids')
+    scope_label = recipient.get('scope_label') or 'Все отделы'
+    generated_label = now_dt.strftime('%d.%m.%Y %H:%M')
+
+    key = None if department_ids is None else tuple(sorted(int(v) for v in department_ids))
+    if cache is not None and key in cache:
+        entries, text = cache[key]
+    else:
+        entries, text = _build_schedule_change_report_payload(
+            day, department_ids, scope_label, generated_label)
+        if cache is not None:
+            cache[key] = (entries, text)
+
+    # Пустые сутки молчат. Проверка стоит ПОСЛЕ сборки, чтобы кеш области
+    # использовался и для получателей, у которых пусто. По области это не
+    # редкость: на бою в любой день изменения есть у одного-двух отделов из
+    # четырёх, а у глав Маркетинга и HR операторов с графиками нет вовсе.
+    if not entries and not force:
+        return False, 'empty'
+
+    _, error = _tg_send_message(chat_id, text)
+    if error:
+        logging.warning("Сводка изменений графика: не отправлено получателю %s: %s",
+                        recipient.get('id'), error)
+        return False, 'send_failed'
+    return True, 'sent'
+
+
+def sync_send_schedule_change_report():
+    """Рассылка суточной сводки об изменениях графика всем подписанным."""
+    try:
+        now_dt = schedule_change_digest.almaty_now()
+
+        recipients = db.get_schedule_change_report_recipients() or []
+        if not recipients:
+            logging.info("Сводка изменений графика: подписанных нет")
+            return True
+
+        day = schedule_change_digest.previous_day(now_dt)
+
+        # Один сбор на область видимости, а не на получателя: у нескольких
+        # админов область одна и та же («все отделы»).
+        cache = {}
+        sent = 0
+        empty = 0
+        already = 0
+        for recipient in recipients:
+            user_id = recipient.get('id')
+            # Заявка — ДО сборки: если сводка за эти сутки этому человеку уже
+            # уходила (второй процесс на деплое, повтор после misfire),
+            # второй раз он её не получит. И в собственном try: сбой базы на
+            # одном получателе (исчерпанный пул, оборванное соединение) не
+            # должен оставлять без сводки всех, кто стоит в списке после него.
+            try:
+                claimed = db.claim_schedule_change_report_send(day, user_id)
+            except Exception:
+                logging.exception("Сводка изменений графика: не удалось занять заявку для %s",
+                                  user_id)
+                continue
+            if not claimed:
+                already += 1
+                continue
+            try:
+                ok, reason = _send_schedule_change_report_to(
+                    recipient, day, now_dt, cache=cache)
+                if ok:
+                    sent += 1
+                elif reason == 'empty':
+                    # Заявку сознательно НЕ снимаем: за те же сутки сводки не
+                    # будет и завтра, а снятая заявка заставляла бы каждый
+                    # следующий прогон заново решать, что писать нечего.
+                    empty += 1
+                else:
+                    db.release_schedule_change_report_send(day, user_id)
+            except Exception:
+                db.release_schedule_change_report_send(day, user_id)
+                logging.exception("Сводка изменений графика: сбой у получателя %s", user_id)
+
+        logging.info("Сводка изменений графика за %s: отправлено %s из %s, "
+                     "пустых %s, уже отправлялось %s",
+                     day, sent, len(recipients), empty, already)
+
+        # Журнал заявок подчищаем 1-го числа, заодно с рассылкой: отдельная
+        # джоба ради одного DELETE в год — лишняя строка в расписании.
+        if now_dt.day == 1:
+            try:
+                removed = db.prune_schedule_change_report_sends()
+                if removed:
+                    logging.info("Сводка изменений графика: подчищено %s старых заявок", removed)
+            except Exception:
+                logging.exception("Сводка изменений графика: не удалось подчистить журнал заявок")
+        return True
+    except Exception:
+        logging.exception("Critical error in schedule change report job")
+        return False
+    finally:
+        _trim_process_memory('schedule_change_report', force=True)
+
+
+async def send_daily_schedule_change_report():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(executor_pool, sync_send_schedule_change_report)
+
+
+@app.route('/api/work_schedules/change_report', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def work_schedule_change_report_subscription():
+    """Переключатель «Уведомления об изменениях» (раздел «Графики работы»).
+
+    GET — состояние для меню, POST — {enabled: true|false}.
+    """
+    if request.method == 'OPTIONS':
+        return build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _resolve_work_schedule_viewer()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        allowed, _department_ids, scope_label = _schedule_change_report_scope(
+            requester_id, requester)
+        if not allowed:
+            # Спрятанный в интерфейсе пункт доступом не является: тот же
+            # предикат обязан стоять и здесь.
+            return jsonify({
+                "error": "Уведомления об изменениях доступны админам и главам отделов",
+                "code": "SCHEDULE_CHANGE_REPORT_FORBIDDEN",
+            }), 403
+
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            enabled, flag_error = _parse_boolean_setting(data.get('enabled'))
+            if flag_error:
+                return jsonify({"error": "Некорректное значение enabled"}), 400
+            state = db.set_schedule_change_report_subscription(requester_id, enabled)
+            if state is None:
+                return jsonify({"error": "Пользователь не найден"}), 404
+            logging.info("Графики: уведомления об изменениях у %s -> %s", requester_id, state)
+        else:
+            state = db.get_schedule_change_report_subscription(requester_id)
+            if state is None:
+                return jsonify({"error": "Пользователь не найден"}), 404
+
+        return jsonify({
+            "status": "success",
+            "enabled": bool(state),
+            "telegram_connected": bool(requester[1]),
+            "scope_label": scope_label,
+            "hint": schedule_change_digest.REPORT_HINT,
+        }), 200
+    except Exception:
+        logging.exception("Error in /api/work_schedules/change_report")
+        return jsonify({"error": "Внутренняя ошибка"}), 500
+
+
+@app.route('/api/work_schedules/change_report/preview', methods=['POST', 'OPTIONS'])
+@require_api_key
+def work_schedule_change_report_preview():
+    """Разово прислать сводку себе — не дожидаясь утра.
+
+    Без этой кнопки проверить настройку можно было бы только на следующий день,
+    а «пришло или нет» — единственный вопрос, который задают о рассылке.
+    Разовая отправка заявку в журнале НЕ занимает (force=True): слот утренней
+    рассылки она не съедает.
+    """
+    if request.method == 'OPTIONS':
+        return build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _resolve_work_schedule_viewer()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        allowed, department_ids, scope_label = _schedule_change_report_scope(
+            requester_id, requester)
+        if not allowed:
+            return jsonify({
+                "error": "Уведомления об изменениях доступны админам и главам отделов",
+                "code": "SCHEDULE_CHANGE_REPORT_FORBIDDEN",
+            }), 403
+        if not requester[1]:
+            return jsonify({
+                "error": "К вашей учётной записи не привязан Telegram — отправлять некуда",
+                "code": "TELEGRAM_NOT_CONNECTED",
+            }), 409
+
+        now_dt = schedule_change_digest.almaty_now()
+        day = schedule_change_digest.previous_day(now_dt)
+
+        recipient = {
+            'id': requester_id,
+            'name': requester[2] if len(requester) > 2 else '',
+            'telegram_id': requester[1],
+            'department_ids': department_ids,
+            'scope_label': scope_label,
+        }
+        ok, reason = _send_schedule_change_report_to(recipient, day, now_dt, force=True)
+        if not ok:
+            return jsonify({
+                "error": "Не удалось отправить сводку в Telegram",
+                "code": reason,
+            }), 502
+        return jsonify({
+            "status": "success",
+            "day": day.isoformat(),
+            "scope_label": scope_label,
+        }), 200
+    except Exception:
+        logging.exception("Error in /api/work_schedules/change_report/preview")
+        return jsonify({"error": "Внутренняя ошибка"}), 500
+
+
 def sync_schedule_statuses_to_user_statuses_job():
     """Background job: sync users.status with active schedule status periods."""
     try:
@@ -62219,6 +62510,29 @@ if __name__ == '__main__':
         send_monthly_training_report,
         CronTrigger(day='1', hour=9, minute=40, timezone=ZoneInfo('Asia/Almaty')),
         id='training_report_monthly',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Уведомления об изменениях» графика: сводка за ПРОШЕДШИЕ сутки. Утром, а
+    # не вечером того же дня, потому что сутки должны быть закрыты: вечерняя
+    # сводка теряла бы всё, что правят после её отправки, а таких правок на
+    # бою хватает — журнал живёт до полуночи.
+    #
+    # 09:45 выбрано как свободная минута: 09:00 занимает часовая рассылка по
+    # чатам, 09:05 — сводка по обратной связи, 09:30/09:35/09:40 — тренинги,
+    # 10:00 — архив опросов. Две сводки в одну минуту приходят в Telegram
+    # слипшимся комом, и читать их перестают обе.
+    #
+    # Время продублировано в work_schedules.change_digest.REPORT_HINT, которым
+    # подписано окно настроек, — расписание и подпись меняются только вместе.
+    scheduler.add_job(
+        send_daily_schedule_change_report,
+        CronTrigger(hour=schedule_change_digest.SEND_HOUR,
+                    minute=schedule_change_digest.SEND_MINUTE,
+                    timezone=ZoneInfo('Asia/Almaty')),
+        id='work_schedule_change_report_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
