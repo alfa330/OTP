@@ -4,7 +4,7 @@
 
 Что закреплено:
   * первый проход — полный день и все касания уезжают; второй без изменений — ни
-    одного запроса к порталу; изменившееся касание уезжает одно;
+    одного запроса к порталу, кроме пульса раз в минуту; изменившееся касание уезжает одно;
   * исчезнувшее из склейки касание уходит в `removed`, а не остаётся на портале
     навсегда;
   * ошибка станции не роняет хвост и не роняет мост: три подряд — пауза длиннее;
@@ -81,11 +81,32 @@ class LiveTailTests(unittest.TestCase):
         self.assertEqual(payload['removed'], [])
         self.assertEqual(set(payload['touches'][0]), set(live.TOUCH_FIELDS))
 
-    def test_no_change_means_no_request(self):
+    def test_no_change_within_a_minute_means_no_request(self):
         self.station.rows = [cdr_row('1.1', '2026-09-15 09:00:00')]
-        self.tail.step()
-        self.tail.step()
+        self.tail.step(now=1000.0)
+        self.tail.step(now=1030.0)
         self.assertEqual(len(self.posts), 1, 'без изменений портал дёргать нельзя')
+
+    def test_silence_longer_than_a_minute_sends_a_heartbeat(self):
+        # Ночью за час два звонка: без пульса live_at на портале замирал, и табло ОП
+        # объявляло мост умершим, хотя он опрашивал станцию каждые двадцать секунд.
+        self.station.rows = [cdr_row('1.1', '2026-09-15 09:00:00')]
+        self.tail.step(now=1000.0)
+        self.tail.step(now=1000.0 + live.HEARTBEAT_SECONDS)
+        self.assertEqual(len(self.posts), 2)
+        path, payload = self.posts[1]
+        self.assertEqual(path, 'live')
+        self.assertEqual((payload['day'], payload['touches'], payload['removed'], payload['heartbeat']),
+                         ('2026-09-15', [], [], True))
+        self.tail.step(now=1000.0 + live.HEARTBEAT_SECONDS + 10)
+        self.assertEqual(len(self.posts), 2, 'пульс — не чаще раза в минуту')
+
+    def test_empty_day_still_pulses(self):
+        # Сразу после полуночи касаний нет, но портал должен знать, что хвост жив.
+        self.tail.step(now=1000.0)
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.posts[0][1]['touches'], [])
+        self.assertTrue(self.posts[0][1]['heartbeat'])
 
     def test_only_the_changed_touch_is_shipped(self):
         first = cdr_row('1.1', '2026-09-15 09:00:00')
@@ -252,6 +273,12 @@ class LiveRouteTests(unittest.TestCase):
         self.assertEqual(touches[0]['phone'], '7015550001')
         self.assertTrue(self.recorder.seen[0]['live'])
         self.assertEqual(self.recorder.seen[0]['agent_key'], self.kid)
+
+    def test_heartbeat_without_touches_marks_the_bridge_alive(self):
+        response = self._live({'day': '2026-09-15', 'touches': [], 'removed': [], 'heartbeat': True})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.get_json(), {'status': 'ok', 'stored': 0, 'removed': 0})
+        self.assertTrue(self.recorder.seen[0]['live'])
 
     def test_yesterday_is_still_accepted_around_midnight(self):
         response = self._live({'day': '2026-09-14', 'touches': []})

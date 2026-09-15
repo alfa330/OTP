@@ -21,7 +21,10 @@
 Не трогает ничего, кроме `/freepbx/cdr` — того же пути, что читает суточное задание.
 Не повторяет запрос после таймаута: станция низкоконкурентная, повтор только добавит ей
 работы. Не роняет мост: любая ошибка здесь — строка в журнале и следующая попытка через
-интервал, а после трёх подряд — пауза подольше. Не шлёт порталу то, что не изменилось.
+интервал, а после трёх подряд — пауза подольше. Не шлёт порталу то, что не изменилось, —
+кроме пульса: раз в HEARTBEAT_SECONDS уходит пустое приращение, по которому портал видит,
+что хвост жив. Табло ОП судит о свежести по live_at, и ночью, когда за час два звонка,
+без пульса оно объявляло мост умершим при живом опросе станции каждые двадцать секунд.
 """
 
 import json
@@ -41,6 +44,11 @@ OVERLAP_MINUTES = 120
 FULL_REFRESH_EVERY = 30          # циклов; при интервале 20 с — раз в десять минут
 BACKOFF_AFTER_FAILURES = 3       # подряд неудач, после которых пауза растёт
 BACKOFF_SECONDS = 300
+
+# Пульс при тишине. Портал ставит live_at только по присланному приращению, а табло ОП по
+# его возрасту пишет «данные устарели» (порог на экране — две минуты, в отбивке — десять).
+# Пустое приращение раз в минуту — двести байт, зато возраст на табло честный.
+HEARTBEAT_SECONDS = 60
 
 # Касание сравнивается по этим полям: прочее (URL записи) либо выводится из них, либо
 # меняется вместе с ними.
@@ -107,7 +115,7 @@ class LiveTail:
         if now < self.next_due:
             return False
         try:
-            self.step()
+            self.step(now)
             self.failures = 0
             self.next_due = now + self.interval
         except StationError as exc:
@@ -144,7 +152,8 @@ class LiveTail:
                 start = max(start, latest - timedelta(minutes=OVERLAP_MINUTES))
         return _fmt(start), _fmt(end), full
 
-    def step(self):
+    def step(self, now=None):
+        now = time.time() if now is None else now
         today = self._today()
         if self.day != today:
             self._reset(today)
@@ -171,7 +180,20 @@ class LiveTail:
                 changed.append(_wire(touch))
         removed = [{'linkedid': k[0], 'phone': k[1]} for k in self.sent if k not in current]
         if not changed and not removed:
-            log.debug('Живой хвост: без изменений (%d строк, %d касаний)', len(fresh), len(current))
+            if self.last_push_at is not None and now - self.last_push_at < HEARTBEAT_SECONDS:
+                log.debug('Живой хвост: без изменений (%d строк, %d касаний)', len(fresh), len(current))
+                return
+            # Тишина дольше минуты — пульс: те же поля, пустые списки, флаг для журнала портала.
+            self._post('live', {
+                'day': day_text,
+                'touches': [],
+                'removed': [],
+                'rows_seen': len(self.rows),
+                'full_refresh': full,
+                'heartbeat': True,
+            })
+            self.last_push_at = now
+            log.debug('Живой хвост: пульс без изменений (%d строк, %d касаний)', len(fresh), len(current))
             return
         self._post('live', {
             'day': day_text,
@@ -182,7 +204,7 @@ class LiveTail:
         })
         # Отправлено — значит принято: портал отвечает 200 только после записи.
         self.sent = current
-        self.last_push_at = time.time()
+        self.last_push_at = now
         log.info('Живой хвост %s: строк в окне %d, касаний за день %d, дослано %d, убрано %d%s',
                  day_text, len(fresh), len(current), len(changed), len(removed),
                  ' (полный проход)' if full else '')
