@@ -419,7 +419,8 @@ const GroupsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader }) => {
 
     const addOperator = () => {
         if (!addOpId) return;
-        mutateMember('operators', { operator_id: Number(addOpId), start_date: effDate || null });
+        // Направление оператора следует за группой: выбрать его здесь негде.
+        mutateMember('operators', { operator_id: Number(addOpId), start_date: effDate || null, sync_direction: true });
         setAddOpId('');
     };
     const removeOperator = (opId) => mutateMember('operators', { operator_id: opId, remove: true, end_date: effDate || null });

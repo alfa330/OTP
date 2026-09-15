@@ -32830,7 +32830,7 @@ class Database:
             group_row = cursor.fetchone()
             if not group_row:
                 raise ValueError(self.DEMOTE_GROUP_NOT_FOUND)
-            _, group_department_id, group_direction_id, group_status = group_row
+            _, group_department_id, _, group_status = group_row
             if str(group_status or '').strip().lower() == 'archived':
                 raise ValueError(self.DEMOTE_GROUP_ARCHIVED)
             if (department_id is not None and group_department_id is not None
@@ -32839,9 +32839,16 @@ class Database:
 
             # Направление оператору обязательно: в проде оно заполнено у всех
             # операторов, и по нему считаются оценки, ЗП и половина отчётов.
+            # Без явного выбора — действующее направление группы, как при любом
+            # переводе (_sync_operator_direction_from_group_tx). Собственное
+            # направление СВ осталось со времён, когда он был оператором, и берётся,
+            # только если у группы направления нет.
             resolved_direction_id = direction_id
             if resolved_direction_id in (None, ''):
-                resolved_direction_id = current_direction_id or group_direction_id
+                resolved_direction_id = (
+                    self._group_effective_direction_id_tx(cursor, group_id)
+                    or current_direction_id
+                )
             if resolved_direction_id in (None, ''):
                 raise ValueError(self.DEMOTE_DIRECTION_REQUIRED)
             resolved_direction_id = int(resolved_direction_id)
@@ -32924,9 +32931,11 @@ class Database:
 
             # 4) Теперь он сам — оператор этой группы (его СВ-членство уже закрыто,
             # поэтому собственным супервайзером он стать не может).
+            # Направление уже выставлено шагом 2 вместе со своей строкой истории.
             self._add_operator_to_group_tx(
                 cursor, group_id, target_id,
                 start_date=effective_date, assigned_by=changed_by,
+                sync_direction=False,
             )
 
             cursor.execute("SELECT supervisor_id FROM users WHERE id = %s", (target_id,))
@@ -39138,6 +39147,34 @@ class Database:
     # архив + создание/переиспользование). Принадлежность операторов/СВ — историческая
     # по датам; один оператор не может иметь две активные основные группы на одну дату.
 
+    # Действующее направление группы — его получает оператор при переводе в группу
+    # (_sync_operator_direction_from_group_tx). Сырой groups.direction_id правим
+    # в двух случаях, оба есть на проде:
+    #  - группа осталась на архивной версии направления (у «Тез КЦ - Тех поддержка»
+    #    79 при живой 83) — берём живую строку по canonical_id;
+    #  - у части групп Отдела продаж направление не задано, но модель расчёта
+    #    указывает ровно на одно живое направление отдела (op_potok → «Поток»).
+    #    Если у отдела на модель приходится несколько направлений (у СЗоВ и Теза
+    #    это 'operator'), не угадываем.
+    # Выражение ссылается на группу через алиас g.
+    _GROUP_EFFECTIVE_DIRECTION_SQL = """
+        COALESCE(
+            (SELECT CASE WHEN gd.is_active THEN gd.id
+                         WHEN live.is_active THEN live.id
+                    END
+               FROM directions gd
+               LEFT JOIN directions live ON live.id = gd.canonical_id
+              WHERE gd.id = g.direction_id),
+            (SELECT MIN(md.id)
+               FROM directions md
+              WHERE g.direction_id IS NULL
+                AND md.is_active
+                AND md.department_id = g.department_id
+                AND md.calculation_model_code = g.calculation_model_code
+             HAVING COUNT(*) = 1)
+        )
+    """
+
     _GROUP_SELECT = """
         SELECT g.id, g.name, g.department_id, g.direction_id, g.calculation_model_code,
                g.table_url, g.status, g.archived_at, g.reused_from_group_id,
@@ -39148,7 +39185,8 @@ class Database:
                         ORDER BY su.name), '[]'::json)
                   FROM group_supervisor_memberships gsm
                   JOIN users su ON su.id = gsm.supervisor_id
-                 WHERE gsm.group_id = g.id AND gsm.end_date IS NULL) AS supervisors
+                 WHERE gsm.group_id = g.id AND gsm.end_date IS NULL) AS supervisors,
+               """ + _GROUP_EFFECTIVE_DIRECTION_SQL + """ AS effective_direction_id
         FROM groups g
         LEFT JOIN directions d ON d.id = g.direction_id
     """
@@ -39172,6 +39210,8 @@ class Database:
             'direction_name': row[11],
             'active_operators': int(row[12] or 0),
             'supervisors': row[13] or [],
+            # Направление, которое получит оператор при переводе в группу.
+            'effective_direction_id': int(row[14]) if row[14] is not None else None,
         }
 
     def list_groups(self, include_archived=False, department_id=None):
@@ -39463,16 +39503,80 @@ class Database:
         with self._get_cursor() as cursor:
             return self._group_active_supervisor_id_tx(cursor, group_id)
 
-    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
+    def _group_effective_direction_id_tx(self, cursor, group_id):
+        """Действующее направление группы (_GROUP_EFFECTIVE_DIRECTION_SQL) или None."""
+        cursor.execute(
+            "SELECT " + self._GROUP_EFFECTIVE_DIRECTION_SQL
+            + " AS effective_direction_id FROM groups g WHERE g.id = %s",
+            (int(group_id),),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def _sync_operator_direction_from_group_tx(self, cursor, group_id, operator_id, changed_by=None):
+        """Направление оператора следует за группой — так же, как супервайзер.
+
+        До задачи #228 СВ, переводя оператора, сам менял ему направление. После неё
+        СВ меняет только группу, и направление оставалось от прежней группы, пока
+        его не поправит админ. Теперь перевод сразу проставляет действующее
+        направление группы и пишет это в историю от имени того, кто перевёл.
+        Группа без действующего направления прежнее направление не трогает; у
+        тренеров и СВ направления по группе нет.
+
+        Возвращает направление оператора после синхронизации.
+        """
+        cursor.execute(
+            "SELECT role, direction_id FROM users WHERE id = %s",
+            (int(operator_id),),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        role = str(row[0] or '').strip().lower()
+        current_direction_id = int(row[1]) if row[1] is not None else None
+        if role not in ('operator', 'trainee'):
+            return current_direction_id
+        target_direction_id = self._group_effective_direction_id_tx(cursor, group_id)
+        if target_direction_id is None or target_direction_id == current_direction_id:
+            return current_direction_id
+        cursor.execute(
+            "UPDATE users SET direction_id = %s WHERE id = %s",
+            (target_direction_id, int(operator_id)),
+        )
+        cursor.execute(
+            "UPDATE operator_profiles SET direction_id = %s WHERE user_id = %s",
+            (target_direction_id, int(operator_id)),
+        )
+        cursor.execute(
+            """
+            INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+            VALUES (%s, %s, 'direction_id', %s, %s)
+            """,
+            (
+                int(operator_id),
+                changed_by,
+                str(current_direction_id) if current_direction_id is not None else None,
+                str(target_direction_id),
+            ),
+        )
+        return target_direction_id
+
+    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None,
+                              sync_direction=True):
         """Добавляет оператора в группу с effective date, закрывая прошлую основную
         группу (один активный основной membership на оператора). users.supervisor_id
-        оператора становится текущим СВ новой группы."""
+        оператора становится текущим СВ новой группы, users.direction_id — её
+        действующим направлением (sync_direction=False, когда направление выбрано
+        явно). Возвращает направление оператора после перевода или None, если
+        направление не синхронизировалось."""
         with self._get_cursor() as cursor:
-            self._add_operator_to_group_tx(
-                cursor, group_id, operator_id, start_date=start_date, assigned_by=assigned_by
+            return self._add_operator_to_group_tx(
+                cursor, group_id, operator_id, start_date=start_date, assigned_by=assigned_by,
+                sync_direction=sync_direction,
             )
 
-    def _add_operator_to_group_tx(self, cursor, group_id, operator_id, start_date=None, assigned_by=None):
+    def _add_operator_to_group_tx(self, cursor, group_id, operator_id, start_date=None, assigned_by=None,
+                                  sync_direction=True):
         """Тело add_operator_to_group внутри чужой транзакции: нужно операциям,
         которые заводят оператора в группу вместе с другими правками (понижение
         СВ до оператора), чтобы всё легло одним коммитом."""
@@ -39504,10 +39608,16 @@ class Database:
         self._set_operators_supervisor_tx(
             cursor, [operator_id], self._group_active_supervisor_id_tx(cursor, group_id)
         )
+        direction_id = None
+        if sync_direction:
+            direction_id = self._sync_operator_direction_from_group_tx(
+                cursor, group_id, operator_id, changed_by=assigned_by
+            )
         # Оператора почти всегда заводят в группу позже, чем он в ней начал
         # работать: дни до start_date остались бы без группы и не попали бы в
         # «Учёт часов». Подбираем их сразу, а не до следующего рестарта.
         self._stamp_orphan_group_ids_tx(cursor, operator_id)
+        return direction_id
 
     def remove_operator_from_group(self, group_id, operator_id, end_date=None):
         with self._get_cursor() as cursor:

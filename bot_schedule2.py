@@ -14315,8 +14315,12 @@ def admin_bulk_update_users():
                         break
                 if update_ok and target_group is not None:
                     # Перевод в группу: закрывает прошлое членство и каскадом
-                    # проставляет оператору СВ новой группы.
-                    db.add_operator_to_group(target_group['id'], target_user_id, assigned_by=requester_id)
+                    # проставляет оператору СВ и направление новой группы.
+                    # Направление, выбранное в той же панели, — явное и остаётся.
+                    db.add_operator_to_group(
+                        target_group['id'], target_user_id, assigned_by=requester_id,
+                        sync_direction='direction_id' not in updates,
+                    )
                 if update_ok:
                     updated_count += 1
                 else:
@@ -19966,9 +19970,12 @@ def add_user():
         # Членство в группе с даты найма; СВ уже проставлен из группы выше,
         # add_operator_to_group синхронизирует его же (идемпотентно).
         if target_group is not None:
+            # Направление из формы — явный выбор, его не трогаем; без него
+            # оператор получает действующее направление группы.
             db.add_operator_to_group(
                 target_group['id'], user_id,
-                start_date=hire_date, assigned_by=requester_id
+                start_date=hire_date, assigned_by=requester_id,
+                sync_direction=direction_id is None
             )
 
         changed_by = requester_id
@@ -20139,8 +20146,8 @@ def _ensure_group_operator_manager():
     """Авторизация перевода оператора в другую группу: админ, глава отдела или СВ.
 
     Обычному СВ смена ГРУППЫ заменила прежнюю смену НАПРАВЛЕНИЯ (задача #228):
-    группа тянет за собой супервайзера, а направление осталось за админом и
-    главой отдела. Остальные операции с группами (создание, архив, модель,
+    группа тянет за собой супервайзера и направление, а ручная смена направления
+    осталась за админом и главой отдела. Остальные операции с группами (создание, архив, модель,
     состав СВ) у СВ по-прежнему закрыты — они на `_ensure_group_manager`.
     Возвращает (requester_id, requester, role, None) или (None, None, None, (resp, code)).
     """
@@ -20550,12 +20557,22 @@ def add_group_operator_endpoint(group_id):
                 supervisor_target_roles=('operator', 'trainee')
             ):
                 return jsonify({"error": "Оператор не из вашего отдела"}), 403
+        direction_id = None
         if remove:
             db.remove_operator_from_group(group_id, int(operator_id), end_date=data.get('end_date'))
         else:
-            db.add_operator_to_group(group_id, int(operator_id),
-                                     start_date=data.get('start_date'), assigned_by=rid)
-        return jsonify({"status": "success", "group": db.get_group(group_id)}), 200
+            # Вместе с группой оператор получает её СВ и направление. Обычный СВ
+            # направление руками не выбирает (задача #228) — ему синхронизация
+            # всегда. Админ и глава отдела могли выбрать направление в карточке
+            # сами, тогда карточка просит его не трогать. Поэтому у них перевод
+            # тянет направление только по явному sync_direction=true: вкладки со
+            # старой сборкой шлют выбранное направление ДО перевода и иначе
+            # потеряли бы его. Итоговое направление отдаём карточке.
+            sync_direction = is_supervisor_move or data.get('sync_direction') is True
+            direction_id = db.add_operator_to_group(group_id, int(operator_id),
+                                                    start_date=data.get('start_date'), assigned_by=rid,
+                                                    sync_direction=sync_direction)
+        return jsonify({"status": "success", "group": db.get_group(group_id), "direction_id": direction_id}), 200
     except Exception as e:
         logging.error(f"Error updating group operator: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500

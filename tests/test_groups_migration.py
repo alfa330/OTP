@@ -585,6 +585,8 @@ class AddUserGroupTests(unittest.TestCase):
         self.assertIn("db.get_group_active_supervisor_id(target_group['id'])", add_user)
         self.assertIn("db.add_operator_to_group(", add_user)
         self.assertIn("start_date=hire_date", add_user)
+        # направление из формы создания остаётся; без него — направление группы
+        self.assertIn("sync_direction=direction_id is None", add_user)
 
     def test_create_payload_sends_group_id(self):
         self.assertIn("group_id: isCreatedTrainer ? null : (editedUser.group_id ? Number(editedUser.group_id) : null)", APP)
@@ -619,7 +621,9 @@ class ExistingUserGroupEditTests(unittest.TestCase):
         bulk = BOT.split("def admin_bulk_update_users():", 1)[1].split("def admin_promote_to_supervisor():", 1)[0]
         self.assertIn("allowed_fields = {'direction_id', 'group_id', 'rate'}", bulk)
         self.assertNotIn("updates['supervisor_id']", bulk)
-        self.assertIn("db.add_operator_to_group(target_group['id'], target_user_id, assigned_by=requester_id)", bulk)
+        self.assertIn("target_group['id'], target_user_id, assigned_by=requester_id,", bulk)
+        # направление, выбранное в той же панели, группа не перетирает
+        self.assertIn("sync_direction='direction_id' not in updates", bulk)
         # скоуп: не-глобальный админ переводит только в группы своего отдела
         self.assertIn("Группа не из вашего отдела", bulk)
         # группа применима только к операторам/стажёрам
@@ -630,6 +634,24 @@ class ExistingUserGroupEditTests(unittest.TestCase):
         # в edit-флоу больше нет прямого update_user(supervisor_id) для операторов —
         # осталось только легаси-обнуление для тренеров
         self.assertEqual(APP.count("field: 'supervisor_id'"), 1)
+
+    def test_edit_flow_takes_direction_from_group_move(self):
+        # Сначала перевод в группу (сервер проставляет её направление), потом —
+        # только направление, выбранное в карточке руками.
+        move = APP.index("`${API_BASE_URL}/api/admin/groups/${nextGroupId}/operators`")
+        direction = APP.index("if (shouldSendDirectionUpdate({")
+        self.assertLess(move, direction)
+        self.assertIn("sync_direction: !editedUser.direction_picked_by_hand", APP)
+        self.assertIn("groupMoveResponse?.data?.direction_id", APP)
+        # сами правила сравнения — в поведенческом tests/group_direction.test.mjs
+
+    def test_edit_modal_fills_direction_from_group(self):
+        self.assertIn("directionForPickedGroup({", USER_MODAL)
+        self.assertNotIn("setEditedUser({ ...editedUser, group_id:", USER_MODAL)
+        self.assertIn("onChange={handleGroupChange}", USER_MODAL)
+        self.assertIn("onChange={(e) => handleGroupChange(e.target.value)}", USER_MODAL)
+        # подстановка не перетирает направление, выбранное руками, — в обоих селектах
+        self.assertEqual(USER_MODAL.count("direction_picked_by_hand: true"), 2)
 
     def test_bulk_panel_uses_groups(self):
         self.assertIn("Группа: не менять", APP)

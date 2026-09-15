@@ -64,6 +64,7 @@ class _PermissionDB:
         self.login_updates = []
         self.user_updates = []
         self.group_moves = []
+        self.group_move_syncs = []
 
     def get_user(self, *, id):
         return self.users.get(int(id))
@@ -103,8 +104,10 @@ class _PermissionDB:
     def get_group(self, group_id):
         return self.groups.get(int(group_id))
 
-    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
+    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None,
+                              sync_direction=True):
         self.group_moves.append((int(group_id), int(operator_id), assigned_by))
+        self.group_move_syncs.append(sync_direction)
 
 
 class AuthenticatedLoginChangeTests(unittest.TestCase):
@@ -453,6 +456,37 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
             self.assertEqual(payload["updated_count"], 0)
             self.assertEqual(payload["failed_user_ids"], [31])
             self.assertEqual(self.db.group_moves, [])
+
+    def test_bulk_group_move_takes_group_direction_unless_one_is_chosen(self):
+        # Направление следует за группой; выбранное в той же панели — явное и остаётся.
+        with self.subTest(changes="group_only"):
+            self.db.group_moves.clear()
+            self.db.group_move_syncs.clear()
+            namespace = self._load_namespace(
+                {"user_ids": [20], "changes": {"group_id": 50}},
+                endpoint="admin_bulk_update_users",
+            )
+
+            result = namespace["admin_bulk_update_users"]()
+
+            self.assertEqual(_response_status(result), 200)
+            self.assertEqual(self.db.group_move_syncs, [True])
+
+        with self.subTest(changes="group_and_direction"):
+            self.db.group_moves.clear()
+            self.db.group_move_syncs.clear()
+            self.db.user_updates.clear()
+            namespace = self._load_namespace(
+                {"user_ids": [20], "changes": {"group_id": 50, "direction_id": 41}},
+                endpoint="admin_bulk_update_users",
+            )
+
+            result = namespace["admin_bulk_update_users"]()
+
+            self.assertEqual(_response_status(result), 200)
+            self.assertEqual(self.db.user_updates, [(20, "direction_id", 41, 10)])
+            self.assertEqual(self.db.group_moves, [(50, 20, 10)])
+            self.assertEqual(self.db.group_move_syncs, [False])
 
 
 class OperatorScopeHelpersTests(unittest.TestCase):

@@ -73,6 +73,7 @@ import { holdPageScroll } from './utils/pageScrollLock';
 import MobilePageChrome from './components/common/MobilePageChrome';
 import useScreenBackGesture from './components/common/useScreenBackGesture';
 import { pushBackEntry, clearBackStack, armBackFloor } from './utils/mobileBackStack';
+import { shouldSendDirectionUpdate } from './utils/groupDirection';
 import useIsMobileShell from './components/common/useIsMobileShell';
 import useOverlayDismiss from './components/common/useOverlayDismiss';
 import sidebarLogo from './components/common/sidebar-logo.svg';
@@ -44940,22 +44941,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             });
                         }
                     } else {
-                        if (editedUser.direction_id && editedUser.direction_id !== userToEdit.direction_id) {
+                        // Супервайзер напрямую не меняется: перевод в другую группу
+                        // закрывает старое членство и каскадом проставляет СВ и
+                        // направление новой группы.
+                        const nextGroupId = editedUser.group_id ? Number(editedUser.group_id) : null;
+                        const prevGroupId = userToEdit?.group_id ? Number(userToEdit.group_id) : null;
+                        // Направление, которое у оператора уже записано: без перевода —
+                        // исходное, после перевода — то, что вернул сервер.
+                        let directionAfterGroupMove = userToEdit?.direction_id;
+                        if (nextGroupId && nextGroupId !== prevGroupId) {
+                            const groupMoveResponse = await axios.post(`${API_BASE_URL}/api/admin/groups/${nextGroupId}/operators`, {
+                                operator_id: editedUser.id,
+                                // Направление, выбранное в карточке руками, перевод не перетирает.
+                                sync_direction: !editedUser.direction_picked_by_hand
+                            }, {
+                                headers: { 'X-User-Id': user.id }
+                            });
+                            directionAfterGroupMove = groupMoveResponse?.data?.direction_id ?? directionAfterGroupMove;
+                        }
+                        if (shouldSendDirectionUpdate({
+                            nextDirectionId: editedUser.direction_id,
+                            directionAfterMove: directionAfterGroupMove,
+                            // У обычного СВ поля направления нет, сервер ответит 403 (задача #228).
+                            canEditDirection: !(isSupervisorRole(user?.role) && !isDepartmentHeadUser),
+                        })) {
                             await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
                                 user_id: editedUser.id,
                                 field: 'direction_id',
                                 value: editedUser.direction_id
-                            }, {
-                                headers: { 'X-User-Id': user.id }
-                            });
-                        }
-                        // Супервайзер напрямую не меняется: перевод в другую группу
-                        // закрывает старое членство и каскадом проставляет СВ новой группы.
-                        const nextGroupId = editedUser.group_id ? Number(editedUser.group_id) : null;
-                        const prevGroupId = userToEdit?.group_id ? Number(userToEdit.group_id) : null;
-                        if (nextGroupId && nextGroupId !== prevGroupId) {
-                            await axios.post(`${API_BASE_URL}/api/admin/groups/${nextGroupId}/operators`, {
-                                operator_id: editedUser.id
                             }, {
                                 headers: { 'X-User-Id': user.id }
                             });

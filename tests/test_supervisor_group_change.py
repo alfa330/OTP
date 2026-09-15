@@ -63,8 +63,12 @@ class _GroupsDB:
         self.groups = dict(groups)
         self.headed = dict(headed or {})
         self.adds = []
+        self.add_syncs = []
         self.removes = []
         self.user_updates = []
+        # Направление оператора после перевода — его add_operator_to_group
+        # возвращает, а ручка отдаёт карточке.
+        self.direction_after_move = 70
 
     # — пользователи —
     def get_user(self, *, id):
@@ -87,8 +91,11 @@ class _GroupsDB:
     def get_group(self, group_id):
         return self.groups.get(int(group_id))
 
-    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None):
+    def add_operator_to_group(self, group_id, operator_id, start_date=None, assigned_by=None,
+                              sync_direction=True):
         self.adds.append((int(group_id), int(operator_id), assigned_by))
+        self.add_syncs.append(sync_direction)
+        return self.direction_after_move if sync_direction else None
 
     def remove_operator_from_group(self, group_id, operator_id, end_date=None):
         self.removes.append((int(group_id), int(operator_id)))
@@ -151,6 +158,47 @@ class SupervisorMovesOperatorBetweenGroupsTests(unittest.TestCase):
 
         self.assertEqual(_status(result), 200)
         self.assertEqual(db.adds, [(50, 20, 10)])
+
+    def test_move_takes_group_direction_and_reports_it_to_the_card(self):
+        # Направление следует за группой. Карточка получает его в ответе и не
+        # отправляет следом прежнее (СВ смена направления всё равно закрыта).
+        db, result = self._call(50, {"operator_id": 20})
+
+        self.assertEqual(_status(result), 200)
+        self.assertEqual(db.add_syncs, [True])
+        self.assertEqual(_payload(result)["direction_id"], 70)
+
+    def test_supervisor_move_always_takes_group_direction(self):
+        # СВ направление не выбирает, поэтому просьба «не трогать» от него не действует.
+        db, result = self._call(50, {"operator_id": 20, "sync_direction": False})
+
+        self.assertEqual(_status(result), 200)
+        self.assertEqual(db.add_syncs, [True])
+
+    def test_department_head_move_takes_group_direction_only_on_request(self):
+        # Админ и глава отдела могли выбрать направление в карточке руками, а
+        # вкладка со старой сборкой шлёт его ДО перевода — без явной просьбы
+        # направление не трогаем.
+        for request_payload, expected_syncs, expected_direction in (
+            ({"operator_id": 20}, [False], None),
+            ({"operator_id": 20, "sync_direction": False}, [False], None),
+            ({"operator_id": 20, "sync_direction": "true"}, [False], None),
+            ({"operator_id": 20, "sync_direction": True}, [True], 70),
+        ):
+            with self.subTest(request_payload=request_payload):
+                db = _groups_db(headed={10: 7})
+                db, result = self._call(50, request_payload, db=db, headed_dept=7)
+
+                self.assertEqual(_status(result), 200)
+                self.assertEqual(db.add_syncs, expected_syncs)
+                self.assertEqual(_payload(result)["direction_id"], expected_direction)
+
+    def test_removal_reports_no_direction(self):
+        db = _groups_db(headed={10: 7})
+        db, result = self._call(50, {"operator_id": 20, "remove": True}, db=db, headed_dept=7)
+
+        self.assertEqual(_status(result), 200)
+        self.assertIsNone(_payload(result)["direction_id"])
 
     def test_supervisor_cannot_move_into_other_department_group(self):
         db, result = self._call(51, {"operator_id": 20})

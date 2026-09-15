@@ -5,6 +5,7 @@ import useScreenBackGesture from '../common/useScreenBackGesture';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
 import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
+import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
 import './user-edit-mobile.css';
 
@@ -374,6 +375,23 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             }
             return next;
         });
+    };
+    // Направление следует за группой: при переводе сервер сам проставит оператору
+    // действующее направление группы, а форма показывает его сразу. Правила — в
+    // directionForPickedGroup; выбранное руками (direction_picked_by_hand) не трогаем.
+    const handleGroupChange = (groupValue) => {
+        setEditedUser((prev) => ({
+            ...prev,
+            group_id: groupValue,
+            direction_id: directionForPickedGroup({
+                groupId: groupValue,
+                groups,
+                originalGroupId: userToEdit?.group_id,
+                originalDirectionId: userToEdit?.direction_id,
+                currentDirectionId: prev?.direction_id,
+                pickedByHand: !!prev?.direction_picked_by_hand,
+            }),
+        }));
     };
     const isExistingUserEdit = Boolean(userToEdit?.id);
     const isSupervisorRateEditDay = getAlmatyDayOfMonth() === 1;
@@ -1714,7 +1732,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <label className="block text-sm font-medium text-gray-700 mb-1">Группа</label>
                         <CustomSelect
                         value={editedUser?.group_id || ""}
-                        onChange={(v) => setEditedUser({ ...editedUser, group_id: v })}
+                        onChange={handleGroupChange}
                         disabled={isLoading || !!createdCredentials}
                         placeholder="Выберите группу"
                         options={[
@@ -1763,7 +1781,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <label className="block text-sm font-medium text-gray-700 mb-1">Направление</label>
                         <CustomSelect
                         value={editedUser?.direction_id || ""}
-                        onChange={(v) => setEditedUser({ ...editedUser, direction_id: v })}
+                        onChange={(v) => setEditedUser({ ...editedUser, direction_id: v, direction_picked_by_hand: true })}
                         disabled={isLoading || !!createdCredentials}
                         placeholder="Выберите направление"
                         options={[
@@ -2430,7 +2448,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     <label className="block text-sm font-medium text-gray-700 mb-1">Группа</label>
                                     <select
                                     value={editedUser?.group_id || ""}
-                                    onChange={(e) => setEditedUser({ ...editedUser, group_id: e.target.value })}
+                                    onChange={(e) => handleGroupChange(e.target.value)}
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                     disabled={isLoading}
                                     >
@@ -2463,7 +2481,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     })()}
                                     </select>
                                     <p className="mt-1 text-xs text-slate-500">
-                                        Супервайзер меняется автоматически вместе с группой.
+                                        Супервайзер меняется автоматически вместе с группой, направление тоже берётся из группы.
                                         {!isPureSupervisorRequester && ' Убрать оператора из группы совсем — в разделе «Группы».'}
                                     </p>
                                 </div>
@@ -2501,7 +2519,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Направление</label>
                                 <select
                                 value={editedUser?.direction_id || ""}
-                                onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value })}
+                                onChange={(e) => setEditedUser({ ...editedUser, direction_id: e.target.value, direction_picked_by_hand: true })}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                                 disabled={isLoading}
                                 >

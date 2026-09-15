@@ -64,6 +64,15 @@ def _demote_error_codes():
 DEMOTE_CODES = _demote_error_codes()
 
 
+def _class_string_constant(name):
+    for node in DATABASE_CLASS.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"Database.{name} not found")
+
+
 def _schedule_status_meta():
     """SCHEDULE_SPECIAL_STATUS_META из database.py — подписи статусов графика."""
     for node in DATABASE_MODULE.body:
@@ -98,8 +107,12 @@ class _ScriptedCursor:
 
     def __init__(self, *, user_row, headed=(), group_row, led_group_ids=(),
                  group_supervisors=None, raise_on_role_update=False,
-                 active_status_period=None):
+                 active_status_period=None, effective_direction=None):
         self.calls = []
+        # Действующее направление группы; по умолчанию — сырое из строки группы.
+        self._effective_direction = (
+            effective_direction if effective_direction is not None else group_row[2]
+        )
         self.executemany_calls = []
         self._user_row = user_row
         self._headed = [(name,) for name in headed]
@@ -124,6 +137,8 @@ class _ScriptedCursor:
             self._next_one = (
                 (self._active_status_period,) if self._active_status_period else None
             )
+        elif "AS effective_direction_id" in flat:
+            self._next_one = (self._effective_direction,)
         elif "FROM groups" in flat:
             self._next_one = self._group_row
         elif "SELECT group_id FROM group_supervisor_memberships" in flat:
@@ -188,12 +203,15 @@ class _FakeDatabase:
         self.stamped = []
         for name, value in DEMOTE_CODES.items():
             setattr(self, name, value)
+        self._GROUP_EFFECTIVE_DIRECTION_SQL = _class_string_constant("_GROUP_EFFECTIVE_DIRECTION_SQL")
         self.demote_supervisor_to_operator = _load_demote().__get__(self, _FakeDatabase)
         for name in (
             "_group_active_supervisor_id_tx",
             "_set_operators_supervisor_tx",
             "_sync_group_operators_supervisor_tx",
             "_add_operator_to_group_tx",
+            "_group_effective_direction_id_tx",
+            "_sync_operator_direction_from_group_tx",
         ):
             setattr(self, name, _load_method_bound(self, name))
 
@@ -232,6 +250,7 @@ class DemotionCascadeTests(unittest.TestCase):
             "group_supervisors": kwargs.pop("group_supervisors", {}),
             "raise_on_role_update": kwargs.pop("raise_on_role_update", False),
             "active_status_period": kwargs.pop("active_status_period", None),
+            "effective_direction": kwargs.pop("effective_direction", None),
         }
         cursor = _ScriptedCursor(**cursor_kwargs)
         cursor.target_group_id = kwargs.get("group_id", 10)
@@ -363,6 +382,40 @@ class DemotionCascadeTests(unittest.TestCase):
             group_row=_group_row(direction_id=77),
         )
         self.assertEqual(result["direction_id"], 77)
+
+    def test_group_direction_wins_over_supervisors_own(self):
+        """Своё направление у СВ осталось со времён, когда он был оператором.
+        Оператором он теперь в группе — значит, и направление её."""
+        result, cursor, _ = self._run(
+            user_row=_user_row(direction_id=69),
+            group_row=_group_row(direction_id=70),
+        )
+        self.assertEqual(result["direction_id"], 70)
+        idx = cursor.index_of("UPDATE users SET role = 'operator'")
+        self.assertEqual(cursor.calls[idx][1][0], 70)
+
+    def test_archived_group_direction_resolves_to_live_row(self):
+        result, _, _ = self._run(
+            user_row=_user_row(direction_id=None),
+            group_row=_group_row(direction_id=79),
+            effective_direction=83,
+        )
+        self.assertEqual(result["direction_id"], 83)
+
+    def test_explicit_direction_still_wins(self):
+        result, _, _ = self._run(group_row=_group_row(direction_id=70), direction_id=77)
+        self.assertEqual(result["direction_id"], 77)
+
+    def test_enrolment_does_not_sync_direction_a_second_time(self):
+        """Направление и его строка истории уже записаны шагом 2 — заведение в
+        группу не должно писать их повторно."""
+        _, cursor, _ = self._run(
+            user_row=_user_row(direction_id=69),
+            group_row=_group_row(direction_id=70),
+        )
+        sql = cursor.sql_log()
+        self.assertFalse([item for item in sql if item.startswith("UPDATE users SET direction_id")])
+        self.assertFalse([item for item in sql if "INSERT INTO user_history" in item])
 
     def test_name_collision_becomes_typed_error(self):
         """unique_name_role (name, role): у одного из девяти СВ в проде уже есть
