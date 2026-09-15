@@ -178,6 +178,19 @@ class PhoneGridTests(unittest.TestCase):
         card_component = PHONE[PHONE.index('export const AuctionPhoneStatusCard'):PHONE.index('const DAY_CAPTION_TONES')]
         self.assertNotIn('workload', card_component)
 
+    def test_top_glass_is_no_taller_than_the_bell_row(self):
+        """Владелец 15.09.2026: «прозрачная чёлка сверху слишком большая,
+        укороти её». Часы оператора стоят в строке колокола, у выреза экрана, а
+        не под пустой полосой в 46 px; колокол не накрывает их правым полем."""
+        grid = PHONE[PHONE.index('export const AuctionPhoneGrid'):]
+        self.assertIn("className={header ? 'sa-m-strip sa-m-strip--bell' : 'sa-m-strip'}", grid)
+        start = CSS.index('body.mobile-shell .sa-m-root .sa-m-strip.sa-m-strip--bell {')
+        self.assertIn('top: max(10px, env(safe-area-inset-top));', CSS[start:CSS.index('}', start)])
+        self.assertIn('.sa-m-strip.sa-m-strip--bell[data-stuck] .sa-m-strip__glass', CSS)
+        self.assertIn('.sa-m-strip.sa-m-strip--bell[data-stuck] .sa-m-norm', CSS)
+        # Строка часов ровно в рост колокола: ниже — дни заехали бы под него.
+        self.assertIn('className="sa-m-norm flex h-11 items-center gap-3 px-4"', PHONE)
+
     def test_timelines_stay_on_the_phone(self):
         """«таймлайны не убирай»: лента суток в экране дня, лента выбора части
         смены и лента карточки смены у руководителя."""

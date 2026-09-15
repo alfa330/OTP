@@ -88,6 +88,27 @@ body.mobile-shell .sa-m-root .sa-m-strip[data-stuck] .sa-m-strip__glass {
     box-shadow: 0 0.5px 0 var(--sheet-sep, rgba(60, 60, 67, 0.2));
 }
 
+/* Сетка аукциона: часы оператора стоят В СТРОКЕ КОЛОКОЛА, а не под ней.
+   Владелец 15.09.2026: «прозрачная чёлка сверху слишком большая, укороти её» —
+   над часами висели пустые 46 px стекла под колокол (на iPhone с вырезом стекло
+   занимало 219 px экрана). Шапка прилипает к вырезу, как и сам колокол, строка
+   часов высотой с него (44 px). Без строки часов (у руководителя) дни встали бы
+   под колокол — у такой шапки прежняя высота, класса --bell у неё нет. */
+body.mobile-shell .sa-m-root .sa-m-strip.sa-m-strip--bell {
+    top: max(10px, env(safe-area-inset-top));
+}
+
+body.mobile-shell .sa-m-root .sa-m-strip.sa-m-strip--bell[data-stuck] .sa-m-strip__glass {
+    top: calc(-1 * max(10px, env(safe-area-inset-top)));
+}
+
+/* Правое поле под колокол (его отступ от края + 44 px + 8 px зазора) — только у
+   прилипшей шапки: в потоке колокола рядом нет, и поле обрывало бы полосу часов
+   раньше края. Высота строки от поля не меняется — прилипание страницу не дёргает. */
+body.mobile-shell .sa-m-root .sa-m-strip.sa-m-strip--bell[data-stuck] .sa-m-norm {
+    padding-right: calc(max(10px, env(safe-area-inset-right)) + 52px);
+}
+
 /* Неделя — ровно в ширину: день занимает седьмую часть за вычетом шести зазоров.
    Период короче недели растягивает дни, длиннее — прокручивается вбок. */
 body.mobile-shell .sa-m-root .sa-m-day {

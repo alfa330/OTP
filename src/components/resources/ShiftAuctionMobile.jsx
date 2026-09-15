@@ -297,7 +297,7 @@ export const AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect, header =
  * карточке статуса наверх.
  */
 export const AuctionPhoneNormBar = ({ claimed, ceiling, balance, balanceClassName = 'text-slate-500', barClassName = 'bg-blue-600', progress = 0 }) => (
-  <div className="sa-m-norm flex items-center gap-3 px-4 pt-2" style={NO_WRAP}>
+  <div className="sa-m-norm flex h-11 items-center gap-3 px-4" style={NO_WRAP}>
     <span className="shrink-0 whitespace-nowrap text-[15px] tabular-nums text-slate-500">
       <b className="text-[17px] font-semibold text-slate-900">{claimed}</b> из {ceiling} ч
     </span>
@@ -390,12 +390,15 @@ export const AuctionPhoneGrid = ({ days = [], groups = [], header = null, onDayS
 
   return (
     <div className="sa-m-grid">
-      <div ref={stripRef} className="sa-m-strip" data-stuck={stuck ? '' : undefined}>
+      {/* Со строкой часов шапка прилипает к вырезу экрана, в строку колокола
+          (sa-m-strip--bell): пустые 46 px стекла над часами владелец назвал
+          слишком большой «чёлкой». Без неё дни встали бы под колокол. */}
+      <div ref={stripRef} className={header ? 'sa-m-strip sa-m-strip--bell' : 'sa-m-strip'} data-stuck={stuck ? '' : undefined}>
         <span className="sa-m-strip__glass" aria-hidden="true" />
         {header}
         <div
           ref={headRef}
-          className="sa-m-grid__scroll px-4 pb-2 pt-1.5"
+          className="sa-m-grid__scroll px-4 pb-1.5 pt-0.5"
           style={scrollStyle}
           onScroll={scrolls ? () => follow(headRef.current, bodyRef.current) : undefined}
         >
@@ -406,13 +409,13 @@ export const AuctionPhoneGrid = ({ days = [], groups = [], header = null, onDayS
                 type="button"
                 onClick={() => onDaySelect?.(day.date)}
                 aria-label={day.ariaLabel}
-                className={`sa-m-grid__day flex w-full min-w-0 flex-col items-center rounded-xl pb-1 pt-0.5 ${COLUMN_HEAD_TONES[day.columnTone] || ''}`}
+                className={`sa-m-grid__day flex w-full min-w-0 flex-col items-center rounded-xl py-0.5 ${COLUMN_HEAD_TONES[day.columnTone] || ''}`}
               >
-                <span className={`text-[11px] font-medium leading-4 ${day.isToday ? 'text-blue-600' : 'text-slate-500'}`}>{day.weekday}</span>
-                <span className={`grid h-7 w-7 place-items-center rounded-full text-[16px] font-semibold tabular-nums ${day.isToday ? 'bg-blue-600 text-white' : 'text-slate-900'}`}>
+                <span className={`text-[11px] font-medium leading-[14px] ${day.isToday ? 'text-blue-600' : 'text-slate-500'}`}>{day.weekday}</span>
+                <span className={`grid h-6 w-6 place-items-center rounded-full text-[15px] font-semibold tabular-nums ${day.isToday ? 'bg-blue-600 text-white' : 'text-slate-900'}`}>
                   {day.dayNumber}
                 </span>
-                <span className={`max-w-full truncate text-[11px] font-medium leading-4 tabular-nums ${DAY_CAPTION_TONES[day.tone] || DAY_CAPTION_TONES.none}`}>
+                <span className={`max-w-full truncate text-[11px] font-medium leading-[14px] tabular-nums ${DAY_CAPTION_TONES[day.tone] || DAY_CAPTION_TONES.none}`}>
                   {day.caption || ' '}
                 </span>
               </button>
