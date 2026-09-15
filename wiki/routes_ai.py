@@ -386,12 +386,12 @@ def register(bp, wiki_route, db, log_ip):
         ai_store.touch_chat(cursor, ctx['user_id'], chat_id,
                             first_question=question)
 
-        # Отказ оператору уходит супервайзеру его отдела (задача #321,
-        # wiki/questions.py). Под савпоинтом: передача — продолжение ответа, а
-        # не его условие, и сломавшаяся очередь не должна отнимать у оператора
-        # сам ответ.
+        # Отказ оператору — и ответ, признавший, что спрошенного в статьях нет, —
+        # уходит супервайзеру его отдела (задача #321, wiki/questions.py). Под
+        # савпоинтом: передача — продолжение ответа, а не его условие, и
+        # сломавшаяся очередь не должна отнимать у оператора сам ответ.
         escalation = None
-        if (wiki_questions.should_escalate(ctx['otp_role'], result['kind'])
+        if (wiki_questions.should_escalate(ctx['otp_role'], result['kind'], result['text'])
                 and wiki_questions.table_ready(cursor)):
             cursor.execute('SAVEPOINT wiki_question_escalate')
             try:

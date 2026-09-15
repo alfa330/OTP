@@ -14,7 +14,8 @@
 и ai/knowledge.py.
 
 РЕШЕНИЯ ПО ЗАДАЧЕ (15.09.2026), которых в постановке нет:
-  * вопрос уходит АВТОМАТИЧЕСКИ на каждый отказ помощника, без кнопки;
+  * вопрос уходит АВТОМАТИЧЕСКИ на каждый отказ помощника, без кнопки, — и на
+    ответ, признавший, что спрошенного в статьях нет (should_escalate);
   * ответ супервайзера приходит оператору СРАЗУ, статья оформляется следом —
     оператор на линии не ждёт публикации;
   * разбирают вопросы во вкладке «Вопросы» раздела «Вики», о новом будит колокол.
@@ -43,6 +44,7 @@
 from news import access as news_access
 
 from . import access as wiki_access
+from .ai import answer as ai_answer
 from .ai import store as ai_store
 
 # Кто передаёт вопрос супервайзеру при отказе помощника.
@@ -84,9 +86,20 @@ _ORDER = {
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
 
-def should_escalate(otp_role, kind):
-    """Передаётся ли отказ помощника супервайзеру."""
-    return kind == 'no_answer' and wiki_access.normalize_role(otp_role) in ESCALATING_ROLES
+def should_escalate(otp_role, kind, text=''):
+    """Передаётся ли ответ помощника супервайзеру.
+
+    Два случая: полный отказ (kind no_answer) и ответ, который начинается с
+    признания «нет информации о …», а дальше даёт смежное (ai_answer.admits_missing).
+    Второй — решение 15.09.2026: оператор спросил комиссию Яндекса и получил таблицу
+    комиссий парков; ответа на заданный вопрос нет, а к супервайзеру вопрос не ушёл.
+    Смежные данные оператору остаются, под ответом — строка о передаче.
+    """
+    if wiki_access.normalize_role(otp_role) not in ESCALATING_ROLES:
+        return False
+    if kind == 'no_answer':
+        return True
+    return kind == 'answer' and ai_answer.admits_missing(text)
 
 
 def reviewer_scope(ctx):

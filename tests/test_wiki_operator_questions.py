@@ -15,6 +15,7 @@ from news import schema as news_schema
 from notifications import sources
 from wiki import access as wiki_access
 from wiki import questions as wiki_questions
+from wiki.ai import answer as ai_answer
 from wiki.ai import knowledge
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -66,9 +67,65 @@ class EscalationRuleTests(unittest.TestCase):
                      'hr_manager', 'accounting_manager', '', None):
             self.assertFalse(wiki_questions.should_escalate(role, 'no_answer'), role)
 
-    def test_only_a_refusal_escalates(self):
+    def test_a_plain_answer_does_not_escalate(self):
         for kind in ('answer', 'clarify', 'supervisor', None):
-            self.assertFalse(wiki_questions.should_escalate('operator', kind), kind)
+            self.assertFalse(wiki_questions.should_escalate(
+                'operator', kind, 'Минимальный срок аренды — 14 дней.'), kind)
+
+    def test_an_answer_admitting_the_gap_escalates_for_operators_only(self):
+        """Прод 15.09.2026: на «комиссию Яндекса» — таблица комиссий парков, без передачи."""
+        text = ('В доступных мне фрагментах статей нет информации о размере комиссии '
+                'сервиса Яндекс. Есть данные только по комиссиям таксопарков:\n'
+                '| Парк | Комиссия |\n| Ноль такси | 0% |')
+        self.assertTrue(wiki_questions.should_escalate('operator', 'answer', text))
+        self.assertTrue(wiki_questions.should_escalate('trainee', 'answer', text))
+        self.assertFalse(wiki_questions.should_escalate('sv', 'answer', text))
+        self.assertFalse(wiki_questions.should_escalate('operator', 'clarify', text))
+
+    def test_the_route_hands_over_the_answer_text(self):
+        ask = _function(_code_only(_read('wiki', 'routes_ai.py')), 'wiki_ai_ask')
+        self.assertIn("should_escalate(ctx['otp_role'], result['kind'], result['text'])", ask)
+
+
+class AdmitsMissingTests(unittest.TestCase):
+    """Признание «нет информации о …» в начале ответа. Формулировки — с прода."""
+
+    ADMITS = (
+        'В доступных вам статьях нет информации о конкретных моделях и годах выпуска '
+        'автомобилей. Для проверки обратитесь к «Классификатору авто».',
+        'В предоставленных фрагментах статей информации об адресе офиса в Туркестане нет. '
+        'Для связи доступны контакты: * **Поддержка:** +77003000770',
+        'В предоставленных фрагментах статей информация о таксопарке «Достойный» отсутствует. '
+        'В материалах содержатся данные только по следующим паркам:',
+        'В доступных мне фрагментах статей нет точной информации о размере комиссии '
+        'таксопарка **2донгелек**.',
+        '**В доступных вам статьях нет информации о комиссии Яндекса.**',
+        'Қолжетімді мақала үзінділерінде Kaspi аударымдары туралы ақпарат жоқ. '
+        'Бұл сұрақ бойынша бухгалтерге жүгініңіз.',
+    )
+    ANSWERS = (
+        'Минимальный срок аренды — 14 дней.',
+        # «нет» — сам ответ, а не признание.
+        'Штрафа за опоздание нет. В статье «Аренда» сказано, что залог возвращается.',
+        'В статьях указано, что комиссии за вывод нет.',
+        # Признание не первой фразой — на вопрос уже ответили.
+        'Комиссия парка «Ноль такси» — 0%. В доступных статьях нет информации о других парках.',
+        'В статье «Аренда» указано: депозит 5000 ₸, минимальный срок 14 дней.',
+    )
+
+    def test_admissions_are_recognised(self):
+        for text in self.ADMITS:
+            self.assertTrue(ai_answer.admits_missing(text), text[:60])
+
+    def test_answers_are_not_mistaken_for_admissions(self):
+        for text in self.ANSWERS:
+            self.assertFalse(ai_answer.admits_missing(text), text[:60])
+
+    def test_admission_with_data_stays_an_answer_with_sources(self):
+        """Передача не отнимает у оператора смежное: вид ответа не меняется."""
+        text = self.ADMITS[1]
+        self.assertTrue(ai_answer.admits_missing(text))
+        self.assertFalse(ai_answer.is_refusal(text))
 
     def test_escalation_never_costs_the_operator_the_answer(self):
         """Передача — продолжение ответа, а не его условие: сбой очереди под
