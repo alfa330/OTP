@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronRight, Loader2, Plus } from 'lucide-react';
 import { iosCard, iosGroupLabel } from '../ui/ios';
 
 /*
@@ -8,8 +8,12 @@ import { iosCard, iosGroupLabel } from '../ui/ios';
  * На компьютере период — сетка «ставки × дни» с ячейками по 64 px, полосой дней
  * у нижней грани и карточкой дня поверх неё. На экране в 390 px это давало семь
  * колонок с подписями «9-18» в 10 px, горизонтальную прокрутку по сетке, полосу
- * дней под баром разделов и плашку статуса под колоколом. Здесь период — полоса
- * дней сверху и список смен выбранного дня, как в календаре телефона.
+ * дней под баром разделов и плашку статуса под колоколом. Здесь период — та же
+ * сетка, собранная под палец (AuctionPhoneGrid): неделя в ширину экрана, смена —
+ * ячейка с началом и концом в две строки, шапка дней и часы оператора липнут
+ * сверху, смена и день открываются нажатием. (Были и списки — один день, потом
+ * вся неделя; владелец 15.09.2026: «сделай как на сайте, чтобы смены
+ * отображались ячейками», «норма за неделю должна быть закреплена».)
  *
  * Данные и решения («можно ли взять», «почему нельзя», сколько часов) считает
  * ShiftAuctionView.jsx теми же помощниками, что и сетку: здесь нет ни одного
@@ -147,11 +151,12 @@ const STATUS_DOTS = {
 };
 
 /*
- * Статус и часы одной карточкой. На компьютере это плашка, прибитая к правому
+ * Статус аукциона карточкой. На компьютере это плашка, прибитая к правому
  * верхнему углу экрана; на телефоне в том же углу висит колокол, и плашка
- * уходила под него вместе с «осталось N ч».
+ * уходила под него. Часы оператора здесь не повторяются — они закреплены над
+ * полосой дней (AuctionPhoneNormBar).
  */
-export const AuctionPhoneStatusCard = ({ status = 'closed', label, detail = null, period = '', workload = null, notes = [], alert = null }) => (
+export const AuctionPhoneStatusCard = ({ status = 'closed', label, detail = null, period = '', notes = [], alert = null }) => (
   <div className={`${iosCard} px-4 py-3`}>
     <div className="flex items-center gap-2">
       <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOTS[status] || STATUS_DOTS.closed}`} aria-hidden="true" />
@@ -164,19 +169,6 @@ export const AuctionPhoneStatusCard = ({ status = 'closed', label, detail = null
         {detail}
         {detail && period ? ' · ' : ''}
         {period}
-      </div>
-    ) : null}
-    {workload ? (
-      <div className="mt-3">
-        <div className="flex items-baseline gap-1.5">
-          <span className="text-[24px] font-semibold leading-none tabular-nums text-slate-900">{workload.claimed}</span>
-          <span className="text-[15px] text-slate-500">из {workload.ceiling} ч</span>
-          <span className={`ml-auto shrink-0 text-[14px] font-medium tabular-nums ${workload.balanceClassName}`}>{workload.balance}</span>
-        </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
-          <div className={`h-full rounded-full ${workload.barClassName}`} style={{ width: `${workload.progress}%` }} />
-        </div>
-        {workload.caption ? <div className="mt-1.5 text-[13px] text-slate-500">{workload.caption}</div> : null}
       </div>
     ) : null}
     {notes.filter(Boolean).map((note, index) => (
@@ -197,6 +189,44 @@ const DAY_CAPTION_TONES = {
 };
 
 /*
+ * Прилипла ли полоса. Над прилипшей полосой остаётся полоса под колокол
+ * (46 px + вырез), и страница ехала бы там на виду — заголовки и кнопки
+ * просвечивали над днями. Прилипнув, полоса продолжает стекло до верхней
+ * грани экрана (слой .sa-m-strip__glass в shift-auction-mobile.css).
+ *
+ * Наблюдатель за самой полосой, а не обработчик прокрутки: линия прилипания
+ * сдвинута внутрь на пиксель, и у прилипшей полосы верхний край оказывается за
+ * ней — видимая доля падает ниже единицы. Доля падает и у полосы, уехавшей за
+ * НИЖНИЙ край, поэтому второе условие — её верх уже на линии.
+ */
+const useAuctionPhoneStuck = (stripRef, enabled) => {
+  const [stuck, setStuck] = useState(false);
+  const [viewportTick, setViewportTick] = useState(0);
+
+  useEffect(() => {
+    const strip = stripRef.current;
+    if (!enabled || !strip || typeof IntersectionObserver === 'undefined') return undefined;
+    // Линию берём у самой полосы: в CSS она посчитана с вырезом экрана, а
+    // пробником вырез из JS пришлось бы мерить заново.
+    const stickTop = parseFloat(window.getComputedStyle(strip).top) || 0;
+    const observer = new IntersectionObserver(([entry]) => {
+      setStuck(entry.intersectionRatio < 1 && entry.boundingClientRect.top <= stickTop + 1);
+    }, { rootMargin: `-${Math.ceil(stickTop) + 1}px 0px 0px 0px`, threshold: [1] });
+    observer.observe(strip);
+    return () => observer.disconnect();
+  }, [enabled, stripRef, viewportTick]);
+
+  // Поворот меняет вырез, а с ним и линию прилипания — наблюдатель пересоздаётся.
+  useEffect(() => {
+    const handle = () => setViewportTick((value) => value + 1);
+    window.addEventListener('orientationchange', handle);
+    return () => window.removeEventListener('orientationchange', handle);
+  }, []);
+
+  return stuck;
+};
+
+/*
  * Полоса дней периода. Неделя помещается целиком (день — седьмая часть ширины),
  * длинный период прокручивается вбок, выбранный день подъезжает в середину.
  * Полоса липкая: в дне бывает за три десятка смен, и возвращаться к ней
@@ -206,40 +236,8 @@ export const AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect, header =
   const stripRef = useRef(null);
   const scrollRef = useRef(null);
   const firstRunRef = useRef(true);
-  const [stuck, setStuck] = useState(false);
-  const [viewportTick, setViewportTick] = useState(0);
   const hasDays = days.length > 0;
-
-  /*
-   * Прилипла ли полоса. Над прилипшей полосой остаётся полоса под колокол
-   * (46 px + вырез), и страница ехала бы там на виду — заголовки и кнопки
-   * просвечивали над днями. Прилипнув, полоса продолжает стекло до верхней
-   * грани экрана (слой .sa-m-strip__glass в shift-auction-mobile.css).
-   *
-   * Наблюдатель за самой полосой, а не обработчик прокрутки: линия прилипания
-   * сдвинута внутрь на пиксель, и у прилипшей полосы верхний край оказывается за
-   * ней — видимая доля падает ниже единицы. Доля падает и у полосы, уехавшей за
-   * НИЖНИЙ край, поэтому второе условие — её верх уже на линии.
-   */
-  useEffect(() => {
-    const strip = stripRef.current;
-    if (!strip || typeof IntersectionObserver === 'undefined') return undefined;
-    // Линию берём у самой полосы: в CSS она посчитана с вырезом экрана, а
-    // пробником вырез из JS пришлось бы мерить заново.
-    const stickTop = parseFloat(window.getComputedStyle(strip).top) || 0;
-    const observer = new IntersectionObserver(([entry]) => {
-      setStuck(entry.intersectionRatio < 1 && entry.boundingClientRect.top <= stickTop + 1);
-    }, { rootMargin: `-${Math.ceil(stickTop) + 1}px 0px 0px 0px`, threshold: [1] });
-    observer.observe(strip);
-    return () => observer.disconnect();
-  }, [hasDays, viewportTick]);
-
-  // Поворот меняет вырез, а с ним и линию прилипания — наблюдатель пересоздаётся.
-  useEffect(() => {
-    const handle = () => setViewportTick((value) => value + 1);
-    window.addEventListener('orientationchange', handle);
-    return () => window.removeEventListener('orientationchange', handle);
-  }, []);
+  const stuck = useAuctionPhoneStuck(stripRef, hasDays);
 
   useEffect(() => {
     const strip = scrollRef.current;
@@ -287,6 +285,185 @@ export const AuctionPhoneDayStrip = ({ days = [], activeDate, onSelect, header =
             </button>
           );
         })}
+      </div>
+    </div>
+  );
+};
+
+/*
+ * Часы оператора строкой над полосой дней: сколько набрано, полоса, сколько
+ * осталось. Липнет вместе с днями — владелец 15.09.2026: оператор должен видеть,
+ * сколько ему ещё взять, пока листает неделю, а не возвращаться за этим к
+ * карточке статуса наверх.
+ */
+export const AuctionPhoneNormBar = ({ claimed, ceiling, balance, balanceClassName = 'text-slate-500', barClassName = 'bg-blue-600', progress = 0 }) => (
+  <div className="sa-m-norm flex items-center gap-3 px-4 pt-2" style={NO_WRAP}>
+    <span className="shrink-0 whitespace-nowrap text-[15px] tabular-nums text-slate-500">
+      <b className="text-[17px] font-semibold text-slate-900">{claimed}</b> из {ceiling} ч
+    </span>
+    <span className="sa-m-norm__track h-1.5 flex-1 overflow-hidden rounded-full bg-slate-200" aria-hidden="true">
+      <span className={`block h-full rounded-full ${barClassName}`} style={{ width: `${progress}%` }} />
+    </span>
+    <span className={`shrink-0 whitespace-nowrap text-[14px] font-medium tabular-nums ${balanceClassName}`}>{balance}</span>
+  </div>
+);
+
+// Неделя в ширину экрана; период длиннее едет вбок: колонка уже 48 px не читается.
+const GRID_MAX_FIT_DAYS = 7;
+const GRID_COLUMN_MIN = 48;
+const GRID_GAP = 4;
+
+const CELL_MARKERS = {
+  parts: 'bg-white ring-1 ring-orange-600',
+  added: 'bg-violet-600 ring-1 ring-white',
+  self: 'bg-teal-500 ring-1 ring-white',
+};
+
+// Выходной и закрытый статусом день подкрашены во всю колонку, как на сайте.
+const COLUMN_HEAD_TONES = { off: 'bg-blue-50', blocked: 'bg-rose-50' };
+const COLUMN_EMPTY_TONES = { off: 'border-blue-100 bg-blue-50/70', blocked: 'border-rose-100 bg-rose-50/70' };
+
+/*
+ * Смена-ячейка: начало крупно, конец под ним. «9-18» одной строкой в колонку
+ * шириной в палец не помещается даже кеглем 10 px — так и выглядела сетка сайта
+ * на телефоне. Цвет приходит из раздела готовым, той же шкалой, что у ячейки на
+ * сайте; метка в углу — смена разобрана частями, добавлена руками или своя.
+ */
+export const AuctionPhoneCell = ({ start, end, style = undefined, className = '', marker = null, busy = false, onClick, ariaLabel }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-label={ariaLabel}
+    className={`sa-m-cell relative flex h-11 w-full flex-col items-center justify-center overflow-hidden rounded-lg border tabular-nums leading-none transition active:scale-95 ${className}`}
+    style={style}
+  >
+    {busy ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : (
+      <>
+        <span className="text-[13px] font-semibold">{start}</span>
+        <span className="mt-1 text-[11px] font-medium opacity-80">{end}</span>
+      </>
+    )}
+    {marker ? (
+      <span className={`pointer-events-none absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${CELL_MARKERS[marker] || ''}`} aria-hidden="true" />
+    ) : null}
+  </button>
+);
+
+/*
+ * Неделя сеткой, как на сайте: столбцы — дни, строки — смены по ставкам. Шапка
+ * дней липнет под стеклом вместе с часами оператора (header) — это та же
+ * полоса .sa-m-strip, только дни в ней стоят ровно над своими колонками.
+ * Нажатие на день открывает день, на ячейку — смену; решения о том, что именно
+ * откроется, принимает раздел.
+ *
+ * Шапка и сетка — разные прокрутки: общая горизонтальная прокрутка стала бы
+ * окном прокрутки и для вертикали, и шапка перестала бы липнуть. Поэтому у
+ * периода длиннее недели они едут вбок вместе, по синхронизации.
+ */
+export const AuctionPhoneGrid = ({ days = [], groups = [], header = null, onDaySelect, onAdd = null }) => {
+  const stripRef = useRef(null);
+  const headRef = useRef(null);
+  const bodyRef = useRef(null);
+  const echoRef = useRef(null);
+  const hasDays = days.length > 0;
+  const stuck = useAuctionPhoneStuck(stripRef, hasDays);
+  if (!hasDays) return null;
+
+  const scrolls = days.length > GRID_MAX_FIT_DAYS;
+  const track = {
+    display: 'grid',
+    gridTemplateColumns: scrolls ? `repeat(${days.length}, ${GRID_COLUMN_MIN}px)` : `repeat(${days.length}, minmax(0, 1fr))`,
+    gap: GRID_GAP,
+  };
+  const scrollStyle = scrolls ? { overflowX: 'auto', scrollbarWidth: 'none' } : undefined;
+  // Запись scrollLeft во вторую прокрутку возвращается её же событием — эхо пропускаем.
+  const follow = (source, target) => {
+    if (!source || !target) return;
+    if (echoRef.current === source) {
+      echoRef.current = null;
+      return;
+    }
+    if (Math.abs(target.scrollLeft - source.scrollLeft) < 1) return;
+    echoRef.current = target;
+    target.scrollLeft = source.scrollLeft;
+  };
+
+  return (
+    <div className="sa-m-grid">
+      <div ref={stripRef} className="sa-m-strip" data-stuck={stuck ? '' : undefined}>
+        <span className="sa-m-strip__glass" aria-hidden="true" />
+        {header}
+        <div
+          ref={headRef}
+          className="sa-m-grid__scroll px-4 pb-2 pt-1.5"
+          style={scrollStyle}
+          onScroll={scrolls ? () => follow(headRef.current, bodyRef.current) : undefined}
+        >
+          <div style={track}>
+            {days.map((day) => (
+              <button
+                key={day.date}
+                type="button"
+                onClick={() => onDaySelect?.(day.date)}
+                aria-label={day.ariaLabel}
+                className={`sa-m-grid__day flex w-full min-w-0 flex-col items-center rounded-xl pb-1 pt-0.5 ${COLUMN_HEAD_TONES[day.columnTone] || ''}`}
+              >
+                <span className={`text-[11px] font-medium leading-4 ${day.isToday ? 'text-blue-600' : 'text-slate-500'}`}>{day.weekday}</span>
+                <span className={`grid h-7 w-7 place-items-center rounded-full text-[16px] font-semibold tabular-nums ${day.isToday ? 'bg-blue-600 text-white' : 'text-slate-900'}`}>
+                  {day.dayNumber}
+                </span>
+                <span className={`max-w-full truncate text-[11px] font-medium leading-4 tabular-nums ${DAY_CAPTION_TONES[day.tone] || DAY_CAPTION_TONES.none}`}>
+                  {day.caption || ' '}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div
+        ref={bodyRef}
+        className="sa-m-grid__scroll sa-m-bleed pb-1"
+        style={scrollStyle}
+        onScroll={scrolls ? () => follow(bodyRef.current, headRef.current) : undefined}
+      >
+        {groups.map((group) => (
+          <section key={group.id} className="pt-4">
+            <h2
+              className={`${iosGroupLabel} sa-m-group__label px-1 pb-1.5`}
+              style={scrolls ? { position: 'sticky', left: 0, display: 'inline-block' } : undefined}
+            >
+              {group.title}
+            </h2>
+            <div style={track}>
+              {group.rows.map((row, rowIndex) => row.map((cell, dayIndex) => {
+                if (!cell) {
+                  return (
+                    <span
+                      // Пустая клетка — место в сетке, а не данные: адрес «строка-день» и есть её ключ.
+                      // eslint-disable-next-line react/no-array-index-key
+                      key={`empty-${rowIndex}-${dayIndex}`}
+                      className={`h-11 rounded-lg border border-dashed ${COLUMN_EMPTY_TONES[days[dayIndex]?.columnTone] || 'border-slate-200'}`}
+                      aria-hidden="true"
+                    />
+                  );
+                }
+                const { key, ...cellProps } = cell;
+                return <AuctionPhoneCell key={key} {...cellProps} />;
+              }))}
+              {onAdd ? days.map((day) => (
+                <button
+                  key={`add-${group.id}-${day.date}`}
+                  type="button"
+                  onClick={() => onAdd(group.id, day.date)}
+                  aria-label={`Добавить смену · ${group.title} · ${day.ariaLabel}`}
+                  className="sa-m-cell flex h-8 w-full items-center justify-center rounded-lg border border-dashed border-violet-300 bg-violet-50 text-violet-600"
+                >
+                  <Plus size={15} aria-hidden="true" />
+                </button>
+              )) : null}
+            </div>
+          </section>
+        ))}
       </div>
     </div>
   );

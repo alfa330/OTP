@@ -87,3 +87,93 @@ export const describeAuctionPhoneDay = (item, { canMonitor = false, shiftLabel =
   if (available > 0) return { caption: `${available} св.`, tone: 'none' };
   return { caption: '—', tone: 'none' };
 };
+
+const DAY_MINUTES = 1440;
+
+// Номер дня от эпохи: разница дат без часовых поясов и перевода часов.
+const toDayNumber = (value) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
+  if (!match) return null;
+  return Math.round(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 86400000);
+};
+
+/*
+ * Лента дня 00–24 над своими сменами дня. Минуты смены и перерывов считаются от
+ * полуночи ДАТЫ СМЕНЫ и у ночи уходят за 1440 (20:00–08:00 — это 1200–1920),
+ * поэтому смена кладётся на ленту со сдвигом на разницу дат и обрезается по
+ * суткам: вечер ночи — на ленте её дня, хвост до 08:00 — на ленте следующего.
+ * Перерывы — доли внутри своей полосы, как у ленты «Моих смен».
+ */
+export const buildAuctionPhoneDayTimelineParts = ({ date, entries = [] } = {}) => {
+  const day = toDayNumber(date);
+  if (day === null) return [];
+  const parts = [];
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const entryDay = toDayNumber(entry?.date);
+    const start = Number(entry?.start);
+    const end = Number(entry?.end);
+    if (entryDay === null || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+    const offset = (entryDay - day) * DAY_MINUTES;
+    const from = Math.max(0, start + offset);
+    const to = Math.min(DAY_MINUTES, end + offset);
+    if (to - from < 1) return;
+    const span = to - from;
+    const breaks = (Array.isArray(entry.breaks) ? entry.breaks : [])
+      .map((item) => {
+        const breakStart = Number(item?.start);
+        let breakEnd = Number(item?.end);
+        if (!Number.isFinite(breakStart) || !Number.isFinite(breakEnd)) return null;
+        if (breakEnd <= breakStart) breakEnd += DAY_MINUTES;
+        const left = Math.max(from, breakStart + offset);
+        const right = Math.min(to, breakEnd + offset);
+        return right > left ? { left: ((left - from) / span) * 100, width: ((right - left) / span) * 100 } : null;
+      })
+      .filter(Boolean);
+    parts.push({
+      key: `${entry.key}@${date}`,
+      startMin: from,
+      endMin: to,
+      left: (from / DAY_MINUTES) * 100,
+      width: (span / DAY_MINUTES) * 100,
+      breaks,
+    });
+  });
+  return parts.sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
+};
+
+/*
+ * Строки сетки одной ставки: i-я строка — i-я по времени смена каждого дня, как
+ * в сетке на сайте. День, где смен меньше, чем строк, получает пустую клетку.
+ */
+export const buildAuctionPhoneGridRows = (lotsByDate, dates = []) => {
+  const byDate = lotsByDate instanceof Map ? lotsByDate : new Map();
+  const list = Array.isArray(dates) ? dates : [];
+  const rowCount = list.reduce((max, date) => Math.max(max, (byDate.get(date) || []).length), 0);
+  return Array.from({ length: rowCount }, (_, index) => list.map((date) => (byDate.get(date) || [])[index] || null));
+};
+
+export const AUCTION_PHONE_CELL_ACTION = Object.freeze({
+  DETAILS: 'details', // руководитель: кто какую часть смены взял
+  CONFIRM: 'confirm', // лист снизу со сменой и «Взять»
+  PARTIAL: 'partial', // чат: сразу экран выбора части с таймлайном
+  TOPUP: 'topup',     // добор: сразу экран выбора интервала
+  RELEASE: 'release', // своя смена: лист «Вернуть смену»
+  DAY: 'day',         // своя смена, которую не вернуть: экран дня
+  INFO: 'info',       // взять нельзя: лист с причиной
+});
+
+/*
+ * Что делает нажатие на ячейку. На сайте нажатие на свободную смену линии сразу
+ * её берёт; на телефоне ячейка шириной в палец, и промахом легко взять соседнюю,
+ * поэтому сначала лист со сменой и кнопкой «Взять». Чат и добор и на сайте
+ * открывают экран выбора интервала — он сам и есть подтверждение, второй шаг
+ * перед ним был бы лишним.
+ */
+export const pickAuctionPhoneCellAction = ({ kind, canManage = false, supportsPartialClaim = false, releasable = false } = {}) => {
+  const ACTION = AUCTION_PHONE_CELL_ACTION;
+  if (canManage) return ACTION.DETAILS;
+  if (kind === KIND.TAKE) return supportsPartialClaim ? ACTION.PARTIAL : ACTION.CONFIRM;
+  if (kind === KIND.TOPUP) return ACTION.TOPUP;
+  if (kind === KIND.MINE) return releasable ? ACTION.RELEASE : ACTION.DAY;
+  return ACTION.INFO;
+};

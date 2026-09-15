@@ -1,5 +1,6 @@
-"""«Аукцион смен» на телефоне: сетка «ставки × дни» заменена полосой дней и
-списком смен выбранного дня, окна стали экранами портала.
+"""«Аукцион смен» на телефоне: сетка «ставки × дни», как на сайте, собрана под
+палец — неделя в ширину экрана, смена — ячейка, шапка дней и часы оператора
+липнут сверху; окна стали экранами портала.
 
 Проверки читают исходники текстом: решения здесь про то, ЧТО рисуется на
 телефоне и какими путями, а поведение самих правил (какая ветка у смены)
@@ -86,10 +87,12 @@ class PhoneBranchTests(unittest.TestCase):
         self.assertIn('postAuctionClaimOptionsByLotId.get(lotKey)', VIEW)
 
     def test_shared_day_reason_is_said_once(self):
-        """«На этот день уже выбрана смена» под каждой из восьми смен дня —
-        шум: одна причина на весь день говорится под его заголовком."""
-        self.assertIn('row.reason !== dayReason ? row.reason : null', VIEW)
+        """«На этот день уже выбрана смена» у каждой из восьми серых ячеек —
+        шум: общая причина дня — одна строка в экране дня, причина отдельной
+        ячейки — в её листе."""
         self.assertIn('dayBlockedReasons.size === 1', VIEW)
+        self.assertIn('{dayReason ? <p className="px-1 text-[15px] leading-snug text-slate-500">{dayReason}</p> : null}', VIEW)
+        self.assertIn('cellState = cellRow.reason;', VIEW)
 
     def test_stuck_strip_extends_its_glass_only_when_stuck(self):
         """Продолжение стекла вверх — только у прилипшей полосы: в потоке оно
@@ -102,13 +105,10 @@ class PhoneBranchTests(unittest.TestCase):
         start = CSS.index('body.mobile-shell .sa-m-root .sa-m-strip {')
         self.assertNotIn('backdrop-filter', CSS[start:CSS.index('}', start)])
 
-    def test_own_shift_is_listed_once(self):
-        """Своя смена стоит группой «Мои смены» с кнопкой «Вернуть» и не
-        повторяется строкой ниже, в списке ставок."""
-        self.assertIn(
-            "if (!canMonitor && lot.status === 'claimed' && getMyAuctionClaimEntry(lot, user?.id)) return;",
-            VIEW,
-        )
+    def test_own_shift_is_green_like_on_the_site(self):
+        """Своя смена в сетке — зелёная ячейка, как на сайте; нажатие на неё
+        открывает лист «Вернуть смену», а в экране дня она в «Моих сменах»."""
+        self.assertIn("if (row.kind === K.MINE) return { className: 'border-emerald-600 bg-emerald-600 text-white' };", VIEW)
         self.assertIn('openReleaseConfirm([mine.claimLot || mine.lot])', VIEW)
 
     def test_return_is_confirmed_by_a_sheet_naming_the_shift(self):
@@ -130,6 +130,78 @@ class PhoneBranchTests(unittest.TestCase):
         for desktop_only in ('нижней панели', 'левой панели', 'правом верхнем углу', 'Кликните'):
             self.assertNotIn(desktop_only, steps)
         self.assertIn('isMobileShell ? OPERATOR_PHONE_INSTRUCTION_STEPS : OPERATOR_INSTRUCTION_STEPS', VIEW)
+
+
+class PhoneGridTests(unittest.TestCase):
+    """Владелец 15.09.2026: «сделай как на сайте, чтобы смены отображались
+    ячейками, сделай удобно и аккуратно»; до этого — «норма за неделю должна
+    быть закреплена у оператора или у чатника», «таймлайны не убирай»,
+    «применить только к мобильной версии»."""
+
+    @staticmethod
+    def grid_block():
+        return VIEW[VIEW.index('const getPhoneLotRow = (lot) => {'):VIEW.index('const renderPhoneScreens = () => {')]
+
+    def test_week_is_a_grid_of_cells_like_the_site(self):
+        self.assertIn('<AuctionPhoneGrid', VIEW)
+        self.assertIn('buildAuctionPhoneGridRows(group.lotsByDate, lotDates)', VIEW)
+        for gone in ('renderPhoneWeek', 'renderPhoneDay()', 'AuctionPhoneWeek'):
+            self.assertNotIn(gone, VIEW + PHONE, gone)
+        # Неделя — ровно в ширину экрана, без боковой прокрутки.
+        self.assertIn('`repeat(${days.length}, minmax(0, 1fr))`', PHONE)
+        self.assertIn('const GRID_MAX_FIT_DAYS = 7;', PHONE)
+
+    def test_cell_colours_come_from_the_site_scale(self):
+        block = self.grid_block()
+        for helper in ('getAuctionLotStartTone(lot)', 'getAuctionLotPostAuctionTone(lot)', 'getAuctionLotPhoneTone(lot)'):
+            self.assertIn(helper, block)
+        # Фиолетовый добавленной смены — одна константа у сайта и у телефона.
+        self.assertIn('const addedToneStyle = AUCTION_ADDED_LOT_TONE;', VIEW)
+        self.assertIn('return { style: AUCTION_ADDED_LOT_TONE };', block)
+
+    def test_tap_on_a_cell_goes_through_one_decision(self):
+        """Что откроет нажатие, решает проверенный модуль, а не разметка: линия —
+        лист с «Взять», чат и добор — экран выбора, своя смена — «Вернуть»."""
+        self.assertIn('pickAuctionPhoneCellAction({ kind: row.kind, canManage: canMonitor, supportsPartialClaim, releasable })', VIEW)
+        self.assertIn('label: `Взять смену ${cellStart}–${cellEnd}`', VIEW)
+
+    def test_norm_is_pinned_above_the_days(self):
+        self.assertIn('header={normBar}', self.grid_block())
+        self.assertIn('const normBar = phoneWorkload ? <AuctionPhoneNormBar {...phoneWorkload} /> : null;', VIEW)
+        grid = PHONE[PHONE.index('export const AuctionPhoneGrid'):]
+        self.assertIn('{header}', grid)
+        self.assertIn("data-stuck={stuck ? '' : undefined}", grid)
+        self.assertIn('useAuctionPhoneStuck(stripRef, hasDays)', grid)
+        # Часы на экране одни: в карточке статуса их больше нет.
+        card = VIEW[VIEW.index('<AuctionPhoneStatusCard'):]
+        self.assertNotIn('workload', card[:card.index('/>')])
+        card_component = PHONE[PHONE.index('export const AuctionPhoneStatusCard'):PHONE.index('const DAY_CAPTION_TONES')]
+        self.assertNotIn('workload', card_component)
+
+    def test_timelines_stay_on_the_phone(self):
+        """«таймлайны не убирай»: лента суток в экране дня, лента выбора части
+        смены и лента карточки смены у руководителя."""
+        self.assertIn("import { MyShiftsTimeline } from '../schedule/MyShiftsMobile';", VIEW)
+        self.assertIn('<MyShiftsTimeline parts={timelineParts}', VIEW)
+        self.assertIn('buildAuctionPhoneDayTimelineParts({ date: dayDate, entries: timelineEntries })', VIEW)
+        self.assertIn('key={`phone-available-${segment.start}-${segment.end}`}', VIEW)
+        self.assertIn('key={`phone-detail-bar-${si}`}', VIEW)
+
+    def test_day_header_opens_the_day(self):
+        self.assertIn('onDaySelect={openPhoneDay}', VIEW)
+        # Та же карточка дня, что на компьютере, но экраном — и только на телефоне.
+        self.assertIn('const dayOpen = Boolean(isMobileShell && isDayDetailsOpen && dayItem);', VIEW)
+
+    def test_day_off_quota_is_said_once(self):
+        self.assertNotIn('Выходных на период', self.grid_block())
+        self.assertEqual(VIEW.count('Выходных на период — до {dayOffQuota}'), 1)
+
+    def test_only_the_phone_gets_the_grid(self):
+        self.assertIn(
+            "{isMobileShell && canUseAuction && (!canMonitor || monitorTab === 'monitoring') ? renderPhoneGrid() : null}",
+            VIEW,
+        )
+        self.assertEqual(VIEW.count('renderPhoneGrid()'), 1)
 
 
 if __name__ == '__main__':

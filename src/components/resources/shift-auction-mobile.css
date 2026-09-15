@@ -115,6 +115,19 @@ body.mobile-shell .sa-m-root .sa-m-segments > button {
     font-size: 14px;
 }
 
+/* ── Сетка недели ── */
+
+/* Ячейка и день в шапке — кнопки размером с палец: серая вспышка нажатия поверх
+   цветной ячейки выглядит как сбой, отклик у них свой — лёгкое сжатие. */
+body.mobile-shell .sa-m-root .sa-m-cell,
+body.mobile-shell .sa-m-root .sa-m-grid__day {
+    -webkit-tap-highlight-color: transparent;
+}
+
+body.mobile-shell .sa-m-root .sa-m-grid__scroll::-webkit-scrollbar {
+    display: none;
+}
+
 /* ── Строки ── */
 
 body.mobile-shell .sa-m-row {

@@ -9,9 +9,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  AUCTION_PHONE_CELL_ACTION as ACTION,
   AUCTION_PHONE_ROW_KIND as KIND,
+  buildAuctionPhoneDayTimelineParts,
+  buildAuctionPhoneGridRows,
   classifyAuctionLotForPhone,
   describeAuctionPhoneDay,
+  pickAuctionPhoneCellAction,
 } from '../src/components/resources/shiftAuctionPhoneRows.js';
 
 const ME = 4;
@@ -108,4 +112,89 @@ test('полоса дней руководителя — сколько взят
   assert.deepEqual(describeAuctionPhoneDay({ claimed: 3, total: 9 }, { canMonitor: true }), { caption: '3/9', tone: 'none' });
   assert.deepEqual(describeAuctionPhoneDay({ claimed: 9, total: 9 }, { canMonitor: true }), { caption: '9/9', tone: 'done' });
   assert.deepEqual(describeAuctionPhoneDay({ claimed: 0, total: 0 }, { canMonitor: true }), { caption: '', tone: 'none' });
+});
+
+/*
+ * Лента дня над «Моими сменами» и подсветка дня в полосе, пока неделю листают.
+ */
+
+const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} ≠ ${expected}`);
+
+test('лента дня: дневная смена ложится своими часами, перерыв — долей внутри полосы', () => {
+  const [part] = buildAuctionPhoneDayTimelineParts({
+    date: '2026-09-15',
+    entries: [{ key: '7', date: '2026-09-15', start: 540, end: 1080, breaks: [{ start: 780, end: 810 }] }],
+  });
+  near(part.left, (540 / 1440) * 100);
+  near(part.width, (540 / 1440) * 100);
+  assert.equal(part.breaks.length, 1);
+  near(part.breaks[0].left, ((780 - 540) / 540) * 100);
+  near(part.breaks[0].width, (30 / 540) * 100);
+});
+
+test('ночь 20*08: вечер на ленте своего дня, хвост до 08:00 — на ленте следующего', () => {
+  // Перерывы ночи приходят минутами от полуночи даты смены и уходят за 1440.
+  const night = { key: '9', date: '2026-09-14', start: 1200, end: 1920, breaks: [{ start: 1340, end: 1355 }, { start: 1475, end: 1505 }] };
+  const [evening] = buildAuctionPhoneDayTimelineParts({ date: '2026-09-14', entries: [night] });
+  assert.equal(evening.startMin, 1200);
+  assert.equal(evening.endMin, 1440);
+  assert.equal(evening.breaks.length, 1, 'перерыв после полуночи — уже не на этой ленте');
+
+  const [tail] = buildAuctionPhoneDayTimelineParts({ date: '2026-09-15', entries: [night] });
+  assert.equal(tail.startMin, 0);
+  assert.equal(tail.endMin, 480);
+  assert.equal(tail.breaks.length, 1);
+  near(tail.breaks[0].left, (35 / 480) * 100);
+
+  assert.deepEqual(buildAuctionPhoneDayTimelineParts({ date: '2026-09-16', entries: [night] }), []);
+});
+
+test('лента дня: чужие даты и битые смены не рисуются, полосы идут по времени', () => {
+  const parts = buildAuctionPhoneDayTimelineParts({
+    date: '2026-09-15',
+    entries: [
+      { key: 'b', date: '2026-09-15', start: 900, end: 1080 },
+      { key: 'a', date: '2026-09-15', start: 540, end: 840 },
+      { key: 'gone', date: '2026-09-13', start: 540, end: 1080 },
+      { key: 'bad', date: '2026-09-15', start: 600, end: 600 },
+    ],
+  });
+  assert.deepEqual(parts.map((part) => part.key), ['a@2026-09-15', 'b@2026-09-15']);
+  assert.deepEqual(buildAuctionPhoneDayTimelineParts({ date: '', entries: [{ key: 'x', date: '', start: 0, end: 60 }] }), []);
+});
+
+/*
+ * Сетка недели: строки ставки и что делает нажатие на ячейку.
+ */
+
+test('сетка: i-я строка — i-я смена каждого дня, короткий день добит пустыми клетками', () => {
+  const a = { id: 1 };
+  const b = { id: 2 };
+  const c = { id: 3 };
+  const rows = buildAuctionPhoneGridRows(new Map([['d1', [a, b]], ['d2', [c]], ['d3', []]]), ['d1', 'd2', 'd3']);
+  assert.deepEqual(rows, [[a, c, null], [b, null, null]]);
+  assert.deepEqual(buildAuctionPhoneGridRows(new Map(), ['d1']), []);
+  // День, которого нет в карте, — тоже пустая клетка, а не падение.
+  assert.deepEqual(buildAuctionPhoneGridRows(new Map([['d1', [a]]]), ['d0', 'd1']), [[null, a]]);
+});
+
+test('нажатие на свободную ячейку: линия — лист с «Взять», чат и добор — сразу экран выбора', () => {
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.TAKE }), ACTION.CONFIRM);
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.TAKE, supportsPartialClaim: true }), ACTION.PARTIAL);
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.TOPUP }), ACTION.TOPUP);
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.TOPUP, supportsPartialClaim: true }), ACTION.TOPUP);
+});
+
+test('нажатие на свою ячейку: вернуть можно — лист «Вернуть», нельзя — экран дня', () => {
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.MINE, releasable: true }), ACTION.RELEASE);
+  assert.equal(pickAuctionPhoneCellAction({ kind: KIND.MINE }), ACTION.DAY);
+});
+
+test('серая и закрытая ячейка объясняют, руководитель смотрит, кто взял', () => {
+  for (const kind of [KIND.BLOCKED, KIND.CLOSED, KIND.TAKEN]) {
+    assert.equal(pickAuctionPhoneCellAction({ kind }), ACTION.INFO, kind);
+  }
+  for (const kind of Object.values(KIND)) {
+    assert.equal(pickAuctionPhoneCellAction({ kind, canManage: true, supportsPartialClaim: true, releasable: true }), ACTION.DETAILS, kind);
+  }
 });
