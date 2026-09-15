@@ -1,0 +1,55 @@
+/* ── «Мои часы» на телефоне ──────────────────────────────────────────────────
+
+   Разметка — MyHoursMobile.jsx и ветки isMobileShell в разделе «Мои часы»
+   (App.jsx). Заголовок, подписи групп, строки и их разделители — общие с
+   «Аукционом смен» и «Моими сменами» (sa-m-*, shift-auction-mobile.css,
+   подключается из MyHoursMobile.jsx). Здесь только то, чего там нет.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_my_hours_mobile.py). Своих цветов нет: тёмный
+   слой портала перекрашивает утилиты Tailwind, а hex отсюда он не видит. */
+
+/* Корень раздела на компьютере — карточка «Ваши рабочие часы» с полями; на
+   телефоне тот же узел становится колонкой групп с полями экрана. Поля и
+   зазоры заданы здесь, а не обёрткой в разметке: лишний узел в общей ветке
+   поменял бы настольное дерево. */
+body.mobile-shell .main-content .mh-m-root {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 0 16px 24px;
+}
+
+/* Календарь — семь колонок ровно в ширину карточки. Сетка задана классом, а
+   не утилитой grid-cols-7: общий слой разделов сводит многоколоночные сетки
+   к двум колонкам. */
+body.mobile-shell .main-content .mh-m-root .mh-m-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px;
+}
+
+/* Ячейка дня — кнопка под палец: число, часы и метки в три строки. Серая
+   вспышка нажатия поверх зелёной заливки читалась бы как смена цвета дня. */
+body.mobile-shell .main-content .mh-m-root .mh-m-cell {
+    min-height: 54px;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Месяц: видна подпись со стрелкой вниз, а поверх неё — прозрачный системный
+   список (на iOS — колесо). Вес выше, чем у .main-content select из
+   mobile-motion.css (0,2,2): иначе список получил бы рамку, поле и высоту 40 px. */
+body.mobile-shell .main-content .mh-m-root select.mh-m-month__select {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    opacity: 0;
+    font-size: 16px;
+}

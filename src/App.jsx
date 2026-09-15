@@ -63,6 +63,9 @@ import {
 } from './components/schedule/MyShiftsMobile';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import {
+    MyHoursPhoneCalendar, MyHoursPhoneEmpty, MyHoursPhoneHeader, MyHoursPhoneNotice, MyHoursPhoneSkeleton, MyHoursPhoneSummary
+} from './components/hours/MyHoursMobile';
+import {
     MobileAccountScreen,
     MobileAccountGroup,
     MobileAccountField,
@@ -54076,7 +54079,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </Suspense>
                                 ))}
-                                {(view === 'hours' || view === 'evaluation') && (
+                                {/* На телефоне месяц «Моих часов» выбирается в шапке самого
+                                    раздела (MyHoursPhoneHeader): стрелками и колесом месяцев. */}
+                                {(view === 'evaluation' || (view === 'hours' && !isMobileShell)) && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                       <FaIcon className="fas fa-calendar-alt text-blue-600"></FaIcon>
@@ -54098,11 +54103,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 
                                 {view === 'hours' && (
-                                    <div className="workhours-section workhours-container bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    /* На телефоне раздел — список настроек телефона, как «Мои смены»
+                                       (MyHoursMobile.jsx): крупный заголовок, месяц стрелками, группы
+                                       строк, календарь ячейками и день экраном. Суммы и подписи считаются
+                                       здесь же теми же помощниками; настольная разметка не тронута —
+                                       ветки разведены isMobileShell. */
+                                    <div
+                                        className={isMobileShell
+                                            ? 'sa-m-root mh-m-root min-h-screen bg-slate-100'
+                                            : 'workhours-section workhours-container bg-white p-4 sm:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg'}
+                                        style={isMobileShell ? { fontFamily: IOS_FONT } : undefined}
+                                    >
+                                        {isMobileShell ? (
+                                        <MyHoursPhoneHeader
+                                            direction={((hoursData?.operators || []).find((item) => Number(item?.operator_id) === Number(user?.id)) || hoursData?.operators?.[0])?.direction || user?.direction || ''}
+                                            month={selectedMonth}
+                                            onMonthChange={setSelectedMonth}
+                                            disabled={isLoading}
+                                        >
+                                            {getMonthOptions()}
+                                        </MyHoursPhoneHeader>
+                                        ) : (
                                         <h2 className="text-xl sm:text-3xl font-bold mb-4 sm:mb-8 text-gray-900 flex items-center gap-2">
                                         <FaIcon className="fas fa-clock text-blue-600"></FaIcon>
                                         <span className="text-blue-600">Ваши рабочие часы</span>
                                         </h2>
+                                        )}
 
                                         {/* Уведомление: показатели за месяц по нескольким направлениям (перевод) */}
                                         {(() => {
@@ -54112,6 +54138,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const _segs = (_op && Array.isArray(_op.group_segments)) ? _op.group_segments : [];
                                             const _multi = new Set(_segs.map(s => (s.direction_id != null ? `d${s.direction_id}` : `g${s.group_id}`))).size > 1;
                                             if (!_multi) return null;
+                                            if (isMobileShell) return <MyHoursPhoneNotice segments={_segs} />;
                                             return (
                                                 <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] text-amber-800">
                                                     <div className="flex items-center gap-2 font-semibold">
@@ -54132,7 +54159,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         })()}
 
                                         {isLoading ? (
-                                        <HoursPageSkeleton />
+                                        isMobileShell ? <MyHoursPhoneSkeleton /> : <HoursPageSkeleton />
                                         ) : hoursData && Array.isArray(hoursData.operators) && hoursData.operators.length > 0 ? (
                                         (() => {
                                             // На входе ожидаем стабильный формат от бекенда:
@@ -54672,6 +54699,115 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 navigateToView('salary');
                                             };
 
+                                            // Подписи примерной зарплаты — одни на оба вида: у телефона нет своей
+                                            // копии цепочки моделей, компьютер показывает те же строки, что раньше.
+                                            const salaryPreviewCaption = dualSalaryResults && dualSalaryResults.length >= 2
+                                                ? 'Сумма рассчитана отдельно по операторской и чат-модели.'
+                                                : isTezOpModel
+                                                ? `По модели «Оператор ОП TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                : isTezLineModel
+                                                ? `По модели «Оператор Линия TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                : isOsnovaModel
+                                                ? `По модели «Оператор ОП Основа»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                : isPotokModel
+                                                ? `По модели «Оператор ОП Поток»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                : isVerificatorModel
+                                                ? `По модели «Оператор ОП Верификатор»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                : isYandexRegModel
+                                                ? `По модели «Оператор ОП Яндекс Регистрация»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                : isChatModel
+                                                ? 'Для чат-модели используется отдельный калькулятор.'
+                                                : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`;
+                                            const salaryPreviewNote = dualSalaryResults && dualSalaryResults.length >= 2
+                                                ? 'Откройте общий расчёт, чтобы посмотреть обе части подробно.'
+                                                : isTezOpModel
+                                                ? 'Оклад + бонус за успешки, минус штрафы. Удержание 50% не учтено.'
+                                                : isTezLineModel
+                                                ? 'Оклад + бонус за качество и стаж, минус штрафы. Удержание 50% не учтено.'
+                                                : isOsnovaModel
+                                                ? 'Только постоянная часть: часы × 600 ₸, минус штрафы. Бонус за сделки — в калькуляторе.'
+                                                : isPotokModel
+                                                ? 'Только сумма за часы: часы × 700 ₸, минус штрафы. Бонусы за продажи — в калькуляторе.'
+                                                : isVerificatorModel
+                                                ? 'Сумма за часы (часы × 500 ₸) и баллы за качество, минус штрафы. Баллы за план и за чаты — в калькуляторе.'
+                                                : isYandexRegModel
+                                                ? 'Только оклад: часы × 600 ₸, минус штрафы. Бонус за успешки — в калькуляторе.'
+                                                : isChatModel
+                                                ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
+                                                : 'Штрафы в формуле калькулятора не вычитаются.';
+                                            const salaryCalculatorLabel = isTezOpModel
+                                                ? 'Открыть калькулятор ОП TEZ'
+                                                : isTezLineModel
+                                                ? 'Открыть калькулятор Линия TEZ'
+                                                : isOsnovaModel
+                                                ? 'Открыть калькулятор «Основа»'
+                                                : isPotokModel
+                                                ? 'Открыть калькулятор «Поток»'
+                                                : isVerificatorModel
+                                                ? 'Открыть калькулятор «Верификатор»'
+                                                : isYandexRegModel
+                                                ? 'Открыть калькулятор «Яндекс Регистрация»'
+                                                : isChatModel
+                                                ? 'Открыть чат-калькулятор'
+                                                : 'Открыть в калькуляторе';
+
+                                            // Телефон: тот же расчёт, своя разметка (MyHoursMobile.jsx).
+                                            if (isMobileShell) {
+                                                const hasDualSalary = Boolean(dualSalaryResults && dualSalaryResults.length >= 2);
+                                                return (
+                                                    <MyHoursPhoneSummary
+                                                        regular={regular}
+                                                        norm={norm}
+                                                        percent={completionPct}
+                                                        remaining={remainingHours}
+                                                        overtime={overtimeHours}
+                                                        breakdown={{ base: regularBase, training: trainingHours, technical: technicalIssueHours, offline: offlineActivityHours }}
+                                                        isTezOp={isTezOpModel}
+                                                        tez={{
+                                                            successes: tezSuccessesTotal,
+                                                            plan: tezIndividualPlan,
+                                                            percent: tezPlanPercent,
+                                                            caseLabel: tezPlanResult?.caseCode && tezPlanResult.caseCode !== 'standard' ? tezPlanResult.caseLabel : null,
+                                                        }}
+                                                        intensity={{
+                                                            perHourLabel: interactionPerHourLabel,
+                                                            perHour: callsPerHour,
+                                                            perHourClassName: getCallsPerHourColor(callsPerHour),
+                                                            totalLabel: isChatModel ? 'Всего чатов' : 'Всего звонков',
+                                                            total: totalCalls,
+                                                        }}
+                                                        bonuses={bonuses}
+                                                        fines={fines}
+                                                        dual={hasDualSalary ? <DualPeriodBreakdown parts={dualSalaryResults} onOpenCalculator={openSalaryCalculatorWithHours} /> : null}
+                                                        salary={hasDualSalary ? null : {
+                                                            amount: estimatedSalary.finalSalary,
+                                                            caption: salaryPreviewCaption,
+                                                            note: salaryPreviewNote,
+                                                            calculatorLabel: salaryCalculatorLabel,
+                                                            onOpenCalculator: openSalaryCalculatorWithHours,
+                                                        }}
+                                                        calendar={(
+                                                            <MyHoursPhoneCalendar
+                                                                op={op}
+                                                                month={selectedMonth}
+                                                                trainings={operatorTrainings}
+                                                                technicalByDay={technicalByDayMap}
+                                                                offlineByDay={offlineByDayMap}
+                                                                monthModelCode={calculationModelCode}
+                                                                resolveDayModel={resolveWorkHoursDayModelCode}
+                                                                countTrainingHours={computeUniqueTrainingDurationHours}
+                                                                onSendRequest={(payload) => axios.post(
+                                                                    `${API_BASE_URL}/api/hours/send_request`,
+                                                                    payload,
+                                                                    { headers: { 'Content-Type': 'application/json', 'X-User-Id': user.id } }
+                                                                )}
+                                                                onSent={() => showToast('Запрос успешно отправлен супервайзеру', 'success')}
+                                                            />
+                                                        )}
+                                                    />
+                                                );
+                                            }
+
                                             // --- отображаем ---
                                             return (
                                             <div className="workhours-main-grid grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -54852,42 +54988,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 Примерная зарплата
                                                             </span>
                                                             <div className="mt-1 text-xs text-gray-500">
-                                                                {dualSalaryResults && dualSalaryResults.length >= 2
-                                                                    ? 'Сумма рассчитана отдельно по операторской и чат-модели.'
-                                                                    : isTezOpModel
-                                                                    ? `По модели «Оператор ОП TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
-                                                                    : isTezLineModel
-                                                                    ? `По модели «Оператор Линия TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
-                                                                    : isOsnovaModel
-                                                                    ? `По модели «Оператор ОП Основа»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
-                                                                    : isPotokModel
-                                                                    ? `По модели «Оператор ОП Поток»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
-                                                                    : isVerificatorModel
-                                                                    ? `По модели «Оператор ОП Верификатор»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
-                                                                    : isYandexRegModel
-                                                                    ? `По модели «Оператор ОП Яндекс Регистрация»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
-                                                                    : isChatModel
-                                                                    ? 'Для чат-модели используется отдельный калькулятор.'
-                                                                    : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`}
+                                                                {salaryPreviewCaption}
                                                             </div>
                                                             <div className="mt-1 text-[11px] text-gray-400">
-                                                                {dualSalaryResults && dualSalaryResults.length >= 2
-                                                                    ? 'Откройте общий расчёт, чтобы посмотреть обе части подробно.'
-                                                                    : isTezOpModel
-                                                                    ? 'Оклад + бонус за успешки, минус штрафы. Удержание 50% не учтено.'
-                                                                    : isTezLineModel
-                                                                    ? 'Оклад + бонус за качество и стаж, минус штрафы. Удержание 50% не учтено.'
-                                                                    : isOsnovaModel
-                                                                    ? 'Только постоянная часть: часы × 600 ₸, минус штрафы. Бонус за сделки — в калькуляторе.'
-                                                                    : isPotokModel
-                                                                    ? 'Только сумма за часы: часы × 700 ₸, минус штрафы. Бонусы за продажи — в калькуляторе.'
-                                                                    : isVerificatorModel
-                                                                    ? 'Сумма за часы (часы × 500 ₸) и баллы за качество, минус штрафы. Баллы за план и за чаты — в калькуляторе.'
-                                                                    : isYandexRegModel
-                                                                    ? 'Только оклад: часы × 600 ₸, минус штрафы. Бонус за успешки — в калькуляторе.'
-                                                                    : isChatModel
-                                                                    ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
-                                                                    : 'Штрафы в формуле калькулятора не вычитаются.'}
+                                                                {salaryPreviewNote}
                                                             </div>
                                                             </div>
                                                             <span className="text-lg font-bold text-green-600 whitespace-nowrap">
@@ -54903,21 +55007,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition"
                                                             >
                                                                 <FaIcon className="fas fa-arrow-right"></FaIcon>
-                                                                {isTezOpModel
-                                                                    ? 'Открыть калькулятор ОП TEZ'
-                                                                    : isTezLineModel
-                                                                    ? 'Открыть калькулятор Линия TEZ'
-                                                                    : isOsnovaModel
-                                                                    ? 'Открыть калькулятор «Основа»'
-                                                                    : isPotokModel
-                                                                    ? 'Открыть калькулятор «Поток»'
-                                                                    : isVerificatorModel
-                                                                    ? 'Открыть калькулятор «Верификатор»'
-                                                                    : isYandexRegModel
-                                                                    ? 'Открыть калькулятор «Яндекс Регистрация»'
-                                                                    : isChatModel
-                                                                    ? 'Открыть чат-калькулятор'
-                                                                    : 'Открыть в калькуляторе'}
+                                                                {salaryCalculatorLabel}
                                                             </button>
                                                         )}
                                                         </div>
@@ -54941,6 +55031,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                             );
                                         })()
+                                        ) : isMobileShell ? (
+                                        <MyHoursPhoneEmpty />
                                         ) : (
                                         <p className="text-center text-gray-600 flex items-center justify-center">
                                             <FaIcon className="fas fa-times-circle mr-2 text-red-500"></FaIcon>
