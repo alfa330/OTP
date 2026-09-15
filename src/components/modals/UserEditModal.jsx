@@ -6,6 +6,7 @@ import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils
 import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import CustomSelect from '../ui/CustomSelect';
+import './user-edit-mobile.css';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
 const DISMISSAL_REASON_WITH_END_DATE = 'Б/С на летний период';
@@ -1092,6 +1093,30 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             >
             <div className="px-6 py-5 max-h-[88vh] overflow-y-auto">
                 {/* Header */}
+                {isMobileShell ? (
+                /* Телефон: шапка экрана — стрелка слева и заголовок по центру,
+                   как у остальных экранов портала. Карандаш и крестик справа —
+                   приметы окна посреди стола; уход с экрана делают стрелкой. */
+                <div className="uem-bar">
+                    <button
+                    type="button"
+                    className="otp-modal-back uem-back"
+                    onClick={() => {
+                    setModalError("");
+                    setCreatedCredentials(null);
+                    closeAvatarCropEditor();
+                    onClose();
+                    }}
+                    aria-label="Назад"
+                    >
+                    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    </button>
+                    <div className="uem-heading">
+                    <h2 id="edit-user-title" className="uem-title">{isCreateMode ? "Новый сотрудник" : "Изменить данные"}</h2>
+                    {editedUser?.name && !isCreateMode && <div className="uem-sub">{editedUser.name}</div>}
+                    </div>
+                </div>
+                ) : (
                 <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-col gap-0.5">
                     <h2 id="edit-user-title" className="text-2xl font-bold text-gray-800 flex items-center gap-2">
@@ -1117,6 +1142,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     <FaIcon className="fas fa-times text-lg" />
                 </button>
                 </div>
+                )}
 
                 <div className="mt-4 space-y-6">
                 {!createdCredentials && (
@@ -2659,7 +2685,21 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                 </div>
 
                 {/* Actions */}
-                {!createdCredentials && (
+                {/* Телефон: одна кнопка во всю ширину у нижнего края. «Отмена»
+                    там лишняя — уход с экрана уже сделан стрелкой в шапке. */}
+                {!createdCredentials && isMobileShell && (
+                    <div className="uem-foot">
+                    <button
+                        type="button"
+                        className="uem-save"
+                        onClick={handleSave}
+                        disabled={isLoading || isAvatarProcessing}
+                    >
+                        {(isLoading || isAvatarProcessing) ? "Сохранение…" : isCreateMode ? "Создать" : "Сохранить"}
+                    </button>
+                    </div>
+                )}
+                {!createdCredentials && !isMobileShell && (
                     <div className="flex justify-end items-center gap-3 pt-2">
                     <button
                         onClick={() => {
@@ -2700,7 +2740,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </p>
                 )}
 
-                {!createdCredentials && <p className="mt-2 text-xs text-gray-400">Нажмите Esc, кликните вне модалки или крестик вверху, чтобы закрыть.</p>}
+                {!createdCredentials && !isMobileShell && <p className="mt-2 text-xs text-gray-400">Нажмите Esc, кликните вне модалки или крестик вверху, чтобы закрыть.</p>}
                 </div>
             </div>
             </div>

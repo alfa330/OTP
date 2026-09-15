@@ -1,0 +1,892 @@
+/* ── «Учет сотрудников» на телефоне ─────────────────────────────────────────
+
+   Настольный раздел — таблица с шапкой сортировки, шесть цветных вкладок
+   статусов, выбор отдела и две крупные кнопки в ряд, карточка дней рождения
+   и плавающий переключатель колонок в правом нижнем углу. На экране в 390 px
+   общий слой оболочки складывал это в столбик: кнопки одна под другой, вкладки
+   в три ряда, таблица ездит вбок, а переключатель висит поверх строк.
+
+   Здесь раздел приводится к виду списка в приложении: крупный заголовок с
+   круглыми кнопками, отдел строкой под ним, поле поиска, метки статусов вбок,
+   строка — человек, по нажатию — его карточка экраном. Массовая правка —
+   режимом «Выбрать», как в «Сессиях»: панель встаёт на место бара разделов.
+
+   Разметка своя (EmployeesMobileView.jsx), и классы у неё свои — БЕЗ утилит
+   Tailwind. Общий слой разделов в mobile-shell.css отбирает элементы по
+   подстроке класса (`-actions`, `-tabs`, `.flex[class*="gap-"]`, `h2`) и
+   переносил бы ряды и ужимал заголовок; ни одно имя здесь этих подстрок не
+   содержит (страж: tests/test_employees_mobile.py).
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило. Цвета — токены --sheet-*: тёмная тема подменяет их в
+   mobile-shell.css. */
+
+body.mobile-shell .emp-m {
+    padding: 2px 16px 28px;
+    color: var(--sheet-text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+}
+
+/* ── Шапка: крупный заголовок, «Выбрать», отчёт и «+» ── */
+
+body.mobile-shell .emp-m-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 40px;
+}
+
+body.mobile-shell .emp-m-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+}
+
+body.mobile-shell .emp-m-link {
+    flex: none;
+    padding: 8px 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+    font-size: 17px;
+    line-height: 22px;
+}
+
+body.mobile-shell .emp-m-link.is-strong {
+    font-weight: 600;
+}
+
+body.mobile-shell .emp-m-link:disabled {
+    color: var(--sheet-muted);
+    opacity: 0.6;
+}
+
+body.mobile-shell .emp-m-round {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--sheet-card);
+    color: var(--sheet-accent);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+body.mobile-shell .emp-m-round svg {
+    width: 19px;
+    height: 19px;
+}
+
+body.mobile-shell .emp-m-round:disabled {
+    color: var(--sheet-muted);
+}
+
+/* ── Отдел: строка-уточнение под заголовком ── */
+
+body.mobile-shell .emp-m-dept {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    margin-top: 2px;
+    padding: 4px 0;
+    color: var(--sheet-accent);
+    font-size: 17px;
+    line-height: 22px;
+}
+
+body.mobile-shell .emp-m-dept-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+body.mobile-shell .emp-m-dept-chev {
+    flex: none;
+    width: 12px;
+    height: 12px;
+}
+
+/* Системное колесо под прозрачным полем. Вес (0,3,1) выше, чем у общего
+   правила select в mobile-motion.css (0,2,2): его рамка, поле и свой шеврон
+   прозрачному полю не нужны, а высота в 40 px растянула бы строку. */
+body.mobile-shell .emp-m .emp-m-dept-select,
+body.mobile-shell .emp-card .emp-card-select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    font-size: 16px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* ── Поиск: поле системного вида ── */
+
+body.mobile-shell .emp-m-search {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    margin-top: 12px;
+    padding: 0 6px 0 10px;
+    border-radius: 12px;
+    background: rgba(118, 118, 128, 0.12);
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-search > svg {
+    flex: none;
+    width: 17px;
+    height: 17px;
+}
+
+/* 17 px — кегль системного поля: мельче iOS наезжает на поле при фокусе. */
+body.mobile-shell .emp-m-search input,
+body.mobile-shell .emp-m-search input:focus {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    margin: 0 0 0 7px;
+    padding: 0;
+    border: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+    color: var(--sheet-text);
+    font-size: 17px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+body.mobile-shell .emp-m-search input::placeholder {
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-search input::-webkit-search-cancel-button,
+body.mobile-shell .emp-m-search input::-webkit-search-decoration {
+    display: none;
+    -webkit-appearance: none;
+}
+
+body.mobile-shell .emp-m-search-clear {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-search-clear svg {
+    width: 17px;
+    height: 17px;
+}
+
+/* ── Статусы: полоса меток вбок ── */
+
+/* Полоса доходит до краёв экрана: отрицательное поле ровно на отступ раздела,
+   иначе прокрученные метки обрезались бы в шестнадцати пикселях от края. */
+body.mobile-shell .emp-m-chips {
+    display: flex;
+    gap: 8px;
+    margin: 10px -16px 0;
+    padding: 0 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    overscroll-behavior-x: contain;
+}
+
+body.mobile-shell .emp-m-chip {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 16px;
+    background: var(--sheet-card);
+    color: var(--sheet-text);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+body.mobile-shell .emp-m-chip-count {
+    color: var(--sheet-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .emp-m-chip.is-on {
+    background: var(--sheet-accent);
+    color: #fff;
+    box-shadow: none;
+}
+
+body.mobile-shell .emp-m-chip.is-on .emp-m-chip-count {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+/* ── Группы: подпись со счётом и порядок ── */
+
+body.mobile-shell .emp-m-block {
+    margin-top: 20px;
+}
+
+body.mobile-shell .emp-m-summary {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 22px 0 0;
+    padding: 0 2px 0 16px;
+}
+
+body.mobile-shell .emp-m-summary + .emp-m-block {
+    margin-top: 6px;
+}
+
+body.mobile-shell .emp-m-caption {
+    display: block;
+    padding: 0 16px 6px;
+    font-size: 13px;
+    line-height: 18px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-summary .emp-m-caption {
+    padding: 0 0 6px;
+}
+
+body.mobile-shell .emp-m-sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 2px;
+    padding: 4px 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+    font-size: 15px;
+    line-height: 20px;
+}
+
+body.mobile-shell .emp-m-sort svg {
+    width: 11px;
+    height: 11px;
+}
+
+/* ── Список людей ── */
+
+body.mobile-shell .emp-m-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--sheet-card);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+body.mobile-shell .emp-m-list[aria-busy="true"] {
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+}
+
+body.mobile-shell .emp-m-item {
+    position: relative;
+}
+
+/* Разделитель от текста, а не от края: так строки читаются одной группой. */
+body.mobile-shell .emp-m-item + .emp-m-item::before {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 70px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep);
+    pointer-events: none;
+}
+
+body.mobile-shell .emp-m.is-selecting .emp-m-item + .emp-m-item::before {
+    left: 106px;
+}
+
+body.mobile-shell .emp-m-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 62px;
+    padding: 10px 14px 10px 16px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+
+/* Строке списка отвечает заливка, как в системных списках. Общее приглушение
+   нажатия из mobile-motion.css (opacity 0.58) гасило бы всю строку — читалось
+   бы как «строка недоступна». */
+body.mobile-shell .emp-m-row:active {
+    opacity: 1 !important;
+    background: var(--sheet-active);
+}
+
+body.mobile-shell .emp-m-row:disabled {
+    opacity: 1;
+}
+
+body.mobile-shell .emp-m-check {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1.5px var(--sheet-chevron);
+    color: transparent;
+}
+
+body.mobile-shell .emp-m-check.is-on {
+    background: var(--sheet-accent);
+    box-shadow: none;
+    color: #fff;
+}
+
+body.mobile-shell .emp-m-check svg {
+    width: 14px;
+    height: 14px;
+}
+
+body.mobile-shell .emp-m-avatar,
+body.mobile-shell .emp-card-photo {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: linear-gradient(180deg, #a8adb9, #868b97);
+    color: #fff;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+body.mobile-shell .emp-m-avatar-img {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    object-fit: cover;
+}
+
+body.mobile-shell .emp-m-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+body.mobile-shell .emp-m-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+body.mobile-shell .emp-m-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 21px;
+    letter-spacing: -0.01em;
+}
+
+body.mobile-shell .emp-m-note,
+body.mobile-shell .emp-m-when {
+    flex: none;
+    font-size: 14px;
+    line-height: 19px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-note.is-warn,
+body.mobile-shell .emp-card-sub .is-warn {
+    color: #c77700;
+}
+
+body.mobile-shell .emp-m-note.is-danger,
+body.mobile-shell .emp-card-sub .is-danger {
+    color: #ff3b30;
+}
+
+body.mobile-shell .emp-m-when.is-today {
+    color: var(--sheet-accent);
+    font-weight: 600;
+}
+
+body.mobile-shell .emp-m-meta {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 14px;
+    line-height: 19px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-chevron {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin: 0 2px;
+    border-right: 2px solid var(--sheet-chevron);
+    border-bottom: 2px solid var(--sheet-chevron);
+    transform: rotate(-45deg);
+}
+
+body.mobile-shell .emp-m-more {
+    display: block;
+    width: 100%;
+    min-height: 44px;
+    padding: 0 16px;
+    border: 0;
+    background: transparent;
+    color: var(--sheet-accent);
+    font-size: 16px;
+    text-align: left;
+}
+
+body.mobile-shell .emp-m-more:active {
+    opacity: 1 !important;
+    background: var(--sheet-active);
+}
+
+/* Строка «Показать все» — действие, а не человек: разделитель над ней от
+   самого края текста, без отступа под фото. */
+body.mobile-shell .emp-m-item:has(> .emp-m-more)::before {
+    left: 16px;
+}
+
+body.mobile-shell .emp-m-empty {
+    padding: 44px 24px;
+    text-align: center;
+    font-size: 15px;
+    line-height: 20px;
+    color: var(--sheet-muted);
+}
+
+/* ── Режим «Выбрать»: панель действий на месте бара разделов ── */
+
+body.mobile-shell:has(.emp-m.is-selecting) .mobile-tabbar {
+    display: none;
+}
+
+body.mobile-shell .emp-m.is-selecting {
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
+}
+
+body.mobile-shell .emp-m-bulk {
+    position: fixed;
+    z-index: 70;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: calc(var(--mtb-thickness, 56px) + env(safe-area-inset-bottom));
+    padding: 0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(16px, env(safe-area-inset-left));
+    background: var(--sheet-bar);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 -0.5px 0 var(--sheet-sep);
+    animation: emp-m-bulk-in 0.28s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes emp-m-bulk-in {
+    from { transform: translateY(100%); }
+    to { transform: none; }
+}
+
+body.mobile-shell .emp-m-bulk .emp-m-link {
+    min-width: 0;
+    white-space: nowrap;
+}
+
+body.mobile-shell .emp-m-bulk-count {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;
+    font-size: 13px;
+    line-height: 17px;
+    color: var(--sheet-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .emp-m-bulk-count strong {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--sheet-text);
+}
+
+/* ── Листы: подтверждение и порядок ── */
+
+body.mobile-shell .emp-m-sheet-note {
+    margin: 0;
+    padding: 14px 20px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-m-sheet-note + .mobile-actions__row {
+    border-top: 0.5px solid var(--sheet-sep);
+}
+
+body.mobile-shell .mobile-actions__row.emp-m-sheet-choice {
+    position: relative;
+}
+
+body.mobile-shell .mobile-actions__row.emp-m-sheet-choice.is-current {
+    font-weight: 600;
+}
+
+body.mobile-shell .emp-m-sheet-check {
+    position: absolute;
+    top: 50%;
+    right: 18px;
+    width: 18px;
+    height: 18px;
+    margin-top: -9px;
+}
+
+/* ── Карточка сотрудника экраном ── */
+
+body.mobile-shell .emp-card {
+    padding-bottom: 8px;
+    color: var(--sheet-text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+}
+
+body.mobile-shell .emp-card-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 12px 6px;
+    text-align: center;
+}
+
+body.mobile-shell .emp-card-photo {
+    width: 88px;
+    height: 88px;
+    margin-bottom: 9px;
+    font-size: 36px;
+    font-weight: 500;
+}
+
+body.mobile-shell .emp-card-name {
+    max-width: 100%;
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 29px;
+    letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
+}
+
+body.mobile-shell .emp-card-sub {
+    font-size: 15px;
+    line-height: 20px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-card-sub > span + span::before {
+    content: ' · ';
+    color: var(--sheet-muted);
+}
+
+/* Вес у действий (0,3,1): у группы действий есть и класс списка, а его
+   `margin: 0` ниже при равном весе снимал бы отступ — действия прилипали к
+   последней группе полей. */
+body.mobile-shell .emp-card-group,
+body.mobile-shell .emp-card-list.emp-card-acts {
+    margin-top: 20px;
+}
+
+body.mobile-shell .emp-card-caption {
+    padding: 0 16px 6px;
+    font-size: 13px;
+    line-height: 18px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-card-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--sheet-card);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+body.mobile-shell .emp-card-item {
+    position: relative;
+}
+
+body.mobile-shell .emp-card-item + .emp-card-item::before {
+    content: '';
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep);
+    pointer-events: none;
+}
+
+/* Поле — строкой «подпись — значение», как в «Настройках». Длинное значение
+   (близкий контакт с телефоном) переносится у правого края, а не выталкивает
+   подпись. */
+body.mobile-shell .emp-card-field {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 44px;
+    padding: 11px 16px;
+    font-size: 16px;
+    line-height: 21px;
+}
+
+body.mobile-shell .emp-card-label {
+    flex: none;
+    max-width: 48%;
+    color: var(--sheet-text);
+}
+
+body.mobile-shell .emp-card-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: right;
+    color: var(--sheet-muted);
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+body.mobile-shell .emp-card-value a {
+    color: var(--sheet-accent);
+    text-decoration: none;
+}
+
+body.mobile-shell .emp-card-act {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 46px;
+    padding: 0 16px;
+    border: 0;
+    background: transparent;
+    color: var(--sheet-accent);
+    font-size: 16px;
+    text-align: left;
+}
+
+body.mobile-shell .emp-card-act.is-danger {
+    color: #ff3b30;
+}
+
+body.mobile-shell .emp-card-act:disabled {
+    opacity: 0.4;
+}
+
+body.mobile-shell .emp-card-act:active {
+    opacity: 1 !important;
+    background: var(--sheet-active);
+}
+
+/* ── Массовая правка: строки выбора ── */
+
+body.mobile-shell .emp-card-pick {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 0 14px 0 16px;
+    font-size: 16px;
+    line-height: 21px;
+}
+
+body.mobile-shell .emp-card-pick-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: right;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .emp-card-pick-value.is-set {
+    color: var(--sheet-accent);
+}
+
+body.mobile-shell .emp-card-pick-chev {
+    flex: none;
+    width: 11px;
+    height: 11px;
+    color: var(--sheet-chevron);
+}
+
+body.mobile-shell .emp-m-apply {
+    width: 100%;
+    min-height: 48px;
+    border: 0;
+    border-radius: 14px;
+    background: var(--sheet-accent);
+    color: #fff;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+body.mobile-shell .emp-m-apply:disabled {
+    opacity: 0.4;
+}
+
+/* ── «Параметры выгрузки» на телефоне ──
+
+   Окно открывается из этого же раздела (App.jsx, showUsersReportModal) и
+   общее с компьютером; телефонная у него только шапка со стрелкой — метка
+   .urep-m на карточке. Настольный вид: плитка со значком и крестик под
+   текстом, варианты листов карточками по 112 px, переключатели «Добавить
+   уволенных» уезжали под подпись (общий слой переносит ряды с
+   justify-between), «Отмена» второй кнопкой под «Скачать». */
+
+/* Экран целиком: без рамки и скругления окна. overflow: visible обязателен —
+   под overflow-hidden липкие шапка и кнопка не держатся. */
+body.mobile-shell .otp-modal-panel .urep-m {
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: var(--sheet-bg);
+    color: var(--sheet-text);
+}
+
+body.mobile-shell .urep-m-bar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: calc(52px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0 14px;
+    background: var(--sheet-bar);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 0.5px 0 var(--sheet-sep);
+}
+
+body.mobile-shell .urep-m-back {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+}
+
+body.mobile-shell .urep-m-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-right: 36px;
+    text-align: center;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 22px;
+}
+
+body.mobile-shell .otp-modal-panel .urep-m > .space-y-6 {
+    flex: 1 0 auto;
+    padding: 16px !important;
+}
+
+/* Варианты листов: строка ростом с палец вместо плитки на 112 px. */
+body.mobile-shell .urep-m [class~="min-h-[112px]"] {
+    min-height: 0;
+    padding: 12px 14px;
+}
+
+body.mobile-shell .urep-m [class~="min-h-[112px]"] > span:first-child {
+    margin-bottom: 2px;
+}
+
+/* Переключатель — справа в строке, как в «Настройках», а не под подписью.
+   Вес (0,7,2): общий перенос рядов `.flex[class*="gap-"]:not(.flex-col)
+   :not([class*="rounded-"])` в mobile-shell.css весит (0,6,1) и с меньшим
+   весом эта строка проигрывала — переключатель уезжал под текст. */
+body.mobile-shell .otp-modal-panel .urep-m label.flex.items-center.justify-between.gap-4 {
+    flex-wrap: nowrap;
+}
+
+/* Кнопка скачивания — у нижнего края во всю ширину. */
+body.mobile-shell .otp-modal-panel .urep-m > .flex-col-reverse {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    margin-top: auto;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom)) !important;
+    border-top: 0;
+    background: var(--sheet-bar);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 -0.5px 0 var(--sheet-sep);
+}
+
+body.mobile-shell .otp-modal-panel .urep-m > .flex-col-reverse > button {
+    width: 100%;
+    min-height: 48px;
+    border-radius: 14px;
+    font-size: 17px;
+}

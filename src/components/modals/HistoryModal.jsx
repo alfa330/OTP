@@ -2,6 +2,7 @@
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import FaIcon from '../common/FaIcon';
+import './history-mobile.css';
 
 const HistoryModal = ({ isOpen, onClose, history = [], subjectName = "" }) => {
     const isMobileShell = useIsMobileShell();
@@ -14,12 +15,14 @@ const HistoryModal = ({ isOpen, onClose, history = [], subjectName = "" }) => {
 const [query, setQuery] = useState("");
 const searchRef = React.useRef(null);
 
-// Фокус на строку поиска при открытии
+// Фокус на строку поиска при открытии. На телефоне — нет: клавиатура,
+// поднятая посреди въезда экрана, закрывает половину истории, ради которой
+// экран и открыли.
 useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !isMobileShell) {
     setTimeout(() => searchRef.current?.focus(), 50);
     }
-}, [isOpen]);
+}, [isOpen, isMobileShell]);
 
 // Закрытие по Escape
 useEffect(() => {
@@ -68,6 +71,81 @@ const filtered = useMemo(() => {
 }, [history, query]);
 
 if (!isOpen) return null;
+
+/* Телефон: экран со стрелкой вместо окна с таблицей на пять колонок. Таблица
+   в 390 px ездила вбок, поле поиска с кнопкой «Закрыть» переносилось в две
+   строки, а подсказка про Esc и клик по фону на телефоне просто неправда.
+   Правка — строкой: что поменяли, было → стало, кто и когда. */
+if (isMobileShell) {
+    const query_ = query.trim();
+    return (
+    <div className="otp-modal-root fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="history-modal-title"
+        className="otp-modal-card hist-m w-full"
+        onClick={(e) => e.stopPropagation()}
+        >
+        <div className="hist-m-bar">
+            <button type="button" className="otp-modal-back hist-m-back" onClick={onClose} aria-label="Назад">
+            <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </button>
+            <div className="hist-m-heading">
+            <div id="history-modal-title" className="hist-m-title" role="heading" aria-level={2}>История изменений</div>
+            {subjectName && <div className="hist-m-sub">{subjectName}</div>}
+            </div>
+        </div>
+
+        <div className="hist-m-body">
+            {history.length > 0 && (
+            <div className="hist-m-search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                </svg>
+                <input
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                placeholder="Поиск"
+                enterKeyHint="search"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Поиск в истории"
+                />
+            </div>
+            )}
+
+            {filtered.length > 0 ? (
+            <ul className="hist-m-list">
+                {filtered.map((entry, i) => (
+                <li key={i} className="hist-m-item">
+                    <div className="hist-m-line">
+                    <span className="hist-m-field">{entry.field}</span>
+                    <span className="hist-m-when">{formatDate(entry.changed_at)}</span>
+                    </div>
+                    <div className="hist-m-change">
+                    <span className="hist-m-old">{entry.old_value ?? '—'}</span>
+                    <svg className="hist-m-arrow" viewBox="0 0 16 16" fill="none" aria-label="стало">
+                        <path d="M3 8h9.5M9 4.5L12.5 8 9 11.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    <span className="hist-m-new">{entry.new_value ?? '—'}</span>
+                    </div>
+                    {entry.changed_by && <div className="hist-m-who">{entry.changed_by}</div>}
+                </li>
+                ))}
+            </ul>
+            ) : (
+            <div className="hist-m-empty">
+                {query_ ? `Ничего не найдено по запросу «${query_}»` : 'Изменений пока не было'}
+            </div>
+            )}
+        </div>
+        </div>
+    </div>
+    );
+}
 
 return (
     <>

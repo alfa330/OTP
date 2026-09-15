@@ -192,6 +192,7 @@ const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModa
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
 const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
+const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -40610,7 +40611,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 frontOfficeTraining: !departmentHidesFrontOfficeTraining(user),
             });
 
-            const buildEmployeeSectionColumns = (variant = 'operator', deptFields = null) => {
+            // Колонки ОДНОГО набора («Общее», «Данные», «Контакты»,
+            // «Корпоративное») независимо от переключателя таблицы: карточке
+            // сотрудника на телефоне нужны все четыре сразу. Таблица читает
+            // выбранный набор через buildEmployeeSectionColumns ниже.
+            const buildEmployeeColumnsOfSection = (tableSection, variant = 'operator', deptFields = null) => {
                 const employeeDeptFields = deptFields || employeeDeptFieldsOfViewer();
                 // Вариант задаёт вызывающий (у списков СВ/тренеров/админов он
                 // 'staff' по роли), но операторских колонок не бывает там, где
@@ -40624,7 +40629,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     render: (employee) => renderEmployeeNameCell(employee)
                 };
 
-                if (employeeTableSection === 'data') {
+                if (tableSection === 'data') {
                     const dataColumns = [
                         nameColumn,
                         {
@@ -40674,7 +40679,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return dataColumns;
                 }
 
-                if (employeeTableSection === 'contacts') {
+                if (tableSection === 'contacts') {
                     return [
                         nameColumn,
                         {
@@ -40723,7 +40728,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ];
                 }
 
-                if (employeeTableSection === 'corporate') {
+                if (tableSection === 'corporate') {
                     // Кадровые колонки отдела: у фронт-офисов «Город» вместо
                     // отметки об обучении во фронт офисе (см. departmentViews).
                     return [
@@ -40851,6 +40856,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return generalColumns;
             };
 
+            const buildEmployeeSectionColumns = (variant = 'operator', deptFields = null) => {
+                return buildEmployeeColumnsOfSection(employeeTableSection, variant, deptFields);
+            };
+
             // Колонки «Операторов» у СВ и тренера (view === 'manage_operators') и
             // списков супервайзеров/тренеров/админов. Здесь отдел берём у
             // СМОТРЯЩЕГО — раздел показывает его собственных сотрудников. У
@@ -40932,6 +40941,58 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
                 </div>
             );
+
+            // Значение поля в карточке сотрудника на телефоне. Таблица рисует часть
+            // полей значками (галочка прокси, кружок ставки, пилюля пола), а в
+            // строке «подпись — значение» нужен текст. Остальное — тем же render,
+            // что у таблицы, чтобы карточка не разошлась с колонками.
+            const renderEmployeePhoneValue = (column, employee) => {
+                switch (column.key) {
+                    case 'status':
+                        return getEmployeeStatusBadgeMeta(employee?.status).label;
+                    case 'gender': {
+                        const gender = String(employee?.gender || '').trim().toLowerCase();
+                        if (gender === 'male') return 'Мужской';
+                        if (gender === 'female') return 'Женский';
+                        return '';
+                    }
+                    case 'rate':
+                        return Number(employee?.rate || 1).toFixed(2);
+                    case 'has_proxy': {
+                        const hasProxy = isEmployeeTruthy(employee?.has_proxy);
+                        const cardNumber = hasProxy ? String(employee?.proxy_card_number || '').trim() : '';
+                        const statusLabel = employee?.proxy_status_label || formatProxyStatusLabel(employee?.proxy_status);
+                        return [hasProxy ? 'Есть' : 'Нет', cardNumber, statusLabel].filter(Boolean).join(' · ');
+                    }
+                    case 'has_driver_license':
+                        return isEmployeeTruthy(employee?.has_driver_license) ? 'Есть' : 'Нет';
+                    case 'study_place': {
+                        const place = String(employee?.study_place || '').trim();
+                        const year = normalizeEmployeeStudyCompletionYear(employee?.study_completion_year);
+                        const completed = isEmployeeTruthy(employee?.study_completed);
+                        if (!place && year === null && !completed) return '';
+                        const state = `${completed ? 'Завершил' : 'Не завершил'}${year ? ` · ${year}` : ''}`;
+                        return [place, state].filter(Boolean).join(' · ');
+                    }
+                    case 'phone': {
+                        const shown = formatKzPhoneForDisplay(employee?.phone);
+                        if (shown === '-') return '';
+                        const digits = normalizeKzPhoneDigits(employee?.phone);
+                        // Таблица открывает web.whatsapp.com, на телефоне то же
+                        // намерение ведёт в приложение WhatsApp.
+                        return digits
+                            ? <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer">{shown}</a>
+                            : shown;
+                    }
+                    case 'telegram_nick': {
+                        const parsed = parseTelegramNick(employee?.telegram_nick);
+                        if (!parsed) return String(employee?.telegram_nick || '').trim();
+                        return <a href={`https://t.me/${parsed.username}`} target="_blank" rel="noopener noreferrer">{parsed.display}</a>;
+                    }
+                    default:
+                        return column.render(employee);
+                }
+            };
 
             const handleToggleDropdown = (forceClose = null) => {
             if (forceClose === true) {
@@ -46311,7 +46372,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const promoteUserToSupervisor = useCallback(async (targetUser) => {
+            const promoteUserToSupervisor = useCallback(async (targetUser, options = {}) => {
                 const targetUserId = Number(targetUser?.id);
                 if (!Number.isFinite(targetUserId)) {
                     showToast('Некорректный сотрудник', 'error');
@@ -46324,7 +46385,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 const targetUserName = String(targetUser?.name || `#${targetUserId}`).trim();
-                const confirmed = window.confirm(`Повысить "${targetUserName}" до супервайзера?`);
+                // На телефоне вопрос уже задан листом снизу (EmployeesMobileView).
+                const confirmed = options.skipConfirm || window.confirm(`Повысить "${targetUserName}" до супервайзера?`);
                 if (!confirmed) return;
 
                 setPromotingUserId(targetUserId);
@@ -46449,7 +46511,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [API_BASE_URL, closeDemotionModal, demotionGroupId, demotionTarget, fetchUsers, showToast, user]);
 
-            const dismissAdminUser = useCallback(async (targetUser) => {
+            const dismissAdminUser = useCallback(async (targetUser, options = {}) => {
                 const targetUserId = Number(targetUser?.id);
                 if (!Number.isFinite(targetUserId)) {
                     showToast('Некорректный админ', 'error');
@@ -46465,7 +46527,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     showToast(`"${targetUserName}" уже уволен`, 'warning');
                     return;
                 }
-                const confirmed = window.confirm(`Уволить админа "${targetUserName}"?`);
+                // На телефоне вопрос уже задан листом снизу (EmployeesMobileView).
+                const confirmed = options.skipConfirm || window.confirm(`Уволить админа "${targetUserName}"?`);
                 if (!confirmed) return;
 
                 setDismissingAdminId(targetUserId);
@@ -47094,8 +47157,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }
                 };
 
-            const removeSv = async (svId) => {
-                if (!confirm('Are you sure you want to remove this supervisor?')) return;
+            const removeSv = async (svId, options = {}) => {
+                // На телефоне вопрос уже задан листом снизу (EmployeesMobileView).
+                if (!options.skipConfirm && !confirm('Are you sure you want to remove this supervisor?')) return;
                 setIsLoading(true);
                 
                 try {
@@ -47134,6 +47198,111 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setShowUserEditModal(true);
             };
 
+            // «Добавить сотрудника» в «Учете сотрудников» — одна точка на обе
+            // раскладки. Отдел бэк-офиса заводит сотрудника СВОЕЙ ролью, а не
+            // оператором. Отдел берём тот же, что уйдёт на сервер: у главы это
+            // его собственный, у админа — выбранный фильтром (не выбран — роль
+            // по умолчанию, отдел доопределит сервер).
+            const openCreateManageUsersEmployee = () => {
+                const createDeptId = manageUsersDeptFilter || "";
+                const createDeptCode = createDeptId
+                    ? (departments || []).find((d) => Number(d?.id) === Number(createDeptId))?.code
+                    : (isScopedDepartmentHead
+                        ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
+                        : (user?.department_code ?? user?.departmentCode ?? null));
+                setUserToEdit({
+                    name: "",
+                    rate: 1.0,
+                    direction_id: "",
+                    department_id: createDeptId,
+                    hire_date: "",
+                    supervisor_id: "",
+                    status: "working",
+                    role: departmentCodeEmployeeRole(createDeptCode) || "operator",
+                });
+                setShowUserEditModal(true);
+            };
+
+            // «Операторы» у СВ: новый оператор сразу закреплён за тем, кто его заводит.
+            const openCreateManagedOperator = () => {
+                setUserToEdit({
+                    name: "",
+                    rate: 1.0,
+                    direction_id: "",
+                    hire_date: "",
+                    supervisor_id: user?.id || "",
+                    status: "working",
+                    role: "operator",
+                });
+                setShowUserEditModal(true);
+            };
+
+            // Правка из «Операторов»: строка списка у СВ урезана, полная запись
+            // сотрудника лежит в adminUsers.
+            const openManagedOperatorEditor = (op) => {
+                const fullOp = (Array.isArray(adminUsers) ? adminUsers : []).find((cand) => Number(cand?.id) === Number(op?.id)) || op;
+                setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });
+                setShowUserEditModal(true);
+            };
+
+            // «Мои операторы» — то же правило, что у таблицы «Операторов»: по id
+            // супервайзера, а без него — по имени.
+            const isManagedOperatorMine = (op) => {
+                const requesterSupervisorId = Number(user?.id);
+                const opSupervisorId = Number(op?.supervisor_id);
+                if (Number.isFinite(requesterSupervisorId) && Number.isFinite(opSupervisorId)) {
+                    return opSupervisorId === requesterSupervisorId;
+                }
+                const requesterSupervisorName = String(user?.name || '').trim().toLowerCase();
+                const opSupervisorName = String(op?.supervisor_name || '').trim().toLowerCase();
+                return !!requesterSupervisorName && opSupervisorName === requesterSupervisorName;
+            };
+
+            // Телефонная раскладка «Учета сотрудников» (src/components/employees):
+            // список людей вместо таблицы и карточка сотрудника экраном. Данные,
+            // права и действия — отсюда, общие с компьютером; там только раскладка.
+            const renderEmployeesPhone = (config) => (
+                <Suspense fallback={null}>
+                    <EmployeesMobileView
+                        loading={isAdminDataLoading}
+                        {...config}
+                        statusTabs={USER_STATUS_FILTER_TABS}
+                        isVisibleByStatus={isEmployeeVisibleByStatusTab}
+                        statusCodeOf={normalizeEmployeeStatusCode}
+                        statusLabelOf={(status) => getEmployeeStatusBadgeMeta(status).label}
+                        isBlacklist={isEmployeeBlacklistDismissal}
+                        cardSectionList={EMPLOYEE_TABLE_SECTIONS}
+                        renderValue={renderEmployeePhoneValue}
+                        formatDaysAway={formatDaysAwayLabel}
+                        Avatar={AvatarImage}
+                    />
+                </Suspense>
+            );
+
+            const employeeHistoryPhoneAction = (employee) => ({
+                key: 'history',
+                label: loadingHistoryId === employee?.id ? 'Загрузка…' : 'История изменений',
+                disabled: loadingHistoryId === employee?.id,
+                onClick: () => {
+                    setSelectedUserForHistory(employee);
+                    fetchUserHistory(employee.id);
+                },
+            });
+
+            const usersSortPhone = {
+                sortField: usersSortField,
+                sortDir: usersSortDirection,
+                onSort: (field, dir) => {
+                    setUsersSortField(field);
+                    setUsersSortDirection(dir);
+                },
+                compare: (a, b) => compareUsersByField(a, b, usersSortField),
+            };
+
+            const departmentNameOfEmployee = (employee) => (departments || []).find(
+                (dep) => Number(dep?.id) === Number(employee?.department_id ?? employee?.departmentId),
+            )?.name || '';
+
             const renderEmployeeDirectorySection = ({
                 title,
                 addLabel,
@@ -47160,6 +47329,74 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const rows = departmentFilter
                     ? allRows.filter((r) => Number(r?.department_id ?? r?.departmentId) === Number(departmentFilter))
                     : allRows;
+                if (isMobileShell) {
+                    const countWordsByRole = {
+                        sv: ['супервайзер', 'супервайзера', 'супервайзеров'],
+                        trainer: ['тренер', 'тренера', 'тренеров'],
+                        admin: ['админ', 'админа', 'админов'],
+                    };
+                    return renderEmployeesPhone({
+                        title,
+                        rows,
+                        emptyText,
+                        emptySearchText,
+                        countWords: countWordsByRole[role],
+                        statusTab: activeStatusTab,
+                        onStatusTab: setActiveStatusTab,
+                        search: searchQuery,
+                        onSearch: setSearchQuery,
+                        matchesSearch: (employee, query) => matchesEmployeeSearchQuery(employee, query),
+                        columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, role === 'operator' ? 'operator' : 'staff'),
+                        ...usersSortPhone,
+                        // Отдел в строке — только когда в списке люди разных отделов.
+                        subtitleOf: setDepartmentFilter && !departmentFilter ? departmentNameOfEmployee : null,
+                        department: setDepartmentFilter && (departmentOptions || []).length > 0
+                            ? { value: departmentFilter, onChange: setDepartmentFilter, options: departmentOptions }
+                            : null,
+                        onAdd: canAdd ? () => openCreateEmployeeModalForRole(role) : null,
+                        addLabel,
+                        actionsFor: (employee) => {
+                            const statusCode = normalizeEmployeeStatusCode(employee?.status);
+                            const isDismissed = statusCode === 'fired' || statusCode === 'dismissal';
+                            const isDismissing = dismissingAdminId === Number(employee?.id);
+                            const name = employee?.name || '';
+                            return [
+                                {
+                                    key: 'edit',
+                                    label: 'Изменить',
+                                    onClick: () => {
+                                        setUserToEdit(employee);
+                                        setShowUserEditModal(true);
+                                    },
+                                },
+                                employeeHistoryPhoneAction(employee),
+                                canDemoteSupervisor && !isDismissed && {
+                                    key: 'demote',
+                                    label: 'Перевести в операторы',
+                                    onClick: () => {
+                                        setDemotionTarget(employee);
+                                        setDemotionGroupId('');
+                                    },
+                                },
+                                canRemoveSupervisor && {
+                                    key: 'remove',
+                                    label: 'Удалить',
+                                    danger: true,
+                                    confirm: { note: `Удалить супервайзера «${name}»?`, label: 'Удалить' },
+                                    onClick: () => removeSv(employee.id, { skipConfirm: true }),
+                                },
+                                canDismissAdmin && {
+                                    key: 'dismiss',
+                                    label: isDismissed ? 'Уволен' : (isDismissing ? 'Увольняю…' : 'Уволить'),
+                                    danger: true,
+                                    disabled: isDismissed || isDismissing,
+                                    confirm: { note: `Уволить админа «${name}»?`, label: 'Уволить' },
+                                    onClick: () => dismissAdminUser(employee, { skipConfirm: true }),
+                                },
+                            ].filter(Boolean);
+                        },
+                    });
+                }
                 const columns = buildEmployeeSectionColumns(role === 'operator' ? 'operator' : 'staff');
 
                 const renderRowActionMenu = (employee) => {
@@ -51561,7 +51798,76 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         })()}
                                 </span>}
 
+                                {(view === 'manage_users' || view === 'employees') && isMobileShell && renderEmployeesPhone({
+                                    title: 'Сотрудники',
+                                    rows: (operatorUsers || []).filter((employee) => (
+                                        !manageUsersDeptFilter || Number(employee?.department_id) === Number(manageUsersDeptFilter)
+                                    )),
+                                    emptySearchText: 'Сотрудники по запросу не найдены.',
+                                    statusTab: activeUserTab,
+                                    onStatusTab: setActiveUserTab,
+                                    search: manageUsersSearchQuery,
+                                    onSearch: setManageUsersSearchQuery,
+                                    matchesSearch: (employee, query) => matchesEmployeeSearchQuery(employee, query),
+                                    columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, 'operator', manageUsersDeptFields),
+                                    ...usersSortPhone,
+                                    subtitleOf: (employee) => [
+                                        manageUsersDeptFields.jobTitle ? employee?.job_title : (employee?.direction || employee?.job_title),
+                                        manageUsersDeptFields.supervisor ? employee?.supervisor_name : '',
+                                    ].filter(Boolean).join(' · '),
+                                    department: canFilterByDepartment && (departments || []).length > 0
+                                        ? { value: manageUsersDeptFilter, onChange: setManageUsersDeptFilter, options: departments }
+                                        : null,
+                                    birthdays: upcomingManageUsersBirthdays,
+                                    onAdd: openCreateManageUsersEmployee,
+                                    addLabel: 'Добавить сотрудника',
+                                    onReport: openUsersReportModal,
+                                    reportBusy: isLoading,
+                                    // Массовая правка — те же поля, что у панели Ctrl + клик:
+                                    // группа и направление только у отдела с линией.
+                                    selection: {
+                                        ids: selectedManageUsersIds,
+                                        onToggle: toggleManageUsersSelection,
+                                        onClear: clearManageUsersSelection,
+                                        onSelectAll: (ids) => setSelectedManageUsersIds(new Set(ids)),
+                                        bulk: {
+                                            showGroupAndDirection: manageUsersDeptFields.operatorFields,
+                                            groups: (userModalGroups || []).filter((group) => group?.status !== 'archived').map((group) => ({
+                                                value: String(group.id),
+                                                label: (group.supervisors || []).length
+                                                    ? `${group.name} — СВ: ${(group.supervisors || []).map((sv) => sv?.name).filter(Boolean).join(', ')}`
+                                                    : group.name,
+                                            })),
+                                            directions: (directions || []).map((dir) => ({ value: String(dir.id), label: dir.name })),
+                                            draft: bulkManageUsersChanges,
+                                            onDraft: setBulkManageUsersChanges,
+                                            onApply: applyBulkManageUsersChanges,
+                                            saving: isBulkManageUsersSaving,
+                                        },
+                                    },
+                                    actionsFor: (employee) => [
+                                        {
+                                            key: 'edit',
+                                            label: 'Изменить',
+                                            onClick: () => {
+                                                setUserToEdit(employee);
+                                                setShowUserEditModal(true);
+                                            },
+                                        },
+                                        employeeHistoryPhoneAction(employee),
+                                        // Повышать может только админ: у остальных пункт
+                                        // заканчивался бы отказом уже после нажатия.
+                                        isAdminLikeRole && {
+                                            key: 'promote',
+                                            label: promotingUserId === Number(employee?.id) ? 'Повышение…' : 'Перевести в супервайзеры',
+                                            disabled: promotingUserId === Number(employee?.id),
+                                            confirm: { note: `Повысить «${employee?.name || ''}» до супервайзера?`, label: 'Повысить' },
+                                            onClick: () => promoteUserToSupervisor(employee, { skipConfirm: true }),
+                                        },
+                                    ].filter(Boolean),
+                                })}
                                 {(view === 'manage_users' || view === 'employees') && (
+                                !isMobileShell && (
                                 <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                     <div className="flex items-center justify-between mb-6">
                                     <h2 className="text-2xl font-semibold text-gray-800">Сотрудники</h2>
@@ -51584,30 +51890,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                         )}
                                         <button
-                                        onClick={() => {
-                                            // Отдел бэк-офиса заводит сотрудника СВОЕЙ ролью, а не
-                                            // оператором. Отдел берём тот же, что уйдёт на сервер:
-                                            // у главы это его собственный, у админа — выбранный
-                                            // фильтром (не выбран — роль по умолчанию, отдел
-                                            // доопределит сервер).
-                                            const createDeptId = manageUsersDeptFilter || "";
-                                            const createDeptCode = createDeptId
-                                                ? (departments || []).find((d) => Number(d?.id) === Number(createDeptId))?.code
-                                                : (isScopedDepartmentHead
-                                                    ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
-                                                    : (user?.department_code ?? user?.departmentCode ?? null));
-                                            setUserToEdit({
-                                            name: "",
-                                            rate: 1.0,
-                                            direction_id: "",
-                                            department_id: createDeptId,
-                                            hire_date: "",
-                                            supervisor_id: "",
-                                            status: "working",
-                                            role: departmentCodeEmployeeRole(createDeptCode) || "operator",
-                                            });
-                                            setShowUserEditModal(true);
-                                        }}
+                                        onClick={openCreateManageUsersEmployee}
                                         className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition"
                                         >
                                         <FaIcon className="fas fa-user-plus"></FaIcon> Добавить сотрудника
@@ -51945,7 +52228,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                     {renderEmployeeTableSectionSwitcher()}
                                 </div>
-                                )}
+                                ))}
                                 {view === 'manage_admins' && isSuperAdmin && renderEmployeeDirectorySection({
                                     title: 'Админы',
                                     addLabel: 'Добавить админа',
@@ -52600,7 +52883,57 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </Suspense>
                                 )}
 
-                                {view === 'manage_operators' && (
+                                {view === 'manage_operators' && isMobileShell && renderEmployeesPhone({
+                                    title: 'Операторы',
+                                    rows: (() => {
+                                        const operators = (Array.isArray(users) && users.length > 0)
+                                            ? users
+                                            : (Array.isArray(svData?.operators) ? svData.operators : []);
+                                        return manageOperatorsDeptFilter
+                                            ? operators.filter((op) => Number(op?.department_id ?? op?.departmentId) === Number(manageOperatorsDeptFilter))
+                                            : operators;
+                                    })(),
+                                    loading: isLoading || isAdminDataLoading,
+                                    emptyText: 'Операторы не найдены.',
+                                    emptySearchText: 'Операторы по запросу не найдены.',
+                                    countWords: ['оператор', 'оператора', 'операторов'],
+                                    statusTab: activeTab,
+                                    onStatusTab: setActiveTab,
+                                    search: manageOperatorsSearchQuery,
+                                    onSearch: setManageOperatorsSearchQuery,
+                                    matchesSearch: (op, query) => matchesEmployeeSearchQuery(op, query, getOperatorDirectionLabel(op)),
+                                    columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, departmentHidesOperatorFields(user) ? 'staff' : 'operator'),
+                                    sortField,
+                                    sortDir: sortDirection,
+                                    onSort: (field, dir) => {
+                                        setSortField(field);
+                                        setSortDirection(dir);
+                                    },
+                                    compare: (a, b) => compareByField(a, b, sortField),
+                                    operatorGroups: { isMine: isManagedOperatorMine, directionOf: getOperatorDirectionLabel },
+                                    // В группе направления подпись — супервайзер; у своих и в
+                                    // карточке — направление (супервайзер там — сам смотрящий).
+                                    subtitleOf: (op, groupKey) => {
+                                        if (groupKey === 'mine' || groupKey === 'card') {
+                                            const direction = getOperatorDirectionLabel(op);
+                                            return direction === 'Без направления' ? '' : direction;
+                                        }
+                                        return op?.supervisor_name || op?.job_title || '';
+                                    },
+                                    department: canFilterByDepartment && (departments || []).length > 0
+                                        ? { value: manageOperatorsDeptFilter, onChange: setManageOperatorsDeptFilter, options: departments }
+                                        : null,
+                                    birthdays: upcomingManageOperatorsBirthdays,
+                                    onAdd: isManageOperatorsReadOnly ? null : openCreateManagedOperator,
+                                    addLabel: 'Добавить оператора',
+                                    onReport: canSupervisorExportOperators ? openUsersReportModal : null,
+                                    reportBusy: isLoading,
+                                    actionsFor: isManageOperatorsReadOnly ? null : (op) => [
+                                        { key: 'edit', label: 'Изменить', onClick: () => openManagedOperatorEditor(op) },
+                                        employeeHistoryPhoneAction(op),
+                                    ],
+                                })}
+                                {view === 'manage_operators' && !isMobileShell && (
                                     <div className="bg-white p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
                                         <div className="flex justify-between items-center mb-6">
                                         <h2 className="text-2xl font-semibold text-gray-800">Операторы</h2>
@@ -52625,18 +52958,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                                         {!isManageOperatorsReadOnly && (
                                         <button
-                                            onClick={() => {
-                                                setUserToEdit({
-                                                    name: "",
-                                                    rate: 1.0,
-                                                    direction_id: "",
-                                                    hire_date: "",
-                                                    supervisor_id: user?.id || "",
-                                                    status: "working",
-                                                    role: "operator",
-                                                });
-                                                setShowUserEditModal(true);
-                                            }}
+                                            onClick={openCreateManagedOperator}
                                             className="inline-flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition"
                                         >
                                             <FaIcon className="fas fa-user-plus"></FaIcon> Добавить оператора
@@ -52826,11 +53148,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <td className="px-6 py-4 text-left">
                                                             <div className="flex space-x-2">
                                                                 <button
-                                                                onClick={() => {
-                                                                    const fullOp = (Array.isArray(adminUsers) ? adminUsers : []).find((cand) => Number(cand?.id) === Number(op?.id)) || op;
-                                                                    setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });
-                                                                    setShowUserEditModal(true);
-                                                                }}
+                                                                onClick={() => openManagedOperatorEditor(op)}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
                                                                 >
                                                                 <FaIcon className="fas fa-edit"></FaIcon> Править
@@ -52887,11 +53205,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             <td className="px-6 py-4 text-left">
                                                             <div className="flex space-x-2">
                                                                 <button
-                                                                onClick={() => {
-                                                                    const fullOp = (Array.isArray(adminUsers) ? adminUsers : []).find((cand) => Number(cand?.id) === Number(op?.id)) || op;
-                                                                    setUserToEdit({ ...fullOp, supervisor_id: fullOp?.supervisor_id ?? user?.id });
-                                                                    setShowUserEditModal(true);
-                                                                }}
+                                                                onClick={() => openManagedOperatorEditor(op)}
                                                                 className="bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700 text-sm transition-all duration-200 flex items-center gap-1"
                                                                 >
                                                                 <FaIcon className="fas fa-edit"></FaIcon> Править
@@ -56382,7 +56696,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 }}
                                 panelClassName="w-[760px] max-w-[calc(100vw-1rem)] !bg-transparent !p-0"
                             >
-                                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+                                <div className={`overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl${isMobileShell ? ' urep-m' : ''}`}>
+                                    {/* Телефон: шапка экрана со стрелкой (раздел «Учет
+                                        сотрудников», employees-mobile.css). Плитка со значком,
+                                        пояснение и крестик под текстом — приметы окна. */}
+                                    {isMobileShell && (
+                                    <div className="urep-m-bar">
+                                        <button
+                                            type="button"
+                                            className="otp-modal-back urep-m-back"
+                                            onClick={() => { if (!isLoading) setShowUsersReportModal(false); }}
+                                            aria-label="Назад"
+                                        >
+                                            <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 2.5L4.5 8l5.5 5.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                                        </button>
+                                        <div className="urep-m-title" role="heading" aria-level={2}>Выгрузка сотрудников</div>
+                                    </div>
+                                    )}
+                                    {!isMobileShell && (
                                     <div className="border-b border-slate-100 bg-slate-50 px-6 py-5">
                                         <div className="flex items-start justify-between gap-4">
                                             <div className="flex items-start gap-4">
@@ -56407,6 +56738,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </button>
                                         </div>
                                     </div>
+                                    )}
 
                                     <div className="space-y-6 px-6 py-6">
                                         {isAdminLikeRole ? (
@@ -56590,6 +56922,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
 
                                     <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50 px-6 py-4 sm:flex-row sm:items-center sm:justify-end">
+                                        {!isMobileShell && (
                                         <button
                                             type="button"
                                             onClick={() => setShowUsersReportModal(false)}
@@ -56598,6 +56931,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         >
                                             Отмена
                                         </button>
+                                        )}
                                         <button
                                             type="button"
                                             onClick={() => handleGenerateReport(usersReportOptions)}

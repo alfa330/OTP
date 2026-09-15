@@ -1,0 +1,173 @@
+/* ── Карточка сотрудника («Добавить» / «Изменить») на телефоне ───────────────
+
+   Настольное окно: заголовок с карандашом и крестик справа, пять вкладок
+   сеткой в ряд, прокрутка внутри окна на 88% высоты, «Отмена» и «Сохранить»
+   справа внизу и подсказка «Нажмите Esc, кликните вне модалки». На телефоне
+   общий слой оболочки превращал ряд вкладок в сетку 2×3 (правило grid-cols-5
+   → две колонки), под формой оставалась полоса пустоты от внутреннего
+   max-height, а подсказка была неправдой — ни Esc, ни «вне модалки» там нет.
+
+   Здесь: стеклянная шапка экрана со стрелкой (ветка isMobileShell в
+   UserEditModal.jsx), вкладки одной полосой-переключателем, прокрутка у
+   экрана целиком и одна кнопка во всю ширину у нижнего края. Поля формы
+   остаются прежними: их приводит в вид общий слой (mobile-motion.css).
+
+   Отбор по aria-labelledby — это метка самой формы, другим окнам портала
+   правила не достаются. Всё заперто на body.mobile-shell. */
+
+/* Вес (0,4,1) выше общего правила карточки окна (0,3,1): отступ под вырез
+   несёт сама шапка, иначе при прокрутке над стеклом ехали бы строки. */
+body.mobile-shell .otp-modal-root .otp-modal-card[aria-labelledby="edit-user-title"] {
+    display: flex;
+    flex-direction: column;
+    padding-top: 0;
+    background: var(--sheet-card);
+}
+
+/* Прокрутка — у экрана, а не внутри: одна лента вместо двух. Поля — те же 16,
+   что у остальных экранов; !important перебивает общее `.px-6` оболочки. */
+body.mobile-shell .otp-modal-card[aria-labelledby="edit-user-title"] > div {
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+    max-height: none;
+    overflow: visible;
+    padding: 0 16px !important;
+}
+
+body.mobile-shell .otp-modal-card[aria-labelledby="edit-user-title"] > div > .space-y-6 {
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+    margin-top: 12px;
+}
+
+/* ── Шапка ── */
+
+body.mobile-shell .uem-bar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: calc(52px + env(safe-area-inset-top));
+    margin: 0 -16px;
+    padding: env(safe-area-inset-top) 12px 0 14px;
+    background: var(--sheet-glass);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 0.5px 0 var(--sheet-sep);
+}
+
+body.mobile-shell .uem-back {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+}
+
+/* Заголовок — по оптической середине: поле справа шириной со стрелку. */
+body.mobile-shell .uem-bar .uem-heading {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-right: 36px;
+    text-align: center;
+}
+
+/* Вес (0,3,1): общий слой ужимает h2 в разделах до 18 px правилом (0,2,2). */
+body.mobile-shell .uem-bar .uem-title {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 22px;
+    color: var(--sheet-text);
+}
+
+body.mobile-shell .uem-bar .uem-sub {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    line-height: 17px;
+    color: var(--sheet-muted);
+}
+
+/* ── Вкладки: одна полоса-переключатель ── */
+
+/* Пять вкладок в ряд помещаются в 358 px при кегле 13: сетка 2×3, которую
+   давал общий слой, читалась как пять отдельных кнопок, а не как одно
+   переключение. */
+body.mobile-shell .otp-modal-card[aria-labelledby="edit-user-title"] .grid.grid-cols-5 {
+    display: flex;
+    gap: 0;
+    padding: 2px;
+    border-radius: 9px;
+    background: rgba(118, 118, 128, 0.12);
+}
+
+body.mobile-shell .otp-modal-card[aria-labelledby="edit-user-title"] .grid.grid-cols-5 > button {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    padding: 0 7px;
+    border-radius: 7px;
+    background: transparent;
+    box-shadow: none;
+    color: var(--sheet-text);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+body.mobile-shell .otp-modal-card[aria-labelledby="edit-user-title"] .grid.grid-cols-5 > button[aria-pressed="true"] {
+    background: var(--sheet-card);
+    font-weight: 600;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04);
+}
+
+/* В тёмной теме выбранный сегмент у системы светлее подложки: цвет карточки
+   на полупрозрачном сером просто пропадает. */
+html[data-otp-theme="dark"] body.mobile-shell .otp-modal-card[aria-labelledby="edit-user-title"] .grid.grid-cols-5 > button[aria-pressed="true"] {
+    background: #636366;
+}
+
+/* ── Кнопка сохранения у нижнего края ── */
+
+/* Вес (0,4,1): у детей .space-y-6 верхний отступ задаёт утилита с весом
+   (0,3,0), а подвалу нужен margin-top: auto — на короткой вкладке
+   («Аккаунт») кнопка всё равно стоит внизу экрана, а не посреди. */
+body.mobile-shell .otp-modal-card .space-y-6 > .uem-foot {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    margin: auto -16px 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    background: var(--sheet-glass);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 -0.5px 0 var(--sheet-sep);
+}
+
+body.mobile-shell .uem-save {
+    width: 100%;
+    min-height: 48px;
+    border: 0;
+    border-radius: 14px;
+    background: var(--sheet-accent);
+    color: #fff;
+    font-size: 17px;
+    font-weight: 600;
+}
+
+body.mobile-shell .uem-save:disabled {
+    opacity: 0.5;
+}

@@ -1,0 +1,214 @@
+/* ── «История изменений» сотрудника на телефоне ──────────────────────────────
+
+   Настольное окно — таблица на пять колонок («Поле», «Старое значение»,
+   «Новое значение», «Кто изменил», «Дата»), поле поиска с кнопкой «Закрыть»
+   в одну строку и подсказка «ESC или клик по фону — закрыть». На телефоне
+   таблица ездила вбок, а подсказка была неправдой: ни Esc, ни фона там нет.
+
+   Здесь — экран в стиле списка: стеклянная шапка со стрелкой, поле поиска
+   системного вида, правка — строкой «что поменяли, было → стало, кто и
+   когда». Разметка своя (ветка isMobileShell в HistoryModal.jsx), классы
+   свои, без утилит Tailwind. Всё заперто на body.mobile-shell; цвета —
+   токены --sheet-*, их подменяет тёмная тема. */
+
+/* Полотно экрана — серое, как у списков настроек; строки на нём белые.
+   Вес (0,3,1) выше, чем у общего правила карточки окна в mobile-shell.css:
+   отступ под вырез несёт сама шапка, иначе при прокрутке над стеклом
+   оставалась бы полоса с уезжающими строками. */
+body.mobile-shell .otp-modal-root .otp-modal-card.hist-m {
+    padding-top: 0;
+    background: var(--sheet-bg);
+    color: var(--sheet-text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+}
+
+body.mobile-shell .hist-m-bar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: calc(52px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0 14px;
+    background: var(--sheet-bar);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    box-shadow: 0 0.5px 0 var(--sheet-sep);
+}
+
+body.mobile-shell .hist-m-back {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--sheet-accent);
+}
+
+/* Заголовок — по оптической середине: поле справа шириной со стрелку. */
+body.mobile-shell .hist-m-heading {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-right: 36px;
+    text-align: center;
+}
+
+body.mobile-shell .hist-m-title {
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 22px;
+}
+
+body.mobile-shell .hist-m-sub {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    line-height: 17px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .hist-m-body {
+    padding: 12px 16px calc(24px + env(safe-area-inset-bottom));
+}
+
+body.mobile-shell .hist-m-search {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    margin-bottom: 14px;
+    padding: 0 10px;
+    border-radius: 12px;
+    background: rgba(118, 118, 128, 0.12);
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .hist-m-search > svg {
+    flex: none;
+    width: 17px;
+    height: 17px;
+}
+
+/* 17 px — кегль системного поля: мельче iOS наезжает на поле при фокусе. */
+body.mobile-shell .hist-m-search input,
+body.mobile-shell .hist-m-search input:focus {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    margin: 0 0 0 7px;
+    padding: 0;
+    border: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+    color: var(--sheet-text);
+    font-size: 17px;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+body.mobile-shell .hist-m-search input::placeholder {
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .hist-m-search input::-webkit-search-cancel-button,
+body.mobile-shell .hist-m-search input::-webkit-search-decoration {
+    -webkit-appearance: none;
+}
+
+body.mobile-shell .hist-m-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--sheet-card);
+    box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+body.mobile-shell .hist-m-item {
+    position: relative;
+    padding: 11px 16px 12px;
+}
+
+body.mobile-shell .hist-m-item + .hist-m-item::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 0.5px;
+    background: var(--sheet-sep);
+}
+
+body.mobile-shell .hist-m-line {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+body.mobile-shell .hist-m-field {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 21px;
+}
+
+body.mobile-shell .hist-m-when {
+    flex: none;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--sheet-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Было → стало. Старое значение серое, новое — обычным цветом: взгляд сразу
+   идёт к тому, что стоит сейчас. Значения бывают многострочными (адреса,
+   комментарии) — переносы из базы сохраняются. */
+body.mobile-shell .hist-m-change {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 6px;
+    margin-top: 3px;
+    font-size: 15px;
+    line-height: 20px;
+    overflow-wrap: anywhere;
+    white-space: pre-line;
+}
+
+body.mobile-shell .hist-m-old {
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .hist-m-arrow {
+    flex: none;
+    align-self: center;
+    width: 14px;
+    height: 14px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .hist-m-new {
+    color: var(--sheet-text);
+}
+
+body.mobile-shell .hist-m-who {
+    margin-top: 3px;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--sheet-muted);
+}
+
+body.mobile-shell .hist-m-empty {
+    padding: 48px 24px;
+    text-align: center;
+    font-size: 15px;
+    line-height: 20px;
+    color: var(--sheet-muted);
+}
