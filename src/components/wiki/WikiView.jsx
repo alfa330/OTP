@@ -3,7 +3,7 @@ import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
     AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
-    Layers, MapPin,
+    Layers, Link2, MapPin,
     Network,
     Building2, LineChart, Loader2, Megaphone, Plus, RefreshCw,
     MessageCircleQuestion, ScrollText, ShieldCheck, Sparkles, Users,
@@ -35,7 +35,12 @@ const WikiAssistant = lazy(() => import('./WikiAssistant'));
 const WikiNews = lazy(() => import('./WikiNews'));
 const WikiQuestions = lazy(() => import('./WikiQuestions'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
+import { readArticleSlugFromSearch } from './articleLink';
 import { getScrollContainer, scrollPortalTo } from './scrollContainer';
+import {
+    buildWikiTabLink, readWikiSpaceFromSearch, readWikiTabFromSearch, syncWikiTabLink,
+    WIKI_DEFAULT_TAB,
+} from './tabLink';
 import { CAPABILITY_LABELS } from './sectionGrants';
 import './wiki-theme.css';
 
@@ -170,7 +175,23 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
     const [structureLoading, setStructureLoading] = useState(true);
-    const [tab, setTab] = useState('library');
+    const [tab, setTab] = useState(WIKI_DEFAULT_TAB);
+    /* ВКЛАДКА, НАЗВАННАЯ АДРЕСОМ (?view=wiki&tab=offices) — просьба, а не
+       значение, и это не перестраховка. Набор вкладок считается из ответа
+       /ping и тумблеров пространства, то есть ПОЗЖЕ первого рендера: поставь
+       мы «Офисы» сразу, эффект «активной вкладки больше нет» вернул бы человека
+       на главную раньше, чем приедут права. Просьба ждёт своего набора и
+       гасится, когда выполнена или когда стало ясно, что вкладки нет. */
+    const [requestedTab, setRequestedTab] = useState(() => {
+        if (typeof window === 'undefined') return '';
+        const search = window.location.search;
+        /* Ссылка на СТАТЬЮ сильнее ссылки на вкладку: статья живёт на витрине, и
+           просьба открыть «Офисы» поверх неё закрыла бы текст, ради которого
+           человек перешёл. Сами метки вместе не ставятся (ссылка на вкладку
+           снимает article), но адрес могли собрать и руками. */
+        if (readArticleSlugFromSearch(search)) return '';
+        return readWikiTabFromSearch(search);
+    });
     const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight}
     /* Вопрос, уехавший из поиска к помощнику. Просьба одноразовая, как
        createRequest: помощник её выполняет и гасит. Своим id, а не текстом —
@@ -231,6 +252,14 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        вместо результата. Храним ИДЕНТИФИКАТОР, а не объект: список приходит с
        сервера, и сохранённая копия устарела бы при первом переименовании. */
     const [spaceId, setSpaceId] = useState(() => {
+        /* Пространство из ПРИСЛАННОЙ ССЫЛКИ сильнее сохранённого: у отправителя
+           и получателя вики выбраны разные, и без этого ссылка на «Офисы»
+           Таксопарков открывала бы офисы той вики, в которой получатель был в
+           прошлый раз. Недоступное пространство подставится обратно первым
+           доступным — см. activeSpace. */
+        const fromLink = typeof window === 'undefined'
+            ? 0 : readWikiSpaceFromSearch(window.location.search);
+        if (fromLink) return fromLink;
         const saved = Number(localStorage.getItem('wiki:space'));
         return Number.isFinite(saved) && saved > 0 ? saved : null;
     });
@@ -515,8 +544,39 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
 
     // Если права сузились между заходами, активная вкладка может исчезнуть.
     useEffect(() => {
-        if (tabs.length && !tabs.some((t) => t.key === tab)) setTab('library');
+        if (tabs.length && !tabs.some((t) => t.key === tab)) setTab(WIKI_DEFAULT_TAB);
     }, [tabs, tab]);
+
+    /* ПРИШЛИ ПО ССЫЛКЕ НА ВКЛАДКУ. Открываем её, когда она появилась в наборе,
+       — тем же способом, каким приходит переход из колокола.
+
+       Просьбу гасим и в случае «вкладки нет»: ответ /ping уже получен, набор
+       окончательный, а непогашенная просьба заперла бы адресную строку —
+       синхронизация ниже её ждёт. Человек в этом случае остаётся на главной:
+       ссылку прислали на то, чего ему не показывают. */
+    useEffect(() => {
+        if (!requestedTab) return;
+        if (tabs.some((t) => t.key === requestedTab)) {
+            setTab(requestedTab);
+            setRequestedTab('');
+            return;
+        }
+        if (!loading && tabs.length) setRequestedTab('');
+    }, [requestedTab, tabs, loading]);
+
+    /* ОТКРЫТАЯ ВКЛАДКА В АДРЕСНОЙ СТРОКЕ. Пишем её на каждое переключение: в
+       приложении на телефоне адресной строки не видно вовсе, но перезагрузка,
+       возврат по истории и кнопка «Ссылка» берут адрес именно отсюда.
+
+       Пока просьба из ссылки не выполнена, адрес не трогаем: иначе первый же
+       рендер (tab ещё 'library') стёр бы метку, ради которой человек и перешёл
+       по ссылке. */
+    useEffect(() => {
+        if (requestedTab) return;
+        /* Пространство — в адрес, только когда их несколько: у одной вики метка
+           в каждой ссылке ничего не решает. */
+        syncWikiTabLink(tab, spaces.length > 1 ? activeSpace?.id : null);
+    }, [tab, requestedTab, spaces.length, activeSpace]);
 
     /* Пришли из колокола по «Вопросам операторов». Вкладку открываем, только
        когда она уже есть в наборе: права приезжают с ping ПОЗЖЕ первого
@@ -585,6 +645,37 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         setTab(known ? exit.tab : 'library');
         scrollPortalTo(0);
     }, [tabs]);
+
+    /* ССЫЛКА НА ОТКРЫТУЮ ВКЛАДКУ. Кладём в буфер, а не показываем адрес: в
+       приложении на телефоне адресной строки нет вовсе, а именно оттуда ссылку
+       и отправляют в переписку. Запасной путь через execCommand нужен не для
+       красоты — clipboard.writeText живёт только в защищённом контексте, и в
+       старом вебвью кнопка иначе молча ничего не делала бы (тот же приём, что
+       у ссылки на статью — WikiArticle.copyLink). */
+    const copyTabLink = () => {
+        const link = buildWikiTabLink(tab, spaces.length > 1 ? activeSpace?.id : null);
+        if (!link) { showToast?.('Не удалось собрать ссылку', 'error'); return; }
+        // Подписываем ссылку ВКЛАДКОЙ: «скопировано» без имени не отвечает на
+        // вопрос «что именно я сейчас отправлю».
+        const label = tabs.find((t) => t.key === tab)?.label || 'раздел';
+        const ok = () => showToast?.(`Ссылка на «${label}» скопирована`, 'success');
+        const fallback = () => {
+            const field = document.createElement('textarea');
+            field.value = link;
+            field.setAttribute('readonly', '');
+            field.style.position = 'fixed';
+            field.style.opacity = '0';
+            document.body.appendChild(field);
+            field.select();
+            let copied = false;
+            try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+            document.body.removeChild(field);
+            if (copied) ok();
+            else showToast?.('Не удалось скопировать — адрес вкладки есть в адресной строке', 'error');
+        };
+        if (!navigator.clipboard?.writeText) { fallback(); return; }
+        navigator.clipboard.writeText(link).then(ok).catch(fallback);
+    };
 
     /* Заголовок раздела работает как логотип сайта: возвращает на главную вики
        из статьи, из выбранного раздела и с любой вкладки. Прокрутку сбрасываем
@@ -683,6 +774,20 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             }}
                             onAskAssistant={canAskAssistant ? askAssistant : null}
                         />
+
+                        {/* Ссылка на вкладку — рядом с «Обновить», одной кнопкой на
+                            весь раздел: адрес есть у каждой вкладки, и второй такой
+                            кнопки внутри вкладок быть не должно. Подпись скрыта на
+                            телефоне слоем оболочки (кнопки шапки там круглые). */}
+                        <button
+                            type="button"
+                            onClick={copyTabLink}
+                            className={iosBtnSecondary}
+                            title="Скопировать ссылку на эту вкладку"
+                            aria-label="Скопировать ссылку на эту вкладку"
+                        >
+                            <Link2 size={15} /> Ссылка
+                        </button>
 
                         <button type="button" onClick={refresh} className={iosBtnSecondary}>
                             <RefreshCw size={15} /> Обновить

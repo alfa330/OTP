@@ -95,6 +95,12 @@ class WiringTests(unittest.TestCase):
             'WikiCatalog.jsx': ('wiki-m-row',),
             'WikiIndexPanel.jsx': ('wiki-m-index',),
             'WikiParkRail.jsx': ('wiki-m-parks',),
+            # Офисы — вкладка со своим списком: заголовок с датой, поиск,
+            # легенда-фильтр и карточки группами по городам.
+            'WikiOffices.jsx': ('wiki-m-office-head', 'wiki-m-office-day',
+                                'wiki-m-office-tools', 'wiki-m-office-legend',
+                                'wiki-m-office-list', 'wiki-m-office-card', 'wiki-m-office-group'),
+            'OfficeInfoModal.jsx': ('wiki-m-office-actions',),
         }
         for name, names in hooks.items():
             source = (WIKI / name).read_text(encoding='utf-8')
@@ -135,6 +141,49 @@ class WeightTests(unittest.TestCase):
         shell = next(s for s, body in rules(SHELL) if 'flex-direction: column' in body and ':has(> .flex-1)' in s)
         mine = next(s for s, body in rules(LAYER) if 'flex-direction: row' in body)
         self.assertGreater(specificity(top_level_parts(mine)[0]), specificity(top_level_parts(shell)[0]))
+
+
+class OfficesTests(unittest.TestCase):
+    """Вкладка «Офисы» на телефоне (владелец 16.09.2026: «сделай адаптив, аккуратно,
+    удобно, в стиле iOS/macOS; применить только к мобильной версии»).
+
+    Три решения этой вкладки стилями не сделать, и каждое ломается молча: на
+    компьютере всё выглядит как прежде, а на телефоне возвращается таблица
+    шириной 860 px, ряд неработающих переключателей и подвал в две строки.
+    """
+
+    def setUp(self):
+        self.offices = (WIKI / 'WikiOffices.jsx').read_text(encoding='utf-8')
+        self.info = (WIKI / 'OfficeInfoModal.jsx').read_text(encoding='utf-8')
+        self.filters = (WIKI / 'OfficeFilters.jsx').read_text(encoding='utf-8')
+
+    def test_table_is_not_rendered_on_the_phone(self):
+        """Таблица ТЗ — шесть колонок и min-w-[860px]: на 390 px из неё видно
+        первую колонку и половину адреса, а статус, телефон и «Обновлено»
+        уезжают за край. Показанный вид считается отдельно от выбранного —
+        настольный выбор человека при этом сохраняется."""
+        self.assertIn("const shownView = isPhone ? 'cards1' : view;", self.offices)
+        self.assertIn("shownView === 'table'", self.offices)
+        self.assertNotIn("view === 'table'", self.offices)
+        self.assertIn("useIsMobileShell", self.offices)
+
+    def test_view_switch_is_hidden_on_the_phone(self):
+        """Две из трёх кнопок переключателя вида («Две в ряд», «Таблица») на
+        телефоне не про что — ряд неработающих кнопок и есть визуальный шум."""
+        self.assertIn('{!isPhone && (', self.offices)
+
+    def test_office_card_footer_drops_the_close_button_on_the_phone(self):
+        """На телефоне окно — экран, и уходят с него шевроном в шапке (IosModal
+        не рисует там крестика). «Закрыть» в подвале была бы вторым выходом, и
+        из-за неё три кнопки управляющего ломались на «Статус на / дату»."""
+        self.assertIn('{!isPhone && (', self.info)
+        self.assertIn('useIsMobileShell', self.info)
+
+    def test_filter_panel_is_full_width_on_the_phone(self):
+        """Панель фильтра ставит координаты ИНЛАЙН-стилем, и правило со стороны
+        слоя их не перебивает: ширину под телефон обязана считать сама панель."""
+        self.assertIn('useIsMobileShell', self.filters)
+        self.assertIn('isPhone ? Math.max(240, window.innerWidth - 32) : PANEL_WIDTH', self.filters)
 
 
 if __name__ == '__main__':

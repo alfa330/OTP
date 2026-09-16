@@ -753,3 +753,239 @@ body.mobile-shell .wiki-scope[class~="fixed"] [role="dialog"] > div:first-child 
     width: 32px;
     height: 32px;
 }
+
+/* ── 11. Офисы ───────────────────────────────────────────────────────────────
+
+   Вкладка «Офисы» отвечает на два вопроса: «где сегодня закрыто» и «куда ехать
+   и кому звонить». На компьютере первый ответ даёт таблица из шести колонок,
+   второй — карточка за нажатием на адрес. На телефоне таблицы нет вовсе
+   (WikiOffices.jsx: isPhone), и весь ответ несёт список карточек — поэтому
+   правила ниже собирают из него системный список iOS: серое полотно, белая
+   группа строк, разделители от текста, цветная кромка состояния слева.
+
+   Замер на стенде 390×844 ДО правок: таблица шириной 1291 px внутри экрана в
+   390 — видно первую колонку и обрезанный адрес; поле поиска схлопнулось в
+   лупу 44 px без единой буквы; ряд из семи органов управления (дата, стрелки,
+   поиск, фильтр, три вида, «Офис») стоял в две строки. */
+
+/* Шапка вкладки: заголовок строкой, дата — полосой под ним. В остаток строки
+   с заголовком дата со стрелками и «Сегодня» не помещается никогда. */
+body.mobile-shell .wiki-scope .wiki-m-office-head {
+    gap: 12px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-day {
+    width: 100%;
+    gap: 8px;
+}
+
+/* Сам пикер — на всю ширину за вычетом стрелок: дата тут не подпись, а орган
+   управления таблицей, и попадать по ней нужно пальцем. */
+body.mobile-shell .wiki-scope .wiki-m-office-day > div:has(> button[aria-haspopup="dialog"]) {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-day button[aria-haspopup="dialog"] {
+    width: 100%;
+    height: 40px;
+    justify-content: center;
+    padding: 0 12px;
+    font-size: 17px;
+    border-radius: 12px;
+}
+
+/* Стрелки — круглые кнопки 40×40. Отбор по aria-label: у «Сегодня» его нет, и
+   круглой кнопкой она стала бы подписью, обрезанной по кругу. */
+body.mobile-shell .wiki-scope .wiki-m-office-day > button[aria-label] {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-day > button:not([aria-label]) {
+    height: 40px;
+    padding: 0 14px;
+    border-radius: 12px;
+    font-size: 15px;
+}
+
+/* Поиск — своей строкой во всю ширину. Кегль 17 px: на меньшем Safari
+   приближает страницу при фокусе (то же правило, что у листа поиска). */
+body.mobile-shell .wiki-scope .wiki-m-office-tools {
+    gap: 8px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-tools > div:first-child {
+    flex: 1 0 100%;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-tools input {
+    height: 40px;
+    font-size: 17px;
+    border-radius: 12px;
+}
+
+/* «Фильтр» и «Офис» — две равные кнопки второй строкой. Заливка «Фильтра» —
+   системная: bg-slate-100 на сером полотне раздела читался как надпись без
+   кнопки. Синюю кнопку действия не трогаем — она и есть акцент строки. */
+body.mobile-shell .wiki-scope .wiki-m-office-tools > button {
+    flex: 1 1 0;
+    height: 40px;
+    border-radius: 12px;
+    font-size: 15px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-tools > button:not([class~="bg-blue-600"]) {
+    background: var(--wiki-m-fill);
+}
+
+/* Легенда состояний — она же фильтр. Перенос в две строки делал из неё абзац;
+   здесь это лента чипов от края до края, как вкладки раздела выше. */
+body.mobile-shell .main-content .wiki-scope .wiki-m-office-legend {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: none;
+    gap: 8px;
+    margin-inline: -16px;
+    padding: 2px 16px;
+    border-radius: 0;
+    background: transparent;
+    scrollbar-width: none;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-legend > button {
+    flex: 0 0 auto;
+    height: 34px;
+    padding: 0 12px;
+    border-radius: 999px;
+    font-size: 15px;
+    color: var(--wiki-ink);
+    background: var(--wiki-m-fill);
+}
+
+/* Выбранное состояние — заливка цветом текста, как у выбранной вкладки. */
+body.mobile-shell .wiki-scope .wiki-m-office-legend > button[class~="bg-slate-900"] {
+    color: var(--wiki-surface);
+    background: var(--wiki-ink);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-legend > span {
+    flex: 0 0 auto;
+    align-self: center;
+}
+
+/* Список — одна белая группа строк, а не стопка отдельных карточек: двадцать
+   плашек с тенью и обводкой на сером полотне читаются как двадцать разных
+   сущностей, хотя это один список. */
+body.mobile-shell .wiki-scope .wiki-m-office-list {
+    gap: 0;
+    overflow: hidden;
+    border-radius: 14px;
+    background: var(--wiki-surface);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-card {
+    border-radius: 0;
+    background: transparent;
+    /* box-shadow держит и тень, и обводку (ring-1 у Tailwind — это тень):
+       внутри группы не нужны обе. */
+    box-shadow: none;
+}
+
+/* Разделитель — от текста, а не от края, как в системных списках. ::before у
+   карточки занят цветной кромкой состояния, поэтому линия рисуется ::after. */
+body.mobile-shell .wiki-scope .wiki-m-office-card + .wiki-m-office-card::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 16px;
+    height: 0.5px;
+    background: var(--wiki-m-sep);
+    z-index: 11;
+}
+
+/* Строка карточки — сетка, а не ряд, и это не вкусовщина. В ряду бейдж
+   «Открыто до 18:00» занимает 180 px из 390, и названию офиса остаётся 150:
+   «Партнёрский пункт «Авто-Люкс»» вставал тремя строками, а адрес под ним —
+   двумя. Сеткой текст получает всю ширину, статус уходит под него отдельной
+   строкой, а шеврон держит правый край обеих.
+
+   display: grid здесь ещё и единственный способ перебить общий слой, не
+   умножая классы: перенос ряду он запрещает правилом (0,7,1), а СПОСОБ
+   раскладки не задаёт вовсе. */
+body.mobile-shell .wiki-scope .wiki-m-office-card > button {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 6px;
+    min-height: 56px;
+    padding: 10px 12px 10px 16px;
+}
+
+/* Название, город и адрес — первой строкой сетки. */
+body.mobile-shell .wiki-scope .wiki-m-office-card > button > div:first-child {
+    grid-area: 1 / 1;
+}
+
+/* Статус — второй строкой под текстом, прижат влево. */
+body.mobile-shell .wiki-scope .wiki-m-office-card > button > span {
+    grid-area: 2 / 1;
+    justify-self: start;
+}
+
+/* Шеврон — справа, по центру обеих строк. */
+body.mobile-shell .wiki-scope .wiki-m-office-card > button > svg:last-child {
+    grid-area: 1 / 2 / 3 / 3;
+    align-self: center;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-card > button:active {
+    background: var(--wiki-m-fill);
+}
+
+/* Название офиса — основной кегль iOS. В лестницу раздела 14,5 px не попадает:
+   ступени заканчиваются на 14. */
+body.mobile-shell .wiki-scope .wiki-m-office-card [class~="text-[14.5px]"] {
+    font-size: 17px;
+}
+
+/* Заголовок города — заголовок группы. Линия до правого края нужна была там,
+   где карточки заполнены только слева; в списке во всю ширину это лишняя
+   черта поперёк экрана. */
+body.mobile-shell .wiki-scope .wiki-m-office-group h3 {
+    font-size: 22px;
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-group > div:first-child > div[class~="h-px"] {
+    display: none;
+}
+
+/* Подвал карточки офиса. Он рисуется порталом в <body>, ВНЕ .wiki-scope, —
+   отсюда селектор от самой оболочки и заливка числом: переменные слоя
+   объявлены на .wiki-scope и сюда не достают.
+
+   Три действия управляющего в один ряд с кнопкой «Закрыть» не помещались:
+   подписи ломались на «Статус на / дату» и «В / архив», а «Закрыть» уезжала
+   второй строкой. «Закрыть» на телефоне убрана в разметке (уход — шевроном в
+   шапке), оставшиеся кнопки делят строку поровну и переносятся целиком. */
+body.mobile-shell .wiki-m-office-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+body.mobile-shell .wiki-m-office-actions > button {
+    flex: 1 1 auto;
+    height: 40px;
+    padding: 0 12px;
+    border-radius: 12px;
+    font-size: 15px;
+    white-space: nowrap;
+    /* tertiarySystemFill — та же заливка, что у круглых кнопок раздела. */
+    background: rgba(118, 118, 128, 0.12);
+}

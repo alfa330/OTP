@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Check, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { APPLE_FONT, IosToggle, iosGroupLabel } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import useIsMobileShell from '../common/useIsMobileShell';
 
 /* Фильтр офисов одной кнопкой.
  *
@@ -59,6 +60,12 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
     const [coords, setCoords] = useState(null);
     const btnRef = useRef(null);
     const popRef = useRef(null);
+    /* На телефоне панель шириной 268 px висела слева от кнопки, занимая две
+       трети экрана и оставляя справа пустую полосу, — окно, приколотое к углу.
+       Там она разворачивается во всю ширину, как лист снизу в iOS. Ширину
+       считаем здесь, а не в CSS: координаты панель ставит инлайн-стилем, и
+       правило со стороны стилей их не перебьёт. */
+    const isPhone = useIsMobileShell();
 
     const count = activeFilterCount(value);
     const isDefault = count === 0 && value.sort === DEFAULT_FILTERS.sort;
@@ -67,18 +74,29 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
         const el = btnRef.current;
         if (!el) return;
         const rect = el.getBoundingClientRect();
-        const spaceBelow = window.innerHeight - rect.bottom;
+        /* На телефоне низ экрана занят баром разделов, и панель, посчитанная до
+           края окна, ложилась поверх него: нижние условия («Показывать
+           архивные») оказывались на месте иконок бара. Край — верх бара. */
+        const bar = isPhone
+            ? document.querySelector('.mobile-tabbar[data-side="bottom"]')?.getBoundingClientRect()
+            : null;
+        const floor = bar ? Math.min(window.innerHeight, bar.top) : window.innerHeight;
+        const spaceBelow = floor - rect.bottom;
         const openUp = spaceBelow < 260 && rect.top > spaceBelow;
+        const width = isPhone ? Math.max(240, window.innerWidth - 32) : PANEL_WIDTH;
         setCoords({
-            left: Math.min(window.innerWidth - PANEL_WIDTH - 8,
-                           Math.max(8, Math.round(rect.right - PANEL_WIDTH))),
+            width,
+            left: isPhone
+                ? 16
+                : Math.min(window.innerWidth - width - 8,
+                           Math.max(8, Math.round(rect.right - width))),
             top: openUp ? undefined : Math.round(rect.bottom + 6),
             bottom: openUp ? Math.round(window.innerHeight - rect.top + 6) : undefined,
             // Высоту не считаем заранее (состав панели меняется) — ограничиваем
             // доступным местом и разрешаем прокрутку внутри.
             maxHeight: Math.max(200, (openUp ? rect.top : spaceBelow) - 16),
         });
-    }, []);
+    }, [isPhone]);
 
     useLayoutEffect(() => { if (open) recompute(); }, [open, recompute]);
 
@@ -171,7 +189,7 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
                     style={{
                         position: 'fixed',
                         left: coords.left,
-                        width: PANEL_WIDTH,
+                        width: coords.width || PANEL_WIDTH,
                         top: coords.top,
                         bottom: coords.bottom,
                         maxHeight: coords.maxHeight,

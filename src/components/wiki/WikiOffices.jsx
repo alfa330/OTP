@@ -9,6 +9,7 @@ import {
     IosBadge, IosModal,
 } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
+import useIsMobileShell from '../common/useIsMobileShell';
 import useStableCallback from './useStableCallback';
 import OfficeEditor from './OfficeEditor';
 import OfficeFilters, { DEFAULT_FILTERS, SORT_OPTIONS } from './OfficeFilters';
@@ -78,7 +79,7 @@ const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
     const absent = status.state === 'absent';
 
     return (
-        <div className={`${iosCard} relative overflow-hidden before:absolute before:inset-y-0 before:left-0 before:z-10 before:w-[3px] ${DAY_STATE_EDGE[status.state] || ''}`}>
+        <div className={`${iosCard} wiki-m-office-card relative overflow-hidden before:absolute before:inset-y-0 before:left-0 before:z-10 before:w-[3px] ${DAY_STATE_EDGE[status.state] || ''}`}>
             {/* Вся карточка — одна кнопка: цель нажатия «адрес» на ощупь должна
                 быть строкой, а не подчёркнутыми буквами в ней. Кнопки правки
                 здесь больше нет намеренно — вложенная кнопка в кнопке
@@ -183,6 +184,15 @@ const readPrefs = () => {
 export default function WikiOffices({ base, headers, showToast, spaceId = null }) {
     const toast = useStableCallback(showToast);
     const prefs = useMemo(readPrefs, []);
+    /* НА ТЕЛЕФОНЕ ТАБЛИЦЫ НЕТ, и это не упрощение вёрстки. Таблица ТЗ — шесть
+       колонок и 860 px минимальной ширины; на экране 390 px из неё видно первую
+       колонку и половину адреса, а статус, телефон и «Обновлено» уезжают за
+       край. То есть ответ на вопрос, ради которого раздел и заводили («где
+       сегодня закрыто»), на телефоне лежал за горизонтальной прокруткой.
+       Карточка отвечает на него целиком: адрес, статус и вход в подробности.
+       Настольный выбор вида при этом не трогаем — он лежит в localStorage и
+       ждёт человека за компьютером. */
+    const isPhone = useIsMobileShell();
 
     /* Пространство едет в КАЖДОМ запросе вкладки, а не только в списке:
        справочник офисов принадлежит пространству, и на офис соседней вики
@@ -436,9 +446,13 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
     // Одна карточка в ряд или две — выбор человека, а не порог экрана: прежняя
     // сетка включала вторую колонку сама от 2xl и никого не спрашивала. На узком
     // экране колонка всё равно одна: две по 300 px нечитаемы.
-    const grid = view === 'cards2'
-        ? 'grid grid-cols-1 gap-3 lg:grid-cols-2'
-        : 'grid grid-cols-1 gap-3';
+    /* Вид, который ФАКТИЧЕСКИ показан: на телефоне всегда карточки в один ряд
+       (см. isPhone выше), на компьютере — выбранный человеком. */
+    const shownView = isPhone ? 'cards1' : view;
+
+    const grid = shownView === 'cards2'
+        ? 'grid grid-cols-1 gap-3 lg:grid-cols-2 wiki-m-office-list'
+        : 'grid grid-cols-1 gap-3 wiki-m-office-list';
 
     const renderCard = (office, showCity) => (
         <OfficeCard
@@ -459,7 +473,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                 отвечает на другой вопрос — «работает ли офис в этот день». Пара
                 «название + подпись» и говорит, что таблицей управляет дата
                 справа, без чего календарь читается как фильтр по одному дню. */}
-            <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+            <div className="wiki-m-office-head flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
                 <div className="min-w-0">
                     <h2 className="text-[19px] font-semibold leading-tight tracking-tight text-slate-900">
                         Статус офисов по городам
@@ -473,7 +487,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                     статус будущего дня — это график, а не факт. Стрелки нужны
                     затем, что типовой вопрос — «а позавчера?», и открывать ради
                     одного дня календарь незачем. */}
-                <div className="flex shrink-0 items-center gap-1">
+                <div className="wiki-m-office-day flex shrink-0 items-center gap-1">
                     <button
                         type="button"
                         onClick={() => setDayISO(shiftDay(dayISO, -1))}
@@ -514,7 +528,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                 датой они складывались в семь элементов подряд, и дата, которой
                 таблица и управляется, стояла в этом ряду наравне с кнопкой
                 «Офис». */}
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="wiki-m-office-tools flex flex-wrap items-center gap-2">
                 <div className="relative min-w-[200px] flex-1">
                     <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
@@ -533,6 +547,11 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                     canManage={canManage}
                 />
 
+                {/* Переключатель вида на телефоне не рисуем вовсе: две из трёх
+                    его кнопок («Две в ряд», «Таблица») там не про что —
+                    показать нечего, а ряд неработающих переключателей и есть
+                    тот самый визуальный шум. */}
+                {!isPhone && (
                 <div className="flex shrink-0 rounded-xl bg-slate-100 p-1">
                     {VIEWS.map(({ key, label, icon: Icon }) => (
                         <button
@@ -552,6 +571,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                         </button>
                     ))}
                 </div>
+                )}
 
                 {canManage && (
                     <button type="button" className={iosBtnPrimary} onClick={() => setDraft(emptyDraft())}>
@@ -569,7 +589,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                 полю читались как случайные слова над таблицей, а не как ключ
                 к её цветам. */}
             {!loading && offices.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
+                <div className="wiki-m-office-legend flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
                     {DAY_LEGEND.map((item) => {
                         const count = counts[item.state] || 0;
                         const active = stateFilter === item.state;
@@ -625,7 +645,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                 </div>
             )}
 
-            {!loading && visible.length > 0 && view === 'table' && (
+            {!loading && visible.length > 0 && shownView === 'table' && (
                 <OfficeTable
                     offices={visible}
                     groups={groups}
@@ -642,7 +662,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                 />
             )}
 
-            {!loading && visible.length > 0 && view !== 'table' && (
+            {!loading && visible.length > 0 && shownView !== 'table' && (
                 groups
                     /* Между городами воздуха больше, чем между карточками внутри
                        города: одинаковый отступ и делал список сплошным, а
@@ -655,7 +675,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null }
                        читалась как другой уровень, а не как тот же. */
                     ? <div className="space-y-5">
                         {groups.map((group) => (
-                            <section key={group.city} className="space-y-2.5">
+                            <section key={group.city} className="wiki-m-office-group space-y-2.5">
                                 <div className="flex items-baseline gap-3">
                                     <h3 className="text-[20px] font-semibold leading-none tracking-tight text-slate-900">
                                         {group.city}

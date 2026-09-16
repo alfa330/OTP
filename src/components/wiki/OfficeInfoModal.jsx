@@ -6,6 +6,7 @@ import {
 import {
     iosBtnGhost, iosBtnSecondary, iosGroupLabel, IosBadge, IosModal,
 } from '../ui/ios';
+import useIsMobileShell from '../common/useIsMobileShell';
 import OfficeMap from './OfficeMap';
 import { OfficeStatusBadge } from './officeBadges';
 import {
@@ -37,6 +38,11 @@ export default function OfficeInfoModal({
     office, base, dayISO, isToday, tick, canManage,
     onClose, onCopyAddress, onEdit, onArchive, onRestore, onMarkDay,
 }) {
+    /* На телефоне окно — экран, и уходят с него шевроном в шапке (IosModal):
+       крестика там нет намеренно. «Закрыть» в подвале была бы второй кнопкой
+       того же действия — а из-за неё три кнопки управляющего не помещались в
+       строку и ломались на «Статус на / дату» и «В / архив». */
+    const isPhone = useIsMobileShell();
     const status = officeDayStatus(office, dayISO);
     const absent = status.state === 'absent';
 
@@ -58,7 +64,7 @@ export default function OfficeInfoModal({
             footer={(
                 <>
                     {canManage && (
-                        <div className="mr-auto flex items-center gap-1">
+                        <div className="wiki-m-office-actions mr-auto flex items-center gap-1">
                             {!absent && (
                                 <button
                                     type="button"
@@ -82,9 +88,11 @@ export default function OfficeInfoModal({
                             )}
                         </div>
                     )}
-                    <button type="button" className={iosBtnSecondary} onClick={onClose}>
-                        Закрыть
-                    </button>
+                    {!isPhone && (
+                        <button type="button" className={iosBtnSecondary} onClick={onClose}>
+                            Закрыть
+                        </button>
+                    )}
                 </>
             )}
         >
