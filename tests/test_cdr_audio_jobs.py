@@ -143,6 +143,14 @@ class BridgeAudioTests(unittest.TestCase):
         statuses = [p['status'] for path, p in self.posts if path == 'audio']
         self.assertEqual(statuses, ['error', 'ok'])
 
+    def test_failures_alone_are_not_work(self):
+        # Иначе мост шёл бы за следующим заказом без паузы и сжигал попытки за секунды.
+        self.bridge._post = lambda path, payload: (self.posts.append((path, payload))
+                                                   or ({'jobs': [self.job()]} if path == 'audio_poll' else {}))
+        self.bridge.records_session = _RecordsSession(_Response(403, b''))
+        self.assertFalse(self.bridge.do_audio_jobs())
+        self.assertEqual(self.posts[-1][1]['status'], 'error')
+
     def test_portal_outage_on_poll_is_not_fatal(self):
         def failing(path, payload):
             raise RuntimeError('портал лёг')

@@ -642,9 +642,11 @@ def filter_values(cursor, day_from, day_to):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Заказ записи: после стольких попыток остаётся в error; «в работе» дольше
-# STALE_MINUTES считается брошенным (мост умер) и выдаётся снова.
+# STALE_MINUTES считается брошенным (мост умер) и выдаётся снова; повтор после
+# отказа — не раньше RETRY_MINUTES.
 AUDIO_MAX_ATTEMPTS = 3
 AUDIO_STALE_MINUTES = 15
+AUDIO_RETRY_MINUTES = 5
 
 
 def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0, max_talk=0,
@@ -698,7 +700,12 @@ def claim_audio_jobs(cursor, agent_id, limit=3):
         WITH next AS (
             SELECT id FROM cdr_audio_jobs
              WHERE attempts < %(max_attempts)s
-               AND (status = 'pending'
+               AND ((status = 'pending'
+                     -- Повтор после отказа — не раньше чем через несколько минут: мост после
+                     -- заказа сразу идёт за следующим, и без паузы три попытки сгорали за
+                     -- секунды на одной и той же причине (16.09.2026: 403 прокси записей).
+                     AND (attempts = 0 OR claimed_at IS NULL
+                          OR claimed_at < NOW() - make_interval(mins => %(retry)s)))
                     OR (status = 'running'
                         AND claimed_at < NOW() - make_interval(mins => %(stale)s)))
              ORDER BY requested_at
@@ -712,9 +719,24 @@ def claim_audio_jobs(cursor, agent_id, limit=3):
          WHERE j.id = next.id
      RETURNING j.id, j.linkedid, j.recording_url, j.attempts
     """, {'max_attempts': AUDIO_MAX_ATTEMPTS, 'stale': AUDIO_STALE_MINUTES,
-          'limit': int(limit), 'agent': str(agent_id or '')[:120]})
+          'retry': AUDIO_RETRY_MINUTES, 'limit': int(limit), 'agent': str(agent_id or '')[:120]})
     return [{'id': int(row[0]), 'linkedid': row[1], 'recording_url': row[2], 'attempts': row[3]}
             for row in cursor.fetchall()]
+
+
+def retry_audio_job(cursor, imported_call_id):
+    """Вернуть заказ записи строки пула в очередь с чистым счётчиком попыток.
+
+    Зовётся, когда человек открыл запись, а её нет: причина отказа (прокси, сервер записей)
+    могла быть уже устранена, и три сгоревшие попытки не должны хоронить запись навсегда.
+    Возвращает True, если заказ был в финальном состоянии и снова поставлен."""
+    cursor.execute("""
+        UPDATE cdr_audio_jobs
+           SET status = 'pending', attempts = 0, claimed_at = NULL, claimed_by = NULL,
+               finished_at = NULL, error = NULL
+         WHERE imported_call_id = %s AND status IN ('error', 'missing')
+    """, (int(imported_call_id),))
+    return bool(cursor.rowcount)
 
 
 def audio_job(cursor, job_id):

@@ -26560,7 +26560,16 @@ def _ensure_imported_call_audio(imported_id, rec=None):
     if notes.endswith(':cdr'):
         # Записи отдела продаж портал сам не достаёт: файловый сервер виден только из
         # корпоративной сети, файл приносит мост по заказу (cdr_audio_jobs). Пока его
-        # нет — честное «запись ещё готовится», а не поход в Oktell по отделу.
+        # нет — честное «запись ещё готовится», а не поход в Oktell по отделу. Заказ,
+        # сгоревший на отказах, при этом возвращается в очередь: причина (прокси, сервер
+        # записей) к моменту, когда человек нажал «слушать», обычно уже устранена.
+        try:
+            from cdr import queries as cdr_queries
+            with db._get_cursor() as cursor:
+                if cdr_queries.retry_audio_job(cursor, imported_id):
+                    logging.info("cdr audio job re-queued on demand (imported_call=%s)", imported_id)
+        except Exception:
+            logging.exception("cdr audio job retry failed (imported_call=%s)", imported_id)
         return None
     is_oktell = notes.endswith(':oktell')
     if not is_oktell:

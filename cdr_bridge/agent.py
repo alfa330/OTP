@@ -413,12 +413,15 @@ class Bridge:
             log.warning('Записи: портал не ответил на опрос заказов: %s', exc)
             return False
         jobs = answer.get('jobs') or []
+        delivered = 0
         for job in jobs:
             try:
-                self.do_audio(job)
+                delivered += 1 if self.do_audio(job) else 0
             except Exception as exc:  # noqa: BLE001
                 log.error('Запись %s: заказ не выполнен: %s', job.get('linkedid'), exc)
-        return bool(jobs)
+        # «Работа была» — только доставленные файлы: отказ не повод идти за следующим
+        # заказом без паузы, иначе попытки сгорают за секунды на одной причине.
+        return delivered > 0
 
     def _report_audio(self, job_id, status, error):
         self._post('audio', {'job_id': job_id, 'status': status, 'error': str(error)[:400]})
