@@ -1,0 +1,176 @@
+/* ── «Учет часов» на телефоне ────────────────────────────────────────────────
+
+   Разметка — HoursAccountingMobile.jsx и ветка isMobileShell в
+   HoursAccountingView (App.jsx). Заголовок, подписи групп, разделители строк и
+   колесо месяцев — общие с «Аукционом смен» (sa-m-*, shift-auction-mobile.css,
+   подключается из того же модуля). Здесь только то, чего там нет.
+
+   ВСЁ ЗАПЕРТО НА body.mobile-shell — на компьютере не срабатывает ни одно
+   правило (страж: tests/test_hours_accounting_mobile.py). Своих цветов нет:
+   тёмный слой портала перекрашивает утилиты Tailwind, а hex отсюда не видит.
+
+   ВЕС СЕЛЕКТОРОВ. Общий слой разделов (mobile-shell.css) и слой моторики
+   задают поля, высоты и вид полей ввода внутри .main-content весом (0,2,2).
+   Поэтому у правил ниже в селекторе три класса: иначе поле получило бы рамку
+   и высоту 40 px от `.main-content input`, а сетка календаря свелась бы к
+   двум колонкам. */
+
+/* Корень раздела: колонка групп с полями экрана. На компьютере тот же узел —
+   белая карточка с тенью, и она здесь не нужна вовсе. */
+body.mobile-shell .main-content .ha-m-root {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 0 16px 24px;
+}
+
+/* Календарь — семь колонок ровно в ширину карточки. Сетка задана классом, а
+   не утилитой grid-cols-7: общий слой разделов сводит многоколоночные сетки
+   к двум колонкам. */
+body.mobile-shell .main-content .ha-m-root .ha-m-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px;
+}
+
+/* Ячейка дня — кнопка под палец: число, значение и метки в три строки. Серая
+   вспышка нажатия поверх заливки читалась бы как смена цвета дня. */
+body.mobile-shell .main-content .ha-m-root .ha-m-cell {
+    min-height: 54px;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Поле-число в строке: плашка у правого края, как «Порт» в настройках iOS.
+   16 px — порог, ниже которого iOS приближает страницу при фокусе. Стрелки
+   счётчика сняты: на телефоне по ним не попасть, а место они занимают. */
+body.mobile-shell .main-content .ha-m-root .ha-m-num {
+    width: 96px;
+    flex: none;
+    height: 34px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--sheet-active);
+    color: inherit;
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+body.mobile-shell .main-content .ha-m-root .ha-m-num::-webkit-outer-spin-button,
+body.mobile-shell .main-content .ha-m-root .ha-m-num::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+body.mobile-shell .main-content .ha-m-root .ha-m-num:disabled {
+    opacity: 0.55;
+}
+
+/* Поле-строка (комментарий, имена друзей, ссылки) — во всю ширину карточки. */
+body.mobile-shell .main-content .ha-m-root .ha-m-text {
+    display: block;
+    width: 100%;
+    height: 36px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--sheet-active);
+    color: inherit;
+    font-size: 16px;
+}
+
+/* Дата и время — системные колёса iOS. Ширина фиксированная, чтобы строки
+   «Начало» и «Окончание» не плясали друг относительно друга. */
+body.mobile-shell .main-content .ha-m-root .ha-m-time {
+    flex: none;
+    height: 34px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--sheet-active);
+    color: inherit;
+    font-size: 16px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* Список причин и типов — системный, но плашкой, а не полем с рамкой:
+   вес выше, чем у `.main-content select` из mobile-motion.css (0,2,2). */
+body.mobile-shell .main-content .ha-m-root select.ha-m-select {
+    flex: none;
+    height: 34px;
+    max-width: 60%;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--sheet-active);
+    color: inherit;
+    font-size: 16px;
+    -webkit-appearance: none;
+    appearance: none;
+    text-align: right;
+}
+
+body.mobile-shell .main-content .ha-m-root select.ha-m-select--wide {
+    display: block;
+    width: 100%;
+    max-width: none;
+    text-align: left;
+}
+
+/* «Добавить» в подписи группы — текстовая кнопка, как «Изменить» в списках
+   iOS. Круглая с плюсом на этом месте читалась бы как часть заголовка. */
+body.mobile-shell .main-content .ha-m-root .ha-m-add {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    height: 28px;
+    padding: 0 4px;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+body.mobile-shell .main-content .ha-m-root .ha-m-add:disabled {
+    opacity: 0.5;
+}
+
+/* Круглые кнопки правки и удаления в строке записи — мишень 32×32, как того
+   требуют мобильные рекомендации; сама иконка остаётся 17 px. */
+body.mobile-shell .main-content .ha-m-root .ha-m-icon {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+}
+
+body.mobile-shell .main-content .ha-m-root .ha-m-icon:disabled {
+    opacity: 0.4;
+}
+
+/* Единица измерения после поля: «176 ч». Ширина фиксирована, чтобы поля в
+   соседних строках стояли в одну линию, даже когда у части единицы нет. */
+body.mobile-shell .main-content .ha-m-root .ha-m-unit {
+    width: 14px;
+    text-align: left;
+}
+
+/* Окно тренинга приходит из App.jsx готовой разметкой: затемнение на z-40 и
+   карточка на z-50. Экран дня — общий примитив окна, он стоит на 120 и
+   накрывает их целиком, поэтому «Добавить тренинг» открывалось невидимым.
+   Поднимаем ровно этот слой; порядок затемнения и карточки задаёт разметка. */
+body.mobile-shell .main-content .ha-m-root .ha-m-training {
+    display: contents;
+}
+
+body.mobile-shell .main-content .ha-m-root .ha-m-training > div {
+    z-index: 130;
+}

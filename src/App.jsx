@@ -205,6 +205,7 @@ const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditMo
 const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
 const SessionsMobileView = lazyWithRetry(() => import('./components/sessions/SessionsMobileView'));
 const EmployeesMobileView = lazyWithRetry(() => import('./components/employees/EmployeesMobileView'));
+const HoursAccountingMobileView = lazyWithRetry(() => import('./components/hours/HoursAccountingMobile'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -3647,6 +3648,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const d = new Date();
             return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         });
+
+        /* Телефонная раскладка раздела (HoursAccountingMobile.jsx). Признак
+           один на весь портал — src/utils/mobileShell.js; ветка стоит ПЕРЕД
+           настольной разметкой, после всех хуков раздела. */
+        const isHoursPhone = useIsMobileShell();
 
         const [operators, setOperators] = useState([]);
         const [trainingsMap, setTrainingsMap] = useState({}); // { operatorId: { dayNum: [trainings...] } }
@@ -7152,6 +7158,178 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const hoursSummaryColClass = 'shrink-0 p-2 text-center border-l';
         const lowRatingAttentionCount = lowRatingFilterCount('attention');
         const lowRatingUnreviewedCount = Number(lowRatingSummary?.unreviewed || 0);
+
+        /* ТЕЛЕФОН. Настольный вид ниже — таблица в тридцать шесть колонок,
+           которую листают вбок внутри вертикальной прокрутки; на экране 390 px
+           от неё видно два столбца. Здесь раздел разложен по уровням: отбор
+           строками, операторы списком с одним числом выбранного показателя,
+           месяц оператора экраном, день — экраном с правкой
+           (src/components/hours/HoursAccountingMobile.jsx). Данные, права,
+           запросы и все формулы остаются здесь, общие с компьютером; там
+           только раскладка. Настольная разметка не тронута ни на строку.
+
+           Загрузка файла на день, импорт и синхронизация чат-метрик, окна
+           наплыва, «Низкие оценки» и база лидов ОП на телефон не вынесены:
+           это работа с файлами и многоколоночными панелями, ради которой
+           открывают компьютер. */
+        if (isHoursPhone) {
+            const phoneHelpers = {
+                trainingHours: computeUniqueTrainingDurationHours,
+                technicalHours: computeTechnicalIssueDurationHours,
+                offlineHours: computeOfflineActivityDurationHours,
+                noPhoneHours: computeNoPhoneHoursFromDaily,
+            };
+            return (
+                <Suspense fallback={null}>
+                    <HoursAccountingMobileView
+                        month={month}
+                        onMonthChange={setMonth}
+                        isLoading={isLoading}
+                        emptyText={isAdminWithoutSupervisorSelected ? 'Выберите группу' : 'Операторы не найдены'}
+                        scope={{
+                            reportScope,
+                            onReportScope: setReportScope,
+                            groups: (groupsList || []).filter(g => g.status !== 'archived'),
+                            selectedGroupId,
+                            onSelectGroup: (value) => {
+                                setSelectedGroupId(value);
+                                if (value) {
+                                    // Тот же побочный эффект, что у настольного списка групп:
+                                    // СВ группы нужен вспомогательным запросам и загрузке часов.
+                                    const group = (groupsList || []).find(item => String(item.id) === String(value));
+                                    const svId = (group && Array.isArray(group.supervisors) && group.supervisors.length) ? group.supervisors[0].id : '';
+                                    setSelectedSvId(svId ? String(svId) : '');
+                                }
+                            },
+                            directionOptions,
+                            selectedDirections,
+                            onSelectDirections: setSelectedDirections,
+                            onToggleDirection: toggleDirectionSelection,
+                            operatorsTab: operatorsViewTab,
+                            onOperatorsTab: setOperatorsViewTab,
+                            activeCount,
+                            firedCount,
+                        }}
+                        metrics={{ tabs: VIEW_TABS, selectedTab, onSelectTab: setSelectedTab }}
+                        data={{
+                            groupedByDirection,
+                            footer: footerTotals,
+                            days: daysArray,
+                            monthRelation: monthRel,
+                            todayDay: todayD,
+                            trainingsMap,
+                            technicalIssuesMap,
+                            offlineActivitiesMap,
+                            tezSuccessMap,
+                            isChatModel,
+                            isTezOpContext,
+                            scales: {
+                                work: maxWork,
+                                trainings: maxTrainingsHours,
+                                technical: maxTechnicalIssuesHours,
+                                offline: maxOfflineActivitiesHours,
+                                noPhone: maxNoPhoneHours,
+                            },
+                            helpers: phoneHelpers,
+                            isFired: isFiredLikeOperator,
+                            dismissalDate: formatDismissalDate,
+                            chatAverageFor: getWeightedChatAverage,
+                            responseAverageFor: (op) => {
+                                const values = daysArray
+                                    .map(day => op.daily?.[String(day)]?.chat_metrics?.avg_response_time_seconds)
+                                    .filter(value => value != null && value !== '' && Number(value) > 0)
+                                    .map(Number);
+                                return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+                            },
+                            planFor: (op, totals) => {
+                                if (!showTezPlanColumn) return null;
+                                if (String(op?.calculation_model_code || op?.calculationModelCode || '').trim() !== 'tez_op') return null;
+                                const result = calculateTezOpMonthlyPlan({
+                                    planPerFte: tezPlanPerFte,
+                                    rate: op.rate,
+                                    normHours: totals.norm,
+                                    factHours: totals.displayedTotal,
+                                    hireDate: op.hire_date,
+                                    month,
+                                });
+                                return result?.plan ?? null;
+                            },
+                        }}
+                        actions={{
+                            onRefresh: fetchDailyHoursAndTrainings,
+                            onDownloadReport: downloadMonthlyReport,
+                            isDownloadingReport,
+                            onNormChange: handleNormChange,
+                        }}
+                        day={{
+                            selectedCell,
+                            cellModel,
+                            isSaving: isSavingCell,
+                            onOpenDay: openCellDetail,
+                            onOpenForeignDay: (op, day) => {
+                                // Чужой день переведённого оператора: на компьютере нажатие
+                                // по замку переключает группу — здесь ровно то же.
+                                const segment = (Array.isArray(op?.group_segments) ? op.group_segments : [])
+                                    .find(item => day >= item.start_day && day <= item.end_day);
+                                if (segment) setSelectedGroupId(String(segment.group_id));
+                            },
+                            onClose: closeCellModal,
+                            onSave: saveCell,
+                            updateField: updateCellField,
+                            updateChatMetric: updateChatMetricField,
+                            addFine,
+                            updateFine: updateFineField,
+                            removeFine,
+                            addBonus,
+                            updateBonus: updateBonusField,
+                            removeBonus,
+                            bonusAmount: computeBonusAmountByType,
+                            clearFields: clearCellFields,
+                        }}
+                        activities={{
+                            getTrainings: getTrainingsFor,
+                            getTechnical: getTechnicalIssuesFor,
+                            getOffline: getOfflineActivitiesFor,
+                            trainingDuration: computeTrainingDurationHours,
+                            technicalDuration: computeTechnicalIssueDurationHours,
+                            offlineDuration: computeOfflineActivityDurationHours,
+                            onAddTraining: (operatorId, day) => openTrainingModalForDay(operatorId, day),
+                            onEditTraining: (operatorId, day, item) => openTrainingModalForDay(operatorId, day, item),
+                            onDeleteTraining: handleTrainingDeleteFromModal,
+                            trainingBusy: isTrainingActionLoading,
+                            onDeleteTechnical: handleTechnicalIssueDeleteFromModal,
+                            technicalBusy: isTechnicalIssueActionLoading,
+                            onAddOffline: (operatorId, day) => openOfflineActivityModalForDay(operatorId, day),
+                            onEditOffline: (operatorId, day, item) => openOfflineActivityModalForDay(operatorId, day, item),
+                            onDeleteOffline: handleOfflineActivityDeleteFromModal,
+                            offlineBusy: isOfflineActivityActionLoading,
+                        }}
+                        offlineModal={{
+                            state: offlineActivityModalState,
+                            error: offlineActivityModalError,
+                            onChange: updateOfflineActivityModalField,
+                            onSave: handleOfflineActivitySaveFromModal,
+                            onClose: closeOfflineActivityModal,
+                            busy: isOfflineActivityActionLoading,
+                        }}
+                        trainingModal={TrainingModalComponent && trainingModalState?.open ? (
+                            <TrainingModalComponent
+                                isOpen={trainingModalState.open}
+                                onClose={closeTrainingModal}
+                                onSave={handleTrainingSaveFromModal}
+                                initialData={trainingModalState.training ? { ...trainingModalState.training, date: trainingModalState.date || trainingModalState.training.date } : { date: trainingModalState.date }}
+                                selectedOperators={operators
+                                    .filter(op => Number(op?.operator_id) === Number(trainingModalState.operatorId))
+                                    .map(op => ({ id: op.operator_id, name: op.name }))}
+                                selectedOperatorIds={trainingModalState.operatorId ? [Number(trainingModalState.operatorId)] : []}
+                                selectableOperators={operators.map(op => ({ id: op.operator_id, name: op.name }))}
+                                existingTrainingsByOperator={trainingsMap}
+                            />
+                        ) : null}
+                    />
+                </Suspense>
+            );
+        }
 
         return (
             <div className="bg-white p-5 rounded-xl shadow-md">
