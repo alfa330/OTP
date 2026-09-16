@@ -99,6 +99,9 @@ import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { createAuthRetryingFetch, createAxiosAuthErrorHandler, createSharedAuthRefresh, watchAuthTokensFromOtherTabs } from './utils/authRefresh';
 import { applyDarkTheme, canUseDarkTheme, readStoredDarkTheme, storeDarkTheme } from './utils/darkTheme';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
+import {
+    WIKI_SPACE_QUERY_PARAM, WIKI_TAB_QUERY_PARAM,
+} from './components/wiki/tabLink';
 /* Из модуля адреса, а не из самого раздела: WazzupChatsView грузится lazy, и
    импорт компонента ради двух функций утащил бы его в основной бандл. */
 import { WAZZUP_CHAT_QUERY_PARAM, readWazzupChatTargetFromSearch } from './components/wazzup/chatLink';
@@ -2630,6 +2633,11 @@ const buildAppViewUrl = (nextView) => {
         }
         if (nextView !== 'wiki') {
             url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
+            /* Вкладка и пространство вики — метки того же раздела (tabLink.js):
+               без снятия адрес «Задач» унёс бы с собой tab=offices, и Ctrl-клик
+               по пункту меню открыл бы новую вкладку с чужой меткой. */
+            url.searchParams.delete(WIKI_TAB_QUERY_PARAM);
+            url.searchParams.delete(WIKI_SPACE_QUERY_PARAM);
         }
         /* Та же история с меткой чата Wazzup: без снятия Ctrl-клик по любому
            пункту меню унёс бы чужой chat= в новую вкладку. */
@@ -2671,6 +2679,10 @@ const syncAppViewWithUrl = (nextView) => {
            «задач» унёс бы с собой чужой слаг. */
         if (nextView !== 'wiki') {
             url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
+            // Метку вкладки ставит и снимает сам раздел (tabLink.js), уход из
+            // него она уже не видит — снимаем здесь.
+            url.searchParams.delete(WIKI_TAB_QUERY_PARAM);
+            url.searchParams.delete(WIKI_SPACE_QUERY_PARAM);
         }
         /* Метку чата — так же (chatLink.js). Условие обязано быть именно
            «не wazzup_chats»: снятие без него стёрло бы диплинк сразу после
