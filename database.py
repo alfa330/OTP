@@ -11399,6 +11399,16 @@ class Database:
     SHIFT_AUCTION_CLAIM_STAGE_AUCTION = 'auction'
     SHIFT_AUCTION_CLAIM_STAGE_POST = 'post_auction'
 
+    # Дата, в которой взятый КУСОК смены реально начинается. Кусок хранится двумя
+    # временами без даты, а дату ему даёт исходная смена — и у ночи 20:00–08:00
+    # хвост 00:00–08:00 принадлежит уже СЛЕДУЮЩЕМУ дню. Без этого сдвига ночь
+    # уезжает в график на сутки назад: 16.09.2026 так вышло две ночи в среду и
+    # пустая ночь на четверг. Алиасы sh/hc обязаны совпадать с запросом.
+    SHIFT_AUCTION_CLAIM_DATE_SQL = (
+        "(sh.shift_date + CASE WHEN sh.end_time <= sh.start_time "
+        "AND hc.claimed_start_time < sh.start_time THEN 1 ELSE 0 END)"
+    )
+
     def _get_shift_auction_operator_claimed_intervals_tx(self, cursor, operator_id,
                                                          direction_mode=SHIFT_AUCTION_MODE_LINE):
         """Всё, что оператор уже занял в ЭТОМ аукционе: целые лоты и взятые части смен.
@@ -11407,7 +11417,7 @@ class Database:
         забравший кусок получил бы в норму всю смену.
         """
         mode = normalize_shift_auction_mode(direction_mode)
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT
                 to_char(l.shift_date, 'YYYY-MM-DD') AS shift_date,
                 to_char(COALESCE(l.post_claim_start_time, l.start_time), 'HH24:MI') AS start_time,
@@ -11426,7 +11436,7 @@ class Database:
               )
             UNION ALL
             SELECT
-                to_char(sh.shift_date, 'YYYY-MM-DD') AS shift_date,
+                to_char({self.SHIFT_AUCTION_CLAIM_DATE_SQL}, 'YYYY-MM-DD') AS shift_date,
                 to_char(hc.claimed_start_time, 'HH24:MI') AS start_time,
                 to_char(hc.claimed_end_time, 'HH24:MI') AS end_time,
                 '[]'::jsonb AS breaks
@@ -12989,7 +12999,7 @@ class Database:
             # В графики уезжают и целые лоты, и ЧАСТИ смен, взятые в ходе аукциона
             # (чат): последние лежат в shift_auction_historical_claims, а сам лот при
             # этом мог остаться 'available' — свободный кусок ещё ждёт хозяина.
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT claimed_by, shift_date, start_time, end_time
                 FROM (
                     SELECT l.claimed_by, l.shift_date, l.start_time, l.end_time,
@@ -13006,7 +13016,8 @@ class Database:
                             AND hc.claimed_end_time IS NOT NULL
                       )
                     UNION ALL
-                    SELECT hc.claimed_by, sh.shift_date, hc.claimed_start_time, hc.claimed_end_time,
+                    SELECT hc.claimed_by, {self.SHIFT_AUCTION_CLAIM_DATE_SQL} AS shift_date,
+                           hc.claimed_start_time, hc.claimed_end_time,
                            hc.claimed_at AS ordered_at, sh.id AS ordered_id
                     FROM shift_auction_historical_claims hc
                     JOIN resource_saved_schedule_shifts sh
@@ -13059,6 +13070,7 @@ class Database:
 
             first_date = min(lot_dates)
             last_date = max(lot_dates)
+            lot_date_set = set(lot_dates)
             cursor.execute(
                 """
                 SELECT u.id, d.name
@@ -13150,18 +13162,39 @@ class Database:
                         summary["blocked_days"] += 1
                         continue
 
-                    if (operator_id, lot_date) in day_off_dates:
+                    claimed_shifts = claimed_by_operator_date.get((operator_id, lot_date), [])
+                    # Выходной ставим, только если в этот день ничего не взято: хвост
+                    # ночи с прошлого дня приходит сюда уже после того, как человек
+                    # отметил день выходным, и смена важнее отметки.
+                    if (operator_id, lot_date) in day_off_dates and not claimed_shifts:
                         self._set_day_off_tx(cursor, operator_id, lot_date)
                         summary["days_off_saved"] += 1
                         continue
 
-                    claimed_shifts = claimed_by_operator_date.get((operator_id, lot_date), [])
                     if not claimed_shifts:
                         continue
                     for claimed in self._merge_shift_auction_claimed_shifts_for_publish(claimed_shifts):
                         shifts_to_save.append({
                             "operator_id": operator_id,
                             "shift_date": lot_date,
+                            "start_time": claimed["start_time"],
+                            "end_time": claimed["end_time"],
+                            "direction": operator_direction_map.get(operator_id)
+                        })
+
+                # Хвост ночи ПОСЛЕДНЕГО дня прогона лежит уже за периодом. Этот день
+                # не наш, чистить его нельзя, но смену записать надо — иначе ночь с
+                # воскресенья на понедельник уедет в график наполовину.
+                for extra_date in sorted(
+                    day for (claim_operator_id, day) in claimed_by_operator_date
+                    if claim_operator_id == operator_id and day not in lot_date_set
+                ):
+                    for claimed in self._merge_shift_auction_claimed_shifts_for_publish(
+                        claimed_by_operator_date[(operator_id, extra_date)]
+                    ):
+                        shifts_to_save.append({
+                            "operator_id": operator_id,
+                            "shift_date": extra_date,
                             "start_time": claimed["start_time"],
                             "end_time": claimed["end_time"],
                             "direction": operator_direction_map.get(operator_id)
@@ -15742,26 +15775,35 @@ class Database:
             selected_start_time = claim_range["start_time"]
             selected_end_time = claim_range["end_time"]
 
-            shift_start_date = shift_date + timedelta(days=1 if claim_range["start_minute"] >= 24 * 60 else 0)
+            # День, в котором кусок реально НАЧИНАЕТСЯ: у ночи 20:00–08:00 хвост
+            # 00:00–08:00 принадлежит следующему дню. В график, выходные, перерывы и
+            # часы он обязан лечь именно туда, иначе ночь уезжает на сутки назад —
+            # в среду оказываются две ночи, а ночь на четверг остаётся без человека.
+            claim_day_shift = 1 if claim_range["start_minute"] >= 24 * 60 else 0
+            shift_start_date = shift_date + timedelta(days=claim_day_shift)
             shift_start_dt = datetime.combine(shift_start_date, selected_start_time)
             if shift_start_dt <= datetime.now():
                 raise ValueError("SHIFT_ALREADY_STARTED")
 
             blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(
-                cursor, operator_id, lot_dates=[shift_date]
+                cursor, operator_id, lot_dates=[shift_start_date]
             )
-            lot_date_key = shift_date.strftime('%Y-%m-%d')
-            if any((item.get("date") or '') == lot_date_key for item in blocked_dates):
+            claim_date_key = shift_start_date.strftime('%Y-%m-%d')
+            if any((item.get("date") or '') == claim_date_key for item in blocked_dates):
                 raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
 
             cursor.execute(
                 "SELECT 1 FROM days_off WHERE operator_id = %s AND day_off_date = %s",
-                (operator_id, shift_date)
+                (operator_id, shift_start_date)
             )
             day_off_row = cursor.fetchone()
 
+            # Минуты куска приходят сквозными от начала ЛОТА (00:00 ночи — это 1440);
+            # для сравнения со сменами своего дня их надо вернуть внутрь суток.
             new_start_min = claim_range["start_minute"]
             new_end_min = claim_range["end_minute"]
+            day_start_min = new_start_min - claim_day_shift * 24 * 60
+            day_end_min = new_end_min - claim_day_shift * 24 * 60
 
             # Что оператор уже держит в этом прогоне. Раньше добор сверялся ТОЛЬКО с
             # частями той же исходной смены, а свои же ДРУГИЕ лоты того дня не смотрел
@@ -15771,13 +15813,11 @@ class Database:
             own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
                 cursor, operator_id, direction_mode=mode
             )
-            for claimed in own_claims:
-                if str(claimed.get('shift_date') or '') != lot_date_key:
-                    continue
-                other_start, other_end = self._schedule_interval_minutes(
-                    claimed.get('start_time'), claimed.get('end_time'))
-                if new_start_min < other_end and other_start < new_end_min:
-                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+            # Сквозное время, а не сравнение внутри одного дня: хвост ночи лежит уже
+            # в следующем дне, и посуточная проверка его пару не видела.
+            if self._shift_auction_claim_conflict(
+                    own_claims, claim_date_key, day_start_min, day_end_min):
+                raise ValueError("SHIFT_OVERLAPS_EXISTING")
 
             # Две ночи 20:00–08:00 подряд не даём и в доборе.
             if self._shift_auction_adjacent_night_date(
@@ -15789,13 +15829,13 @@ class Database:
                 FROM work_shifts
                 WHERE operator_id = %s AND shift_date = %s
                 ORDER BY start_time
-            """, (operator_id, shift_date))
+            """, (operator_id, shift_start_date))
             existing_shifts = cursor.fetchall() or []
 
             merged_start_min, merged_end_min, merge_ids = self._resolve_post_auction_merged_shift_range(
                 existing_shifts,
-                new_start_min,
-                new_end_min
+                day_start_min,
+                day_end_min
             )
 
             # SINGLE-LOT model for partial доборы: the shift stays ONE lot. Each taken
@@ -15873,17 +15913,17 @@ class Database:
             audit_actor = self._schedule_change_actor(
                 cursor, actor_id=operator_id, source='auction_topup'
             )
-            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date)])
+            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_start_date)])
 
             if day_off_row:
                 cursor.execute(
                     "DELETE FROM days_off WHERE operator_id = %s AND day_off_date = %s",
-                    (operator_id, shift_date)
+                    (operator_id, shift_start_date)
                 )
 
             # Снимок до слияния смен: добор к идущей смене не должен переставлять
             # уже отсиженные перерывы (они уедут каскадом вместе со старой строкой).
-            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_date)
+            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_start_date)
             if merge_ids:
                 cursor.execute("DELETE FROM work_shifts WHERE id = ANY(%s)", (merge_ids,))
                 merged_start_obj = self._normalize_schedule_time(
@@ -15896,7 +15936,7 @@ class Database:
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=operator_id,
-                    shift_date=shift_date,
+                    shift_date=shift_start_date,
                     start_time=merged_start_obj,
                     end_time=merged_end_obj,
                     breaks=None,
@@ -15907,7 +15947,7 @@ class Database:
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=operator_id,
-                    shift_date=shift_date,
+                    shift_date=shift_start_date,
                     start_time=selected_start_time,
                     end_time=selected_end_time,
                     breaks=None,
@@ -15920,8 +15960,8 @@ class Database:
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
                 operator_ids=[operator_id],
-                start_date=shift_date,
-                end_date=shift_date
+                start_date=shift_start_date,
+                end_date=shift_start_date
             )
 
             lot_payload = {
@@ -16057,16 +16097,21 @@ class Database:
             selected_start_time = claim_range["start_time"]
             selected_end_time = claim_range["end_time"]
 
-            shift_start_date = shift_date + timedelta(days=1 if claim_range["start_minute"] >= 24 * 60 else 0)
+            # День, в котором кусок реально НАЧИНАЕТСЯ: у ночи 20:00–08:00 хвост
+            # 00:00–08:00 принадлежит следующему дню. В график, выходные, перерывы и
+            # часы он обязан лечь именно туда, иначе ночь уезжает на сутки назад —
+            # в среду оказываются две ночи, а ночь на четверг остаётся без человека.
+            claim_day_shift = 1 if claim_range["start_minute"] >= 24 * 60 else 0
+            shift_start_date = shift_date + timedelta(days=claim_day_shift)
             shift_start_dt = datetime.combine(shift_start_date, selected_start_time)
             if shift_start_dt <= datetime.now():
                 raise ValueError("SHIFT_ALREADY_STARTED")
 
             blocked_dates = self._get_shift_auction_operator_blocked_dates_tx(
-                cursor, operator_id, lot_dates=[shift_date]
+                cursor, operator_id, lot_dates=[shift_start_date]
             )
-            lot_date_key = shift_date.strftime('%Y-%m-%d')
-            if any((item.get("date") or '') == lot_date_key for item in blocked_dates):
+            claim_date_key = shift_start_date.strftime('%Y-%m-%d')
+            if any((item.get("date") or '') == claim_date_key for item in blocked_dates):
                 raise ValueError("SHIFT_AUCTION_STATUS_PERIOD_BLOCKED")
 
             # Disjoint partial доборы are allowed: several operators may each take a
@@ -16098,14 +16143,13 @@ class Database:
             own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
                 cursor, operator_id, direction_mode=mode
             )
-            own_date_key = shift_date.strftime('%Y-%m-%d')
-            for claimed in own_claims:
-                if str(claimed.get('shift_date') or '') != own_date_key:
-                    continue
-                other_start, other_end = self._schedule_interval_minutes(
-                    claimed.get('start_time'), claimed.get('end_time'))
-                if req_start_min < other_end and other_start < req_end_min:
-                    raise ValueError("SHIFT_OVERLAPS_EXISTING")
+            # Сквозное время, а не сравнение внутри одного дня: хвост ночи лежит уже
+            # в следующем дне, и посуточная проверка его пару не видела.
+            if self._shift_auction_claim_conflict(
+                    own_claims, claim_date_key,
+                    req_start_min - claim_day_shift * 24 * 60,
+                    req_end_min - claim_day_shift * 24 * 60):
+                raise ValueError("SHIFT_OVERLAPS_EXISTING")
             if self._shift_auction_adjacent_night_date(
                     own_claims, shift_date, start_time, end_time):
                 raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
@@ -16124,41 +16168,45 @@ class Database:
 
             cursor.execute(
                 "SELECT 1 FROM days_off WHERE operator_id = %s AND day_off_date = %s",
-                (operator_id, shift_date)
+                (operator_id, shift_start_date)
             )
             day_off_row = cursor.fetchone()
 
+            # Минуты куска приходят сквозными от начала ЛОТА (00:00 ночи — это 1440);
+            # для сравнения со сменами своего дня их надо вернуть внутрь суток.
             new_start_min = claim_range["start_minute"]
             new_end_min = claim_range["end_minute"]
+            day_start_min = new_start_min - claim_day_shift * 24 * 60
+            day_end_min = new_end_min - claim_day_shift * 24 * 60
 
             cursor.execute("""
                 SELECT id, start_time, end_time
                 FROM work_shifts
                 WHERE operator_id = %s AND shift_date = %s
                 ORDER BY start_time
-            """, (operator_id, shift_date))
+            """, (operator_id, shift_start_date))
             existing_shifts = cursor.fetchall() or []
 
             merged_start_min, merged_end_min, merge_ids = self._resolve_post_auction_merged_shift_range(
                 existing_shifts,
-                new_start_min,
-                new_end_min
+                day_start_min,
+                day_end_min
             )
 
             audit_actor = self._schedule_change_actor(
                 cursor, actor_id=operator_id, source='auction_topup'
             )
-            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date)])
+            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_start_date)])
 
             if day_off_row:
                 cursor.execute(
                     "DELETE FROM days_off WHERE operator_id = %s AND day_off_date = %s",
-                    (operator_id, shift_date)
+                    (operator_id, shift_start_date)
                 )
 
             # Снимок до слияния смен: добор к идущей смене не должен переставлять
             # уже отсиженные перерывы (они уедут каскадом вместе со старой строкой).
-            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_date)
+            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_start_date)
             if merge_ids:
                 cursor.execute("DELETE FROM work_shifts WHERE id = ANY(%s)", (merge_ids,))
                 merged_start_obj = self._normalize_schedule_time(
@@ -16171,7 +16219,7 @@ class Database:
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=operator_id,
-                    shift_date=shift_date,
+                    shift_date=shift_start_date,
                     start_time=merged_start_obj,
                     end_time=merged_end_obj,
                     breaks=None,
@@ -16182,7 +16230,7 @@ class Database:
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=operator_id,
-                    shift_date=shift_date,
+                    shift_date=shift_start_date,
                     start_time=selected_start_time,
                     end_time=selected_end_time,
                     breaks=None,
@@ -16195,8 +16243,8 @@ class Database:
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
                 operator_ids=[operator_id],
-                start_date=shift_date,
-                end_date=shift_date
+                start_date=shift_start_date,
+                end_date=shift_start_date
             )
 
             breaks = saved_shift[5] if isinstance(saved_shift[5], list) else []
