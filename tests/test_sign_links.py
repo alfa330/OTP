@@ -288,13 +288,40 @@ class ParseResponseTests(unittest.TestCase):
         self.assertEqual(outcome, sapar_link.NO_DOCUMENTS)
         self.assertEqual(message, 'Нет документов на подписание')
         outcome, link, _ = sapar_link.parse_response(page(
-            body='<a href="https://sign.example.kz/s/2">x</a>', with_title_marker=False))
-        # Ссылка ПЕРЕД alert'ом и формой без якоря заголовка не видна — это
-        # осознанная плата за то, что ссылкой не считается что попало.
-        self.assertEqual((outcome, link), (sapar_link.UNAVAILABLE, None))
-        outcome, link, _ = sapar_link.parse_response(page(
             postback='<a href="https://sign.example.kz/s/3">Открыть</a>', with_title_marker=False))
         self.assertEqual((outcome, link), (sapar_link.LINK, 'https://sign.example.kz/s/3'))
+
+    def test_link_outside_the_column_is_found_by_the_whole_page_scan(self):
+        """Первая живая попытка (16.09.2026) вернула колонку с одной формой:
+        если вендор рисует ссылку в модальном окне или подвале, разбор обязан
+        дойти и туда — оформление страницы при этом кандидатом не считается."""
+        outcome, link, _ = sapar_link.parse_response(
+            page() + '<div class="modal"><input id="signLink" readonly '
+                     'value="https://sign.example.kz/m/42"><button '
+                     'onclick="copyLinkToClipboard(\'signLink\')">Копировать</button></div>')
+        self.assertEqual((outcome, link), (sapar_link.LINK, 'https://sign.example.kz/m/42'))
+
+    def test_alert_without_the_postback_id_is_still_the_vendor_message(self):
+        outcome, link, message = sapar_link.parse_response(page(
+            body='<div class="alert alert-danger" role="alert">Ошибка формирования ссылки</div>'))
+        self.assertEqual((outcome, link), (sapar_link.REJECTED, None))
+        self.assertEqual(message, 'Ошибка формирования ссылки')
+
+    def test_diagnostics_carry_the_shape_of_the_page_but_not_the_iin(self):
+        info = sapar_link.diagnostics(page(
+            postback='Что-то новое', body='<div id="result-box"></div>', iin='850326302174'))
+        self.assertNotIn('850326302174', repr(info))
+        self.assertNotIn('TOKEN', repr(info))
+        self.assertTrue(info['token'])
+        self.assertTrue(info['iin_echoed'])
+        self.assertEqual(info['alerts'], ['Что-то новое'])
+        self.assertIn('result-box', info['region_ids'])
+        # Поле ИИН вырезано целиком — вместе со значением, которое в него вернул вендор.
+        self.assertNotIn('flDriverIin', info['region_html'])
+        self.assertIn('form-container-', info['region_html'])
+        # Оформление страницы в доменах не числится — только то, что могло бы
+        # оказаться ссылкой: здесь ничего.
+        self.assertEqual(info['hosts'], ['cdnjs.cloudflare.com', 'pip.silt.kz'])
 
     def test_iin_echoed_in_the_form_never_leaks_as_a_link(self):
         outcome, link, _ = sapar_link.parse_response(page('Отказ', iin='https://evil.example'))

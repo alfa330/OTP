@@ -130,12 +130,23 @@ const SignLinksView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
 
     const check = useMemo(() => validateIin(iinInput), [iinInput]);
     const digits = normalizeIin(iinInput);
-    /* Подсказка под полем — не по каждой букве. Пока человек набирает, ошибка
-       «должно быть 12 цифр» была бы правдой одиннадцать раз подряд. Показываем
-       её, когда цифр уже двенадцать или больше либо когда уже нажали кнопку. */
-    const fieldError = check.error && check.error !== 'empty' && (touched || digits.length >= IIN_LENGTH)
+    /* В поле попадают ТОЛЬКО цифры и не больше двенадцати (замечание владельца
+       16.09.2026: «в поле можно внести даже буквы»). Вставка «900101 300 007»
+       с пробелами при этом работает — лишнее отбрасывается на входе. */
+    const acceptIin = useCallback((raw) => {
+        const next = String(raw ?? '').replace(/\D/g, '').slice(0, IIN_LENGTH);
+        setIinInput(next);
+        if (!next) setTouched(false);
+    }, []);
+    /* Под полем — одна строка. Пока набирают, серый счётчик «7 из 12 цифр»;
+       когда цифр двенадцать и они не сходятся — розовая ошибка сразу; если
+       нажали кнопку с недобором — розовая «должно быть 12 цифр». */
+    const incomplete = digits.length > 0 && digits.length < IIN_LENGTH;
+    const fieldError = check.error && check.error !== 'empty'
+        && (touched || digits.length >= IIN_LENGTH)
         ? iinErrorMessage(check.error)
         : '';
+    const fieldHint = !fieldError && incomplete ? `${digits.length} из ${IIN_LENGTH} цифр` : '';
 
     const submit = useCallback(async () => {
         setTouched(true);
@@ -229,12 +240,14 @@ const SignLinksView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                     <GenerateStage
                         compact={compact}
                         value={iinInput}
-                        onChange={(next) => { setIinInput(next); if (touched && !next) setTouched(false); }}
+                        onChange={acceptIin}
                         onSubmit={submit}
                         busy={busy}
                         disabled={Boolean(contextError)}
                         inputRef={inputRef}
                         fieldError={fieldError}
+                        fieldHint={fieldHint}
+                        complete={digits.length === IIN_LENGTH}
                         warning={warning}
                     />
 
@@ -259,9 +272,10 @@ const SignLinksView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
    исчезают: сворачивание читается как «поле переехало наверх», исчезновение —
    как «страница перескочила». */
 const GenerateStage = ({ compact, value, onChange, onSubmit, busy, disabled, inputRef,
-                         fieldError, warning }) => {
+                         fieldError, fieldHint, complete, warning }) => {
     const [focused, setFocused] = useState(false);
-    const canSubmit = !busy && !disabled && normalizeIin(value).length > 0;
+    // Кнопка оживает только на двенадцати цифрах: с недобором ей нечего слать.
+    const canSubmit = !busy && !disabled && complete;
 
     return (
         <div>
@@ -300,8 +314,9 @@ const GenerateStage = ({ compact, value, onChange, onSubmit, busy, disabled, inp
                         onFocus={() => setFocused(true)}
                         onBlur={() => setFocused(false)}
                         inputMode="numeric"
+                        pattern="[0-9]*"
                         autoComplete="off"
-                        maxLength={20}
+                        maxLength={IIN_LENGTH}
                         placeholder="ИИН водителя"
                         aria-label="ИИН водителя"
                         aria-invalid={Boolean(fieldError)}
@@ -319,13 +334,13 @@ const GenerateStage = ({ compact, value, onChange, onSubmit, busy, disabled, inp
                     </button>
                 </div>
 
-                {/* Под полем — одна строка: либо ошибка ИИН, либо предупреждение о
-                    пределе. Обе редкие; в обычный день здесь пусто, и строка
-                    не занимает места. */}
-                {(fieldError || warning) && (
-                    <div className={`mt-2 text-center text-[12px] ${
-                        fieldError ? 'text-rose-600' : 'text-amber-600'}`}>
-                        {fieldError || warning}
+                {/* Под полем — одна строка: ошибка ИИН, счётчик цифр во время
+                    набора или предупреждение о пределе. На пустом поле в обычный
+                    день здесь пусто, и строка не занимает места. */}
+                {(fieldError || fieldHint || warning) && (
+                    <div className={`mt-2 text-center text-[12px] tabular-nums ${
+                        fieldError ? 'text-rose-600' : fieldHint ? 'text-slate-400' : 'text-amber-600'}`}>
+                        {fieldError || fieldHint || warning}
                     </div>
                 )}
             </div>

@@ -53,6 +53,7 @@ UNAVAILABLE = 'unavailable'
 _TOKEN_RE = re.compile(r'name="__RequestVerificationToken"[^>]*value="([^"]+)"')
 _OPTIONS_RE = re.compile(r'name="(flDriverIin-[^"]*-options)"[^>]*value="([^"]*)"')
 _POSTBACK_RE = re.compile(r'id="postback-message"[^>]*>(.*?)</div>', re.S)
+_ALERT_RE = re.compile(r'<div[^>]*class="[^"]*\balert\b[^"]*"[^>]*>(.*?)</div>', re.S | re.I)
 # Содержательная колонка страницы: от конца заголовка до конца колонки. Так
 # устроена живая разметка (16.09.2026): `<!-- end page title -->`, затем
 # `.row > .col` с alert'ом и формой, затем `<!-- end col -->`. Запасной якорь —
@@ -126,17 +127,41 @@ def _candidate_links(region):
     return seen
 
 
+def _vendor_message(page):
+    """Текст ответа вендора: `#postback-message`, а без него — любой alert.
+
+    На несуществующий ИИН страница отвечает alert'ом с id — но отказ по другой
+    причине может прийти alert'ом без id (так у Bootstrap-страниц обычно и
+    бывает), и молчать про него значило бы показать оператору «сервис не
+    отвечает» вместо слов вендора.
+    """
+    postback = _POSTBACK_RE.search(page)
+    if postback:
+        return _clean_text(postback.group(1))
+    for match in _ALERT_RE.finditer(page):
+        text = _clean_text(match.group(1))
+        if text:
+            return text
+    return ''
+
+
 def parse_response(page):
     """Разбор HTML ответа формы. Чистая функция — проверяется без сети.
 
     Возвращает (исход, ссылка, сообщение вендора). Ссылка есть только у
-    исхода LINK; сообщение — текст `#postback-message`, если он был.
+    исхода LINK; сообщение — текст alert'а, если он был.
+
+    Ссылку ищем сначала в содержательной колонке, а не найдя — по всей
+    странице: оформление страницы (тема, скрипты, переключатели языка,
+    счётчики) отсеивает _is_chrome_link, и на живых страницах вендора без
+    результата ни одного кандидата не остаётся (проверено 16.09.2026 на
+    трёх снятых страницах). Так ссылка находится и если вендор рисует её
+    вне колонки — в модальном окне или в подвале.
     """
     page = page or ''
-    postback = _POSTBACK_RE.search(page)
-    message = _clean_text(postback.group(1)) if postback else ''
+    message = _vendor_message(page)
 
-    links = _candidate_links(_content_region(page))
+    links = _candidate_links(_content_region(page)) or _candidate_links(page)
 
     if links:
         return LINK, links[0], message or None
@@ -146,6 +171,32 @@ def parse_response(page):
             return NO_DOCUMENTS, None, message
         return REJECTED, None, message
     return UNAVAILABLE, None, None
+
+
+def diagnostics(page):
+    """Что за страницу прислал вендор — для лога, когда разбор её не узнал.
+
+    Без персональных данных: поле ИИН и anti-forgery токен вырезаны, адреса
+    сведены к доменам. Нужна ровно один раз — чтобы по логу понять новый
+    формат ответа и поправить parse_response, не выпрашивая у кого-то живой
+    ИИН для опытов.
+    """
+    page = page or ''
+    scrubbed = _TOKEN_RE.sub('', _IIN_INPUT_RE.sub('', page))
+    region = _content_region(scrubbed)
+    hosts = sorted({(urlsplit(u).netloc or urlsplit(u).scheme)[:60]
+                    for u in _candidate_links(scrubbed) + re.findall(r'https?://[^\s"\'<>]+', scrubbed)})
+    alerts = [_clean_text(m.group(0))[:200] for m in _ALERT_RE.finditer(scrubbed)][:5]
+    ids = re.findall(r'\bid="([^"]{1,60})"', region)[:20]
+    return {
+        'bytes': len(page),
+        'token': bool(_TOKEN_RE.search(page)),
+        'iin_echoed': bool(re.search(r'name="flDriverIin"[^>]*value="[^"]+"', page)),
+        'alerts': alerts,
+        'hosts': hosts[:20],
+        'region_ids': ids,
+        'region_html': re.sub(r'\s+', ' ', region)[:1500],
+    }
 
 
 def _result(outcome, *, link=None, message=None, error=None, started):
@@ -209,12 +260,10 @@ def generate(iin):
 
     outcome, link, message = parse_response(answer.text or '')
     if outcome == UNAVAILABLE:
-        # Формат ответа изменился — это надо увидеть в логе, но без ИИН и без
-        # простыни HTML: хватит заголовка и первых символов содержательной части.
-        snippet = _clean_text(_content_region(answer.text or ''))[:120]
-        logging.warning('sign_links: незнакомый ответ генератора (%s байт, статус %s)%s',
-                        len(answer.text or ''), answer.status_code,
-                        (': ' + snippet) if snippet else '')
+        # Формат ответа изменился — это надо увидеть в логе целиком (без ИИН и
+        # токена, см. diagnostics): по одному такому логу разбор и правится.
+        logging.warning('sign_links: незнакомый ответ генератора (статус %s): %s',
+                        answer.status_code, diagnostics(answer.text or ''))
         return _result(UNAVAILABLE, error='незнакомый формат ответа генератора',
                        started=started)
     return _result(outcome, link=link, message=message, started=started)
