@@ -90,17 +90,13 @@ def _finish(bucket):
     return out
 
 
-def _first_queue(value):
-    """Касание через несколько очередей несёт их списком через запятую — относим к
-    первой по алфавиту; вторая копия в другом разрезе удвоила бы входящие."""
-    parts = [p for p in str(value or '').split(',') if p]
-    return min(parts) if parts else ''
-
-
 def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
-    """Итоги, разрезы по линиям и часам, счётчики по внутренним номерам."""
+    """Итоги, разрез по часам, счётчики по внутренним номерам.
+
+    Разреза по линиям (очередям станции) нет — решение владельца 16.09.2026: номера
+    очередей вида 3010 на стене и в отбивке читались как шум. Поле `queue` касания
+    на итоги не влияет."""
     totals = _bucket()
-    queues = defaultdict(_bucket)
     hourly = [dict(hour=h, arrived=0, answered=0, missed=0, outgoing=0) for h in range(24)]
     by_ext = defaultdict(lambda: {'answered': 0, 'missed': 0, 'outgoing': 0,
                                   'outgoing_answered': 0, 'talk_seconds': 0,
@@ -121,9 +117,8 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
 
         if call_type == touches_mod.TYPE_OUT:
             answered = talk > 0
-            for bucket in (totals, queues[_first_queue(touch.get('queue'))]):
-                bucket['outgoing'] += 1
-                bucket['outgoing_answered'] += 1 if answered else 0
+            totals['outgoing'] += 1
+            totals['outgoing_answered'] += 1 if answered else 0
             hour['outgoing'] += 1
             if person is not None:
                 person['outgoing'] += 1
@@ -136,29 +131,25 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
         answered = call_type == touches_mod.TYPE_IN and talk > 0
         answered_at = _parse(touch.get('answered_at'))
         wait = int((answered_at - started).total_seconds()) if (answered and answered_at) else None
-        for bucket in (totals, queues[_first_queue(touch.get('queue'))]):
-            bucket['arrived'] += 1
-            if answered:
-                bucket['answered'] += 1
-                bucket['talk_seconds'] += talk
-                if wait is not None:
-                    bucket['waited'] += 1
-                    bucket['wait_seconds'] += max(0, wait)
-                    if wait <= sl_seconds:
-                        bucket['served_sl'] += 1
-            else:
-                bucket['missed'] += 1
+        totals['arrived'] += 1
+        if answered:
+            totals['answered'] += 1
+            totals['talk_seconds'] += talk
+            if wait is not None:
+                totals['waited'] += 1
+                totals['wait_seconds'] += max(0, wait)
+                if wait <= sl_seconds:
+                    totals['served_sl'] += 1
+        else:
+            totals['missed'] += 1
         hour['arrived'] += 1
         hour['answered' if answered else 'missed'] += 1
         if person is not None:
             person['answered' if answered else 'missed'] += 1
             person['talk_seconds'] += talk if answered else 0
 
-    queue_rows = [dict(_finish(bucket), queue=name or '—') for name, bucket in queues.items()]
-    queue_rows.sort(key=lambda row: (-(row['arrived'] + row['outgoing']), row['queue']))
     return {
         'totals': _finish(totals),
-        'queues': queue_rows,
         'hourly': hourly,
         'by_ext': dict(by_ext),
     }
@@ -250,7 +241,6 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
         'ar_min_percent': ar_min_percent,
         'ar_max_percent': ar_max_percent,
         'totals': parts['totals'],
-        'queues': parts['queues'],
         'hourly': parts['hourly'],
         'now': count_now(rows),
         'operators': rows,

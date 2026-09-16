@@ -68,10 +68,12 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual((totals['outgoing'], totals['outgoing_answered']), (2, 1))
         self.assertIsNone(totals['ar'])
 
-    def test_multi_queue_touch_lands_in_one_line(self):
-        parts = S.aggregate([touch(queue='3002,3000')])
-        self.assertEqual([q['queue'] for q in parts['queues']], ['3000'])
-        self.assertEqual(parts['queues'][0]['arrived'], 1)
+    def test_no_per_line_breakdown(self):
+        # Разрез по линиям снят целиком (владелец, 16.09.2026): очередь касания на итоги
+        # не влияет и отдельным разрезом в снимок не попадает.
+        parts = S.aggregate([touch(queue='3002,3000'), touch(queue='')])
+        self.assertNotIn('queues', parts)
+        self.assertEqual(parts['totals']['arrived'], 2)
 
     def test_hourly_buckets(self):
         parts = S.aggregate([touch(started='2026-09-15 09:59:59', answered='2026-09-15 10:00:05'),
@@ -284,14 +286,16 @@ class FrontendTests(unittest.TestCase):
         cls.szov_view = (MONITORING / 'SzovWallboardView.jsx').read_text(encoding='utf-8-sig')
         cls.app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8-sig')
 
-    def test_lines_panel_is_gone_from_the_wall(self):
-        """Решение владельца 16.09.2026: разрез «По линиям» с экрана снят. Снимок его
-        по-прежнему несёт — отбивка в Telegram пишет строки по линиям из `queues`."""
+    def test_lines_panel_is_gone_everywhere(self):
+        """Решение владельца 16.09.2026: разрез «По линиям» снят целиком — с экрана,
+        из снимка и из текста отбивки (тот сторожит test_op_broadcast)."""
         self.assertNotIn('По линиям', self.view)
         self.assertNotIn('QueuesTable', self.view)
+        self.assertNotIn('queues', self.view)
         self.assertIn('title="По часам"', self.view)
-        self.assertIn("'queues': queue_rows", (ROOT / 'op_wallboard' / 'snapshot.py')
-                      .read_text(encoding='utf-8-sig'))
+        backend = (ROOT / 'op_wallboard' / 'snapshot.py').read_text(encoding='utf-8-sig')
+        self.assertNotIn("'queues'", backend)
+        self.assertNotIn('_first_queue', backend)
 
     def test_widget_button_is_the_same_as_szov(self):
         """Кнопка виджета — общая с СЗоВ (экспорт), а не третья копия."""

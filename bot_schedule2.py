@@ -41604,25 +41604,13 @@ def _op_broadcast_deviations(data):
     return notes
 
 
-def _op_broadcast_lines(data):
-    """Строки по линиям — то, ради чего отбивка «по Линии»: очередь, принято/потеряно, AR."""
-    rows = []
-    for queue in (data.get('queues') or []):
-        if not queue.get('arrived') and not queue.get('outgoing'):
-            continue
-        rows.append('• Линия %s: входящих %d, принято %d, потеряно %d (AR %s), SL %s'
-                    % (queue.get('queue') or '—', _szov_wallboard_int(queue.get('arrived')),
-                       _szov_wallboard_int(queue.get('answered')),
-                       _szov_wallboard_int(queue.get('missed')),
-                       _op_broadcast_percent(queue.get('ar')), _op_broadcast_percent(queue.get('sl'))))
-    return rows
-
-
 def _op_broadcast_text(data):
     """Текст отбивки ОП. HTML parse_mode: заголовок жирный.
 
-    Итоги дня повторяются картинкой, поэтому в тексте — отклонения, строки по линиям
-    и дежурная строка о людях: этого хватает, чтобы понять положение без картинки."""
+    Итоги дня повторяются картинкой, поэтому в тексте — отклонения, итоги одной строкой
+    и дежурная строка о людях: этого хватает, чтобы понять положение без картинки.
+    Разреза по линиям (очередям станции) нет нигде — ни на экране, ни здесь: решение
+    владельца 16.09.2026, номера очередей вида 3010 читались как шум."""
     totals = data.get('totals') or {}
     now = data.get('now') or {}
     lines = ['<b>Табло ОП</b> (%s):' % (data.get('stamp') or '')]
@@ -41640,10 +41628,6 @@ def _op_broadcast_text(data):
                  % (_szov_wallboard_int(now.get('operators_online')),
                     _szov_wallboard_int(now.get('operators_talking')),
                     _szov_wallboard_int(now.get('operators_on_break'))))
-    per_line = _op_broadcast_lines(data)
-    if len(per_line) > 1:
-        lines.append('')
-        lines.extend(per_line)
     return '\n'.join(lines)
 
 

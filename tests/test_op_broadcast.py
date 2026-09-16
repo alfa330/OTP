@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
 DB_PATH = ROOT / "database.py"
 
-HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent", "_op_broadcast_lines",
+HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
            "_op_broadcast_text", "_op_broadcast_duration"}
 
 
@@ -45,8 +45,7 @@ def _namespace(min_calls=20, sl_min=80.0, stale=600):
     return namespace
 
 
-def snapshot(arrived=100, missed=4, sl=0.9, live_age=30, queues=None, online=5, talking=2,
-             on_break=1):
+def snapshot(arrived=100, missed=4, sl=0.9, live_age=30, online=5, talking=2, on_break=1):
     answered = arrived - missed
     return {
         'stamp': '15.09 18:00',
@@ -56,7 +55,6 @@ def snapshot(arrived=100, missed=4, sl=0.9, live_age=30, queues=None, online=5, 
                    'avg_talk_seconds': 65, 'outgoing': 12},
         'now': {'operators_online': online, 'operators_talking': talking,
                 'operators_on_break': on_break},
-        'queues': queues or [],
         'bridge': {'live_age_seconds': live_age, 'connected': True},
     }
 
@@ -99,20 +97,14 @@ class DeviationTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn('не присылал живых данных', notes[0])
 
-    def test_text_has_header_totals_and_lines(self):
-        text = self.ns["_op_broadcast_text"](snapshot(queues=[
-            {'queue': '3000', 'arrived': 60, 'answered': 58, 'missed': 2, 'ar': 2 / 60, 'sl': 0.9, 'outgoing': 0},
-            {'queue': '3002', 'arrived': 40, 'answered': 38, 'missed': 2, 'ar': 0.05, 'sl': 0.85, 'outgoing': 0},
-        ]))
+    def test_text_has_header_totals_and_people_and_no_per_line_rows(self):
+        """Разрез по линиям снят целиком (владелец, 16.09.2026): ни на экране, ни в тексте."""
+        text = self.ns["_op_broadcast_text"](snapshot())
         self.assertTrue(text.startswith('<b>Табло ОП</b> (15.09 18:00):'))
         self.assertIn('Входящих 100 · принято 96 · потеряно 4', text)
-        self.assertIn('• Линия 3000:', text)
-        self.assertIn('• Линия 3002:', text)
-
-    def test_single_line_is_not_repeated_under_totals(self):
-        text = self.ns["_op_broadcast_text"](snapshot(queues=[
-            {'queue': '3000', 'arrived': 100, 'answered': 96, 'missed': 4, 'ar': 0.04, 'sl': 0.9, 'outgoing': 0}]))
-        self.assertNotIn('• Линия', text)
+        self.assertIn('Онлайн 5 · в разговоре 2 · на перерыве 1', text)
+        self.assertNotIn('Линия', text)
+        self.assertNotIn('def _op_broadcast_lines', BOT_PATH.read_text(encoding="utf-8-sig"))
 
 
 class WiringTests(unittest.TestCase):
