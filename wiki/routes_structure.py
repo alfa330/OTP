@@ -166,6 +166,12 @@ def _slugify(value):
 PERMISSION_FIELDS = ('can_read', 'can_create', 'can_edit',
                      'can_delete', 'can_publish', 'can_approve')
 
+# Сколько адресатов принимает ОДНА выдача (POST /access/section-rules/bulk).
+# Число выбрано по живому справочнику: 12 групп, 11 направлений, 7 отделов и
+# должности ветки укладываются в него с запасом, а сотня правил одним нажатием
+# — это выдача, которую уже никто не перечитает глазами.
+MAX_BULK_SUBJECTS = 50
+
 # Отказ по границе отдела — своими словами на каждый субъект. Общее «адресат из
 # другого отдела» на роли звучало бы неправдой: у роли отдела нет вовсе, и
 # человек искал бы, какой именно отдел не тот.
@@ -1155,6 +1161,194 @@ def register(bp, wiki_route, db, log_ip):
         catalog['grant_departments'] = departments
         return jsonify(catalog)
 
+    # ── Разбор правила: адресат, права, запись ───────────────────────────
+    #
+    # Вынесено из обработчика, потому что адресат у одной выдачи теперь не
+    # один: доступ выдают сразу нескольким группам, должностям и людям одним
+    # сохранением. Проверки при этом обязаны остаться ТЕМИ ЖЕ до буквы —
+    # вторая копия границы отдела однажды разошлась бы с первой, и разошлась
+    # бы в сторону «пропустили». Поэтому и одиночная дверь, и пакетная ходят
+    # через эти три функции, а не повторяют их текст.
+
+    def _rule_subject(cursor, ctx, ceiling, raw):
+        """Проверенный адресат правила: (payload, отказ).
+
+        payload — то, что уйдёт в upsert_section_rule; отказ — пара
+        (тело ответа, код статуса) либо None.
+        """
+        subject_type = raw.get('subject_type')
+        if subject_type not in SUBJECT_TYPES:
+            return None, ({"error": "Укажите раздел и субъект правила"}, 400)
+
+        subject_id, subject_role = None, None
+        if subject_type == 'otp_role':
+            subject_role = str(raw.get('subject_role') or '').strip()
+            if subject_role not in wiki_access.ROLE_LEVELS and subject_role != 'supervisor':
+                return None, ({"error": "Неизвестная роль"}, 400)
+        else:
+            subject_id = _int_or_none(raw.get('subject_id'))
+            if not subject_id:
+                return None, ({"error": "Не выбран субъект"}, 400)
+
+        # Уровень должности — второе измерение правила: «не ниже супервайзера».
+        # Пустое значение (ничего не выбрано) означает «без ограничения»,
+        # поэтому 0 и None здесь равнозначны и оба кладутся как NULL.
+        min_role_level = _int_or_none(raw.get('min_role_level'))
+        if min_role_level is not None and min_role_level not in wiki_access.ROLE_LEVELS.values():
+            return None, ({"error": "Неизвестный уровень должности"}, 400)
+
+        # ── Должность внутри отдела ──────────────────────────────────
+        # Третье измерение того же правила. Только к отделу: на роль по всей
+        # компании или на конкретного человека сужать нечего, а разрешив это,
+        # мы завели бы правило, которое ничего не значит и молча не работает.
+        job_title = str(raw.get('job_title') or '').strip()
+        if job_title and subject_type != 'department':
+            return None, ({
+                "error": "Должность сужает правило на отдел — выберите отдел",
+            }, 400)
+        if len(job_title) > 255:
+            return None, ({"error": "Слишком длинное название должности"}, 400)
+        # «И все, кто выше» у правила с должностью держится сравнением уровня
+        # (queries.SUBJECT_MATCH), а сравнение с NULL истины не даёт. Порог по
+        # умолчанию — оператор: тот же, под которым заведён весь бэк-офис.
+        if job_title and min_role_level is None:
+            min_role_level = wiki_access.ROLE_LEVELS['operator']
+
+        # ── Потолок должности ────────────────────────────────────────
+        # Роль адресата нужна отдельно от порога: у правила на конкретного
+        # человека порог обычно пуст, и одна лишь проверка порога пропустила бы
+        # «супервайзер выписывает правило на самого себя» — то есть выдачу себе
+        # полного доступа к любому разделу своего отдела.
+        target_role, subject_department = None, None
+        if subject_type == 'user':
+            # Роль и отдел одним запросом: отдел нужен проверке ниже, и второй
+            # поход в users за тем же человеком был бы лишним.
+            cursor.execute('SELECT role, department_id FROM users WHERE id = %s',
+                           (subject_id,))
+            target = cursor.fetchone()
+            if not target:
+                return None, ({"error": "Сотрудник не найден"}, 404)
+            target_role, subject_department = target[0], target[1]
+        else:
+            subject_department = structure.subject_department(
+                cursor, subject_type, subject_id)
+
+        # ── Граница отдела для адресата ──────────────────────────────
+        # Раздел уже проверен выше (_section_grant_refusal), но раздел — это
+        # «где», а не «кому». Без этой проверки супервайзер на СВОЁМ разделе
+        # выписывал правило чужому отделу, чужой группе или роли по всей
+        # компании: потолок такое пропускает, потому что порог у них пуст и
+        # весит как оператор.
+        if not wiki_access.may_grant_to_subject(
+                subject_type, grant_departments=_grant_departments(ctx),
+                subject_department=subject_department):
+            return None, ({
+                "error": _SUBJECT_SCOPE_ERRORS.get(
+                    subject_type, "Этот адресат из другого отдела"),
+                "code": "WIKI_DEPARTMENT_SCOPE",
+            }, 403)
+
+        if not wiki_access.may_grant_with_ceiling(ceiling, min_role_level, target_role):
+            return None, ({
+                "error": "Такой доступ выдаёт только вышестоящий руководитель",
+                "code": "WIKI_GRANT_CEILING",
+            }, 403)
+
+        return {'subject_type': subject_type, 'subject_id': subject_id,
+                'subject_role': subject_role, 'min_role_level': min_role_level,
+                'job_title': job_title or None}, None
+
+    def _rule_permissions(ctx, data):
+        """Права правила и флаг управления деревом: (права, флаг, отказ).
+
+        Считается ОДИН раз на всю выдачу: набор галочек общий для всех
+        адресатов, и проверять его на каждом — лишняя работа и лишний способ
+        ответить на один и тот же вопрос по-разному.
+        """
+        permissions = {key: bool(data.get(key)) for key in PERMISSION_FIELDS}
+        # Право без чтения бессмысленно: нельзя править то, чего не видишь.
+        if any(permissions[k] for k in PERMISSION_FIELDS[1:]):
+            permissions['can_read'] = True
+
+        # ── Выписать можно только то, что умеешь сам ─────────────────
+        #
+        # До 21.08.2026 эта граница держалась случайно: право, выписанное сверх
+        # способностей раздающего, всё равно гасло у адресата (wiki/access.py),
+        # и проверять было нечего. Теперь выписанное право работает — значит
+        # «супервайзер выдал оператору удаление, которого у самого супервайзера
+        # нет» стало бы настоящей выдачей, причём мимо лестницы GRANT_CEILING.
+        #
+        # Сверяемся со способностями ДОЛЖНОСТИ, а не с итоговыми: право,
+        # полученное самим раздающим из правила, дальше не передаётся. Иначе
+        # одна выдача сверху делает человека раздающим то же право по всему
+        # своему отделу — мимо лестницы GRANT_CEILING.
+        #
+        # Отказ называет право поимённо: молчаливо снять галочку и сохранить
+        # правило урезанным — тот же класс отказа, от которого чинили сам
+        # инцидент, только с обратной стороны стола. Форма о границе знает
+        # заранее: набор доступных галочек едет в GET /access/section-rules
+        # полем grantable.
+        beyond = [key for key in PERMISSION_FIELDS
+                  if permissions[key] and not ctx['role_capabilities'].get(key)]
+        if beyond:
+            return None, False, ({
+                "error": "Нельзя выдать право, которого нет у вас самих: %s" % ', '.join(
+                    CAPABILITY_TITLES.get(key, key) for key in beyond),
+                "code": "WIKI_GRANT_BEYOND_SELF",
+                "required": beyond,
+            }, 403)
+
+        # ── Право строить дерево внутри ветки ────────────────────────
+        #
+        # Проверка отдельная от блока beyond выше и стоит по той же причине, по
+        # какой сам тумблер не стал седьмым правом: шесть прав — про содержимое
+        # раздела, а этот — про устройство дерева, и сверяется он с
+        # can_manage_structure, которого в PERMISSION_FIELDS нет вовсе.
+        #
+        # Сверяемся со способностями ДОЛЖНОСТИ: у коммерческого директора право
+        # строить дерево приходит из правила, и передать его дальше он не
+        # должен — иначе лестница выдачи разъезжается сама, без чьего-либо
+        # решения.
+        manage_subsections = bool(data.get('manage_subsections'))
+        if manage_subsections and not ctx['role_capabilities'].get('can_manage_structure'):
+            return None, False, ({
+                "error": "Право заводить подразделы выдаёт тот, кто управляет "
+                         "структурой вики",
+                "code": "WIKI_GRANT_BEYOND_SELF",
+                "required": ['can_manage_structure'],
+            }, 403)
+
+        return permissions, manage_subsections, None
+
+    def _write_rule(cursor, ctx, section_id, subject, permissions, *,
+                    grant_subsections, manage_subsections):
+        """Записать одно правило и оставить след в журнале."""
+        rule_id = structure.upsert_section_rule(
+            cursor, section_id=section_id,
+            subject_type=subject['subject_type'],
+            subject_id=subject['subject_id'],
+            subject_role=subject['subject_role'],
+            permissions=permissions,
+            grant_subsections=grant_subsections,
+            manage_subsections=manage_subsections,
+            min_role_level=subject['min_role_level'],
+            job_title=subject['job_title'],
+            created_by=ctx['user_id'],
+        )
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='rule.upsert',
+                           entity_type='section', entity_id=section_id,
+                           target_user_id=(subject['subject_id']
+                                           if subject['subject_type'] == 'user' else None),
+                           details={'rule_id': rule_id,
+                                    'subject_type': subject['subject_type'],
+                                    'subject_id': subject['subject_id'],
+                                    'subject_role': subject['subject_role'],
+                                    'min_role_level': subject['min_role_level'],
+                                    'job_title': subject['job_title'],
+                                    'manage_subsections': manage_subsections,
+                                    **permissions},
+                           ip_address=log_ip())
+        return rule_id
     # Гейт не «can_manage_access», а лестница: право раздавать доступ само
     # ограничено должностью раздающего (wiki_access.GRANT_CEILING) и его
     # отделом. До этого выдача была всё-или-ничего: у кого мастер-ключ — тот
@@ -1219,160 +1413,105 @@ def register(bp, wiki_route, db, log_ip):
             })
 
         data = _body()
-        subject_type = data.get('subject_type')
-        if not section_id or subject_type not in SUBJECT_TYPES:
+        if not section_id or data.get('subject_type') not in SUBJECT_TYPES:
             return jsonify({"error": "Укажите раздел и субъект правила"}), 400
         if structure.section_exists(cursor, section_id) is None:
             return jsonify({"error": "Раздел не найден"}), 404
 
-        subject_id, subject_role = None, None
-        if subject_type == 'otp_role':
-            subject_role = str(data.get('subject_role') or '').strip()
-            if subject_role not in wiki_access.ROLE_LEVELS and subject_role != 'supervisor':
-                return jsonify({"error": "Неизвестная роль"}), 400
-        else:
-            subject_id = _int_or_none(data.get('subject_id'))
-            if not subject_id:
-                return jsonify({"error": "Не выбран субъект"}), 400
+        # Порядок проверок тот же, что был до выноса в функции: сперва
+        # адресат, потом права. Он виден снаружи — на форме с двумя ошибками
+        # сразу человек читает ПЕРВУЮ, и менять её местами значит менять
+        # поведение двери, а не её устройство.
+        subject, refusal = _rule_subject(cursor, ctx, ceiling, data)
+        if refusal:
+            body, status = refusal
+            return jsonify(body), status
 
-        # Уровень должности — второе измерение правила: «не ниже супервайзера».
-        # Пустое значение (ничего не выбрано) означает «без ограничения»,
-        # поэтому 0 и None здесь равнозначны и оба кладутся как NULL.
-        min_role_level = _int_or_none(data.get('min_role_level'))
-        if min_role_level is not None and min_role_level not in wiki_access.ROLE_LEVELS.values():
-            return jsonify({"error": "Неизвестный уровень должности"}), 400
+        permissions, manage_subsections, refusal = _rule_permissions(ctx, data)
+        if refusal:
+            body, status = refusal
+            return jsonify(body), status
 
-        # ── Должность внутри отдела ──────────────────────────────────
-        # Третье измерение того же правила. Только к отделу: на роль по всей
-        # компании или на конкретного человека сужать нечего, а разрешив это,
-        # мы завели бы правило, которое ничего не значит и молча не работает.
-        job_title = str(data.get('job_title') or '').strip()
-        if job_title and subject_type != 'department':
-            return jsonify({
-                "error": "Должность сужает правило на отдел — выберите отдел",
-            }), 400
-        if len(job_title) > 255:
-            return jsonify({"error": "Слишком длинное название должности"}), 400
-        # «И все, кто выше» у правила с должностью держится сравнением уровня
-        # (queries.SUBJECT_MATCH), а сравнение с NULL истины не даёт. Порог по
-        # умолчанию — оператор: тот же, под которым заведён весь бэк-офис.
-        if job_title and min_role_level is None:
-            min_role_level = wiki_access.ROLE_LEVELS['operator']
-
-        # ── Потолок должности ────────────────────────────────────────
-        # Роль адресата нужна отдельно от порога: у правила на конкретного
-        # человека порог обычно пуст, и одна лишь проверка порога пропустила бы
-        # «супервайзер выписывает правило на самого себя» — то есть выдачу себе
-        # полного доступа к любому разделу своего отдела.
-        target_role, subject_department = None, None
-        if subject_type == 'user':
-            # Роль и отдел одним запросом: отдел нужен проверке ниже, и второй
-            # поход в users за тем же человеком был бы лишним.
-            cursor.execute('SELECT role, department_id FROM users WHERE id = %s',
-                           (subject_id,))
-            target = cursor.fetchone()
-            if not target:
-                return jsonify({"error": "Сотрудник не найден"}), 404
-            target_role, subject_department = target[0], target[1]
-        else:
-            subject_department = structure.subject_department(
-                cursor, subject_type, subject_id)
-
-        # ── Граница отдела для адресата ──────────────────────────────
-        # Раздел уже проверен выше (_section_grant_refusal), но раздел — это
-        # «где», а не «кому». Без этой проверки супервайзер на СВОЁМ разделе
-        # выписывал правило чужому отделу, чужой группе или роли по всей
-        # компании: потолок такое пропускает, потому что порог у них пуст и
-        # весит как оператор.
-        if not wiki_access.may_grant_to_subject(
-                subject_type, grant_departments=_grant_departments(ctx),
-                subject_department=subject_department):
-            return jsonify({
-                "error": _SUBJECT_SCOPE_ERRORS.get(
-                    subject_type, "Этот адресат из другого отдела"),
-                "code": "WIKI_DEPARTMENT_SCOPE",
-            }), 403
-
-        if not wiki_access.may_grant_with_ceiling(ceiling, min_role_level, target_role):
-            return jsonify({
-                "error": "Такой доступ выдаёт только вышестоящий руководитель",
-                "code": "WIKI_GRANT_CEILING",
-            }), 403
-
-        permissions = {key: bool(data.get(key)) for key in PERMISSION_FIELDS}
-        # Право без чтения бессмысленно: нельзя править то, чего не видишь.
-        if any(permissions[k] for k in PERMISSION_FIELDS[1:]):
-            permissions['can_read'] = True
-
-        # ── Выписать можно только то, что умеешь сам ─────────────────
-        #
-        # До 21.08.2026 эта граница держалась случайно: право, выписанное сверх
-        # способностей раздающего, всё равно гасло у адресата (wiki/access.py),
-        # и проверять было нечего. Теперь выписанное право работает — значит
-        # «супервайзер выдал оператору удаление, которого у самого супервайзера
-        # нет» стало бы настоящей выдачей, причём мимо лестницы GRANT_CEILING.
-        #
-        # Сверяемся со способностями ДОЛЖНОСТИ, а не с итоговыми: право,
-        # полученное самим раздающим из правила, дальше не передаётся. Иначе
-        # одна выдача сверху делает человека раздающим то же право по всему
-        # своему отделу — мимо лестницы GRANT_CEILING.
-        #
-        # Отказ называет право поимённо: молчаливо снять галочку и сохранить
-        # правило урезанным — тот же класс отказа, от которого чинили сам
-        # инцидент, только с обратной стороны стола. Форма о границе знает
-        # заранее: набор доступных галочек едет в GET /access/section-rules
-        # полем grantable.
-        beyond = [key for key in PERMISSION_FIELDS
-                  if permissions[key] and not ctx['role_capabilities'].get(key)]
-        if beyond:
-            return jsonify({
-                "error": "Нельзя выдать право, которого нет у вас самих: %s" % ', '.join(
-                    CAPABILITY_TITLES.get(key, key) for key in beyond),
-                "code": "WIKI_GRANT_BEYOND_SELF",
-                "required": beyond,
-            }), 403
-
-        # ── Право строить дерево внутри ветки ────────────────────────
-        #
-        # Проверка отдельная от блока beyond выше и стоит по той же причине, по
-        # какой сам тумблер не стал седьмым правом: шесть прав — про содержимое
-        # раздела, а этот — про устройство дерева, и сверяется он с
-        # can_manage_structure, которого в PERMISSION_FIELDS нет вовсе.
-        #
-        # Сверяемся со способностями ДОЛЖНОСТИ: у коммерческого директора право
-        # строить дерево приходит из правила, и передать его дальше он не
-        # должен — иначе лестница выдачи разъезжается сама, без чьего-либо
-        # решения.
-        manage_subsections = bool(data.get('manage_subsections'))
-        if manage_subsections and not ctx['role_capabilities'].get('can_manage_structure'):
-            return jsonify({
-                "error": "Право заводить подразделы выдаёт тот, кто управляет "
-                         "структурой вики",
-                "code": "WIKI_GRANT_BEYOND_SELF",
-                "required": ['can_manage_structure'],
-            }), 403
-
-        rule_id = structure.upsert_section_rule(
-            cursor, section_id=section_id, subject_type=subject_type,
-            subject_id=subject_id, subject_role=subject_role,
-            permissions=permissions,
+        rule_id = _write_rule(
+            cursor, ctx, section_id, subject, permissions,
             grant_subsections=bool(data.get('grant_subsections', True)),
-            manage_subsections=manage_subsections,
-            min_role_level=min_role_level,
-            job_title=job_title or None,
-            created_by=ctx['user_id'],
-        )
-        queries.log_action(cursor, actor_id=ctx['user_id'], action='rule.upsert',
-                           entity_type='section', entity_id=section_id,
-                           target_user_id=subject_id if subject_type == 'user' else None,
-                           details={'rule_id': rule_id, 'subject_type': subject_type,
-                                    'subject_id': subject_id, 'subject_role': subject_role,
-                                    'min_role_level': min_role_level,
-                                    'job_title': job_title or None,
-                                    'manage_subsections': manage_subsections,
-                                    **permissions},
-                           ip_address=log_ip())
+            manage_subsections=manage_subsections)
         return jsonify({"id": rule_id}), 201
+
+    # ── Одни права сразу нескольким адресатам ────────────────────────────
+    #
+    # Решение владельца 16.09.2026: «чтобы я мог добавлять права сразу к
+    # группам людей, и по их должности тоже». До этого выдача шла по одному
+    # адресату за раз — открыть раздел четырём группам значило четыре раза
+    # пройти форму и четыре раза расставить одни и те же шесть галочек.
+    #
+    # ВСЁ ИЛИ НИЧЕГО, и это не строгость ради строгости. Курсор роута
+    # (database._get_cursor) КОММИТИТ транзакцию, когда обработчик вернулся
+    # штатно, — в том числе с ответом 403. Поэтому отказ посреди записи
+    # оставил бы половину выдачи выписанной, а человек прочитал бы «доступ не
+    # выдан». Сначала проверяем всех адресатов, пишем только после.
+    @wiki_route('/access/section-rules/bulk', methods=('POST',))
+    def wiki_section_rules_bulk(cursor, ctx):
+        ceiling = _grant_ceiling(ctx)
+        if ceiling is None:
+            return jsonify({"error": "Доступ раздают супервайзер и выше",
+                            "code": "WIKI_FORBIDDEN"}), 403
+
+        data = _body()
+        section_id = _int_or_none(data.get('section_id'))
+        if not section_id:
+            return jsonify({"error": "Укажите раздел и субъект правила"}), 400
+        refusal = _section_grant_refusal(cursor, ctx, section_id)
+        if refusal:
+            return jsonify({"error": refusal[0], "code": refusal[1]}), 403
+        if structure.section_exists(cursor, section_id) is None:
+            return jsonify({"error": "Раздел не найден"}), 404
+
+        subjects = data.get('subjects')
+        if not isinstance(subjects, list) or not subjects:
+            return jsonify({"error": "Не выбран ни один адресат"}), 400
+        # Потолок на размер пачки. Не про нагрузку: 174 правила одним нажатием
+        # — это выдача, которую никто не перечитает глазами, и отменять её
+        # пришлось бы по одному.
+        if len(subjects) > MAX_BULK_SUBJECTS:
+            return jsonify({
+                "error": "За раз можно открыть раздел %d адресатам" % MAX_BULK_SUBJECTS,
+            }), 400
+
+        permissions, manage_subsections, refusal = _rule_permissions(ctx, data)
+        if refusal:
+            body, status = refusal
+            return jsonify(body), status
+        # Пустой набор прав завёл бы правила, которые ничего не открывают, —
+        # ровно тот же мусор, от которого экран правила лечили удалением.
+        if not any(permissions.values()):
+            return jsonify({"error": "Выберите, что разрешено"}), 400
+
+        # Один и тот же адресат, выбранный дважды (должность отдела и тот же
+        # отдел с тем же порогом), — это ОДНО правило: ключ уникальности
+        # склеил бы их молча, а счётчик в ответе соврал бы.
+        checked, seen = [], set()
+        for raw in subjects:
+            if not isinstance(raw, dict):
+                return jsonify({"error": "Укажите раздел и субъект правила"}), 400
+            subject, refusal = _rule_subject(cursor, ctx, ceiling, raw)
+            if refusal:
+                body, status = refusal
+                return jsonify(body), status
+            key = (subject['subject_type'], subject['subject_id'],
+                   subject['subject_role'], subject['min_role_level'],
+                   subject['job_title'])
+            if key in seen:
+                continue
+            seen.add(key)
+            checked.append(subject)
+
+        grant_subsections = bool(data.get('grant_subsections', True))
+        ids = [_write_rule(cursor, ctx, section_id, subject, permissions,
+                           grant_subsections=grant_subsections,
+                           manage_subsections=manage_subsections)
+               for subject in checked]
+        return jsonify({"ids": ids, "count": len(ids)}), 201
 
     @wiki_route('/access/section-rules/<int:rule_id>', methods=('DELETE',))
     def wiki_section_rule_item(cursor, ctx, rule_id):

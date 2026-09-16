@@ -381,14 +381,30 @@ class RouteContractTest(unittest.TestCase):
         self.assertIn("row['locked'] = not wiki_access.may_grant_with_ceiling(",
                       self.source)
 
+    # 16.09.2026 разбор правила уехал из обработчика в _rule_subject/_write_rule:
+    # адресатов у одной выдачи стало много (POST .../bulk), и обе двери обязаны
+    # ходить через один и тот же разбор. Проверки ниже смотрят туда же, куда и
+    # раньше, — просто переменная теперь называется raw, а не data.
     def test_post_accepts_a_job_title(self):
-        self.assertIn("job_title = str(data.get('job_title') or '').strip()",
+        self.assertIn("job_title = str(raw.get('job_title') or '').strip()",
                       self.source)
-        self.assertIn('job_title=job_title or None,', self.source)
+        self.assertIn("job_title=subject['job_title'],", self.source)
 
     def test_job_title_is_written_to_the_audit_log(self):
         """Без должности журнал не отвечает на вопрос «кому выдали»."""
-        self.assertIn("'job_title': job_title or None,", self.source)
+        self.assertIn("'job_title': subject['job_title'],", self.source)
+
+    def test_both_doors_share_one_subject_check(self):
+        """Вторая копия границы отдела однажды разошлась бы с первой.
+
+        И разошлась бы в сторону «пропустили»: выдача пачкой адресует сразу
+        нескольких, и своя проверка у неё означала бы свой набор дыр.
+        """
+        self.assertEqual(self.source.count('def _rule_subject('), 1)
+        self.assertIn('subject, refusal = _rule_subject(cursor, ctx, ceiling, data)',
+                      self.source)
+        self.assertIn('subject, refusal = _rule_subject(cursor, ctx, ceiling, raw)',
+                      self.source)
 
     def test_job_title_narrows_only_a_department_rule(self):
         self.assertIn("if job_title and subject_type != 'department':", self.source)

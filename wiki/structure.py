@@ -868,30 +868,68 @@ def subject_catalog(cursor, department_ids=None, space_department_ids=None):
     ВАЖНО: наличие space_department_ids НЕ делает раздающего «ограниченным».
     Роли вики и должности гасятся по department_ids — иначе супер-админ,
     открывший форму в конкретном пространстве, потерял бы правило на должность.
+
+    У каждой строки едет `people` — сколько работающих под неё подпадает. Это
+    не украшение: доступ выдают сразу нескольким адресатам, и «Группа Регионы»
+    без числа не отличается от «Группы Регионы», в которой один человек.
+    У роли вики число NULL — носителей у неё считать нечем (назначается руками).
     """
     bounded = department_ids is not None
     depts = narrow_to_space(department_ids, space_department_ids)
     cursor.execute(
         """
-        SELECT 'department' AS kind, id, name FROM departments
-         WHERE is_active AND (%(depts)s::int[] IS NULL OR id = ANY(%(depts)s::int[]))
+        WITH working AS (
+            SELECT id, department_id, direction_id FROM users WHERE status = 'working'
+        ),
+        -- Состав группы считается ТЕМ ЖЕ определением, что и попадание под
+        -- правило (queries._ACCESS_CONTEXT_SQL, CTE my_groups): операторы и
+        -- супервайзеры с действующей записью членства. Любое другое
+        -- определение дало бы число, которое расходится с выдачей, — а число
+        -- в строке отвечает ровно на вопрос «кому я сейчас открываю раздел».
+        memberships AS (
+            SELECT group_id, operator_id AS user_id, start_date, end_date
+              FROM group_operator_memberships
+            UNION ALL
+            SELECT group_id, supervisor_id, start_date, end_date
+              FROM group_supervisor_memberships
+        ),
+        group_people AS (
+            SELECT m.group_id, COUNT(DISTINCT m.user_id) AS people
+              FROM memberships m
+              JOIN working w ON w.id = m.user_id
+             WHERE m.start_date <= CURRENT_DATE
+               AND (m.end_date IS NULL OR m.end_date >= CURRENT_DATE)
+             GROUP BY 1
+        )
+        SELECT 'department' AS kind, d.id, d.name,
+               (SELECT COUNT(*) FROM working w WHERE w.department_id = d.id)
+          FROM departments d
+         WHERE d.is_active
+           AND (%(depts)s::int[] IS NULL OR d.id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'direction', id, name FROM directions
-         WHERE is_active
-           AND (%(depts)s::int[] IS NULL OR department_id = ANY(%(depts)s::int[]))
+        SELECT 'direction', x.id, x.name,
+               (SELECT COUNT(*) FROM working w WHERE w.direction_id = x.id)
+          FROM directions x
+         WHERE x.is_active
+           AND (%(depts)s::int[] IS NULL OR x.department_id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'group', id, name FROM groups
-         WHERE status = 'active'
-           AND (%(depts)s::int[] IS NULL OR department_id = ANY(%(depts)s::int[]))
+        SELECT 'group', g.id, g.name, COALESCE(gp.people, 0)
+          FROM groups g
+          LEFT JOIN group_people gp ON gp.group_id = g.id
+         WHERE g.status = 'active'
+           AND (%(depts)s::int[] IS NULL OR g.department_id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'wiki_role', id, name FROM wiki_roles WHERE NOT %(bounded)s
+        -- У роли вики носителей не считаем: она назначается руками и к отделу
+        -- не привязана, а NULL честнее нуля — форма просто не пишет число.
+        SELECT 'wiki_role', r.id, r.name, NULL FROM wiki_roles r WHERE NOT %(bounded)s
         ORDER BY 1, 3
         """,
         {'depts': list(depts) if depts is not None else None, 'bounded': bounded},
     )
     catalog = {'department': [], 'direction': [], 'group': [], 'wiki_role': []}
-    for kind, ident, name in cursor.fetchall():
-        catalog[kind].append({'id': ident, 'name': name})
+    for kind, ident, name, people in cursor.fetchall():
+        catalog[kind].append({'id': ident, 'name': name,
+                              'people': None if people is None else int(people)})
     return catalog
 
 

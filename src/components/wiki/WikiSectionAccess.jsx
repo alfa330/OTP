@@ -11,6 +11,8 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { sectionAncestors } from './sectionPicker';
 import { grantableCheck, presetIsGrantable } from './sectionGrants';
+import { buildRecipients, grantedKeys, peopleLabel, SUBJECT_KIND_LABEL }
+    from './accessRecipients';
 import useStableCallback from './useStableCallback';
 
 /* Доступ к разделу — прямо из строки раздела во вкладке «Структура».
@@ -42,10 +44,10 @@ import useStableCallback from './useStableCallback';
  * ── Из чего состоит список ────────────────────────────────────────────────
  * Наверху — должности ЭТОЙ ветки, как они заведены в дереве «Структуры»: у
  * СЗоВ это «Оператор», «Супервайзер», «Руководитель группы», у «Маркетинга» —
- * «Видеограф», «Таргетолог», «Контекстолог», «SMM-менеджер», «Руководитель».
- * Это ровно то, что настраивают каждый день, и оно не требует знать слово
- * «субъект». Ниже — точечные правила (человек, группа, направление, роль
- * вики): нужны редко, но без них модель прав беднее.
+ * «Видеограф», «Таргетолог», «Контекстолог», «SMM-менеджер». Это ровно то, что
+ * настраивают каждый день, и оно не требует знать слово «субъект». Ниже —
+ * точечные правила (человек, группа, направление, роль вики): нужны редко, но
+ * без них модель прав беднее.
  *
  * До 04.09.2026 строк было четыре и они были одинаковы во всех ветках. Для
  * линии это правда, для отделов без линии — нет: форма предлагала выдать
@@ -60,6 +62,22 @@ import useStableCallback from './useStableCallback';
  * 'sv' пробила бы границу отдела — супервайзер продаж увидел бы ОТП.
  * Если ветки отдела над разделом нет, писать не на что, кроме самой роли, —
  * и тогда правило действует по всей компании, о чём форма прямо предупреждает.
+ *
+ * ── Выдача сразу нескольким (16.09.2026) ──────────────────────────────────
+ * Экран точечного правила стал экраном ВЫДАЧИ: адресатов на нём отмечают
+ * галочками, сколько нужно, и права уходят всем одним сохранением. Просьба
+ * владельца дословно: «чтобы я мог добавлять права сразу к группам людей, и по
+ * их должности тоже».
+ *
+ * Селект «Тип субъекта» при этом исчез. Он не убран ради красоты: тип перестал
+ * быть выбором — в сплошном списке он стал заголовком над строкой (accessRecipients),
+ * и держать его вторым органом управления значило бы спрашивать одно и то же
+ * дважды. На экране ГОТОВОГО правила адресат и вовсе не редактируется (он часть
+ * ключа), и два заблокированных селекта там заменены строкой текста.
+ *
+ * Запрос ровно один — POST /access/section-rules/bulk. Цикл по адресатам с
+ * фронта дал бы половину выписанных правил при отказе на середине списка:
+ * сервер проверяет всех и только потом пишет.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -117,6 +135,12 @@ const ruleMatchesRow = (rule, row) => (
         : Number(rule.subject_id) === Number(row.subject_id))
     && (rule.min_role_level ?? null) === (row.min_role_level ?? null)
     && (rule.job_title || null) === (row.job_title || null));
+
+/* Сколько адресатов принимает одна выдача. Зеркало MAX_BULK_SUBJECTS из
+   wiki/routes_structure.py: без потолка в форме человек отмечает сто строк и
+   получает отказ на заполненном экране — ровно тот молчаливый отказ с
+   обратной стороны стола, от которого этот экран лечили уже трижды. */
+const MAX_SUBJECTS = 50;
 
 const PERMISSIONS = [
     { key: 'can_read', label: 'Читать', note: 'видит раздел и его статьи' },
@@ -186,47 +210,6 @@ const accessNote = (permissions) => {
     const key = presetOf(permissions);
     if (key) return PRESETS.find((p) => p.key === key).note;
     return PERMISSIONS.filter((p) => permissions[p.key]).map((p) => p.label).join(' · ');
-};
-
-/* «174 человека», «1 человек», «22 человека». Счётчик под строкой должности
-   отвечает на главный вопрос выдачи — кому именно я сейчас открываю раздел, —
-   и склонение тут не украшение: «174 человек» читается как опечатка и роняет
-   доверие ко всей строке. Число приезжает готовым (positions[].people). */
-const peopleLabel = (count) => {
-    const ten = count % 10;
-    const hundred = count % 100;
-    if (ten === 1 && hundred !== 11) return `${count} человек`;
-    if (ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14)) return `${count} человека`;
-    return `${count} человек`;
-};
-
-const SUBJECT_KINDS = [
-    { value: 'user', label: 'Конкретный человек' },
-    { value: 'group', label: 'Группа' },
-    { value: 'direction', label: 'Направление' },
-    { value: 'department', label: 'Отдел' },
-    // Адресуется НАЗНАЧЕНИЮ, а не человеку: правило переезжает вместе со сменой
-    // главы, и переставлять его руками не нужно.
-    { value: 'department_head', label: 'Глава отдела' },
-    { value: 'wiki_role', label: 'Роль в вики' },
-    { value: 'otp_role', label: 'Роль в системе' },
-];
-
-const SUBJECT_KIND_LABEL = Object.fromEntries(SUBJECT_KINDS.map((k) => [k.value, k.label]));
-
-/* Субъекты БЕЗ отдела: роль в системе носят сотрудники всех отделов сразу,
-   роль вики — все, кому её назначили. Раздающему, у которого есть граница
-   отдела, они закрыты (та же пара в wiki/access.py: COMPANY_WIDE_SUBJECTS). */
-const COMPANY_WIDE_KINDS = ['otp_role', 'wiki_role'];
-
-/* Словарь портала, а не свой. Раньше здесь стояли «руководитель» и «директор»,
-   которых больше нигде в системе нет: поиск по слову «админ» не находил никого,
-   и выглядело это как «админов в списке нет» — хотя они были. Ровно эти же
-   подписи отдаёт справочник ролей в /access/subjects. */
-const ROLE_TITLE = {
-    operator: 'оператор', trainee: 'стажёр', trainer: 'тренер',
-    sv: 'супервайзер', supervisor: 'супервайзер',
-    admin: 'админ', super_admin: 'супер-админ',
 };
 
 /* Развёрнуто, а не «от СВ»: в строке правила это единственное объяснение,
@@ -643,10 +626,13 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             manage_subsections: !!rule.manage_subsections,
             permissions: permissionsOf(rule),
         } : {
+            // Новая выдача адресована СПИСКУ: ключи адресатов из
+            // accessRecipients, а не один субъект с типом. Права у всех
+            // отмеченных одни и те же — в этом весь смысл выдачи пачкой.
             editing: false,
             ruleId: null,
-            subject_type: 'user', subject_id: '', subject_role: 'operator',
-            min_role_level: '', job_title: null, grant_subsections: false,
+            subjects: [],
+            grant_subsections: false,
             manage_subsections: false,
             permissions: { ...NO_PERMISSIONS, can_read: true },
         });
@@ -674,8 +660,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
        заведёт правило, которое ничего не откроет. */
     const ruleChanged = draft && (() => {
         if (!draft.editing) {
-            return !!(draft.subject_type === 'otp_role' || draft.subject_id)
-                && anyPermission(draft.permissions);
+            return draft.subjects.length > 0 && anyPermission(draft.permissions);
         }
         const before = rules.find((r) => r.id === draft.ruleId);
         if (!before) return true;
@@ -717,24 +702,48 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
 
     const saveExtra = () => {
         setBusy(true);
-        /* Правило без единого права — это удаление, ровно как в строке
-           должности. Пока экраны расходились, через точечное правило можно было
-           СОХРАНИТЬ пустое правило: в таблице оно оставалось и раздел открывало. */
-        const request = (!anyPermission(draft.permissions) && draft.ruleId)
-            ? axios.delete(`${base}/access/section-rules/${draft.ruleId}`, { headers })
-            : axios.post(`${base}/access/section-rules`, {
+        const common = {
+            ...draft.permissions,
+            grant_subsections: draft.grant_subsections,
+            manage_subsections: !!draft.manage_subsections && grantableStructure,
+        };
+        /* Новая выдача идёт ОДНИМ запросом на всех отмеченных, а не циклом по
+           адресатам. Не ради скорости: цикл на пятом адресате получил бы отказ
+           по границе отдела, а первые четыре правила остались бы выписанными —
+           и человек прочитал бы «не удалось», глядя на наполовину открытый
+           раздел. Сервер проверяет всех и только потом пишет. */
+        const request = !draft.editing
+            ? axios.post(`${base}/access/section-rules/bulk`, {
                 section_id: sectionId,
-                subject_type: draft.subject_type,
-                subject_id: draft.subject_type === 'otp_role' ? null : Number(draft.subject_id) || null,
-                subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
-                min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
-                job_title: draft.job_title || null,
-                ...draft.permissions,
-                grant_subsections: draft.grant_subsections,
-                manage_subsections: !!draft.manage_subsections && grantableStructure,
-            }, { headers });
+                subjects: draft.subjects
+                    .map((key) => recipientByKey.get(key)?.body)
+                    .filter(Boolean),
+                ...common,
+            }, { headers })
+            /* Правило без единого права — это удаление, ровно как в строке
+               должности. Пока экраны расходились, через точечное правило можно
+               было СОХРАНИТЬ пустое правило: в таблице оно оставалось и раздел
+               открывало. */
+            : (!anyPermission(draft.permissions)
+                ? axios.delete(`${base}/access/section-rules/${draft.ruleId}`, { headers })
+                : axios.post(`${base}/access/section-rules`, {
+                    section_id: sectionId,
+                    subject_type: draft.subject_type,
+                    subject_id: draft.subject_type === 'otp_role' ? null : Number(draft.subject_id) || null,
+                    subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
+                    min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
+                    job_title: draft.job_title || null,
+                    ...common,
+                }, { headers }));
         request
-            .then(() => { toast('Правило сохранено', 'success'); goBack(); loadRules(); reload?.(); })
+            // Сколько правил выписано — из ответа сервера, а не из длины
+            // выбора: два одинаковых адресата (должность отдела и тот же отдел
+            // с тем же порогом) — это одно правило, и счёт «выдано 2» соврал бы.
+            .then((r) => {
+                const count = r?.data?.count;
+                toast(count > 1 ? `Доступ выдан: ${count}` : 'Правило сохранено', 'success');
+                goBack(); loadRules(); reload?.();
+            })
             .catch((e) => toast(errText(e, 'Не удалось сохранить правило'), 'error'))
             .finally(() => setBusy(false));
     };
@@ -747,35 +756,45 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             .finally(() => setBusy(false));
     };
 
-    /* Должность в подписи не для красоты: тёзки в списке из 174 человек
-       неразличимы, а ошибка тут выдаёт доступ не тому. */
-    const peopleOptions = useMemo(() => people.map((person) => ({
-        value: String(person.id),
-        label: [person.name, ROLE_TITLE[person.role] || person.role,
-                person.department_name].filter(Boolean).join(' · '),
-    })), [people]);
+    /* Все, кому этот человек вправе открыть раздел, — ОДНИМ списком с
+       заголовками групп. Тип субъекта отдельным селектом больше не выбирают:
+       он стал заголовком над строкой, а выдача идёт сразу нескольким.
 
-    /* Субъекты, которые этот человек вправе адресовать.
        Роль в системе и роль вики действуют ПО ВСЕЙ КОМПАНИИ, мимо отдела:
        правило otp_role='operator' без порога открывает раздел каждому
        сотруднику. Раздающему с границей отдела сервер их отвергает
-       (access.may_grant_to_subject), поэтому и в форме их нет — предложенная
+       (access.may_grant_to_subject), поэтому и в списке их нет — предложенная
        строка, на которую приходит отказ, читается как поломка, а не как
-       правило. Отделы, группы и направления сервер присылает уже сужёнными. */
-    const subjectKinds = useMemo(
-        () => (grantDepartments
-            ? SUBJECT_KINDS.filter((k) => !COMPANY_WIDE_KINDS.includes(k.value))
-            : SUBJECT_KINDS),
-        [grantDepartments]);
+       правило. Отделы, группы, направления и людей сервер присылает уже
+       сужёнными. */
+    const recipients = useMemo(() => buildRecipients({
+        rows, catalog, people, bounded: !!grantDepartments, hasBranch: !!department,
+    }), [rows, catalog, people, grantDepartments, department]);
 
-    const subjectOptions = useMemo(() => {
-        const kind = draft?.subject_type;
-        if (!kind || kind === 'otp_role' || kind === 'user') return [];
-        const source = kind === 'department_head' ? 'department' : kind;
-        return (catalog[source] || []).map((item) => ({
-            value: String(item.id), label: item.name,
-        }));
-    }, [catalog, draft?.subject_type]);
+    const recipientByKey = useMemo(
+        () => new Map(recipients.map((item) => [item.key, item])), [recipients]);
+
+    const recipientOptions = useMemo(() => recipients.map((item) => ({
+        value: item.key, label: item.label,
+        groupLabel: item.groupLabel, disabled: item.disabled,
+    })), [recipients]);
+
+    /* Кому раздел УЖЕ открыт. Выдача поверх готового правила его заменяет
+       (upsert по ключу), и молча перезаписать чужую настройку — тот самый
+       молчаливый отказ, только наоборот: человек думает, что добавил, а он
+       заменил. Поэтому предупреждаем до сохранения. */
+    const granted = useMemo(() => grantedKeys(rules), [rules]);
+    const replacing = useMemo(
+        () => (draft?.subjects || []).filter((key) => granted.has(key)).length,
+        [draft?.subjects, granted]);
+
+    /* Роль в системе и роль вики отдела не знают: правило на них открывает
+       раздел всей компании. Заголовок группы в списке говорит это заранее, но
+       после выбора список закрыт — и предупреждение обязано остаться на виду. */
+    const companyWide = useMemo(
+        () => (draft?.subjects || []).some(
+            (key) => key.startsWith('otp_role|') || key.startsWith('wiki_role|')),
+        [draft?.subjects]);
 
     const isPublic = section?.visibility_scope === 'public';
     const openedRow = rowDraft ? rows.find((r) => r.key === rowDraft.key) : null;
@@ -804,7 +823,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             </>
         );
     } else if (draft) {
-        title = draft.editing ? draft.subject_label : 'Новое правило';
+        title = draft.editing ? draft.subject_label : 'Выдать доступ';
         subtitle = draft.editing
             ? SUBJECT_KIND_LABEL[draft.subject_type]
             : `Раздел «${section?.name}»`;
@@ -902,93 +921,95 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                     </div>
                 )}
 
-                {/* ── Экран точечного правила ─────────────────────────────── */}
+                {/* ── Экран выдачи доступа ────────────────────────────────── */}
                 {draft && (
                     <div className="space-y-4">
                         <section className="space-y-1.5">
                             <div className={iosGroupLabel}>Кому</div>
-                            {/* Селекты БЕЗ обёртки-карточки: у CustomSelect в
-                                варианте ios своя белая плашка с кантом, и внутри
-                                iosCard получались две рамки в трёх пикселях
-                                друг от друга — ровно тот «ящик в ящике», из-за
-                                которого экран и выглядел неаккуратно. */}
-                            <div className="space-y-2">
-                                <CustomSelect
-                                    variant="ios"
-                                    value={draft.subject_type}
-                                    onChange={(v) => setDraft({ ...draft, subject_type: v, subject_id: '' })}
-                                    options={subjectKinds}
-                                    ariaLabel="Тип субъекта"
-                                    // Адресат — часть ключа правила (раздел + субъект +
-                                    // порог). Сменить его на месте нельзя: получилось бы
-                                    // второе правило, а первое осталось бы висеть.
-                                    disabled={!!draft.editing}
-                                />
-
-                                {/* Сотрудник выбирается поиском по имени, а не вводом id.
-                                    Числовой id можно было узнать только заглянув в базу, а
-                                    опечатка выдавала доступ постороннему молча — сервер
-                                    несуществующий id даже не проверял. Список приходит уже
-                                    обрезанным по потолку и отделу. */}
-                                {draft.subject_type === 'user' && (
-                                    <CustomSelect
-                                        variant="ios"
-                                        value={draft.subject_id}
-                                        onChange={(v) => setDraft({ ...draft, subject_id: v })}
-                                        options={peopleOptions}
-                                        searchable
-                                        placeholder="Выберите сотрудника…"
-                                        searchPlaceholder="Поиск по имени…"
-                                        ariaLabel="Сотрудник"
-                                        disabled={!!draft.editing}
-                                    />
-                                )}
-
-                                {draft.subject_type === 'otp_role' && (
-                                    <CustomSelect
-                                        variant="ios"
-                                        value={draft.subject_role}
-                                        onChange={(v) => setDraft({ ...draft, subject_role: v })}
-                                        options={(catalog.otp_role || []).map((r) => ({
-                                            value: String(r.id), label: r.name,
-                                        }))}
-                                        ariaLabel="Роль в системе"
-                                        disabled={!!draft.editing}
-                                    />
-                                )}
-
-                                {!['otp_role', 'user'].includes(draft.subject_type) && (
-                                    <CustomSelect
-                                        variant="ios"
-                                        value={draft.subject_id}
-                                        onChange={(v) => setDraft({ ...draft, subject_id: v })}
-                                        options={subjectOptions}
-                                        searchable
-                                        placeholder="Выберите…"
-                                        ariaLabel="Субъект правила"
-                                        // Тот же ключ правила, что у человека и у роли.
-                                        // Здесь запрета не было, и «переставленный»
-                                        // адресат заводил ВТОРОЕ правило, а первое
-                                        // оставалось с прежними правами.
-                                        disabled={!!draft.editing}
-                                    />
-                                )}
-                            </div>
 
                             {draft.editing ? (
-                                <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                    Адресата у готового правила не меняют — заведите отдельное.
-                                </p>
-                            ) : draft.subject_type === 'otp_role' ? (
-                                <p className="px-1 text-[11.5px] leading-relaxed text-amber-700">
-                                    Роль не знает границ отдела: правило подействует
-                                    во всей компании.
-                                </p>
-                            ) : draft.subject_type === 'user' && !peopleOptions.length ? (
-                                <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                    Открывать раздел отдельным людям вам пока некому.
-                                </p>
-                            ) : null}
+                                /* У готового правила адресат не меняется: он
+                                   часть ключа (раздел + субъект + порог +
+                                   должность), и «переставленный» адресат завёл
+                                   бы ВТОРОЕ правило, а первое осталось бы
+                                   висеть с прежними правами. Раньше здесь
+                                   стояли те же селекты, но заблокированные —
+                                   два мёртвых органа управления на месте одной
+                                   строки текста. */
+                                <>
+                                    <div className={`${iosCard} px-3.5 py-2.5`}>
+                                        <div className="truncate text-[13.5px] font-medium text-slate-900">
+                                            {draft.subject_label}
+                                        </div>
+                                        <div className="mt-0.5 truncate text-[11.5px] text-slate-400">
+                                            {[SUBJECT_KIND_LABEL[draft.subject_type] || draft.subject_type,
+                                              draft.job_title].filter(Boolean).join(' · ')}
+                                        </div>
+                                    </div>
+                                    <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                        Адресата у готового правила не меняют — заведите отдельное.
+                                    </p>
+                                </>
+                            ) : (
+                                /* Селект БЕЗ обёртки-карточки: у CustomSelect в
+                                   варианте ios своя белая плашка с кантом, и внутри
+                                   iosCard получались две рамки в трёх пикселях друг
+                                   от друга — ровно тот «ящик в ящике», из-за
+                                   которого экран и выглядел неаккуратно. */
+                                <>
+                                    <CustomSelect
+                                        variant="ios"
+                                        multiple
+                                        searchable
+                                        value={draft.subjects}
+                                        onChange={(next) => setDraft({ ...draft, subjects: next })}
+                                        options={recipientOptions}
+                                        maxSelected={MAX_SUBJECTS}
+                                        placeholder="Выберите, кому открыть…"
+                                        searchPlaceholder="Поиск по названию…"
+                                        ariaLabel="Кому открыть раздел"
+                                        renderValue={(keys) => `Выбрано: ${keys.length}`}
+                                    />
+
+                                    {/* Кого именно отметили — строкой под списком.
+                                        «Выбрано: 4» в кнопке отвечает сколько, но не
+                                        кому, а закрытый список второй раз открывать
+                                        ради проверки никто не станет. */}
+                                    {draft.subjects.length > 0 && (
+                                        <p className="px-1 text-[11.5px] leading-relaxed text-slate-500">
+                                            {draft.subjects
+                                                .map((key) => recipientByKey.get(key)?.label || key)
+                                                .join(' · ')}
+                                        </p>
+                                    )}
+
+                                    {companyWide && (
+                                        <p className="px-1 text-[11.5px] leading-relaxed text-amber-700">
+                                            Роль не знает границ отдела: правило подействует
+                                            во всей компании.
+                                        </p>
+                                    )}
+
+                                    {/* Выдача поверх готового правила ЗАМЕНЯЕТ его
+                                        целиком (upsert по ключу). Молча перезаписать
+                                        чужую настройку — тот же молчаливый отказ,
+                                        только наоборот: человек думает, что добавил,
+                                        а он заменил. */}
+                                    {replacing > 0 && (
+                                        <p className="px-1 text-[11.5px] leading-relaxed text-amber-700">
+                                            {replacing === 1
+                                                ? 'Одному из выбранных раздел уже открыт — его права будут заменены.'
+                                                : `${replacing} выбранным раздел уже открыт — их права будут заменены.`}
+                                        </p>
+                                    )}
+
+                                    {!recipientOptions.length && (
+                                        <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                            Открывать раздел вам пока некому.
+                                        </p>
+                                    )}
+                                </>
+                            )}
                         </section>
 
                         <PermissionPicker
@@ -1127,8 +1148,8 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 <IosHint
                                     label="Что это"
                                     text={grantDepartments
-                                        ? 'Доступ мимо должностей: конкретному человеку, группе, направлению или главе отдела. Адресовать можно только своему отделу.'
-                                        : 'Доступ мимо должностей: конкретному человеку, группе, направлению, главе отдела или роли.'}
+                                        ? 'Доступ мимо должностей: конкретному человеку, группе, направлению или главе отдела. Отметить можно сразу нескольких — права выдаются всем одним сохранением. Адресовать можно только своему отделу.'
+                                        : 'Доступ мимо должностей: конкретному человеку, группе, направлению, главе отдела или роли. Отметить можно сразу нескольких — права выдаются всем одним сохранением.'}
                                 />
                             </div>
                             <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
@@ -1166,7 +1187,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                     className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13.5px] font-medium text-blue-600 transition hover:bg-slate-50 active:bg-slate-100"
                                 >
                                     <Plus size={16} className="shrink-0" />
-                                    Добавить правило
+                                    Выдать доступ
                                 </button>
                             </div>
                         </section>
