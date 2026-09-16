@@ -111,6 +111,17 @@ LEADS_SYNC_STALE_MINUTES = 30
 # клика не гнали одну выгрузку дважды параллельно.
 _LEAD_SYNC_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cdr-leads-sync')
 
+# Автодогрузка карточек. Раздел сам ставит мосту недостающие сутки звонков — так же он сам
+# дочитывает карточки: сегодняшние (ночная выгрузка «Воронки ОП» идёт только за закрытые
+# сутки, а человек смотрит сегодня) и те, что лежат без телефона (снимок до 16.09.2026 их
+# не хранил). Человек пришёл за данными, а не за кнопкой «а теперь загрузите их».
+LEADS_AUTO_TODAY_MINUTES = 30      # сегодняшние карточки перечитываются не чаще
+LEADS_AUTO_BACKFILL_HOURS = 6      # добор телефонов повторяется не чаще, если счётчик не сдвинулся
+# Состояние автодогрузки на источник. В памяти процесса: экземпляр на Render один, а
+# переживать перезапуск этому состоянию незачем — оно только не даёт запускать одно и то
+# же дважды.
+_LEAD_AUTO = {}
+
 
 def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         resolve_requester, excel_text_warning=None, store_audio=None):
@@ -570,6 +581,11 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         # Сутки звонков, которых в базе ещё нет, ставятся мосту в очередь так же, как в
         # режиме «Звонки»: человек пришёл за данными, а не за кнопкой «загрузите их».
         cdr_coverage = _coverage(day_from, touches_to, enqueue, ctx['user_id'])
+        # И карточки дочитываются сами — сегодняшние и те, что без телефона. Только на
+        # запросах с sync=1 (первый заход, смена условий): опрос прогресса идёт с sync=0.
+        auto = (_maybe_auto_refresh(info, day_from, day_to, present_days, without_phone,
+                                    ctx['user_id'])
+                if enqueue else _auto_state(info['key']))
 
         for touch in touches:
             touch['operator'], touch['direction'] = resolve(
@@ -607,9 +623,80 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             'rows': rows, 'summary': summary, 'blocks': blocks, 'full_url': full_url,
             'values': values, 'cdr_coverage': cdr_coverage,
             'leads_coverage': {'days': present_days, 'missing_days': missing_days,
-                               'without_phone': without_phone, 'last_run': last_run},
+                               'without_phone': without_phone, 'last_run': last_run,
+                               'auto': _auto_view(auto)},
             'filters_note': _lead_filters_note(filters, values),
         }
+
+    def _auto_state(source):
+        return _LEAD_AUTO.setdefault(source, {
+            'active': False, 'kind': None, 'started_at': None, 'done_at': None,
+            'today_at': None, 'last_without': None, 'error': None,
+        })
+
+    def _auto_view(state):
+        return {'active': bool(state.get('active')), 'kind': state.get('kind'),
+                'started_at': _stamp(state.get('started_at')),
+                'done_at': _stamp(state.get('done_at')), 'error': state.get('error')}
+
+    def _maybe_auto_refresh(info, day_from, day_to, present_days, without_phone, user_id):
+        """Запустить фоном то, чего не хватает карточкам периода. Возвращает состояние.
+
+        Два повода, оба с ограничением частоты:
+          * в периоде есть сегодня, а сегодняшних карточек в снимке нет или их читали
+            больше LEADS_AUTO_TODAY_MINUTES назад — перечитать сегодняшние сутки;
+          * у карточек «Основы» нет телефонов — дочитать контакты (только колонки
+            контакта, итоги воронки не трогаются). Повтор — когда счётчик пустых
+            сдвинулся или прошло LEADS_AUTO_BACKFILL_HOURS: у части сделок телефона
+            нет и в amoCRM, и без этого добор крутился бы вечно.
+        """
+        source = info['key']
+        state = _auto_state(source)
+        if state['active']:
+            return state
+        now = queries.now_almaty()
+        today = queries.today_almaty()
+        want_today = (day_to >= today and (
+            today.isoformat() not in present_days
+            or _stale_minutes(state['today_at'], LEADS_AUTO_TODAY_MINUTES)))
+        want_backfill = (source == 'amo' and without_phone > 0 and (
+            state['last_without'] != without_phone
+            or _stale(state['done_at'], hours=LEADS_AUTO_BACKFILL_HOURS)))
+        if not (want_today or want_backfill):
+            return state
+        state.update(active=True, started_at=now, error=None,
+                     kind='backfill' if want_backfill else 'today')
+        # Добор — не длиннее месяца за раз: месяц «Основы» это сотни страниц amoCRM.
+        backfill_from = max(day_from, day_to - timedelta(days=LEADS_SYNC_MAX_DAYS - 1))
+
+        def job():
+            from op_funnel import sync as funnel_sync  # локально: пакет читает окружение
+            error = None
+            try:
+                if want_today:
+                    funnel_sync.sync_direction(db, info['direction'], today, today, force=False,
+                                               started_by=user_id,
+                                               note='из раздела «Касания», автообновление')
+                    state['today_at'] = queries.now_almaty()
+                if want_backfill:
+                    funnel_sync.backfill_amo_contacts(db, backfill_from, day_to)
+            except Exception as exc:  # noqa: BLE001 — отказ показывается в разделе
+                error = str(exc)[:300]
+                log.exception('Касания: автодогрузка карточек %s %s..%s упала',
+                              source, day_from, day_to)
+            left = without_phone
+            if want_backfill and error is None:
+                try:
+                    with db._get_cursor() as cursor:
+                        left = lead_queries.count_without_phones(
+                            cursor, source, info['direction'], backfill_from, day_to)
+                except Exception:  # noqa: BLE001
+                    log.exception('Касания: не удалось пересчитать карточки без телефона')
+            state.update(active=False, done_at=queries.now_almaty(), error=error,
+                         last_without=left if want_backfill else state['last_without'])
+
+        _LEAD_SYNC_POOL.submit(job)
+        return state
 
     def _lead_out(row):
         agg = dict(row['agg'])
@@ -702,6 +789,9 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 and not _stale_minutes(last_run.get('started_at'), LEADS_SYNC_STALE_MINUTES)):
             return jsonify({"error": "Выгрузка по этому источнику уже идёт — дождитесь её",
                             "code": "CDR_LEADS_SYNC_BUSY", "run": last_run}), 409
+        if _auto_state(source)['active']:
+            return jsonify({"error": "Раздел уже дочитывает карточки этого источника — дождитесь",
+                            "code": "CDR_LEADS_SYNC_BUSY"}), 409
 
         def job():
             from op_funnel import sync as funnel_sync  # локально: пакет читает окружение

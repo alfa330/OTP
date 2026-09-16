@@ -164,6 +164,14 @@ class LeadRoutesTests(unittest.TestCase):
         schema_patch = mock.patch.object(cdr_routes.schema, 'schema_is_ready', return_value=True)
         schema_patch.start()
         self.addCleanup(schema_patch.stop)
+        # Автодогрузка: состояние сбрасывается между тестами, а фон не запускается —
+        # проверяется только то, что раздел решил запустить.
+        auto_patch = mock.patch.dict(cdr_routes._LEAD_AUTO, {}, clear=True)
+        auto_patch.start()
+        self.addCleanup(auto_patch.stop)
+        submit_patch = mock.patch.object(cdr_routes._LEAD_SYNC_POOL, 'submit')
+        self.submit = submit_patch.start()
+        self.addCleanup(submit_patch.stop)
 
         app = Flask(__name__)
         app.register_blueprint(cdr_routes.build_cdr_blueprint(
@@ -244,6 +252,41 @@ class LeadRoutesTests(unittest.TestCase):
         body = self.get('leads').get_json()
         self.assertEqual(body['leads_coverage']['missing_days'], ['2026-09-12'])
         self.assertEqual(body['leads_coverage']['without_phone'], 5)
+
+    # ── автодогрузка карточек ────────────────────────────────────────────────
+
+    def test_карточки_без_телефона_дочитываются_сами(self):
+        self.lead_queries.without_phone = 5
+        body = self.get('leads').get_json()
+        self.assertTrue(body['leads_coverage']['auto']['active'])
+        self.assertEqual(body['leads_coverage']['auto']['kind'], 'backfill')
+        self.assertEqual(self.submit.call_count, 1)
+        # пока идёт — второй заход ничего не запускает
+        body = self.get('leads').get_json()
+        self.assertTrue(body['leads_coverage']['auto']['active'])
+        self.assertEqual(self.submit.call_count, 1)
+
+    def test_сегодняшние_карточки_перечитываются_когда_их_нет_в_снимке(self):
+        body = self.get('leads', date_to='2026-09-16').get_json()
+        self.assertEqual(body['leads_coverage']['auto']['kind'], 'today')
+        self.assertEqual(self.submit.call_count, 1)
+
+    def test_когда_всё_на_месте_ничего_не_запускается(self):
+        body = self.get('leads').get_json()          # период закрыт, телефоны есть
+        self.assertFalse(body['leads_coverage']['auto']['active'])
+        self.assertEqual(self.submit.call_count, 0)
+
+    def test_опрос_прогресса_не_запускает_догрузку(self):
+        self.lead_queries.without_phone = 5
+        self.get('leads', sync=0)
+        self.assertEqual(self.submit.call_count, 0)
+
+    def test_кнопка_не_запускает_поверх_автодогрузки(self):
+        self.lead_queries.without_phone = 5
+        self.get('leads')
+        response = self.client.post('/api/cdr/leads/sync', query_string={
+            'source': 'amo', 'date_from': '2026-09-10', 'date_to': '2026-09-12'})
+        self.assertEqual(response.status_code, 409)
 
     def test_неизвестный_источник_это_400(self):
         response = self.get('leads', source='oktell')

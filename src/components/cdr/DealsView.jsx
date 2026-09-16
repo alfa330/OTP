@@ -132,7 +132,10 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
 
     const pending = data?.coverage?.pending || 0;
     const lastRun = data?.leads_coverage?.last_run || null;
-    const runActive = syncing || lastRun?.status === 'running';
+    /* Раздел дочитывает карточки и сам (сегодняшние, без телефона) — это тоже «идёт
+       догрузка», и таблица обновится, когда она кончится. */
+    const autoActive = !!data?.leads_coverage?.auto?.active;
+    const runActive = syncing || autoActive || lastRun?.status === 'running';
 
     // Пока мост забирает сутки звонков или идёт догрузка записей — опрашиваем.
     useEffect(() => {
@@ -362,7 +365,7 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
                 </section>
             ) : null}
 
-            {missingDays.length || withoutPhone || runActive || lastRun?.status === 'error' ? (
+            {missingDays.length || withoutPhone || runActive || lastRun?.status === 'error' || data?.leads_coverage?.auto?.error ? (
                 <div className={`${iosCard} mt-3 flex flex-col gap-2 px-4 py-3 text-[13px] text-slate-700 sm:flex-row sm:items-center`}>
                     <span className="min-w-0 sm:flex-1">
                         {runActive ? (
@@ -384,8 +387,8 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
                                     ({missingDays.slice(0, 4).map(shortDay).join(', ')}{missingDays.length > 4 ? '…' : ''}) {subject.many}
                                     в снимке нет: либо их не было, либо ночная выгрузка ещё не прошла. </>
                                 ) : null}
-                                {!withoutPhone && !missingDays.length && lastRun?.status === 'error' ? (
-                                    <span className="text-rose-700">Последняя догрузка не удалась: {lastRun.error}</span>
+                                {!withoutPhone && !missingDays.length && (lastRun?.status === 'error' || data?.leads_coverage?.auto?.error) ? (
+                                    <span className="text-rose-700">Последняя догрузка не удалась: {data?.leads_coverage?.auto?.error || lastRun?.error}</span>
                                 ) : null}
                             </>
                         )}
