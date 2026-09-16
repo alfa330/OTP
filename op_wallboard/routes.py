@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 """HTTP «Табло ОП»: один снимок для всех зрителей.
 
-    GET /api/op_wallboard/snapshot   снимок дня: итоги, линии, часы, люди
+    GET /api/op_wallboard/snapshot   снимок дня: итоги, часы, люди
 
 Доступ — как у табло Тез КЦ и СЗоВ: глобальные админы, глава отдела продаж и его
 супервайзеры. Граница отдела строгая. Зависимости приходят аргументами фабрики:
 проверки прав, кэш снимков и каталог статусов живут в bot_schedule2, и обратный
 импорт был бы циклом.
+
+Момент ответа (SL, ожидание, разговор) берётся не из CDR, а из событий iCORE Phone за
+сутки — см. `snapshot.attach_answer_moments` и докстринг `snapshot`.
 """
 
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request
@@ -25,6 +28,29 @@ log = logging.getLogger(__name__)
 DEPARTMENT_CODE = 'op'
 _DEPARTMENT_CACHE_TTL = 600  # отделы меняются раз в никогда
 _ALMATY = ZoneInfo('Asia/Almaty')
+
+
+def load_phone_events(cursor, operator_ids, day):
+    """События телефонов операторов за сутки табло: {operator_id, event_at, status_key}.
+
+    Только живые события iCORE Phone (`client_event_id IS NOT NULL`) — в той же таблице
+    лежат сегменты ночных импортов, а они не про секунду ответа. Окно с запасом на
+    рассинхрон часов до полуночи и на звонок, начатый в 23:59 и закончившийся после.
+    Индекс (operator_id, event_at) есть; за сутки ОП это единицы тысяч строк."""
+    ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+    if not ids:
+        return []
+    day_start = datetime.combine(day, datetime.min.time())
+    cursor.execute("""
+        SELECT operator_id, event_at, status_key
+          FROM operator_status_events
+         WHERE operator_id = ANY(%s)
+           AND client_event_id IS NOT NULL
+           AND event_at >= %s AND event_at < %s
+         ORDER BY event_at, id
+    """, (ids, day_start - timedelta(minutes=1), day_start + timedelta(hours=25)))
+    return [{'operator_id': row[0], 'event_at': row[1], 'status_key': row[2]}
+            for row in cursor.fetchall()]
 
 
 def make_department_resolver(db, code=DEPARTMENT_CODE):
@@ -93,16 +119,31 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         resolve = directory_mod.resolver(stored)
         return lambda ext: resolve(ext, datetime.now(_ALMATY).strftime('%Y-%m-%d'))[0]
 
+    def _is_talking(status_key):
+        return status_entry(status_key)[1] == 'talking'
+
     def _fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
+        dept = department_id()
+        people = load_people(dept, day) if dept is not None else []
+        operator_ids = [p['id'] for p in people if p.get('id') is not None]
+        ext_by_operator = {p['id']: str(p['sip_number']) for p in people
+                           if p.get('id') is not None and p.get('sip_number')}
         with db._get_cursor() as cursor:
             touches = queries.day_touches_compact(cursor, day)
             bridge_state = queries.agent_state(cursor)
-        dept = department_id()
-        people = load_people(dept, day) if dept is not None else []
+            try:
+                phone_events = load_phone_events(cursor, operator_ids, day)
+            except Exception:  # noqa: BLE001
+                # Без событий телефонов теряются только SL, ожидание и точный разговор —
+                # снимок отдаёт их прочерком, а не уносит с собой всё табло.
+                log.exception('%s: события iCORE Phone не прочитались', label)
+                phone_events = []
+        touches = snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
+                                                     _is_talking)
         try:
-            statuses = live_statuses([p['id'] for p in people if p.get('id') is not None])
+            statuses = live_statuses(operator_ids)
         except Exception:  # noqa: BLE001
             # Без статусов плитки дня остаются верными: список людей теряет разметку,
             # а не уносит с собой всё табло.

@@ -11,6 +11,24 @@
     владельца ровно на секунду в каждой строке;
   * «онлайн» = свободные + в разговоре; перерыв, тренинг, тех.причина, исход — не онлайн.
 
+Откуда момент ответа (и почему не из CDR)
+-----------------------------------------
+SL и среднее ожидание считаются по `answered_at` касания — моменту, когда трубку снял
+сотрудник. С обновлением станции 09.09.2026 («один звонок = одна строка») плечо агента из
+выдачи CDR исчезло: очередь «отвечает» звонок сама в секунду входа (`duration == billsec`),
+и когда подключился человек, станция больше не сообщает — `answered_at` из склейки пуст у
+всех входящих. Поэтому момент ответа берётся из iCORE Phone: телефон оператора шлёт событие
+«занят» в секунду ответа и «готов» в секунду отбоя (`operator_status_events`), и на живых
+данных 15.09.2026 они сошлись с началом и концом звонка по CDR в пределах секунды у 364 из
+379 принятых. `attach_answer_moments` подставляет `answered_at` и настоящий разговор
+(от «занят» до «готов») тем касаниям, где такая пара нашлась; остальные остаются как есть.
+
+SL по неполному измерению: у части телефонов событий нет (не iCORE Phone, тишина). SL
+считается по измеренным и растягивается на всех принятых: доля «в срок» среди измеренных ×
+доля принятых среди дошедших. `wait_measured` в итогах говорит, по скольким принятым момент
+ответа известен; при нуле измеренных SL и ожидание — None (на экране «—»), а не 0 %: ноль
+здесь читался бы как катастрофа на линии.
+
 Здесь нет ни базы, ни Flask: на вход — списки словарей, на выход — словарь снимка.
 """
 
@@ -72,7 +90,7 @@ def _ratio(numerator, denominator):
 
 def _bucket():
     return {'arrived': 0, 'answered': 0, 'missed': 0, 'served_sl': 0,
-            'talk_seconds': 0, 'wait_seconds': 0, 'waited': 0,
+            'talk_seconds': 0, 'talk_measured_seconds': 0, 'wait_seconds': 0, 'waited': 0,
             'outgoing': 0, 'outgoing_answered': 0}
 
 
@@ -80,13 +98,92 @@ def _finish(bucket):
     """Дописать производные к сырым счётчикам разреза."""
     out = dict(bucket)
     out['ar'] = _ratio(bucket['missed'], bucket['arrived'])
-    out['sl'] = _ratio(bucket['served_sl'], bucket['arrived'])
-    # Усечение, а не округление: см. докстринг модуля.
-    out['avg_talk_seconds'] = (bucket['talk_seconds'] // bucket['answered']
-                               if bucket['answered'] else None)
-    out['avg_wait_seconds'] = (bucket['wait_seconds'] // bucket['waited']
-                               if bucket['waited'] else None)
+    answered, waited, arrived = bucket['answered'], bucket['waited'], bucket['arrived']
+    # SL по измеренным, растянутый на всех принятых (см. докстринг модуля). Принятые без
+    # единого измерения — не «никого не обслужили за 20 с», а «момент ответа неизвестен»;
+    # при нуле принятых SL честно нулевой — все дошедшие потеряны.
+    if waited:
+        out['sl'] = (bucket['served_sl'] / waited) * (answered / arrived) if arrived else None
+    elif not answered:
+        out['sl'] = _ratio(0, arrived)
+    else:
+        out['sl'] = None
+    out['wait_measured'] = waited
+    # Усечение, а не округление: см. докстринг модуля. Разговор — по измеренным телефоном,
+    # где они есть: у остальных billsec очереди включает ожидание и завышает разговор.
+    if waited:
+        out['avg_talk_seconds'] = bucket['talk_measured_seconds'] // waited
+    else:
+        out['avg_talk_seconds'] = bucket['talk_seconds'] // answered if answered else None
+    out['avg_wait_seconds'] = (bucket['wait_seconds'] // waited if waited else None)
     out.pop('waited', None)
+    out.pop('talk_measured_seconds', None)
+    return out
+
+
+# Допуски сопоставления касания с событиями телефона. «Занят» ищем от начала звонка (минус
+# рассинхрон часов), «готов» обязан лечь на конец звонка по CDR: на живых данных расхождение
+# не превышало полутора секунд, шесть — с запасом на очередь событий в телефоне.
+ANSWER_START_TOLERANCE_SECONDS = 2
+ANSWER_END_TOLERANCE_SECONDS = 6
+
+
+def attach_answer_moments(touches, phone_events, ext_by_operator, is_talking,
+                          start_tolerance=ANSWER_START_TOLERANCE_SECONDS,
+                          end_tolerance=ANSWER_END_TOLERANCE_SECONDS):
+    """Подставить принятым входящим момент ответа и разговор по событиям iCORE Phone.
+
+    phone_events — [{operator_id, event_at, status_key}] за сутки, только события телефона;
+    ext_by_operator — {operator_id: внутренний номер}; is_talking(status_key) — «в разговоре»
+    по каталогу статусов. Пара берётся строго: «занят» внутри звонка И следующее событие
+    того же телефона у конца звонка по CDR — иначе за ответ можно принять исходящий, который
+    оператор успел сделать, пока входящий ждал в очереди. Возвращает новые словари, исходные
+    не трогает; касания без пары остаются как были."""
+    by_ext = defaultdict(list)
+    for event in phone_events or []:
+        ext = ext_by_operator.get(event.get('operator_id'))
+        at = _parse(event.get('event_at'))
+        if not ext or at is None:
+            continue
+        by_ext[str(ext)].append((at, bool(is_talking(event.get('status_key')))))
+    for events in by_ext.values():
+        events.sort(key=lambda item: item[0])
+
+    start_slack = timedelta(seconds=start_tolerance)
+    end_slack = timedelta(seconds=end_tolerance)
+    out = []
+    for touch in touches:
+        events = by_ext.get(str(touch.get('ext') or ''))
+        started = _parse(touch.get('started_at'))
+        if (not events or started is None or touch.get('call_type') != touches_mod.TYPE_IN
+                or int(touch.get('talk_seconds') or 0) <= 0 or touch.get('answered_at')):
+            out.append(touch)
+            continue
+        span = int(touch.get('dial_seconds') or touch.get('talk_seconds') or 0)
+        end = started + timedelta(seconds=span)
+        found = None
+        for index, (at, talking) in enumerate(events):
+            if at < started - start_slack:
+                continue
+            if at > end + start_slack:
+                break
+            if not talking or index + 1 >= len(events):
+                continue
+            next_at, next_talking = events[index + 1]
+            if not next_talking and abs((next_at - end).total_seconds()) <= end_tolerance:
+                found = (at, next_at)
+                break
+        if found is None:
+            out.append(touch)
+            continue
+        answered_at, hung_up_at = found
+        enriched = dict(touch)
+        enriched['answered_at'] = max(answered_at, started).strftime('%Y-%m-%d %H:%M:%S')
+        # Разговор — от ответа до отбоя по телефону, усечённый до секунд; ноль не отдаём,
+        # иначе принятый звонок превратился бы в потерянный.
+        enriched['talk_seconds'] = max(1, int((hung_up_at - answered_at).total_seconds()))
+        enriched['answer_source'] = 'phone'
+        out.append(enriched)
     return out
 
 
@@ -138,6 +235,7 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
             if wait is not None:
                 totals['waited'] += 1
                 totals['wait_seconds'] += max(0, wait)
+                totals['talk_measured_seconds'] += talk
                 if wait <= sl_seconds:
                     totals['served_sl'] += 1
         else:

@@ -11,6 +11,7 @@ import {
     formatCount,
     formatSeconds,
     opClockLabel,
+    opDataGapNotice,
     opFreshnessNotice,
     opMetricHint,
     opStatusChip,
@@ -197,6 +198,9 @@ export default function OpWallboardView({
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, SOURCE_LABEL), [error, snapshot]);
     const freshness = useMemo(() => opFreshnessNotice(snapshot), [snapshot]);
     const notice = staleNotice || freshness;
+    // Прочерк в SL и ожидании без объяснения читался бы как поломка табло: причина — в данных
+    // станции, и сказать об этом надо один раз, серым, рядом с заголовком.
+    const dataGap = useMemo(() => opDataGapNotice(snapshot), [snapshot]);
 
     const header = (
         <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
@@ -212,6 +216,12 @@ export default function OpWallboardView({
                     <div className="mt-1 inline-flex items-center gap-2 rounded-full bg-amber-50 px-2.5 py-0.5 text-[12px] text-amber-800 ring-1 ring-amber-200">
                         <FaIcon className="fas fa-triangle-exclamation"></FaIcon>
                         {notice}
+                    </div>
+                ) : null}
+                {dataGap ? (
+                    <div className="mt-1 inline-flex items-center gap-2 rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] text-slate-600">
+                        <FaIcon className="fas fa-circle-info"></FaIcon>
+                        {dataGap}
                     </div>
                 ) : null}
             </div>

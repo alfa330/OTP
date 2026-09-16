@@ -61,6 +61,37 @@ class AggregateTests(unittest.TestCase):
         totals = S.aggregate([touch(talk=10), touch(talk=11), touch(talk=11)])['totals']
         self.assertEqual(totals['avg_talk_seconds'], 10)   # 32 / 3 = 10.67 → 10
 
+    def test_sl_is_stretched_from_measured_calls_to_all_answered(self):
+        # Момент ответа известен у одного из двух принятых (второй телефон молчит): SL —
+        # доля «в срок» среди измеренных × доля принятых среди дошедших, не 1/3 и не 1/2.
+        touches = [touch(),                                         # измерен, за 12 с
+                   touch(answered=''),                              # принят, момента нет
+                   touch(call_type='Входящий (не приняли)', talk=0, ext='', answered='')]
+        totals = S.aggregate(touches, sl_seconds=20)['totals']
+        self.assertEqual(totals['wait_measured'], 1)
+        self.assertAlmostEqual(totals['sl'], 1.0 * (2 / 3))
+        self.assertEqual(totals['avg_wait_seconds'], 12)
+        # Разговор — по измеренным телефоном: у неизмеренного billsec включает ожидание.
+        self.assertEqual(totals['avg_talk_seconds'], 60)
+
+    def test_sl_and_wait_are_unknown_without_answer_moment(self):
+        # Станция с 09.09.2026 не отдаёт плечо агента: answered_at пуст у всех входящих.
+        # SL 0 % при этом читался бы как «никого не обслужили» — должен быть прочерк.
+        touches = [touch(answered=''), touch(answered=''),
+                   touch(call_type='Входящий (не приняли)', talk=0, ext='', answered='')]
+        totals = S.aggregate(touches, sl_seconds=20)['totals']
+        self.assertEqual((totals['arrived'], totals['answered'], totals['missed']), (3, 2, 1))
+        self.assertIsNone(totals['sl'])
+        self.assertIsNone(totals['avg_wait_seconds'])
+        self.assertEqual(totals['wait_measured'], 0)
+        # Ни одного принятого — SL честно нулевой: все дошедшие потеряны.
+        lost_only = S.aggregate([touch(call_type='Входящий (не приняли)', talk=0, ext='')])['totals']
+        self.assertEqual(lost_only['sl'], 0.0)
+        # Момент ответа известен — считается как раньше, и это видно по wait_measured.
+        measured = S.aggregate([touch()], sl_seconds=20)['totals']
+        self.assertAlmostEqual(measured['sl'], 1.0)
+        self.assertEqual(measured['wait_measured'], 1)
+
     def test_outgoing_is_counted_apart_from_incoming(self):
         touches = [touch(call_type='Исходящий', talk=40), touch(call_type='Исходящий', talk=0)]
         totals = S.aggregate(touches)['totals']
@@ -94,6 +125,58 @@ class AggregateTests(unittest.TestCase):
 
     def test_garbage_started_at_is_skipped(self):
         self.assertEqual(S.aggregate([touch(started='вчера')])['totals']['arrived'], 0)
+
+
+def event(operator_id, at, key='занят'):
+    return {'operator_id': operator_id, 'event_at': at, 'status_key': key}
+
+
+def is_talking(key):
+    return status_entry(key)[1] == 'talking'
+
+
+class AnswerMomentTests(unittest.TestCase):
+    """Момент ответа — из пары «занят»/«готов» iCORE Phone, строго внутри звонка по CDR."""
+
+    EXT = {1: '6650', 2: '6651'}
+
+    def test_pair_inside_the_call_gives_answer_and_real_talk(self):
+        # Звонок 10:00:00, длительность по CDR 70 с (touch(): dial_seconds=70) → конец 10:01:10.
+        events = [event(1, '2026-09-15 10:00:15'), event(1, '2026-09-15 10:01:11', 'готов')]
+        out = S.attach_answer_moments([touch(answered='', talk=70)], events, self.EXT, is_talking)
+        self.assertEqual(out[0]['answered_at'], '2026-09-15 10:00:15')
+        self.assertEqual(out[0]['talk_seconds'], 56)
+        self.assertEqual(out[0]['answer_source'], 'phone')
+        totals = S.aggregate(out, sl_seconds=20)['totals']
+        self.assertEqual((totals['avg_wait_seconds'], totals['avg_talk_seconds']), (15, 56))
+        self.assertAlmostEqual(totals['sl'], 1.0)
+
+    def test_outgoing_call_while_waiting_is_not_taken_for_the_answer(self):
+        # Пока входящий ждал в очереди, оператор успел сделать короткий исходящий:
+        # «занят» 10:00:05 → «готов» 10:00:20 лежит внутри звонка, но не у его конца.
+        events = [event(1, '2026-09-15 10:00:05'), event(1, '2026-09-15 10:00:20', 'готов'),
+                  event(1, '2026-09-15 10:00:40'), event(1, '2026-09-15 10:01:09', 'готов')]
+        out = S.attach_answer_moments([touch(answered='', talk=70)], events, self.EXT, is_talking)
+        self.assertEqual(out[0]['answered_at'], '2026-09-15 10:00:40')
+        self.assertEqual(out[0]['talk_seconds'], 29)
+
+    def test_without_a_pair_the_touch_is_left_alone(self):
+        touches = [touch(answered='', talk=70),                                   # телефон молчит
+                   touch(answered='', talk=70, ext='6651'),                       # «готов» не у конца
+                   touch(call_type='Входящий (не приняли)', talk=0, answered=''),  # потерянный
+                   touch(call_type='Исходящий', talk=30, answered='')]            # исходящий
+        events = [event(2, '2026-09-15 10:00:05'), event(2, '2026-09-15 10:00:30', 'готов')]
+        out = S.attach_answer_moments(touches, events, self.EXT, is_talking)
+        self.assertEqual(out, touches)
+        for original, result in zip(touches, out):
+            self.assertIsNot(original, result) if result.get('answer_source') else None
+
+    def test_existing_answer_moment_is_kept(self):
+        # Если склейка когда-нибудь снова получит плечо агента, телефон её не перебивает.
+        events = [event(1, '2026-09-15 10:00:15'), event(1, '2026-09-15 10:01:11', 'готов')]
+        out = S.attach_answer_moments([touch()], events, self.EXT, is_talking)
+        self.assertEqual(out[0]['answered_at'], '2026-09-15 10:00:12')
+        self.assertEqual(out[0]['talk_seconds'], 60)
 
 
 class PeopleTests(unittest.TestCase):
@@ -201,13 +284,19 @@ class RouteTests(unittest.TestCase):
         def get_authenticated_requester():
             return self.requester['id'], (None, None, None, self.requester['role']), None
 
-        for name, value in (('day_touches_compact', lambda cursor, day: [touch()]),
+        self.touches = [touch()]
+        self.phone_events = []
+        for name, value in (('day_touches_compact', lambda cursor, day: list(self.touches)),
                             ('agent_state', lambda cursor: {'connected': True, 'live_at': None,
                                                             'last_seen_at': None}),
                             ('load_directory', lambda cursor: {})):
             patcher = mock.patch.object(op_routes.queries, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(op_routes, 'load_phone_events',
+                                    lambda cursor, ids, day: list(self.phone_events))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         def fetch_guarded_cache(**kwargs):
             if self.fail_fetch:
@@ -261,6 +350,18 @@ class RouteTests(unittest.TestCase):
         self.db.user_department[10] = 7
         self.assertEqual(self.client.get('/api/op_wallboard/snapshot').status_code, 200)
 
+    def test_answer_moment_comes_from_the_phone(self):
+        """Склейка без плеча агента + события iCORE Phone → SL, ожидание и разговор по телефону."""
+        self.requester['role'] = 'admin'
+        self.touches = [touch(answered='', talk=70)]
+        self.phone_events = [event(1, datetime(2026, 9, 15, 10, 0, 15)),
+                             event(1, datetime(2026, 9, 15, 10, 1, 11), 'готов')]
+        totals = self.client.get('/api/op_wallboard/snapshot').get_json()['totals']
+        self.assertEqual(totals['wait_measured'], 1)
+        self.assertEqual(totals['avg_wait_seconds'], 15)
+        self.assertEqual(totals['avg_talk_seconds'], 56)
+        self.assertAlmostEqual(totals['sl'], 1.0)
+
     def test_no_data_at_all_is_a_503_in_words(self):
         self.requester['role'] = 'admin'
         self.fail_fetch = True
@@ -296,6 +397,13 @@ class FrontendTests(unittest.TestCase):
         backend = (ROOT / 'op_wallboard' / 'snapshot.py').read_text(encoding='utf-8-sig')
         self.assertNotIn("'queues'", backend)
         self.assertNotIn('_first_queue', backend)
+
+    def test_missing_answer_moment_is_explained_on_the_wall(self):
+        """Прочерк в SL без причины читается как поломка: причина — в данных станции."""
+        self.assertIn('export const opDataGapNotice', self.shared)
+        self.assertIn('wait_measured', self.shared)
+        self.assertIn('{dataGap ? (', self.view)
+        self.assertIn('opDataGapNotice(snapshot)', self.view)
 
     def test_widget_button_is_the_same_as_szov(self):
         """Кнопка виджета — общая с СЗоВ (экспорт), а не третья копия."""

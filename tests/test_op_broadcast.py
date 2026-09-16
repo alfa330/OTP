@@ -83,6 +83,13 @@ class DeviationTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn('SL 70,0 %', notes[0])
 
+    def test_unknown_sl_is_not_a_deviation(self):
+        # Станция не отдаёт момент ответа → снимок отдаёт SL как None; писать в чат
+        # «SL 0 % при норме 80 %» на этом было бы ложной тревогой в каждой отбивке.
+        self.assertEqual(self.deviations(snapshot(sl=None)), [])
+        text = self.ns["_op_broadcast_text"](snapshot(sl=None))
+        self.assertIn('SL —', text)
+
     def test_small_sample_does_not_wake_anyone(self):
         # Утро: 7 входящих, 1 потерян — 14 % AR, но это не показатель.
         self.assertEqual(self.deviations(snapshot(arrived=7, missed=1, sl=0.5)), [])

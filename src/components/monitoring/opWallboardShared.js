@@ -84,6 +84,32 @@ export const opStatusChip = (row) => {
 };
 
 /*
+ * SL, среднее ожидание и разговор считаются по моменту, когда трубку снял сотрудник. В CDR
+ * станции этого момента с 09.09.2026 нет (очередь «отвечает» звонок сама в секунду входа),
+ * поэтому сервер берёт его из событий iCORE Phone: «занят» в секунду ответа, «готов» —
+ * в секунду отбоя. `wait_measured` в итогах — у скольких принятых пара нашлась; если ни у
+ * одного (телефоны молчат), снимок отдаёт SL и ожидание как null, и экран объясняет прочерк
+ * одной строкой, а не молчит и не рисует 0 %.
+ */
+export const ANSWER_MOMENT_MISSING = 'телефоны iCORE Phone не прислали ни одного момента ответа';
+
+export const opAnswerMomentMissing = (snapshot) => (
+    (snapshot?.totals?.answered || 0) > 0 && !(snapshot?.totals?.wait_measured || 0)
+);
+
+export const opDataGapNotice = (snapshot) => (
+    opAnswerMomentMissing(snapshot) ? `SL и среднее ожидание не считаются: ${ANSWER_MOMENT_MISSING}` : null
+);
+
+/** «по 120 из 130 принятых» — когда момент ответа известен не у всех; иначе пусто. */
+export const opMeasuredNote = (snapshot) => {
+    const answered = Number(snapshot?.totals?.answered || 0);
+    const measured = Number(snapshot?.totals?.wait_measured || 0);
+    if (!measured || measured >= answered) return '';
+    return ` · момент ответа известен у ${formatInt(measured)} из ${formatInt(answered)} принятых`;
+};
+
+/*
  * Каталог показателей: единственное место, где сказано «как называется, откуда берётся,
  * каким цветом». Экран берёт отсюда подпись, значение и тон; виджет «поверх окон» — тот же
  * каталог через реестр направления ниже (OP_WALLBOARD_DIRECTIONS).
@@ -120,17 +146,21 @@ export const OP_METRICS = [
     },
     {
         key: 'op_sl', group: 'day', label: 'SL',
-        hint: (s) => `Отвечено не позже ${s?.sl_threshold_seconds ?? 20} с`,
+        hint: (s) => (opAnswerMomentMissing(s)
+            ? ANSWER_MOMENT_MISSING
+            : `Отвечено не позже ${s?.sl_threshold_seconds ?? 20} с${opMeasuredNote(s)}`),
         read: (s) => ({ value: formatRatio(s.totals?.sl), tone: slTone(s.totals?.sl) }),
     },
     {
         key: 'op_avg_talk', group: 'day', label: 'Средний разговор',
-        hint: 'По принятым, усечённое',
+        hint: 'От ответа до отбоя по телефону, усечённое',
         read: (s) => ({ value: formatSeconds(s.totals?.avg_talk_seconds) }),
     },
     {
         key: 'op_avg_wait', group: 'day', label: 'Среднее ожидание',
-        hint: 'До ответа, по принятым',
+        hint: (s) => (opAnswerMomentMissing(s)
+            ? ANSWER_MOMENT_MISSING
+            : `До ответа сотрудника, по принятым${opMeasuredNote(s)}`),
         read: (s) => ({ value: formatSeconds(s.totals?.avg_wait_seconds) }),
     },
     {
