@@ -412,7 +412,8 @@ _LEAD_COLUMNS = (
     'owner_raw', 'stage_raw', 'call_status', 'dialog_status', 'reason_raw',
     'reason_code', 'sub_reason_raw', 'reach_outcome', 'dialog_outcome',
     'reason_bucket', 'full_name', 'phone', 'park_name', 'city', 'base_title',
-    'comment', 'created_at', 'taken_at', 'updated_at',
+    'comment', 'phones', 'tags', 'utm_source', 'lead_type', 'registered',
+    'created_at', 'taken_at', 'updated_at',
 )
 
 
@@ -484,6 +485,51 @@ def upsert_leads(cursor, rows, page=1000):
         )
         written += len(chunk)
     return written
+
+
+_LEAD_CONTACT_COLUMNS = ('phone', 'phones', 'tags', 'utm_source', 'lead_type', 'registered')
+
+
+def update_lead_contact_fields(cursor, rows):
+    """Дописать телефоны и поля сделки у УЖЕ лежащих строк, ничего больше не трогая.
+
+    Нужен для добора телефонов amoCRM в зафиксированных сутках: до 16.09.2026
+    снимок телефонов не хранил, а перечитывать такие сутки целиком нельзя —
+    их суточный итог уже назван на планёрке, и `sync_direction` без force его
+    не переписывает. Здесь меняются только колонки контакта; статусы, исходы и
+    итоги остаются как были. Строк, которых в снимке нет, не заводит.
+    """
+    updated = 0
+    for row in rows:
+        cursor.execute(
+            """
+            UPDATE op_funnel_leads
+               SET phone = %s, phones = %s, tags = %s, utm_source = %s, lead_type = %s,
+                   registered = %s
+             WHERE direction_code = %s AND source = %s AND stream_type = %s AND lead_key = %s
+            """,
+            tuple(row.get(name) for name in _LEAD_CONTACT_COLUMNS)
+            + (row.get('direction_code'), row.get('source'), int(row.get('stream_type') or 0),
+               row.get('lead_key')),
+        )
+        updated += cursor.rowcount or 0
+    return updated
+
+
+def count_leads_without_phones(cursor, direction_code, source, day_from, day_to):
+    """Сколько записей периода лежат без единого телефона — им звонки не найти."""
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM op_funnel_leads
+         WHERE direction_code = %s AND source = %s AND work_day BETWEEN %s AND %s
+           AND phones = '' AND phone = ''
+        """,
+        (direction_code, source, day_from, day_to),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return 0
+    return int(row[0] if not isinstance(row, dict) else list(row.values())[0])
 
 
 def read_leads_page(cursor, direction_code, day_from, day_to, filters=None, limit=50, offset=0):

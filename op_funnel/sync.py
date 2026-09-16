@@ -172,7 +172,7 @@ def _pull_amo(cursor, direction_code, day_from, day_to):
     Без справочника (403, отозвали права) всё продолжает работать: в отчёте
     останутся числовые id, и их свяжут на экране сопоставления.
     """
-    leads, stage_names, amo_users, loss_reasons = sources.fetch_amo_sales_leads(
+    leads, stage_names, amo_users, loss_reasons, contact_phones = sources.fetch_amo_sales_leads(
         day_from, day_to)
 
     if amo_users:
@@ -193,7 +193,7 @@ def _pull_amo(cursor, direction_code, day_from, day_to):
 
     owner_map = queries.resolve_operator_map(cursor, SOURCE_AMO)
     rows, seen = sources.amo_rows(leads, stage_names, direction_code, owner_map,
-                                  loss_reasons)
+                                  loss_reasons, contact_phones)
     return rows, seen, len(leads)
 
 
@@ -562,6 +562,35 @@ def sync_direction(db, direction_code, day_from, day_to, force=False, started_by
         except Exception:  # noqa: BLE001 — журнал не должен маскировать причину
             log.exception('op_funnel: не удалось записать отказ в журнал прогонов')
     return summary
+
+
+def backfill_amo_contacts(db, day_from, day_to):
+    """Дописать телефоны и поля сделок amoCRM в уже лежащие строки снимка.
+
+    До 16.09.2026 снимок «Основы» телефонов не хранил, а раздел «Касания» ищет по
+    ним звонки. Перечитать зафиксированные сутки через `sync_direction` нельзя —
+    их итог назван на планёрке, — поэтому здесь сделки читаются заново вместе с
+    контактами, а в базе обновляются ТОЛЬКО колонки контакта у существующих
+    строк. Итоги, статусы и журнал прогонов не трогаются.
+
+    Возвращает {'seen', 'updated'}; отказ источника летит наружу — вызывающий
+    решает, как о нём сказать.
+    """
+    day_from = _as_date(day_from)
+    day_to = _as_date(day_to)
+    if day_to < day_from:
+        raise SyncError('Конец периода раньше начала')
+    if (day_to - day_from).days + 1 > MAX_PERIOD_DAYS:
+        raise SyncError('Период больше %d суток — добирайте частями' % MAX_PERIOD_DAYS)
+    leads, stage_names, _users, loss_reasons, contact_phones = sources.fetch_amo_sales_leads(
+        day_from, day_to)
+    rows, _seen = sources.amo_rows(leads, stage_names, 'op_osnova', {}, loss_reasons,
+                                   contact_phones)
+    with db._get_cursor() as cursor:
+        updated = queries.update_lead_contact_fields(cursor, rows)
+    log.info('op_funnel: телефоны amoCRM дописаны за %s—%s: сделок %d, обновлено строк %d',
+             day_from, day_to, len(rows), updated)
+    return {'seen': len(rows), 'updated': updated}
 
 
 # Счётчики для журнала — отдельной функцией, потому что в `summary` лежат ещё и

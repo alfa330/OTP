@@ -38,7 +38,13 @@ UTC нельзя: в проекте на этом горели — отчёт р
 """
 
 import logging
+import re
 from datetime import date, datetime, timedelta
+
+# Правило нормализации телефона — ОДНО на портал: то же, которым касания
+# складываются в cdr_touches. Своя копия здесь однажды разошлась бы, и лид с
+# «+7 705…» перестал бы находить свои же звонки с «7705…».
+from cdr.touches import norm_phone
 
 from . import metrics
 from .schema import (SOURCE_AMO, SOURCE_CRM_PAID_HIRE, SOURCE_CRM_STREAM,
@@ -54,8 +60,132 @@ AMO_SALES_PIPELINE_ID = metrics.AMO_SALES_PIPELINE_ID
 # Кастомные поля сделки, снятые живьём 11.09.2026.
 AMO_FIELD_PARK = 915311        # «Таксопарк привлечения»
 AMO_FIELD_CITY = 1073351       # «Город привлечения»
+AMO_FIELD_UTM_SOURCE = 892237  # utm_source
+AMO_FIELD_REGISTERED = 1074667 # «Зарегистрирован» (флажок)
 
-_AMO_PAGE_LIMIT = 250
+# Страница сделок. Раньше стояло 250, но вместе с `with=contacts` такая страница
+# тяжелее, и на широком периоде nginx amoCRM отвечал 504 (замерено на офлайн-
+# выгрузках: месяц с limit=250 и контактами не проходил, limit=100 — проходил).
+_AMO_PAGE_LIMIT = 100
+
+# Контакты запрашиваются пачками по id: у ручки /api/v4/contacts фильтр
+# `filter[id][N]`, и сотни id в одном URL — предел, после которого он не влезает.
+_AMO_CONTACTS_BATCH = 100
+_AMO_CONTACTS_RETRIES = 3
+
+# ── источник и тип лида amoCRM ───────────────────────────────────────────────
+# Отдел считает лиды по НОРМАЛИЗОВАННОМУ источнику: в amoCRM utm_source = «fb»,
+# в отчётах — «facebook». Таблицы выведены сверкой с выгрузкой заказчика за
+# 24.06–24.07.2026 (26 661 сделка сошлась 1:1 по ID, точность по колонке 99,7%)
+# и повторяют её правила:
+#   * пустое поле ≠ нет значения: источник берётся из ТЕГА вида forma_<парк>_<источник>;
+#   * явный рекламный источник в теге важнее канала («call_цр_olxx» → olx,
+#     а «call_noltaxi_wb» → звонки);
+#   * тип лида — производная от источника: «звонки» и «wz» как есть, остальное «форма».
+AMO_SOURCE_BY_FIELD = {
+    'fb': 'facebook', 'ig': 'facebook', 'facebook': 'facebook', 'yandex': 'yandex',
+    'ya': 'yandex', 'google': 'google', 'googleban': 'google', 'chatgpt.com': 'google',
+    'youtube': 'google', 'seo': 'google', 'tiktok': 'tiktok', 'pro': 'wz',
+    '2gis': '2gis', 'olx': 'olx',
+}
+AMO_SOURCE_BY_TAG = {
+    'wz': 'wz', 'ноль': 'wz', 'такси': 'wz', 'taxi': 'wz', 'центр': 'wz',
+    'регистрации': 'wz', '2гис': 'wz', 'аманат': 'wz', 'честный': 'wz',
+    'не': 'wz', 'писать': 'wz', 'первыми': 'wz',
+    'цр': 'звонки', 'wb': 'звонки', 'wb1': 'звонки', 'honqi': 'звонки', 'wolt': 'звонки',
+    'market': 'звонки', 'market1': 'звонки', 'основная': 'звонки', 'линия': 'звонки',
+    '3333': 'звонки', 'сall': 'звонки', 'call': 'звонки',
+    'google': 'google', 'googleban': 'google', 'google444': 'google', 'yandex': 'google',
+    'yataxi': 'google', 'sait': 'google', 'dostavka': 'google', 'tengegruz': 'google',
+    'youtube': 'google', 'taxipro': 'google', 'idrive': 'google', 'yaitaxi': 'google',
+    'mytaxi': 'google', 'tengetaxi': 'google',
+    'olx': 'olx', 'olxx': 'olx', '2gis': '2gis', 'regiony': '2gis', 'astana': '2gis',
+    'fb': 'facebook', 'facebook': 'facebook', 'импорт': 'facebook', 'tiktok': 'tiktok',
+}
+AMO_CHANNEL_SOURCES = ('звонки', 'wz')
+
+_TAG_TOKEN_RE = re.compile(r'[^0-9a-zA-Zа-яёА-ЯЁ]+')
+
+
+def _tag_tokens(tags):
+    return [token for token in _TAG_TOKEN_RE.split(str(tags or '').lower()) if token]
+
+
+def amo_source_norm(raw_utm_source, tags):
+    """Нормализованный источник сделки: по полю utm_source, а если оно пустое — по тегам."""
+    raw = str(raw_utm_source or '').strip()
+    if raw:
+        return AMO_SOURCE_BY_FIELD.get(raw.lower(), raw.lower())
+    tokens = _tag_tokens(tags)
+    for token in tokens:                  # явный рекламный источник важнее канала
+        value = AMO_SOURCE_BY_TAG.get(token)
+        if value and value not in AMO_CHANNEL_SOURCES:
+            return value
+    for token in tokens:
+        if token in AMO_SOURCE_BY_TAG:
+            return AMO_SOURCE_BY_TAG[token]
+    return ''
+
+
+def amo_lead_type(source):
+    """«звонки» / «wz» как есть, всё остальное — «форма»."""
+    return source if source in AMO_CHANNEL_SOURCES else 'форма'
+
+
+def _amo_tags(lead):
+    tags = ((lead.get('_embedded') or {}).get('tags') or [])
+    return ', '.join(_text(tag.get('name')) for tag in tags if isinstance(tag, dict)
+                     and _text(tag.get('name')))
+
+
+def _amo_contact_ids(lead):
+    """id контактов сделки, основной первым: телефон основного контакта идёт в `phone`."""
+    contacts = ((lead.get('_embedded') or {}).get('contacts') or [])
+    ordered = sorted((c for c in contacts if isinstance(c, dict) and c.get('id') is not None),
+                     key=lambda c: 0 if c.get('is_main') else 1)
+    return [str(c['id']) for c in ordered]
+
+
+def load_amo_contact_phones(client, contact_ids):
+    """{id контакта: [сырые телефоны]} пачками по 100 через /api/v4/contacts.
+
+    Телефон сделки amoCRM живёт на контакте, а не на сделке, и `with=contacts` у
+    /leads отдаёт только id контактов. Без второго похода у «Основы» телефонов
+    нет вовсе — именно так снимок жил до 16.09.2026, и раздел «Касания» не мог
+    приклеить к сделкам ни одного звонка.
+
+    Отказ пачки после повторов — исключение, а не пустой список: молчаливая
+    потеря телефонов выглядела бы как «по сделкам не звонили», а это ложь про
+    работу отдела. Выгрузка читает источник целиком до записи, поэтому падение
+    здесь ничего в базе не портит.
+    """
+    ids = sorted({str(value) for value in (contact_ids or ()) if value})
+    phones = {}
+    for start in range(0, len(ids), _AMO_CONTACTS_BATCH):
+        chunk = ids[start:start + _AMO_CONTACTS_BATCH]
+        params = {'limit': 250}
+        for index, contact_id in enumerate(chunk):
+            params['filter[id][%d]' % index] = contact_id
+        data = None
+        for attempt in range(1, _AMO_CONTACTS_RETRIES + 1):
+            try:
+                data = client.get('/api/v4/contacts', params)
+                break
+            except Exception as exc:  # noqa: BLE001 — сеть и 5xx amoCRM, повторяем
+                if attempt >= _AMO_CONTACTS_RETRIES:
+                    raise RuntimeError('amoCRM: контакты сделок не отдались (%s)' % exc)
+                log.warning('op_funnel: контакты amoCRM, попытка %d/%d: %s',
+                            attempt, _AMO_CONTACTS_RETRIES, exc)
+        for contact in ((data or {}).get('_embedded') or {}).get('contacts') or []:
+            values = []
+            for field in (contact.get('custom_fields_values') or []):
+                if str(field.get('field_code') or '').upper() == 'PHONE':
+                    values.extend(_text(item.get('value'))
+                                  for item in (field.get('values') or []))
+            phones[str(contact.get('id'))] = [value for value in values if value]
+        for contact_id in chunk:
+            phones.setdefault(contact_id, [])
+    return phones
 
 
 def _text(value, limit=None):
@@ -122,10 +252,26 @@ def _base_row(direction_code, source, stream_type, lead_key, work_day, owner_raw
         'city': '',
         'base_title': '',
         'comment': '',
+        'phones': '',
+        'tags': '',
+        'utm_source': '',
+        'lead_type': '',
+        'registered': 0,
         'created_at': None,
         'taken_at': None,
         'updated_at': None,
     }
+
+
+def phones_text(values):
+    """Список сырых номеров → «7015550001,7025550002»: нормализованные, без повторов,
+    в порядке появления. Пустые и короткие («ИИН» в поле телефона) отбрасываются."""
+    seen = []
+    for value in values or ():
+        digits = norm_phone(value)
+        if digits and digits not in seen:
+            seen.append(digits)
+    return ','.join(seen)
 
 
 # ── «Поток» ──────────────────────────────────────────────────────────────────
@@ -165,6 +311,7 @@ def stream_rows(leads, stream_type, direction_code, owner_to_user=None,
             'reason_raw': _text(lead.get('reject_reason'), 500),
             'full_name': _text(lead.get('full_name'), 500),
             'phone': _text(lead.get('phone'), 24),
+            'phones': phones_text([lead.get('phone')]),
             'park_name': _text(lead.get('park_name'), 500),
             'base_title': _text(lead.get('base_title'), 100),
             'comment': _text(lead.get('comment'), 1000),
@@ -204,6 +351,7 @@ def paid_hire_rows(leads, direction_code, owner_to_user=None):
             'sub_reason_raw': _text(lead.get('closed_sub_reason'), 200),
             'full_name': _text(lead.get('full_name'), 500),
             'phone': _text(lead.get('phone'), 24),
+            'phones': phones_text([lead.get('phone')]),
             'park_name': _text(lead.get('park_name'), 500),
             'city': _text(lead.get('city'), 200),
             'comment': _text(lead.get('comment'), 1000),
@@ -248,16 +396,20 @@ def load_amo_loss_reasons(client):
 
 
 def amo_rows(leads, stage_names, direction_code, responsible_to_user=None,
-             loss_reasons=None):
+             loss_reasons=None, contact_phones=None):
     """Сделки воронки «Отдел продаж» → строки таблицы.
 
     `stage_names` — справочник ЭТОЙ воронки, а не всех сразу. Разница не
     теоретическая: статус 142 здесь называется «ПРОШЕЛ РЕГИСТРАЦИЮ», а в
     остальных четырёх воронках аккаунта — «Успешно реализовано», и общий
     справочник затирает подпись (живой дефект ночной выгрузки `amo_leads.py`).
+
+    `contact_phones` — {id контакта: [телефоны]} из `load_amo_contact_phones`:
+    основной контакт даёт `phone`, все вместе — `phones`.
     """
     responsible_to_user = responsible_to_user or {}
     stage_names = stage_names or {}
+    contact_phones = contact_phones or {}
     rows, seen = [], {}
     for lead in leads or []:
         created = parse_moment(lead.get('created_at'))
@@ -281,12 +433,25 @@ def amo_rows(leads, stage_names, direction_code, responsible_to_user=None,
         outcome = metrics.classify_amo_lead(stage, loss_name or None, status_id)
         row = _base_row(direction_code, SOURCE_AMO, 0, lead.get('id'), work_day,
                         key, responsible_to_user.get(key), outcome)
+        raw_phones = []
+        for contact_id in _amo_contact_ids(lead):
+            raw_phones.extend(contact_phones.get(contact_id) or [])
+        phones = phones_text(raw_phones)
+        tags = _amo_tags(lead)
+        source = amo_source_norm(_amo_custom_field(lead, AMO_FIELD_UTM_SOURCE), tags)
         row.update({
             'stage_raw': _text(stage, 300),
             'reason_raw': loss_name[:500],
             'full_name': _text(lead.get('name'), 500),
+            'phone': phones.split(',', 1)[0] if phones else '',
+            'phones': phones,
             'park_name': _amo_custom_field(lead, AMO_FIELD_PARK)[:500],
             'city': _amo_custom_field(lead, AMO_FIELD_CITY)[:200],
+            'tags': tags[:1000],
+            'utm_source': source[:100],
+            'lead_type': amo_lead_type(source),
+            'registered': 1 if _amo_custom_field(lead, AMO_FIELD_REGISTERED).lower()
+                          in ('true', '1', 'да') else 0,
             'created_at': created,
             'taken_at': created,
             'updated_at': parse_moment(lead.get('updated_at')),
@@ -366,7 +531,8 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
     params = {
         'limit': _AMO_PAGE_LIMIT,
         'page': 1,
-        'with': 'loss_reason',
+        # contacts — только id контактов; телефоны добираются вторым походом ниже.
+        'with': 'loss_reason,contacts',
         'filter[pipeline_id]': AMO_SALES_PIPELINE_ID,
         'filter[created_at][from]': int(start.timestamp()),
         'filter[created_at][to]': int(end.timestamp()),
@@ -387,9 +553,13 @@ def fetch_amo_sales_leads(day_from, day_to, client=None):
         if not next_url:
             break
         url, params = next_url, None
-    log.info('op_funnel: amoCRM отдал %d сделок воронки %s за %s—%s, пользователей %d',
-             len(leads), AMO_SALES_PIPELINE_ID, day_from, day_to, len(users))
-    return leads, stage_names, users, loss_reasons
+    contact_ids = {cid for lead in leads for cid in _amo_contact_ids(lead)}
+    contact_phones = load_amo_contact_phones(client, contact_ids)
+    log.info('op_funnel: amoCRM отдал %d сделок воронки %s за %s—%s, пользователей %d, '
+             'контактов с телефонами %d',
+             len(leads), AMO_SALES_PIPELINE_ID, day_from, day_to, len(users),
+             sum(1 for values in contact_phones.values() if values))
+    return leads, stage_names, users, loss_reasons, contact_phones
 
 
 # ── «Верификатор» / Wazzup ───────────────────────────────────────────────────

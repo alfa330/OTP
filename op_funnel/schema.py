@@ -170,6 +170,21 @@ CREATE TABLE IF NOT EXISTS op_funnel_leads (
     base_title     TEXT         NOT NULL DEFAULT '',
     comment        TEXT         NOT NULL DEFAULT '',
 
+    -- Все телефоны контакта, нормализованные до десяти цифр, через запятую. У
+    -- сделки amoCRM телефон лежит не на сделке, а на КОНТАКТЕ, и их бывает
+    -- несколько; раздел «Касания» ищет звонки по любому из них, поэтому одного
+    -- `phone` мало. Правило нормализации — cdr.touches.norm_phone, то же, что у
+    -- касаний: иначе один и тот же номер в двух таблицах не сойдётся.
+    phones         TEXT         NOT NULL DEFAULT '',
+    -- Поля сделки amoCRM, ради которых лид кладётся рядом со звонками: теги,
+    -- нормализованный источник и тип лида («звонки» / «wz» / «форма»). Тип нужен
+    -- разделу «Касания», чтобы объяснить, почему у лида нет звонков (wz ведут в
+    -- переписке), у других источников он пуст.
+    tags           TEXT         NOT NULL DEFAULT '',
+    utm_source     TEXT         NOT NULL DEFAULT '',
+    lead_type      VARCHAR(16)  NOT NULL DEFAULT '',
+    registered     SMALLINT     NOT NULL DEFAULT 0,
+
     -- Времена источника, местные (Алматы). Нужны, чтобы отличить «взял и не
     -- звонил» от «не брал».
     created_at     TIMESTAMP,
@@ -480,9 +495,23 @@ WHERE table_schema = 'public' AND table_name IN (
 SCHEMA_TABLES_COUNT = 10
 
 
+# Таблица лидов могла быть создана до появления колонок: CREATE TABLE IF NOT EXISTS
+# существующую не тронет, поэтому колонки добавляются отдельным идемпотентным
+# шагом (тот же приём, что CDR_SCHEMA_MIGRATIONS в cdr/schema.py).
+OP_FUNNEL_SCHEMA_MIGRATIONS = (
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS phones TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS tags TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS utm_source TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS lead_type VARCHAR(16) NOT NULL DEFAULT ''",
+    "ALTER TABLE op_funnel_leads ADD COLUMN IF NOT EXISTS registered SMALLINT NOT NULL DEFAULT 0",
+)
+
+
 def init_op_funnel_schema(cursor):
     """Развернуть схему и засеять нормы. Идемпотентно, зовётся при каждом старте."""
     cursor.execute(OP_FUNNEL_SCHEMA_SQL)
+    for statement in OP_FUNNEL_SCHEMA_MIGRATIONS:
+        cursor.execute(statement)
     for direction_code, shift_kind, metric, value in DEFAULT_TARGETS:
         cursor.execute(SEED_TARGETS_SQL, (direction_code, shift_kind, metric, value))
 

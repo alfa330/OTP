@@ -329,3 +329,127 @@ def _workbook_with_footer(duplicate_day=False):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PhonesForTouchesTests(unittest.TestCase):
+    """Телефоны в снимке лидов — ради раздела «Касания»: без них к сделке нельзя
+    приклеить ни одного звонка. Правило нормализации одно с cdr_touches."""
+
+    def test_телефоны_нормализуются_к_десяти_цифрам_без_повторов(self):
+        self.assertEqual(sources.phones_text(['+7 (701) 555-00-01', '87015550001', '7025550002']),
+                         '7015550001,7025550002')
+
+    def test_короткое_и_пустое_не_телефон(self):
+        # В поле телефона у части контактов лежит ИИН или мусор — в список не идёт.
+        self.assertEqual(sources.phones_text(['', None, '0305500177'[:9], 'abc']), '')
+
+    def test_у_потока_и_платного_найма_phones_заполняется_из_phone(self):
+        stream, _ = sources.stream_rows([{
+            'lead_id': 1, 'owner': 'Кто-то', 'taken_at': '2026-09-06 17:33:03',
+            'created_at': '2026-09-05 14:36:52', 'phone': '77015550001',
+        }], 1, 'op_potok')
+        self.assertEqual(stream[0]['phones'], '7015550001')
+        hire, _ = sources.paid_hire_rows([{
+            'lead_id': 2, 'owner': 'Кто-то', 'driver_registered_at': '2026-09-06 09:00:00',
+            'status': 'В работе', 'phone': '7025550002',
+        }], 'op_yandex_reg')
+        self.assertEqual(hire[0]['phones'], '7025550002')
+
+
+class AmoPhonesAndTypeTests(unittest.TestCase):
+
+    def lead(self, **over):
+        base = {
+            'id': 321, 'responsible_user_id': 12666570, 'status_id': 142,
+            'pipeline_id': 5524684, 'name': 'Заявка',
+            'created_at': 1788000000, 'updated_at': 1788100000,
+            'custom_fields_values': [
+                {'field_id': sources.AMO_FIELD_UTM_SOURCE, 'values': [{'value': 'fb'}]},
+                {'field_id': sources.AMO_FIELD_REGISTERED, 'values': [{'value': 'true'}]},
+            ],
+            '_embedded': {
+                'contacts': [{'id': 9002, 'is_main': False}, {'id': 9001, 'is_main': True}],
+                'tags': [{'id': 1, 'name': 'forma_jana_google'}],
+            },
+        }
+        base.update(over)
+        return base
+
+    def test_телефоны_берутся_с_контактов_основной_первым(self):
+        phones = {'9001': ['+7 701 555 00 01'], '9002': ['87025550002', '7015550001']}
+        rows, _ = sources.amo_rows([self.lead()], {142: 'ПРОШЕЛ РЕГИСТРАЦИЮ'}, 'op_osnova',
+                                   contact_phones=phones)
+        self.assertEqual(rows[0]['phone'], '7015550001')
+        self.assertEqual(rows[0]['phones'], '7015550001,7025550002')
+
+    def test_без_контактов_телефон_пустой_а_не_ошибка(self):
+        rows, _ = sources.amo_rows([self.lead(_embedded={})], {142: 'ПРОШЕЛ РЕГИСТРАЦИЮ'},
+                                   'op_osnova')
+        self.assertEqual(rows[0]['phone'], '')
+        self.assertEqual(rows[0]['phones'], '')
+
+    def test_источник_нормализуется_по_полю(self):
+        rows, _ = sources.amo_rows([self.lead()], {142: 'ПРОШЕЛ РЕГИСТРАЦИЮ'}, 'op_osnova')
+        self.assertEqual(rows[0]['utm_source'], 'facebook')
+        self.assertEqual(rows[0]['lead_type'], 'форма')
+        self.assertEqual(rows[0]['tags'], 'forma_jana_google')
+        self.assertEqual(rows[0]['registered'], 1)
+
+    def test_пустое_поле_источник_берётся_из_тега(self):
+        lead = self.lead(custom_fields_values=[],
+                         _embedded={'tags': [{'name': 'call_noltaxi_wb'}]})
+        rows, _ = sources.amo_rows([lead], {142: 'ПРОШЕЛ РЕГИСТРАЦИЮ'}, 'op_osnova')
+        self.assertEqual(rows[0]['utm_source'], 'звонки')
+        self.assertEqual(rows[0]['lead_type'], 'звонки')
+        self.assertEqual(rows[0]['registered'], 0)
+
+    def test_рекламный_источник_в_теге_важнее_канала(self):
+        # «call_цр_olxx» в выгрузке заказчика — это olx, а не «звонки».
+        self.assertEqual(sources.amo_source_norm('', 'call_цр_olxx'), 'olx')
+        self.assertEqual(sources.amo_lead_type('olx'), 'форма')
+        self.assertEqual(sources.amo_lead_type('wz'), 'wz')
+
+
+class _ContactsClient:
+    """Двойник AmoClient для /api/v4/contacts: помнит запросы и умеет падать."""
+
+    def __init__(self, fail_times=0):
+        self.calls = []
+        self.fail_times = fail_times
+
+    def get(self, path, params=None):
+        self.calls.append((path, dict(params or {})))
+        if self.fail_times:
+            self.fail_times -= 1
+            raise RuntimeError('amoCRM GET /api/v4/contacts -> 504')
+        ids = [value for key, value in params.items() if key.startswith('filter[id]')]
+        return {'_embedded': {'contacts': [
+            {'id': int(cid), 'custom_fields_values': [
+                {'field_code': 'PHONE', 'values': [{'value': '+7701555%04d' % (int(cid) % 10000)}]},
+            ]} for cid in ids
+        ]}}
+
+
+class AmoContactPhonesTests(unittest.TestCase):
+
+    def test_контакты_запрашиваются_пачками_по_сто(self):
+        client = _ContactsClient()
+        phones = sources.load_amo_contact_phones(client, [str(i) for i in range(1, 251)])
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(phones), 250)
+        self.assertEqual(phones['7'], ['+77015550007'])
+        # каждый запрошенный id получает запись, даже если станция его не вернула
+        self.assertIn('250', phones)
+
+    def test_пустой_список_не_ходит_в_сеть(self):
+        client = _ContactsClient()
+        self.assertEqual(sources.load_amo_contact_phones(client, []), {})
+        self.assertEqual(client.calls, [])
+
+    def test_обрыв_повторяется_а_потом_отдаёт_ошибку_а_не_пустоту(self):
+        client = _ContactsClient(fail_times=1)
+        phones = sources.load_amo_contact_phones(client, ['5'])
+        self.assertEqual(phones['5'], ['+77015550005'])
+        exhausted = _ContactsClient(fail_times=10)
+        with self.assertRaises(RuntimeError):
+            sources.load_amo_contact_phones(exhausted, ['5'])

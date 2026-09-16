@@ -47,14 +47,17 @@ JWT. Проверка идёт первой строкой тела. Основ�
 import base64
 import binascii
 import hmac
+import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from io import BytesIO
 
 from flask import Blueprint, g, jsonify, request, send_file
 
-from . import (access, agent_auth, config, directory as directory_mod, queries, report,
-               schema, sync, touches as touches_mod)
+from . import (access, agent_auth, config, directory as directory_mod, lead_queries, lead_report,
+               leads as leads_mod, queries, report, schema, sync, touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +94,22 @@ AUDIO_JOBS_PER_POLL = 3
 # Потолок одного файла записи: час разговора в WAV 8 кГц — это 58 МБ, у отдела продаж
 # разговоры в минуты. Больше похоже не на запись, а на ошибку.
 MAX_AUDIO_BYTES = 30 * 1024 * 1024
+
+# Режим «Сделки». Записей в файл — не больше стольких: месяц «Основы» это ~27 тысяч,
+# и на полторы сотни колонок больше двух месяцев в одной книге уже не открывается.
+MAX_EXPORT_LEADS = 60000
+
+# Догрузка сделок из источника по кнопке — не длиннее стольких суток за раз: месяц
+# «Основы» — это 280 страниц amoCRM плюс столько же пачек контактов.
+LEADS_SYNC_MAX_DAYS = 31
+
+# Прогон догрузки, не закрывшийся за это время, считается брошенным — можно начинать новый.
+LEADS_SYNC_STALE_MINUTES = 30
+
+# Догрузка идёт в фоне одним потоком: ответ ручке возвращается сразу, а прогресс человек
+# видит по журналу прогонов «Воронки ОП» (op_funnel_sync_runs). Один поток — чтобы два
+# клика не гнали одну выгрузку дважды параллельно.
+_LEAD_SYNC_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='cdr-leads-sync')
 
 
 def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
@@ -439,6 +458,278 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         built = _ensure_directory(force=True)
         return jsonify({'operators': len(built or {})})
 
+    # ── режим «Сделки»: записи источника и их звонки ─────────────────────────
+    # Сделки берутся из снимка «Воронки ОП» (op_funnel_leads): та же ночная выгрузка,
+    # что кормит воронку, ходит в amoCRM и партнёрские ручки СРМ — второй поход за теми
+    # же лидами ради другого экрана был бы дублем. Звонки — из cdr_touches. Правила
+    # привязки — cdr/leads.py, книга и JSON — cdr/lead_report.py.
+
+    def _lead_scope():
+        source = (request.args.get('source') or 'amo').strip()[:24]
+        info = dict(leads_mod.source_info(source), key=source)
+        day_from, day_to = _period()
+        today = queries.today_almaty()
+        raw_to = request.args.get('touches_to')
+        # Звонки по умолчанию берутся на сутки дольше периода записей — ради дожима
+        # последних заявок, как во всех выгрузках до этого раздела.
+        touches_to = (sync.parse_day(raw_to, 'дату конца звонков') if raw_to
+                      else day_to + timedelta(days=1))
+        touches_to = min(max(touches_to, day_to), max(today, day_to))
+        return source, info, day_from, day_to, touches_to
+
+    def _lead_filters():
+        def clean(name, limit=120):
+            return (str(request.args.get(name) or '').strip()[:limit]) or None
+
+        def flag(name):
+            return str(request.args.get(name) or '').lower() in ('1', 'true', 'yes')
+
+        presence = clean('presence', 12) or 'all'
+        stream_type = str(request.args.get('stream_type') or '').strip()
+        return {
+            'park': clean('park'), 'city': clean('city'), 'stage': clean('stage', 300),
+            'lead_type': clean('lead_type', 16), 'owner': clean('owner', 200),
+            'phone': ''.join(ch for ch in str(request.args.get('phone') or '')
+                             if ch.isdigit())[:16] or None,
+            'stream_type': stream_type if stream_type.isdigit() else None,
+            'presence': presence if presence in ('all', 'with', 'without') else 'all',
+            'talked_only': flag('talked_only'),
+            'own_only': flag('own_only'),
+            'no_window': flag('no_window'),
+        }
+
+    def _lead_filters_note(filters, values):
+        labels = {'park': 'парк', 'city': 'город', 'stage': 'статус', 'lead_type': 'тип лида',
+                  'stream_type': 'поток'}
+        parts = ['%s = %s' % (labels[key], filters[key]) for key in labels if filters.get(key)]
+        if filters.get('owner'):
+            owner = next((o['label'] for o in (values or {}).get('owners', [])
+                          if o['key'] == filters['owner']), filters['owner'])
+            parts.append('ответственный = %s' % owner)
+        if filters.get('phone'):
+            parts.append('телефон содержит %s' % filters['phone'])
+        if filters.get('presence') == 'with':
+            parts.append('только записи со звонками')
+        elif filters.get('presence') == 'without':
+            parts.append('только записи без звонков')
+        if filters.get('talked_only'):
+            parts.append('только состоявшиеся разговоры')
+        if filters.get('own_only'):
+            parts.append('только звонки ответственного')
+        if filters.get('no_window'):
+            parts.append('без окна по дате')
+        return '; '.join(parts)
+
+    def _lead_view(lead, prepared):
+        stage = lead.get('stage_raw') or ' · '.join(
+            part for part in (lead.get('call_status'), lead.get('dialog_status')) if part)
+        reason = lead.get('reason_raw') or ''
+        if lead.get('sub_reason_raw'):
+            reason = ('%s — %s' % (reason, lead['sub_reason_raw'])) if reason else lead['sub_reason_raw']
+        phones = prepared['phones']
+        dup_n, dup_i = prepared.get('dup_n', 1), prepared.get('dup_i', 1)
+        return {
+            'key': str(lead.get('lead_key') or ''),
+            'source': lead.get('source'), 'stream_type': lead.get('stream_type') or 0,
+            'work_day': lead['work_day'].isoformat() if lead.get('work_day') else None,
+            'moment': _stamp(prepared.get('moment')),
+            'full_name': lead.get('full_name') or '',
+            'phone': phones[0] if phones else (lead.get('phone') or ''),
+            'phones': phones,
+            'owner': (lead.get('owner_name') or lead.get('owner_external_name')
+                      or lead.get('owner_raw') or ''),
+            'owner_ext': lead.get('owner_ext') or '',
+            'owner_user_id': lead.get('user_id'),
+            'park': lead.get('park_name') or '', 'city': lead.get('city') or '',
+            'base_title': lead.get('base_title') or '',
+            'stage': stage, 'reason': reason, 'comment': lead.get('comment') or '',
+            'tags': lead.get('tags') or '', 'utm_source': lead.get('utm_source') or '',
+            'lead_type': lead.get('lead_type') or '',
+            'registered': bool(lead.get('registered')),
+            'updated_at': _stamp(lead.get('updated_at')),
+            'dup': ('%d из %d' % (dup_i, dup_n)) if dup_n > 1 else '',
+        }
+
+    def _assemble_leads(ctx, info, day_from, day_to, touches_to, filters, enqueue):
+        resolve = _resolver()
+        with db._get_cursor() as cursor:
+            leads = lead_queries.select_leads(cursor, info['key'], info['direction'],
+                                              day_from, day_to, filters)
+            prepared = [{'key': '%s:%s' % (lead.get('stream_type') or 0, lead.get('lead_key')),
+                         'phones': leads_mod.lead_phones(lead),
+                         'moment': leads_mod.lead_moment(lead), 'row': lead} for lead in leads]
+            phones = {phone for item in prepared for phone in item['phones']}
+            touches = lead_queries.select_touches_for_phones(cursor, phones, day_from, touches_to)
+            values = lead_queries.filter_values(cursor, info['key'], info['direction'],
+                                                day_from, day_to)
+            present_days = lead_queries.lead_days(cursor, info['key'], info['direction'],
+                                                  day_from, day_to)
+            without_phone = lead_queries.count_without_phones(cursor, info['key'],
+                                                              info['direction'], day_from, day_to)
+            last_run = lead_queries.last_lead_run(cursor, info['direction'])
+        # Сутки звонков, которых в базе ещё нет, ставятся мосту в очередь так же, как в
+        # режиме «Звонки»: человек пришёл за данными, а не за кнопкой «загрузите их».
+        cdr_coverage = _coverage(day_from, touches_to, enqueue, ctx['user_id'])
+
+        for touch in touches:
+            touch['operator'], touch['direction'] = resolve(
+                touch['ext'], _stamp(touch['started_at']) or '')
+        assigned = leads_mod.assign_touches(prepared, touches, window_to=touches_to,
+                                            no_window=filters.get('no_window', False))
+        rows = []
+        for item in prepared:
+            lead = item['row']
+            own = assigned.get(item['key'], [])
+            owner_exts = {lead['owner_ext']} if lead.get('owner_ext') else set()
+            owner_name = lead.get('owner_name') or lead.get('owner_external_name') or ''
+            # «Ответственный звонил» решается по ВСЕМ звонкам записи, до сужения
+            # фильтрами: иначе в режиме «только свои звонки» ответ был бы всегда «да».
+            called = leads_mod.responsible_called(owner_exts, owner_name, own)
+            if filters.get('own_only'):
+                own = leads_mod.own_touches(owner_exts, owner_name, own)
+            if filters.get('talked_only'):
+                own = [t for t in own if int(t.get('talk_seconds') or 0) > 0]
+            agg = leads_mod.aggregate(item, own)
+            if filters.get('presence') == 'with' and not agg['touches']:
+                continue
+            if filters.get('presence') == 'without' and agg['touches']:
+                continue
+            view = _lead_view(lead, item)
+            rows.append({'lead': view, 'touches': own, 'agg': agg, 'owner_called': called,
+                         'lead_type': view['lead_type'], 'stage': view['stage'],
+                         'park': view['park']})
+        summary = leads_mod.summarize(rows)
+        blocks, full_url = leads_mod.blocks_for(summary['max_touches'])
+        today = queries.today_almaty()
+        missing_days = [day.isoformat() for day in sync.days_in_period(day_from, day_to)
+                        if day <= today and day.isoformat() not in present_days]
+        return {
+            'rows': rows, 'summary': summary, 'blocks': blocks, 'full_url': full_url,
+            'values': values, 'cdr_coverage': cdr_coverage,
+            'leads_coverage': {'days': present_days, 'missing_days': missing_days,
+                               'without_phone': without_phone, 'last_run': last_run},
+            'filters_note': _lead_filters_note(filters, values),
+        }
+
+    def _lead_out(row):
+        agg = dict(row['agg'])
+        for key in ('first_at', 'first_out_at', 'last_at'):
+            agg[key] = _stamp(agg.get(key))
+        return dict(row['lead'], agg=agg, owner_called=row['owner_called'],
+                    touches=[_touch_out(t) for t in row['touches']])
+
+    @cdr_route('/leads')
+    def cdr_leads(ctx):
+        source, info, day_from, day_to, touches_to = _lead_scope()
+        filters = _lead_filters()
+        page = max(1, int(request.args.get('page') or 1))
+        page_size = min(MAX_PAGE_SIZE,
+                        max(1, int(request.args.get('page_size') or DEFAULT_PAGE_SIZE)))
+        enqueue = (str(request.args.get('sync') or '1').lower() not in ('0', 'false', 'no')
+                   and access.can_sync(ctx))
+        built = _assemble_leads(ctx, info, day_from, day_to, touches_to, filters, enqueue)
+        rows = built['rows']
+        start = (page - 1) * page_size
+        return jsonify({
+            'source': info,
+            'sources': [dict(value, key=key) for key, value in leads_mod.SOURCES.items()],
+            'period': {'from': day_from.isoformat(), 'to': day_to.isoformat(),
+                       'touches_to': touches_to.isoformat()},
+            'summary': dict(built['summary'], blocks=built['blocks'], full_url=built['full_url']),
+            'total': len(rows), 'page': page, 'page_size': page_size,
+            'leads': [_lead_out(row) for row in rows[start:start + page_size]],
+            'filter_values': built['values'],
+            'coverage': built['cdr_coverage'],
+            'leads_coverage': built['leads_coverage'],
+            'filters_note': built['filters_note'],
+        })
+
+    @cdr_route('/leads/export')
+    def cdr_leads_export(ctx):
+        source, info, day_from, day_to, touches_to = _lead_scope()
+        filters = _lead_filters()
+        built = _assemble_leads(ctx, info, day_from, day_to, touches_to, filters, False)
+        rows = built['rows']
+        if len(rows) > MAX_EXPORT_LEADS:
+            return jsonify({
+                "error": "В периоде %d записей — больше, чем помещается в один файл (%d). "
+                         "Возьмите период короче." % (len(rows), MAX_EXPORT_LEADS),
+                "code": "CDR_EXPORT_TOO_BIG",
+            }), 400
+        common = dict(
+            source_info=info, period_from=day_from.isoformat(), period_to=day_to.isoformat(),
+            touches_to=touches_to.isoformat(), summary=built['summary'], blocks=built['blocks'],
+            full_url=built['full_url'], filters_note=built['filters_note'],
+            generated_by=ctx.get('name') or '', cdr_coverage=built['cdr_coverage'],
+            leads_coverage=built['leads_coverage'],
+            grace_minutes=int(leads_mod.GRACE.total_seconds() // 60),
+            no_window=filters.get('no_window', False), own_only=filters.get('own_only', False))
+        wanted = str(request.args.get('format') or 'xlsx').lower()
+        if wanted == 'json':
+            payload = lead_report.build_json(rows, **common)
+            stream = BytesIO(json.dumps(payload, ensure_ascii=False, indent=1,
+                                        default=str).encode('utf-8'))
+            log.info('Касания: выгрузка сделок %s %s..%s в JSON — %d записей, собрал %s',
+                     source, day_from, day_to, len(rows), ctx.get('name'))
+            return send_file(stream, mimetype='application/json', as_attachment=True,
+                             download_name=lead_report.report_filename(info, day_from, day_to, 'json'))
+        workbook, written = lead_report.build_workbook(
+            rows, text_warning_patch=excel_text_warning, **common)
+        log.info('Касания: выгрузка сделок %s %s..%s — %d записей, собрал %s',
+                 source, day_from, day_to, written, ctx.get('name'))
+        return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,
+                         download_name=lead_report.report_filename(info, day_from, day_to))
+
+    @cdr_route('/leads/sync', methods=('POST',))
+    def cdr_leads_sync(ctx):
+        """Догрузить записи источника за период — той же выгрузкой, что у «Воронки ОП».
+
+        Идёт в фоне: месяц «Основы» — минуты чтения amoCRM, а ответ ручке должен
+        прийти сразу. Прогресс виден по последнему прогону в `leads_coverage`.
+        Зафиксированные сутки воронки не переписываются (force=False): их итог уже
+        назван на планёрке; дописываются только сутки без снимка и незакрытые.
+        """
+        if not access.can_sync(ctx):
+            return jsonify({"error": "Догружать записи из источника вам не разрешено",
+                            "code": "CDR_SYNC_FORBIDDEN"}), 403
+        source, info, day_from, day_to, _touches_to = _lead_scope()
+        if (day_to - day_from).days + 1 > LEADS_SYNC_MAX_DAYS:
+            raise ValueError('Догрузка за раз — не больше %d суток: месяц «Основы» это сотни '
+                             'страниц amoCRM. Возьмите период короче.' % LEADS_SYNC_MAX_DAYS)
+        with db._get_cursor() as cursor:
+            last_run = lead_queries.last_lead_run(cursor, info['direction'])
+        if (last_run and last_run.get('status') == 'running'
+                and not _stale_minutes(last_run.get('started_at'), LEADS_SYNC_STALE_MINUTES)):
+            return jsonify({"error": "Выгрузка по этому источнику уже идёт — дождитесь её",
+                            "code": "CDR_LEADS_SYNC_BUSY", "run": last_run}), 409
+
+        def job():
+            from op_funnel import sync as funnel_sync  # локально: пакет читает окружение
+            try:
+                funnel_sync.sync_direction(db, info['direction'], day_from, day_to, force=False,
+                                           started_by=ctx['user_id'],
+                                           note='из раздела «Касания»')
+            except Exception:  # noqa: BLE001 — отказ уже записан в журнал прогонов
+                log.exception('Касания: догрузка сделок %s %s..%s упала', source, day_from, day_to)
+                return
+            if source != 'amo':
+                return
+            # Зафиксированные сутки выгрузка выше не переписывает, а сделки «Основы»,
+            # снятые до 16.09.2026, лежат без телефонов. Дочитываем им контакты
+            # отдельно — только колонки контакта, итоги не трогаются.
+            try:
+                with db._get_cursor() as cursor:
+                    left = lead_queries.count_without_phones(cursor, source, info['direction'],
+                                                             day_from, day_to)
+                if left:
+                    funnel_sync.backfill_amo_contacts(db, day_from, day_to)
+            except Exception:  # noqa: BLE001
+                log.exception('Касания: добор телефонов amoCRM %s..%s упал', day_from, day_to)
+
+        _LEAD_SYNC_POOL.submit(job)
+        return jsonify({'status': 'started', 'source': source,
+                        'period': {'from': day_from.isoformat(), 'to': day_to.isoformat()}}), 202
+
     # ── роуты моста ──────────────────────────────────────────────────────────
 
     @agent_route('/agent/poll')
@@ -667,6 +958,23 @@ def _stale(value, hours):
     if not value:
         return True
     return (queries.now_almaty() - _naive(value)) > timedelta(hours=hours)
+
+
+def _stamp(value):
+    """datetime → 'ГГГГ-ММ-ДД ЧЧ:ММ:СС' для JSON; строку пропускаем как есть."""
+    if value is None or value == '':
+        return None
+    if isinstance(value, datetime):
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+    return str(value)[:19].replace('T', ' ')
+
+
+def _touch_out(touch):
+    out = dict(touch)
+    out['started_at'] = _stamp(touch.get('started_at')) or ''
+    out['answered_at'] = _stamp(touch.get('answered_at')) or ''
+    out['has_recording'] = bool(touch.get('recording_url'))
+    return out
 
 
 def _bridge_view(state):

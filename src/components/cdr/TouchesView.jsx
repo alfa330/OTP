@@ -15,6 +15,7 @@ import {
     exportFileName, hms, hours, percent, prettyPhone, resultTone,
     shortDay, shortTime, silence,
 } from './touchMeta';
+import DealsView from './DealsView';
 
 /* Раздел «Касания» — звонки отдела продаж из CDR АТС FreePBX.
  *
@@ -76,6 +77,15 @@ const TABS = [
     { value: 'daily', label: 'По дням' },
 ];
 
+/* Два режима раздела. «Звонки» — единица строки звонок; «Сделки» — запись
+   источника (сделка amoCRM, лид «Потока», водитель «Платного найма») и все её
+   звонки. Один и тот же раздел, а не два: аудитория и права одни, а вопрос
+   «позвонили ли по заявке» — продолжение вопроса «кто и сколько звонил». */
+const MODES = [
+    { value: 'calls', label: 'Звонки' },
+    { value: 'deals', label: 'Сделки' },
+];
+
 const EMPTY_FILTERS = { result: '', ext: '', queue: '', talkedOnly: false };
 
 const Metric = ({ label, value, hint }) => (
@@ -109,6 +119,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const toastRef = useRef(showToast);
     toastRef.current = showToast;
 
+    const [mode, setMode] = useState('calls');
     const [range, setRange] = useState(() => ({ from: dayShift(6), to: dayShift(0) }));
     const [callType, setCallType] = useState('');
     const [filters, setFilters] = useState(EMPTY_FILTERS);
@@ -192,13 +203,15 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     }, [base, headers, query]);
 
     /* Первый заход за период сам ставит недостающие сутки в очередь: человек
-       пришёл за данными, а не за кнопкой «а теперь загрузите их». */
+       пришёл за данными, а не за кнопкой «а теперь загрузите их». В режиме
+       «Сделки» этим занимается его собственный экран — здесь не грузим ничего. */
     useEffect(() => {
+        if (mode !== 'calls') return;
         setLoading(true);
         load(true);
-    }, [load]);
+    }, [load, mode]);
 
-    const pending = data?.coverage?.pending || 0;
+    const pending = mode === 'calls' ? (data?.coverage?.pending || 0) : 0;
 
     // Пока сутки выкачиваются — подтягиваем прогресс; закончилось — опрос
     // прекращается сам. Синхронизацию при этом не перезапускаем: очередь на
@@ -215,7 +228,7 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     useEffect(() => {
         /* Ждать полного периода нельзя: сегодняшние сутки дочитываются весь день,
            и на этом вкладки не грузились бы вовсе. Показываем по тому, что есть. */
-        if (tab === 'touches') return undefined;
+        if (tab === 'touches' || mode !== 'calls') return undefined;
         let alive = true;
         const { page: _p, page_size: _s, ...rest } = query;
         axios.get(`${base}/stats`, { headers: headers(), params: rest })
@@ -307,24 +320,36 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 <div className="min-w-0 sm:flex-1">
                     <h1 className="text-[19px] font-semibold leading-tight text-slate-900">Касания</h1>
                     <p className="mt-0.5 text-[12.5px] text-slate-500">
-                        Звонки отдела продаж из CDR АТС: кто звонил, чем закончилось,
-                        сколько говорили и где запись.
+                        {mode === 'calls'
+                            ? 'Звонки отдела продаж из CDR АТС: кто звонил, чем закончилось, сколько говорили и где запись.'
+                            : 'Сделки, лиды и водители — и все звонки отдела продаж по каждому: позвонили ли, с какой попытки дозвонились и кто.'}
                     </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                    <button type="button" className={iosBtnGhost} onClick={resync}
-                            disabled={pending > 0}
-                            title="Перечитать период со станции — если там дописали звонки задним числом">
-                        <RefreshCw size={14} className={pending > 0 ? 'animate-spin' : ''} />
-                    </button>
-                    <button type="button" className={`${iosBtnPrimary} flex-1 sm:flex-none`}
-                            onClick={download} disabled={downloading || !total}>
-                        {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                        {downloading ? 'Готовим…' : 'Выгрузить в Excel'}
-                    </button>
+                    <IosSegmented value={mode} options={MODES} onChange={setMode} ariaLabel="Режим раздела" />
+                    {mode === 'calls' ? (
+                        <>
+                            <button type="button" className={iosBtnGhost} onClick={resync}
+                                    disabled={pending > 0}
+                                    title="Перечитать период со станции — если там дописали звонки задним числом">
+                                <RefreshCw size={14} className={pending > 0 ? 'animate-spin' : ''} />
+                            </button>
+                            <button type="button" className={`${iosBtnPrimary} flex-1 sm:flex-none`}
+                                    onClick={download} disabled={downloading || !total}>
+                                {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                                {downloading ? 'Готовим…' : 'Выгрузить в Excel'}
+                            </button>
+                        </>
+                    ) : null}
                 </div>
             </header>
 
+            {mode === 'deals' ? (
+                <DealsView apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
+                           showToast={showToast} presets={DATE_PRESETS}
+                           today={meta?.today || isoDate(new Date())} />
+            ) : (
+            <>
             {bridgeDown ? (
                 <div className="mt-4 flex items-start gap-2 rounded-2xl bg-amber-50 px-4 py-3 text-[13px] text-amber-800 ring-1 ring-amber-100">
                     <PlugZap size={16} className="mt-0.5 shrink-0" />
@@ -483,6 +508,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>
+            </>
+            )}
         </div>
     );
 }
