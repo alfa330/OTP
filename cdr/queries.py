@@ -680,6 +680,23 @@ def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0,
             for row in cursor.fetchall()]
 
 
+def operator_sip_and_model(cursor, operator_ids):
+    """{id: {sip, model}} — внутренний номер и модель направления операторов; «Деление
+    звонков» ОП берёт по ним, кто участвует (звонковые модели) и по какому номеру искать."""
+    ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT u.id, u.sip_number, d.calculation_model_code
+          FROM users u
+          LEFT JOIN directions d ON d.id = u.direction_id
+         WHERE u.id = ANY(%s)
+    """, (ids,))
+    return {int(row[0]): {'sip': str(row[1] or '').strip() or None,
+                          'model': str(row[2] or '').strip().lower() or None}
+            for row in cursor.fetchall()}
+
+
 def enqueue_audio_job(cursor, linkedid, recording_url, imported_call_id=None, requested_by=None):
     """Заказ мосту на запись разговора. На одну строку пула — один заказ: повторный
     клик по тому же звонку заказ не дублирует. Возвращает id заказа или None."""

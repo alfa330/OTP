@@ -438,6 +438,8 @@ AI_QA_PULL_SKIPPABLE_CODES = frozenset({'no_sip'})
 CALL_DISTRIBUTION_SOURCE_BY_DEPARTMENT = {
     OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE: 'oktell',
     TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE: 'binotel',
+    # Отдел продаж: касания CDR из своей базы (мост FreePBX), записи заказываются мосту.
+    CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE: 'cdr',
 }
 
 if not API_TOKEN:
@@ -28278,6 +28280,34 @@ def call_distribution_run():
                 "department_id": department_id,
             }), 202
 
+        if source == 'cdr':
+            # --- Отдел продаж: кандидаты из своей базы касаний, прогон быстрый, поэтому
+            # синхронно; записи заказываются мосту и приезжают в пул сами.
+            result = sync_cdr_evaluation_calls(
+                month=month,
+                triggered_by='manual',
+                force=True,
+                importer_id=requester_id,
+                department_id=department_id,
+            )
+            status = result.get('status')
+            if status == 'skipped':
+                reason = result.get('reason')
+                if reason == 'locked':
+                    return jsonify({
+                        "error": "Распределение уже выполняется. Повторите через несколько секунд.",
+                        "sync": result,
+                    }), 429
+                return jsonify({"error": f"Распределение пропущено: {reason or 'unknown'}", "sync": result}), 400
+            if status == 'failed':
+                return jsonify({"error": result.get('error') or "Распределение не выполнено", "sync": result}), 502
+            return jsonify({
+                "status": "success",
+                "message": "Пул звонков на оценку добран из касаний; записи разговоров приедут с моста",
+                "sync": result,
+                "source": source,
+                "department_id": department_id,
+            }), 200
         # --- Oktell / СЗоВ: синхронный прогон, как и до появления селектора отделов ---
         result = sync_oktell_evaluation_calls(
             month=month,
@@ -43512,6 +43542,158 @@ def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=Fa
     finally:
         try:
             BINOTEL_EVAL_SYNC_LOCK.release()
+        except Exception:
+            pass
+
+
+# === CDR / FreePBX: распределение звонков на оценку («Деление звонков» для отдела продаж) ====
+# Третье зеркало норма-добора: каждому оператору звонковых направлений ОП добираем пул
+# imported_calls до NORM(op, месяц) случайными звонками из СВОЕЙ базы касаний (мост FreePBX
+# привозит их сам, к станции ни одного запроса). Отличия от Oktell и Binotel:
+#   * оператор — по внутреннему номеру касания (users.sip_number), как на табло ОП;
+#   * в пул идут только звонки с записью, ДОСТОВЕРНО принадлежащей звонку и оператору
+#     (cdr.touches.recording_belongs_to): станция подставляет ссылку по номеру клиента;
+#   * запись не блокирует импорт и не качается порталом: заказывается мосту (cdr_audio_jobs),
+#     суффикс ':cdr' в notes обязателен — аудио-ручка журнала по нему отдаёт ссылку из офиса.
+# «Верификатор» (op_verificator) — чаты Wazzup, в делении звонков не участвует
+# (CDR_RANDOM_CALL_MODELS), по решению владельца 16.09.2026.
+CDR_EVAL_SYNC_LOCK = threading.Lock()
+
+
+def _cdr_distribution_operators(department_id):
+    """[(op_id, name, sip)] операторов звонковых направлений отдела с внутренним номером."""
+    from cdr import queries as cdr_queries
+    allowed = db.get_department_member_ids(department_id) if department_id else set()
+    if not allowed:
+        return []
+    ops = [(op_id, name) for op_id, name in _call_distribution_operator_rows() if op_id in allowed]
+    if not ops:
+        return []
+    with db._get_cursor() as cursor:
+        meta = cdr_queries.operator_sip_and_model(cursor, [op_id for op_id, _ in ops])
+    result = []
+    for op_id, name in ops:
+        info = meta.get(op_id) or {}
+        if info.get('model') not in CDR_RANDOM_CALL_MODELS or not info.get('sip'):
+            continue
+        result.append((op_id, name, info['sip']))
+    return result
+
+
+def sync_cdr_evaluation_calls(month=None, triggered_by='scheduler', force=False,
+                              importer_id=None, department_id=None):
+    """Норма-ориентированное распределение звонков на оценку для отдела продаж из касаний CDR.
+
+    department_id — отдел, чьим операторам добираем пул (None → отдел продаж). force=True
+    игнорирует флаг enabled в настройках. Диапазон длительности — общие настройки
+    «Деления звонков» (у входящих ОП talk_seconds включает ожидание в очереди)."""
+    from cdr import queries as cdr_queries, touches as cdr_touches
+    started = time.time()
+    settings = db.get_call_distribution_settings()
+    if not force and not settings.get('enabled', True):
+        logging.info("CDR eval distribution skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled', 'triggered_by': triggered_by}
+    min_d = int(settings.get('min_duration_sec') or 0)
+    max_d = int(settings.get('max_duration_sec') or 0)
+    months = _oktell_eval_active_months(month)
+    if department_id is None:
+        department_id = _call_distribution_department_id_by_code(CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+    operators = _cdr_distribution_operators(department_id)
+    if not operators:
+        return {'status': 'skipped', 'reason': 'no_department_members',
+                'triggered_by': triggered_by, 'months': months}
+    if not CDR_EVAL_SYNC_LOCK.acquire(blocking=False):
+        return {'status': 'skipped', 'reason': 'locked', 'triggered_by': triggered_by}
+    try:
+        op_ids = [op_id for op_id, _, _ in operators]
+        name_by_op = {op_id: name for op_id, name, _ in operators}
+        sip_by_op = {op_id: sip for op_id, _, sip in operators}
+        today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+        per_month = []
+        grand_added = grand_ops = grand_audio = grand_foreign = 0
+        for mstr in months:
+            # 1) кому и сколько добирать — та же формула, что у СЗоВ и ТЭЗ.
+            targets = db.get_operator_call_evaluation_targets_for_month(op_ids, mstr) or {}
+            pool_counts = db.get_imported_calls_status_counts_by_operator(mstr)
+            journal = db.get_operator_score_aggregates_for_month(mstr, op_ids) or {}
+            need_by_op = {}
+            for op_id in op_ids:
+                norm = int((targets.get(op_id) or {}).get('required_calls') or 0)
+                pending = int((pool_counts.get(op_id) or {}).get('not_evaluated') or 0)
+                evaluated_real = int((journal.get(op_id) or {}).get('call_count') or 0)
+                need = max(0, norm - (evaluated_real + pending))
+                if need > 0:
+                    need_by_op[op_id] = need
+            if not need_by_op:
+                per_month.append({'month': mstr, 'operators': 0, 'added': 0,
+                                  'audio_pending': 0, 'foreign_recordings': 0})
+                continue
+            y, mo = int(mstr[:4]), int(mstr[5:7])
+            day_from = dt_date(y, mo, 1)
+            day_to = min(dt_date(y + mo // 12, mo % 12 + 1, 1) - timedelta(days=1), today)
+            existing = db.get_imported_call_keys_for_month(mstr)
+            month_added = ready_operators = month_audio = month_foreign = 0
+            for op_id, need in need_by_op.items():
+                sip = sip_by_op[op_id]
+                with db._get_cursor() as cursor:
+                    rows = cdr_queries.sample_operator_calls(
+                        cursor, sip, day_from, day_to,
+                        [cdr_touches.TYPE_IN, cdr_touches.TYPE_OUT], min_d, max_d,
+                        limit=CDR_RANDOM_CALL_SAMPLE_CAP)
+                already = set(existing.get(op_id) or set())
+                taken = 0
+                for row in rows:                       # уже в случайном порядке
+                    if taken >= need:
+                        break
+                    linkedid = str(row['linkedid'])
+                    if linkedid in already:
+                        continue
+                    if not cdr_touches.recording_belongs_to(row['recording_url'], sip, row['phone'], linkedid):
+                        month_foreign += 1
+                        continue
+                    started_at = row['started_at']
+                    if started_at.strftime('%Y-%m') != mstr:
+                        continue
+                    phone = '7%s' % row['phone'] if len(str(row['phone'])) == 10 else str(row['phone'])
+                    new_id = db.import_single_random_call(
+                        operator_id=op_id, operator_name=name_by_op.get(op_id) or '',
+                        external_id=linkedid, month=mstr,
+                        datetime_raw=started_at.strftime('%d.%m.%Y %H:%M:%S'),
+                        phone=phone, duration_sec=row['talk_seconds'],
+                        notes=f"distribution:{importer_id or 'auto'}:cdr",
+                        call_end_party='unknown')
+                    already.add(linkedid)
+                    if not new_id:
+                        continue
+                    with db._get_cursor() as cursor:
+                        cdr_queries.enqueue_audio_job(cursor, linkedid, row['recording_url'], new_id, importer_id)
+                    taken += 1
+                    month_audio += 1
+                if taken:
+                    month_added += taken
+                    ready_operators += 1
+            grand_added += month_added
+            grand_ops += ready_operators
+            grand_audio += month_audio
+            grand_foreign += month_foreign
+            per_month.append({'month': mstr, 'operators': ready_operators, 'added': month_added,
+                              'audio_pending': month_audio, 'foreign_recordings': month_foreign})
+            logging.info("CDR eval distribution month=%s operators=%s added=%s foreign_recordings=%s",
+                         mstr, ready_operators, month_added, month_foreign)
+        return {
+            'status': 'success', 'source': 'cdr', 'triggered_by': triggered_by, 'months': months,
+            'operators': grand_ops, 'added': grand_added, 'audio_pending': grand_audio,
+            'foreign_recordings': grand_foreign, 'per_month': per_month,
+            'min_duration_sec': min_d, 'max_duration_sec': max_d,
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    except Exception as exc:
+        logging.exception("CDR eval distribution failed")
+        return {'status': 'failed', 'source': 'cdr', 'triggered_by': triggered_by, 'months': months,
+                'error': str(exc), 'elapsed_seconds': round(time.time() - started, 2)}
+    finally:
+        try:
+            CDR_EVAL_SYNC_LOCK.release()
         except Exception:
             pass
 
@@ -61326,6 +61508,16 @@ async def run_oktell_operator_statuses_sync_async(triggered_by='scheduler'):
         logging.info("Post-status eval distribution: %s", (dist or {}).get('status'))
     except Exception:
         logging.exception("Post-status eval distribution failed")
+    # Отдел продаж — тем же ночным заходом: норма считается от часов, а касания за
+    # вчера мост уже привёз. Источник — своя база, поэтому прогон дешёвый.
+    try:
+        dist = await loop.run_in_executor(
+            executor_pool,
+            lambda: sync_cdr_evaluation_calls(triggered_by='scheduler-after-status')
+        )
+        logging.info("Post-status OP eval distribution: %s", (dist or {}).get('status'))
+    except Exception:
+        logging.exception("Post-status OP eval distribution failed")
     try:
         backfill = await loop.run_in_executor(
             executor_pool,

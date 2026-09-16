@@ -324,6 +324,26 @@ class WiringTests(unittest.TestCase):
         self.assertIn("'freepbx-%s.%s' % (safe_id, extension)", self.source)
         self.assertIn('CREATE TABLE IF NOT EXISTS cdr_audio_jobs', self.schema)
 
+    def test_nightly_distribution_for_sales_exists_and_skips_verifiers(self):
+        """Третье зеркало норма-добора: источник 'cdr' у отдела продаж, прогон после ночного
+        синка статусов, кнопка запуска ветвится синхронно; «Верификатор» вне деления."""
+        self.assertIn("CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE: 'cdr',", self.source)
+        sync = self.source[self.source.index('def sync_cdr_evaluation_calls'):]
+        sync = sync[:sync.index('\n\n\n')]
+        for needle in ('get_operator_call_evaluation_targets_for_month', 'get_imported_calls_status_counts_by_operator',
+                       'get_operator_score_aggregates_for_month', 'recording_belongs_to(',
+                       'enqueue_audio_job(', 'notes=f"distribution:{importer_id or \'auto\'}:cdr"'):
+            self.assertIn(needle, sync, needle)
+        operators = self.source[self.source.index('def _cdr_distribution_operators'):]
+        operators = operators[:operators.index('\n\n\n')]
+        self.assertIn("info.get('model') not in CDR_RANDOM_CALL_MODELS", operators)
+        self.assertNotIn('op_verificator', "CDR_RANDOM_CALL_MODELS = {'op_osnova', 'op_potok', 'op_yandex_reg'}")
+        self.assertIn("lambda: sync_cdr_evaluation_calls(triggered_by='scheduler-after-status')", self.source)
+        run = self.source[self.source.index('def call_distribution_run'):]
+        run = run[:run.index('\n\n\n')]
+        self.assertIn("if source == 'cdr':", run)
+        self.assertIn('result = sync_cdr_evaluation_calls(', run)
+
     def test_journal_modal_knows_the_cdr_source(self):
         self.assertIn("const isCdr = source === 'cdr';", self.journal)
         self.assertIn('const ownDurations = isBinotel || isCdr;', self.journal)
