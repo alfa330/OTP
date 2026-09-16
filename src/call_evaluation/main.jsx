@@ -2725,18 +2725,23 @@ const RC_MAX_COUNT = 20;         // максимум звонков за оди�
 
 const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, source, onImported }) => {
     const isBinotel = source === 'binotel'; // TEZ: min/max длительности задаются в модалке
+    // ОП (FreePBX через касания CDR): длительности тоже в модалке, период — в пределах
+    // выбранного месяца, но без семидневного потолка: касания лежат в нашей базе.
+    const isCdr = source === 'cdr';
+    const ownDurations = isBinotel || isCdr;
+    const boundToMonth = isBinotel || isCdr;
     const todayKey = rcToKey(new Date());
     // TEZ: выбор ограничен ВЫБРАННЫМ месяцем и максимум 7 днями (иначе Binotel упирается
     // в rate limit) — даты только внутри месяца селектора и не позже сегодня.
     const monthStartKey = rcMonthStartKey(selectedMonth);
     const monthEndKey = rcMonthEndKey(selectedMonth);
-    const binotelMinKey = isBinotel ? monthStartKey : null;
-    const binotelMaxKey = isBinotel ? (monthEndKey < todayKey ? monthEndKey : todayKey) : null;
+    const binotelMinKey = boundToMonth ? monthStartKey : null;
+    const binotelMaxKey = boundToMonth ? (monthEndKey < todayKey ? monthEndKey : todayKey) : null;
     const rcInitialRange = () => {
-        if (!isBinotel) return rcDefaultRange(selectedMonth);
+        if (!boundToMonth) return rcDefaultRange(selectedMonth);
         const end = binotelMaxKey;
         const endDate = rcParseKey(end);
-        let start = endDate ? rcToKey(rcAddDays(endDate, -(RC_TEZ_MAX_DAYS - 1))) : monthStartKey;
+        let start = (isBinotel && endDate) ? rcToKey(rcAddDays(endDate, -(RC_TEZ_MAX_DAYS - 1))) : monthStartKey;
         if (start < monthStartKey) start = monthStartKey;   // не выходим за начало месяца
         return { start, end };
     };
@@ -2767,7 +2772,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
     };
     const minDurNum = parseDur(minDur);
     const maxDurNum = parseDur(maxDur);
-    const durRangeInvalid = isBinotel && minDurNum != null && maxDurNum != null && maxDurNum < minDurNum;
+    const durRangeInvalid = ownDurations && minDurNum != null && maxDurNum != null && maxDurNum < minDurNum;
     const countNum = Math.max(1, Math.min(parseInt(String(count), 10) || 1, RC_MAX_COUNT));
     const spanTooLong = isBinotel && rcSpanDays(range.start, range.end) > RC_TEZ_MAX_DAYS;
 
@@ -2776,7 +2781,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
         setBusy(true); setError('');
         try {
             const body = { operator_id: operator.id, date_from: range.start, date_to: range.end, incoming, outgoing, count: countNum };
-            if (isBinotel) {
+            if (ownDurations) {
                 if (minDurNum != null) body.min_duration_sec = minDurNum;
                 if (maxDurNum != null) body.max_duration_sec = maxDurNum;
             }
@@ -2838,7 +2843,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
                 </div>
                 <div className="modal-body">
                     <label className="label" style={{ marginBottom: 6, display: 'block' }}>
-                        Период · {span} дн.{isBinotel ? ` (не более ${RC_TEZ_MAX_DAYS}, в пределах месяца)` : ''}
+                        Период · {span} дн.{isBinotel ? ` (не более ${RC_TEZ_MAX_DAYS}, в пределах месяца)` : (isCdr ? ' (в пределах месяца)' : '')}
                     </label>
                     <RcRangeCalendar value={range} onChange={setRange} maxKey={binotelMaxKey || todayKey} minKey={binotelMinKey} />
                     {spanTooLong ? (
@@ -2859,7 +2864,7 @@ const RandomCallModal = ({ isOpen, onClose, operator, userId, selectedMonth, sou
                         onBlur={() => setCount(countNum)}
                         style={{ width: '100%', padding: '9px 12px', borderRadius: 'var(--radius)', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13 }} />
 
-                    {isBinotel ? (
+                    {ownDurations ? (
                         <>
                             <label className="label" style={{ margin: '16px 0 6px', display: 'block' }}>Длительность разговора, сек (необязательно)</label>
                             <div style={{ display: 'flex', gap: 8 }}>

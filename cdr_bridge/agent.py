@@ -72,12 +72,14 @@ Render и до сети не дотягивается — значит, ходи
 import argparse
 import json
 import logging
+import base64
 import os
 import platform
 import socket
 import sys
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 import requests
 
@@ -87,7 +89,14 @@ from cdr import touches as touches_mod  # noqa: E402
 from cdr_bridge import live, signing  # noqa: E402
 from cdr_bridge.station import Station, StationError  # noqa: E402
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
+
+# Прокси записей на шлюзе: http://127.0.0.1:8082/rec/<относительный путь файла>.
+RECORDS_DEFAULT = 'http://127.0.0.1:8082'
+RECORDS_TIMEOUT = (10, 120)
+# Потолок файла записи — тот же, что на портале (cdr.routes.MAX_AUDIO_BYTES).
+MAX_RECORD_BYTES = 30 * 1024 * 1024
+_AUDIO_TYPES = {'.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.gsm': 'audio/gsm'}
 
 # Сколько может длиться окно чтения, которое портал присылает мосту: сутки плюс
 # часовой хвост (cdr.sync.window_for). Всё, что шире, — не наше задание.
@@ -152,6 +161,10 @@ def load_config(argv_overrides=None):
         # Живой хвост сегодняшних суток (cdr_bridge/live.py): раз в столько секунд мост
         # досылает порталу изменившиеся касания дня. 0 — выключен.
         'live_interval': value('CDR_LIVE_INTERVAL_SECONDS', '20'),
+        # Прокси записей разговоров на этой же машине (nginx перед файловым сервером,
+        # отдаёт только GET по относительному пути файла). Напрямую к серверу записей
+        # мосту нельзя — фаервол пускает его только на loopback.
+        'records': value('CDR_RECORDS_URL', RECORDS_DEFAULT).rstrip('/'),
     }
     config.update({k: v for k, v in (argv_overrides or {}).items() if v})
     return config
@@ -190,6 +203,7 @@ class Bridge:
         self.signer = self._build_signer(config)
         self.station = station or Station(config['station'], config['login'],
                                           config['password'])
+        self.records_session = self._build_records_session()
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         try:
             live_interval = int(str(config.get('live_interval') or '0').strip() or 0)
@@ -363,10 +377,85 @@ class Bridge:
                 # Без справочника касания всё равно поедут — только без ФИО.
                 log.warning('Справочник станции не забрался: %s', exc)
         jobs = answer.get('jobs') or []
-        if not jobs:
-            return False
         for job in jobs:
             self.do_day(job)
+        # Записи разговоров для журнала оценок — тем же проходом, после суток: они
+        # нужны людям через минуты, а не через сутки, но сутки важнее.
+        had_audio = self.do_audio_jobs()
+        return bool(jobs) or had_audio
+
+    # ── записи разговоров для журнала оценок ─────────────────────────────────
+
+    @staticmethod
+    def _build_records_session():
+        """Сессия к прокси записей на этой же машине: без прокси наружу и без
+        чужих переменных окружения — как у сессии к порталу."""
+        session = requests.Session()
+        session.trust_env = False
+        return session
+
+    def records_url(self, recording_url):
+        """Ссылка станции (http://<файловый сервер>/recordings/…) → прокси на шлюзе
+        (http://127.0.0.1:8082/rec/recordings/…). Хост из ссылки отбрасывается
+        намеренно: куда ходить за файлом, решает конфигурация шлюза, а не станция."""
+        path = urlsplit(str(recording_url or '')).path.lstrip('/')
+        lowered = path.lower()
+        if not path or '..' in path or not lowered.endswith(tuple(_AUDIO_TYPES)):
+            raise ValueError('ссылка на запись не годится: %r' % (recording_url,))
+        return '%s/rec/%s' % (self.config.get('records') or RECORDS_DEFAULT, path)
+
+    def do_audio_jobs(self):
+        """Заказы записей (cdr_audio_jobs): скачать через прокси, отправить порталу.
+        Возвращает True, если заказы были. Наружу не бросает: запись — не сутки."""
+        try:
+            answer = self._post('audio_poll', {'agent_id': self.agent_id})
+        except Exception as exc:  # noqa: BLE001
+            log.warning('Записи: портал не ответил на опрос заказов: %s', exc)
+            return False
+        jobs = answer.get('jobs') or []
+        for job in jobs:
+            try:
+                self.do_audio(job)
+            except Exception as exc:  # noqa: BLE001
+                log.error('Запись %s: заказ не выполнен: %s', job.get('linkedid'), exc)
+        return bool(jobs)
+
+    def _report_audio(self, job_id, status, error):
+        self._post('audio', {'job_id': job_id, 'status': status, 'error': str(error)[:400]})
+
+    def do_audio(self, job):
+        """Один заказ: файл с прокси записей → base64 → портал. 404 у сервера записей —
+        финальный «missing»: файла нет, повтор его не создаст."""
+        job_id = job.get('id')
+        linkedid = job.get('linkedid')
+        try:
+            url = self.records_url(job.get('recording_url'))
+        except ValueError as exc:
+            self._report_audio(job_id, 'error', exc)
+            return False
+        try:
+            response = self.records_session.get(url, timeout=RECORDS_TIMEOUT)
+        except requests.exceptions.RequestException as exc:
+            self._report_audio(job_id, 'error', 'сервер записей: %s' % exc)
+            return False
+        if response.status_code == 404:
+            self._report_audio(job_id, 'missing', 'файла нет на сервере записей')
+            return False
+        if response.status_code != 200:
+            self._report_audio(job_id, 'error', 'сервер записей ответил %d' % response.status_code)
+            return False
+        body = response.content or b''
+        if not body or len(body) > MAX_RECORD_BYTES:
+            self._report_audio(job_id, 'error', 'размер файла %d байт вне допустимого' % len(body))
+            return False
+        content_type = (response.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+        if not content_type or content_type == 'application/octet-stream':
+            content_type = _AUDIO_TYPES.get(os.path.splitext(url)[1].lower(), 'audio/wav')
+        self._post('audio', {
+            'job_id': job_id, 'status': 'ok', 'content_type': content_type,
+            'bytes': len(body), 'audio_b64': base64.b64encode(body).decode('ascii'),
+        })
+        log.info('Запись %s: %d байт отправлено порталу', linkedid, len(body))
         return True
 
     def beat(self):

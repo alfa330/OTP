@@ -635,3 +635,129 @@ def filter_values(cursor, day_from, day_to):
     queues = sorted({part for row in cursor.fetchall()
                      for part in str(row[0]).split(',') if part})
     return {'results': results, 'queues': queues}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Звонки на оценку: кандидаты и заказы записей мосту
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Заказ записи: после стольких попыток остаётся в error; «в работе» дольше
+# STALE_MINUTES считается брошенным (мост умер) и выдаётся снова.
+AUDIO_MAX_ATTEMPTS = 3
+AUDIO_STALE_MINUTES = 15
+
+
+def sample_operator_calls(cursor, ext, day_from, day_to, call_types, min_talk=0, max_talk=0,
+                          limit=500):
+    """Кандидаты «Случайного звонка»: звонки оператора (по внутреннему номеру) за
+    период, с разговором и со ссылкой на запись, в случайном порядке.
+
+    Принадлежность записи здесь не проверяется — это правило склейки
+    (cdr.touches.recording_belongs_to), и вызывающий применяет его к выборке."""
+    if not call_types:
+        return []
+    params = {'ext': str(ext), 'day_from': day_from, 'day_to': day_to,
+              'types': list(call_types), 'min_talk': int(min_talk or 0), 'limit': int(limit)}
+    sql = """
+        SELECT linkedid, phone, started_at, call_type, talk_seconds, recording_url
+          FROM cdr_touches
+         WHERE ext = %(ext)s
+           AND call_day BETWEEN %(day_from)s AND %(day_to)s
+           AND call_type = ANY(%(types)s)
+           AND talk_seconds > 0
+           AND talk_seconds >= %(min_talk)s
+           AND coalesce(recording_url, '') <> ''
+    """
+    if max_talk:
+        params['max_talk'] = int(max_talk)
+        sql += " AND talk_seconds <= %(max_talk)s"
+    sql += " ORDER BY random() LIMIT %(limit)s"
+    cursor.execute(sql, params)
+    return [{'linkedid': row[0], 'phone': row[1], 'started_at': row[2], 'call_type': row[3],
+             'talk_seconds': int(row[4] or 0), 'recording_url': row[5] or ''}
+            for row in cursor.fetchall()]
+
+
+def enqueue_audio_job(cursor, linkedid, recording_url, imported_call_id=None, requested_by=None):
+    """Заказ мосту на запись разговора. На одну строку пула — один заказ: повторный
+    клик по тому же звонку заказ не дублирует. Возвращает id заказа или None."""
+    cursor.execute("""
+        INSERT INTO cdr_audio_jobs (linkedid, recording_url, imported_call_id, requested_by)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (imported_call_id) WHERE imported_call_id IS NOT NULL DO NOTHING
+        RETURNING id
+    """, (str(linkedid)[:64], str(recording_url)[:1000], imported_call_id, requested_by))
+    row = cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+def claim_audio_jobs(cursor, agent_id, limit=3):
+    """Мост забирает заказы записей — тем же приёмом, что сутки (FOR UPDATE SKIP
+    LOCKED, брошенные «в работе» подхватываются по возрасту claimed_at)."""
+    cursor.execute("""
+        WITH next AS (
+            SELECT id FROM cdr_audio_jobs
+             WHERE attempts < %(max_attempts)s
+               AND (status = 'pending'
+                    OR (status = 'running'
+                        AND claimed_at < NOW() - make_interval(mins => %(stale)s)))
+             ORDER BY requested_at
+             LIMIT %(limit)s
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE cdr_audio_jobs j
+           SET status = 'running', claimed_at = NOW(), claimed_by = %(agent)s,
+               attempts = j.attempts + 1, error = NULL
+          FROM next
+         WHERE j.id = next.id
+     RETURNING j.id, j.linkedid, j.recording_url, j.attempts
+    """, {'max_attempts': AUDIO_MAX_ATTEMPTS, 'stale': AUDIO_STALE_MINUTES,
+          'limit': int(limit), 'agent': str(agent_id or '')[:120]})
+    return [{'id': int(row[0]), 'linkedid': row[1], 'recording_url': row[2], 'attempts': row[3]}
+            for row in cursor.fetchall()]
+
+
+def audio_job(cursor, job_id):
+    cursor.execute("""
+        SELECT id, linkedid, recording_url, imported_call_id, status, attempts
+          FROM cdr_audio_jobs WHERE id = %s
+    """, (int(job_id),))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'id': int(row[0]), 'linkedid': row[1], 'recording_url': row[2],
+            'imported_call_id': row[3], 'status': row[4], 'attempts': row[5]}
+
+
+def mark_audio_done(cursor, job_id, audio_path, audio_bytes):
+    cursor.execute("""
+        UPDATE cdr_audio_jobs
+           SET status = 'done', finished_at = NOW(), error = NULL,
+               audio_path = %s, audio_bytes = %s
+         WHERE id = %s
+    """, (str(audio_path)[:500], int(audio_bytes or 0), int(job_id)))
+
+
+def mark_audio_failed(cursor, job_id, error, missing=False):
+    """Файла нет на сервере записей — финал сразу (повторами он не появится).
+    Прочие отказы: заказ возвращается в очередь до потолка попыток."""
+    cursor.execute("""
+        UPDATE cdr_audio_jobs
+           SET status = CASE WHEN %(missing)s THEN 'missing'
+                             WHEN attempts >= %(max_attempts)s THEN 'error'
+                             ELSE 'pending' END,
+               finished_at = CASE WHEN %(missing)s OR attempts >= %(max_attempts)s
+                                  THEN NOW() ELSE NULL END,
+               error = %(error)s
+         WHERE id = %(id)s
+    """, {'missing': bool(missing), 'max_attempts': AUDIO_MAX_ATTEMPTS,
+          'error': str(error)[:500], 'id': int(job_id)})
+
+
+def audio_job_status_for_imported(cursor, imported_call_id):
+    """Состояние заказа записи для строки пула: {status, error} или None."""
+    cursor.execute("""
+        SELECT status, error FROM cdr_audio_jobs WHERE imported_call_id = %s
+    """, (int(imported_call_id),))
+    row = cursor.fetchone()
+    return {'status': row[0], 'error': row[1]} if row else None

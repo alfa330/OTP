@@ -44,6 +44,8 @@ JWT. Проверка идёт первой строкой тела. Основ�
 в 120 секунд).
 """
 
+import base64
+import binascii
 import hmac
 import logging
 from datetime import datetime, timedelta, timezone
@@ -82,11 +84,24 @@ MAX_EXPORT_ROWS = 500000
 # Насколько долго справочник номеров считается свежим.
 DIRECTORY_TTL_HOURS = 12
 
+# Заказов записей за один опрос моста. Файл разговора — единицы мегабайт, и три за
+# заход укладываются в один цикл моста, не задерживая сутки.
+AUDIO_JOBS_PER_POLL = 3
+
+# Потолок одного файла записи: час разговора в WAV 8 кГц — это 58 МБ, у отдела продаж
+# разговоры в минуты. Больше похоже не на запись, а на ошибку.
+MAX_AUDIO_BYTES = 30 * 1024 * 1024
+
 
 def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                        resolve_requester, excel_text_warning=None):
+                        resolve_requester, excel_text_warning=None, store_audio=None):
     """Своего пула у раздела нет и не нужно: тяжёлую работу делает мост внутри
-    корпоративной сети, а портал только читает свою базу и собирает книгу."""
+    корпоративной сети, а портал только читает свою базу и собирает книгу.
+
+    store_audio(linkedid, audio_bytes, content_type, imported_call_id) -> audio_path —
+    куда класть присланную мостом запись разговора (облако портала) и кому её
+    приписать. Своего хранилища у раздела нет; без этого аргумента ручка приёма
+    записей отвечает отказом, а заказы остаются в очереди."""
     bp = Blueprint('cdr', __name__, url_prefix='/api/cdr')
 
     # ── каркас пользовательского роута ───────────────────────────────────────
@@ -544,6 +559,65 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.agent_seen(cursor)
         _ensure_directory(force=True)
         return jsonify({'status': 'ok', 'agents': len(cleaned)})
+
+    @agent_route('/agent/audio_poll')
+    def audio_poll(payload):
+        """Мост спрашивает, какие записи разговоров заказаны (cdr_audio_jobs).
+
+        Без agent_seen: заказ записи — не пульс моста, живость считает /agent/poll."""
+        agent_id = str(payload.get('agent_id') or payload.get('hostname') or '')[:120]
+        with db._get_cursor() as cursor:
+            jobs = queries.claim_audio_jobs(cursor, agent_id, AUDIO_JOBS_PER_POLL)
+        return jsonify({'jobs': [{'id': job['id'], 'linkedid': job['linkedid'],
+                                  'recording_url': job['recording_url']} for job in jobs]})
+
+    @agent_route('/agent/audio')
+    def audio(payload):
+        """Мост присылает запись (base64) или отказ по заказу.
+
+        Файл кладёт в облако вызывающий через store_audio: у раздела своего
+        хранилища нет, а путь и владелец записи (строка пула) — дело журнала."""
+        try:
+            job_id = int(payload.get('job_id'))
+        except (TypeError, ValueError):
+            raise ValueError('job_id обязателен')
+        with db._get_cursor() as cursor:
+            job = queries.audio_job(cursor, job_id)
+        if not job:
+            raise ValueError('Заказ записи %d не найден' % job_id)
+        status = str(payload.get('status') or 'ok')
+        if status != 'ok':
+            error = str(payload.get('error') or status)[:500]
+            with db._get_cursor() as cursor:
+                queries.mark_audio_failed(cursor, job_id, error, missing=(status == 'missing'))
+            log.warning('Касания: запись %s не забралась (%s): %s', job['linkedid'], status, error)
+            return jsonify({'status': 'failure_recorded'})
+        if store_audio is None:
+            raise RuntimeError('Хранилище записей на портале не подключено')
+        raw = payload.get('audio_b64')
+        if not isinstance(raw, str) or not raw:
+            raise ValueError('Ожидалась запись в поле audio_b64')
+        try:
+            audio_bytes = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError('audio_b64 не разбирается')
+        if not audio_bytes or len(audio_bytes) > MAX_AUDIO_BYTES:
+            raise ValueError('Размер записи %d байт вне допустимого' % len(audio_bytes))
+        content_type = str(payload.get('content_type') or 'audio/wav')[:64]
+        try:
+            audio_path = store_audio(job['linkedid'], audio_bytes, content_type,
+                                     job.get('imported_call_id'))
+        except Exception as exc:
+            # Облако не приняло — заказ вернётся мосту следующей попыткой, а не
+            # повиснет в «running» до протухания.
+            with db._get_cursor() as cursor:
+                queries.mark_audio_failed(cursor, job_id, 'портал: %s' % str(exc)[:300])
+            raise
+        with db._get_cursor() as cursor:
+            queries.mark_audio_done(cursor, job_id, audio_path, len(audio_bytes))
+        log.info('Касания: запись %s принята, %d байт → %s', job['linkedid'],
+                 len(audio_bytes), audio_path)
+        return jsonify({'status': 'ok', 'audio_path': audio_path})
 
     return bp
 

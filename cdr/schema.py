@@ -164,6 +164,37 @@ CREATE TABLE IF NOT EXISTS cdr_agent_state (
     -- ротации: старый ключ убирают с портала только когда здесь уже виден новый.
     agent_key      TEXT
 );
+
+-- ── ЗАПИСИ РАЗГОВОРОВ ДЛЯ ЖУРНАЛА ОЦЕНОК ───────────────────────────────────
+-- Файлы записей лежат на сервере внутри корпоративной сети, и портал до него не
+-- дотягивается. Поэтому запись, нужная журналу («Случайный звонок» отдела продаж,
+-- деление звонков), ЗАКАЗЫВАЕТСЯ здесь: мост забирает заказ вместе с сутками,
+-- скачивает файл через свой прокси записей и присылает порталу, а портал кладёт
+-- его в облако и проставляет imported_calls.audio_path. Та же очередь, что у суток:
+-- pending → running (claimed_at/claimed_by) → done | error | missing.
+-- missing — файла на сервере нет (404): повторами он не появится, финал сразу.
+CREATE TABLE IF NOT EXISTS cdr_audio_jobs (
+    id               BIGSERIAL PRIMARY KEY,
+    linkedid         VARCHAR(64) NOT NULL,
+    recording_url    TEXT NOT NULL,
+    imported_call_id INTEGER,
+    status           TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'running', 'done', 'error', 'missing')),
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    requested_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    requested_by     INTEGER,
+    claimed_at       TIMESTAMPTZ,
+    claimed_by       TEXT,
+    finished_at      TIMESTAMPTZ,
+    error            TEXT,
+    audio_path       TEXT,
+    audio_bytes      INTEGER
+);
+
+-- Одна строка пула — один заказ: повторный клик по тому же звонку не плодит дублей.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cdr_audio_jobs_imported_call
+    ON cdr_audio_jobs(imported_call_id) WHERE imported_call_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cdr_audio_jobs_status ON cdr_audio_jobs(status);
 """
 
 # Таблица могла быть создана до появления колонки: CREATE TABLE IF NOT EXISTS

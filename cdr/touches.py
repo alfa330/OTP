@@ -177,6 +177,45 @@ def _recording_url(leg):
     return url
 
 
+# Полные имена файлов записей — с датой, временем и uniqueid плеча в хвосте. Захватывается
+# только uniqueid (третья группа у каждой формы): дата и время для проверки не нужны.
+_REC_TAIL = r"-\d{8}-\d{6}-(\d+\.\d+)\.(?:wav|mp3|gsm)$"
+REC_EXT_FULL = re.compile(r"external-(\d{3,4})-\+?(\d{9,15})" + _REC_TAIL)
+REC_OUT_FULL = re.compile(r"out-(?:\d+\*)?\+?(\d{9,15})-(\d{3,4})" + _REC_TAIL)
+REC_Q_FULL = re.compile(r"q-(\d{3,4})-\+?(\d{9,15})" + _REC_TAIL)
+
+
+def recording_belongs_to(url, ext, phone, linkedid):
+    """Достоверно ли запись по ссылке — этого звонка и этого оператора.
+
+    С 09.09.2026 станция отдаёт одну строку на звонок и подставляет в неё ссылку
+    на запись по номеру клиента: у трети принятых входящих это файл ДРУГОГО агента
+    той же группы вызова (ring-all), которого клиент не слышал, — а бывает, что
+    и файла такого нет, потому что тот агент не ответил. В журнал оценок такую
+    запись класть нельзя: супервайзер слушал бы чужой разговор или тишину.
+
+    Правило: `external-<ext>-<клиент>` и `out-…*<клиент>-<ext>` — только при
+    совпадении и внутреннего номера, и клиента; `q-<очередь>-<клиент>` — запись
+    плеча очереди, она одна на звонок, поэтому сверяется uniqueid файла с linkedid.
+    Замер 01–16.09.2026 по направлениям отдела продаж: у исходящих проходит 100 %,
+    у входящих 73 %, остальные — чужие файлы."""
+    name = str(url or "").rsplit("/", 1)[-1]
+    ext = str(ext or "")
+    client = norm_phone(phone)
+    if not name or not ext or not client:
+        return False
+    matched = REC_EXT_FULL.search(name)
+    if matched:
+        return matched.group(1) == ext and norm_phone(matched.group(2)) == client
+    matched = REC_OUT_FULL.search(name)
+    if matched:
+        return matched.group(2) == ext and norm_phone(matched.group(1)) == client
+    matched = REC_Q_FULL.search(name)
+    if matched:
+        return norm_phone(matched.group(2)) == client and matched.group(3) == str(linkedid or "")
+    return False
+
+
 def _touch(linkedid, client, legs, resolve_operator):
     legs.sort(key=lambda leg: (leg["at"] or "", leg["disposition"] or ""))
     kind = "out" if any(leg["kind"] == "out" for leg in legs) else "in"

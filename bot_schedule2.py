@@ -396,6 +396,18 @@ TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE = (os.getenv('TEZ_CALL_DISTRIBUTION_DEPART
 TEZ_RANDOM_CALL_MODELS = {'operator', 'tez_line', 'tez_op'}
 # Верхняя граница выборки кандидатов Binotel за запрос (перед дедупом и рандомом).
 TEZ_BINOTEL_SAMPLE_CAP = _env_int('TEZ_BINOTEL_SAMPLE_CAP', 500, minimum=1, maximum=5000)
+
+# «Случайный звонок» для отдела продаж питается из СВОЕЙ базы касаний (cdr_touches,
+# их приносит мост с FreePBX) — к станции ни одного запроса. Кнопку получают звонковые
+# направления ОП; «Верификатор» — чаты (Wazzup), ему кнопки нет. Запись едет в облако
+# не порталом, а мостом по заказу (cdr_audio_jobs): файловый сервер записей виден только
+# из корпоративной сети.
+CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE = (os.getenv('CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE') or 'op').strip().lower() or 'op'
+CDR_RANDOM_CALL_MODELS = {'op_osnova', 'op_potok', 'op_yandex_reg'}
+# Период выборки: касания лежат у нас все, ограничение — только чтобы модалка не
+# предлагала полугодовой диапазон; месяц с запасом на выбор «весь месяц».
+CDR_RANDOM_CALL_MAX_DAYS = _env_int('CDR_RANDOM_CALL_MAX_DAYS', 31, minimum=1, maximum=366)
+CDR_RANDOM_CALL_SAMPLE_CAP = _env_int('CDR_RANDOM_CALL_SAMPLE_CAP', 500, minimum=1, maximum=5000)
 # Сколько случайных звонков разрешаем взять за один запрос (СЗоВ и TEZ).
 RANDOM_CALL_MAX_COUNT = _env_int('RANDOM_CALL_MAX_COUNT', 20, minimum=1, maximum=100)
 # Окно подтяжки звонка из АТС в разделе «ИИ-оценка», когда период не задан.
@@ -2978,6 +2990,22 @@ def _build_calibration_results(criteria, etalon_scores, etalon_comments, evaluat
     }
 
 
+def _signed_audio_response_type(blob_name):
+    """Content-Type подписанной ссылки на запись — по расширению файла в облаке.
+
+    Записи Oktell и Binotel лежат mp3, записи отдела продаж (мост FreePBX) — WAV как
+    есть, без перекодирования. Раньше тип был зашит `audio/mpeg`: WAV под таким
+    заголовком часть браузеров играть отказывается."""
+    lowered = str(blob_name or '').lower()
+    if lowered.endswith('.wav'):
+        return 'audio/wav'
+    if lowered.endswith('.gsm'):
+        return 'audio/gsm'
+    if lowered.endswith('.ogg') or lowered.endswith('.oga'):
+        return 'audio/ogg'
+    return 'audio/mpeg'
+
+
 def _build_signed_audio_url(audio_path):
     if not audio_path:
         return None
@@ -2994,7 +3022,7 @@ def _build_signed_audio_url(audio_path):
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            response_type='audio/mpeg'
+            response_type=_signed_audio_response_type(blob.name)
         )
     except Exception as e:
         logging.error("Error building signed audio URL: %s", e)
@@ -6118,6 +6146,16 @@ def api_ai_qa_pull_call():
                     # проверяемого кандидата. Именно это делало «Из АТС» у Тез КЦ
                     # висящей кнопкой.
                     fetch_end_parties=False, **kwargs)
+            elif department == CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+                # Отдел продаж: кандидаты из своих касаний CDR, длительности — как у
+                # Binotel, из общих настроек «Деления звонков», если раздел не задал свои.
+                settings = db.get_call_distribution_settings() or {}
+                response = _cdr_random_call(
+                    min_duration_sec=body.get('min_duration_sec',
+                                              settings.get('min_duration_sec')),
+                    max_duration_sec=body.get('max_duration_sec',
+                                              settings.get('max_duration_sec')),
+                    **kwargs)
             else:
                 response = _oktell_random_call(**kwargs)
 
@@ -19387,7 +19425,7 @@ def dispute_call_evaluation():
                             version="v4",
                             expiration=timedelta(minutes=15),
                             method="GET",
-                            response_type='audio/mpeg'
+                            response_type=_signed_audio_response_type(blob.name)
                         )
             except Exception as e:
                 logging.error(f"Error generating signed audio URL for dispute: {e}")
@@ -20077,6 +20115,9 @@ def get_directions():
                 _source = 'oktell'
             elif _code == TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE and _model in TEZ_RANDOM_CALL_MODELS:
                 _source = 'binotel'
+            elif _code == CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE and _model in CDR_RANDOM_CALL_MODELS:
+                # Отдел продаж (FreePBX): кандидаты из своих касаний, запись — мостом.
+                _source = 'cdr'
             _d['random_call_eligible'] = _source is not None
             _d['random_call_source'] = _source
             _chat_source = None
@@ -25374,7 +25415,7 @@ def get_call_versions(call_id):
                                     version="v4",
                                     expiration=timedelta(minutes=15),
                                     method="GET",
-                                    response_type='audio/mpeg'
+                                    response_type=_signed_audio_response_type(blob.name)
                                 )
                     except Exception as e:
                         logging.error(f"Error generating signed URL for version {version['id']}: {e}")
@@ -26111,6 +26152,108 @@ def _binotel_random_call(*, operator_id, operator_name, requester_id, incoming, 
     }), 200
 
 
+def _cdr_random_call(*, operator_id, operator_name, requester_id, incoming, outgoing,
+                     date_from, date_to, min_duration_sec=None, max_duration_sec=None,
+                     count=1, source='random'):
+    """«Случайный звонок» для отдела продаж из касаний CDR (мост FreePBX). Возвращает Flask-ответ.
+
+    Кандидаты — из СВОЕЙ базы (cdr_touches): к станции ни одного запроса, выборка
+    мгновенная. Оператор — по внутреннему номеру касания (users.sip_number), как на табло
+    ОП. Берутся только звонки с разговором и с записью, которая ДОСТОВЕРНО принадлежит
+    этому звонку и этому оператору: у входящих станция подставляет ссылку по номеру
+    клиента и у трети принятых отдаёт файл другого агента той же группы вызова
+    (cdr.touches.recording_belongs_to — иначе супервайзер слушал бы чужой разговор).
+
+    Запись в облако кладёт не портал: файловый сервер записей виден только из корпоративной
+    сети. Здесь ставится заказ мосту (cdr_audio_jobs), строка пула появляется в журнале
+    сразу, а audio_path — когда мост пришлёт файл (обычно в пределах минуты)."""
+    from cdr import queries as cdr_queries, touches as cdr_touches
+    sip = db.get_user_sip_number(operator_id)
+    if not sip:
+        return jsonify({"error": "У оператора не указан внутренний номер (sip_number)",
+                        "code": "no_sip"}), 400
+    try:
+        day_from = datetime.strptime(str(date_from), '%Y-%m-%d').date()
+        day_to = datetime.strptime(str(date_to), '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return jsonify({"error": "Укажите период (date_from, date_to в формате YYYY-MM-DD)"}), 400
+    if day_to < day_from:
+        day_from, day_to = day_to, day_from
+    if (day_to - day_from).days + 1 > CDR_RANDOM_CALL_MAX_DAYS:
+        return jsonify({"error": f"Период не больше {CDR_RANDOM_CALL_MAX_DAYS} дней"}), 400
+    count = max(1, min(int(count or 1), RANDOM_CALL_MAX_COUNT))
+
+    def _dur(value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed >= 0 else 0
+    # Длительность: из модалки, а без неё — из общих настроек «Деления звонков», как у
+    # подтяжки Binotel в «ИИ-оценке»: без умолчания в пул уезжал бы двухсекундный «не туда
+    # попал». У входящих ОП talk_seconds включает ожидание в очереди (станция отдаёт одну
+    # строку на звонок), так что фильтр здесь чуть мягче, чем по разговору.
+    settings = db.get_call_distribution_settings() or {}
+    min_d = _dur(min_duration_sec if min_duration_sec is not None else settings.get('min_duration_sec'))
+    max_d = _dur(max_duration_sec if max_duration_sec is not None else settings.get('max_duration_sec'))
+    if max_d and min_d and max_d < min_d:
+        min_d, max_d = max_d, min_d
+    call_types = []
+    if incoming:
+        call_types.append(cdr_touches.TYPE_IN)
+    if outgoing:
+        call_types.append(cdr_touches.TYPE_OUT)
+    with db._get_cursor() as cursor:
+        rows = cdr_queries.sample_operator_calls(
+            cursor, sip, day_from, day_to, call_types, min_d, max_d,
+            limit=CDR_RANDOM_CALL_SAMPLE_CAP)
+    if not rows:
+        return jsonify({"error": "За выбранный период у оператора нет подходящих звонков по этим критериям",
+                        "code": "empty_window", "fetched": 0}), 404
+    trusted = [row for row in rows
+               if cdr_touches.recording_belongs_to(row['recording_url'], sip, row['phone'], row['linkedid'])]
+    if not trusted:
+        return jsonify({"error": "Звонки за период есть, но ни у одного запись не подтверждена как запись "
+                                 "этого оператора — расширьте период",
+                        "code": "empty_window", "fetched": len(rows), "skipped": {"foreign_recording": len(rows)}}), 404
+    existing = db.get_imported_call_external_ids_for_operator(operator_id)
+    created_list = []
+    for row in trusted:                       # выборка уже в случайном порядке (ORDER BY random())
+        if len(created_list) >= count:
+            break
+        linkedid = str(row['linkedid'])
+        if linkedid in existing:
+            continue
+        started = row['started_at']
+        month = started.strftime('%Y-%m')
+        dt_raw = started.strftime('%d.%m.%Y %H:%M:%S')
+        phone = '7%s' % row['phone'] if len(str(row['phone'])) == 10 else str(row['phone'])
+        new_id = db.import_single_random_call(
+            operator_id=operator_id, operator_name=operator_name,
+            external_id=linkedid, month=month, datetime_raw=dt_raw,
+            phone=phone, duration_sec=row['talk_seconds'],
+            notes=f"{source}:{requester_id}:cdr", call_end_party='unknown')
+        existing.add(linkedid)                # чтобы не выбрать тот же дважды (и на гонке — пропустить)
+        if not new_id:
+            continue
+        with db._get_cursor() as cursor:
+            cdr_queries.enqueue_audio_job(cursor, linkedid, row['recording_url'], new_id, requester_id)
+        created_list.append({
+            "id": new_id, "operator_id": operator_id, "operator_name": operator_name,
+            "month": month, "datetime": dt_raw, "phone": phone,
+            "duration_sec": row['talk_seconds'],
+            "direction": "in" if row['call_type'] == cdr_touches.TYPE_IN else "out",
+            "call_end_party": 'unknown', "audio_pending": True,
+        })
+    if not created_list:
+        return jsonify({"error": "Новых звонков по этим критериям не осталось — все уже в оценках",
+                        "code": "pool_exhausted"}), 404
+    return jsonify({
+        "status": "success", "calls": created_list, "created": len(created_list),
+        "call": created_list[0], "month": created_list[0]["month"],
+    }), 200
+
+
 @app.route('/api/call_evaluations/random_call', methods=['POST'])
 @require_api_key
 def fetch_random_evaluation_call():
@@ -26158,7 +26301,8 @@ def fetch_random_evaluation_call():
             return jsonify({"error": "Нет доступа к этому оператору"}), 403
         operator_name = operator[2]
 
-        # Диспетчеризация по отделу: СЗоВ обслуживает Oktell, TEZ — Binotel API 4.0.
+        # Диспетчеризация по отделу: СЗоВ обслуживает Oktell, TEZ — Binotel API 4.0,
+        # отдел продаж — свои касания CDR (запись приносит мост).
         _dept_id, dept_code = db.get_user_department(operator_id)
         dept_code = str(dept_code or '').strip().lower()
 
@@ -26172,8 +26316,18 @@ def fetch_random_evaluation_call():
                 count=count,
             )
 
+        if dept_code == CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE:
+            return _cdr_random_call(
+                operator_id=operator_id, operator_name=operator_name, requester_id=requester_id,
+                incoming=incoming, outgoing=outgoing,
+                date_from=data.get('date_from'), date_to=data.get('date_to'),
+                min_duration_sec=data.get('min_duration_sec'),
+                max_duration_sec=data.get('max_duration_sec'),
+                count=count,
+            )
+
         if dept_code != OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE:
-            return jsonify({"error": "«Случайный звонок» доступен только для операторов СЗоВ и TEZ"}), 400
+            return jsonify({"error": "«Случайный звонок» доступен только для операторов СЗоВ, TEZ и отдела продаж"}), 400
 
         return _oktell_random_call(
             operator_id=operator_id, operator_name=operator_name, requester_id=requester_id,
@@ -26365,7 +26519,7 @@ def get_audio_file(evaluation_id):
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            response_type='audio/mpeg'
+            response_type=_signed_audio_response_type(blob.name)
         )
 
         return jsonify({"status": "success", "url": signed_url})
@@ -26403,6 +26557,11 @@ def _ensure_imported_call_audio(imported_id, rec=None):
         except Exception:
             logging.exception("binotel on-demand record fetch failed (imported_call=%s)", imported_id)
             return None
+    if notes.endswith(':cdr'):
+        # Записи отдела продаж портал сам не достаёт: файловый сервер виден только из
+        # корпоративной сети, файл приносит мост по заказу (cdr_audio_jobs). Пока его
+        # нет — честное «запись ещё готовится», а не поход в Oktell по отделу.
+        return None
     is_oktell = notes.endswith(':oktell')
     if not is_oktell:
         try:
@@ -26476,7 +26635,7 @@ def get_imported_call_audio_file(imported_id):
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            response_type='audio/mpeg'
+            response_type=_signed_audio_response_type(blob.name)
         )
         return jsonify({"status": "success", "url": signed_url})
     except Exception as e:
@@ -59009,12 +59168,31 @@ except Exception:
 try:
     from cdr.routes import build_cdr_blueprint  # noqa: E402
 
+    def _cdr_store_audio(linkedid, audio_bytes, content_type, imported_call_id=None):
+        """Запись разговора ОП, присланная мостом, → облако портала → imported_calls.audio_path.
+        Тот же бакет и тот же вид пути, что у записей Oktell и Binotel: журнал и «Оценки ИИ»
+        читают их одним кодом."""
+        lowered = str(content_type or '').lower()
+        if 'mpeg' in lowered or 'mp3' in lowered:
+            extension, mime = 'mp3', 'audio/mpeg'
+        elif 'gsm' in lowered:
+            extension, mime = 'gsm', 'audio/gsm'
+        else:
+            extension, mime = 'wav', 'audio/wav'
+        safe_id = re.sub(r'[^0-9A-Za-z.]', '_', str(linkedid))
+        audio_path = _upload_external_record_to_gcs(
+            audio_bytes, 'freepbx-%s.%s' % (safe_id, extension), mime)
+        if imported_call_id:
+            db.set_imported_call_audio_path(int(imported_call_id), audio_path)
+        return audio_path
+
     app.register_blueprint(build_cdr_blueprint(
         db=db,
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         excel_text_warning=_excel_suppress_number_as_text_warning,
+        store_audio=_cdr_store_audio,
     ))
     logging.info("Раздел «Касания»: Blueprint подключён на /api/cdr")
 except Exception:
