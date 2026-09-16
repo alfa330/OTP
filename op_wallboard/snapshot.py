@@ -314,6 +314,11 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
 
         if call_type not in _INCOMING_TYPES:
             continue
+        if not str(touch.get('queue') or '').strip():
+            # Входящий без очереди — звонок на прямой внутренний номер (DID → 2030 и подобные),
+            # до очереди ОП он не доходил. «Дошедшие» табло — только попавшие в очередь, как у
+            # СЗоВ; сверка с CDR станции за 15.09.2026 сходится строка в строку лишь так.
+            continue
         answered = call_type == touches_mod.TYPE_IN and talk > 0
         answered_at = _parse(touch.get('answered_at'))
         # Ожидание — от входа в очередь (queued_at), а без него — от начала строки.

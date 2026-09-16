@@ -108,7 +108,7 @@ class AggregateTests(unittest.TestCase):
     def test_no_per_line_breakdown(self):
         # Разрез по линиям снят целиком (владелец, 16.09.2026): очередь касания на итоги
         # не влияет и отдельным разрезом в снимок не попадает.
-        parts = S.aggregate([touch(queue='3002,3000'), touch(queue='')])
+        parts = S.aggregate([touch(queue='3002,3000'), touch(queue='3010')])
         self.assertNotIn('queues', parts)
         self.assertEqual(parts['totals']['arrived'], 2)
 
@@ -131,6 +131,14 @@ class AggregateTests(unittest.TestCase):
 
     def test_garbage_started_at_is_skipped(self):
         self.assertEqual(S.aggregate([touch(started='вчера')])['totals']['arrived'], 0)
+
+    def test_incoming_without_a_queue_is_not_a_queue_call(self):
+        # DID → прямой внутренний номер 2030: клиент до очереди не дошёл. Станция таких в
+        # строках очередей не имеет, и табло их не считает — ни дошедшими, ни потерянными.
+        touches = [touch(call_type='Входящий (не приняли)', talk=0, queue=''),
+                   touch(queue='')]
+        totals = S.aggregate(touches)['totals']
+        self.assertEqual((totals['arrived'], totals['answered'], totals['missed']), (0, 0, 0))
 
 
 class QueueEntryTests(unittest.TestCase):
