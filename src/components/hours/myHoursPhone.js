@@ -14,6 +14,8 @@
  * статус нормы — progressStatus, показатели дня — окно дня WorkHoursCalendar.
  */
 
+import { PHONE_MONTHS_BACK, formatPhoneMonth, shiftPhoneMonth } from '../../utils/phoneMonth.js';
+
 export const MY_HOURS_REQUEST_MAX_LENGTH = 500;
 
 /* Ответ сервера на запрос по дню показываем, только если он написан по-русски:
@@ -25,9 +27,8 @@ export const myHoursRequestErrorText = (error) => {
 };
 
 // «Выбор месяца» на компьютере предлагает текущий месяц и одиннадцать прошлых.
-export const MY_HOURS_MONTHS_BACK = 11;
+export const MY_HOURS_MONTHS_BACK = PHONE_MONTHS_BACK;
 
-const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const MONTHS_GENITIVE = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const WEEKDAYS = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 export const MY_HOURS_WEEKDAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -77,21 +78,11 @@ const parseMonth = (value) => {
   return { year: Number(match[1]), monthIndex };
 };
 
-export const formatMyHoursMonth = (value) => {
-  const parsed = parseMonth(value);
-  return parsed ? `${MONTHS[parsed.monthIndex]} ${parsed.year}` : '';
-};
+export const formatMyHoursMonth = (value) => formatPhoneMonth(value);
 
-/* Соседний месяц в пределах того же списка, что на компьютере. За его краем —
-   null, и стрелка гаснет: часов за месяц вне списка раздел не запрашивает. */
-export const shiftMyHoursMonth = (value, delta, today = new Date()) => {
-  const parsed = parseMonth(value);
-  if (!parsed) return null;
-  const index = parsed.year * 12 + parsed.monthIndex + delta;
-  const newest = today.getFullYear() * 12 + today.getMonth();
-  if (index > newest || index < newest - MY_HOURS_MONTHS_BACK) return null;
-  return `${Math.floor(index / 12)}-${pad2((index % 12) + 1)}`;
-};
+/* Соседний месяц — общим правилом шапки (utils/phoneMonth.js): список месяцев
+   у «Моих часов» и «Моих оценок» один и тот же. */
+export const shiftMyHoursMonth = (value, delta, today = new Date()) => shiftPhoneMonth(value, delta, today);
 
 // Те же пороги и подписи, что у progressStatus в «Моих часах» на компьютере.
 export const myHoursNormStatus = (percent, norm) => {

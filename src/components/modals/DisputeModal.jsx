@@ -1,9 +1,14 @@
 import React, { useEffect, useRef } from 'react';
+import { Loader2, Send } from 'lucide-react';
 import useOverlayDismiss from '../common/useOverlayDismiss';
 import useIsMobileShell from '../common/useIsMobileShell';
-import useScreenBackGesture from '../common/useScreenBackGesture';
+import { IosBadge, IosModal } from '../ui/ios';
+import { AUCTION_PHONE_BUTTON, AuctionPhoneGroup } from '../resources/ShiftAuctionMobile';
+import '../resources/shift-auction-mobile.css';
 
 const MAX_DISPUTE_CHARS = 500;
+
+const SCORE_TONE = (value) => (value == null ? 'slate' : value >= 90 ? 'green' : value >= 60 ? 'amber' : 'red');
 
 const DisputeModal = ({
   selectedEvaluation,
@@ -33,16 +38,17 @@ const DisputeModal = ({
     setDisputeText('');
   };
 
-  /* Системное «назад» закрывает окно — на телефоне это главный способ его
-  закрыть. Без записи в стеке жест перешагивает через окно и снимает переход
-  между разделами: человек свайпает, чтобы закрыть окно, а получает чужой
-  раздел (владелец 11.09.2026: «перекидывает в другой раздел»). */
-  useScreenBackGesture(isMobileShell, handleClose);
+  /* Системное «назад» на телефоне держит IosModal — окном там рисует он.
+     Вторая запись в стеке снимала бы жестом сразу два слоя: и форму запроса,
+     и экран оценки под ней. */
 
+  /* Курсор в поле — когда экран доехал. Клавиатура, поднятая посреди въезда
+     экрана справа, дёргает его на середине пути (та же мерка, что у экранов
+     своей учётки: 420 мс). На компьютере окно появляется сразу. */
   useEffect(() => {
-    const timer = setTimeout(() => textareaRef.current?.focus(), 80);
+    const timer = setTimeout(() => textareaRef.current?.focus(), isMobileShell ? 420 : 80);
     return () => clearTimeout(timer);
-  }, []);
+  }, [isMobileShell]);
 
   useEffect(() => {
     const onKey = (event) => {
@@ -60,6 +66,67 @@ const DisputeModal = ({
   const handleTextChange = (event) => {
     setDisputeText(event.target.value.slice(0, MAX_DISPUTE_CHARS));
   };
+
+  /* НА ТЕЛЕФОНЕ ЭТО ЭКРАН РАЗДЕЛА, а не окно: список настроек телефона, как в
+     «Моих оценках», откуда его и открывают. Настольное окно ниже оставлено
+     слово в слово прежним — ветки разведены isMobileShell. */
+  if (isMobileShell) {
+    const subject = selectedEvaluation?.knowledge_test
+      ? (selectedEvaluation.knowledge_test.title || 'Тест')
+      : (selectedEvaluation?.phone_number || '—');
+    return (
+      <IosModal
+        open
+        onClose={handleClose}
+        title="Запрос на переоценку"
+        subtitle={subject}
+        footer={(
+          <button type="button" onClick={handleSubmitDispute} disabled={!canSubmit} className={AUCTION_PHONE_BUTTON.blue}>
+            {isLoading ? <Loader2 size={18} className="animate-spin" aria-hidden="true" /> : <Send size={17} aria-hidden="true" />}
+            {isLoading ? 'Отправка…' : 'Отправить запрос'}
+          </button>
+        )}
+      >
+        <div className="flex flex-col gap-5">
+          <AuctionPhoneGroup label="Оценка">
+            <div className="sa-m-row flex items-center gap-3 px-4 py-3">
+              <span className="min-w-0 flex-1 text-[16px] text-slate-900">Балл</span>
+              <IosBadge tone={SCORE_TONE(scoreNum)}>
+                {scoreNum != null && Number.isFinite(scoreNum) ? scoreNum.toFixed(0) : '—'}
+              </IosBadge>
+            </div>
+            <div className="sa-m-row flex items-center gap-3 px-4 py-3">
+              <span className="min-w-0 flex-1 text-[16px] text-slate-900">Оценщик</span>
+              <span className="shrink-0 text-[16px] text-slate-500">{selectedEvaluation?.evaluator || '—'}</span>
+            </div>
+            <div className="sa-m-row flex items-center gap-3 px-4 py-3">
+              <span className="min-w-0 flex-1 text-[16px] text-slate-900">Месяц</span>
+              <span className="shrink-0 text-[16px] tabular-nums text-slate-500">{selectedEvaluation?.month || '—'}</span>
+            </div>
+          </AuctionPhoneGroup>
+
+          <AuctionPhoneGroup
+            label="Комментарий к запросу"
+            hint="Опишите конкретные критерии, с которыми вы не согласны. Запрос уйдёт руководителю."
+          >
+            <div className="sa-m-row px-4 py-3">
+              <textarea
+                ref={textareaRef}
+                value={textValue}
+                onChange={handleTextChange}
+                maxLength={MAX_DISPUTE_CHARS}
+                placeholder="С какими критериями вы не согласны и почему"
+                className="w-full resize-none bg-transparent text-[16px] leading-snug text-slate-900 outline-none placeholder:text-slate-400"
+                rows={5}
+                disabled={isLoading}
+              />
+              <p className="mt-1 text-right text-[13px] tabular-nums text-slate-400">{charCount} / {MAX_DISPUTE_CHARS}</p>
+            </div>
+          </AuctionPhoneGroup>
+        </div>
+      </IosModal>
+    );
+  }
 
   return (
     <div

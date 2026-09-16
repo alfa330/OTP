@@ -1051,6 +1051,11 @@ class BackGestureTests(unittest.TestCase):
                 continue
             if 'useScreenBackGesture' in text:
                 continue
+            # Окно, у которого телефонная ветка — IosModal, запись кладёт сам
+            # примитив: свой хук рядом с ним дал бы ВТОРУЮ запись, и один жест
+            # снимал бы два слоя (так устроен «Запрос на переоценку»).
+            if 'IosModal' in text and 'isMobileShell' in text:
+                continue
             forgotten.append(str(path.relative_to(ROOT)))
         self.assertEqual(forgotten, [], f'окна без записи в стеке: {forgotten}')
 

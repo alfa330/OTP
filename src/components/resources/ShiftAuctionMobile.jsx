@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronRight, Loader2, Plus } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus } from 'lucide-react';
 import { iosCard, iosGroupLabel } from '../ui/ios';
 
 /*
@@ -525,4 +525,96 @@ export const useLastPresent = (value) => {
   const ref = useRef(value);
   if (value) ref.current = value;
   return value || ref.current;
+};
+
+/*
+ * Шапка раздела с выбором месяца: крупный заголовок, под ним — стрелки парой и
+ * подпись месяца. Подпись прозрачная сверху накрыта системным списком: нажатие
+ * открывает колесо месяцев iOS, а не наш выпадающий список.
+ *
+ * Общая на «Мои часы» и «Мои оценки»: месяц у них выбирается одинаково, и
+ * вторая копия этой шапки разъехалась бы с первой на первой же правке.
+ * children — <option>ы месяца, их считает раздел.
+ */
+export const AuctionPhoneMonthHeader = ({
+  title,
+  subtitle = '',
+  month,
+  label,
+  onMonthChange,
+  onPrev = null,
+  onNext = null,
+  prevDisabled = false,
+  nextDisabled = false,
+  disabled = false,
+  children,
+}) => {
+  const arrow = 'grid h-8 w-8 shrink-0 place-items-center rounded-full text-blue-600 active:opacity-60 disabled:text-slate-300';
+  return (
+    <header className="pt-1">
+      <h1 className="sa-m-title truncate text-slate-900">{title}</h1>
+      {subtitle ? <p className="text-[15px] text-slate-500">{subtitle}</p> : null}
+      <div className="mt-3 flex items-center gap-0.5" style={{ flexWrap: 'nowrap' }}>
+        <button type="button" onClick={onPrev} disabled={disabled || prevDisabled} aria-label="Предыдущий месяц" className={arrow}>
+          <ChevronLeft size={20} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={onNext} disabled={disabled || nextDisabled} aria-label="Следующий месяц" className={arrow}>
+          <ChevronRight size={20} aria-hidden="true" />
+        </button>
+        <label className="relative ml-1 flex min-w-0 items-center gap-1" style={{ flexWrap: 'nowrap' }}>
+          <span className="truncate text-[17px] font-semibold text-slate-900">{label}</span>
+          <ChevronDown size={16} className="shrink-0 text-slate-400" aria-hidden="true" />
+          <select
+            className="sa-m-wheel"
+            value={month}
+            onChange={(event) => onMonthChange?.(event.target.value)}
+            disabled={disabled}
+            aria-label="Месяц"
+          >
+            {children}
+          </select>
+        </label>
+      </div>
+    </header>
+  );
+};
+
+const GAUGE_TONES = {
+  green: 'text-green-500',
+  blue: 'text-blue-500',
+  amber: 'text-amber-500',
+  red: 'text-red-500',
+  slate: 'text-slate-300',
+};
+const GAUGE_ARC = 'M 10 58 A 46 46 0 0 1 102 58';
+
+/*
+ * Полукруг — тот же знак, что на компьютере, но в SVG: холст (canvas) рисуется
+ * в CSS-пикселях и на экране телефона расплывается. Цвет — тон показателя,
+ * чтобы дуга и подпись под ней не спорили друг с другом.
+ */
+export const AuctionPhoneGauge = ({ percent, tone = 'slate', text, ariaLabel }) => {
+  const filled = Math.max(0, Math.min(100, Number(percent) || 0));
+  return (
+    <div className="relative h-[64px] w-[112px] shrink-0" role="img" aria-label={ariaLabel}>
+      <svg viewBox="0 0 112 64" width="112" height="64" aria-hidden="true">
+        <path d={GAUGE_ARC} fill="none" stroke="currentColor" strokeWidth="9" strokeLinecap="round" pathLength="100" className="text-slate-200" />
+        {filled > 0 ? (
+          <path
+            d={GAUGE_ARC}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="9"
+            strokeLinecap="round"
+            pathLength="100"
+            strokeDasharray={`${filled} 100`}
+            className={GAUGE_TONES[tone] || GAUGE_TONES.slate}
+          />
+        ) : null}
+      </svg>
+      <span className="absolute inset-x-0 bottom-0 text-center text-[16px] font-semibold leading-6 tabular-nums text-slate-900">
+        {text}
+      </span>
+    </div>
+  );
 };

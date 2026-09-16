@@ -77,7 +77,7 @@ class PhoneBranchTests(unittest.TestCase):
         self.assertIn('Нет информации о часах.', block)
 
     def test_month_picker_moves_into_the_phone_header(self):
-        self.assertIn("{(view === 'evaluation' || (view === 'hours' && !isMobileShell)) && (", APP)
+        self.assertIn("{((view === 'evaluation' || view === 'hours') && !isMobileShell) && (", APP)
         block = hours_block()
         self.assertIn('<MyHoursPhoneHeader', block)
         self.assertIn('onMonthChange={setSelectedMonth}', block)

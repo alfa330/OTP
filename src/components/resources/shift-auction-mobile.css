@@ -215,3 +215,24 @@ body.mobile-shell .mobile-actions .sa-m-sheet-title b {
 body.mobile-shell .mobile-actions .sa-m-sheet-title + .mobile-actions__row {
     border-top: 0.5px solid var(--sheet-sep);
 }
+
+/* ── Системный список поверх подписи ── */
+
+/* Видна подпись со стрелкой, а поверх неё — прозрачный системный список (на
+   iOS это колесо). Так выбирается месяц в шапке «Моих часов» и «Моих оценок» и
+   направление в мониторинговой шкале. Вес выше, чем у .main-content select из
+   mobile-motion.css (0,2,2): иначе список получил бы рамку, поле и высоту 40 px. */
+body.mobile-shell .main-content .sa-m-root select.sa-m-wheel {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    opacity: 0;
+    font-size: 16px;
+}

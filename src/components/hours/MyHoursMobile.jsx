@@ -1,7 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Calculator, ChevronDown, ChevronLeft, ChevronRight, Loader2, MessageSquareText, TriangleAlert } from 'lucide-react';
+import { Calculator, Loader2, MessageSquareText, TriangleAlert } from 'lucide-react';
 import { IosBadge, IosModal, iosCard, iosGroupLabel } from '../ui/ios';
-import { AUCTION_PHONE_BUTTON, AuctionPhoneGroup, AuctionPhoneLinkRow, useLastPresent } from '../resources/ShiftAuctionMobile';
+import {
+  AUCTION_PHONE_BUTTON,
+  AuctionPhoneGauge,
+  AuctionPhoneGroup,
+  AuctionPhoneLinkRow,
+  AuctionPhoneMonthHeader,
+  useLastPresent,
+} from '../resources/ShiftAuctionMobile';
 import '../resources/shift-auction-mobile.css';
 import './my-hours-mobile.css';
 import {
@@ -46,40 +53,25 @@ import {
 
 const NO_WRAP = { flexWrap: 'nowrap' };
 
-export const MyHoursPhoneHeader = ({ direction = '', month, onMonthChange, disabled = false, children }) => {
-  const prev = shiftMyHoursMonth(month, -1);
-  const next = shiftMyHoursMonth(month, 1);
-  const arrow = 'grid h-8 w-8 shrink-0 place-items-center rounded-full text-blue-600 active:opacity-60 disabled:text-slate-300';
-  return (
-    <header className="pt-1">
-      <h1 className="sa-m-title truncate text-slate-900">Мои часы</h1>
-      {direction ? <p className="text-[15px] text-slate-500">{direction}</p> : null}
-      {/* Как строка недели в «Моих сменах»: стрелки парой слева, подпись за ними.
-          Подпись — прозрачный системный список: нажатие открывает колесо месяцев. */}
-      <div className="mt-3 flex items-center gap-0.5" style={NO_WRAP}>
-        <button type="button" onClick={() => prev && onMonthChange?.(prev)} disabled={disabled || !prev} aria-label="Предыдущий месяц" className={arrow}>
-          <ChevronLeft size={20} aria-hidden="true" />
-        </button>
-        <button type="button" onClick={() => next && onMonthChange?.(next)} disabled={disabled || !next} aria-label="Следующий месяц" className={arrow}>
-          <ChevronRight size={20} aria-hidden="true" />
-        </button>
-        <label className="relative ml-1 flex min-w-0 items-center gap-1" style={NO_WRAP}>
-          <span className="truncate text-[17px] font-semibold text-slate-900">{formatMyHoursMonth(month)}</span>
-          <ChevronDown size={16} className="shrink-0 text-slate-400" aria-hidden="true" />
-          <select
-            className="mh-m-month__select"
-            value={month}
-            onChange={(event) => onMonthChange?.(event.target.value)}
-            disabled={disabled}
-            aria-label="Месяц"
-          >
-            {children}
-          </select>
-        </label>
-      </div>
-    </header>
-  );
-};
+export const MyHoursPhoneHeader = ({ direction = '', month, onMonthChange, disabled = false, children }) => (
+  /* Шапка общая с «Моими оценками» (AuctionPhoneMonthHeader): заголовок, под ним
+     стрелки парой и подпись месяца с колесом. Здесь — только то, что знает
+     раздел: имя, направление и шаг месяца. */
+  <AuctionPhoneMonthHeader
+    title="Мои часы"
+    subtitle={direction}
+    month={month}
+    label={formatMyHoursMonth(month)}
+    onMonthChange={onMonthChange}
+    onPrev={() => { const prev = shiftMyHoursMonth(month, -1); if (prev) onMonthChange?.(prev); }}
+    onNext={() => { const next = shiftMyHoursMonth(month, 1); if (next) onMonthChange?.(next); }}
+    prevDisabled={!shiftMyHoursMonth(month, -1)}
+    nextDisabled={!shiftMyHoursMonth(month, 1)}
+    disabled={disabled}
+  >
+    {children}
+  </AuctionPhoneMonthHeader>
+);
 
 // Перевод посреди месяца: показатели считаются по нескольким направлениям.
 export const MyHoursPhoneNotice = ({ segments = [] }) => (
@@ -112,42 +104,10 @@ export const MyHoursPhoneEmpty = () => (
   </div>
 );
 
-const GAUGE_TONES = {
-  green: 'text-green-500',
-  blue: 'text-blue-500',
-  amber: 'text-amber-500',
-  slate: 'text-slate-300',
-};
-const GAUGE_ARC = 'M 10 58 A 46 46 0 0 1 102 58';
-
-/* Полукруг нормы — тот же знак, что на компьютере, но в SVG: холст там рисуется
-   в CSS-пикселях и на экране телефона расплывается. Цвет — тон статуса нормы,
-   чтобы полукруг и подпись под ним не спорили друг с другом. */
-const MyHoursNormGauge = ({ percent, tone }) => {
-  const filled = Math.max(0, Math.min(100, Number(percent) || 0));
-  return (
-    <div className="relative h-[64px] w-[112px] shrink-0" role="img" aria-label={`Норма: ${formatPercent(percent)}`}>
-      <svg viewBox="0 0 112 64" width="112" height="64" aria-hidden="true">
-        <path d={GAUGE_ARC} fill="none" stroke="currentColor" strokeWidth="9" strokeLinecap="round" pathLength="100" className="text-slate-200" />
-        {filled > 0 ? (
-          <path
-            d={GAUGE_ARC}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="9"
-            strokeLinecap="round"
-            pathLength="100"
-            strokeDasharray={`${filled} 100`}
-            className={GAUGE_TONES[tone] || GAUGE_TONES.slate}
-          />
-        ) : null}
-      </svg>
-      <span className="absolute inset-x-0 bottom-0 text-center text-[16px] font-semibold leading-6 tabular-nums text-slate-900">
-        {formatPercent(percent)}
-      </span>
-    </div>
-  );
-};
+/* Полукруг нормы — общий знак разделов (AuctionPhoneGauge), тон = статус нормы. */
+const MyHoursNormGauge = ({ percent, tone }) => (
+  <AuctionPhoneGauge percent={percent} tone={tone} text={formatPercent(percent)} ariaLabel={`Норма: ${formatPercent(percent)}`} />
+);
 
 const NormCard = ({ regular, norm, percent, remaining, overtime }) => {
   const status = myHoursNormStatus(percent, norm);

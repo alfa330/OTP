@@ -66,6 +66,9 @@ import {
     MyHoursPhoneCalendar, MyHoursPhoneEmpty, MyHoursPhoneHeader, MyHoursPhoneNotice, MyHoursPhoneSkeleton, MyHoursPhoneSummary
 } from './components/hours/MyHoursMobile';
 import {
+    MyEvaluationsPhone, MyEvaluationsPhoneHeader, MyEvaluationsPhoneSkeleton
+} from './components/evaluation/MyEvaluationsMobile';
+import {
     MobileAccountScreen,
     MobileAccountGroup,
     MobileAccountField,
@@ -54381,9 +54384,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         />
                                     </Suspense>
                                 ))}
-                                {/* На телефоне месяц «Моих часов» выбирается в шапке самого
-                                    раздела (MyHoursPhoneHeader): стрелками и колесом месяцев. */}
-                                {(view === 'evaluation' || (view === 'hours' && !isMobileShell)) && (
+                                {/* На телефоне месяц «Моих часов» и «Моих оценок» выбирается в шапке
+                                    самого раздела (MyHoursPhoneHeader, MyEvaluationsPhoneHeader):
+                                    стрелками и колесом месяцев. */}
+                                {((view === 'evaluation' || view === 'hours') && !isMobileShell) && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">
                                       <FaIcon className="fas fa-calendar-alt text-blue-600"></FaIcon>
@@ -55344,7 +55348,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </div>
                                     )}
                                     {view === 'evaluation' && (
-                                    <div className="bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg">
+                                    /* На телефоне раздел — список настроек телефона (MyEvaluationsMobile.jsx):
+                                       крупный заголовок, месяц стрелками, балл карточкой с полукругом, оценки
+                                       строками, а сама оценка и мониторинговая шкала — экранами. Настольная
+                                       разметка не тронута: ветки разведены isMobileShell. */
+                                    <div
+                                        className={isMobileShell
+                                            ? 'sa-m-root me-m-root min-h-screen bg-slate-100'
+                                            : 'bg-white p-4 sm:p-6 lg:p-8 rounded-xl shadow-md mb-8 border border-gray-200 transition-all duration-300 hover:shadow-lg'}
+                                        style={isMobileShell ? { fontFamily: IOS_FONT } : undefined}
+                                    >
+                                        {isMobileShell ? (
+                                        <MyEvaluationsPhoneHeader
+                                            direction={profileData?.direction || user?.direction || ''}
+                                            month={selectedMonth}
+                                            onMonthChange={setSelectedMonth}
+                                            disabled={isLoading}
+                                        >
+                                            {getMonthOptions()}
+                                        </MyEvaluationsPhoneHeader>
+                                        ) : (
                                         <div className="mb-4 sm:mb-6 lg:mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                             <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-900 flex items-center gap-2">
                                                 <FaIcon className="fas fa-chart-bar text-blue-600"></FaIcon>
@@ -55371,8 +55394,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <span>{showEvaluationMonitoringScale ? 'Скрыть шкалу' : 'Мониторинговая шкала'}</span>
                                             </button>
                                         </div>
+                                        )}
 
-                                        {user.role === 'operator' && (
+                                        {/* Замок доступа на телефоне — строкой в разделе (MyEvaluationsPhone). */}
+                                        {!isMobileShell && user.role === 'operator' && (
                                         <div className="bg-white p-4 rounded-xl shadow-sm mb-6 border border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                             <div className="flex items-center gap-3">
                                                 <FaIcon className={`fas fa-shield-alt ${sensitiveAccess.granted ? 'text-green-600' : 'text-amber-600'}`}></FaIcon>
@@ -55399,7 +55424,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         )}
 
                                         {isLoading ? (
-                                        <EvaluationPageSkeleton />
+                                        isMobileShell ? <MyEvaluationsPhoneSkeleton /> : <EvaluationPageSkeleton />
                                         ) : (() => {
                                         // prepare filtered lists: exclude evaluations whose call is imported
                                         const allEvals = operatorData?.evaluations ?? [];
@@ -55611,6 +55636,119 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             selectedMonitoringScaleCriterionIndex >= 0 &&
                                             selectedMonitoringScaleCriterionIndex < selectedScaleCriteria.length;
 
+                                        /* Назначенная повторная проверка (задача #86). Сотруднику
+                                           показывается только СРОК и «что подготовить»: вид контроля,
+                                           причина постановки и внутренний комментарий супервайзера сюда
+                                           не приходят вовсе — сервер отдаёт ему урезанную карточку
+                                           (trainings/checkpoints.py::payload_for_operator). Плашка одна
+                                           на страницу и только пока проверка не проведена. Считается
+                                           один раз на оба вида: телефон и компьютер показывают один срок. */
+                                        const openCheckpoint = (() => {
+                                            const checkpoint = allEvals
+                                                .map((ev) => ev?.checkpoint)
+                                                .find((item) => item && item.status === 'open');
+                                            if (!checkpoint) return null;
+                                            const parts = String(checkpoint.due_date || '').slice(0, 10).split('-').map(Number);
+                                            let left = null;
+                                            if (parts.length === 3 && parts.every(Number.isFinite)) {
+                                                const target = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
+                                                const today = new Date();
+                                                today.setHours(12, 0, 0, 0);
+                                                left = Math.round((target - today) / 86400000);
+                                            }
+                                            const when = left === null
+                                                ? ''
+                                                : (left < 0 ? 'дата уже прошла' : (left === 0 ? 'сегодня' : (left === 1 ? 'завтра' : `через ${left} дн.`)));
+                                            return { date: formatDate(checkpoint.due_date), dueDate: checkpoint.due_date, when, focus: checkpoint.focus || '' };
+                                        })();
+
+                                        /* Низкие оценки клиентов: сводка на странице, детали —
+                                           в полноэкранном просмотре и только по QR (решает компонент). */
+                                        const lowRatingsBlock = (
+                                            <Suspense fallback={null}>
+                                                <MyLowRatings
+                                                    apiBaseUrl={API_BASE_URL}
+                                                    withAccessTokenHeader={withAccessTokenHeader}
+                                                    userId={user.id}
+                                                    month={selectedMonth}
+                                                    granted={!!sensitiveAccess.granted}
+                                                />
+                                            </Suspense>
+                                        );
+
+                                        // Окно запроса на переоценку (использует локальный state выше).
+                                        const disputeBlock = showDisputeModal ? (
+                                            <Suspense fallback={null}>
+                                                <DisputeModal
+                                                selectedEvaluation={selectedEvaluation}
+                                                disputeText={disputeText}
+                                                setDisputeText={setDisputeText}
+                                                handleSubmitDispute={handleSubmitDispute}
+                                                isLoading={disputeLoading}
+                                                setShowDisputeModal={setShowDisputeModal}
+                                                />
+                                            </Suspense>
+                                        ) : null;
+
+                                        /* Телефон: те же данные и те же решения, своя разметка
+                                           (MyEvaluationsMobile.jsx). Возврат до настольного дерева —
+                                           ниже начинается панель шкалы и таблица оценок. */
+                                        if (isMobileShell) {
+                                            return (
+                                                <>
+                                                    <MyEvaluationsPhone
+                                                        evaluations={allEvals}
+                                                        average={averageScore}
+                                                        formatDate={formatDate}
+                                                        requestMetaOf={getReevaluationRequestStatusMeta}
+                                                        access={user.role === 'operator' ? {
+                                                            granted: !!sensitiveAccess.granted,
+                                                            loading: !!sensitiveAccess.loading,
+                                                            onRequestQr: requestSensitiveQrAccess,
+                                                        } : null}
+                                                        checkpoint={openCheckpoint}
+                                                        lowRatings={lowRatingsBlock}
+                                                        scale={{
+                                                            directions: availableScaleDirections,
+                                                            selectedKey: selectedScaleDirectionKey,
+                                                            directionName: selectedScaleDirection?.name || '',
+                                                            criteria: selectedScaleCriteria,
+                                                            openIndex: hasSelectedScaleCriterion ? selectedMonitoringScaleCriterionIndex : null,
+                                                            open: showEvaluationMonitoringScale,
+                                                            onOpen: () => {
+                                                                setSelectedMonitoringScaleDirectionKey('');
+                                                                setSelectedMonitoringScaleCriterionIndex(null);
+                                                                setShowEvaluationMonitoringScale(true);
+                                                            },
+                                                            onClose: closeEvaluationMonitoringScale,
+                                                            onSelectDirection: (key) => {
+                                                                setSelectedMonitoringScaleDirectionKey(key);
+                                                                setSelectedMonitoringScaleCriterionIndex(null);
+                                                            },
+                                                            onToggleCriterion: (index) => setSelectedMonitoringScaleCriterionIndex((prev) => (prev === index ? null : index)),
+                                                        }}
+                                                        audio={{
+                                                            granted: canAccessSensitiveCallData,
+                                                            loading: loadingAudioId != null,
+                                                            evaluationId: expandedEvaluation?.id ?? null,
+                                                            player: audioUrl ? <AudioPlayer audioSrc={audioUrl} uniqueKey={expandedEvaluation?.id || audioUrl} /> : null,
+                                                        }}
+                                                        onOpenEvaluation={(ev) => {
+                                                            // handleEvaluationClick — переключатель: на второй заход
+                                                            // по той же оценке он снял бы уже загруженную запись.
+                                                            if (expandedEvaluation?.id !== ev.id) handleEvaluationClick(ev);
+                                                        }}
+                                                        onOpenChat={(ev, quote) => openEvaluationChat(ev, quote)}
+                                                        onRequestReevaluation={(ev) => {
+                                                            setSelectedEvaluation(ev);
+                                                            setShowDisputeModal(true);
+                                                        }}
+                                                    />
+                                                    {disputeBlock}
+                                                </>
+                                            );
+                                        }
+
                                         return isLoading ? (
                                             <p className="text-center text-gray-600 flex items-center justify-center">
                                             <FaIcon className="fas fa-spinner fa-spin mr-2 text-gray-500"></FaIcon>
@@ -55777,47 +55915,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </aside>
                                             </div>
 
-                                            {/* Назначенная повторная проверка (задача #86).
-                                                Сотруднику показывается только СРОК и «что подготовить»:
-                                                вид контроля, причина постановки и внутренний комментарий
-                                                супервайзера сюда не приходят вовсе — сервер отдаёт ему
-                                                урезанную карточку (trainings/checkpoints.py::payload_for_operator).
-                                                Плашка одна на страницу и только пока проверка не проведена. */}
-                                            {(() => {
-                                                const checkpoint = allEvals
-                                                    .map((ev) => ev?.checkpoint)
-                                                    .find((item) => item && item.status === 'open');
-                                                if (!checkpoint) return null;
-                                                const parts = String(checkpoint.due_date || '').slice(0, 10).split('-').map(Number);
-                                                let left = null;
-                                                if (parts.length === 3 && parts.every(Number.isFinite)) {
-                                                    const target = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0);
-                                                    const today = new Date();
-                                                    today.setHours(12, 0, 0, 0);
-                                                    left = Math.round((target - today) / 86400000);
-                                                }
-                                                const when = left === null
-                                                    ? ''
-                                                    : (left < 0 ? 'дата уже прошла' : (left === 0 ? 'сегодня' : (left === 1 ? 'завтра' : `через ${left} дн.`)));
-                                                return (
-                                                    <div className="mb-6 sm:mb-8 rounded-xl border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
-                                                        <FaIcon className="fas fa-user-shield text-amber-600 mt-0.5"></FaIcon>
-                                                        <div className="min-w-0">
-                                                            <div className="text-sm font-semibold text-gray-900">
-                                                                Повторная проверка качества
-                                                                <span className="ml-2 font-normal text-amber-700 tabular-nums">
-                                                                    {formatDate(checkpoint.due_date)}{when ? ` · ${when}` : ''}
-                                                                </span>
-                                                            </div>
-                                                            {checkpoint.focus && (
-                                                                <div className="mt-1 text-sm text-gray-700">
-                                                                    <span className="text-gray-500">Что подготовить: </span>{checkpoint.focus}
-                                                                </div>
-                                                            )}
+                                            {openCheckpoint && (
+                                                <div className="mb-6 sm:mb-8 rounded-xl border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
+                                                    <FaIcon className="fas fa-user-shield text-amber-600 mt-0.5"></FaIcon>
+                                                    <div className="min-w-0">
+                                                        <div className="text-sm font-semibold text-gray-900">
+                                                            Повторная проверка качества
+                                                            <span className="ml-2 font-normal text-amber-700 tabular-nums">
+                                                                {openCheckpoint.date}{openCheckpoint.when ? ` · ${openCheckpoint.when}` : ''}
+                                                            </span>
                                                         </div>
+                                                        {openCheckpoint.focus && (
+                                                            <div className="mt-1 text-sm text-gray-700">
+                                                                <span className="text-gray-500">Что подготовить: </span>{openCheckpoint.focus}
+                                                            </div>
+                                                        )}
                                                     </div>
-                                                );
-                                            })()}
+                                                </div>
+                                            )}
 
                                             {/* Средний балл. Карточки с планом проверок рядом больше нет:
                                                 сколько звонков и чатов сотрудника должны проверить — не его
@@ -55832,17 +55947,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 />
                                             </div>
 
-                                            {/* Низкие оценки клиентов: сводка на странице, детали —
-                                                в полноэкранном просмотре и только по QR (решает компонент). */}
-                                            <Suspense fallback={null}>
-                                                <MyLowRatings
-                                                    apiBaseUrl={API_BASE_URL}
-                                                    withAccessTokenHeader={withAccessTokenHeader}
-                                                    userId={user.id}
-                                                    month={selectedMonth}
-                                                    granted={!!sensitiveAccess.granted}
-                                                />
-                                            </Suspense>
+                                            {lowRatingsBlock}
 
                                             {allEvals.length === 0 ? (
                                                 <p className="text-center text-gray-600 flex items-center justify-center">
@@ -56417,19 +56522,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </>
                                             )}
 
-                                            {/* Dispute modal (использует локальный state выше) */}
-                                            {showDisputeModal && (
-                                                <Suspense fallback={null}>
-                                                    <DisputeModal
-                                                    selectedEvaluation={selectedEvaluation}
-                                                    disputeText={disputeText}
-                                                    setDisputeText={setDisputeText}
-                                                    handleSubmitDispute={handleSubmitDispute}
-                                                    isLoading={disputeLoading}
-                                                    setShowDisputeModal={setShowDisputeModal}
-                                                    />
-                                                </Suspense>
-                                            )}
+                                            {disputeBlock}
                                             </div>
                                         );
                                         })()}
