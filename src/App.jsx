@@ -62,6 +62,7 @@ import {
     PhoneLinkRow, PhoneRow, useLastPresent
 } from './components/schedule/MyShiftsMobile';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
+import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
 import {
     MyHoursPhoneCalendar, MyHoursPhoneEmpty, MyHoursPhoneHeader, MyHoursPhoneNotice, MyHoursPhoneSkeleton, MyHoursPhoneSummary
 } from './components/hours/MyHoursMobile';
@@ -22852,6 +22853,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
                 return merged;
             }, [myLiveScheduleData, myScheduleData]);
+            /* Выбрали другую дату — время обязано переехать за ней. Иначе в форме
+               остаётся интервал прошлой даты, он выпадает из смен нового дня, и
+               кандидаты не грузятся вовсе: у оператора со сменами 15:00–00:00 и
+               одной поздней 18:30–01:00 «не выходят кандидаты» ровно на этом дне.
+               Правило одно на все три точки выбора — см. swapDefaultInterval.js. */
+            const buildDefaultSwapIntervalForDate = useCallback((dayKey) => (
+                defaultSwapIntervalForDate((myLiveScheduleData || myScheduleData)?.shifts, dayKey)
+            ), [myLiveScheduleData, myScheduleData]);
             useEffect(() => {
                 if (!isOperatorSelfSchedules) return;
                 setSwapForm(prev => {
@@ -22881,22 +22890,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (!swapDate || !mySwapSourceShiftDays.includes(swapDate)) swapDate = firstDate;
                     let endDate = prev.endDate;
                     if (!endDate || endDate < swapDate) endDate = swapDate;
-                    const intervals = buildLocalSwapIntervalsForDate(swapDate);
                     let startTime = prev.startTime;
                     let endTime = prev.endTime;
                     const parsedRange = parseSwapRangeWithDates(swapDate, startTime, endDate, endTime);
-                    if (!parsedRange.isValid) {
-                        if (intervals.length > 0) {
-                            const firstInterval = intervals[0];
-                            startTime = minutesToTime(firstInterval.start);
-                            const defaultEnd = Math.min(firstInterval.end, firstInterval.start + 60);
-                            endTime = minutesToTime(defaultEnd);
-                            endDate = swapDate;
-                        } else {
-                            startTime = '';
-                            endTime = '';
-                            endDate = swapDate;
-                        }
+                    // Дату увело нам (её не стало в графике) — время увозим тем же
+                    // движением, иначе останется интервал уже несуществующего дня.
+                    if (swapDate !== prev.swapDate || !parsedRange.isValid) {
+                        const fallback = buildDefaultSwapIntervalForDate(swapDate);
+                        startTime = fallback.startTime;
+                        endTime = fallback.endTime;
+                        endDate = fallback.endDate || swapDate;
                     }
                     if (
                         swapDate === prev.swapDate &&
@@ -22916,7 +22919,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         targetSegments: []
                     };
                 });
-            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildLocalSwapIntervalsForDate, parseSwapRangeWithDates, normalizeSwapRequestType]);
+            }, [isOperatorSelfSchedules, mySwapSourceShiftDays, buildDefaultSwapIntervalForDate, parseSwapRangeWithDates, normalizeSwapRequestType]);
             const swapTimeValidation = useMemo(() => {
                 const swapDate = swapForm.swapDate;
                 const endDate = swapForm.endDate || swapDate;
@@ -26227,7 +26230,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <select
                                                 className="ms-m-select text-slate-900"
                                                 value={swapForm.swapDate}
-                                                onChange={(e) => phoneSwapFieldChange({ swapDate: e.target.value, endDate: e.target.value || '' })}
+                                                onChange={(e) => phoneSwapFieldChange({
+                                                    swapDate: e.target.value,
+                                                    ...buildDefaultSwapIntervalForDate(e.target.value)
+                                                })}
                                                 aria-label="Дата смены"
                                             >
                                                 <option value="">Выберите</option>
@@ -27312,7 +27318,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                             setSwapForm(prev => ({
                                                                                 ...prev,
                                                                                 swapDate: nextDate,
-                                                                                endDate: nextDate || '',
+                                                                                ...buildDefaultSwapIntervalForDate(nextDate),
                                                                                 targetOperatorId: '',
                                                                                 targetSegments: []
                                                                             }));
