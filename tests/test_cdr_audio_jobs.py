@@ -306,6 +306,19 @@ class WiringTests(unittest.TestCase):
         self.assertIn('cdr_queries.enqueue_audio_job(', body)
         self.assertIn('"audio_pending": True', body)
 
+    def test_journal_gets_the_lan_link_while_the_cloud_copy_is_pending(self):
+        """Ждать облака ради прослушки не обязательно: ручка аудио отдаёт ссылку на файл на
+        сервере записей (внутренняя сеть) и состояние заказа, пока копии нет."""
+        body = self.source[self.source.index('def _cdr_pending_recording'):]
+        body = body[:body.index('\n\n\n')]
+        self.assertIn("endswith(':cdr')", body)
+        self.assertIn('audio_job_status_for_imported', body)
+        self.assertIn('"lan_url"', body)
+        endpoint = self.source[self.source.index('def get_imported_call_audio_file'):]
+        endpoint = endpoint[:endpoint.index('\n\n\n')]
+        self.assertIn('"status": "pending_cloud"', endpoint)
+        self.assertIn('_cdr_pending_recording(imported_id, rec)', endpoint)
+
     def test_storage_is_handed_to_the_cdr_section(self):
         self.assertIn('store_audio=_cdr_store_audio,', self.source)
         self.assertIn("'freepbx-%s.%s' % (safe_id, extension)", self.source)

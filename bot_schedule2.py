@@ -26592,6 +26592,28 @@ def _ensure_imported_call_audio(imported_id, rec=None):
         return None
 
 
+def _cdr_pending_recording(imported_id, rec):
+    """Для строки пула отдела продаж без облачной копии — состояние заказа мосту и ссылка
+    на файл на сервере записей (внутренняя сеть). None, если строка не из CDR или заказа нет."""
+    if not str(rec.get('notes') or '').endswith(':cdr'):
+        return None
+    try:
+        from cdr import queries as cdr_queries
+        with db._get_cursor() as cursor:
+            job = cdr_queries.audio_job_status_for_imported(cursor, imported_id)
+    except Exception:
+        logging.exception("cdr audio job lookup failed (imported_call=%s)", imported_id)
+        return None
+    if not job:
+        return None
+    return {
+        "lan_url": job.get('recording_url') or None,
+        "cloud": job.get('status'),
+        "cloud_error": job.get('error'),
+        "lan_note": "Открывается только из офисной сети, отдельной вкладкой",
+    }
+
+
 @app.route('/api/imported_calls/<int:imported_id>/audio', methods=['GET'])
 @require_api_key
 def get_imported_call_audio_file(imported_id):
@@ -26628,6 +26650,13 @@ def get_imported_call_audio_file(imported_id):
 
         audio_path = rec.get('audio_path') or _ensure_imported_call_audio(imported_id, rec)
         if not audio_path:
+            # Записи отдела продаж приносит мост, обычно за минуту. До этого журнал получает
+            # ссылку на файл на сервере записей: она открывается только из офисной сети и
+            # только отдельной вкладкой (сайт по HTTPS, файл по HTTP — в плеер браузер такое
+            # не вставит), но ждать облака ради прослушки не обязательно.
+            pending = _cdr_pending_recording(imported_id, rec)
+            if pending:
+                return jsonify({"status": "pending_cloud", "url": None, **pending})
             return jsonify({"error": "Запись ещё готовится или недоступна",
                             "code": "AUDIO_NOT_READY"}), 404
 

@@ -777,9 +777,11 @@ def mark_audio_failed(cursor, job_id, error, missing=False):
 
 
 def audio_job_status_for_imported(cursor, imported_call_id):
-    """Состояние заказа записи для строки пула: {status, error} или None."""
+    """Состояние заказа записи для строки пула: {status, error, recording_url} или None.
+    Ссылка на файл нужна журналу, чтобы дать послушать запись из офиса, пока копии в
+    облаке ещё нет."""
     cursor.execute("""
-        SELECT status, error FROM cdr_audio_jobs WHERE imported_call_id = %s
+        SELECT status, error, recording_url FROM cdr_audio_jobs WHERE imported_call_id = %s
     """, (int(imported_call_id),))
     row = cursor.fetchone()
-    return {'status': row[0], 'error': row[1]} if row else None
+    return {'status': row[0], 'error': row[1], 'recording_url': row[2]} if row else None

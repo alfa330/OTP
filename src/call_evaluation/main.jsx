@@ -641,17 +641,25 @@ const getAudioUrl = async (evalId, userId) => {
     } catch { return null; }
 };
 
+// Тип дорожки для <source>: записи отдела продаж приезжают WAV (мост FreePBX), остальные —
+// mp3. Подписанная ссылка облака несёт расширение до знака вопроса.
+const audioMimeFor = (url) => (/\.wav(\?|#|$)/i.test(String(url || '')) ? 'audio/wav' : 'audio/mpeg');
+
 // Аудио неоценённого (импортированного) звонка из Binotel или Oktell.
 // Не кэшируем по общему audioUrlCache: id импортированного звонка живёт в своей
 // таблице и может пересекаться с id обычной оценки.
-const getImportedAudioUrl = async (importedId, userId) => {
+// Ответ: url — временная ссылка на копию в облаке (плеер); lanUrl — файл на сервере записей
+// для звонков отдела продаж, пока копию везёт мост (открывается только из офисной сети,
+// отдельной вкладкой); cloud — состояние заказа копии (pending/running/done/error/missing).
+const getImportedAudio = async (importedId, userId) => {
     try {
         const r = await authFetch(`${API_BASE_URL}/api/imported_calls/${importedId}/audio`, { headers: { 'X-User-Id': userId } });
         if (!r.ok) return null;
         const d = await r.json();
-        return d?.url || null;
+        return { url: d?.url || null, lanUrl: d?.lan_url || null, cloud: d?.cloud || null, note: d?.lan_note || null };
     } catch { return null; }
 };
+const getImportedAudioUrl = async (importedId, userId) => (await getImportedAudio(importedId, userId))?.url || null;
 
 const emitCallEvaluationToast = (message, type = 'info') => {
     const text = String(message ?? '');
@@ -2502,7 +2510,7 @@ const BatchFeedbackModal = ({
                                 </div>
                                 {audioUrls[c.id] && (
                                     <div style={{marginBottom:8}}>
-                                        <audio controls style={{width:'100%'}}><source src={audioUrls[c.id]} type="audio/mpeg" /></audio>
+                                        <audio controls style={{width:'100%'}}><source src={audioUrls[c.id]} type={audioMimeFor(audioUrls[c.id])} /></audio>
                                     </div>
                                 )}
                                 <textarea
@@ -3741,6 +3749,8 @@ const EvaluationModal = ({
     const [callFile, setCallFile] = useState(null);
     const [audioUrl, setAudioUrl] = useState(null);
     const [audioError, setAudioError] = useState(null);
+    // Запись отдела продаж, копия которой ещё едет в облако: ссылка на файл во внутренней сети.
+    const [audioLan, setAudioLan] = useState(null);
     const [scores, setScores] = useState([]);
     const [comments, setComments] = useState([]);
     const [commentVisible, setCommentVisible] = useState([]);
@@ -3972,17 +3982,29 @@ const EvaluationModal = ({
     }, [existingEvaluation, userId, currentDir?.hasFileUpload]);
 
     // Для старых импортов audio_path может быть пустым: сервер сам докачает запись
-    // из Binotel/Oktell, сохранит её в GCS и вернёт временную ссылку.
+    // из Binotel/Oktell, сохранит её в GCS и вернёт временную ссылку. У записей отдела
+    // продаж файл приносит мост (обычно за минуту): пока копии в облаке нет, приходит
+    // ссылка на файл на сервере записей — из офиса её можно открыть сразу, а плеер
+    // появится сам, когда копия доедет (опрос раз в 15 с, не дольше пяти минут).
     useEffect(() => {
         if (!existingEvaluation?.is_imported || !existingEvaluation?.id || !userId) return;
         let alive = true;
-        setAudioError(null);
-        getImportedAudioUrl(existingEvaluation.id, userId).then(url => {
+        let timer = null;
+        let attempts = 0;
+        setAudioError(null); setAudioLan(null);
+        const load = async () => {
+            const audio = await getImportedAudio(existingEvaluation.id, userId);
             if (!alive) return;
-            if (url) setAudioUrl(url);
-            else setAudioError('Не удалось загрузить аудио');
-        });
-        return () => { alive = false; };
+            if (audio?.url) { setAudioLan(null); setAudioUrl(audio.url); return; }
+            if (audio?.lanUrl) {
+                setAudioLan({ url: audio.lanUrl, cloud: audio.cloud, note: audio.note });
+                if (attempts++ < 20) timer = setTimeout(load, 15000);
+                return;
+            }
+            setAudioError('Не удалось загрузить аудио');
+        };
+        load();
+        return () => { alive = false; if (timer) clearTimeout(timer); };
     }, [existingEvaluation, userId]);
 
     const handleFile = (e) => {
@@ -4253,7 +4275,21 @@ const EvaluationModal = ({
                             {audioUrl && (
                                 <div className="audio-wrap">
                                     <div className="audio-label">Прослушать запись</div>
-                                    <audio controls style={{width:'100%'}}><source src={audioUrl} type="audio/mpeg" /></audio>
+                                    <audio controls style={{width:'100%'}}><source src={audioUrl} type={audioMimeFor(audioUrl)} /></audio>
+                                </div>
+                            )}
+                            {!audioUrl && audioLan?.url && (
+                                <div className="audio-wrap">
+                                    <div className="audio-label">Запись ещё едет в облако</div>
+                                    <a className="btn btn-secondary btn-sm" href={audioLan.url} target="_blank" rel="noreferrer"
+                                       title={audioLan.note || 'Открывается только из офисной сети'}>
+                                        <FaIcon className="fas fa-play" /> Открыть запись из офисной сети
+                                    </a>
+                                    <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-3)' }}>
+                                        {audioLan.cloud === 'error' || audioLan.cloud === 'missing'
+                                            ? 'С копией в облаке не вышло, ссылка из офиса всё равно работает.'
+                                            : 'Плеер появится сам, когда копия доедет.'}
+                                    </div>
                                 </div>
                             )}
                             {!hasAttachedImportedAudio && (expectedDuration || actualDuration) && (
@@ -4494,7 +4530,7 @@ const CalibrationReviewModal = ({ isOpen, onClose, callEntry, userId, onSubmitte
                     {callEntry?.audio_url && (
                         <div className="audio-wrap" style={{ maxWidth: 520 }}>
                             <div className="audio-label">Аудиозапись</div>
-                            <audio controls><source src={callEntry.audio_url} type="audio/mpeg" /></audio>
+                            <audio controls><source src={callEntry.audio_url} type={audioMimeFor(callEntry.audio_url)} /></audio>
                         </div>
                     )}
 
@@ -7201,7 +7237,7 @@ const App = ({ user, initialSelection }) => {
                                                         {call.audioUrl && call.directions?.[0]?.hasFileUpload && (
                                                             <div className="audio-wrap" style={{marginBottom:14,maxWidth:480}}>
                                                                 <div className="audio-label">Аудиозапись</div>
-                                                                <audio controls style={{width:'100%'}}><source src={call.audioUrl} type="audio/mpeg" /></audio>
+                                                                <audio controls style={{width:'100%'}}><source src={call.audioUrl} type={audioMimeFor(call.audioUrl)} /></audio>
                                                             </div>
                                                         )}
                                                         {call._rawEvaluation?.c2d_snapshot_id && (
@@ -7851,7 +7887,7 @@ const App = ({ user, initialSelection }) => {
                                                 {calibrationCall.audio_url && (
                                                     <div className="audio-wrap" style={{maxWidth:520}}>
                                                         <div className="audio-label">Аудиозапись</div>
-                                                        <audio key={calibrationCall.id} controls><source src={calibrationCall.audio_url} type="audio/mpeg" /></audio>
+                                                        <audio key={calibrationCall.id} controls><source src={calibrationCall.audio_url} type={audioMimeFor(calibrationCall.audio_url)} /></audio>
                                                     </div>
                                                 )}
                                             </>
@@ -8528,7 +8564,7 @@ const App = ({ user, initialSelection }) => {
                                         <div><strong>{v.appeal_date||'—'}</strong>Дата обращения</div>
                                     </div>
                                     {v.comment && <div style={{marginTop:10,fontSize:12,color:'var(--text-2)',padding:'8px',background:'var(--surface-2)',borderRadius:'var(--radius)'}}>{v.comment}</div>}
-                                    {v.audio_path && <audio controls style={{width:'100%',marginTop:10}}><source src={v.audio_url||''} type="audio/mpeg" /></audio>}
+                                    {v.audio_path && <audio controls style={{width:'100%',marginTop:10}}><source src={v.audio_url||''} type={audioMimeFor(v.audio_url||'')} /></audio>}
                                 </div>
                             ))}
                         </div>
