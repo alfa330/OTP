@@ -1244,6 +1244,50 @@ class ModalScreenTests(unittest.TestCase):
             self.assertIn('otp-modal-root', source, name)
             self.assertIn('otp-modal-card', source, name)
 
+    def test_bespoke_screens_scroll_instead_of_the_section_under_them(self):
+        """ЭКРАН ПРОКРУЧИВАЕТСЯ САМ — и это держится на трёх правилах разом.
+
+        Корню оболочка ставит `align-items: stretch`, а карточка — элемент его
+        flex-строки: растяжка ЗАДАЁТ ей высоту экрана, и расти по содержимому
+        `min-height: 100%` уже нечему. У карточки с overflow-hidden (экран
+        «Изменить данные» в «Учете сотрудников») лишнее при этом срезалось
+        совсем: прокручивать экрану было нечего, палец увозил РАЗДЕЛ ПОД НИМ, а
+        нижние поля формы были недостижимы вовсе.
+
+        Обрезка мешает и липким шапкам: обрезающий предок сам становится
+        «прокручиваемым» для потомков с position: sticky, а карточка не
+        прокручивается никогда — стеклянная полоса со стрелкой уезжала вместе с
+        содержимым. Кадр фотографии — единственное исключение: там снимок
+        обязан оставаться в границах экрана.
+        """
+        root = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root {', 400)
+        self.assertIn('align-items: stretch !important;', root)
+        card = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root .otp-modal-card {', 1400)
+        self.assertIn('align-self: flex-start;', card)
+        self.assertIn(
+            'body.mobile-shell .otp-modal-root .otp-modal-card:not(.mobile-crop__card) {',
+            SHELL_CSS,
+        )
+        clip = css_block(
+            SHELL_CSS,
+            'body.mobile-shell .otp-modal-root .otp-modal-card:not(.mobile-crop__card) {',
+            120,
+        )
+        self.assertIn('overflow: visible;', clip)
+        self.assertIn('overflow: hidden;', css_block(SHELL_CSS, 'body.mobile-shell .mobile-crop__card {', 300))
+        # Докрутив экран до конца, палец продолжал движение — и увозил раздел
+        # под экраном: закрыв окно, человек оказывался в другом месте списка.
+        screen = css_block(SHELL_CSS, 'body.mobile-shell .otp-modal-root:has(.otp-modal-card) {', 700)
+        self.assertIn('overflow-y: auto;', screen)
+        self.assertIn('overscroll-behavior: contain;', screen)
+        # Шапки этих экранов липкие — ради них обрезку и снимали.
+        for path, selector in (
+            ('src/components/modals/user-edit-mobile.css', 'body.mobile-shell .uem-bar {'),
+            ('src/components/modals/history-mobile.css', 'body.mobile-shell .hist-m-bar {'),
+        ):
+            block = css_block((ROOT / path).read_text(encoding='utf-8'), selector, 200)
+            self.assertIn('position: sticky;', block, path)
+
     def test_back_chevron_replaces_the_cross_on_a_phone(self):
         """Крестик в правом углу читается как «отменить»; уход с экрана в
         мессенджере делают шевроном слева. Двух кнопок «закрыть» в одной шапке
