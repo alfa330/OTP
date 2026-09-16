@@ -196,6 +196,7 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
     const bridge = coverage.bridge || null;
     const bridgeDown = bridge && !bridge.connected;
     const missingDays = leadsCoverage.missing_days || [];
+    const withoutPhone = leadsCoverage.without_phone || 0;
 
     const ownerLabel = (key) => values.owners?.find((o) => o.key === key)?.label || key;
     const chips = [
@@ -361,7 +362,7 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
                 </section>
             ) : null}
 
-            {missingDays.length || runActive || lastRun?.status === 'error' ? (
+            {missingDays.length || withoutPhone || runActive || lastRun?.status === 'error' ? (
                 <div className={`${iosCard} mt-3 flex flex-col gap-2 px-4 py-3 text-[13px] text-slate-700 sm:flex-row sm:items-center`}>
                     <span className="min-w-0 sm:flex-1">
                         {runActive ? (
@@ -369,19 +370,29 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
                                 <Loader2 size={14} className="animate-spin text-blue-500" />
                                 Догружаем {subject.acc} из источника — таблица обновится сама.
                             </span>
-                        ) : missingDays.length ? (
-                            <>
-                                За {missingDays.length === 1 ? 'сутки' : `${missingDays.length} сут.`}{' '}
-                                ({missingDays.slice(0, 4).map(shortDay).join(', ')}{missingDays.length > 4 ? '…' : ''}) {subject.many}
-                                в снимке нет: либо их не было, либо ночная выгрузка ещё не прошла.
-                            </>
                         ) : (
-                            <span className="text-rose-700">Последняя догрузка не удалась: {lastRun.error}</span>
+                            <>
+                                {withoutPhone ? (
+                                    /* Снимок «Воронки ОП» хранит телефоны с 16.09.2026; карточки,
+                                       снятые раньше, лежат без номера — по ним звонки не найти,
+                                       пока не дочитаны контакты. */
+                                    <>У {withoutPhone.toLocaleString('ru-RU')} {subject.many} в снимке нет телефона —
+                                    звонки по ним не найти, пока не дочитаны контакты из источника. </>
+                                ) : null}
+                                {missingDays.length ? (
+                                    <>За {missingDays.length === 1 ? 'сутки' : `${missingDays.length} сут.`}{' '}
+                                    ({missingDays.slice(0, 4).map(shortDay).join(', ')}{missingDays.length > 4 ? '…' : ''}) {subject.many}
+                                    в снимке нет: либо их не было, либо ночная выгрузка ещё не прошла. </>
+                                ) : null}
+                                {!withoutPhone && !missingDays.length && lastRun?.status === 'error' ? (
+                                    <span className="text-rose-700">Последняя догрузка не удалась: {lastRun.error}</span>
+                                ) : null}
+                            </>
                         )}
                     </span>
                     {!runActive ? (
                         <button type="button" className={`${iosBtnSecondary} shrink-0`} onClick={syncLeads}
-                                title={`Дочитать ${subject.acc} за период из источника — сутки без снимка и незакрытые. Аудио не скачивается: у звонков остаются ссылки`}>
+                                title={`Дочитать ${subject.acc} за период из источника — сутки без снимка, незакрытые и карточки без телефона. Аудио не скачивается: у звонков остаются ссылки`}>
                             <RefreshCw size={14} /> Догрузить {subject.acc}
                         </button>
                     ) : null}

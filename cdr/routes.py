@@ -705,13 +705,25 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
         def job():
             from op_funnel import sync as funnel_sync  # локально: пакет читает окружение
-            try:
-                funnel_sync.sync_direction(db, info['direction'], day_from, day_to, force=False,
-                                           started_by=ctx['user_id'],
-                                           note='из раздела «Касания»')
-            except Exception:  # noqa: BLE001 — отказ уже записан в журнал прогонов
-                log.exception('Касания: догрузка сделок %s %s..%s упала', source, day_from, day_to)
-                return
+            today = queries.today_almaty()
+            with db._get_cursor() as cursor:
+                present = lead_queries.lead_days(cursor, source, info['direction'], day_from, day_to)
+                without_phone = lead_queries.count_without_phones(
+                    cursor, source, info['direction'], day_from, day_to)
+            missing = [day for day in sync.days_in_period(day_from, day_to)
+                       if day <= today and day.isoformat() not in present]
+            # Полная выгрузка нужна, когда в снимке нет суток (или период задевает
+            # незакрытые). Если сутки на месте и не хватает только телефонов, читать
+            # источник дважды незачем — сразу к добору контактов.
+            if missing or day_to >= today or source != 'amo' or not without_phone:
+                try:
+                    funnel_sync.sync_direction(db, info['direction'], day_from, day_to,
+                                               force=False, started_by=ctx['user_id'],
+                                               note='из раздела «Касания»')
+                except Exception:  # noqa: BLE001 — отказ уже записан в журнал прогонов
+                    log.exception('Касания: догрузка сделок %s %s..%s упала',
+                                  source, day_from, day_to)
+                    return
             if source != 'amo':
                 return
             # Зафиксированные сутки выгрузка выше не переписывает, а сделки «Основы»,
