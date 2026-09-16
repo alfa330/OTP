@@ -142,5 +142,70 @@ class PhoneBranchTests(unittest.TestCase):
         self.assertIn('{!isNarrowShell && (\n                                                <button', footer)
 
 
+class OperatorStatusTrackTests(unittest.TestCase):
+    """Задача #330: оператор видит свои фактические статусы под лентой смен —
+    тем же таймлайном, что руководитель в «Графиках работы»."""
+
+    DAY_CARD = (
+        "{viewMode === 'day' && myCurrentDayCard && (() => {",
+        '{myScheduleVisibleDays.length === 0 && (',
+    )
+    PHONE_BRANCH = (
+        '                if (isNarrowShell) {\n                    const phoneToday',
+        '                return (\n                    <div className="px-0 sm:px-4 py-2 min-h-screen bg-slate-50">',
+    )
+
+    def test_statuses_are_asked_only_for_the_visible_period(self):
+        """У «живого» запроса окно −7/+90 суток: статусы за три месяца ехали бы
+        впустую, поэтому их просит только запрос видимого периода."""
+        self.assertEqual(APP.count("qs.set('include_imported_statuses', '1');"), 1)
+        live = block(APP, 'const loadMyLiveSchedules = async () => {', 'setMyLiveScheduleData')
+        self.assertNotIn('include_imported_statuses', live)
+
+    def test_track_is_rendered_under_the_shift_timeline(self):
+        # На компьютере лента дня — своя разметка (myTimelineParts.map), а не
+        # общий компонент телефона; полоса статусов идёт сразу под ней.
+        card = block(APP, *self.DAY_CARD)
+        self.assertIn('renderMyStatusTrack(myCurrentDayStatusTrack)', card)
+        self.assertLess(card.index('myTimelineParts.map'),
+                        card.index('renderMyStatusTrack(myCurrentDayStatusTrack)'))
+        phone = block(APP, *self.PHONE_BRANCH)
+        self.assertIn('renderMyStatusTrack(phoneStatusTrack', phone)
+        self.assertLess(phone.index('<MyShiftsTimeline parts={phoneTimelineParts}'),
+                        phone.index('renderMyStatusTrack(phoneStatusTrack'))
+        self.assertIn('export const MyShiftsStatusTrack', PHONE)
+
+    def test_compliance_comes_from_the_planner_helper(self):
+        """Второй формулы соответствия быть не должно: у оператора и у
+        руководителя один и тот же процент за один и тот же день."""
+        builder = block(APP, 'const getMyStatusTrackForDate = useCallback(', 'const myCurrentDayStatusTrack')
+        self.assertEqual(builder.count('plannerComputeShiftStatusMatchMetrics('), 2)
+        # Проценты — по кускам смены внутри суток, опоздание и ранний уход —
+        # по смене, которая в этот день началась (ночная 21:00–09:00).
+        self.assertIn('getShiftPartsForDate(myTimelineOperator, targetDate)', builder)
+        self.assertIn('getShiftStartPartsForDate(myTimelineOperator, targetDate)', builder)
+        self.assertIn('buildImportedStatusContextBarsForDay(', builder)
+        # Обоснованные активности идут в зачёт тем же помощником, что и в сетке.
+        self.assertIn('getPlannerStatusMatchCreditedActivityBarsForDate(', builder)
+        self.assertIn('getPlannerStatusMatchCreditedActivityContextBars(', builder)
+
+    def test_deviations_are_printed_only_when_they_exist(self):
+        """«Опоздание 0 мин» каждый день — ровно тот шум, из-за которого строку
+        перестают читать. Порог переработки тот же, что красит её в сетке."""
+        note = block(APP, 'const renderMyStatusTrack = (track,', 'const formatEtaRu =')
+        self.assertIn('metrics.lateTotalMin > 0 &&', note)
+        self.assertIn('metrics.earlyLeaveTotalMin > 0 &&', note)
+        self.assertIn('overtimeMin > 10 &&', note)
+        self.assertIn('specialStatusMatchMetrics.workOutsideShiftMin > 10', APP)
+
+    def test_empty_track_is_not_drawn_for_the_operator(self):
+        """В сетке пустая дорожка честно пишет «Нет статусов» — руководитель по
+        этому и работает. Оператору нажать на пропуск статусов нечем, поэтому у
+        него полосы просто нет."""
+        self.assertIn('if (!bars.length) return null;', PHONE)
+        self.assertNotIn('Нет статусов', PHONE)
+        self.assertIn('if (!track) return null;', block(APP, 'const renderMyStatusTrack = (track,', 'const formatEtaRu ='))
+
+
 if __name__ == '__main__':
     unittest.main()

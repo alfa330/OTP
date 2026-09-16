@@ -57,7 +57,7 @@ import MobileSheetTitle from './components/common/MobileSheetTitle';
 import MobileActionSheet from './components/common/MobileActionSheet';
 import {
     MyShiftsCandidateRow, MyShiftsCheckRow, MyShiftsColleagueRow, MyShiftsNoteRow, MyShiftsPlainRow,
-    MyShiftsRequestCard, MyShiftsShiftRow, MyShiftsStatusCard, MyShiftsTimeline, MyShiftsWeekHeader,
+    MyShiftsRequestCard, MyShiftsShiftRow, MyShiftsStatusCard, MyShiftsStatusTrack, MyShiftsTimeline, MyShiftsWeekHeader,
     PHONE_BUTTON, PHONE_ICONS, PHONE_TIME_INPUT, PhoneDayStrip, PhoneField, PhoneGroup,
     PhoneLinkRow, PhoneRow, useLastPresent
 } from './components/schedule/MyShiftsMobile';
@@ -13623,6 +13623,73 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (endMin <= startMin) return null;
             return { start: startMin, end: endMin };
             };
+            /* Полосы фактических статусов за одни сутки из карты «день → сегменты».
+               Смотрим и в соседние дни: ночной статус приезжает куском предыдущих
+               суток, и без этого у смены с 21:00 первые часы остались бы пустыми.
+               Тот же приём, что у сетки «Графиков работы»
+               (importedStatusTimelineByOperatorDateKey), только на одного человека. */
+            const buildImportedStatusBarsForDay = (timelineByDay, dateKey) => {
+            const targetDayKey = String(dateKey || '').trim();
+            if (!timelineByDay || typeof timelineByDay !== 'object' || !targetDayKey) return [];
+            const targetDayObj = parseDateStr(targetDayKey);
+            if (!targetDayObj || Number.isNaN(targetDayObj.getTime())) return [];
+            const seen = new Set();
+            const bars = [];
+            [
+                todayDateStr(addDays(targetDayObj, -1)),
+                targetDayKey,
+                todayDateStr(addDays(targetDayObj, 1))
+            ].forEach(dayKey => {
+                const source = Array.isArray(timelineByDay[dayKey]) ? timelineByDay[dayKey] : [];
+                source.forEach(seg => {
+                    const mins = plannerStatusImportedSegmentToDayMinutes(seg, targetDayKey);
+                    if (!mins) return;
+                    const segKey = [
+                        String(seg?.start || ''),
+                        String(seg?.end || ''),
+                        String(seg?.stateKey || seg?.statusKey || ''),
+                        String(seg?.stateNote || seg?.state_note || ''),
+                        String(mins.start),
+                        String(mins.end)
+                    ].join('|');
+                    if (seen.has(segKey)) return;
+                    seen.add(segKey);
+                    bars.push({ ...seg, startMin: mins.start, endMin: mins.end });
+                });
+            });
+            bars.sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+            return bars;
+            };
+            /* То же, но в «сквозных» минутах смены, которая началась в этот день:
+               соседние сутки не обрезаются по полуночи, а уезжают на ∓1440. Нужно
+               для опоздания и раннего ухода ночной смены 21:00–09:00 — иначе конец
+               смены и конец статусов лежали бы в разных системах координат.
+               Повторяет getImportedStatusBarsForShiftContext сетки «Графиков работы». */
+            const buildImportedStatusContextBarsForDay = (timelineByDay, dateKey) => {
+            const targetDayKey = String(dateKey || '').trim();
+            if (!timelineByDay || typeof timelineByDay !== 'object' || !targetDayKey) return [];
+            const targetDayObj = parseDateStr(targetDayKey);
+            if (!targetDayObj || Number.isNaN(targetDayObj.getTime())) return [];
+            const seen = new Set();
+            const bars = [];
+            [
+                { dayKey: todayDateStr(addDays(targetDayObj, -1)), offset: -1440 },
+                { dayKey: targetDayKey, offset: 0 },
+                { dayKey: todayDateStr(addDays(targetDayObj, 1)), offset: 1440 }
+            ].forEach(({ dayKey, offset }) => {
+                buildImportedStatusBarsForDay(timelineByDay, dayKey).forEach(seg => {
+                    const startMin = seg.startMin + offset;
+                    const endMin = seg.endMin + offset;
+                    if (!Number.isFinite(startMin) || !Number.isFinite(endMin) || endMin <= startMin) return;
+                    const segKey = `${String(seg?.start || '')}|${String(seg?.end || '')}|${String(seg?.stateKey || '')}|${startMin}|${endMin}`;
+                    if (seen.has(segKey)) return;
+                    seen.add(segKey);
+                    bars.push({ ...seg, startMin, endMin });
+                });
+            });
+            bars.sort((a, b) => (a.startMin - b.startMin) || (a.endMin - b.endMin));
+            return bars;
+            };
             const plannerNoPhoneShiftMetricsForTimeline = ({ timeline = [], dateKey = '', shiftParts = [] } = {}) => {
             const shiftIntervals = mergeIntervals(
                 (shiftParts || [])
@@ -17183,6 +17250,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const qs = new URLSearchParams({ start_date: startDate, end_date: endDate });
                         qs.set('include_technical_issues', '1');
                         qs.set('include_offline_activities', '1');
+                        // Фактические статусы телефонии — под ленту смен. Просим их
+                        // только у видимого периода: у «живого» запроса ниже окно
+                        // −7/+90 суток, и статусы за три месяца ехали бы впустую.
+                        qs.set('include_imported_statuses', '1');
                         const response = await fetch(`${API_BASE_URL}/api/work_schedules/my?${qs.toString()}`, {
                             credentials: 'include',
                             headers: withAccessTokenHeader()
@@ -22392,9 +22463,93 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ...myScheduleData,
                     shifts: myScheduleData.shifts || {},
                     technicalIssueTimelineDays: myScheduleData.technicalIssueTimelineDays || {},
-                    offlineActivityTimelineDays: myScheduleData.offlineActivityTimelineDays || {}
+                    offlineActivityTimelineDays: myScheduleData.offlineActivityTimelineDays || {},
+                    importedStatusTimelineDays: myScheduleData.importedStatusTimelineDays || {}
                 };
             }, [myScheduleData]);
+            /* Фактические статусы под ленту смен — то же, что видит руководитель в
+               «Графиках работы» (дорожка «ст» и строка соответствия), только про
+               себя и без спецрежима: оператору переключать нечего.
+               Считаем по дате, а не по одному «текущему дню»: на телефоне день
+               выбирают полосой недели, и карточка рисует не currentDate. */
+            const getMyStatusTrackForDate = useCallback((dateKey) => {
+                const targetDate = String(dateKey || '').trim();
+                if (!targetDate || !myTimelineOperator) return null;
+                const bars = buildImportedStatusBarsForDay(myTimelineOperator.importedStatusTimelineDays, targetDate);
+                if (bars.length === 0) return null;
+
+                const breakPartsFor = (parts) => (parts || [])
+                    .flatMap(part => getBreakPartsForPart(myTimelineOperator, part, targetDate) || [])
+                    .map(b => ({ start: Number(b?.start || 0), end: Number(b?.end || 0) }))
+                    .filter(b => b.end > b.start);
+                /* Соответствие считаем ровно так же, как сетка «Графиков работы»:
+                   проценты — по кускам смены внутри суток, а опоздание и ранний
+                   уход — по смене, которая в этот день НАЧАЛАСЬ (ночная 21:00–09:00
+                   иначе теряла бы свой конец). Обоснованные активности (тренинг,
+                   тех. сбой, офлайн-работа) идут в зачёт тем же помощником, иначе у
+                   оператора и у руководителя вышли бы разные проценты за один день. */
+                const shiftParts = getShiftPartsForDate(myTimelineOperator, targetDate) || [];
+                const dayMetrics = shiftParts.length > 0
+                    ? plannerComputeShiftStatusMatchMetrics({
+                        shiftParts,
+                        breakParts: breakPartsFor(shiftParts),
+                        statusBars: [
+                            ...bars,
+                            ...getPlannerStatusMatchCreditedActivityBarsForDate(myTimelineOperator, targetDate, plannerTrainingsByOperator)
+                        ]
+                    })
+                    : null;
+                const shiftStartParts = getShiftStartPartsForDate(myTimelineOperator, targetDate) || [];
+                const boundaryMetrics = shiftStartParts.length > 0
+                    ? plannerComputeShiftStatusMatchMetrics({
+                        shiftParts: shiftStartParts,
+                        breakParts: breakPartsFor(shiftStartParts),
+                        statusBars: [
+                            ...buildImportedStatusContextBarsForDay(myTimelineOperator.importedStatusTimelineDays, targetDate),
+                            ...getPlannerStatusMatchCreditedActivityContextBars(myTimelineOperator, targetDate, plannerTrainingsByOperator)
+                        ]
+                    })
+                    : null;
+                const baseMetrics = dayMetrics || boundaryMetrics;
+                const metrics = baseMetrics
+                    ? {
+                        ...baseMetrics,
+                        lateTotalMin: Number(boundaryMetrics?.lateTotalMin ?? dayMetrics?.lateTotalMin ?? 0),
+                        earlyLeaveTotalMin: Number(boundaryMetrics?.earlyLeaveTotalMin ?? dayMetrics?.earlyLeaveTotalMin ?? 0)
+                    }
+                    : null;
+
+                const totalsByLabel = new Map();
+                const timelineBars = bars.map((seg, idx) => {
+                    const display = plannerStatusResolveDisplayState(
+                        seg?.stateName || seg?.statusName || seg?.stateKey || '',
+                        seg?.stateNote || seg?.state_note || ''
+                    );
+                    const label = display.label || 'Статус';
+                    const background = getPlannerImportedStatusTone(label).bar;
+                    const minutes = Math.max(0, seg.endMin - seg.startMin);
+                    const totals = totalsByLabel.get(label) || { key: label, label, background, minutes: 0 };
+                    totals.minutes += minutes;
+                    totalsByLabel.set(label, totals);
+                    return {
+                        key: `my-status-${idx}`,
+                        left: (seg.startMin / minutesInDay) * 100,
+                        width: (minutes / minutesInDay) * 100,
+                        background,
+                        tooltip: `${label} • ${minutesToTime(seg.startMin)} — ${minutesToTime(seg.endMin)}`
+                    };
+                });
+
+                return {
+                    bars: timelineBars,
+                    totals: Array.from(totalsByLabel.values()).sort((a, b) => b.minutes - a.minutes),
+                    metrics: metrics && metrics.totalScheduledMin > 0 ? metrics : null
+                };
+            }, [myTimelineOperator, plannerTrainingsByOperator]);
+            const myCurrentDayStatusTrack = useMemo(
+                () => getMyStatusTrackForDate(myCurrentDayCard?.date),
+                [getMyStatusTrackForDate, myCurrentDayCard?.date]
+            );
             const myLiveTimelineOperator = useMemo(() => {
                 const src = myLiveScheduleData || myScheduleData;
                 if (!src) return null;
@@ -25246,6 +25401,53 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const rounded = Math.round(((Number(minutes) || 0) / 60) * 10) / 10;
                     return `${String(rounded).replace('.', ',')} ч`;
                 };
+                /* Полоса фактических статусов под лентой смен — одна сборка на телефон
+                   и на компьютер: слова и числа у оператора должны совпадать с тем, что
+                   руководитель видит в «Графиках работы».
+                   Отклонения печатаем ТОЛЬКО когда они есть: «опоздание 0 мин» каждый
+                   день — ровно тот шум, из-за которого строку перестают читать. */
+                const renderMyStatusTrack = (track, { withHours = false } = {}) => {
+                    if (!track) return null;
+                    const statusDuration = (minutes) => {
+                        const mins = Math.max(0, Math.round(Number(minutes) || 0));
+                        return mins < 60 ? `${mins} мин` : formatHoursMinutes(mins);
+                    };
+                    const metrics = track.metrics;
+                    const overtimeMin = metrics ? Math.round(Number(metrics.workOutsideShiftMin) || 0) : 0;
+                    // Разделителей между отклонениями нет намеренно: на телефоне строка
+                    // переносится, и «·» оказывалась первым знаком новой строки —
+                    // читалось как обрывок. Цвет и так их разделяет.
+                    const note = metrics ? (
+                        <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                            <span>
+                                Совпадение с графиком{' '}
+                                <span className="font-semibold tabular-nums text-slate-700">
+                                    {metrics.compliancePct != null ? `${Math.round(metrics.compliancePct)}%` : '—'}
+                                </span>
+                            </span>
+                            {metrics.lateTotalMin > 0 && (
+                                <span className="text-rose-600">опоздание {formatMinutesOnly(metrics.lateTotalMin)}</span>
+                            )}
+                            {metrics.earlyLeaveTotalMin > 0 && (
+                                <span className="text-rose-600">ранний уход {formatMinutesOnly(metrics.earlyLeaveTotalMin)}</span>
+                            )}
+                            {/* Порог в 10 минут — тот же, что красит переработку в
+                                «Графиках работы»: хвост в пару минут после смены есть
+                                почти всегда и переработкой не является. */}
+                            {overtimeMin > 10 && (
+                                <span className="text-emerald-600">сверх смены {formatMinutesOnly(overtimeMin)}</span>
+                            )}
+                        </span>
+                    ) : null;
+                    return (
+                        <MyShiftsStatusTrack
+                            bars={track.bars}
+                            totals={track.totals.map(item => ({ ...item, value: statusDuration(item.minutes) }))}
+                            note={note}
+                            showHours={Boolean(withHours)}
+                        />
+                    );
+                };
                 const formatEtaRu = (targetTs) => {
                     const diffMin = Math.round((targetTs - Date.now()) / 60000);
                     if (diffMin < 1) return 'начинается сейчас';
@@ -25735,6 +25937,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const phoneNowPercent = phoneDayDate === phoneToday
                         ? computeLeftPercent(phoneNowDate.getHours() * 60 + phoneNowDate.getMinutes())
                         : null;
+                    // Фактические статусы телефонии за выбранный день полосы недели.
+                    const phoneStatusTrack = getMyStatusTrackForDate(phoneDayDate);
                     // Нули не пишем: «0 выходных» — шум, а без смен и выходных строки нет вовсе.
                     const phoneWeekSummary = [
                         myScheduleSummary.shiftsCount ? `${myScheduleSummary.shiftsCount} ${pluralRu(myScheduleSummary.shiftsCount, 'смена', 'смены', 'смен')} · ${formatHoursRu(myScheduleSummary.totalWorkMin)}` : '',
@@ -25791,9 +25995,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {myScheduleLoading && !phoneDay ? (
                                     <MyShiftsNoteRow tileClassName="bg-slate-300" iconClassName="fa-spinner fa-spin" title="Загружаю смены…" />
                                 ) : null}
-                                {phoneTimelineParts.length || phoneTimelineLines.length ? (
-                                    <div className="px-4 pb-3.5 pt-3">
-                                        <MyShiftsTimeline parts={phoneTimelineParts} lines={phoneTimelineLines} nowPercent={phoneNowPercent} />
+                                {phoneTimelineParts.length || phoneTimelineLines.length || phoneStatusTrack ? (
+                                    <div className="space-y-2.5 px-4 pb-3.5 pt-3">
+                                        {phoneTimelineParts.length || phoneTimelineLines.length ? (
+                                            <MyShiftsTimeline parts={phoneTimelineParts} lines={phoneTimelineLines} nowPercent={phoneNowPercent} />
+                                        ) : null}
+                                        {renderMyStatusTrack(phoneStatusTrack, {
+                                            withHours: !(phoneTimelineParts.length || phoneTimelineLines.length)
+                                        })}
                                     </div>
                                 ) : null}
                                 {phoneDayStatus ? (
@@ -26923,6 +27132,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                         </div>
                                                                     )}
                                                                 </div>
+                                                                {myCurrentDayStatusTrack && (
+                                                                    <div className="mt-2.5">
+                                                                        {renderMyStatusTrack(myCurrentDayStatusTrack)}
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                             <div className="divide-y divide-slate-100 border-t border-slate-100">
                                                                 {myCurrentDayScheduleStatus && (

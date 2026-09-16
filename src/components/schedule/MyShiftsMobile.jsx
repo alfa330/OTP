@@ -269,6 +269,65 @@ export const MyShiftsTimeline = ({
   </div>
 );
 
+/*
+ * Полоса фактических статусов телефонии под лентой смен — та же ось 00–24, но
+ * тоньше и без подписей часов: часы уже стоят над лентой смен, второй раз это
+ * шум. Цвет полосы приходит готовым из общего справочника статусов, поэтому
+ * «перерыв» у оператора и у руководителя в «Графиках работы» одного цвета.
+ * Подписи под полосой обязательны: наведения на телефоне нет, и без них
+ * цветные куски ничего не значат. Совсем узкие статусы («без телефона» на
+ * полминуты) держим на 2 px, иначе они исчезают с ленты вовсе.
+ * Компонент общий с настольным видом: там у полос ещё и подсказка по наведению.
+ */
+export const MyShiftsStatusTrack = ({ label = 'Статусы', bars = [], totals = [], note = null, showHours = false }) => {
+  if (!bars.length) return null;
+  return (
+    <div>
+      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</div>
+      {/* Свою шкалу часов рисуем только когда над полосой нет ленты смен (день без
+          смены): два одинаковых ряда цифр подряд читаются как ошибка вёрстки. */}
+      {showHours ? (
+        <div className="relative mb-1 h-4">
+          {[0, 6, 12, 18, 24].map((hour) => (
+            <span
+              key={hour}
+              className="absolute top-0 text-[11px] leading-none tabular-nums text-slate-400"
+              style={{ left: `${(hour / 24) * 100}%`, transform: hour === 0 ? 'none' : hour === 24 ? 'translateX(-100%)' : 'translateX(-50%)' }}
+            >
+              {String(hour).padStart(2, '0')}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="relative h-5 overflow-hidden rounded-lg bg-slate-100">
+        {[3, 6, 9, 12, 15, 18, 21].map((hour) => (
+          <div key={hour} className="absolute inset-y-0 w-px bg-slate-200" style={{ left: `${(hour / 24) * 100}%` }} />
+        ))}
+        {bars.map((bar) => (
+          <div
+            key={bar.key}
+            className="absolute inset-y-0"
+            style={{ left: `${bar.left}%`, width: `${bar.width}%`, minWidth: '2px', background: bar.background }}
+            data-schedule-tooltip={bar.tooltip || undefined}
+          />
+        ))}
+      </div>
+      {totals.length ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-none">
+          {totals.map((item) => (
+            <span key={item.key} className="inline-flex items-center gap-1.5">
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: item.background }} aria-hidden="true" />
+              <span className="text-slate-600">{item.label}</span>
+              <span className="tabular-nums text-slate-400">{item.value}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {note ? <div className="mt-1.5 text-[12px] leading-snug text-slate-500">{note}</div> : null}
+    </div>
+  );
+};
+
 /* Строка с плиткой-значком: «Выходной», «Смен нет», статус графика. */
 export const MyShiftsNoteRow = ({ tileClassName = 'bg-slate-300', iconClassName = 'fa-calendar-xmark', title, subtitle = null, note = null }) => (
   <div className="sa-m-row flex items-center gap-3 px-4 py-3">
