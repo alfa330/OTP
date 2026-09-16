@@ -8679,11 +8679,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {selectedTab === 'chats' && (
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Всего чатов</div>
                     )}
+                    {/* Успешки: три отдельные колонки. Подписи стоят в шапке, а в
+                        строках остаются только числа — иначе слова «Успешки» и
+                        «Выполнение» повторялись бы в каждой строке таблицы. */}
                     {selectedTab === 'tez_successes' && (
-                    <div className={`${hoursSummaryColClass} w-72 bg-gray-50 text-sm font-medium`}
-                         title="Успешки за месяц и выполнение индивидуального плана оператора">
-                        Успешки и выполнение плана
-                    </div>
+                    <>
+                        <div className={`${hoursSummaryColClass} w-28 bg-gray-50 text-sm font-medium`}
+                             title="Успешки за месяц">
+                            Успешки
+                        </div>
+                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}
+                             title="Выполнение индивидуального плана успешек">
+                            Выполнение
+                        </div>
+                        <div className={`${hoursSummaryColClass} w-32 bg-gray-50 text-sm font-medium`}
+                             title="Успешки за месяц ÷ отработанные часы (те же часы, по которым считается план)">
+                            Успешки в час
+                        </div>
+                    </>
                     )}
                     {selectedTab === 'avg_score' && (
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Средняя оценка</div>
@@ -8971,24 +8984,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     });
                                     const plan = planRes?.plan;
                                     const pct = plan > 0 ? (total / plan) * 100 : null;
+                                    // Успешки в час: делим на те же отработанные часы, из которых
+                                    // считается индивидуальный план (база + зачтённые тренинги,
+                                    // техсбои и офлайн-активность) — иначе две соседние колонки
+                                    // мерили бы работу разными часами.
+                                    const perHour = displayedTotal > 0 ? total / displayedTotal : null;
                                     return (
-                                        <div
-                                            className={`${hoursSummaryColClass} w-72 text-sm`}
-                                            title={plan > 0 ? `Успешки: ${total}; индивидуальный план: ${formatNumber(plan, 1)}` : 'Индивидуальный план не задан'}
-                                        >
-                                            <div className="grid w-full grid-cols-2 divide-x divide-gray-200">
-                                                <div className="px-1">
-                                                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Успешки</div>
-                                                    <div className="font-semibold tabular-nums text-emerald-700">{total}</div>
-                                                </div>
-                                                <div className="px-1">
-                                                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Выполнение</div>
-                                                    <div className={`font-semibold tabular-nums ${planClosureClass(pct)}`}>
-                                                        {pct == null ? '—' : `${pct.toFixed(0)}%`}
-                                                    </div>
-                                                </div>
+                                        <>
+                                            <div className={`${hoursSummaryColClass} w-28 text-sm font-semibold tabular-nums text-emerald-700`}>
+                                                {total}
                                             </div>
-                                        </div>
+                                            <div
+                                                className={`${hoursSummaryColClass} w-32 text-sm font-semibold tabular-nums ${planClosureClass(pct)}`}
+                                                title={plan > 0 ? `${total} / ${formatNumber(plan, 1)} × 100% — индивидуальный план` : 'Индивидуальный план не задан'}
+                                            >
+                                                {pct == null ? '—' : `${pct.toFixed(0)}%`}
+                                            </div>
+                                            <div
+                                                className={`${hoursSummaryColClass} w-32 text-sm font-semibold tabular-nums text-gray-800`}
+                                                title={perHour == null
+                                                    ? 'Отработанных часов за месяц нет'
+                                                    : `${total} ÷ ${formatNumber(displayedTotal, 2)} ч отработано`}
+                                            >
+                                                {perHour == null ? '—' : formatNumber(perHour, 2)}
+                                            </div>
+                                        </>
                                     );
                                 })()}
 
@@ -9131,24 +9151,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const plan = footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan : null;
                             const pct = plan > 0 ? (total / plan) * 100 : null;
                             const pctClass = planClosureClass(pct);
+                            // Итог по отделу: сумма успешек на сумму отработанных часов,
+                            // а не среднее по строкам — тогда вес оператора равен его часам.
+                            const hours = footerTotals.sumDisplayedTotal;
+                            const perHour = hours > 0 ? total / hours : null;
                             return (
-                                <div
-                                    className={`${hoursSummaryColClass} w-72 text-sm`}
-                                    title={plan > 0
-                                        ? `${total} / ${formatNumber(plan, 1)} × 100% — по сумме индивидуальных планов. Общий план отдела считается отдельно (карточка над таблицей).`
-                                        : 'Индивидуальные планы не заданы'}
-                                >
-                                    <div className="grid w-full grid-cols-2 divide-x divide-gray-200">
-                                        <div className="px-1">
-                                            <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Успешки</div>
-                                            <div className="font-semibold text-emerald-700">{total}</div>
-                                        </div>
-                                        <div className="px-1">
-                                            <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Выполнение</div>
-                                            <div className={`font-semibold ${pctClass}`}>{pct == null ? '—' : `${pct.toFixed(0)}%`}</div>
-                                        </div>
+                                <>
+                                    <div className={`${hoursSummaryColClass} w-28 text-sm font-semibold tabular-nums text-emerald-700`}>
+                                        {total}
                                     </div>
-                                </div>
+                                    <div
+                                        className={`${hoursSummaryColClass} w-32 text-sm font-semibold tabular-nums ${pctClass}`}
+                                        title={plan > 0
+                                            ? `${total} / ${formatNumber(plan, 1)} × 100% — по сумме индивидуальных планов. Общий план отдела считается отдельно (карточка над таблицей).`
+                                            : 'Индивидуальные планы не заданы'}
+                                    >
+                                        {pct == null ? '—' : `${pct.toFixed(0)}%`}
+                                    </div>
+                                    <div
+                                        className={`${hoursSummaryColClass} w-32 text-sm font-semibold tabular-nums text-gray-800`}
+                                        title={perHour == null
+                                            ? 'Отработанных часов за месяц нет'
+                                            : `${total} ÷ ${formatNumber(hours, 2)} ч отработано`}
+                                    >
+                                        {perHour == null ? '—' : formatNumber(perHour, 2)}
+                                    </div>
+                                </>
                             );
                         })()}
 
@@ -54907,6 +54935,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const tezPlanPercent = (tezIndividualPlan && tezIndividualPlan > 0)
                                                 ? (tezSuccessesTotal / tezIndividualPlan) * 100
                                                 : 0;
+                                            // Успешки в час — тот же показатель, что в учёте часов у СВ:
+                                            // делим на отработанные часы (regular), из которых считается план.
+                                            const tezSuccessesPerHour = safeNum(regular) > 0
+                                                ? (tezSuccessesTotal / safeNum(regular))
+                                                : null;
                                             // Стаж в месяцах для модели Линия TEZ (в её формуле надбавка идёт по месяцам, а не по диапазону).
                                             const tezExperienceMonths = (() => {
                                                 const raw = profileData?.hire_date || user?.hire_date || user?.hireDate
@@ -55291,6 +55324,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         isTezOp={isTezOpModel}
                                                         tez={{
                                                             successes: tezSuccessesTotal,
+                                                            perHour: tezSuccessesPerHour,
                                                             plan: tezIndividualPlan,
                                                             percent: tezPlanPercent,
                                                             caseLabel: tezPlanResult?.caseCode && tezPlanResult.caseCode !== 'standard' ? tezPlanResult.caseLabel : null,
@@ -55439,6 +55473,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 Успешки за месяц
                                                             </span>
                                                             <span className="text-lg font-bold text-gray-900 tabular-nums">{safeNum(tezSuccessesTotal).toFixed(0)}</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
+                                                            <span className="text-sm text-gray-600 flex items-center gap-2">
+                                                                <FaIcon className="fas fa-tachometer-alt text-gray-400"></FaIcon>
+                                                                Успешки в час
+                                                            </span>
+                                                            <span className="text-lg font-bold text-gray-900 tabular-nums" title={tezSuccessesPerHour == null ? 'Отработанных часов за месяц нет' : `${safeNum(tezSuccessesTotal).toFixed(0)} ÷ ${safeNum(regular).toFixed(2)} ч отработано`}>
+                                                                {tezSuccessesPerHour == null ? '—' : tezSuccessesPerHour.toFixed(2)}
+                                                            </span>
                                                             </div>
                                                             <div className="flex items-center justify-between rounded-lg bg-white border border-gray-200 px-3 py-2.5">
                                                             <span className="text-sm text-gray-600 flex items-center gap-2">

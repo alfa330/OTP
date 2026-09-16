@@ -272,13 +272,20 @@ class DepartmentPlanFrontendTests(unittest.TestCase):
             APP_SRC,
         )
 
-    def test_operator_row_shows_count_next_to_percent(self):
+    def test_operator_row_shows_only_numbers(self):
+        """Подписи колонок стоят в шапке — в строке оператора одни числа.
+
+        Задача #329 (Алчинбаева Анель): слова «Успешки» и «Выполнение»
+        повторялись в КАЖДОЙ строке таблицы. Если они вернутся в тело строки,
+        вернётся и тот же визуальный шум.
+        """
         start = APP_SRC.index("{selectedTab === 'tez_successes' && (() => {")
-        block = APP_SRC[start:start + 2200]
-        self.assertIn("Успешки", block)
-        self.assertIn("Выполнение", block)
+        block = APP_SRC[start:start + 2600]
         self.assertIn("{total}", block)
         self.assertIn("planClosureClass(pct)", block)
+        rendered = block[block.index("return ("):]
+        self.assertNotIn("Успешки<", rendered)
+        self.assertNotIn("Выполнение<", rendered)
 
     def test_closure_color_is_one_helper(self):
         """Цвет процента не должен расходиться между строкой, итогом и карточкой."""

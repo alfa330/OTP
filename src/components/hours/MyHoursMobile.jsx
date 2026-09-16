@@ -201,6 +201,9 @@ export const MyHoursPhoneSummary = ({
           <ValueRow title="Успешки за месяц" value={formatHoursNumber(Math.round(Number(tez.successes) || 0))} />
         ) : null}
         {!dual && isTezOp ? (
+          <ValueRow title="Успешки в час" value={tez.perHour == null ? '—' : formatHoursNumber(tez.perHour)} />
+        ) : null}
+        {!dual && isTezOp ? (
           <ValueRow title="План успешек" value={tezPlan != null ? formatHoursNumber(Math.round(tezPlan * 10) / 10) : '—'} />
         ) : null}
         {!dual && isTezOp && tezPlan != null && tezPlan > 0 ? (
