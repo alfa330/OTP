@@ -34,6 +34,7 @@ export const OUTCOME_ORDER = ['link', 'no_documents', 'rejected', 'unavailable',
 export const DEPARTMENT_LABELS = {
     szov: 'СЗоВ',
     front_office: 'Фронт-офисы',
+    op: 'Отдел продаж',
 };
 
 export const outcomeLabel = (code) => OUTCOME_LABELS[code] || code || '—';

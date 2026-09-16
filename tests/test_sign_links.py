@@ -126,15 +126,17 @@ class IinTests(unittest.TestCase):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SectionEntryTests(unittest.TestCase):
-    def test_both_departments_get_in_in_any_role(self):
-        for code in ('szov', 'front_office'):
+    def test_all_three_departments_get_in_in_any_role(self):
+        """СЗоВ и фронт-офисы — постановка; ОП добавлен в тот же день
+        («у ОП операторов через QR») тем же правилом — отдел целиком."""
+        for code in ('szov', 'front_office', 'op'):
             for role in ('operator', 'trainee', 'sv', 'supervisor'):
                 self.assertTrue(access.can_open_section(ctx(role=role, department_code=code)),
                                 '%s/%s' % (code, role))
                 self.assertTrue(access.can_generate(ctx(role=role, department_code=code)))
 
     def test_other_departments_do_not(self):
-        for code in ('op', 'tez', 'marketing', 'hr', 'accounting', None, ''):
+        for code in ('tez', 'marketing', 'hr', 'accounting', None, ''):
             self.assertFalse(access.can_open_section(ctx(department_code=code)),
                              'отдел %r не должен попадать в раздел' % code)
 
@@ -148,22 +150,22 @@ class SectionEntryTests(unittest.TestCase):
 
     def test_head_of_a_foreign_department_stays_out(self):
         """Назначение главой ЗАМЕНЯЕТ базовую admin-роль и режет периметр отделом."""
-        head_of_sales = ctx(role='admin', department_code='op', headed=[367], headed_codes=['op'])
-        self.assertFalse(access.is_global_admin(head_of_sales))
-        self.assertFalse(access.can_open_section(head_of_sales))
+        head_of_tez = ctx(role='admin', department_code='tez', headed=[560], headed_codes=['tez'])
+        self.assertFalse(access.is_global_admin(head_of_tez))
+        self.assertFalse(access.can_open_section(head_of_tez))
+        self.assertFalse(access.can_view_journal(head_of_tez))
 
-    def test_heads_of_both_departments_get_in(self):
-        szov = ctx(role='admin', department_code='szov', headed=[1], headed_codes=['szov'])
-        front = ctx(role='admin', department_code='front_office', headed=[909],
-                    headed_codes=['front_office'])
-        self.assertTrue(access.can_open_section(szov))
-        self.assertTrue(access.can_open_section(front))
+    def test_heads_of_the_section_departments_get_in_with_a_scoped_journal(self):
+        for code, dept_id in (('szov', 1), ('front_office', 909), ('op', 367)):
+            head = ctx(role='admin', department_code=code, headed=[dept_id], headed_codes=[code])
+            self.assertTrue(access.can_open_section(head), code)
+            self.assertEqual(access.journal_scope(head), [code])
 
 
 class SensitiveQrTests(unittest.TestCase):
-    def test_operators_of_both_departments_need_qr(self):
-        self.assertTrue(access.requires_sensitive_qr(ctx(department_code='szov')))
-        self.assertTrue(access.requires_sensitive_qr(ctx(department_code='front_office')))
+    def test_operators_of_every_section_department_need_qr(self):
+        for code in ('szov', 'front_office', 'op'):
+            self.assertTrue(access.requires_sensitive_qr(ctx(department_code=code)), code)
 
     def test_those_who_confirm_are_not_asked(self):
         self.assertFalse(access.requires_sensitive_qr(ctx(role='sv')))
@@ -534,7 +536,7 @@ class QrGateRouteTests(RouteHarness):
 
     def test_closed_section_answers_before_the_qr_question(self):
         """«Раздел вам не выдан» обязан отвечать раньше, чем «нужен QR»."""
-        client, _cursor, gate = self.build(ctx(department_code='op'))
+        client, _cursor, gate = self.build(ctx(department_code='tez'))
         response = client.get('/api/sign_links/ping')
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json().get('code'), 'SIGN_LINKS_SECTION_CLOSED')
@@ -795,7 +797,7 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn('const canAccessSignLinksSection = canAccessSignLinksSectionForUser(user);',
                       self.source)
         self.assertIn('<SidebarDeptScope section="sign_links"', self.source)
-        self.assertIn("sign_links: ['front_office', 'szov'],", self.source)
+        self.assertIn("sign_links: ['front_office', 'szov', 'op'],", self.source)
 
     def test_view_is_rendered_and_wrapped_into_the_qr_gate(self):
         self.assertIn('view === "sign_links" && canAccessSignLinksSection', self.source)
@@ -810,9 +812,15 @@ class FrontendWiringTests(unittest.TestCase):
     def test_qr_status_is_requested_before_the_section_is_drawn(self):
         self.assertIn("|| view === 'driver_chats' || view === 'sign_links') {", self.source)
 
-    def test_both_departments_are_named_in_the_predicate(self):
-        self.assertIn("SIGN_LINKS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov']", self.source)
-        self.assertEqual(sorted(access.SECTION_DEPARTMENT_CODES), ['front_office', 'szov'])
+    def test_the_same_departments_are_named_on_both_sides(self):
+        """Двойники обязаны совпадать: иначе пункт меню ведёт в 403 или раздел
+        открывается адресом без пункта в меню."""
+        self.assertIn("SIGN_LINKS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov', 'op']",
+                      self.source)
+        self.assertEqual(sorted(access.SECTION_DEPARTMENT_CODES), ['front_office', 'op', 'szov'])
+        meta = META_JS.read_text(encoding='utf-8')
+        for code in access.SECTION_DEPARTMENT_CODES:
+            self.assertIn("    %s: '" % code, meta, 'подписи отдела %s нет в журнале' % code)
 
     def test_menu_icon_token_exists(self):
         self.assertIn("'fa-file-signature':", FAICON_JSX.read_text(encoding='utf-8-sig'))

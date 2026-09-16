@@ -447,7 +447,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     contests: ['szov'],
     // Реестры
     parcels: ['front_office', 'szov'],
-    sign_links: ['front_office', 'szov'],
+    sign_links: ['front_office', 'szov', 'op'],
 };
 
 /* Цвет плитки значка — свой на каждый блок меню.
@@ -2296,11 +2296,12 @@ const canAccessParcelsSectionForUser = (userLike) => {
 /* «Ссылка на подписание» — ИИН водителя → ссылка на подписание документов
    через eGov Mobile, генерация на сервере (просьба владельца 16.09.2026).
 
-   Периметр тот же, что у «Посылок»: два отдела — СЗоВ и фронт-офисы — в любой
-   роли, кроме тренера; главы этих отделов и глобальные админы. Журнал запросов
-   внутри раздела открыт только админам и главам — это решает бэкенд
-   (sign_links/access.py), здесь только «показывать ли пункт меню». */
-const SIGN_LINKS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
+   Периметр как у «Посылок», но на три отдела — СЗоВ, фронт-офисы и отдел продаж
+   (ОП добавлен 16.09.2026: «раздел так же должен быть у ОП операторов через
+   QR») — в любой роли, кроме тренера; главы этих отделов и глобальные админы.
+   Журнал запросов внутри раздела открыт только админам и главам — это решает
+   бэкенд (sign_links/access.py), здесь только «показывать ли пункт меню». */
+const SIGN_LINKS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov', 'op'];
 
 const isSignLinksSectionDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
