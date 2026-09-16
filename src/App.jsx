@@ -55307,8 +55307,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         dual={hasDualSalary ? <DualPeriodBreakdown parts={dualSalaryResults} onOpenCalculator={openSalaryCalculatorWithHours} /> : null}
                                                         salary={hasDualSalary ? null : {
                                                             amount: estimatedSalary.finalSalary,
-                                                            caption: salaryPreviewCaption,
-                                                            note: salaryPreviewNote,
+                                                            // Телефон: у чат-модели подписи под суммой сняты — на узком экране
+                                                            // они только занимали место, сам расчёт и кнопка остаются.
+                                                            caption: isChatModel ? null : salaryPreviewCaption,
+                                                            note: isChatModel ? null : salaryPreviewNote,
                                                             calculatorLabel: salaryCalculatorLabel,
                                                             onOpenCalculator: openSalaryCalculatorWithHours,
                                                         }}

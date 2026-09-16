@@ -92,6 +92,16 @@ class PhoneBranchTests(unittest.TestCase):
             self.assertGreaterEqual(block.count(name), 3, name)
         self.assertIn('Открыть калькулятор «Поток»', block)
 
+    def test_chat_model_captions_are_dropped_on_the_phone(self):
+        """У чат-модели подписи под примерной зарплатой на телефоне сняты, а на
+        компьютере остаются: в ветке телефона обе подписи проходят через
+        isChatModel, сами строки из раздела не исчезли."""
+        block = hours_block()
+        self.assertIn('caption: isChatModel ? null : salaryPreviewCaption,', block)
+        self.assertIn('note: isChatModel ? null : salaryPreviewNote,', block)
+        self.assertIn("'Для чат-модели используется отдельный калькулятор.'", block)
+        self.assertIn("'Чаты, оценка и время ответа уже подтянуты в часы работы.'", block)
+
     def test_phone_calendar_reuses_app_helpers_and_endpoint(self):
         block = hours_block()
         self.assertIn('<MyHoursPhoneCalendar', block)
