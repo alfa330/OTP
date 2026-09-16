@@ -55304,13 +55304,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         }}
                                                         bonuses={bonuses}
                                                         fines={fines}
-                                                        dual={hasDualSalary ? <DualPeriodBreakdown parts={dualSalaryResults} onOpenCalculator={openSalaryCalculatorWithHours} /> : null}
+                                                        dual={hasDualSalary ? <DualPeriodBreakdown parts={dualSalaryResults} onOpenCalculator={openSalaryCalculatorWithHours} showIntro={false} /> : null}
                                                         salary={hasDualSalary ? null : {
                                                             amount: estimatedSalary.finalSalary,
-                                                            // Телефон: у чат-модели подписи под суммой сняты — на узком экране
-                                                            // они только занимали место, сам расчёт и кнопка остаются.
-                                                            caption: isChatModel ? null : salaryPreviewCaption,
-                                                            note: isChatModel ? null : salaryPreviewNote,
+                                                            // Телефон: пояснения под суммой сняты у ВСЕХ моделей — на узком экране
+                                                            // две строки прозы занимали больше места, чем сама сумма. Остаются
+                                                            // сумма и строка калькулятора; компьютер показывает подписи как прежде.
+                                                            caption: null,
+                                                            note: null,
                                                             calculatorLabel: salaryCalculatorLabel,
                                                             onOpenCalculator: openSalaryCalculatorWithHours,
                                                         }}

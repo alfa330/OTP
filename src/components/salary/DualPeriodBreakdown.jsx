@@ -166,7 +166,9 @@ const PeriodCard = ({ part, open, onToggle }) => {
     );
 };
 
-const DualPeriodBreakdown = ({ parts, onOpenCalculator }) => {
+// showIntro=false — телефон: пояснение сверху там съедало экран, а два периода
+// и так подписаны моделью и днями. На компьютере баннер остаётся как был.
+const DualPeriodBreakdown = ({ parts, onOpenCalculator, showIntro = true }) => {
     // По умолчанию раскрыт первый период — чтобы данные были видны сразу.
     const [openIdx, setOpenIdx] = useState(0);
 
@@ -176,13 +178,15 @@ const DualPeriodBreakdown = ({ parts, onOpenCalculator }) => {
 
     return (
         <div className="space-y-3">
-            <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-                <FaIcon className="fas fa-circle-info mt-0.5" />
-                <span>
-                    В этом месяце вы работали по двум моделям. Метрики и ЗП считаются отдельно по каждому периоду.
-                    Нажмите на период, чтобы увидеть все показатели.
-                </span>
-            </div>
+            {showIntro ? (
+                <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                    <FaIcon className="fas fa-circle-info mt-0.5" />
+                    <span>
+                        В этом месяце вы работали по двум моделям. Метрики и ЗП считаются отдельно по каждому периоду.
+                        Нажмите на период, чтобы увидеть все показатели.
+                    </span>
+                </div>
+            ) : null}
 
             {parts.map((part, i) => (
                 <PeriodCard

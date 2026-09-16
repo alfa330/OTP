@@ -83,24 +83,43 @@ class PhoneBranchTests(unittest.TestCase):
         self.assertIn('onMonthChange={setSelectedMonth}', block)
         self.assertIn('{getMonthOptions()}', block)
 
-    def test_salary_labels_are_shared_by_both_views(self):
-        """Подписи примерной зарплаты считаются один раз: телефон не держит второй
-        копии цепочки моделей, а компьютер показывает те же строки, что раньше."""
+    def test_salary_labels_are_computed_once_for_the_desktop(self):
+        """Цепочка моделей считается один раз и живёт на компьютере: кнопку
+        калькулятора телефон берёт оттуда же, второй копии цепочки нет."""
         block = hours_block()
         for name in ('salaryPreviewCaption', 'salaryPreviewNote', 'salaryCalculatorLabel'):
             self.assertIn(f'const {name} = ', block)
-            self.assertGreaterEqual(block.count(name), 3, name)
+        self.assertIn('{salaryPreviewCaption}', block)
+        self.assertIn('{salaryPreviewNote}', block)
+        self.assertGreaterEqual(block.count('salaryCalculatorLabel'), 3)
         self.assertIn('Открыть калькулятор «Поток»', block)
 
-    def test_chat_model_captions_are_dropped_on_the_phone(self):
-        """У чат-модели подписи под примерной зарплатой на телефоне сняты, а на
-        компьютере остаются: в ветке телефона обе подписи проходят через
-        isChatModel, сами строки из раздела не исчезли."""
+    def test_salary_captions_are_dropped_on_the_phone_for_every_model(self):
+        """Пояснения под примерной зарплатой на телефоне сняты у ВСЕХ моделей —
+        две строки прозы занимали больше места, чем сама сумма. На компьютере
+        подписи остаются, поэтому строки из раздела не удалены."""
         block = hours_block()
-        self.assertIn('caption: isChatModel ? null : salaryPreviewCaption,', block)
-        self.assertIn('note: isChatModel ? null : salaryPreviewNote,', block)
-        self.assertIn("'Для чат-модели используется отдельный калькулятор.'", block)
-        self.assertIn("'Чаты, оценка и время ответа уже подтянуты в часы работы.'", block)
+        self.assertIn('caption: null,', block)
+        self.assertIn('note: null,', block)
+        self.assertNotIn('caption: salaryPreviewCaption', block)
+        self.assertNotIn('note: salaryPreviewNote', block)
+        for line in (
+            "'Для чат-модели используется отдельный калькулятор.'",
+            "'Чаты, оценка и время ответа уже подтянуты в часы работы.'",
+            "'Штрафы в формуле калькулятора не вычитаются.'",
+        ):
+            self.assertIn(line, block)
+
+    def test_dual_model_banner_is_hidden_on_the_phone(self):
+        """Пояснение «вы работали по двум моделям» — та же проза в том же месте:
+        на телефоне снято пропом, на компьютере остаётся по умолчанию."""
+        block = hours_block()
+        self.assertIn('showIntro={false}', block)
+        self.assertEqual(block.count('showIntro'), 1)
+        dual = (ROOT / 'src' / 'components' / 'salary' / 'DualPeriodBreakdown.jsx').read_text(encoding='utf-8')
+        self.assertIn('showIntro = true', dual)
+        self.assertIn('{showIntro ? (', dual)
+        self.assertIn('В этом месяце вы работали по двум моделям.', dual)
 
     def test_phone_calendar_reuses_app_helpers_and_endpoint(self):
         block = hours_block()
