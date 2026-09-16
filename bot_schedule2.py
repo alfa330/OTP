@@ -59275,6 +59275,28 @@ except Exception:
     logging.exception("Раздел «Чаты водителей»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Ссылка на подписание» ─────────────────────────────────────────────
+# Просьба владельца 16.09.2026: оператор СЗоВ или фронт-офиса вводит ИИН
+# водителя, сервер ходит в гостевой генератор Sapar и отдаёт ссылку на
+# подписание через eGov Mobile; каждый запрос — строка журнала для админов.
+# Адрес генератора наружу не уходит — оператор до него добираться не должен.
+# QR-гейт — тот же ключ, что у «Обращений», «Посылок» и «Чатов водителей».
+try:
+    from sign_links.routes import build_sign_links_blueprint  # noqa: E402
+
+    app.register_blueprint(build_sign_links_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+        client_ip=_client_ip,
+    ))
+    logging.info("Раздел «Ссылка на подписание»: Blueprint подключён на /api/sign_links")
+except Exception:
+    logging.exception("Раздел «Ссылка на подписание»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Лиды OLX» (робот переноса откликов из чатов OLX в amoCRM) ────────
 # Задача #223. Раздел показывает журнал обращений, сводку за день и состояние
 # девяти кабинетов; сам перенос делает фоновая джоба olx_amo_poll_job ниже.

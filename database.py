@@ -6553,6 +6553,7 @@ class Database:
             self._init_crm_schema_tx(cursor)
             self._init_parcels_schema_tx(cursor)
             self._init_driver_chats_schema_tx(cursor)
+            self._init_sign_links_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_driver_mailings_schema_tx(cursor)
@@ -7537,6 +7538,36 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT driver_chats_schema")
+
+    def _init_sign_links_schema_tx(self, cursor):
+        """Схема раздела «Ссылка на подписание» (таблица sign_link_requests).
+
+        DDL живёт в пакете sign_links/schema.py по той же причине, что у вики,
+        обращений, посылок и чатов водителей; импорт локальный — на уровне
+        модуля он создал бы цикл.
+
+        Порядок относительно других разделов безразличен: внешний ключ у
+        раздела один, на `users`, а та создаётся в самом начале _init_db.
+
+        SAVEPOINT — потому что весь _init_db идёт одной транзакцией: падение
+        здесь не должно ронять инициализацию всей базы. При отказе раздел
+        честно сообщает о себе через /api/sign_links/ping (schema_ready=false),
+        а остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT sign_links_schema")
+        try:
+            from sign_links.schema import init_sign_links_schema
+            init_sign_links_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT sign_links_schema")
+            logging.exception(
+                "Схема раздела «Ссылка на подписание» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT sign_links_schema")
 
     def cleanup_driver_chats_data(self, events_days=None, cache_days=None):
         """Ретеншн раздела «Чаты водителей»: журнал и кеш переписки.

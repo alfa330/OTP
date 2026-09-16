@@ -228,6 +228,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const ParcelsView = lazyWithRetry(() => import('./components/parcels/ParcelsView'));
+const SignLinksView = lazyWithRetry(() => import('./components/sign_links/SignLinksView'));
 const DriverChatsView = lazyWithRetry(() => import('./components/driver_chats/DriverChatsView'));
 const OlxLeadsView = lazyWithRetry(() => import('./components/olx/OlxLeadsView'));
 const OlxAdsView = lazyWithRetry(() => import('./components/olx/OlxAdsView'));
@@ -385,6 +386,7 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  *   ai_qa — AI_QA_SUBJECT_DEPARTMENT_CODES + наблюдатель «Маркетинга»;
  *   sip_settings — SIP_SETTINGS_DEPARTMENT_CODES;
  *   parcels — PARCELS_SECTION_DEPARTMENT_CODES;
+ *   sign_links — SIGN_LINKS_SECTION_DEPARTMENT_CODES;
  *   group_late_bot — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES + главы фронт-офисов;
  *   download_icore_phone — ICORE_PHONE_DEPARTMENT_IDS (367 ОП, 560 ТЭЗ);
  *   работа с линией (графики, часы, оценки, шкала, зарплата) — по
@@ -445,6 +447,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     contests: ['szov'],
     // Реестры
     parcels: ['front_office', 'szov'],
+    sign_links: ['front_office', 'szov'],
 };
 
 /* Цвет плитки значка — свой на каждый блок меню.
@@ -690,6 +693,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     fleet_edm: 'EDM provider',
     operators: 'Operators',
     parcels: 'Unclaimed parcels',
+    sign_links: 'Signing links',
     driver_chats: 'Driver chats',
     driver_mailings: 'Driver mailings',
     payments: 'Invoice approval',
@@ -2289,6 +2293,35 @@ const canAccessParcelsSectionForUser = (userLike) => {
     );
 };
 
+/* «Ссылка на подписание» — ИИН водителя → ссылка на подписание документов
+   через eGov Mobile, генерация на сервере (просьба владельца 16.09.2026).
+
+   Периметр тот же, что у «Посылок»: два отдела — СЗоВ и фронт-офисы — в любой
+   роли, кроме тренера; главы этих отделов и глобальные админы. Журнал запросов
+   внутри раздела открыт только админам и главам — это решает бэкенд
+   (sign_links/access.py), здесь только «показывать ли пункт меню». */
+const SIGN_LINKS_SECTION_DEPARTMENT_CODES = ['front_office', 'szov'];
+
+const isSignLinksSectionDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).some(
+        (code) => SIGN_LINKS_SECTION_DEPARTMENT_CODES.includes(code),
+    )
+);
+
+const canAccessSignLinksSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    if (role === 'trainer') return false;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
+    // отделов раздел не нужен (главы СЗоВ и фронт-офисов проходят ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isSignLinksSectionDepartmentHead(userLike)) return true;
+    return SIGN_LINKS_SECTION_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode),
+    );
+};
+
 /* «Чаты водителей» — поиск переписки водителя и передача её чат-менеджеру
    (задача #271).
 
@@ -2422,7 +2455,7 @@ const canAccessOpFunnelSectionForUser = (userLike) => {
         === OP_FUNNEL_SECTION_DEPARTMENT_CODE;
 };
 
-// Разделы «Обращения», «Вики» и «Посылки» оператор открывает только после того,
+// Разделы «Обращения», «Вики», «Посылки» и «Ссылка на подписание» оператор открывает только после того,
 // как админ или супервайзер подтвердил его QR-код — тем же ключом, что открывает
 // записи в «Моих оценках». Правило повторяет серверное (crm/access.py,
 // wiki/access.py, parcels/access.py): экран с замком — удобство, а доступом
@@ -39712,6 +39745,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessParcelsSection = canAccessParcelsSectionForUser(user);
+            const canAccessSignLinksSection = canAccessSignLinksSectionForUser(user);
             const canAccessDriverChatsSection = canAccessDriverChatsSectionForUser(user);
             const canAccessOlxLeadsSection = canAccessOlxLeadsForUser(user);
             const canAccessOlxAdsSection = canAccessOlxAdsForUser(user);
@@ -48763,6 +48797,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // (фронт-офисы и СЗоВ), и в allowlist каждого его пришлось бы
                 // вписывать отдельно, а у СЗоВ allowlist'а нет вовсе.
                 if (view === 'parcels' && canAccessParcelsSection) return;
+                // «Ссылка на подписание» — тот же периметр и та же причина.
+                if (view === 'sign_links' && canAccessSignLinksSection) return;
                 // «Чаты водителей» — свой предикат: раздел живёт в одном отделе,
                 // но у СЗоВ allowlist'а разделов нет вовсе, а внутри отдела есть
                 // исключение (чат-менеджеры), которого карта отдела не выразит.
@@ -48788,7 +48824,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessParcelsSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -48859,7 +48895,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // мигнёт тому, кто доступ уже подтвердил, а сам раздел успеет
                 // получить 403.
                 if (view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
-                        || view === 'driver_chats') {
+                        || view === 'driver_chats' || view === 'sign_links') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept, profileHidesOperatorBlocks]);
@@ -50681,6 +50717,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderDividerIfInner(
                                         canAccessCrmSection && deptAllowsInner('crm_tickets'),
                                         canAccessParcelsSection && deptAllowsInner('parcels'),
+                                        canAccessSignLinksSection && deptAllowsInner('sign_links'),
                                         canAccessDriverChatsSection && deptAllowsInner('driver_chats'),
                                         canAccessOlxLeadsSection && deptAllowsInner('olx_leads'),
                                         canAccessOlxAdsSection && deptAllowsInner('olx_ads'),
@@ -50758,6 +50795,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             >
                                                 <FaIcon className="fas fa-box"></FaIcon>
                                                 <span className="sidebar-text">Посылки</span>
+                                            </button>
+                                        </li>
+                                    </SidebarDeptScope>
+                                    )}
+
+                                    {/* «Ссылка на подписание» — ИИН водителя → ссылка на
+                                        подписание документов через eGov Mobile. Аудитория та
+                                        же, что у «Посылок» (фронт-офисы и СЗоВ), поэтому пункт
+                                        объявлен ОДИН раз здесь, в общей части меню. Журнал
+                                        внутри раздела видят только админы и главы — это
+                                        решает бэкенд. */}
+                                    {canAccessSignLinksSection && (
+                                    <SidebarDeptScope section="sign_links" activeCode={activeDeptCode}>
+                                        <li>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleSidebarViewNavigation(e, 'sign_links')}
+                                                className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sign_links' ? 'bg-blue-700' : ''}`}
+                                            >
+                                                <FaIcon className="fas fa-file-signature"></FaIcon>
+                                                <span className="sidebar-text">Ссылка на подписание</span>
                                             </button>
                                         </li>
                                     </SidebarDeptScope>
@@ -51380,6 +51438,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 crmUnreadCount,
                 canAccessCrmSection,
                 canAccessParcelsSection,
+                canAccessSignLinksSection,
                 canAccessTouchesSection,
                 canAccessOpFunnelSection,
                 canAccessDriverMailings,
@@ -51831,6 +51890,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ) : (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка реестра…</div>}>
                                 <ParcelsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        ))}
+                        {view === "sign_links" && canAccessSignLinksSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Ссылка на подписание"
+                                description="Здесь по ИИН водителя выдаётся ссылка на подписание его документов. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <SignLinksView
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
