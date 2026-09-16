@@ -148,7 +148,7 @@ export const OP_METRICS = [
         key: 'op_sl', group: 'day', label: 'SL',
         hint: (s) => (opAnswerMomentMissing(s)
             ? ANSWER_MOMENT_MISSING
-            : `Отвечено не позже ${s?.sl_threshold_seconds ?? 20} с${opMeasuredNote(s)}`),
+            : `Отвечено не позже ${s?.sl_threshold_seconds ?? 20} с после входа в очередь${opMeasuredNote(s)}`),
         read: (s) => ({ value: formatRatio(s.totals?.sl), tone: slTone(s.totals?.sl) }),
     },
     {
@@ -160,7 +160,7 @@ export const OP_METRICS = [
         key: 'op_avg_wait', group: 'day', label: 'Среднее ожидание',
         hint: (s) => (opAnswerMomentMissing(s)
             ? ANSWER_MOMENT_MISSING
-            : `До ответа сотрудника, по принятым${opMeasuredNote(s)}`),
+            : `От входа в очередь (после автоинформатора) до ответа сотрудника${opMeasuredNote(s)}`),
         read: (s) => ({ value: formatSeconds(s.totals?.avg_wait_seconds) }),
     },
     {

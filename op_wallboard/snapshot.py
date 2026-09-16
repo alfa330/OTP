@@ -29,6 +29,20 @@ SL по неполному измерению: у части телефонов 
 ответа известен; при нуле измеренных SL и ожидание — None (на экране «—»), а не 0 %: ноль
 здесь читался бы как катастрофа на линии.
 
+Откуда вход в очередь (и почему не `started_at`)
+------------------------------------------------
+Ожидание считается от входа в очередь, а не от прихода звонка на станцию (решение владельца
+16.09.2026): перед каждой очередью ОП играет автоинформатор постоянной длины (Jana → 3034
+16 с, iTaxi → 3001 и Ноль Такси → 3041 26 с, Центр регистрации → 3010 7 с…), и он ожиданием
+не является. Станция отдаёт на звонок одну строку — то строку прихода, то строку входа в
+очередь, поэтому `started_at` касания это либо приход, либо вход, и различить их можно по
+`linkedid`: его целая часть — секунда прихода (epoch создания канала). Длина автоинформатора
+очереди не хранится нигде, она вычисляется из самих касаний: у строк входа в очередь
+`started_at − приход` равен ей с точностью до секунды (`announcement_seconds_from_deltas`),
+и вход в очередь = max(`started_at`, приход + длина) (`attach_queue_entry`). Очереди без
+устойчивой длины (меню IVR, где каждый жмёт кнопку в своё время; прямые очереди) правки не
+получают — там `started_at` остаётся точкой отсчёта.
+
 Здесь нет ни базы, ни Flask: на вход — списки словарей, на выход — словарь снимка.
 """
 
@@ -118,6 +132,81 @@ def _finish(bucket):
     out['avg_wait_seconds'] = (bucket['wait_seconds'] // waited if waited else None)
     out.pop('waited', None)
     out.pop('talk_measured_seconds', None)
+    return out
+
+
+def arrival_from_linkedid(linkedid):
+    """Секунда прихода звонка на станцию из linkedid («1789533127.1074887») — наивное время
+    Алматы. Хвост после точки — порядковый номер канала, к времени отношения не имеет."""
+    head = str(linkedid or '').split('.', 1)[0]
+    if not head.isdigit():
+        return None
+    return datetime.fromtimestamp(int(head), tz=_ALMATY).replace(tzinfo=None)
+
+
+def _touch_queue(value):
+    """Очередь касания для поиска длины автоинформатора; через несколько очередей — первая."""
+    parts = [p for p in str(value or '').split(',') if p]
+    return min(parts) if parts else ''
+
+
+# Длина автоинформатора признаётся постоянной, если вокруг самой частой задержки (±1 с)
+# собралось не меньше стольких строк и не меньше такой доли всех положительных задержек.
+# Меню IVR (кто-то жмёт кнопку сразу, кто-то слушает до конца) этот порог не проходит.
+ANNOUNCEMENT_MIN_SAMPLES = 5
+ANNOUNCEMENT_MIN_SHARE = 0.5
+ANNOUNCEMENT_MAX_SECONDS = 120
+
+
+def announcement_seconds_from_deltas(rows, min_samples=ANNOUNCEMENT_MIN_SAMPLES,
+                                     min_share=ANNOUNCEMENT_MIN_SHARE):
+    """{очередь: длина автоинформатора, с} из троек (очередь, started_at − приход, число строк).
+
+    Считаются только положительные задержки в разумных пределах: ноль — строка прихода,
+    а не входа; больше двух минут — повторный вход в очередь после перевода, не автоинформатор."""
+    counts = defaultdict(lambda: defaultdict(int))
+    for queue, delta, count in rows or []:
+        try:
+            delta, count = int(delta), int(count)
+        except (TypeError, ValueError):
+            continue
+        if 0 < delta <= ANNOUNCEMENT_MAX_SECONDS and count > 0 and queue:
+            counts[str(queue)][delta] += count
+    result = {}
+    for queue, deltas in counts.items():
+        total = sum(deltas.values())
+        mode = max(deltas, key=lambda d: (deltas[d], -d))
+        cluster = sum(n for d, n in deltas.items() if abs(d - mode) <= 1)
+        if cluster >= min_samples and cluster >= min_share * total:
+            result[queue] = mode
+    return result
+
+
+def attach_queue_entry(touches, announce_seconds):
+    """Подставить входящим `queued_at` — момент входа в очередь (см. докстринг модуля).
+
+    Вход = max(started_at, приход + длина автоинформатора очереди). Если длины у очереди нет
+    или linkedid не разбирается, `queued_at` не ставится, и отсчёт остаётся от started_at.
+    Возвращает новые словари, исходные не трогает."""
+    out = []
+    for touch in touches:
+        started = _parse(touch.get('started_at'))
+        seconds = (announce_seconds or {}).get(_touch_queue(touch.get('queue')))
+        arrival = arrival_from_linkedid(touch.get('linkedid'))
+        if (touch.get('call_type') not in _INCOMING_TYPES or started is None
+                or seconds is None or arrival is None):
+            out.append(touch)
+            continue
+        queued = max(started, arrival + timedelta(seconds=int(seconds)))
+        span = int(touch.get('dial_seconds') or touch.get('talk_seconds') or 0)
+        if queued > started + timedelta(seconds=span):
+            # Автоинформатор длиннее самого звонка — так не бывает у дошедшего до очереди;
+            # значит, linkedid чужой или длина устарела. Честнее не править вовсе.
+            out.append(touch)
+            continue
+        enriched = dict(touch)
+        enriched['queued_at'] = queued.strftime('%Y-%m-%d %H:%M:%S')
+        out.append(enriched)
     return out
 
 
@@ -227,7 +316,9 @@ def aggregate(touches, sl_seconds=DEFAULT_SL_SECONDS):
             continue
         answered = call_type == touches_mod.TYPE_IN and talk > 0
         answered_at = _parse(touch.get('answered_at'))
-        wait = int((answered_at - started).total_seconds()) if (answered and answered_at) else None
+        # Ожидание — от входа в очередь (queued_at), а без него — от начала строки.
+        queued = _parse(touch.get('queued_at')) or started
+        wait = int((answered_at - queued).total_seconds()) if (answered and answered_at) else None
         totals['arrived'] += 1
         if answered:
             totals['answered'] += 1
@@ -326,8 +417,11 @@ def count_now(people_rows):
 
 def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
              bridge_state, now, sl_seconds=DEFAULT_SL_SECONDS,
-             ar_min_percent=DEFAULT_AR_MIN_PERCENT, ar_max_percent=DEFAULT_AR_MAX_PERCENT):
-    """Снимок целиком. `bridge_state` — строка `cdr_agent_state` (live_at, last_seen_at)."""
+             ar_min_percent=DEFAULT_AR_MIN_PERCENT, ar_max_percent=DEFAULT_AR_MAX_PERCENT,
+             announce_seconds=None):
+    """Снимок целиком. `bridge_state` — строка `cdr_agent_state` (live_at, last_seen_at);
+    `announce_seconds` — {очередь: длина автоинформатора}, по которой касаниям уже поставлен
+    `queued_at` (отдаётся в снимке для прозрачности: видно, от чего отсчитано ожидание)."""
     parts = aggregate(touches, sl_seconds)
     rows = build_people(people, live_statuses, status_entry, parts['by_ext'], resolve_name)
     live_at = _parse(bridge_state.get('live_at')) if bridge_state else None
@@ -336,6 +430,7 @@ def assemble(*, day, touches, people, live_statuses, status_entry, resolve_name,
         'day': day.isoformat(),
         'captured_at': now.strftime('%Y-%m-%dT%H:%M:%S'),
         'sl_threshold_seconds': sl_seconds,
+        'announcement_seconds': dict(announce_seconds or {}),
         'ar_min_percent': ar_min_percent,
         'ar_max_percent': ar_max_percent,
         'totals': parts['totals'],

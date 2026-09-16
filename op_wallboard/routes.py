@@ -53,6 +53,31 @@ def load_phone_events(cursor, operator_ids, day):
             for row in cursor.fetchall()]
 
 
+ANNOUNCEMENT_LOOKBACK_DAYS = 7
+
+
+def load_announcement_deltas(cursor, day, days=ANNOUNCEMENT_LOOKBACK_DAYS):
+    """Тройки (очередь, started_at − приход, число строк) по входящим за последние сутки —
+    сырьё для `snapshot.announcement_seconds_from_deltas`.
+
+    `started_at` — наивное время Алматы, а EXTRACT(EPOCH) считает наивное время UTC, поэтому
+    перед вычитанием epoch прихода из linkedid снимаем те же пять часов, что и везде в разделе
+    (у Казахстана одна зона без перевода, см. cdr/queries.now_almaty)."""
+    cursor.execute("""
+        SELECT split_part(queue, ',', 1) AS q,
+               (EXTRACT(EPOCH FROM started_at - interval '5 hours')::bigint
+                    - split_part(linkedid, '.', 1)::bigint) AS delta,
+               count(*)
+          FROM cdr_touches
+         WHERE call_day BETWEEN %s AND %s
+           AND call_type LIKE 'Входящий%%'
+           AND queue <> ''
+           AND linkedid ~ '^[0-9]+\\.[0-9]+$'
+         GROUP BY 1, 2
+    """, (day - timedelta(days=days), day))
+    return [(row[0], int(row[1]), int(row[2])) for row in cursor.fetchall()]
+
+
 def make_department_resolver(db, code=DEPARTMENT_CODE):
     """id отдела по коду, с кэшем. Хардкодить id нельзя — он засеян, а не задан."""
     cache = {'ts': 0.0, 'id': None}
@@ -122,6 +147,24 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
     def _is_talking(status_key):
         return status_entry(status_key)[1] == 'talking'
 
+    # Длины автоинформаторов по очередям — константы станции, вычисленные из недели касаний.
+    # Считать их на каждый снимок (раз в десять секунд) незачем: раз в час, и в тот же день.
+    announce_cache = {'ts': 0.0, 'day': None, 'value': {}}
+
+    def _announcement_seconds(cursor, day, now_ts):
+        if announce_cache['day'] == day and now_ts - announce_cache['ts'] < 3600:
+            return announce_cache['value']
+        try:
+            value = snapshot_mod.announcement_seconds_from_deltas(
+                load_announcement_deltas(cursor, day))
+        except Exception:  # noqa: BLE001
+            # Без длин ожидание считается от начала строки — так было до этой правки;
+            # снимок при этом целый.
+            log.exception('%s: длины автоинформаторов не посчитались', label)
+            value = announce_cache['value'] or {}
+        announce_cache.update(ts=now_ts, day=day, value=value)
+        return value
+
     def _fetch():
         now = datetime.now(_ALMATY).replace(tzinfo=None)
         day = now.date()
@@ -133,6 +176,7 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
         with db._get_cursor() as cursor:
             touches = queries.day_touches_compact(cursor, day)
             bridge_state = queries.agent_state(cursor)
+            announce_seconds = _announcement_seconds(cursor, day, time.time())
             try:
                 phone_events = load_phone_events(cursor, operator_ids, day)
             except Exception:  # noqa: BLE001
@@ -140,6 +184,7 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 # снимок отдаёт их прочерком, а не уносит с собой всё табло.
                 log.exception('%s: события iCORE Phone не прочитались', label)
                 phone_events = []
+        touches = snapshot_mod.attach_queue_entry(touches, announce_seconds)
         touches = snapshot_mod.attach_answer_moments(touches, phone_events, ext_by_operator,
                                                      _is_talking)
         try:
@@ -153,7 +198,8 @@ def build_op_wallboard_blueprint(*, db, require_api_key, build_cors_preflight_re
             day=day, touches=touches, people=people, live_statuses=statuses,
             status_entry=status_entry, resolve_name=_resolve_name(),
             bridge_state=bridge_state, now=now, sl_seconds=sl_seconds,
-            ar_min_percent=ar_min_percent, ar_max_percent=ar_max_percent)
+            ar_min_percent=ar_min_percent, ar_max_percent=ar_max_percent,
+            announce_seconds=announce_seconds)
 
     def _snapshot():
         """Снимок из общего кэша — один на всех зрителей и на отбивку. Бросает, если

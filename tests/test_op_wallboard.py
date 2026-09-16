@@ -13,7 +13,7 @@
 
 import unittest
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -35,10 +35,16 @@ def status_entry(key):
 
 
 def touch(call_type='Входящий', started='2026-09-15 10:00:00', answered='2026-09-15 10:00:12',
-          talk=60, ext='6650', queue='3000'):
+          talk=60, ext='6650', queue='3000', linkedid=''):
     return {'started_at': started, 'answered_at': answered if talk else '', 'ext': ext,
             'call_type': call_type, 'result': 'Разговор' if talk else 'Не ответил',
-            'talk_seconds': talk, 'dial_seconds': 70, 'queue': queue}
+            'talk_seconds': talk, 'dial_seconds': 70, 'queue': queue, 'linkedid': linkedid}
+
+
+def linkedid_at(text, seq='1074887'):
+    """linkedid станции, у которого целая часть — секунда прихода (время Алматы)."""
+    arrival = datetime.strptime(text, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone(timedelta(hours=5)))
+    return '%d.%s' % (int(arrival.timestamp()), seq)
 
 
 class AggregateTests(unittest.TestCase):
@@ -125,6 +131,49 @@ class AggregateTests(unittest.TestCase):
 
     def test_garbage_started_at_is_skipped(self):
         self.assertEqual(S.aggregate([touch(started='вчера')])['totals']['arrived'], 0)
+
+
+class QueueEntryTests(unittest.TestCase):
+    """Ожидание — от входа в очередь: приход (linkedid) + автоинформатор, а не started_at."""
+
+    def test_announcement_length_is_the_stable_positive_delta(self):
+        rows = [('3034', 0, 175), ('3034', 16, 122), ('3034', 15, 6), ('3034', 17, 4), ('3034', 51, 1),
+                ('3010', 0, 461), ('3010', 7, 290), ('3010', 8, 45),
+                # Меню IVR: кто-то жмёт сразу, кто-то дослушивает — устойчивой длины нет.
+                ('3000', 0, 39), ('3000', 11, 3), ('3000', 15, 5), ('3000', 19, 5), ('3000', 25, 3),
+                # Прямая очередь без автоинформатора: положительных задержек почти нет.
+                ('3042', 0, 25), ('3042', 1, 2), ('3042', 66, 1)]
+        self.assertEqual(S.announcement_seconds_from_deltas(rows), {'3034': 16, '3010': 7})
+
+    def test_arrival_row_gets_queue_entry_after_the_announcement(self):
+        # Тестовый звонок владельца 16.09: пришёл 09:32:07, автоинформатор Jana 16 с,
+        # оператор снял трубку в 09:32:29 → в очереди ждал 6 с, а не 22.
+        call = touch(started='2026-09-16 09:32:07', answered='2026-09-16 09:32:29', talk=12,
+                     queue='3034', linkedid=linkedid_at('2026-09-16 09:32:07'))
+        call['dial_seconds'] = 33
+        out = S.attach_queue_entry([call], {'3034': 16})
+        self.assertEqual(out[0]['queued_at'], '2026-09-16 09:32:23')
+        totals = S.aggregate(out, sl_seconds=20)['totals']
+        self.assertEqual(totals['avg_wait_seconds'], 6)
+        self.assertAlmostEqual(totals['sl'], 1.0)
+
+    def test_row_that_already_starts_at_the_queue_is_kept(self):
+        # Станция отдала строку входа в очередь: started_at уже на 16 с позже прихода.
+        call = touch(started='2026-09-16 09:32:23', answered='2026-09-16 09:32:29', talk=12,
+                     queue='3034', linkedid=linkedid_at('2026-09-16 09:32:07'))
+        out = S.attach_queue_entry([call], {'3034': 16})
+        self.assertEqual(out[0]['queued_at'], '2026-09-16 09:32:23')
+
+    def test_without_length_or_linkedid_nothing_changes(self):
+        calls = [touch(queue='3000', linkedid=linkedid_at('2026-09-15 10:00:00')),   # длины нет
+                 touch(queue='3034', linkedid=''),                                    # linkedid нет
+                 touch(call_type='Исходящий', queue='3034', linkedid=linkedid_at('2026-09-15 10:00:00'))]
+        out = S.attach_queue_entry(calls, {'3034': 16})
+        self.assertEqual(out, calls)
+        # Автоинформатор длиннее звонка — linkedid чужой или длина устарела: не правим.
+        short = touch(queue='3034', talk=5, linkedid=linkedid_at('2026-09-15 10:00:00'))
+        short['dial_seconds'] = 5
+        self.assertNotIn('queued_at', S.attach_queue_entry([short], {'3034': 16})[0])
 
 
 def event(operator_id, at, key='занят'):
@@ -297,6 +346,11 @@ class RouteTests(unittest.TestCase):
                                     lambda cursor, ids, day: list(self.phone_events))
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.announcement_deltas = []
+        patcher = mock.patch.object(op_routes, 'load_announcement_deltas',
+                                    lambda cursor, day, days=7: list(self.announcement_deltas))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         def fetch_guarded_cache(**kwargs):
             if self.fail_fetch:
@@ -361,6 +415,18 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(totals['avg_wait_seconds'], 15)
         self.assertEqual(totals['avg_talk_seconds'], 56)
         self.assertAlmostEqual(totals['sl'], 1.0)
+
+    def test_wait_starts_after_the_announcement(self):
+        """Строка прихода + длина автоинформатора очереди из недели касаний → ожидание в очереди."""
+        self.requester['role'] = 'admin'
+        self.touches = [touch(answered='', talk=70, queue='3034',
+                              linkedid=linkedid_at('2026-09-15 10:00:00'))]
+        self.announcement_deltas = [('3034', 0, 100), ('3034', 10, 80), ('3034', 11, 5)]
+        self.phone_events = [event(1, datetime(2026, 9, 15, 10, 0, 15)),
+                             event(1, datetime(2026, 9, 15, 10, 1, 11), 'готов')]
+        body = self.client.get('/api/op_wallboard/snapshot').get_json()
+        self.assertEqual(body['announcement_seconds'], {'3034': 10})
+        self.assertEqual(body['totals']['avg_wait_seconds'], 5)   # 15 с от прихода − 10 с сообщения
 
     def test_no_data_at_all_is_a_503_in_words(self):
         self.requester['role'] = 'admin'

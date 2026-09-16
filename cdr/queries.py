@@ -604,7 +604,7 @@ def day_touches_compact(cursor, day):
     индексу call_day, тысячи строк, считается в памяти за миллисекунды."""
     cursor.execute("""
         SELECT started_at, answered_at, ext, call_type, result, talk_seconds,
-               dial_seconds, queue
+               dial_seconds, queue, linkedid
           FROM cdr_touches
          WHERE call_day = %s
     """, (day,))
@@ -614,6 +614,9 @@ def day_touches_compact(cursor, day):
         'ext': row[2] or '', 'call_type': row[3] or '', 'result': row[4] or '',
         'talk_seconds': int(row[5] or 0), 'dial_seconds': int(row[6] or 0),
         'queue': row[7] or '',
+        # Целая часть linkedid — секунда, когда звонок пришёл на станцию; табло по ней
+        # находит вход в очередь после автоинформатора (op_wallboard.snapshot).
+        'linkedid': row[8] or '',
     } for row in cursor.fetchall()]
 
 
