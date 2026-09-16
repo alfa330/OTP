@@ -62,20 +62,23 @@ MAX_BLOCKS = 12
 FULL_URL_BLOCKS = 6
 
 # Ключ источника → как он называется человеку и что здесь строка.
+# Слово «записи» для карточек источника не используется намеренно: в разделе про
+# звонки оно читается как «записи разговоров». Где нужен общий термин — «карточка».
 SOURCES = OrderedDict((
     ('amo', {
         'label': 'Основа', 'direction': 'op_osnova', 'subject': 'сделка',
-        'subjects': 'сделок', 'system': 'amoCRM, воронка «Отдел продаж»',
-        'moment': 'создание сделки',
+        'subjects': 'сделок', 'subject_gen': 'сделки', 'subject_dat': 'сделке',
+        'system': 'amoCRM, воронка «Отдел продаж»', 'moment': 'создание сделки',
     }),
     ('crm_paid_hire', {
         'label': 'Платный найм', 'direction': 'op_yandex_reg', 'subject': 'водитель',
-        'subjects': 'водителей', 'system': 'СРМ yataxi, лиды платного найма',
-        'moment': 'регистрация водителя',
+        'subjects': 'водителей', 'subject_gen': 'водителя', 'subject_dat': 'водителю',
+        'system': 'СРМ yataxi, лиды платного найма', 'moment': 'регистрация водителя',
     }),
     ('crm_stream', {
         'label': 'Поток', 'direction': 'op_potok', 'subject': 'лид',
-        'subjects': 'лидов', 'system': 'СРМ yataxi, базы «Отток» и «Фокус»',
+        'subjects': 'лидов', 'subject_gen': 'лида', 'subject_dat': 'лиду',
+        'system': 'СРМ yataxi, базы «Отток» и «Фокус»',
         'moment': 'взятие лида в работу (или загрузка базы)',
     }),
 ))

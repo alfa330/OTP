@@ -652,8 +652,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         rows = built['rows']
         if len(rows) > MAX_EXPORT_LEADS:
             return jsonify({
-                "error": "В периоде %d записей — больше, чем помещается в один файл (%d). "
-                         "Возьмите период короче." % (len(rows), MAX_EXPORT_LEADS),
+                "error": "В периоде %d %s — больше, чем помещается в один файл (%d). "
+                         "Возьмите период короче." % (len(rows), info['subjects'], MAX_EXPORT_LEADS),
                 "code": "CDR_EXPORT_TOO_BIG",
             }), 400
         common = dict(
@@ -690,7 +690,7 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         назван на планёрке; дописываются только сутки без снимка и незакрытые.
         """
         if not access.can_sync(ctx):
-            return jsonify({"error": "Догружать записи из источника вам не разрешено",
+            return jsonify({"error": "Догружать карточки из источника вам не разрешено",
                             "code": "CDR_SYNC_FORBIDDEN"}), 403
         source, info, day_from, day_to, _touches_to = _lead_scope()
         if (day_to - day_from).days + 1 > LEADS_SYNC_MAX_DAYS:

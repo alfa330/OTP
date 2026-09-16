@@ -16,11 +16,13 @@ export const SOURCE_OPTIONS = [
 
 export const SOURCE_LABELS = Object.fromEntries(SOURCE_OPTIONS.map((o) => [o.value, o.label]));
 
-/** Кто в строке: сделка, водитель или лид — подписи меняются вместе с источником. */
+/** Кто в строке: сделка, водитель или лид — подписи меняются вместе с источником.
+ *  Слово «записи» здесь не используется намеренно: в разделе про звонки оно
+ *  читается как «записи разговоров», а речь о карточках источника. */
 export const SUBJECT = {
-    amo: { one: 'сделка', many: 'сделок', gen: 'сделки', date: 'Создана' },
-    crm_paid_hire: { one: 'водитель', many: 'водителей', gen: 'водителя', date: 'Зарегистрирован' },
-    crm_stream: { one: 'лид', many: 'лидов', gen: 'лида', date: 'Взят в работу' },
+    amo: { one: 'сделка', many: 'сделок', gen: 'сделки', acc: 'сделки', date: 'Создана' },
+    crm_paid_hire: { one: 'водитель', many: 'водителей', gen: 'водителя', acc: 'водителей', date: 'Зарегистрирован' },
+    crm_stream: { one: 'лид', many: 'лидов', gen: 'лида', acc: 'лиды', date: 'Взят в работу' },
 };
 
 export const subjectOf = (source) => SUBJECT[source] || SUBJECT.amo;

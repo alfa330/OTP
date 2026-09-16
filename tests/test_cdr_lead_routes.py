@@ -270,7 +270,7 @@ class LeadRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.data.decode('utf-8'))
         self.assertEqual(list(payload)[0], 'КОНТЕКСТ_ДЛЯ_ИИ')
-        self.assertEqual(len(payload['записи']), 2)
+        self.assertEqual(len(payload['карточки']), 2)
 
     # ── /leads/sync ──────────────────────────────────────────────────────────
 

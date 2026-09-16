@@ -124,7 +124,7 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
         setError(null);
         return axios.get(`${base}/leads`, { headers: headers(), params: { ...query, sync: withSync ? 1 : 0 } })
             .then((response) => setData(response.data))
-            .catch((exc) => setError(errText(exc, 'Не удалось загрузить записи')))
+            .catch((exc) => setError(errText(exc, `Не удалось загрузить ${subjectOf(source).acc}`)))
             .finally(() => setLoading(false));
     }, [base, headers, query]);
 
@@ -177,7 +177,7 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
         axios.post(`${base}/leads/sync`, null, {
             headers: headers(), params: { source, date_from: range.from, date_to: range.to },
         })
-            .then(() => toastRef.current?.('Догрузка записей запущена — цифры обновятся сами', 'success'))
+            .then(() => toastRef.current?.(`Догрузка ${subjectOf(source).many} из источника запущена — цифры обновятся сами`, 'success'))
             .catch((exc) => {
                 setSyncing(false);
                 toastRef.current?.(errText(exc, 'Не удалось запустить догрузку'), 'error');
@@ -367,12 +367,12 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
                         {runActive ? (
                             <span className="inline-flex items-center gap-2">
                                 <Loader2 size={14} className="animate-spin text-blue-500" />
-                                Догружаем записи из источника — таблица обновится сама.
+                                Догружаем {subject.acc} из источника — таблица обновится сама.
                             </span>
                         ) : missingDays.length ? (
                             <>
                                 За {missingDays.length === 1 ? 'сутки' : `${missingDays.length} сут.`}{' '}
-                                ({missingDays.slice(0, 4).map(shortDay).join(', ')}{missingDays.length > 4 ? '…' : ''}) записей
+                                ({missingDays.slice(0, 4).map(shortDay).join(', ')}{missingDays.length > 4 ? '…' : ''}) {subject.many}
                                 в снимке нет: либо их не было, либо ночная выгрузка ещё не прошла.
                             </>
                         ) : (
@@ -381,8 +381,8 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
                     </span>
                     {!runActive ? (
                         <button type="button" className={`${iosBtnSecondary} shrink-0`} onClick={syncLeads}
-                                title="Дочитать записи за период из источника — сутки без снимка и незакрытые">
-                            <RefreshCw size={14} /> Догрузить записи
+                                title={`Дочитать ${subject.acc} за период из источника — сутки без снимка и незакрытые. Аудио не скачивается: у звонков остаются ссылки`}>
+                            <RefreshCw size={14} /> Догрузить {subject.acc}
                         </button>
                     ) : null}
                 </div>
@@ -534,9 +534,10 @@ export default function DealsView({ apiBaseUrl, withAccessTokenHeader, showToast
             ) : null}
 
             <p className="mt-4 px-1 text-[11.5px] leading-relaxed text-slate-400">
-                Звонок относится к записи, если начался не раньше чем за 2 минуты до её появления и раньше
-                следующей записи с тем же номером — карточку часто заводят уже после начала разговора.
-                Записи берутся из ночной выгрузки «Воронки ОП», звонки приносит мост из корпоративной сети.
+                Звонок относится к карточке, если начался не раньше чем за 2 минуты до её появления и раньше
+                следующей карточки с тем же номером — их часто заводят уже после начала разговора.
+                Карточки берутся из ночной выгрузки «Воронки ОП», звонки приносит мост из корпоративной сети;
+                записи разговоров не скачиваются — только ссылки, открываются из внутренней сети.
                 {data?.period?.touches_to ? ` Звонки взяты по ${shortDay(data.period.touches_to)} включительно.` : ''}
             </p>
         </>

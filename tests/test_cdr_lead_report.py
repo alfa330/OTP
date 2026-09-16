@@ -105,7 +105,7 @@ class WorkbookTests(unittest.TestCase):
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
         self.assertEqual(len(rows), 2)
         first = dict(zip(header, rows[0]))
-        self.assertEqual(first['ID сделки'], '101')
+        self.assertEqual(first['ID карточки'], '101')
         self.assertEqual(first['Относительно заявки'], 'до заявки')
         self.assertEqual(first['№ касания'], 1)
         self.assertEqual(first['Вн. номер'], '6474')
@@ -140,7 +140,7 @@ class JsonTests(unittest.TestCase):
         self.assertEqual(list(payload)[0], 'КОНТЕКСТ_ДЛЯ_ИИ')
         text = json.dumps(payload, ensure_ascii=False, default=str)
         self.assertIn('Жупан Аружан', text)
-        first = payload['записи'][0]
+        first = payload['карточки'][0]
         self.assertEqual(first['касаний'], 2)
         self.assertEqual(first['касания'][0]['результат'], 'Разговор')
         self.assertEqual(first['moment'], '2026-09-10 10:00:00')
