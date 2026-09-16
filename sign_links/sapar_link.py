@@ -77,10 +77,18 @@ _ANY_URL_RE = re.compile(r'(?:https?://|www\.)\S+', re.I)
 _NO_DOCUMENTS_HINTS = ('нет документов', 'документы подписаны', 'құжаттар жоқ',
                        'no documents', 'documents are signed')
 
-# Служебные адреса самой страницы: тема, скрипты, переключатели языка. Ссылкой
-# на подписание не бывают, и попадаться разбору не должны.
+# Служебные адреса самой страницы: тема, скрипты, переключатели языка и вход.
+# Ссылкой на подписание не бывают, и попадаться разбору не должны.
+#
+# Языковой префикс сам по себе НЕ признак оформления: живая ссылка на
+# подписание (снята с прода 16.09.2026) выглядит как
+# `https://tps-public.silt.kz/ru/egovsignmenu?token=…` — на том же хосте и с
+# тем же `/ru/`, что и переключатели языка. Первая версия отсекала все `/ru/`,
+# `/kz/`, `/en/` целиком и три попытки подряд назвала «незнакомым форматом».
+# Поэтому служебные страницы перечислены поимённо.
 _CHROME_PATH_PREFIXES = ('/theme/', '/uicorepackages/', '/scripts/', '/images2/',
-                         '/app.webmanifest', '/ru/', '/kz/', '/en/')
+                         '/app.webmanifest')
+_CHROME_PAGE_RE = re.compile(r'^/(ru|kz|en)/(link-generator|auth/)', re.I)
 _CHROME_HOSTS = ('cdnjs.cloudflare.com', 'cdn.jsdelivr.net', 'www.googletagmanager.com',
                  'pip.silt.kz', 'fonts.googleapis.com', 'fonts.gstatic.com')
 
@@ -104,6 +112,8 @@ def _is_chrome_link(url):
     path = (parts.path or '').lower()
     if not parts.netloc and not path.startswith('/'):
         # «#», «javascript:», относительные хвосты — не адрес для водителя.
+        return True
+    if _CHROME_PAGE_RE.match(path):
         return True
     return any(path.startswith(prefix) for prefix in _CHROME_PATH_PREFIXES)
 

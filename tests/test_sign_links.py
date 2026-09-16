@@ -246,6 +246,24 @@ class ParseResponseTests(unittest.TestCase):
         self.assertIsNone(link)
         self.assertEqual(message, 'Нет документов на подписание. Документы подписаны')
 
+    def test_the_live_success_format_a_bare_link_in_the_postback_alert(self):
+        """Формат снят с прода 16.09.2026 (журнал строк 6–8): та же плашка
+        `#postback-message`, что и у «документов нет», но с голой ссылкой на
+        ХОСТЕ ГЕНЕРАТОРА и с языковым префиксом `/ru/`. Первая версия разбора
+        отсекала все `/ru/` как переключатели языка и три попытки подряд
+        назвала «незнакомым форматом»."""
+        link = 'https://tps-public.silt.kz/ru/egovsignmenu?token=eyJhbGciOiJI.abc-def_123'
+        outcome, found, message = sapar_link.parse_response(page(postback=link))
+        self.assertEqual(outcome, sapar_link.LINK)
+        self.assertEqual(found, link)
+        self.assertIsNone(message)
+        self.assertEqual(sapar_link.link_host(link), 'tps-public.silt.kz')
+        # А переключатели языка и вход на том же хосте по-прежнему не ссылка.
+        for chrome in ('/kz/link-generator', '/en/link-generator', '/ru/auth/login',
+                       'https://tps-public.silt.kz/ru/link-generator'):
+            self.assertTrue(sapar_link._is_chrome_link(chrome), chrome)
+        self.assertFalse(sapar_link._is_chrome_link(link))
+
     def test_link_in_an_anchor_is_found_and_page_chrome_is_not(self):
         outcome, link, _message = sapar_link.parse_response(page(
             body='<div id="postback-message"><a href="https://sign.example.kz/s/abc?x=1&amp;y=2">'
