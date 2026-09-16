@@ -222,7 +222,9 @@ class OktellRecordAudioTests(unittest.TestCase):
         effect_start = frontend.index("// Для старых импортов audio_path")
         effect = frontend[effect_start:effect_start + 900]
         self.assertNotIn("!existingEvaluation?.audio_path", effect)
-        self.assertIn("getImportedAudioUrl(existingEvaluation.id, userId)", effect)
+        # Ответ ручки — объект: ссылка на копию в облаке или, у записей отдела продаж,
+        # ссылка на сервер записей, пока копию везёт мост (533aeaa4).
+        self.assertIn("getImportedAudio(existingEvaluation.id, userId)", effect)
 
     def test_attached_import_audio_hides_upload_and_duration_check(self):
         frontend = FRONTEND_PATH.read_text(encoding="utf-8")
