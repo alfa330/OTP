@@ -433,22 +433,30 @@ class ChatSectionFrontendTests(unittest.TestCase):
             self.assertIn(fn, model, "расчёт биллинга чата удалять нельзя — он готов")
 
     def test_chat_billing_table_declares_every_column_it_renders(self):
-        """Заголовки и ячейки таблицы биллинга чата собираются РАЗДЕЛЬНО.
+        """Шапка и ячейки таблицы биллинга чата идут из ОДНОГО списка колонок разреза.
 
-        Шапка идёт циклом по CHAT_BILLING_COLUMNS, тело — руками в renderMetricsCells.
-        Коммит 60f865a2 выкинул константу целиком (вместе с колонкой AR), а цикл по
-        ней оставил, и вкладка «Биллинг» у чата упала с ReferenceError в режимах
-        «Таксопарки» и «Чатники» — сборка такое не ловит, минификатор оставляет
-        необъявленное имя как есть. Сторожим и объявление, и совпадение длин.
+        Коммит 60f865a2 выкинул константу колонок целиком (вместе с AR), а цикл по ней
+        оставил, и вкладка «Биллинг» у чата упала с ReferenceError — сборка такое не
+        ловит, минификатор оставляет необъявленное имя как есть. Теперь колонки разрезов
+        лежат в CHAT_BILLING_COLUMN_SETS, и сторожим, что у каждой колонки каждого
+        разреза объявлена ячейка, а шапка и строка обходят один и тот же список.
         """
         source = _read(LINE_VIEW)
-        match = re.search(r"const CHAT_BILLING_COLUMNS = \[(.*?)\];", source, re.S)
-        self.assertIsNotNone(match, "CHAT_BILLING_COLUMNS должна быть объявлена")
-        columns = re.findall(r"key: '([a-z_]+)'", match.group(1))
+        sets = source[source.index("const CHAT_BILLING_COLUMN_SETS = {"):]
+        sets = sets[:sets.index("\n};")]
+        keys = set(re.findall(r"\['([a-z_]+)', '", sets))
+        self.assertTrue(keys, "CHAT_BILLING_COLUMN_SETS должна быть объявлена")
+        cells = source[source.index("const CHAT_BILLING_CELLS = {"):]
+        cells = cells[:cells.index("\n};")]
+        declared = set(re.findall(r"^  ([a-z_]+): \{", cells, re.M))
+        self.assertEqual(keys - declared, set(), "у колонки разреза нет объявленной ячейки")
+        for mode in ("park", "operator", "grouping", "groupingPark"):
+            self.assertIn(f"  {mode}: [", sets, f"нет набора колонок «{mode}»")
         body = source[source.index("const ChatBillingTable = "):]
-        body = body[:body.index("const firstColumnLabel")]
-        self.assertEqual(len(columns), body.count("<td "),
-                         "число колонок в шапке разошлось с числом ячеек в строке")
+        body = body[:body.index("// Разрез по людям")]
+        self.assertEqual(body.count("columns.map("), 2, "шапка и строка должны обходить один список")
+        self.assertNotIn("CHAT_BILLING_COLUMNS", source.replace("CHAT_BILLING_COLUMNS_", ""),
+                         "осталась ссылка на удалённую константу колонок")
 
     def test_chat_has_no_answer_rate_anywhere(self):
         """AR — телефонный показатель, у чата его нет.

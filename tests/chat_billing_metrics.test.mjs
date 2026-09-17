@@ -38,13 +38,15 @@ test('у каждого среднего свой знаменатель', () =>
   assert.equal(averages.firstReplySeconds, 150);
   assert.equal(averages.innerReplySeconds, 150);
   assert.equal(averages.sl, 0.5);
-  assert.equal(formatChatBillingRating(averages.rating), '4,33');
+  assert.equal(formatChatBillingRating(averages.rating), '4,3');
   const empty = chatBillingAverages({ chats: 3, answered: 0 });
   assert.equal(empty.firstReplySeconds, null);
   assert.equal(empty.innerReplySeconds, null);
   assert.equal(empty.rating, null);
   assert.equal(formatChatBillingRating(empty.rating), '—');
-  assert.equal(formatChatBillingRating(5), '5,00');
+  assert.equal(formatChatBillingRating(5), '5,0');
+  // Как в ежедневном отчёте СЗоВ: один знак, половина вверх.
+  assert.equal(formatChatBillingRating(4.25), '4,3');
 });
 
 test('час группировки — промежуток', () => {

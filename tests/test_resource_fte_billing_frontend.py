@@ -133,8 +133,8 @@ class BillingGroupingFrontendTests(unittest.TestCase):
         # таксопарку. Смен и комментариев линии у неё нет, таблица — чатовая.
         self.assertEqual(re.findall(r"key: '(\w+)'", self._block("const CHAT_BILLING_MODES = [", "];")),
                          ["park", "operator", "detail", "grouping"])
-        self.assertIn('<ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode="grouping" />',
-                      self.source)
+        self.assertIn('<ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" '
+                      "mode={billingReport.park ? 'groupingPark' : 'grouping'} />", self.source)
         self.assertIn("billingMode === 'grouping' && !cfg.hasBillingTalkTime ? (", self.source)
         self.assertIn("params.park = requestedPark", self.source)
         self.assertIn("@app.route('/api/resource_fte/chat/billing_grouping', methods=['GET', 'OPTIONS'])",

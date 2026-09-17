@@ -115,12 +115,15 @@ from resource_fte.chat import (
     build_chat_uplift_profile,
     fit_first_reply_curve,
     get_chat_analytics,
+    attach_chat_billing_grouping_staff,
+    get_chat_billing_daily,
     get_chat_billing_detail_export_rows,
     get_chat_billing_details,
     get_chat_billing_grouping,
     get_chat_billing_grouping_by_park,
     get_chat_billing_operators,
     get_chat_billing_report,
+    get_chat_billing_staff,
     get_chat_day,
     get_chat_operator_availability,
     get_chat_overview,
@@ -9824,11 +9827,14 @@ def api_resource_fte_chat_billing():
         return jsonify({"error": "group_by должен быть park или transport"}), 400
 
     try:
-        payload = get_chat_billing_report(
-            db, params['start_day'], params['end_day'],
-            minute_from=params['minute_from'], minute_to=params['minute_to'],
-            sl_seconds=params['sl_seconds'], group_by=group_by,
-        )
+        window = dict(minute_from=params['minute_from'], minute_to=params['minute_to'],
+                      sl_seconds=params['sl_seconds'])
+        # Разрез по паркам — ежедневный отчёт СЗоВ: к факту добавляются план чатов и
+        # часы работы дня. По транспорту плана нет — прогноз строится по паркам.
+        payload = (get_chat_billing_daily(db, params['start_day'], params['end_day'], **window)
+                   if group_by == 'park' else
+                   get_chat_billing_report(db, params['start_day'], params['end_day'],
+                                           group_by=group_by, **window))
         return jsonify({"status": "success",
                         **_chat_billing_response_meta(params, group_by),
                         **payload}), 200
@@ -9935,11 +9941,17 @@ def api_resource_fte_chat_billing_grouping():
         return error_response, error_status
 
     try:
+        park = _chat_billing_park_arg()
         payload = get_chat_billing_grouping(
             db, params['start_day'], params['end_day'],
             minute_from=params['minute_from'], minute_to=params['minute_to'],
-            sl_seconds=params['sl_seconds'], park=_chat_billing_park_arg(),
+            sl_seconds=params['sl_seconds'], park=park,
         )
+        if not park:
+            # Сотрудники по часам — только у всего чата: люди не делятся по паркам.
+            attach_chat_billing_grouping_staff(
+                payload, get_chat_billing_staff(db, params['start_day'], params['end_day']),
+                params['minute_from'], params['minute_to'])
         return jsonify({"status": "success",
                         **_chat_billing_response_meta(params),
                         **payload}), 200
@@ -9957,16 +9969,16 @@ def api_resource_fte_chat_billing_grouping():
 # Числом, а не текстом: по колонке должны работать формулы. Общий формат Excel сам
 # показывает 7 без «,0» и 2,5 с запятой.
 _CHAT_BILLING_EXPORT_PCT_FMT = '0.0%'
-_CHAT_BILLING_EXPORT_RATING_FMT = '0.00'
+_CHAT_BILLING_EXPORT_RATING_FMT = '0.0'
 
 _CHAT_BILLING_EXPORT_SUMMARY_COLUMNS = [
     ('chats', 'Поступило', 12, None),
     ('answered', 'Обслужено', 12, None),
     ('no_reply', 'Без ответа', 12, None),
-    ('first_reply', 'Ср. первая реакция, мин', 16, None),
+    ('first_reply', 'Ср. реакция на 1 сообщение, мин', 18, None),
     ('sl', 'SL', 10, _CHAT_BILLING_EXPORT_PCT_FMT),
-    ('inner_reply', 'Ср. время ответа, мин', 16, None),
-    ('rating', 'Ср. оценка', 12, _CHAT_BILLING_EXPORT_RATING_FMT),
+    ('inner_reply', 'Ср. время ответа внутри чата, мин', 18, None),
+    ('rating', 'Ср. оценка водителей', 12, _CHAT_BILLING_EXPORT_RATING_FMT),
 ]
 
 _CHAT_BILLING_EXPORT_DETAIL_COLUMNS = [
@@ -9975,9 +9987,9 @@ _CHAT_BILLING_EXPORT_DETAIL_COLUMNS = [
     ('client_number', 'Номер клиента', 16),
     ('client', 'Клиент', 24),
     ('operator', 'Чатник', 24),
-    ('first_reply_minutes', 'Первая реакция, мин', 14),
+    ('first_reply_minutes', 'Реакция на 1 сообщение, мин', 16),
     ('answered_sl', 'В цель', 9),
-    ('inner_reply_minutes', 'Время ответа, мин', 14),
+    ('inner_reply_minutes', 'Время ответа внутри чата, мин', 16),
     ('rating', 'Оценка', 9),
     ('incoming_messages', 'Сообщений от клиента', 21),
     ('outgoing_messages', 'Сообщений от чатника', 21),
@@ -10029,7 +10041,7 @@ def _chat_billing_export_metrics(item):
         _chat_billing_minutes(avg_first),
         _chat_billing_export_ratio(item.get('answered_sl'), chats),
         _chat_billing_minutes(avg_inner),
-        None if avg_rating is None else _chat_billing_round_half_up(avg_rating, 2),
+        None if avg_rating is None else _chat_billing_round_half_up(avg_rating, 1),
     ]
 
 
@@ -10060,94 +10072,305 @@ def _chat_billing_sheet_title(name, used):
     return title
 
 
-def _chat_billing_hour_label(hour):
-    hour = int(hour)
-    return f"{hour:02d}:00–{(hour + 1) % 24:02d}:00"
+_CHAT_BILLING_MONTHS_RU = ('Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль',
+                           'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
+
+# «Ежедневный отчёт по чатам» — колонки образца СЗоВ (#343) без служебной «Нужно удалить»:
+# (ключ, подпись, ширина, формат). Подписи дословно из образца, чтобы файл лёг рядом с
+# прежними месяцами без переименований.
+_CHAT_BILLING_DAILY_COLUMNS = (
+    ('date', 'Дата', 14, 'dd.mm.yyyy'),
+    ('park', 'Название очереди', 22, None),
+    ('plan', 'План (чатов)', 12, '0'),
+    ('chats', 'факт (чатов)', 12, None),
+    ('plan_match', '% совпадения прогноза', 14, '0%'),
+    ('first_reply', 'Среднее время реакции на 1 сообщение оператора (в минутах) в разрезе парков', 24, None),
+    ('inner_reply', 'Среднее время ответа внутри чата (в минутах) в разрезе парков', 24, None),
+    ('rating', 'Сред оценка водителей в разрезе парков', 16, '0.0'),
+    ('planned_hours', 'План по часам', 12, '0'),
+    ('fact_hours', 'Факт по часам', 12, '0'),
+    ('hours_delta', '% Пере/Недоработки', 13, '0%'),
+    ('comment', 'Комментарии', 40, None),
+)
+# Колонки, объединённые на весь блок парков дня — как в образце.
+_CHAT_BILLING_DAILY_DAY_KEYS = ('date', 'planned_hours', 'fact_hours', 'hours_delta', 'comment')
+# Порог оценки, ниже которого образец красит её тёмно-красным.
+CHAT_BILLING_LOW_RATING = 4.5
+
+# «Отчёт с группировкой по часам»: блок колонок на день. Сотрудники не делятся по паркам,
+# поэтому на листах парков их колонок нет.
+_CHAT_BILLING_HOURLY_COLUMNS = (
+    ('chats', 'Поступившие чаты', None, 13),
+    ('staff_planned', 'План(По сотрудникам)', None, 13),
+    ('staff_fact', 'Факт(По сотрудникам)', None, 13),
+    ('staff_delta', 'Разница', '0', 9),
+    ('first_reply', 'Ср вр реакции на 1 сообщение', None, 11),
+    ('inner_reply', 'Ср время ответа внутри чата', None, 11),
+)
+_CHAT_BILLING_HOURLY_STAFF_KEYS = frozenset({'staff_planned', 'staff_fact', 'staff_delta'})
 
 
-def _chat_billing_grouping_workbook(params, reports):
-    """«Группировка» чата: лист на таксопарк, внутри — блок на каждый день по часам.
+def _chat_billing_minutes_label(seconds):
+    minutes = _chat_billing_minutes(seconds)
+    if minutes is None:
+        return '—'
+    text = f"{minutes:.1f}".rstrip('0').rstrip('.')
+    return text.replace('.', ',')
 
-    Первый лист «Все таксопарки», если парк не выбран; выбран — только его лист.
-    Шапка часов — как у «Группировки» линии (голубая, по центру, в рамке), чтобы
-    два отчёта одного раздела читались одинаково."""
-    header_fill = PatternFill(start_color='B4C6E7', end_color='B4C6E7', fill_type='solid')
-    total_fill = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
-    bold_font = Font(bold=True)
-    side = Side(style='thin', color='808080')
+
+def _chat_billing_day_comment(day):
+    """Текст «Комментарии» как в образце: итог дня одной ячейкой для пересылки."""
+    totals = day.get('totals') or {}
+    try:
+        day_label = datetime.strptime(day.get('date') or '', '%Y-%m-%d').strftime('%d.%m.%Y')
+    except ValueError:
+        day_label = str(day.get('date') or '')
+    plan = totals.get('plan_chats')
+    avg_first = _chat_billing_export_ratio(totals.get('first_reply_seconds'), totals.get('answered'))
+    avg_rating = _chat_billing_export_ratio(totals.get('rating_sum'), totals.get('rated'))
+    rating_text = ('—' if avg_rating is None
+                   else f"{_chat_billing_round_half_up(avg_rating, 1):.1f}".replace('.', ','))
+    return (
+        f"Ежедневный отчет по чатам за {day_label}\n"
+        f"План чатов: {'—' if plan is None else int(_chat_billing_round_half_up(plan, 0))}\n"
+        f"Факт чатов: {int(totals.get('chats') or 0)}\n"
+        f"ASA - {_chat_billing_minutes_label(avg_first)} минуты\n"
+        f"Средняя оценка по чатам - {rating_text}"
+    )
+
+
+def _chat_billing_daily_values(item, day_date=None):
+    """Значения строки парка (или итога дня) по ключам _CHAT_BILLING_DAILY_COLUMNS."""
+    item = item or {}
+    chats = int(item.get('chats') or 0)
+    plan = item.get('plan_chats')
+    avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), item.get('answered'))
+    avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
+    avg_rating = _chat_billing_export_ratio(item.get('rating_sum'), item.get('rated'))
+    return {
+        'date': day_date,
+        'park': item.get('park'),
+        'plan': None if plan is None else _chat_billing_round_half_up(plan, 1),
+        # Пустая ячейка, а не ноль, — как в образце у парка, который за день не писал.
+        'chats': chats or None,
+        'plan_match': (chats / float(plan)) if plan else None,
+        'first_reply': _chat_billing_minutes(avg_first),
+        'inner_reply': _chat_billing_minutes(avg_inner),
+        'rating': None if avg_rating is None else _chat_billing_round_half_up(avg_rating, 1),
+    }
+
+
+def _chat_billing_daily_workbook(params, report):
+    """«Ежедневный отчёт по чатам» в формате образца СЗоВ: лист на месяц, блок на день.
+
+    В блоке строка на таксопарк и строка итога дня на голубой подложке; дата, часы работы и
+    комментарий объединены на весь блок. Итог дня — по обращениям всех парков (как в
+    биллинге), а не среднее средних по паркам, как считали формулы ручного файла."""
+    header_fill = PatternFill(start_color='DCDCDC', end_color='DCDCDC', fill_type='solid')
+    total_fill = PatternFill(start_color='9DC3E6', end_color='9DC3E6', fill_type='solid')
+    header_font = Font(bold=True, size=10)
+    low_rating_font = Font(color='9C0006')
+    side = Side(style='thin', color='000000')
     border = Border(left=side, right=side, top=side, bottom=side)
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    columns = [('hour', 'Час', 14, None)] + list(_CHAT_BILLING_EXPORT_SUMMARY_COLUMNS)
-    period_text = (
-        f"{params['start_day'].strftime('%d.%m.%Y')} — {params['end_day'].strftime('%d.%m.%Y')}, "
-        f"время {params['minute_from'] // 60:02d}:{params['minute_from'] % 60:02d}–"
-        f"{params['minute_to'] // 60:02d}:{params['minute_to'] % 60:02d}"
-    )
-    note = (f"Час — по началу обращения. SL — первая реакция за ≤ {params['sl_seconds']} сек "
-            f"от поступивших. Время ответа и первой реакции — в минутах")
-    weekdays = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
+    left = Alignment(horizontal='left', vertical='center')
+    keys = [key for key, _title, _width, _fmt in _CHAT_BILLING_DAILY_COLUMNS]
+    formats = {key: fmt for key, _title, _width, fmt in _CHAT_BILLING_DAILY_COLUMNS}
+    column_of = {key: index for index, key in enumerate(keys, start=1)}
 
-    def _write_row(ws, label, metrics, is_total=False):
-        ws.append([label, *metrics])
-        row_idx = ws.max_row
-        for column, (_key, _title, _width, fmt) in enumerate(columns, start=1):
-            cell = ws.cell(row=row_idx, column=column)
+    workbook = Workbook()
+    sheets = {}
+
+    def _sheet(day_date):
+        month_key = (day_date.year, day_date.month) if day_date else (0, 0)
+        if month_key in sheets:
+            return sheets[month_key]
+        ws = workbook.active if not sheets else workbook.create_sheet()
+        ws.title = (f"{_CHAT_BILLING_MONTHS_RU[day_date.month - 1]} {day_date.year}"
+                    if day_date else 'Ежедневный отчет')
+        for column, (_key, title, width, _fmt) in enumerate(_CHAT_BILLING_DAILY_COLUMNS, start=1):
+            cell = ws.cell(row=1, column=column, value=title)
+            cell.fill = header_fill
+            cell.font = header_font
             cell.alignment = center
             cell.border = border
-            if cell.value is None:
-                cell.value = '—'
-            elif fmt:
-                cell.number_format = fmt
-            if is_total:
-                cell.font = bold_font
-                cell.fill = total_fill
-            elif column == 1:
-                cell.font = bold_font
+            ws.column_dimensions[get_column_letter(column)].width = width
+        ws.row_dimensions[1].height = 64
+        ws.freeze_panes = 'A2'
+        sheets[month_key] = ws
+        return ws
+
+    def _put(ws, row_idx, key, value, fill=None):
+        cell = ws.cell(row=row_idx, column=column_of[key], value=value)
+        cell.border = border
+        cell.alignment = left if key == 'park' else center
+        if value is not None and formats.get(key):
+            cell.number_format = formats[key]
+        if fill is not None:
+            cell.fill = fill
+        return cell
+
+    days = (report or {}).get('days') or []
+    if not days:
+        ws = workbook.active
+        ws.title = 'Ежедневный отчет'
+        ws.append(['За выбранный период и окно времени обращений не нашлось'])
+    for day in days:
+        try:
+            day_date = datetime.strptime(day.get('date') or '', '%Y-%m-%d')
+        except ValueError:
+            day_date = None
+        ws = _sheet(day_date)
+        parks = day.get('parks') or []
+        first_row = ws.max_row + 1
+        for offset, item in enumerate(parks):
+            row_idx = first_row + offset
+            values = _chat_billing_daily_values(item)
+            for key in ('park', 'plan', 'chats', 'plan_match', 'first_reply', 'inner_reply', 'rating'):
+                cell = _put(ws, row_idx, key, values[key])
+                if key == 'rating' and values['rating'] is not None and values['rating'] < CHAT_BILLING_LOW_RATING:
+                    cell.font = low_rating_font
+            for key in _CHAT_BILLING_DAILY_DAY_KEYS:
+                _put(ws, row_idx, key, None)
+
+        # Дата, часы работы и комментарий — одной ячейкой на блок парков.
+        last_park_row = first_row + max(len(parks), 1) - 1
+        staff = day.get('staff') or {}
+        planned_hours = staff.get('planned_hours')
+        fact_hours = staff.get('fact_hours')
+        day_values = {
+            'date': day_date,
+            'planned_hours': planned_hours,
+            'fact_hours': fact_hours,
+            'hours_delta': ((fact_hours - planned_hours) / planned_hours
+                            if planned_hours and fact_hours is not None else None),
+            'comment': _chat_billing_day_comment(day),
+        }
+        for key in _CHAT_BILLING_DAILY_DAY_KEYS:
+            _put(ws, first_row, key, day_values[key])
+            if last_park_row > first_row:
+                ws.merge_cells(start_row=first_row, start_column=column_of[key],
+                               end_row=last_park_row, end_column=column_of[key])
+
+        total_row = last_park_row + 1
+        totals = _chat_billing_daily_values(day.get('totals'), day_date)
+        for key in keys:
+            value = totals.get(key) if key in totals else None
+            cell = _put(ws, total_row, key, value, fill=total_fill)
+            if key == 'rating' and value is not None and value < CHAT_BILLING_LOW_RATING:
+                cell.font = low_rating_font
+    return workbook
+
+
+def _chat_billing_hourly_workbook(params, reports):
+    """«Отчёт с группировкой по часам» в формате образца СЗоВ: лист на весь чат и по листу
+    на таксопарк; дни идут блоками колонок вправо, часы — строками, внизу «Общий итог».
+
+    Сотрудники есть только на листе всего чата. «Разница» = факт − план, ненулевая
+    заливается красным, как условное форматирование образца."""
+    bold = Font(bold=True)
+    thin = Side(style='thin', color='000000')
+    medium = Side(style='medium', color='000000')
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    mismatch_fill = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')
+    first_hour = max(0, int(params['minute_from']) // 60)
+    last_hour = min(23, int(params['minute_to']) // 60)
+    hours = list(range(first_hour, last_hour + 1))
 
     workbook = Workbook()
     used_titles = set()
     for index, (park, report) in enumerate(reports or [(None, {})]):
         ws = workbook.active if index == 0 else workbook.create_sheet()
-        park_label = park if park is not None else 'Все таксопарки'
-        ws.title = _chat_billing_sheet_title(park_label, used_titles)
-        for column, (_key, _title, width, _fmt) in enumerate(columns, start=1):
-            ws.column_dimensions[get_column_letter(column)].width = width
-        ws.append([park_label])
-        ws.cell(row=1, column=1).font = Font(bold=True, size=13)
-        ws.append([period_text])
-        ws.append([note])
+        ws.title = _chat_billing_sheet_title(park if park is not None else 'Все таксопарки', used_titles)
+        columns = [column for column in _CHAT_BILLING_HOURLY_COLUMNS
+                   if park is None or column[0] not in _CHAT_BILLING_HOURLY_STAFF_KEYS]
+        width = len(columns)
         days = (report or {}).get('days') or []
+
+        corner = ws.cell(row=2, column=1, value='Время')
+        corner.font = bold
+        corner.alignment = center
+        corner.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        ws.cell(row=1, column=1).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        ws.column_dimensions['A'].width = 11
+        ws.row_dimensions[2].height = 75
+        for offset, hour in enumerate(hours):
+            cell = ws.cell(row=3 + offset, column=1, value=hour)
+            cell.font = bold
+            cell.alignment = center
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        total_row = 3 + len(hours)
+        total_label = ws.cell(row=total_row, column=1, value='Общий итог')
+        total_label.font = bold
+        total_label.alignment = center
+        total_label.border = Border(left=thin, right=thin, top=thin, bottom=thin)
         if not days:
-            ws.append([])
-            ws.append(['За выбранный период и окно времени обращений не нашлось'])
+            ws.cell(row=1, column=2, value='За выбранный период и окно времени обращений не нашлось')
             continue
-        for day in days:
-            ws.append([])
+
+        for day_index, day in enumerate(days):
+            start_column = 2 + day_index * width
             try:
                 day_date = datetime.strptime(day.get('date') or '', '%Y-%m-%d')
-                day_title = f"{day_date.strftime('%d.%m.%Y')}, {weekdays[day_date.weekday()]}"
             except ValueError:
-                day_title = str(day.get('date') or '')
-            ws.append([day_title])
-            ws.cell(row=ws.max_row, column=1).font = bold_font
-            ws.append([title for _key, title, _width, _fmt in columns])
-            header_row = ws.max_row
-            for column in range(1, len(columns) + 1):
-                cell = ws.cell(row=header_row, column=column)
-                cell.fill = header_fill
-                cell.font = bold_font
+                day_date = day.get('date')
+            head = ws.cell(row=1, column=start_column, value=day_date)
+            head.number_format = 'dd.mm.yyyy'
+            head.font = bold
+            head.alignment = center
+            ws.merge_cells(start_row=1, start_column=start_column,
+                           end_row=1, end_column=start_column + width - 1)
+            for column_offset, (key, title, _fmt, column_width) in enumerate(columns):
+                column = start_column + column_offset
+                edge = medium if column_offset == 0 else thin
+                ws.column_dimensions[get_column_letter(column)].width = column_width
+                cell = ws.cell(row=2, column=column, value=title)
+                cell.font = bold
                 cell.alignment = center
-                cell.border = border
-            ws.row_dimensions[header_row].height = 32
-            for item in day.get('hours') or []:
-                _write_row(ws, _chat_billing_hour_label(item.get('hour') or 0),
-                           _chat_billing_export_metrics(item))
-            _write_row(ws, 'Итого за день', _chat_billing_export_metrics(day.get('totals')),
-                       is_total=True)
-        if len(days) > 1:
-            ws.append([])
-            _write_row(ws, 'Итого за период',
-                       _chat_billing_export_metrics((report or {}).get('totals')), is_total=True)
+                cell.border = Border(left=edge, right=thin, top=medium, bottom=thin)
+                ws.cell(row=1, column=column).border = Border(left=edge, right=thin, top=medium, bottom=thin)
+
+            by_hour = {int(item.get('hour') or 0): item for item in day.get('hours') or []}
+            for row_offset, hour in enumerate(hours):
+                item = by_hour.get(hour) or {}
+                planned = item.get('staff_planned')
+                fact = item.get('staff_fact')
+                values = {
+                    'chats': int(item.get('chats') or 0),
+                    'staff_planned': planned,
+                    'staff_fact': fact,
+                    'staff_delta': None if planned is None or fact is None else fact - planned,
+                    'first_reply': _chat_billing_minutes(_chat_billing_export_ratio(
+                        item.get('first_reply_seconds'), item.get('answered'))),
+                    'inner_reply': _chat_billing_minutes(_chat_billing_export_ratio(
+                        item.get('inner_reply_seconds'), item.get('inner_replied'))),
+                }
+                for column_offset, (key, _title, fmt, _width) in enumerate(columns):
+                    value = values[key]
+                    cell = ws.cell(row=3 + row_offset, column=start_column + column_offset, value=value)
+                    cell.alignment = center
+                    cell.border = Border(left=medium if column_offset == 0 else thin,
+                                         right=thin, top=thin, bottom=thin)
+                    if value is not None and fmt:
+                        cell.number_format = fmt
+                    if key == 'staff_delta' and value:
+                        cell.fill = mismatch_fill
+
+            totals = day.get('totals') or {}
+            total_values = {
+                'chats': int(totals.get('chats') or 0),
+                'first_reply': _chat_billing_minutes(_chat_billing_export_ratio(
+                    totals.get('first_reply_seconds'), totals.get('answered'))),
+                'inner_reply': _chat_billing_minutes(_chat_billing_export_ratio(
+                    totals.get('inner_reply_seconds'), totals.get('inner_replied'))),
+            }
+            for column_offset, (key, _title, _fmt, _width) in enumerate(columns):
+                cell = ws.cell(row=total_row, column=start_column + column_offset,
+                               value=total_values.get(key))
+                cell.alignment = center
+                cell.border = Border(left=medium if column_offset == 0 else thin,
+                                     right=thin, top=thin, bottom=thin)
+        ws.freeze_panes = 'B3'
     return workbook
 
 
@@ -10260,13 +10483,22 @@ def api_resource_fte_chat_billing_export():
         return jsonify({"error": "mode должен быть park, operator, detail или grouping"}), 400
 
     try:
+        window = dict(minute_from=params['minute_from'], minute_to=params['minute_to'],
+                      sl_seconds=params['sl_seconds'])
         if mode == 'grouping':
-            # Выбран таксопарк — файл только о нём; не выбран — лист на каждый парк.
-            workbook = _chat_billing_grouping_workbook(params, get_chat_billing_grouping_by_park(
-                db, params['start_day'], params['end_day'],
-                minute_from=params['minute_from'], minute_to=params['minute_to'],
-                sl_seconds=params['sl_seconds'], park=_chat_billing_park_arg(),
-            ))
+            # Формат «Отчёта с группировкой по часам»: выбран таксопарк — только его лист,
+            # не выбран — весь чат с сотрудниками и по листу на каждый парк.
+            reports = get_chat_billing_grouping_by_park(
+                db, params['start_day'], params['end_day'], park=_chat_billing_park_arg(), **window)
+            if reports and reports[0][0] is None:
+                attach_chat_billing_grouping_staff(
+                    reports[0][1], get_chat_billing_staff(db, params['start_day'], params['end_day']),
+                    params['minute_from'], params['minute_to'])
+            workbook = _chat_billing_hourly_workbook(params, reports)
+        elif mode == 'park':
+            # Формат «Ежедневного отчёта по чатам» СЗоВ.
+            workbook = _chat_billing_daily_workbook(params, get_chat_billing_daily(
+                db, params['start_day'], params['end_day'], **window))
         elif mode == 'detail':
             workbook = _chat_billing_export_workbook(mode, params, None, get_chat_billing_detail_export_rows(
                 db, params['start_day'], params['end_day'],

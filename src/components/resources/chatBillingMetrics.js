@@ -32,7 +32,8 @@ export const chatBillingMinutes = (seconds) => {
 };
 
 const MINUTES_FORMAT = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
-const RATING_FORMAT = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Оценка — с одним знаком, как в ежедневном отчёте СЗоВ («4,7»).
+const RATING_FORMAT = new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 export const formatChatBillingMinutes = (seconds) => {
   const minutes = chatBillingMinutes(seconds);
@@ -48,7 +49,7 @@ export const formatChatBillingMinutesUnit = (seconds) => {
 export const formatChatBillingRating = (value) => (
   value === null || value === undefined || !Number.isFinite(Number(value))
     ? '—'
-    : RATING_FORMAT.format(roundHalfUp(value, 2))
+    : RATING_FORMAT.format(roundHalfUp(value, 1))
 );
 
 // Час «Группировки» — промежуток, а не точка: в строку 09:00–10:00 идут обращения,

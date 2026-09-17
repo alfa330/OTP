@@ -2250,6 +2250,277 @@ def get_chat_billing_grouping_by_park(db, day_from: date, day_to: date, minute_f
     return reports
 
 
+# --- «Биллинг чатов»: план и сотрудники в формате отчётов СЗоВ --------------------------
+# Образцы постановщика (#343): «Ежедневный отчёт по чатам» — парки дня с планом и фактом
+# чатов, план и факт часов работы; «Отчёт с группировкой по часам» — поступившие чаты и
+# сотрудники по часам. В ручных файлах план и сотрудники вбивались шаблоном (одинаковые
+# во всех днях), здесь они берутся из данных раздела:
+#   план чатов — прогноз раздела (среднее того же дня недели в базовых неделях), разложенный
+#     по паркам их долями в тех же неделях; в ручном отчёте доли стояли константами;
+#   план сотрудников — выбранные смены аукциона чата (как «Запланировано смен» у линии);
+#   факт сотрудников — онлайн-статусы чатников. Головой часа считается тот, кто был онлайн
+#     хотя бы минуту: то же правило, что у табло СЗоВ по чату.
+# Квоту Chat2Desk ничего из этого не тратит: всё уже лежит в базе.
+
+CHAT_BILLING_STAFF_MIN_SECONDS = 60
+CHAT_BILLING_PHONE_SHIFT_KIND = "phone"
+
+
+def _chat_billing_window_hours(minute_from: int, minute_to: int) -> Tuple[int, int]:
+    return max(0, int(minute_from) // 60), min(23, int(minute_to) // 60)
+
+
+def get_chat_billing_plan(db, day_from: date, day_to: date) -> Dict[str, Any]:
+    """{"days": {день: [прогноз чатов по 24 часам]}, "shares": {парк: доля}}."""
+    forecast = build_chat_forecast(db, day_from, period_end_value=day_to)
+    days = {
+        item["forecast_date"]: [_to_float(row.get("forecast_chats"))
+                                for row in sorted(item["hourly_forecast"], key=lambda row: row["hour"])]
+        for item in forecast.get("days") or []
+    }
+    base = [value for value in (_parse_date(item) for item in forecast.get("base_week_starts") or [])
+            if value is not None]
+    shares: Dict[str, float] = {}
+    if base:
+        with db._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT {_CHAT_BILLING_PARK_SQL} AS park, COUNT(*)::int
+                FROM c2d_requests r
+                WHERE r.request_type = %s AND r.day BETWEEN %s AND %s
+                GROUP BY 1
+                """,
+                (CHAT_REQUEST_TYPE, min(base), max(base) + timedelta(days=6)),
+            )
+            rows = cursor.fetchall()
+        total = sum(max(0, int(count or 0)) for _, count in rows)
+        if total > 0:
+            shares = {str(park): int(count) / total for park, count in rows if count}
+    return {"days": days, "shares": shares}
+
+
+def _chat_billing_fact_staff_tx(cursor, day_from: date, day_to: date) -> List[Tuple[Any, ...]]:
+    """(день, час, чатник, секунды онлайн) — те же сегменты, что факт чатнико-часов раздела."""
+    cursor.execute(
+        """
+        SELECT (g.slot)::date AS d,
+               EXTRACT(HOUR FROM g.slot)::int AS hh,
+               s.operator_id,
+               SUM(EXTRACT(EPOCH FROM (
+                   LEAST(s.end_at, g.slot + INTERVAL '1 hour')
+                   - GREATEST(s.start_at, g.slot)
+               )))
+        FROM operator_status_segments s
+        JOIN users u ON u.id = s.operator_id
+        JOIN directions d ON d.id = u.direction_id
+        CROSS JOIN LATERAL generate_series(
+            date_trunc('hour', s.start_at),
+            s.end_at - INTERVAL '1 microsecond',
+            INTERVAL '1 hour'
+        ) AS g(slot)
+        WHERE s.status_key = %s
+          AND d.name ILIKE %s
+          AND s.status_date BETWEEN %s AND %s
+        GROUP BY 1, 2, 3
+        """,
+        (CHAT_ONLINE_STATUS_KEY, CHAT_DIRECTION_NAME_PATTERN,
+         day_from - timedelta(days=1), day_to),
+    )
+    return cursor.fetchall()
+
+
+def _chat_billing_planned_staff(db, day: date) -> Optional[Dict[str, List[Any]]]:
+    """Головы и часы по сменам аукциона чата на день; None — графика на день нет."""
+    day_key = day.isoformat()
+    auction = db.get_shift_auction_lots_for_planner_date(day, direction_mode="chat") or {}
+    # {час: {чатник: [(начало, конец) в минутах]}} — часы считаются объединением отрезков
+    # человека: в опубликованном графике у одного чатника бывают наложенные смены
+    # (12.09.2026: три смены на сутки у одного человека), и сумма дала бы 27 часов за день.
+    parts_by_hour: List[Dict[int, List[Tuple[int, int]]]] = [dict() for _ in range(24)]
+    for lot in auction.get("lots") or []:
+        if str(lot.get("status") or "").strip().lower() != "claimed":
+            continue
+        # Телефонные смены чатников (#304) стоят в графике чата, но это работа на линии:
+        # в расчёт ресурсов чата они не входят, значит и в план сотрудников чата тоже.
+        if str(lot.get("shift_kind") or "").strip().lower() == CHAT_BILLING_PHONE_SHIFT_KIND:
+            continue
+        try:
+            operator_id = int(lot.get("claimed_by") or 0)
+        except (TypeError, ValueError):
+            continue
+        if operator_id <= 0:
+            continue
+        for start, end in db._hourly_lot_parts_for_date(lot, day_key):
+            for hour in range(24):
+                part_start, part_end = max(start, hour * 60), min(end, hour * 60 + 60)
+                if part_end > part_start:
+                    parts_by_hour[hour].setdefault(operator_id, []).append((part_start, part_end))
+    if not any(parts_by_hour):
+        return None
+
+    def _union_minutes(parts: List[Tuple[int, int]]) -> int:
+        total, reached = 0, None
+        for start, end in sorted(parts):
+            if reached is not None and start < reached:
+                start = reached
+            if end > start:
+                total += end - start
+                reached = end
+        return total
+
+    return {
+        "heads": [len(slot) for slot in parts_by_hour],
+        "hours": [round(sum(_union_minutes(parts) for parts in slot.values()) / 60.0, 4)
+                  for slot in parts_by_hour],
+    }
+
+
+def build_chat_billing_staff(day_from: date, day_to: date, fact_rows: List[Tuple[Any, ...]],
+                             planned: Dict[str, Optional[Dict[str, List[Any]]]]
+                             ) -> Dict[str, Dict[str, Optional[List[Any]]]]:
+    """{день: {planned_heads, planned_hours, fact_heads, fact_hours}} по 24 часам.
+
+    None вместо списка — данных нет (графика не было, статусы не приехали): это не то
+    же самое, что ноль людей, и в отчёте такой час идёт прочерком."""
+    seconds: Dict[str, List[Dict[int, float]]] = {}
+    for day_value, hour, operator_id, value in fact_rows:
+        if day_value is None or day_value < day_from or day_value > day_to:
+            # Ночная смена вылезает за края окна — такие часы не наши.
+            continue
+        per_hour = seconds.setdefault(day_value.isoformat(), [dict() for _ in range(24)])
+        slot = per_hour[int(hour)]
+        slot[int(operator_id)] = slot.get(int(operator_id), 0.0) + _to_float(value)
+
+    result = {}
+    current = day_from
+    while current <= day_to:
+        key = current.isoformat()
+        plan = planned.get(key)
+        fact = seconds.get(key)
+        result[key] = {
+            "planned_heads": plan["heads"] if plan else None,
+            "planned_hours": plan["hours"] if plan else None,
+            "fact_heads": ([sum(1 for value in slot.values() if value >= CHAT_BILLING_STAFF_MIN_SECONDS)
+                            for slot in fact] if fact else None),
+            "fact_hours": [round(sum(slot.values()) / 3600.0, 4) for slot in fact] if fact else None,
+        }
+        current += timedelta(days=1)
+    return result
+
+
+def get_chat_billing_staff(db, day_from: date, day_to: date) -> Dict[str, Dict[str, Any]]:
+    with db._get_cursor() as cursor:
+        fact_rows = _chat_billing_fact_staff_tx(cursor, day_from, day_to)
+    planned = {}
+    current = day_from
+    while current <= day_to:
+        planned[current.isoformat()] = _chat_billing_planned_staff(db, current)
+        current += timedelta(days=1)
+    return build_chat_billing_staff(day_from, day_to, fact_rows, planned)
+
+
+def _chat_billing_window_sum(values: Optional[List[Any]], first_hour: int,
+                             last_hour: int) -> Optional[float]:
+    if values is None:
+        return None
+    return round(sum(_to_float(value) for value in values[first_hour:last_hour + 1]), 2)
+
+
+def _chat_billing_day_staff(staff_day: Optional[Dict[str, Any]], first_hour: int,
+                            last_hour: int) -> Dict[str, Optional[float]]:
+    staff_day = staff_day or {}
+    return {
+        "planned_hours": _chat_billing_window_sum(staff_day.get("planned_hours"), first_hour, last_hour),
+        "fact_hours": _chat_billing_window_sum(staff_day.get("fact_hours"), first_hour, last_hour),
+    }
+
+
+def _chat_billing_sum_optional(values: List[Optional[float]]) -> Optional[float]:
+    present = [value for value in values if value is not None]
+    return round(sum(present), 2) if present else None
+
+
+def attach_chat_billing_plan(report: Dict[str, Any], plan: Dict[str, Any],
+                             staff: Dict[str, Dict[str, Any]], minute_from: int = 0,
+                             minute_to: int = 1439) -> Dict[str, Any]:
+    """Дописывает к отчёту по паркам план чатов и часы работы дня.
+
+    Порядок парков в каждом дне один — по объёму за период, как в ручном отчёте, где
+    блоки дней сравниваются глазами строка к строке. Парк, у которого в прогнозе есть
+    доля, а обращений за день не было, остаётся строкой с планом и нулевым фактом."""
+    first_hour, last_hour = _chat_billing_window_hours(minute_from, minute_to)
+    shares = plan.get("shares") or {}
+    order = [item["park"] for item in report.get("parks") or []]
+    known = set(order)
+    order += [name for name, _ in sorted(shares.items(), key=lambda item: (-item[1], item[0]))
+              if name not in known]
+
+    period_parks: Dict[str, Dict[str, Any]] = {
+        item["park"]: item for item in report.get("parks") or []}
+    park_plans: Dict[str, List[Optional[float]]] = {}
+    day_plans: List[Optional[float]] = []
+    day_staff: List[Dict[str, Optional[float]]] = []
+    for day in report.get("days") or []:
+        hourly = (plan.get("days") or {}).get(day["date"])
+        day_plan = _chat_billing_window_sum(hourly, first_hour, last_hour)
+        existing = {item["park"]: item for item in day.get("parks") or []}
+        parks = []
+        for name in order:
+            item = existing.get(name) or {"park": name, **_chat_billing_blank(CHAT_BILLING_METRICS)}
+            item["plan_chats"] = (round(day_plan * shares[name], 2)
+                                  if day_plan is not None and name in shares else None)
+            park_plans.setdefault(name, []).append(item["plan_chats"])
+            parks.append(item)
+        day["parks"] = parks
+        day["totals"]["plan_chats"] = day_plan
+        day["staff"] = _chat_billing_day_staff(staff.get(day["date"]), first_hour, last_hour)
+        day_plans.append(day_plan)
+        day_staff.append(day["staff"])
+
+    parks = []
+    for name in order:
+        item = period_parks.get(name) or {"park": name, **_chat_billing_blank(CHAT_BILLING_METRICS)}
+        item["plan_chats"] = _chat_billing_sum_optional(park_plans.get(name, []))
+        parks.append(item)
+    report["parks"] = parks
+    report.setdefault("totals", _chat_billing_blank(CHAT_BILLING_METRICS))["plan_chats"] = (
+        _chat_billing_sum_optional(day_plans))
+    report["staff"] = {
+        "planned_hours": _chat_billing_sum_optional([item["planned_hours"] for item in day_staff]),
+        "fact_hours": _chat_billing_sum_optional([item["fact_hours"] for item in day_staff]),
+    }
+    return report
+
+
+def attach_chat_billing_grouping_staff(report: Dict[str, Any],
+                                       staff: Dict[str, Dict[str, Any]],
+                                       minute_from: int = 0,
+                                       minute_to: int = 1439) -> Dict[str, Any]:
+    """Сотрудники по часам — только к отчёту по всему чату: люди не делятся по паркам."""
+    first_hour, last_hour = _chat_billing_window_hours(minute_from, minute_to)
+    for day in report.get("days") or []:
+        staff_day = staff.get(day["date"]) or {}
+        planned = staff_day.get("planned_heads")
+        fact = staff_day.get("fact_heads")
+        for item in day.get("hours") or []:
+            hour = int(item["hour"])
+            item["staff_planned"] = planned[hour] if planned is not None else None
+            item["staff_fact"] = fact[hour] if fact is not None else None
+        day["staff"] = _chat_billing_day_staff(staff_day, first_hour, last_hour)
+    return report
+
+
+def get_chat_billing_daily(db, day_from: date, day_to: date, minute_from: int = 0,
+                           minute_to: int = 1439,
+                           sl_seconds: int = CHAT_BILLING_SL_DEFAULT_SECONDS) -> Dict[str, Any]:
+    """«Таксопарки» в формате ежедневного отчёта: факт, план чатов по паркам и часы работы."""
+    report = get_chat_billing_report(db, day_from, day_to, minute_from=minute_from,
+                                     minute_to=minute_to, sl_seconds=sl_seconds)
+    return attach_chat_billing_plan(
+        report, get_chat_billing_plan(db, day_from, day_to),
+        get_chat_billing_staff(db, day_from, day_to), minute_from, minute_to)
+
+
 def _chat_billing_detail_row(raw: Tuple[Any, ...], sl_seconds: int) -> Dict[str, Any]:
     (request_id, started_at, park, transport_name, client, client_number, operator_name,
      reply_seconds, inner_reply_seconds, rating, incoming, outgoing) = raw

@@ -1689,72 +1689,168 @@ const chatBillingReplyLabel = (item) => formatChatBillingMinutesUnit(
 // уже виден колонкой «Без ответа».
 const chatBillingShareClass = billingSlClass;
 
-// Колонки таблицы обязаны идти ровно в том же порядке, что ячейки
-// renderMetricsCells ниже: заголовки и тело собираются раздельно, и разъехавшийся
-// список молча сдвинет подписи. Колонки «AR» здесь нет — см. комментарий выше.
-// Подсказки колонок — в title шапки: определение нужно тому, кто сверяет цифры,
-// а постоянной строкой под таблицей оно было бы шумом.
-const CHAT_BILLING_COLUMNS = [
-  { key: 'chats', label: 'Поступило' },
-  { key: 'answered', label: 'Обслужено' },
-  { key: 'no_reply', label: 'Без ответа' },
-  { key: 'first_reply', label: 'Ср. первая реакция, мин', hint: 'От первого сообщения клиента до первого ответа оператора' },
-  { key: 'sl', label: 'SL' },
-  { key: 'inner_reply', label: 'Ср. время ответа, мин', hint: 'Между сообщением клиента и ответом оператора внутри чата' },
-  { key: 'rating', label: 'Ср. оценка', hint: 'Оценка водителя после чата, по пятибалльной шкале' },
-];
+// Ячейки таблиц биллинга чата. Шапка и строка строятся из ОДНОГО списка колонок разреза
+// (CHAT_BILLING_COLUMN_SETS), поэтому подписи не могут разъехаться с ячейками. Колонки
+// «AR» здесь нет — см. комментарий выше. Подсказки — в title шапки: определение нужно
+// тому, кто сверяет цифры, а постоянной строкой под таблицей оно было бы шумом.
+const chatBillingOptionalInt = (value) => (value === null || value === undefined ? '—' : formatInt(value));
+
+const CHAT_BILLING_CELLS = {
+  plan_chats: {
+    hint: 'Прогноз раздела на день, разложенный по долям парков в базовых неделях',
+    render: (item) => ({ value: chatBillingOptionalInt(item.plan_chats), className: 'text-slate-700' }),
+  },
+  chats: {
+    render: (item) => ({ value: formatInt(item.chats), className: 'font-semibold text-slate-900' }),
+  },
+  plan_match: {
+    hint: 'Факт чатов к плану',
+    render: (item) => {
+      const ratio = safeRatio(item.chats, item.plan_chats);
+      return { value: ratio === null ? '—' : formatPercent(ratio, 0), className: 'text-slate-700' };
+    },
+  },
+  answered: {
+    render: (item) => ({ value: formatInt(item.answered), className: 'text-emerald-700' }),
+  },
+  no_reply: {
+    render: (item) => ({ value: formatInt(item.no_reply), className: 'text-rose-600' }),
+  },
+  first_reply: {
+    hint: 'От первого сообщения клиента до первого ответа оператора',
+    render: (item, averages) => ({ value: formatChatBillingMinutes(averages.firstReplySeconds), className: 'text-slate-700' }),
+  },
+  sl: {
+    render: (item, averages) => ({
+      value: averages.sl === null ? '—' : formatPercent(averages.sl, 1),
+      className: `font-semibold ${chatBillingShareClass(averages.sl)}`,
+    }),
+  },
+  inner_reply: {
+    hint: 'Между сообщением клиента и ответом оператора внутри чата',
+    render: (item, averages) => ({ value: formatChatBillingMinutes(averages.innerReplySeconds), className: 'text-slate-700' }),
+  },
+  rating: {
+    hint: 'Оценка водителя после чата, по пятибалльной шкале',
+    render: (item, averages) => ({
+      value: formatChatBillingRating(averages.rating),
+      className: 'text-slate-700',
+      title: averages.rating === null ? undefined : `Оценок: ${formatInt(item.rated)}`,
+    }),
+  },
+  // Сотрудники — головы часа: по сменам аукциона чата и по онлайну от минуты.
+  staff_planned: {
+    hint: 'Чатники по сменам аукциона чата (без телефонных смен)',
+    render: (item) => ({ value: chatBillingOptionalInt(item.staff_planned), className: 'text-slate-700' }),
+  },
+  staff_fact: {
+    hint: 'Чатники, бывшие онлайн в этом часу хотя бы минуту',
+    render: (item) => ({ value: chatBillingOptionalInt(item.staff_fact), className: 'text-slate-700' }),
+  },
+  staff_delta: {
+    hint: 'Факт минус план',
+    render: (item) => {
+      const delta = item.staff_planned === null || item.staff_planned === undefined
+        || item.staff_fact === null || item.staff_fact === undefined
+        ? null
+        : Number(item.staff_fact) - Number(item.staff_planned);
+      return {
+        value: delta === null ? '—' : formatInt(delta),
+        // Цвет только у нехватки людей: лишний чатник в часе — не тревога.
+        className: delta !== null && delta < 0 ? 'font-semibold text-rose-600' : 'text-slate-700',
+      };
+    },
+  },
+};
+
+// Колонки разрезов: [ключ ячейки, подпись]. «Таксопарки» и «Группировка» повторяют
+// образцы СЗоВ — «Ежедневный отчёт по чатам» и «Отчёт с группировкой по часам».
+const CHAT_BILLING_COLUMN_SETS = {
+  park: [
+    ['plan_chats', 'План (чатов)'],
+    ['chats', 'Факт (чатов)'],
+    ['plan_match', '% совпадения прогноза'],
+    ['first_reply', 'Ср. реакция на 1 сообщение, мин'],
+    ['inner_reply', 'Ср. время ответа внутри чата, мин'],
+    ['rating', 'Ср. оценка водителей'],
+  ],
+  operator: [
+    ['chats', 'Поступило'],
+    ['answered', 'Обслужено'],
+    ['no_reply', 'Без ответа'],
+    ['first_reply', 'Ср. реакция на 1 сообщение, мин'],
+    ['sl', 'SL'],
+    ['inner_reply', 'Ср. время ответа внутри чата, мин'],
+    ['rating', 'Ср. оценка водителей'],
+  ],
+  grouping: [
+    ['chats', 'Поступившие чаты'],
+    ['staff_planned', 'План (по сотрудникам)'],
+    ['staff_fact', 'Факт (по сотрудникам)'],
+    ['staff_delta', 'Разница'],
+    ['first_reply', 'Ср. реакция на 1 сообщение, мин'],
+    ['inner_reply', 'Ср. время ответа внутри чата, мин'],
+  ],
+  // Один таксопарк: сотрудники не делятся по паркам, их колонок нет.
+  groupingPark: [
+    ['chats', 'Поступившие чаты'],
+    ['first_reply', 'Ср. реакция на 1 сообщение, мин'],
+    ['inner_reply', 'Ср. время ответа внутри чата, мин'],
+  ],
+};
+
+// В строке итога дня голов нет: сумма людей по часам ничего не значит.
+const CHAT_BILLING_HOURLY_ONLY_CELLS = new Set(['staff_planned', 'staff_fact', 'staff_delta']);
 
 const chatBillingRowKey = (item, mode) => {
   if (mode === 'operator') return String(item.operator || '');
-  if (mode === 'grouping') return String(item.hour);
+  if (mode === 'grouping' || mode === 'groupingPark') return String(item.hour);
   return String(item.park || '');
 };
 
 const chatBillingFirstCell = (item, mode) => {
   if (mode === 'operator') return item.operator || '—';
-  if (mode === 'grouping') return chatBillingHourLabel(item.hour);
+  if (mode === 'grouping' || mode === 'groupingPark') return chatBillingHourLabel(item.hour);
   return billingParkLabel(item.park);
 };
 
 const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'park' }) => {
-  const renderMetricsCells = (item) => {
+  const columns = CHAT_BILLING_COLUMN_SETS[mode] || CHAT_BILLING_COLUMN_SETS.park;
+  const isHourly = mode === 'grouping' || mode === 'groupingPark';
+  const renderMetricsCells = (item, isTotal = false) => {
     const averages = chatBillingAverages(item);
-    return (
-      <>
-        <td className="px-3 py-2.5 text-right font-semibold text-slate-900">{formatInt(item.chats)}</td>
-        <td className="px-3 py-2.5 text-right text-emerald-700">{formatInt(item.answered)}</td>
-        <td className="px-3 py-2.5 text-right text-rose-600">{formatInt(item.no_reply)}</td>
-        <td className="px-3 py-2.5 text-right text-slate-700">{formatChatBillingMinutes(averages.firstReplySeconds)}</td>
-        <td className={`px-3 py-2.5 text-right font-semibold ${chatBillingShareClass(averages.sl)}`}>
-          {averages.sl === null ? '—' : formatPercent(averages.sl, 1)}
+    return columns.map(([key]) => {
+      if (isTotal && CHAT_BILLING_HOURLY_ONLY_CELLS.has(key)) {
+        return <td key={key} className="px-3 py-2.5" />;
+      }
+      const cell = CHAT_BILLING_CELLS[key].render(item, averages);
+      return (
+        <td key={key} className={`whitespace-nowrap px-3 py-2.5 text-right ${cell.className}`} title={cell.title}>
+          {cell.value}
         </td>
-        <td className="px-3 py-2.5 text-right text-slate-700">{formatChatBillingMinutes(averages.innerReplySeconds)}</td>
-        <td className="px-3 py-2.5 text-right text-slate-700" title={averages.rating === null ? undefined : `Оценок: ${formatInt(item.rated)}`}>
-          {formatChatBillingRating(averages.rating)}
-        </td>
-      </>
-    );
+      );
+    });
   };
 
   const firstColumnLabel = mode === 'operator'
     ? 'Чатник'
-    : mode === 'grouping' ? 'Час' : 'Таксопарк';
+    : isHourly ? 'Час' : 'Таксопарк';
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[980px] divide-y divide-slate-200 text-sm tabular-nums">
+      <table className={`w-full divide-y divide-slate-200 text-sm tabular-nums ${columns.length > 4 ? 'min-w-[980px]' : 'min-w-[560px]'}`}>
         <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2.5 text-left font-semibold">{firstColumnLabel}</th>
-            {CHAT_BILLING_COLUMNS.map((column) => (
-              <th key={column.key} className="px-3 py-2.5 text-right font-semibold" title={column.hint}>{column.label}</th>
+            {columns.map(([key, label]) => (
+              <th key={key} className="px-3 py-2.5 text-right font-semibold" title={CHAT_BILLING_CELLS[key].hint}>{label}</th>
             ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {rows.map((item) => (
             <tr key={chatBillingRowKey(item, mode)} className="transition hover:bg-slate-50/70">
-              <td className={`whitespace-nowrap px-3 py-2.5 font-medium ${mode === 'grouping' && !item.chats ? 'text-slate-400' : 'text-slate-900'}`}>
+              <td className={`whitespace-nowrap px-3 py-2.5 font-medium ${isHourly && !item.chats ? 'text-slate-400' : 'text-slate-900'}`}>
                 {chatBillingFirstCell(item, mode)}
               </td>
               {renderMetricsCells(item)}
@@ -1765,7 +1861,7 @@ const ChatBillingTable = ({ rows, totals, totalsLabel = 'Итого', mode = 'pa
           <tfoot>
             <tr className="bg-slate-50 font-semibold text-slate-950">
               <td className="px-3 py-2.5">{totalsLabel}</td>
-              {renderMetricsCells(totals)}
+              {renderMetricsCells(totals, true)}
             </tr>
           </tfoot>
         ) : null}
@@ -1789,9 +1885,9 @@ const ChatBillingDetailTable = ({ rows }) => (
           <th className="px-3 py-2.5 text-left font-semibold">Номер</th>
           <th className="px-3 py-2.5 text-left font-semibold">Клиент</th>
           <th className="px-3 py-2.5 text-left font-semibold">Чатник</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="От первого сообщения клиента до первого ответа оператора">Первая реакция, мин</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="От первого сообщения клиента до первого ответа оператора">Реакция на 1 сообщение, мин</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Первая реакция уложилась в цель">В цель</th>
-          <th className="px-3 py-2.5 text-right font-semibold" title="Между сообщением клиента и ответом оператора внутри чата">Время ответа, мин</th>
+          <th className="px-3 py-2.5 text-right font-semibold" title="Между сообщением клиента и ответом оператора внутри чата">Время ответа внутри чата, мин</th>
           <th className="px-3 py-2.5 text-right font-semibold" title="Оценка водителя после чата">Оценка</th>
         </tr>
       </thead>
@@ -1903,9 +1999,22 @@ const CHAT_DIRECTION = {
     summaryTitle: (mode) => (mode === 'operator'
       ? 'Итоги за период по чатникам'
       : 'Итоги за период по таксопаркам'),
-    daySummary: (mode, day) => (mode === 'operator'
-      ? `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. первая реакция ${chatBillingReplyLabel(day.totals)}`
-      : `Поступило ${formatInt(day.totals?.chats)} · Обслужено ${formatInt(day.totals?.answered)} · Без ответа ${formatInt(day.totals?.no_reply)}`),
+    daySummary: (mode, day) => {
+      if (mode === 'operator') {
+        return `Чатников ${formatInt((day.operators || []).length)} · Обслужено ${formatInt(day.totals?.answered)} · Ср. реакция ${chatBillingReplyLabel(day.totals)}`;
+      }
+      // Часы работы — как «План/Факт по часам» ежедневного отчёта; у одного таксопарка
+      // их нет: люди не делятся по паркам.
+      const plan = day.totals?.plan_chats;
+      const parts = mode === 'park'
+        ? [`План ${plan === null || plan === undefined ? '—' : formatInt(plan)}`, `Факт ${formatInt(day.totals?.chats)}`]
+        : [`Поступило ${formatInt(day.totals?.chats)}`];
+      if (day.staff) {
+        const hours = (value) => (value === null || value === undefined ? '—' : formatNumber(value, 1));
+        parts.push(`Часы работы: план ${hours(day.staff.planned_hours)} · факт ${hours(day.staff.fact_hours)}`);
+      }
+      return parts.join(' · ');
+    },
     modeHint: (mode, slSeconds) => {
       const sl = `SL — доля обращений, где первая реакция уложилась в ≤ ${slSeconds} сек, от всех поступивших`;
       if (mode === 'detail') return 'Одна строка — одно обращение; на странице 25 строк';
@@ -1913,8 +2022,8 @@ const CHAT_DIRECTION = {
       // ручка отбрасывает чаты без привязки к человеку (chat.py, WHERE … operator
       // IS NOT NULL). Раньше расхождение висело на экране без единого слова.
       if (mode === 'operator') return `${sl}. Считаются только обращения, привязанные к чатнику, поэтому «Поступило» здесь меньше, чем по таксопаркам`;
-      if (mode === 'grouping') return `${sl}. Час — по началу обращения`;
-      return sl;
+      if (mode === 'grouping') return 'Час — по началу обращения; сотрудники — смены аукциона чата и онлайн хотя бы минуту';
+      return 'План — прогноз раздела по долям парков; факт — обращения без автоматических опросов после чата';
     },
     // Разрез в имени файла: выгрузка теперь слушает mode, и разные отчёты за один
     // период не должны ложиться в папку под одним именем. У «Группировки» по одному
@@ -6004,7 +6113,7 @@ const ResourceFteView = ({
                     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                       <StatCard
                         icon={Clock3}
-                        label="Ср. первая реакция"
+                        label="Ср. реакция на 1 сообщение"
                         value={formatChatBillingMinutesUnit(billingChatAverages.firstReplySeconds)}
                         hint="До первого ответа оператора"
                         tone="slate"
@@ -6018,14 +6127,14 @@ const ResourceFteView = ({
                       />
                       <StatCard
                         icon={Timer}
-                        label="Ср. время ответа"
+                        label="Ср. время ответа внутри чата"
                         value={formatChatBillingMinutesUnit(billingChatAverages.innerReplySeconds)}
                         hint="Между сообщением клиента и ответом"
                         tone="slate"
                       />
                       <StatCard
                         icon={Star}
-                        label="Ср. оценка"
+                        label="Ср. оценка водителей"
                         value={formatChatBillingRating(billingChatAverages.rating)}
                         hint={Number(billingTotals.rated) > 0 ? `Оценок водителей: ${formatInt(billingTotals.rated)}` : 'Оценок за период нет'}
                         tone="slate"
@@ -6212,7 +6321,7 @@ const ResourceFteView = ({
                                 {billingMode === 'operator' ? (
                                   <BillingPeopleTable rows={day.operators || []} totals={day.totals} totalsLabel="Итого за день" />
                                 ) : billingMode === 'grouping' && !cfg.hasBillingTalkTime ? (
-                                  <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode="grouping" />
+                                  <ChatBillingTable rows={day.hours || []} totals={day.totals} totalsLabel="Итого за день" mode={billingReport.park ? 'groupingPark' : 'grouping'} />
                                 ) : billingMode === 'grouping' ? (
                                   <BillingGroupingTable date={day.date} hours={day.hours || []} onEditComment={setBillingCommentEditor} />
                                 ) : (
