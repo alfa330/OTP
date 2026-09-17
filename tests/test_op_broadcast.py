@@ -28,7 +28,8 @@ DB_PATH = ROOT / "database.py"
 
 HELPERS = {"_op_broadcast_deviations", "_op_broadcast_percent",
            "_op_broadcast_text", "_op_broadcast_duration", "_op_broadcast_table",
-           "_op_broadcast_attach_period", "_op_broadcast_caption"}
+           "_op_broadcast_attach_period", "_op_broadcast_caption", "_op_broadcast_period_notes",
+           "_op_broadcast_bridge_note", "_op_broadcast_notes"}
 CONSTANTS = {"_OP_BROADCAST_TABLE_ROWS"}
 
 
@@ -89,6 +90,12 @@ class DeviationTests(unittest.TestCase):
 
     def test_all_in_norm_is_silent(self):
         self.assertEqual(self.deviations(snapshot()), [])
+
+    def test_day_deviation_is_marked_as_the_day(self):
+        """Владелец 17.09.2026: у отклонения видно, за какой оно период."""
+        notes = self.deviations(snapshot(arrived=100, missed=9, sl=0.7))
+        self.assertEqual(notes, ['Обратите внимание (за день): потеряно 9,0 % входящих при норме до 5 %.',
+                                 'Обратите внимание (за день): SL 70,0 % при норме от 80 %.'])
 
     def test_ar_above_corridor(self):
         notes = self.deviations(snapshot(arrived=100, missed=9))
@@ -218,7 +225,7 @@ class PeriodTests(unittest.TestCase):
         data['totals'] = dict(data['totals'], sl=0.7)
         text = self.ns["_op_broadcast_text"](self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts))
         self.assertTrue(text.startswith('<b>Табло ОП</b> (15.09 18:00):\n\n<pre>'))
-        self.assertLess(text.index('</pre>'), text.index('Обратите внимание: SL 70,0 %'))
+        self.assertLess(text.index('</pre>'), text.index('Обратите внимание (за день): SL 70,0 %'))
         self.assertLess(text.index('Обратите внимание'), text.index('Онлайн 5 · в разговоре 2'))
 
     def test_midnight_table_is_titled_by_the_day_that_ended(self):
@@ -226,6 +233,38 @@ class PeriodTests(unittest.TestCase):
         header, rows, _ = table(self.ns["_op_broadcast_text"](out))
         self.assertEqual(header, ['16.09', '23–24'])
         self.assertEqual(rows['Входящих'], ['400', '12'])
+
+    def test_hour_deviations_are_marked_with_the_hour(self):
+        data = self.today()
+        data['hourly'] = hourly({9: (30, 12, 0.3)})
+        out = self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts)
+        caption = self.ns["_op_broadcast_caption"](out).split('\n')
+        self.assertEqual(caption, [
+            'Обратите внимание (за час 09:00–10:00): потеряно 40,0 % входящих при норме до 5 %.',
+            'Обратите внимание (за час 09:00–10:00): SL 30,0 % при норме от 80 %.',
+        ])
+
+    def test_day_then_hour_then_bridge(self):
+        data = self.today()
+        data['totals'] = dict(data['totals'], sl=0.7)
+        data['hourly'] = hourly({9: (30, 12, 0.3)})
+        data['bridge'] = {'live_age_seconds': 1200}
+        notes = self.ns["_op_broadcast_notes"](self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts))
+        self.assertTrue(notes[0].startswith('Обратите внимание (за день)'))
+        self.assertTrue(notes[1].startswith('Обратите внимание (за час 09:00–10:00)'))
+        self.assertIn('молчит 20 мин', notes[-1])
+
+    def test_small_hour_is_not_judged(self):
+        data = self.today()
+        data['hourly'] = hourly({9: (19, 10, 0.2)})
+        out = self.attach(data, datetime(2026, 9, 17, 10, 0), self.day_parts)
+        self.assertEqual(self.ns["_op_broadcast_caption"](out), '')
+
+    def test_midnight_day_deviation_names_the_day(self):
+        out = self.attach(self.today('2026-09-17'), datetime(2026, 9, 17, 0, 0, 3), self.day_parts)
+        out['totals'] = dict(out['totals'], sl=0.5)
+        self.assertIn('Обратите внимание (за день 16.09): SL 50,0 % при норме от 80 %.',
+                      self.ns["_op_broadcast_caption"](out))
 
     def test_hour_is_not_a_deviation_on_its_own(self):
         # Отклонения — по итогам дня, как и раньше: плохой час в хороший день режим

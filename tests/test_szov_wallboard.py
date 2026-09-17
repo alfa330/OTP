@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from tests import source_cache
@@ -1222,7 +1222,7 @@ class SzovBroadcastTests(unittest.TestCase):
 
         ns = {
             'os': os, 'time': time, 'logging': logging, 're': re,
-            'datetime': datetime, 'ZoneInfo': ZoneInfo,
+            'datetime': datetime, 'ZoneInfo': ZoneInfo, 'timedelta': timedelta,
             '_env_int': lambda name, default, minimum=None, maximum=None: default,
             '_oktell_query': fake_oktell,
             'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS': 20,
@@ -1243,7 +1243,10 @@ class SzovBroadcastTests(unittest.TestCase):
             'SZOV_BROADCAST_MODE_ALWAYS', 'SZOV_BROADCAST_MODE_DEVIATIONS',
             '_szov_wallboard_int',
             '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
-            '_szov_broadcast_collect',
+            '_szov_broadcast_collect', 'OKTELL_BILLING_SL_DEFAULT_SECONDS',
+            '_szov_broadcast_hour_block', '_szov_broadcast_safe_hour_block',
+            'SZOV_BROADCAST_HOUR_MIN_CALLS', '_szov_broadcast_ar_notes', '_szov_broadcast_sl_note',
+            '_szov_broadcast_hour_notes',
             '_szov_plural', '_szov_format_seconds_mmss', '_szov_format_percent',
             '_szov_format_age_ru',
             '_szov_broadcast_stale_note', '_szov_broadcast_deviations',
@@ -1486,6 +1489,123 @@ class SzovBroadcastTests(unittest.TestCase):
         notes = ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']())
         self.assertIn('не обновляются уже 12 минут', notes[-1])
         self.assertEqual(len([note for note in notes if 'не обновляются' in note]), 1)
+
+    # --- показатели за час (владелец, 17.09.2026: «как у Табло ОП») ---
+
+    def test_hourly_sql_counts_sl_the_same_way_as_the_wallboard(self):
+        sql = self._namespace()['_oktell_wallboard_hourly_sql'](None)
+        self.assertIn("t.LenQueue <= 20 THEN 1 ELSE 0 END), 0) AS served_sl", sql)
+        self.assertIn("t.dt_insert >= CONVERT(date, GETDATE())", sql)
+
+    def test_hourly_sql_for_an_explicit_day_does_not_trust_oktell_clock(self):
+        sql = self._namespace()['_oktell_wallboard_hourly_sql'](None, date(2026, 9, 16))
+        self.assertIn("t.dt_insert >= '20260916' AND t.dt_insert < '20260917'", sql)
+        self.assertNotIn('GETDATE', sql)
+
+    def test_hourly_rows_carry_sl(self):
+        ns = self._namespace(hourly_raw=[
+            {'hh': 9, 'served': 45, 'arrived': 50, 'lost': 5, 'greet_drop': 1, 'served_sl': 40,
+             'talk_seconds': 4500},
+        ])
+        row = ns['_szov_broadcast_hourly_rows']()[0]
+        self.assertAlmostEqual(row['sl_ratio'], 40 / 50)
+        self.assertEqual(row['served_sl'], 40)
+
+    HOUR_ROWS = [
+        {'hour': 9, 'served': 45, 'arrived': 50, 'lost': 5, 'greet_drop': 1, 'served_sl': 30,
+         'avg_talk_seconds': 100, 'ar_ratio': 0.1, 'sl_ratio': 0.6},
+        {'hour': 14, 'served': 20, 'arrived': 21, 'lost': 1, 'greet_drop': 0, 'served_sl': 20,
+         'avg_talk_seconds': 90, 'ar_ratio': 1 / 21, 'sl_ratio': 20 / 21},
+    ]
+
+    def _block(self, hour_to, now, yesterday=None):
+        asked = []
+
+        def load(day):
+            asked.append(day)
+            return yesterday or []
+        block = self._namespace()['_szov_broadcast_hour_block'](self.HOUR_ROWS, hour_to, now, load)
+        return block, asked
+
+    def test_scheduled_send_reports_the_hour_that_just_ended(self):
+        block, asked = self._block(None, datetime(2026, 9, 17, 10, 0, 2))
+        self.assertEqual((block['label'], block['day'], block['arrived']), ('09:00–10:00', '17.09', 50))
+        self.assertEqual(asked, [])
+
+    def test_manual_send_mid_hour_reports_the_last_full_hour(self):
+        block, _ = self._block(None, datetime(2026, 9, 17, 10, 37))
+        self.assertEqual(block['label'], '09:00–10:00')
+
+    def test_tablo_slice_reports_the_requested_hour_itself(self):
+        # «/tablo 14:00» — показатели на 14-й час: его строка последняя в таблице среза.
+        block, _ = self._block(14, datetime(2026, 9, 17, 16, 5))
+        self.assertEqual((block['label'], block['arrived']), ('14:00–15:00', 21))
+
+    def test_midnight_reads_the_last_hour_of_the_day_that_ended(self):
+        yesterday = [{'hour': 23, 'served': 30, 'arrived': 33, 'lost': 3, 'greet_drop': 0, 'served_sl': 25,
+                      'avg_talk_seconds': 80, 'ar_ratio': 3 / 33, 'sl_ratio': 25 / 33}]
+        block, asked = self._block(None, datetime(2026, 9, 17, 0, 0, 4), yesterday)
+        self.assertEqual(asked, [date(2026, 9, 16)])
+        self.assertEqual((block['label'], block['day'], block['arrived']), ('23:00–24:00', '16.09', 33))
+
+    def test_quiet_hour_is_zeros_not_a_missing_block(self):
+        block, _ = self._block(None, datetime(2026, 9, 17, 4, 0))
+        self.assertEqual((block['label'], block['arrived'], block['sl_ratio']), ('03:00–04:00', 0, None))
+
+    def test_failed_midnight_query_drops_only_the_hour_block(self):
+        ns = self._namespace()
+
+        def broken(sql, timeout=None):
+            raise RuntimeError('прокси Oktell не ответил')
+        ns['_oktell_query'] = broken
+        self.assertIsNone(ns['_szov_broadcast_safe_hour_block']([], None, datetime(2026, 9, 17, 0, 0)))
+
+    def _hour_data(self, ns, hour):
+        data = ns['_szov_broadcast_collect']()
+        data['hour'] = dict(hour, label='09:00–10:00', day='17.09')
+        return data
+
+    def test_day_deviation_is_marked_as_the_day(self):
+        ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.7}, 'stale': False, 'age_seconds': 0})
+        deviations = ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']())
+        self.assertTrue(deviations[0].startswith('Обратите внимание (за день): AR выше установленного диапазона'))
+        self.assertIn('Обратите внимание (за день): SL ниже нормы (80%) — 70,0%.', deviations)
+
+    def test_hour_deviations_are_marked_with_the_hour_and_shown(self):
+        ns = self._calm()
+        data = self._hour_data(ns, self.HOUR_ROWS[0])
+        notes = ns['_szov_broadcast_notes'](data)
+        self.assertIn('Обратите внимание (за час 09:00–10:00): AR выше установленного диапазона (3–5%) — 10,0%. '
+                      'За час потеряно 5 звонков.', notes)
+        self.assertIn('Обратите внимание (за час 09:00–10:00): SL ниже нормы (80%) — 60,0%.', notes)
+
+    def test_hour_deviations_do_not_wake_the_deviations_only_chat(self):
+        # AR одного часа редко ложится в коридор — «тревожный» чат получал бы письмо каждый час.
+        ns = self._calm()
+        self.assertEqual(ns['_szov_broadcast_deviations'](self._hour_data(ns, self.HOUR_ROWS[0])), [])
+
+    def test_small_hour_is_not_judged(self):
+        ns = self._calm()
+        small = dict(self.HOUR_ROWS[0], arrived=19, lost=10, ar_ratio=10 / 19, sl_ratio=0.2)
+        self.assertEqual(ns['_szov_broadcast_hour_notes'](self._hour_data(ns, small)), [])
+
+    def test_hour_notes_follow_the_day_ones(self):
+        ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.9}, 'stale': False, 'age_seconds': 0})
+        notes = '\n'.join(ns['_szov_broadcast_notes'](self._hour_data(ns, self.HOUR_ROWS[0])))
+        self.assertLess(notes.index('(за день)'), notes.index('(за час 09:00–10:00)'))
+        self.assertLess(notes.index('(за час 09:00–10:00)'), notes.index('Среднее время разговора'))
+
+    def test_hour_picture_goes_third_and_on_its_own(self):
+        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        prepare = source[source.index("async def _szov_broadcast_prepare("):]
+        prepare = prepare[:prepare.index("\n\n\n")]
+        self.assertIn("media = [('table.png', table_png), ('board.png', board_png)]", prepare)
+        self.assertIn("media.append(('hour.png'", prepare)
+        self.assertLess(prepare.index("('board.png', board_png)"), prepare.index("'hour.png'"))
+        preview = source[source.index("def api_szov_wallboard_broadcast_preview"):]
+        self.assertIn("'hour': _szov_render_hour_png", preview[:4000])
+        renderer = source[source.index("def _szov_render_hour_png("):]
+        self.assertIn("_szov_render_tiles_png(", renderer[:2500])
 
     def test_age_wording(self):
         age = self._namespace()['_szov_format_age_ru']

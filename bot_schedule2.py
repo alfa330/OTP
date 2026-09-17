@@ -37996,41 +37996,55 @@ SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIREC
                              SZOV_BROADCAST_DIRECTION_OP)
 
 
-def _oktell_wallboard_hourly_sql(hour_to=None):
-    """Почасовая таблица за текущий день Oktell: принято / поступило / потеряно / разговор.
+def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
+    """Почасовая таблица за день Oktell: принято / поступило / потеряно / разговор / SL.
 
-    hour_to — включительная верхняя граница часа (для команды «покажи на 14:00»)."""
+    hour_to — включительная верхняя граница часа (для команды «покажи на 14:00»).
+    day — явные сутки (date): нужны отбивке в полночь, когда последний полный час 23:00–24:00
+    уже вчерашний. Границы суток тогда задаются литералом из Python, а не GETDATE() Oktell —
+    иначе отставшие на пару секунд часы сервера унесли бы запрос на позавчера.
+    served_sl — принятые с ожиданием в очереди не дольше порога SL, тем же правилом, что у
+    снимка табло (_oktell_wallboard_totals_sql): SL часа и SL на экране не должны спорить."""
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
     cutoff = ''
     if hour_to is not None:
         cutoff = f"AND DATEPART(HOUR, t.dt_insert) <= {int(hour_to)} "
+    if day is None:
+        day_start = "CONVERT(date, GETDATE())"
+        day_end = "DATEADD(day, 1, CONVERT(date, GETDATE()))"
+    else:
+        day_start = "'%s'" % day.strftime('%Y%m%d')
+        day_end = "'%s'" % (day + timedelta(days=1)).strftime('%Y%m%d')
     return (
         "SELECT DATEPART(HOUR, t.dt_insert) AS hh, "
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END), 0) AS served, "
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19) THEN 1 ELSE 0 END), 0) AS lost, "
         f"ISNULL(SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
+        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {sl_seconds} THEN 1 ELSE 0 END), 0) AS served_sl, "
         f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END), 0) AS talk_seconds "
         "FROM oktell.dbo.Call_Systems_hst t "
         "WHERE t.route = 'incoming' AND t.taxi_park <> '' "
         f"AND t.result_call <> N'{fail}' "
-        "AND t.dt_insert >= CONVERT(date, GETDATE()) "
-        "AND t.dt_insert < DATEADD(day, 1, CONVERT(date, GETDATE())) "
+        f"AND t.dt_insert >= {day_start} "
+        f"AND t.dt_insert < {day_end} "
         f"{cutoff}"
         "GROUP BY DATEPART(HOUR, t.dt_insert) ORDER BY hh"
     )
 
 
-def _szov_broadcast_hourly_rows(hour_to=None):
+def _szov_broadcast_hourly_rows(hour_to=None, day=None):
     """Строки почасовой таблицы. Пустые часы Oktell не отдаёт — их в таблице и не будет."""
-    raw = _oktell_query(_oktell_wallboard_hourly_sql(hour_to),
+    raw = _oktell_query(_oktell_wallboard_hourly_sql(hour_to, day),
                         timeout=SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS)
     rows = []
     for item in raw or []:
         served = _szov_wallboard_int(item.get('served'))
         arrived = _szov_wallboard_int(item.get('arrived'))
         lost = _szov_wallboard_int(item.get('lost'))
+        served_sl = _szov_wallboard_int(item.get('served_sl'))
         talk = float(item.get('talk_seconds') or 0)
         rows.append({
             'hour': _szov_wallboard_int(item.get('hh')),
@@ -38038,11 +38052,38 @@ def _szov_broadcast_hourly_rows(hour_to=None):
             'arrived': arrived,
             'lost': lost,
             'greet_drop': _szov_wallboard_int(item.get('greet_drop')),
+            'served_sl': served_sl,
             # Секунды усечением, а не округлением — так же, как в исходном отчёте владельца.
             'avg_talk_seconds': int(talk / served) if served > 0 else 0,
             'ar_ratio': (lost / arrived) if arrived > 0 else None,
+            # SL — как у снимка табло: принятые в пределах порога от всех дошедших до очереди.
+            'sl_ratio': (served_sl / arrived) if arrived > 0 else None,
         })
     return rows
+
+
+def _szov_broadcast_hour_block(hourly, hour_to, now, load_day_rows):
+    """Показатели одного часа для картинки «за час» и отклонений часа (владелец, 17.09.2026 —
+    как у «Табло ОП»).
+
+    Плановая отбивка и «Отправить сейчас» говорят о последнем ПОЛНОМ часе: в 10:00 и в 10:37 это
+    09:00–10:00. Срез «/tablo 14:00» — о самом 14-м часе: его строка уже последняя в таблице
+    («показатели на указанный час»). В полночь последний полный час вчерашний — его строка
+    берётся запросом за те сутки (`load_day_rows(date)`), текущая таблица ещё пустая.
+    Пустой час Oktell не отдаёт вовсе — тогда нули и прочерки, а не отсутствие блока."""
+    if hour_to is None:
+        hour_start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+        rows = hourly if hour_start.date() == now.date() else load_day_rows(hour_start.date())
+    else:
+        hour_start = now.replace(hour=int(hour_to), minute=0, second=0, microsecond=0)
+        rows = hourly
+    row = next((dict(item) for item in rows or [] if item.get('hour') == hour_start.hour), None)
+    if row is None:
+        row = {'hour': hour_start.hour, 'served': 0, 'arrived': 0, 'lost': 0, 'greet_drop': 0,
+               'served_sl': 0, 'avg_talk_seconds': 0, 'ar_ratio': None, 'sl_ratio': None}
+    row['label'] = '%02d:00–%02d:00' % (hour_start.hour, hour_start.hour + 1)
+    row['day'] = hour_start.strftime('%d.%m')
+    return row
 
 
 def _szov_shift_rows_for_range(start_day, end_day):
@@ -38408,8 +38449,8 @@ def _szov_broadcast_break_violations(hour_to=None, scheduled=False, now=None):
         return []
 
 
-def _szov_broadcast_collect(hour_to=None, scheduled=False):
-    """Всё, что нужно отбивке: почасовая таблица, итоги дня и статусы операторов.
+def _szov_broadcast_collect(hour_to=None, scheduled=False, now=None):
+    """Всё, что нужно отбивке: почасовая таблица, итоги дня, последний час и статусы операторов.
 
     Чаты Chat2Desk сюда не входят — они уехали в отдельный почасовой отчёт
     (`_chat_hourly_*`), где показываются целиком, а не одним числом.
@@ -38417,6 +38458,7 @@ def _szov_broadcast_collect(hour_to=None, scheduled=False):
     они в примечания не попадают (см. _szov_broadcast_notes).
     scheduled — собираем плановую отправку: тогда нарушения перерывов берутся «о чём ещё не
     писали», а не срезом часа."""
+    now = now or datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).replace(tzinfo=None)
     hourly = _szov_broadcast_hourly_rows(hour_to)
     # Смены (прогноз/план/факт) приклеиваем к часам звонков — так таблица остаётся одной.
     day_iso = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
@@ -38463,7 +38505,19 @@ def _szov_broadcast_collect(hour_to=None, scheduled=False):
         'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
         'snapshot': snapshot,
         'break_violations': _szov_broadcast_break_violations(hour_to, scheduled=scheduled),
+        'hour': _szov_broadcast_safe_hour_block(hourly, hour_to, now),
     }
+
+
+def _szov_broadcast_safe_hour_block(hourly, hour_to, now):
+    """Блок часа или None. В полночь он стоит отдельного запроса к Oktell за вчера, и если прокси
+    не ответил, отбивка уходит без картинки часа, а не пропадает целиком."""
+    try:
+        return _szov_broadcast_hour_block(
+            hourly, hour_to, now, lambda day: _szov_broadcast_hourly_rows(None, day))
+    except Exception as exc:
+        logging.warning("Отбивка табло: показатели последнего часа недоступны: %s", exc)
+        return None
 
 
 def _szov_plural(count, one, few, many):
@@ -38525,36 +38579,68 @@ def _szov_broadcast_deviations(data):
     Выход на перерыв мимо графика отклонением НЕ считается (решение владельца 20.08.2026):
     нарушения находятся почти в каждом часу (97 часов из 168 на замере), и «тревожный» чат
     получал бы письмо круглые сутки — ровно то, от чего этот режим и заводился. Строку про
-    перерывы добавляет _szov_broadcast_notes, как и остальные дежурные."""
-    notes = []
-    totals = data['totals']
-    ar = totals['ar_ratio']
-    if ar is not None:
-        percent = ar * 100
-        direction = None
-        if percent > SZOV_AR_MAX_PERCENT:
-            direction = 'выше'
-        elif percent < SZOV_AR_MIN_PERCENT:
-            direction = 'ниже'
-        if direction:
-            notes.append(
-                f"Обратите внимание: AR {direction} установленного диапазона "
-                f"({SZOV_AR_MIN_PERCENT:g}–{SZOV_AR_MAX_PERCENT:g}%) — {_szov_format_percent(ar)}. "
-                f"За день потеряно {totals['lost']} {_szov_plural(totals['lost'], 'звонок', 'звонка', 'звонков')}."
-            )
+    перерывы добавляет _szov_broadcast_notes, как и остальные дежурные.
+
+    Каждое отклонение помечено периодом — «за день» или «за час 09:00–10:00» (владелец,
+    17.09.2026). Отклонения ЧАСА сюда не входят и «тревожный» чат не будят: AR одного часа редко
+    ложится ровно в коридор, и письмо уходило бы почти каждый час — по той же причине, что и
+    перерывы. В сообщении они есть: _szov_broadcast_notes добавляет их следом за дневными."""
+    notes = _szov_broadcast_ar_notes(data['totals'], 'за день', 'За день')
 
     # SL приходит из снимка «за сегодня». Для среза на прошедший час он относится к другому
     # периоду, чем остальная таблица, поэтому там его не проверяем — иначе отбивка «на 14:00»
     # ругалась бы на SL всего дня.
     sl = ((data.get('snapshot') or {}).get('today') or {}).get('sl_ratio')
     if data.get('hour_to') is None and sl is not None and sl * 100 < SZOV_SL_MIN_PERCENT:
-        notes.append(
-            f"Обратите внимание: SL ниже нормы ({SZOV_SL_MIN_PERCENT:g}%) — {_szov_format_percent(sl)}."
-        )
+        notes.append(_szov_broadcast_sl_note(sl, 'за день'))
 
     stale = _szov_broadcast_stale_note(data)
     if stale:
         notes.append(stale)
+    return notes
+
+
+# С какого числа дошедших до очереди звонков за час AR и SL часа проверяются на отклонение: на
+# единицах звонков ночью процент не показатель (один потерянный из пяти — 20 %). Порог тот же,
+# что у «Табло ОП»; итогов дня он не касается — за день выборка у линии всегда большая.
+SZOV_BROADCAST_HOUR_MIN_CALLS = _env_int('SZOV_BROADCAST_HOUR_MIN_CALLS', 20, minimum=1, maximum=10000)
+
+
+def _szov_broadcast_ar_notes(totals, period, lost_period):
+    """«AR вне коридора» одного периода: [] или одна строка с пометкой периода."""
+    ar = totals.get('ar_ratio')
+    if ar is None:
+        return []
+    percent = ar * 100
+    if percent > SZOV_AR_MAX_PERCENT:
+        direction = 'выше'
+    elif percent < SZOV_AR_MIN_PERCENT:
+        direction = 'ниже'
+    else:
+        return []
+    lost = _szov_wallboard_int(totals.get('lost'))
+    return [
+        f"Обратите внимание ({period}): AR {direction} установленного диапазона "
+        f"({SZOV_AR_MIN_PERCENT:g}–{SZOV_AR_MAX_PERCENT:g}%) — {_szov_format_percent(ar)}. "
+        f"{lost_period} потеряно {lost} {_szov_plural(lost, 'звонок', 'звонка', 'звонков')}."
+    ]
+
+
+def _szov_broadcast_sl_note(sl, period):
+    return f"Обратите внимание ({period}): SL ниже нормы ({SZOV_SL_MIN_PERCENT:g}%) — {_szov_format_percent(sl)}."
+
+
+def _szov_broadcast_hour_notes(data):
+    """Отклонения последнего часа (или часа среза /tablo) — AR и SL по строке этого часа из Oktell.
+    Та же норма, что у дня; проверяются только от SZOV_BROADCAST_HOUR_MIN_CALLS звонков."""
+    hour = data.get('hour')
+    if not hour or _szov_wallboard_int(hour.get('arrived')) < SZOV_BROADCAST_HOUR_MIN_CALLS:
+        return []
+    period = 'за час %s' % hour['label']
+    notes = _szov_broadcast_ar_notes(hour, period, 'За час')
+    sl = hour.get('sl_ratio')
+    if sl is not None and sl * 100 < SZOV_SL_MIN_PERCENT:
+        notes.append(_szov_broadcast_sl_note(sl, period))
     return notes
 
 
@@ -38566,6 +38652,8 @@ def _szov_broadcast_notes(data):
     stale = _szov_broadcast_stale_note(data)
     # Замершие данные упоминаем последними, после дежурных строк.
     notes = [note for note in _szov_broadcast_deviations(data) if note != stale]
+    # Отклонения часа — сразу за дневными: в сообщении они есть, «тревожный» чат не будят.
+    notes.extend(_szov_broadcast_hour_notes(data))
     ops = data['operators']
 
     # Перерывы мимо графика — первыми среди дежурных строк: это единственное в сообщении,
@@ -38834,6 +38922,37 @@ def _szov_render_wallboard_png(data):
         'Табло СЗоВ', f"Входящая линия · {data['generated_at']}", key_tiles, stat_tiles)
 
 
+def _szov_render_hour_png(data):
+    """PNG «Табло СЗоВ · за час»: плитки последнего полного часа (или часа среза /tablo) — как у
+    «Табло ОП» (владелец, 17.09.2026). Очередь, онлайн и перерывы — «на сейчас», у часа их нет."""
+    hour = data.get('hour')
+    if not hour:
+        raise RuntimeError('показатели часа не собрались')
+    ar = hour.get('ar_ratio')
+    ar_percent = None if ar is None else ar * 100
+    if ar_percent is None:
+        ar_colors = ('#f1f5f9', '#334155')
+    elif SZOV_AR_MIN_PERCENT <= ar_percent <= SZOV_AR_MAX_PERCENT:
+        ar_colors = ('#d1fae5', '#047857')
+    else:
+        ar_colors = ('#ffe4e6', '#be123c')
+    lost = _szov_wallboard_int(hour.get('lost'))
+    lost_colors = ('#fef3c7', '#b45309') if lost else ('#f1f5f9', '#334155')
+    key_tiles = [
+        ('Входящих', str(_szov_wallboard_int(hour.get('arrived'))), '#dbeafe', '#1d4ed8'),
+        ('Принято', str(_szov_wallboard_int(hour.get('served'))), '#d1fae5', '#047857'),
+        ('Потеряно', str(lost), lost_colors[0], lost_colors[1]),
+        ('AR', _szov_format_percent(ar), ar_colors[0], ar_colors[1]),
+    ]
+    stat_tiles = [
+        ('SL', _szov_format_percent(hour.get('sl_ratio'))),
+        ('Ср. разговор', _szov_format_seconds_mmss(hour.get('avg_talk_seconds'))
+         if _szov_wallboard_int(hour.get('served')) else '—'),
+    ]
+    return _szov_render_tiles_png(
+        'Табло СЗоВ · за час', f"Входящая линия · {hour['label']} · {hour['day']}", key_tiles, stat_tiles)
+
+
 # --- Отправка отбивки -------------------------------------------------------------------------
 # Ссылку на цикл бота держим явно: из потока Flask asyncio.get_event_loop() вернёт ЧУЖОЙ цикл,
 # а сессия aiohttp у aiogram привязана к своему — отправлять из другого нельзя.
@@ -38854,7 +38973,7 @@ def _bot_event_loop():
 
 
 async def _szov_broadcast_prepare(hour_to=None, scheduled=False):
-    """Собрать отбивку целиком: данные, текст и обе картинки.
+    """Собрать отбивку целиком: данные, текст и картинки — таблицу, табло и последний час.
 
     Отдельно от отправки, потому что получателей несколько: прокси Oktell
     низкоконкурентный, и собирать одно и то же по разу на каждый чат нельзя.
@@ -38874,6 +38993,13 @@ async def _szov_broadcast_prepare(hour_to=None, scheduled=False):
     except Exception as exc:
         # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинок.
         logging.error("Отбивка табло: не удалось собрать картинки: %s", exc)
+    if media:
+        # Картинка часа — третьей и отдельно: её сбой (час не собрался) не отнимает первые две.
+        try:
+            media.append(('hour.png', await loop.run_in_executor(
+                executor_pool, _szov_render_hour_png, data)))
+        except Exception as exc:
+            logging.error("Отбивка табло: не удалось собрать картинку часа: %s", exc)
     return data, text, media
 
 
@@ -42233,6 +42359,8 @@ def _op_broadcast_attach_period(data, now, day_parts):
         out.update(day=parts['day'], totals=parts['totals'], hourly=parts['hourly'])
     out['day_closed'] = report_day != now.date()
     out['day_label'] = ('За %s' % report_day.strftime('%d.%m')) if out['day_closed'] else 'За день'
+    # Пометка периода у «Обратите внимание»: «за день» или, в полночь, «за день 16.09».
+    out['day_note_label'] = ('за день %s' % report_day.strftime('%d.%m')) if out['day_closed'] else 'за день'
     out['hour_label'] = '%02d:00–%02d:00' % (hour_start.hour, hour_start.hour + 1)
     out['hour_day'] = report_day.strftime('%d.%m')
     # Заголовки столбцов таблицы в тексте — короче подписей картинок: строка обязана влезть в телефон.
@@ -42278,15 +42406,14 @@ def _op_broadcast_duration(seconds):
     return '%d:%02d' % (seconds // 60, seconds % 60)
 
 
-def _op_broadcast_deviations(data):
-    """Отклонения от нормы направления «Табло ОП». Пустой список — всё в норме.
+def _op_broadcast_period_notes(data, totals, period):
+    """Отклонения AR и SL одного периода с пометкой, за какой он: «за день» или «за час 09:00–10:00»
+    (владелец, 17.09.2026 — чтобы было видно, отклонился день или отдельный час).
 
     Норма — ровно та, что красит плитки: AR вне коридора (ar_min/ar_max из снимка),
     SL ниже OP_BROADCAST_SL_MIN_PERCENT. Поправка одна — размер выборки
-    (OP_BROADCAST_MIN_CALLS): на утренних единицах звонков процент не показатель.
-    Замерший или молчащий мост — отклонение всегда: цифры на стене замерли."""
+    (OP_BROADCAST_MIN_CALLS), своя у каждого периода: на единицах звонков процент не показатель."""
     notes = []
-    totals = data.get('totals') or {}
     arrived = _szov_wallboard_int(totals.get('arrived'))
     ar = totals.get('ar')
     sl = totals.get('sl')
@@ -42295,25 +42422,59 @@ def _op_broadcast_deviations(data):
     if arrived >= OP_BROADCAST_MIN_CALLS and ar is not None:
         percent = float(ar) * 100
         if percent > ar_max + 1e-9:
-            notes.append('Обратите внимание: потеряно %s входящих при норме до %s %%.'
-                         % (_op_broadcast_percent(ar), ('%g' % ar_max).replace('.', ',')))
+            notes.append('Обратите внимание (%s): потеряно %s входящих при норме до %s %%.'
+                         % (period, _op_broadcast_percent(ar), ('%g' % ar_max).replace('.', ',')))
         elif percent < ar_min - 1e-9:
-            notes.append('Обратите внимание: потеряно %s входящих — ниже коридора %s–%s %%, '
+            notes.append('Обратите внимание (%s): потеряно %s входящих — ниже коридора %s–%s %%, '
                          'операторов на линии больше, чем нужно.'
-                         % (_op_broadcast_percent(ar), ('%g' % ar_min).replace('.', ','),
+                         % (period, _op_broadcast_percent(ar), ('%g' % ar_min).replace('.', ','),
                             ('%g' % ar_max).replace('.', ',')))
     if arrived >= OP_BROADCAST_MIN_CALLS and sl is not None \
             and float(sl) * 100 < OP_BROADCAST_SL_MIN_PERCENT - 1e-9:
-        notes.append('Обратите внимание: SL %s при норме от %s %%.'
-                     % (_op_broadcast_percent(sl),
+        notes.append('Обратите внимание (%s): SL %s при норме от %s %%.'
+                     % (period, _op_broadcast_percent(sl),
                         ('%g' % OP_BROADCAST_SL_MIN_PERCENT).replace('.', ',')))
-    bridge = data.get('bridge') or {}
-    age = bridge.get('live_age_seconds')
+    return notes
+
+
+def _op_broadcast_bridge_note(data):
+    """Замерший или молчащий мост — отклонение всегда: цифры на стене замерли. У этой строки
+    нет периода, она про свежесть данных."""
+    age = (data.get('bridge') or {}).get('live_age_seconds')
     if age is None:
-        notes.append('Мост «Касаний» ещё не присылал живых данных за сегодня — цифры дня '
-                     'могут быть неполными.')
-    elif int(age) > OP_BROADCAST_LIVE_STALE_SECONDS:
-        notes.append('Мост «Касаний» молчит %d мин — цифры на табло замерли.' % (int(age) // 60))
+        return ('Мост «Касаний» ещё не присылал живых данных за сегодня — цифры дня '
+                'могут быть неполными.')
+    if int(age) > OP_BROADCAST_LIVE_STALE_SECONDS:
+        return 'Мост «Касаний» молчит %d мин — цифры на табло замерли.' % (int(age) // 60)
+    return None
+
+
+def _op_broadcast_deviations(data):
+    """Отклонения, по которым пишем чату в режиме «только при отклонениях»: итоги дня и мост.
+    Пустой список — всё в норме.
+
+    Час сюда НЕ входит: AR одного часа редко ложится ровно в коридор 3–5 %, и «тревожный» чат
+    получал бы письмо почти каждый час — режим потерял бы смысл (то же решение владельца, что
+    про перерывы у СЗоВ, 20.08.2026). В самом сообщении отклонения часа есть — см.
+    `_op_broadcast_notes`."""
+    notes = _op_broadcast_period_notes(data, data.get('totals') or {},
+                                       data.get('day_note_label') or 'за день')
+    bridge = _op_broadcast_bridge_note(data)
+    if bridge:
+        notes.append(bridge)
+    return notes
+
+
+def _op_broadcast_notes(data):
+    """Все «Обратите внимание» сообщения: за день, за последний час, затем о мосте."""
+    notes = _op_broadcast_period_notes(data, data.get('totals') or {},
+                                       data.get('day_note_label') or 'за день')
+    if data.get('hour_label'):
+        notes += _op_broadcast_period_notes(data, data.get('hour_totals') or {},
+                                            'за час %s' % data['hour_label'])
+    bridge = _op_broadcast_bridge_note(data)
+    if bridge:
+        notes.append(bridge)
     return notes
 
 
@@ -42355,8 +42516,9 @@ def _op_broadcast_caption(data):
     """Подпись к картинкам отбивки ОП — только отклонения («Обратите внимание…»), если они есть.
 
     Решение владельца 17.09.2026: цифры дня и часа уже на двух картинках, и заголовок, таблица
-    и строка о людях в подписи были повтором. Отклонений нет — картинки уходят без подписи."""
-    return '\n'.join(_op_broadcast_deviations(data))
+    и строка о людях в подписи были повтором. Отклонений нет — картинки уходят без подписи.
+    Каждое отклонение помечено периодом: за день или за час."""
+    return '\n'.join(_op_broadcast_notes(data))
 
 
 def _op_broadcast_text(data):
@@ -42364,13 +42526,13 @@ def _op_broadcast_text(data):
     сбой отрисовки): тогда цифры уходят текстом, а не пропадают. HTML parse_mode.
 
     Итоги дня и последнего полного часа — таблицей, как в отбивке по лидам; под ней
-    отклонения (по итогам дня, как и раньше) и дежурная строка о людях.
+    отклонения за день и за час и дежурная строка о людях.
     Разреза по линиям (очередям станции) нет нигде — ни на экране, ни здесь: решение
     владельца 16.09.2026, номера очередей вида 3010 читались как шум."""
     now = data.get('now') or {}
     lines = ['<b>Табло ОП</b> (%s):' % (data.get('stamp') or ''), '']
     lines.extend(_op_broadcast_table(data))
-    notes = _op_broadcast_deviations(data)
+    notes = _op_broadcast_notes(data)
     if notes:
         lines.append('')
         lines.extend(notes)
@@ -43174,7 +43336,7 @@ def api_szov_wallboard_broadcast():
 def api_szov_wallboard_broadcast_preview():
     """Показать, как будет выглядеть отбивка, НИЧЕГО не отправляя.
 
-    ?image=table|board отдаёт картинку, без параметра — текст и диагностику шрифта.
+    ?image=table|board|hour отдаёт картинку, без параметра — текст и диагностику шрифта.
     ?direction=chat — то же для направления «Чат» (у него одна картинка, board).
     Нужен и владельцу (посмотреть перед включением), и на проде — убедиться, что на
     сервере вообще нашёлся шрифт с кириллицей."""
@@ -43214,10 +43376,11 @@ def api_szov_wallboard_broadcast_preview():
         return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
 
     which = (request.args.get('image') or '').strip()
-    if which in ('table', 'board'):
+    renderers = {'table': lambda d: _szov_render_hourly_table_png(d['hourly']),
+                 'board': _szov_render_wallboard_png, 'hour': _szov_render_hour_png}
+    if which in renderers:
         try:
-            blob = (_szov_render_hourly_table_png(data['hourly']) if which == 'table'
-                    else _szov_render_wallboard_png(data))
+            blob = renderers[which](data)
         except Exception as exc:
             return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
         response = Response(blob, mimetype='image/png')
@@ -43228,6 +43391,7 @@ def api_szov_wallboard_broadcast_preview():
     return jsonify({
         "text": _szov_broadcast_text(data),
         "hours": len(data['hourly']),
+        "hour": (data.get('hour') or {}).get('label'),
         "font_path": regular,
         "images_available": bool(regular),
     })
